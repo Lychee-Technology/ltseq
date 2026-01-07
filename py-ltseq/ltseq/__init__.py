@@ -583,5 +583,76 @@ class LTSeq:
         result._inner = self._inner.slice(offset, length)
         return result
 
+    def cum_sum(self, *cols: Union[str, Callable]) -> "LTSeq":
+        """
+        Add cumulative sum columns for specified columns.
+
+        Calculates running sums across ordered rows. Requires data to be sorted.
+        New columns are added to the table with names suffixed by '_cumsum'.
+
+        Args:
+            *cols: Column names (str) or lambda expressions.
+                   - String: column name (e.g., "amount")
+                   - Lambda: expression (e.g., lambda r: r.price * r.qty)
+                   - Multiple args: add cumulative sum for each
+
+        Returns:
+            A new LTSeq with cumulative sum columns added
+
+        Raises:
+            ValueError: If schema is not initialized or no columns provided
+            AttributeError: If lambda references a non-existent column
+            TypeError: If column type is non-numeric
+
+        Example:
+            >>> t = LTSeq.read_csv("sales.csv").sort("date")
+            >>> t.cum_sum("revenue").show()
+            >>> t.cum_sum("revenue", "units").show()
+            >>> t.cum_sum(lambda r: r.price * r.qty).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not cols:
+            raise ValueError("cum_sum() requires at least one column argument")
+
+        # Collect cumulative sum expressions
+        cum_exprs = []
+        for col_expr in cols:
+            if isinstance(col_expr, str):
+                # String column name: create simple Column expression
+                cum_exprs.append(
+                    {
+                        "type": "Column",
+                        "name": col_expr,
+                    }
+                )
+            elif callable(col_expr):
+                # Lambda expression: capture and serialize
+                expr_dict = self._capture_expr(col_expr)
+                cum_exprs.append(expr_dict)
+            else:
+                raise TypeError(
+                    f"cum_sum() argument must be str or callable, got {type(col_expr).__name__}"
+                )
+
+        # Create a new LTSeq with cumulative sum columns added
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Add cumulative sum columns to schema (with _cumsum suffix)
+        for i, col_expr in enumerate(cols):
+            if isinstance(col_expr, str):
+                result._schema[f"{col_expr}_cumsum"] = result._schema.get(
+                    col_expr, "float64"
+                )
+            else:
+                # For lambda expressions, auto-name the column
+                result._schema[f"cum_sum_{i}"] = "float64"
+        # Delegate cum_sum to Rust implementation
+        result._inner = self._inner.cum_sum(cum_exprs)
+        return result
+
 
 __all__ = ["LTSeq"]

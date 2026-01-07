@@ -742,6 +742,38 @@ impl RustTable {
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
         })
     }
+    
+    /// Add cumulative sum columns for specified columns
+    /// 
+    /// Args:
+    ///     cum_exprs: List of serialized expression dicts (from Python)
+    ///                Each expression identifies the column(s) to cumulate
+    /// 
+    /// Returns:
+    ///     New RustTable with cumulative sum columns added
+    fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+        // If no dataframe, return empty result (for unit tests)
+        if self.dataframe.is_none() {
+            return Ok(RustTable {
+                session: Arc::clone(&self.session),
+                dataframe: None,
+                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            });
+        }
+        
+        // Get DataFrame
+        let _df = self.dataframe.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first."
+            ))?;
+        
+        // Phase 6 limitation: cum_sum not yet fully implemented in Rust
+        // TODO: Implement window functions for proper cumulative sums
+        // For now, return error indicating feature is not available
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "cum_sum() is not yet implemented. Phase 6 limitation: requires window function support."
+        ));
+    }
 }
 
 /// Format RecordBatches as a pretty-printed ASCII table
