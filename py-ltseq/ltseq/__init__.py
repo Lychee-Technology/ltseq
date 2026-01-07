@@ -6,39 +6,220 @@ from typing import Callable, Dict, Any, Optional
 import csv
 
 
+def _eval_expr_on_row(expr_dict: Dict[str, Any], row_proxy: "SchemaProxy") -> Any:
+    """
+    Evaluate a serialized expression tree on a given row.
+
+    Args:
+        expr_dict: Serialized expression dict
+        row_proxy: SchemaProxy instance bound to current row
+
+    Returns:
+        The result of evaluating the expression
+    """
+    expr_type = expr_dict.get("type")
+
+    if expr_type == "Column":
+        col_name = expr_dict["name"]
+        return row_proxy[col_name]
+
+    elif expr_type == "Literal":
+        return expr_dict["value"]
+
+    elif expr_type == "BinOp":
+        op = expr_dict["op"]
+        left = _eval_expr_on_row(expr_dict["left"], row_proxy)
+        right = _eval_expr_on_row(expr_dict["right"], row_proxy)
+
+        if op == "Add":
+            return left + right
+        elif op == "Sub":
+            return left - right
+        elif op == "Mul":
+            return left * right
+        elif op == "Div":
+            return left / right if right != 0 else None
+        elif op == "Mod":
+            return left % right if right != 0 else None
+        elif op == "Eq":
+            return left == right
+        elif op == "Ne":
+            return left != right
+        elif op == "Lt":
+            return left < right
+        elif op == "Le":
+            return left <= right
+        elif op == "Gt":
+            return left > right
+        elif op == "Ge":
+            return left >= right
+        elif op == "And":
+            return left and right
+        elif op == "Or":
+            return left or right
+        else:
+            raise ValueError(f"Unknown binary operator: {op}")
+
+    elif expr_type == "UnaryOp":
+        op = expr_dict["op"]
+        operand = _eval_expr_on_row(expr_dict["operand"], row_proxy)
+
+        if op == "Not":
+            return not operand
+        else:
+            raise ValueError(f"Unknown unary operator: {op}")
+
+    else:
+        raise ValueError(f"Unknown expression type: {expr_type}")
+
+
 # Stub RustTable for now - actual Rust extension has GIL issues in Phase 1
 # This will be properly integrated in Phase 2
 class RustTable:
     def __init__(self):
-        pass
+        self.data: list = []  # List of dicts, one per row
+        self.schema: Dict[str, str] = {}
 
     def read_csv(self, path: str) -> None:
-        raise NotImplementedError("RustTable.read_csv() - deferred to Phase 2")
+        """Read CSV file into memory."""
+        import csv
+
+        self.data = []
+        self.schema = {}
+
+        try:
+            with open(path, "r") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    return
+
+                # Initialize schema with all columns as string
+                for col in reader.fieldnames:
+                    self.schema[col] = "string"
+
+                # Read all rows
+                for row in reader:
+                    # Try to infer types from values
+                    typed_row = {}
+                    for col, value in row.items():
+                        # Attempt to convert to int, then float, else keep as string
+                        if value == "":
+                            typed_row[col] = None
+                        else:
+                            try:
+                                typed_row[col] = int(value)
+                                if self.schema[col] == "string":
+                                    self.schema[col] = "int64"
+                            except ValueError:
+                                try:
+                                    typed_row[col] = float(value)
+                                    if self.schema[col] == "string":
+                                        self.schema[col] = "float64"
+                                except ValueError:
+                                    typed_row[col] = value
+                    self.data.append(typed_row)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"CSV file not found: {path}")
 
     def show(self, n: int = 10) -> str:
-        # Phase 1 stub - demonstrate successful schema and lambda capture
-        return (
-            f"✓ Phase 1 Success: Lambda expressions successfully captured and will execute in Phase 2!\n"
-            f"  Showing {n} rows (Rust/DataFusion execution deferred to Phase 2)"
-        )
+        """Display the data as a formatted table."""
+        if not self.data:
+            return "No data loaded"
+
+        # Get column names from schema
+        cols = list(self.schema.keys())
+        if not cols:
+            return "No columns in schema"
+
+        # Format header
+        output = []
+        output.append("\t".join(cols))
+
+        # Format rows
+        for i, row in enumerate(self.data[:n]):
+            values = [str(row.get(col, "")) for col in cols]
+            output.append("\t".join(values))
+
+        return "\n".join(output)
 
     def hello(self) -> str:
         return "Hello from stub RustTable (Phase 1)"
 
     def filter(self, expr_dict: Dict[str, Any]) -> "RustTable":
-        # Phase 1 stub - just return self for now
-        return self
+        """Apply filter expression and return a new RustTable with filtered data."""
+        # Create new RustTable with same schema
+        filtered = RustTable()
+        filtered.schema = self.schema.copy()
+
+        # Evaluate expression for each row
+        for row in self.data:
+            # Create an evaluator for this row
+            evaluator = _RowEvaluator(row)
+
+            # Evaluate the expression
+            try:
+                result = _eval_expr_on_row(expr_dict, evaluator)
+                if result:  # Include row if expression is truthy
+                    filtered.data.append(row)
+            except Exception:
+                # If evaluation fails, skip this row
+                pass
+
+        return filtered
 
     def select(self, exprs: list) -> "RustTable":
-        # Phase 1 stub - just return self for now
-        return self
+        """Select columns and return a new RustTable."""
+        result = RustTable()
+
+        if not exprs:
+            # If no columns specified, return copy
+            result.schema = self.schema.copy()
+            result.data = [row.copy() for row in self.data]
+            return result
+
+        # Extract column names from expressions
+        selected_cols = []
+        for expr in exprs:
+            if isinstance(expr, dict) and expr.get("type") == "Column":
+                selected_cols.append(expr["name"])
+            else:
+                # For now, skip computed columns
+                pass
+
+        # Update schema to only selected columns
+        result.schema = {
+            col: self.schema[col] for col in selected_cols if col in self.schema
+        }
+
+        # Select columns from data
+        result.data = []
+        for row in self.data:
+            new_row = {col: row.get(col) for col in selected_cols if col in self.schema}
+            result.data.append(new_row)
+
+        return result
 
     def derive(self, derived_cols: Dict[str, Dict[str, Any]]) -> "RustTable":
-        # Phase 1 stub - just return self for now
-        return self
+        """Add derived columns and return a new RustTable."""
+        # For now, just return a copy
+        # TODO: Implement proper column derivation
+        result = RustTable()
+        result.schema = self.schema.copy()
+        result.data = [row.copy() for row in self.data]
+        return result
 
 
-from .expr import _lambda_to_expr
+from .expr import _lambda_to_expr, SchemaProxy
+
+
+class _RowEvaluator:
+    """Helper to evaluate expressions on actual row data."""
+
+    def __init__(self, row_data: Dict[str, Any]):
+        self._row = row_data
+
+    def __getitem__(self, key: str) -> Any:
+        return self._row.get(key)
 
 
 def _normalize_schema(schema_dict: Dict[str, str]) -> Dict[str, str]:
@@ -148,16 +329,25 @@ class LTSeq:
 
     @classmethod
     def read_csv(cls, path: str) -> "LTSeq":
+        """
+        Read a CSV file and return an LTSeq instance.
+
+        Infers schema from the CSV header and first rows.
+
+        Args:
+            path: Path to CSV file
+
+        Returns:
+            New LTSeq instance with data loaded from CSV
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> filtered = t.filter(lambda r: r.age > 18)
+        """
         t = cls()
-        # Note: RustTable.read_csv() has GIL issues with async, so we skip it for now
-        # The Rust side read is intended for Phase 2 integration
-        # For now, we just extract schema from the CSV file
         t._schema = _infer_schema_from_csv(path)
-
-        # In a full Phase 2 implementation, we would call:
-        # t._inner.read_csv(path)
-        # But that triggers a GIL/async conflict we'll fix in Phase 2
-
+        # Call RustTable.read_csv to load the actual data
+        t._inner.read_csv(path)
         return t
 
     def show(self, n: int = 10) -> None:
