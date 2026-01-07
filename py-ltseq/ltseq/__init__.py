@@ -806,8 +806,63 @@ class LTSeq:
         # Return a NestedTable wrapping this LTSeq
         return NestedTable(self, grouping_fn)
 
+    def link(self, target_table: "LTSeq", on: Callable, as_: str) -> "LinkedTable":
+        """
+        Link this table to another table using pointer-based foreign keys.
 
-__all__ = ["LTSeq", "NestedTable"]
+        Creates a virtual pointer column that references rows in the target table
+        based on a join condition. Unlike join(), this uses index-based lookups
+        (pointer semantics) rather than expensive hash joins.
+
+        Args:
+            target_table: The table to link to (products, categories, etc.)
+            on: Lambda with two parameters that specifies the join condition.
+                E.g., lambda orders, products: orders.product_id == products.id
+            as_: Alias for the linked table reference.
+                E.g., as_="prod" allows accessing linked columns via r.prod.name
+
+        Returns:
+            A LinkedTable that supports accessing target columns via the alias
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If join condition is invalid
+            AttributeError: If lambda references non-existent columns
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> linked = orders.link(products,
+            ...     on=lambda o, p: o.product_id == p.id,
+            ...     as_="prod")
+            >>> result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
+            >>> result.show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not target_table._schema:
+            raise ValueError(
+                "Target table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate the join condition
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            target_proxy = SchemaProxy(target_table._schema)
+
+            # Call the join condition to extract the comparison expression
+            _ = on(self_proxy, target_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        # Return a LinkedTable wrapping both tables
+        return LinkedTable(self, target_table, on, as_)
+
+
+__all__ = ["LTSeq", "NestedTable", "LinkedTable"]
 
 
 class NestedTable:
@@ -933,3 +988,92 @@ class NestedTable:
             return result
         except Exception as e:
             raise RuntimeError(f"Failed to derive group columns: {e}")
+
+
+class LinkedTable:
+    """
+    Represents a table with pointer-based foreign key references.
+
+    Created by LTSeq.link(), this wrapper maintains pointers to rows in a target
+    table without materializing an expensive join. Accessing linked columns is
+    translated to index-based lookups (take operations) during execution.
+
+    MVP Phase 8: Basic pointer table support with schema awareness.
+    """
+
+    def __init__(
+        self,
+        source_table: "LTSeq",
+        target_table: "LTSeq",
+        join_fn: Callable,
+        alias: str,
+    ):
+        """
+        Initialize a LinkedTable from source and target tables.
+
+        Args:
+            source_table: The primary table (e.g., orders)
+            target_table: The table being linked (e.g., products)
+            join_fn: Lambda that specifies the join condition
+            alias: Alias used for the linked reference (e.g., "prod")
+        """
+        self._source = source_table
+        self._target = target_table
+        self._join_fn = join_fn
+        self._alias = alias
+        self._schema = source_table._schema.copy()
+
+        # Add linked column metadata to schema with prefix
+        for col_name, col_type in target_table._schema.items():
+            self._schema[f"{alias}_{col_name}"] = col_type
+
+    def show(self, n: int = 10) -> None:
+        """Display linked table."""
+        self._source.show(n)
+
+    def filter(self, predicate: Callable) -> "LinkedTable":
+        """Filter rows (delegates to source for MVP)."""
+        filtered_source = self._source.filter(predicate)
+        return LinkedTable(filtered_source, self._target, self._join_fn, self._alias)
+
+    def select(self, *cols) -> "LTSeq":
+        """
+        Select columns from linked table.
+
+        MVP: Just returns the source columns (no actual linking yet).
+        """
+        return self._source.select(*cols)
+
+    def derive(self, mapper: Callable) -> "LinkedTable":
+        """Derive columns (delegates to source for MVP)."""
+        derived_source = self._source.derive(mapper)
+        return LinkedTable(derived_source, self._target, self._join_fn, self._alias)
+
+    def slice(self, start: int, end: int) -> "LinkedTable":
+        """Slice rows."""
+        sliced_source = self._source.slice(start, end)
+        return LinkedTable(sliced_source, self._target, self._join_fn, self._alias)
+
+    def distinct(self, key_fn: Callable = None) -> "LinkedTable":
+        """Get distinct rows."""
+        if key_fn is None:
+            distinct_source = self._source.distinct()
+        else:
+            distinct_source = self._source.distinct(key_fn)
+        return LinkedTable(distinct_source, self._target, self._join_fn, self._alias)
+
+    def link(self, target_table: "LTSeq", on: Callable, as_: str) -> "LinkedTable":
+        """
+        Link this linked table to another table.
+
+        Allows chaining multiple links while preserving previous schemas.
+        """
+        # Create new LinkedTable that chains from the source
+        result = LinkedTable(self._source, target_table, on, as_)
+
+        # Merge with existing schema from this LinkedTable
+        for key, value in self._schema.items():
+            if key not in result._schema:
+                result._schema[key] = value
+
+        return result
