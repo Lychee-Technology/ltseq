@@ -61,6 +61,95 @@ use std::sync::Arc;
 
 use crate::engine::RUNTIME;
 
+/// Extract join key column names from either a Column or And-expression
+/// 
+/// Phase 8H: Support both simple column references and composite And-expressions
+/// 
+/// For composite keys like: (o.id == p.id) & (o.year == p.year)
+/// This function extracts the column pairs:
+/// - Returns (left_cols, right_cols) where left_cols[i] should equal right_cols[i]
+/// 
+/// Examples:
+/// - Column("id") passed as left_key_expr → returns (["id"], [])
+/// - Column("id") passed as right_key_expr → returns ([], ["id"])
+/// - And( Eq(Column("id"), Column("id")), Eq(Column("year"), Column("year")) )
+///   → (["id", "year"], ["id", "year"])  // Composite case (same tree)
+/// 
+/// Returns: (left_col_names, right_col_names) tuple of column names
+fn extract_join_key_columns(left_expr: &PyExpr, right_expr: &PyExpr) -> PyResult<(Vec<String>, Vec<String>)> {
+    // Handle simple case: single column on each side
+    if let (PyExpr::Column(left_name), PyExpr::Column(right_name)) = (left_expr, right_expr) {
+        return Ok((vec![left_name.clone()], vec![right_name.clone()]));
+    }
+    
+    // Handle composite case: And-expressions (should be same tree)
+    if let (PyExpr::BinOp { op: op_left, .. }, PyExpr::BinOp { op: op_right, .. }) = (left_expr, right_expr) {
+        if op_left == "And" && op_right == "And" {
+            let mut left_cols = Vec::new();
+            let mut right_cols = Vec::new();
+            
+            extract_cols_from_and(left_expr, &mut left_cols, &mut right_cols)?;
+            return Ok((left_cols, right_cols));
+        }
+    }
+    
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+        "Join keys must be either simple columns or matching And-expressions",
+    ))
+}
+
+/// Recursively extract column names from And-expressions containing Eq operations
+fn extract_cols_from_and(
+    expr: &PyExpr,
+    left_cols: &mut Vec<String>,
+    right_cols: &mut Vec<String>,
+) -> PyResult<()> {
+    match expr {
+        PyExpr::BinOp { op, left, right } => {
+            match op.as_str() {
+                "And" => {
+                    // Recursively process both sides of And
+                    extract_cols_from_and(left, left_cols, right_cols)?;
+                    extract_cols_from_and(right, left_cols, right_cols)?;
+                    Ok(())
+                }
+                "Eq" => {
+                    // Extract left and right column names from equality
+                    if let PyExpr::Column(left_name) = left.as_ref() {
+                        left_cols.push(left_name.clone());
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Left side of join equality must be a column reference",
+                        ));
+                    }
+                    
+                    if let PyExpr::Column(right_name) = right.as_ref() {
+                        right_cols.push(right_name.clone());
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Right side of join equality must be a column reference",
+                        ));
+                    }
+                    Ok(())
+                }
+                other => {
+                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!(
+                            "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
+                            other
+                        ),
+                    ))
+                }
+            }
+        }
+        _ => {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Expected And or Eq expression in composite join",
+            ))
+        }
+    }
+}
+
 /// Helper function to sort rows by one or more key expressions
 ///
 /// Sorts the table in ascending order by default. Captures the sort keys
@@ -209,36 +298,38 @@ pub fn join_impl(
     let right_key_expr = dict_to_py_expr(right_key_expr_dict)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    // 3. Extract column names from expressions (only Column variant supported)
-    let left_col_name = match left_key_expr {
-        PyExpr::Column(name) => name,
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Phase 8B: Only simple column references are supported in join keys",
-            ))
-        }
-    };
+    // 3. Extract column names from expressions
+    // Phase 8H: Support both simple columns and composite And-expressions
+    let (left_col_names, right_col_names) = extract_join_key_columns(&left_key_expr, &right_key_expr)?;
 
-    let right_col_name = match right_key_expr {
-        PyExpr::Column(name) => name,
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Phase 8B: Only simple column references are supported in join keys",
-            ))
-        }
-    };
-
-    // 4. Validate columns exist in schemas
-    if !schema_left.fields().iter().any(|f| f.name() == &left_col_name) {
+    // For MVP, we only support joining on the first key pair
+    // Future phases can support true composite keys
+    if left_col_names.is_empty() || right_col_names.is_empty() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Column '{}' not found in left table", left_col_name),
+            "No join keys found in expressions",
         ));
     }
 
-    if !schema_right.fields().iter().any(|f| f.name() == &right_col_name) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Column '{}' not found in right table", right_col_name),
-        ));
+    let left_col_names_copy = left_col_names.clone();
+    let right_col_names_copy = right_col_names.clone();
+    let left_col_name = left_col_names[0].clone();
+    let right_col_name = right_col_names[0].clone();
+
+    // 4. Validate columns exist in schemas
+    for left_col in &left_col_names {
+        if !schema_left.fields().iter().any(|f| f.name() == left_col) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Column '{}' not found in left table", left_col),
+            ));
+        }
+    }
+
+    for right_col in &right_col_names {
+        if !schema_right.fields().iter().any(|f| f.name() == right_col) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Column '{}' not found in right table", right_col),
+            ));
+        }
     }
 
     // 5. Map join type string to DataFusion JoinType
@@ -254,22 +345,29 @@ pub fn join_impl(
         }
     };
 
-    // 6. Rename the join key from the right table to avoid schema conflicts
-    // Create a select that renames the join key to add a temporary suffix
+    // 6. Rename ALL join keys from the right table to avoid schema conflicts
+    // For composite keys, we need to rename multiple columns
     let mut right_select_exprs = Vec::new();
+    let mut temp_right_col_names = Vec::new();  // Track the renamed column names
+    
     for field in schema_right.fields().iter() {
         let col_name = field.name();
-        if col_name == &right_col_name {
-            // Rename the join key temporarily
-            let temp_join_key_name = "__join_key_right__".to_string();
-            right_select_exprs.push(col(col_name).alias(temp_join_key_name));
+        // Check if this column is a join key
+        if right_col_names_copy.contains(&col_name.to_string()) {
+            // Find its index in the join keys
+            if let Some(idx) = right_col_names_copy.iter().position(|c| c == col_name) {
+                // Rename the join key temporarily
+                let temp_join_key_name = format!("__join_key_right_{}__", idx);
+                right_select_exprs.push(col(col_name).alias(&temp_join_key_name));
+                temp_right_col_names.push(temp_join_key_name);
+            }
         } else {
             // Keep other columns as-is
             right_select_exprs.push(col(col_name));
         }
     }
 
-    // Apply the select to rename the join key
+    // Apply the select to rename the join keys
     let df_right_renamed = RUNTIME
         .block_on(async {
             (**df_right)
@@ -279,7 +377,11 @@ pub fn join_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 7. Execute the join with the renamed join key
+    // 7. Execute the join with ALL join keys
+    // For composite keys, join on multiple column pairs
+    let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
+    let right_join_keys: Vec<&str> = temp_right_col_names.iter().map(|s| s.as_str()).collect();
+    
     let joined_df = RUNTIME
         .block_on(async {
             (**df_left)
@@ -287,8 +389,8 @@ pub fn join_impl(
                 .join(
                     df_right_renamed.clone(),
                     df_join_type,
-                    &[left_col_name.as_str()],
-                    &["__join_key_right__"],
+                    left_join_keys.as_slice(),
+                    right_join_keys.as_slice(),
                     None,
                 )
                 .map_err(|e| format!("Join execution failed: {}", e))

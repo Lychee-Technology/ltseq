@@ -199,46 +199,53 @@ def _extract_join_keys(
     Phase 8A: Parses join conditions like:
         lambda orders, products: orders.product_id == products.id
 
+    Phase 8H: Enhanced to support composite keys:
+        lambda orders, products: (orders.product_id == products.id) & (orders.year == products.year)
+
     to extract:
         left_key="product_id", right_key="id", join_type="inner"
+        OR for composite:
+        left_key=(expr1 & expr2), right_key=(expr1 & expr2), join_type="inner"
 
     The function validates that:
-    1. The lambda returns a BinOpExpr with op="Eq" (only equality joins supported)
-    2. Left operand is a ColumnExpr from source table
-    3. Right operand is a ColumnExpr from target table
-    4. Both columns exist in their respective schemas
+    1. The lambda returns a BinOpExpr with op="Eq" or "And" (for composite)
+    2. All operands are equality comparisons between columns
+    3. Left operands are from source table, right from target
+    4. All columns exist in their respective schemas
 
     Args:
         join_fn: Lambda function with two parameters (source row, target row)
                 E.g., lambda o, p: o.product_id == p.id
+                Or: lambda o, p: (o.id == p.id) & (o.year == p.year)
         source_schema: Dict mapping source column names to types
         target_schema: Dict mapping target column names to types
 
     Returns:
         Tuple of (left_key_expr, right_key_expr, join_type) where:
-        - left_key_expr: Serialized expression for left join key
-        - right_key_expr: Serialized expression for right join key
+        - left_key_expr: Serialized expression for left join key(s)
+        - right_key_expr: Serialized expression for right join key(s)
         - join_type: String "inner" (only supported for MVP)
 
     Raises:
-        TypeError: If join condition is not a simple equality comparison
+        TypeError: If join condition is not equality comparisons
         ValueError: If columns don't exist in respective schemas
         AttributeError: If lambda references non-existent columns
 
     Example:
-        >>> orders_schema = {"id": "int64", "product_id": "int64"}
-        >>> products_schema = {"id": "int64", "name": "string"}
+        >>> orders_schema = {"id": "int64", "product_id": "int64", "year": "int64"}
+        >>> products_schema = {"id": "int64", "product_id": "int64", "year": "int64", "name": "string"}
+        >>> # Single key
         >>> left_key, right_key, join_type = _extract_join_keys(
-        ...     lambda o, p: o.product_id == p.id,
+        ...     lambda o, p: o.product_id == p.product_id,
         ...     orders_schema,
         ...     products_schema
         ... )
-        >>> left_key
-        {'type': 'Column', 'name': 'product_id'}
-        >>> right_key
-        {'type': 'Column', 'name': 'id'}
-        >>> join_type
-        'inner'
+        >>> # Composite key (Phase 8H)
+        >>> left_key, right_key, join_type = _extract_join_keys(
+        ...     lambda o, p: (o.product_id == p.product_id) & (o.year == p.year),
+        ...     orders_schema,
+        ...     products_schema
+        ... )
     """
     # Create proxies for both tables
     source_proxy = SchemaProxy(source_schema)
@@ -250,22 +257,119 @@ def _extract_join_keys(
     except Exception as e:
         raise TypeError(f"Failed to evaluate join condition: {e}")
 
-    # Validate that we got a BinOpExpr with op="Eq"
+    # Validate and extract key expressions
+    # Handle both single equality and composite And-expressions
     if not isinstance(expr, BinOpExpr):
         raise TypeError(
-            f"Join condition must be a simple equality comparison, got {type(expr).__name__}"
+            f"Join condition must be a simple equality comparison or composite And-expression, got {type(expr).__name__}"
         )
 
-    if expr.op != "Eq":
+    # Phase 8H: Handle composite keys with And operator
+    if expr.op == "And":
+        # Recursively extract all equality pairs from And-expression
+        # Structure: (a == b) & (c == d) is represented as nested BinOp with op="And"
+        all_equalities = _extract_all_equalities_from_and(expr)
+
+        if not all_equalities:
+            raise TypeError(
+                "And-expression must contain at least one equality comparison"
+            )
+
+        # Validate all equalities
+        for left_eq, right_eq in all_equalities:
+            _validate_equality_pair(left_eq, right_eq, source_schema, target_schema)
+
+        # For Rust compatibility, we keep single key expressions but they're And-composed
+        # Return the original And-expression as-is
+        left_key_expr = expr.serialize()
+        right_key_expr = expr.serialize()
+        return left_key_expr, right_key_expr, "inner"
+
+    # Phase 8A: Handle single equality
+    elif expr.op == "Eq":
+        # Extract left and right operands
+        left_expr = expr.left
+        right_expr = expr.right
+
+        # Validate operands are ColumnExpr
+        if not isinstance(left_expr, ColumnExpr) or not isinstance(
+            right_expr, ColumnExpr
+        ):
+            raise TypeError(
+                "Join condition must compare two columns directly. "
+                "Complex expressions are not supported in Phase 8."
+            )
+
+        # Validate the pair
+        _validate_equality_pair(left_expr, right_expr, source_schema, target_schema)
+
+        # Serialize the key expressions
+        left_key_expr = left_expr.serialize()
+        right_key_expr = right_expr.serialize()
+
+        # Return as tuple (MVP only supports inner join)
+        return left_key_expr, right_key_expr, "inner"
+
+    else:
         raise TypeError(
             f"Join condition must use equality (==), got operator: {expr.op}. "
             "Only inner equality joins are supported in Phase 8."
         )
 
-    # Extract left and right operands
-    left_expr = expr.left
-    right_expr = expr.right
 
+def _extract_all_equalities_from_and(expr: BinOpExpr) -> list:
+    """
+    Recursively extract all equality pairs from an And-expression tree.
+
+    Handles nested And-expressions like: (a==b) & ((c==d) & (e==f))
+
+    Args:
+        expr: BinOpExpr with op="And"
+
+    Returns:
+        List of tuples: [(left_col_expr, right_col_expr), ...]
+    """
+    equalities = []
+
+    # Recursively traverse the And-expression
+    if isinstance(expr.left, BinOpExpr):
+        if expr.left.op == "And":
+            # Recurse on left side if it's also an And
+            equalities.extend(_extract_all_equalities_from_and(expr.left))
+        elif expr.left.op == "Eq":
+            # Found an equality on the left
+            equalities.append((expr.left.left, expr.left.right))
+
+    if isinstance(expr.right, BinOpExpr):
+        if expr.right.op == "And":
+            # Recurse on right side if it's also an And
+            equalities.extend(_extract_all_equalities_from_and(expr.right))
+        elif expr.right.op == "Eq":
+            # Found an equality on the right
+            equalities.append((expr.right.left, expr.right.right))
+
+    return equalities
+
+
+def _validate_equality_pair(
+    left_expr: Any,
+    right_expr: Any,
+    source_schema: Dict[str, str],
+    target_schema: Dict[str, str],
+) -> None:
+    """
+    Validate that a left-right pair are both ColumnExprs from correct tables.
+
+    Args:
+        left_expr: Expression from left side of equality
+        right_expr: Expression from right side of equality
+        source_schema: Source table schema
+        target_schema: Target table schema
+
+    Raises:
+        TypeError: If not both ColumnExpr
+        ValueError: If columns aren't in correct tables
+    """
     # Validate operands are ColumnExpr
     if not isinstance(left_expr, ColumnExpr) or not isinstance(right_expr, ColumnExpr):
         raise TypeError(
@@ -274,9 +378,6 @@ def _extract_join_keys(
         )
 
     # Validate that left operand is from source and right from target
-    # Phase 8A Validation: Ensure left operand is from source and right from target
-    # This enforces a consistent join condition order and makes the lambda more intuitive:
-    # lambda source, target: source.key == target.key (not reversed)
     left_in_source = left_expr.name in source_schema
     left_in_target = left_expr.name in target_schema
     right_in_source = right_expr.name in source_schema
@@ -302,13 +403,6 @@ def _extract_join_keys(
                 f"Column '{right_expr.name}' not found in target schema. "
                 f"Available columns: {list(target_schema.keys())}"
             )
-
-    # Serialize the key expressions
-    left_key_expr = left_expr.serialize()
-    right_key_expr = right_expr.serialize()
-
-    # Return as tuple (MVP only supports inner join)
-    return left_key_expr, right_key_expr, "inner"
 
 
 class LTSeq:
