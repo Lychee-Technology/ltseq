@@ -428,11 +428,15 @@ class LTSeq:
         )
 
         if has_window_functions:
-            # Phase 6: Handle window functions - for now, raise informative error
+            # Phase 6: Window functions not fully implemented yet
+            # Users need to wait for Phase 6.1 which will have proper support
             raise NotImplementedError(
-                "Window functions (shift, rolling, diff, cum_sum) are not yet fully implemented. "
-                "This is a Phase 6 feature that requires DataFrame-level support. "
-                "Current status: Infrastructure in place, implementation in progress."
+                "Window functions (shift, rolling, diff, cum_sum) are not yet implemented in Phase 6.\n\n"
+                "These features require DataFrame-level support with window frame specifications.\n"
+                "Expected implementation: Phase 6.1\n\n"
+                "Workaround for Phase 6: Use regular operations without window functions.\n"
+                "Example: Instead of t.derive(prev=lambda r: r.price.shift(1)),\n"
+                "         use t.sort('date').select('*').filter(...)"
             )
         else:
             # Phase 4/5: Standard Rust-based derivation

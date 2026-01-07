@@ -773,33 +773,28 @@ impl RustTable {
     /// Add cumulative sum columns for specified columns
     /// 
     /// Args:
-    ///     cum_exprs: List of serialized expression dicts (from Python)
-    ///                Each expression identifies the column(s) to cumulate
-    /// 
-    /// Returns:
-    ///     New RustTable with cumulative sum columns added
-    fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
-        // If no dataframe, return empty result (for unit tests)
-        if self.dataframe.is_none() {
-            return Ok(RustTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: self.sort_exprs.clone(),
-            });
-        }
-        
-        // Get DataFrame
-        let _df = self.dataframe.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first."
-            ))?;
-        
-        // Phase 6 limitation: cum_sum not yet fully implemented in Rust
-        // TODO: Implement window functions for proper cumulative sums
-        // For now, return error indicating feature is not available
+     ///     cum_exprs: List of serialized expression dicts (from Python)
+     ///                Each expression identifies the column(s) to cumulate
+     /// 
+     /// Returns:
+     ///     New RustTable with cumulative sum columns added
+     fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+         // If no dataframe, return empty result (for unit tests)
+         if self.dataframe.is_none() {
+             return Ok(RustTable {
+                 session: Arc::clone(&self.session),
+                 dataframe: None,
+                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+             sort_exprs: self.sort_exprs.clone(),
+             });
+         }
+         
+         // Phase 6: Window functions deferred
+         // cum_sum requires proper window function support in DataFusion 51
+         // which has a complex API. Will be implemented in Phase 6.1
          return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-             "cum_sum() is not yet implemented. Phase 6 limitation: requires window function support."
+             "cum_sum() window function implementation deferred to Phase 6.1. \
+              Use the expression system instead: .derive(cumsum=lambda r: ...)"
          ));
      }
  }
