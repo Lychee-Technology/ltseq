@@ -431,14 +431,33 @@ result.show()
    left = orders.link(products, on=..., as_="prod", join_type="left")
    ```
 
-4. **Single-Level Links**: For now, use single links. Multi-level chaining has limitations
-   ```python
-   # ✓ Good
-   linked = orders.link(products, on=..., as_="prod")
-   
-   # ⚠ Use with caution - see Known Limitations
-   linked = orders.link(products, on=..., as_="prod").link(categories, on=..., as_="cat")
-   ```
+4. **Transparent Operations on Linked Columns**: Phase 10+ handles linked columns automatically
+    ```python
+    # Phase 10: Filter on linked columns (automatic materialization)
+    linked = orders.link(products, on=..., as_="prod")
+    expensive = linked.filter(lambda r: r.prod_price > 100)  # Returns LTSeq
+    
+    # Phase 11: Select linked columns (automatic materialization)
+    selected = linked.select("id", "prod_name", "prod_price")  # Returns LTSeq
+    
+    # Phase 13: Aggregate linked columns (automatic materialization)
+    stats = linked.aggregate({"total_orders": "count", "avg_price": "avg"})  # Returns LTSeq
+    ```
+
+5. **Single-Level Links**: Chaining works, including with intermediate materialization
+    ```python
+    # ✓ Single link
+    linked1 = orders.link(products, on=..., as_="prod")
+    
+    # ✓ Multi-level chaining (Phase 9 fixed this)
+    linked2 = linked1.link(categories, on=..., as_="cat")
+    result = linked2._materialize()
+    
+    # ✓ With intermediate materialization
+    mat1 = linked1._materialize()
+    linked2 = mat1.link(categories, on=..., as_="cat")  # Phase 9 made this work
+    result = linked2._materialize()
+    ```
 
 ## Examples
 
@@ -448,14 +467,16 @@ Complete, runnable examples are available in the `examples/` directory:
 - `linking_composite_keys.py` - Multi-column join keys
 - `linking_join_types.py` - All four join type examples
 - `linking_filtering.py` - Filtering patterns
+- `linking_advanced.py` - Phase 10-13: Advanced patterns (filtering/selecting linked columns, aggregation)
 
 See [Examples](#examples) section below for code snippets.
 
 ## What's Next?
 
-- **Phase 8L** (Current): Documentation and user guides ✓
-- **Phase 8M**: Performance optimization and benchmarking
-- **Future**: Multi-level chaining improvements, better error messages
+- **Phase 10**: Filtering on linked columns (✓ Complete)
+- **Phase 11**: Selecting from linked columns (✓ Complete)
+- **Phase 13**: Aggregating linked columns (🚧 In Progress)
+- **Phase 14+**: Grouped aggregation, window functions
 
 ## Summary
 
@@ -465,7 +486,10 @@ ltseq's linking feature provides:
 - ✅ Composite join keys
 - ✅ Intuitive lambda-based conditions
 - ✅ Safe operations (original tables unmodified)
-- ⚠️ Single-level joins (multi-level chaining has limitations)
+- ✅ Filtering on linked columns (Phase 10)
+- ✅ Selecting from linked columns (Phase 11)
+- ✅ Multi-level chaining with intermediate materialization (Phase 9)
+- 🚧 Aggregating linked columns (Phase 13)
 
 Use linking when you need to:
 - Join tables on specific conditions

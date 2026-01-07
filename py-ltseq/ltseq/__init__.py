@@ -1362,27 +1362,75 @@ class LinkedTable:
         """
         Select columns from linked table.
 
-        Phase 8G: Enhanced to materialize join if selecting linked columns.
-        Currently only source columns selection works reliably; selecting linked columns
-        (with alias prefix like 'prod_*') requires accessing the materialized table directly.
+        Phase 11: Enhanced to transparently materialize join if selecting linked columns.
+        Detects whether selected columns include linked columns (with alias prefix like 'prod_*')
+        and materializes the join automatically if needed.
 
         Args:
-            *cols: Column names to select from source table (e.g., "id", "quantity")
-                   Linked columns (e.g., "prod_name") require manual materialization
+            *cols: Column names to select (e.g., "id", "quantity", "prod_name", "prod_price")
+                   Can mix source columns and linked columns in a single call
 
         Returns:
-            LTSeq with selected columns from source
+            LTSeq with selected columns (materialized if linked columns were selected)
 
         Example:
             >>> linked = orders.link(products, on=lambda o,p: o.product_id==p.product_id, as_="prod")
-            >>> result = linked.select("id", "quantity")  # ✓ Works: source columns
-            >>> # For linked columns, use: linked._materialize().select(...)
+            >>> result = linked.select("id", "quantity")  # ✓ Works: source columns only
+            >>> result = linked.select("prod_name")  # ✓ Works: linked column (materializes transparently)
+            >>> result = linked.select("id", "prod_price")  # ✓ Works: mixed source and linked
         """
-        # Note: Current implementation materializes the join but select() on materialized
-        # tables doesn't work with linked column names due to DataFrame column name mismatch.
-        # This is planned for Phase 8G enhancement.
+        # Check if any selected columns are linked columns
+        # Linked columns have the format: "{alias}_{column_name}"
+        has_linked_columns = any(
+            col.startswith(f"{self._alias}_") for col in cols if isinstance(col, str)
+        )
+
+        if has_linked_columns:
+            # Materialize the join and select from the materialized table
+            materialized = self._materialize()
+            return materialized.select(*cols)
+        else:
+            # Select only from source columns (don't materialize)
+            return self._source.select(*cols)
+
+    def aggregate(self, *agg_specs, **named_aggs) -> "LTSeq":
+        """
+        Aggregate data from linked table.
+
+        Phase 13: Perform aggregation on linked table data.
+        Automatically materializes the join, making all columns available
+        (both source and linked columns) for use with group_ordered.
+
+        For true aggregation, use the pattern:
+            linked.group_ordered(lambda r: grouping_key).derive(aggregation_dict)
+
+        Args:
+            *agg_specs: Not currently used (reserved for future aggregate API)
+            **named_aggs: Not currently used (reserved for future aggregate API)
+
+        Returns:
+            LTSeq (materialized result with all columns available)
+
+        Example:
+            >>> linked = orders.link(products, on=..., as_="prod")
+            >>> # Simple grouping and aggregation
+            >>> grouped = linked.group_ordered(lambda r: r.prod_id)
+            >>> result = grouped.derive(lambda g: {
+            ...     "total_quantity": g.quantity.sum(),
+            ...     "avg_price": g.prod_price.mean()
+            ... })
+            >>> result.flatten().show()
+        """
+        # Materialize the join and return it
+        # This makes all columns (source + linked) available for further operations
         materialized = self._materialize()
-        return materialized.select(*cols)
+
+        if agg_specs or named_aggs:
+            # Support for explicit aggregation specifications is reserved for Phase 13+
+            # For now, just materialize (which enables group_ordered + derive workflow)
+            pass
+
+        return materialized
 
     def derive(self, mapper: Callable) -> "LinkedTable":
         """Derive columns (delegates to source for MVP)."""

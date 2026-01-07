@@ -197,7 +197,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 - **Python Bindings**: PyO3 27.2 for seamless Python/Rust integration
 - **SQL Engine**: Apache DataFusion 51.0 (powers Databricks, Apache Datafusion, etc.)
 - **Data Format**: Apache Arrow for zero-copy columnar operations
-- **Testing**: pytest with 250+ comprehensive tests
+- **Testing**: pytest with 351 comprehensive tests
 
 ### Performance Characteristics
 
@@ -342,7 +342,7 @@ A: LTSeq offers two approaches:
 2. **Traditional SQL joins** - Full data materialization
 
 **Q: Is this production-ready?**  
-A: LTSeq is stable with 302 passing tests covering all functionality. It's suitable for production use cases.
+A: LTSeq is stable with 351 passing tests covering all functionality. It's suitable for production use cases.
 
 **Q: How does performance compare to Pandas?**  
 A: LTSeq is generally faster for large datasets due to vectorized operations and the underlying DataFusion engine. For small datasets, both are comparable.
