@@ -1094,14 +1094,14 @@ class NestedTable:
         Derive new columns based on group properties.
 
         Args:
-            group_mapper: Lambda that returns a dict of new columns based on group.
-                        Can use g.first(), g.last(), g.count()
+        group_mapper: Lambda that returns a dict of new columns based on group.
+        Can use g.first(), g.last(), g.count()
 
         Returns:
-            A new NestedTable with derived columns
+        A new NestedTable with derived columns
 
         Example:
-            >>> grouped.derive(lambda g: {"span": g.count(), "gain": g.last().price - g.first().price})
+        >>> grouped.derive(lambda g: {"span": g.count(), "gain": g.last().price - g.first().price})
         """
         try:
             result = NestedTable(self._ltseq, self._grouping_lambda)
@@ -1109,6 +1109,203 @@ class NestedTable:
             return result
         except Exception as e:
             raise RuntimeError(f"Failed to derive group columns: {e}")
+
+
+def _extract_join_keys(
+    join_fn: Callable,
+    source_schema: Dict[str, str],
+    target_schema: Dict[str, str],
+) -> tuple:
+    """
+    Extract join keys from a lambda expression.
+
+    Parses a two-parameter lambda to extract equality-based join conditions.
+    Supports both directions: `source_col == target_col` and `target_col == source_col`.
+
+    Args:
+        join_fn: Lambda expression like `lambda o, p: o.product_id == p.product_id`
+        source_schema: Dictionary of source table columns {col_name: col_type}
+        target_schema: Dictionary of target table columns {col_name: col_type}
+
+    Returns:
+        Tuple of (left_key_expr, right_key_expr, join_type) where:
+        - left_key_expr: Serialized expression dict for source column
+        - right_key_expr: Serialized expression dict for target column
+        - join_type: String "inner" (default for MVP)
+
+    Raises:
+        TypeError: If join condition is not a supported equality expression
+        ValueError: If join columns don't exist in respective schemas
+        AttributeError: If lambda signature is invalid
+
+    Examples:
+        >>> left, right, jtype = _extract_join_keys(
+        ...     lambda o, p: o.product_id == p.product_id,
+        ...     {"product_id": "Int64", "quantity": "Int64"},
+        ...     {"product_id": "Int64", "name": "Utf8"}
+        ... )
+        >>> assert left == {"type": "Column", "name": "product_id"}
+        >>> assert right == {"type": "Column", "name": "product_id"}
+    """
+    import inspect
+
+    # Get lambda signature to validate parameter count
+    sig = inspect.signature(join_fn)
+    params = list(sig.parameters.keys())
+    if len(params) != 2:
+        raise TypeError(
+            f"Join lambda must have exactly 2 parameters (source, target), got {len(params)}"
+        )
+
+    # Create schema proxies for the lambda parameters
+    source_proxy = SchemaProxy(source_schema)
+    target_proxy = SchemaProxy(target_schema)
+
+    # Call the lambda with proxies to capture the expression
+    try:
+        expr = join_fn(source_proxy, target_proxy)
+    except AttributeError as e:
+        raise ValueError(f"Invalid column access in join condition: {e}")
+
+    # The lambda should return a BinOpExpr representing the equality condition
+    if not isinstance(expr, BinOpExpr):
+        raise TypeError(
+            f"Join condition must be an equality expression (e.g., o.id == p.id), got {type(expr).__name__}"
+        )
+
+    if expr.op != "Eq":
+        raise TypeError(f"Join condition must use equality (==), got operator '{expr.op}'")
+
+    # Validate that both sides are ColumnExpr (not literals or other expressions)
+    if not isinstance(expr.left, ColumnExpr):
+        raise TypeError(
+            f"Cannot compare directly with literal: left side must be a column reference, got {type(expr.left).__name__}"
+        )
+
+    if not isinstance(expr.right, ColumnExpr):
+        raise TypeError(
+            f"Cannot compare directly with literal: right side must be a column reference, got {type(expr.right).__name__}"
+        )
+
+    left_col = expr.left.name
+    right_col = expr.right.name
+
+    # Validate columns exist in their respective schemas
+    if left_col not in source_schema:
+        raise ValueError(
+            f"Source column '{left_col}' not found. Available columns: {list(source_schema.keys())}"
+        )
+
+    if right_col not in target_schema:
+        raise ValueError(
+            f"Target column '{right_col}' not found. Available columns: {list(target_schema.keys())}"
+        )
+
+    # Return serialized expressions and join type
+    left_key_expr = {"type": "Column", "name": left_col}
+    right_key_expr = {"type": "Column", "name": right_col}
+    join_type = "inner"  # MVP: only inner join
+
+    return left_key_expr, right_key_expr, join_type
+
+
+
+def _extract_join_keys(
+    join_fn: Callable,
+    source_schema: Dict[str, str],
+    target_schema: Dict[str, str],
+) -> tuple:
+    """
+    Extract join keys from a lambda expression.
+
+    Parses a two-parameter lambda to extract equality-based join conditions.
+    Supports both directions: `source_col == target_col` and `target_col == source_col`.
+
+    Args:
+        join_fn: Lambda expression like `lambda o, p: o.product_id == p.product_id`
+        source_schema: Dictionary of source table columns {col_name: col_type}
+        target_schema: Dictionary of target table columns {col_name: col_type}
+
+    Returns:
+        Tuple of (left_key_expr, right_key_expr, join_type) where:
+        - left_key_expr: Serialized expression dict for source column
+        - right_key_expr: Serialized expression dict for target column
+        - join_type: String "inner" (default for MVP)
+
+    Raises:
+        TypeError: If join condition is not a supported equality expression
+        ValueError: If join columns don't exist in respective schemas
+        AttributeError: If lambda signature is invalid
+
+    Examples:
+        >>> left, right, jtype = _extract_join_keys(
+        ...     lambda o, p: o.product_id == p.product_id,
+        ...     {"product_id": "Int64", "quantity": "Int64"},
+        ...     {"product_id": "Int64", "name": "Utf8"}
+        ... )
+        >>> assert left == {"type": "Column", "name": "product_id"}
+        >>> assert right == {"type": "Column", "name": "product_id"}
+    """
+    import inspect
+
+    # Get lambda signature to validate parameter count
+    sig = inspect.signature(join_fn)
+    params = list(sig.parameters.keys())
+    if len(params) != 2:
+        raise TypeError(
+            f"Join lambda must have exactly 2 parameters (source, target), got {len(params)}"
+        )
+
+    # Create schema proxies for the lambda parameters
+    source_proxy = SchemaProxy(source_schema)
+    target_proxy = SchemaProxy(target_schema)
+
+    # Call the lambda with proxies to capture the expression
+    try:
+        expr = join_fn(source_proxy, target_proxy)
+    except AttributeError as e:
+        raise ValueError(f"Invalid column access in join condition: {e}")
+
+    # The lambda should return a BinOpExpr representing the equality condition
+    if not isinstance(expr, BinOpExpr):
+        raise TypeError(
+            f"Join condition must be an equality expression (e.g., o.id == p.id), got {type(expr).__name__}"
+        )
+
+    if expr.op != "Eq":
+        raise TypeError(f"Join condition must use equality (==), got operator '{expr.op}'")
+
+    # Validate that both sides are ColumnExpr (not literals or other expressions)
+    if not isinstance(expr.left, ColumnExpr):
+        raise TypeError(
+            f"Cannot compare directly with literal: left side must be a column reference, got {type(expr.left).__name__}"
+        )
+
+    if not isinstance(expr.right, ColumnExpr):
+        raise TypeError(
+            f"Cannot compare directly with literal: right side must be a column reference, got {type(expr.right).__name__}"
+        )
+
+    left_col = expr.left.name
+    right_col = expr.right.name
+
+    # Validate columns exist in their respective schemas
+    if left_col not in source_schema:
+        raise ValueError(
+            f"Source column '{left_col}' not found. Available columns: {list(source_schema.keys())}"
+        )
+
+    if right_col not in target_schema:
+        raise ValueError(
+            f"Target column '{right_col}' not found. Available columns: {list(target_schema.keys())}"
+        )
+
+    # Return serialized expressions and join type
+    left_key_expr = {"type": "Column", "name": left_col}
+    right_key_expr = {"type": "Column", "name": right_col}
+    join_type = "inner"  # MVP: only inner join
+
+    return left_key_expr, right_key_expr, join_type
 
 
 class LinkedTable:
