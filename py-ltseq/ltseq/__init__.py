@@ -421,9 +421,57 @@ class LTSeq:
         for col_name in derived_cols:
             # In Phase 2, we'd infer the dtype from the expression
             result._schema[col_name] = "Unknown"
-        # Delegate derivation to Rust implementation
-        result._inner = self._inner.derive(derived_cols)
+
+        # Check if any expressions contain window functions
+        has_window_functions = any(
+            self._contains_window_function(expr) for expr in derived_cols.values()
+        )
+
+        if has_window_functions:
+            # Phase 6: Handle window functions - for now, raise informative error
+            raise NotImplementedError(
+                "Window functions (shift, rolling, diff, cum_sum) are not yet fully implemented. "
+                "This is a Phase 6 feature that requires DataFrame-level support. "
+                "Current status: Infrastructure in place, implementation in progress."
+            )
+        else:
+            # Phase 4/5: Standard Rust-based derivation
+            result._inner = self._inner.derive(derived_cols)
+
         return result
+
+    def _contains_window_function(self, expr_dict: Dict[str, Any]) -> bool:
+        """
+        Check if an expression tree contains window function calls.
+
+        Window functions include: shift, rolling, diff, cum_sum, etc.
+        """
+        if expr_dict.get("type") == "Call":
+            func_name = expr_dict.get("func", "")
+            if func_name in ("shift", "rolling", "diff", "cum_sum"):
+                return True
+
+        # Recurse into sub-expressions
+        if expr_dict.get("type") == "BinOp":
+            return self._contains_window_function(
+                expr_dict["left"]
+            ) or self._contains_window_function(expr_dict["right"])
+        elif expr_dict.get("type") == "UnaryOp":
+            return self._contains_window_function(expr_dict["operand"])
+        elif expr_dict.get("type") == "Call":
+            # Check arguments
+            for arg in expr_dict.get("args", []):
+                if self._contains_window_function(arg):
+                    return True
+            for val in expr_dict.get("kwargs", {}).values():
+                if self._contains_window_function(val):
+                    return True
+            # Check nested call
+            if expr_dict.get("on"):
+                if self._contains_window_function(expr_dict["on"]):
+                    return True
+
+        return False
 
     def sort(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
         """
