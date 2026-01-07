@@ -1402,14 +1402,27 @@ class LinkedTable:
             distinct_source = self._source.distinct(key_fn)
         return LinkedTable(distinct_source, self._target, self._join_fn, self._alias)
 
-    def link(self, target_table: "LTSeq", on: Callable, as_: str) -> "LinkedTable":
+    def link(
+        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+    ) -> "LinkedTable":
         """
         Link this linked table to another table.
 
         Allows chaining multiple links while preserving previous schemas.
+
+        Phase 8I: Enhanced to support join_type parameter.
+
+        Args:
+            target_table: The table to link to
+            on: Lambda with two parameters specifying the join condition
+            as_: Alias for the linked table reference
+            join_type: Type of join ("inner", "left", "right", "full"). Default: "inner"
+
+        Returns:
+            A new LinkedTable with chained links
         """
         # Create new LinkedTable that chains from the source
-        result = LinkedTable(self._source, target_table, on, as_)
+        result = LinkedTable(self._source, target_table, on, as_, join_type)
 
         # Merge with existing schema from this LinkedTable
         for key, value in self._schema.items():
