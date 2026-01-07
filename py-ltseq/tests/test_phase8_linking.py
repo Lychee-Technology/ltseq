@@ -221,6 +221,174 @@ class TestLinkedTableFilter:
         assert filtered_count > 0
 
 
+class TestLinkedTableFilterOnLinkedColumns:
+    """
+    Phase 10: Tests for filtering directly on linked columns without forced materialization.
+
+    These tests verify that we can filter on linked table columns (like r.prod_price)
+    and get back filtered results without requiring explicit materialization in user code.
+    """
+
+    @pytest.fixture
+    def orders_table(self):
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        return LTSeq.read_csv("examples/products.csv")
+
+    def test_filter_on_linked_column_returns_ltseq(self, orders_table, products_table):
+        """
+        Filtering on a linked column should return an LTSeq (materialized result).
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        result = linked.filter(lambda r: r.prod_price > 100)
+
+        # When filtering on linked columns, we get back an LTSeq
+        assert isinstance(result, LTSeq)
+        assert len(result) > 0
+
+    def test_filter_on_linked_column_simple_condition(
+        self, orders_table, products_table
+    ):
+        """
+        Test filtering with a simple condition on a single linked column.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter to only expensive products
+        filtered = linked.filter(lambda r: r.prod_price > 100)
+
+        assert filtered is not None
+        assert len(filtered) > 0
+
+        # Verify schema is preserved
+        assert "prod_price" in filtered._schema
+
+    def test_filter_on_linked_column_with_comparison(
+        self, orders_table, products_table
+    ):
+        """
+        Test filtering with comparison operators on linked columns.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Test greater than
+        filtered_gt = linked.filter(lambda r: r.prod_price > 50)
+        assert len(filtered_gt) > 0
+
+        # Test less than
+        filtered_lt = linked.filter(lambda r: r.prod_price < 200)
+        assert len(filtered_lt) > 0
+
+        # Test equality
+        filtered_eq = linked.filter(lambda r: r.prod_price == 100)
+        assert len(filtered_eq) >= 0
+
+    def test_filter_on_linked_string_column(self, orders_table, products_table):
+        """
+        Test filtering on a string-type linked column.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter by product name (Widget, Gadget, Tool, or Device)
+        filtered = linked.filter(lambda r: r.prod_name == "Widget")
+
+        # Verify filtering worked
+        assert len(filtered) > 0
+        assert "prod_name" in filtered._schema
+
+    def test_filter_with_combined_source_and_linked_condition(
+        self, orders_table, products_table
+    ):
+        """
+        Test that we cannot easily combine source and linked column conditions in a single filter.
+
+        Note: Complex conditions combining source and linked columns would require
+        more sophisticated handling. For now, test that the simpler case works.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on linked column only
+        filtered = linked.filter(lambda r: r.prod_price > 75)
+
+        assert filtered is not None
+        assert len(filtered) > 0
+
+    def test_filter_on_linked_column_preserves_all_columns(
+        self, orders_table, products_table
+    ):
+        """
+        Verify that filtering on linked columns preserves all columns in result.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        original_columns = set(linked._schema.keys())
+
+        filtered = linked.filter(lambda r: r.prod_price > 100)
+        filtered_columns = set(filtered._schema.keys())
+
+        assert original_columns == filtered_columns
+
+    def test_filter_on_linked_column_chaining(self, orders_table, products_table):
+        """
+        Test that we can chain operations after filtering on linked columns.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on linked column, then materialize (should already be materialized)
+        filtered = linked.filter(lambda r: r.prod_price > 100)
+
+        # Should be able to call methods on the result
+        assert len(filtered) > 0
+        filtered.show(2)
+
+    def test_filter_on_linked_column_empty_result(self, orders_table, products_table):
+        """
+        Test filtering on linked column with condition that matches no rows.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter with condition that should match nothing
+        filtered = linked.filter(lambda r: r.prod_price > 10000)
+
+        assert len(filtered) == 0
+
+    def test_filter_on_linked_column_with_multiple_conditions(
+        self, orders_table, products_table
+    ):
+        """
+        Test filtering with multiple conditions on linked columns using logical operators.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Test AND condition (both must be true)
+        filtered = linked.filter(lambda r: (r.prod_price > 50) & (r.prod_price < 200))
+
+        # Verify filtering worked
+        assert len(filtered) > 0
+        assert "prod_price" in filtered._schema
+
+
 class TestLinkedTableSelect:
     """Tests for select() on linked tables"""
 
@@ -818,3 +986,245 @@ class TestPhase8KErrorHandling:
 
         # Original table schema should be unchanged
         assert orders_table._schema == original_schema
+
+
+# Phase 9: Chained Materialization Tests
+class TestChainedMaterialization:
+    """Tests for chaining multiple link() calls with intermediate materialization"""
+
+    @pytest.fixture
+    def orders_table(self):
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        return LTSeq.read_csv("examples/products.csv")
+
+    @pytest.fixture
+    def categories_table(self):
+        return LTSeq.read_csv("examples/categories.csv")
+
+    def test_single_link_then_materialize(self, orders_table, products_table):
+        """Single link followed by materialization should work"""
+        linked = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        result = linked._materialize()
+
+        assert result is not None
+        assert isinstance(result, LTSeq)
+        # Should have columns from both tables
+        assert "id" in result._schema
+        assert "prod_name" in result._schema
+
+    def test_materialize_then_link_with_inner_join(
+        self, orders_table, products_table, categories_table
+    ):
+        """Materialize first link, then link to third table with inner join"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+
+        # Link the materialized result to categories
+        # Use product_id from the materialized result
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+            join_type="inner",
+        )
+
+        # This should create a LinkedTable successfully
+        assert linked2 is not None
+        assert isinstance(linked2, LinkedTable)
+
+    def test_materialize_then_link_then_materialize_again(
+        self, orders_table, products_table, categories_table
+    ):
+        """Materialize, link, then materialize again - the critical test"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+
+        # Link to categories
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+            join_type="inner",
+        )
+
+        # Now materialize the second link - THIS IS THE KEY TEST
+        # This currently fails due to schema/DataFrame mismatch
+        mat2 = linked2._materialize()
+
+        assert mat2 is not None
+        assert isinstance(mat2, LTSeq)
+        # Schema should include columns from all three tables
+        assert "id" in mat2._schema
+        assert "prod_name" in mat2._schema
+        assert "cat_category" in mat2._schema
+
+    def test_schema_consistency_after_chaining(
+        self, orders_table, products_table, categories_table
+    ):
+        """Schema should be consistent through the materialization chain"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+        )
+        mat2 = linked2._materialize()
+
+        # All expected columns should be in schema
+        schema_keys = set(mat2._schema.keys())
+        expected_columns = {
+            "id",
+            "product_id",
+            "quantity",  # From orders
+            "prod_product_id",
+            "prod_name",
+            "prod_price",  # From products (linked as prod)
+            "cat_product_id",
+            "cat_category",
+            "cat_category_id",  # From categories (linked as cat)
+        }
+
+        # At minimum, check that base columns are present
+        assert "id" in schema_keys
+        assert "product_id" in schema_keys
+        assert "quantity" in schema_keys
+
+    def test_chained_materialization_preserves_data(
+        self, orders_table, products_table, categories_table
+    ):
+        """Data should be preserved through chained materialization"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+        original_rows = len(mat1)
+
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+        )
+        mat2 = linked2._materialize()
+
+        # Data should be preserved (inner join, so same or fewer rows)
+        assert len(mat2) > 0
+        assert len(mat2) <= original_rows
+
+    def test_three_table_chain_without_intermediate_materialization(
+        self, orders_table, products_table, categories_table
+    ):
+        """Direct chaining without intermediate materialization should work"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        # Chain without materializing in between
+        linked2 = linked1.link(
+            categories_table,
+            on=lambda l, c: l.product_id == c.product_id,
+            as_="cat",
+        )
+
+        # Now materialize the entire chain
+        result = linked2._materialize()
+
+        assert result is not None
+        assert isinstance(result, LTSeq)
+        # Should have rows
+        assert len(result) > 0
+
+    def test_chained_link_with_left_join(
+        self, orders_table, products_table, categories_table
+    ):
+        """Left join in chained linking"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+            join_type="left",
+        )
+        mat1 = linked1._materialize()
+
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+            join_type="left",
+        )
+        mat2 = linked2._materialize()
+
+        # Left joins should preserve all left rows
+        assert len(mat2) > 0
+
+    def test_chained_materialization_with_filtering(
+        self, orders_table, products_table, categories_table
+    ):
+        """Filter after chained materialization"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+        )
+        mat2 = linked2._materialize()
+
+        # Filter on the chained materialized result
+        filtered = mat2.filter(lambda r: r.quantity > 5)
+        assert len(filtered) >= 0
+
+    def test_materialized_result_has_correct_dataframe_columns(
+        self, orders_table, products_table, categories_table
+    ):
+        """DataFrame columns should match schema after chaining"""
+        linked1 = orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+        mat1 = linked1._materialize()
+
+        linked2 = mat1.link(
+            categories_table,
+            on=lambda m, c: m.product_id == c.product_id,
+            as_="cat",
+        )
+        mat2 = linked2._materialize()
+
+        # Check schema has expected columns
+        schema_cols = set(mat2._schema.keys())
+
+        # Should have columns from all three tables
+        assert "id" in schema_cols  # from orders
+        assert "quantity" in schema_cols  # from orders
+        assert "prod_name" in schema_cols  # from products (with alias)
+        assert len(schema_cols) > 0

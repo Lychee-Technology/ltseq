@@ -345,8 +345,21 @@ pub fn join_impl(
         }
     };
 
-    // 6. Rename ALL join keys from the right table to avoid schema conflicts
-    // For composite keys, we need to rename multiple columns
+    // Phase 9: Simple and robust join key renaming for chained joins
+    // Key insight: Just rename the right table's join keys with unique names.
+    // Don't try to rename the left table - that's more complex with qualified names.
+    
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    
+    // Don't rename left table - use columns as-is
+    let df_left_renamed = (**df_left).clone();
+    let actual_left_join_keys = left_col_names.clone();
+    
+    // 6. Rename ALL join keys from the right table
+    
     let mut right_select_exprs = Vec::new();
     let mut temp_right_col_names = Vec::new();  // Track the renamed column names
     
@@ -356,8 +369,8 @@ pub fn join_impl(
         if right_col_names_copy.contains(&col_name.to_string()) {
             // Find its index in the join keys
             if let Some(idx) = right_col_names_copy.iter().position(|c| c == col_name) {
-                // Rename the join key temporarily
-                let temp_join_key_name = format!("__join_key_right_{}__", idx);
+                // Use a completely unique temporary name
+                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__", idx, unique_suffix);
                 right_select_exprs.push(col(col_name).alias(&temp_join_key_name));
                 temp_right_col_names.push(temp_join_key_name);
             }
@@ -379,12 +392,12 @@ pub fn join_impl(
 
     // 7. Execute the join with ALL join keys
     // For composite keys, join on multiple column pairs
-    let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
+    let left_join_keys: Vec<&str> = actual_left_join_keys.iter().map(|s| s.as_str()).collect();
     let right_join_keys: Vec<&str> = temp_right_col_names.iter().map(|s| s.as_str()).collect();
     
     let joined_df = RUNTIME
         .block_on(async {
-            (**df_left)
+            df_left_renamed
                 .clone()
                 .join(
                     df_right_renamed.clone(),
@@ -397,38 +410,48 @@ pub fn join_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 8. No need to rename columns in join - they are properly tracked in the schema
-     // The schema will be used by show() to display correct names
-     // For select() operations, we'll handle column mapping at the Python level
-     
-     // Build the final schema with correct column names
-     let mut final_fields = Vec::new();
-     
-     // Add left table columns
-     for field in schema_left.fields().iter() {
-         final_fields.push((**field).clone());
-     }
-     
-     // Add right table columns with alias prefix
-     for field in schema_right.fields().iter() {
-         let col_name = field.name();
-         let new_field = Field::new(
-             format!("{}_{}", alias, col_name),
-             field.data_type().clone(),
-             field.is_nullable(),
-         );
-         final_fields.push(new_field);
-     }
-     
-     let final_arrow_schema = ArrowSchema::new(final_fields);
+    // 8. Build the final schema with correct column names AND rename DataFrame columns
+      // DataFusion joins produce qualified names like "?table?.col", we need to rename to user-facing names
+       let mut final_fields = Vec::new();
+       let mut select_exprs: Vec<Expr> = Vec::new();
+       
+       // Add left table columns - select them by their original names
+       for field in schema_left.fields().iter() {
+           final_fields.push((**field).clone());
+           select_exprs.push(col(field.name()));
+       }
+       
+       // Add right table columns with alias prefix - rename via SELECT
+       for field in schema_right.fields().iter() {
+           let col_name = field.name();
+           let new_col_name = format!("{}_{}", alias, col_name);
+           let new_field = Field::new(
+               new_col_name.clone(),
+               field.data_type().clone(),
+               field.is_nullable(),
+           );
+           final_fields.push(new_field);
+           // Select the column with its original name and alias it to the final name
+           select_exprs.push(col(col_name).alias(&new_col_name));
+       }
+       
+       let final_arrow_schema = ArrowSchema::new(final_fields);
 
-     // 9. Return new RustTable with joined data
-     // Note: The DataFrame still has its original qualified column names,
-     // but the schema reports them with alias prefixes
-     Ok(RustTable {
-         session: Arc::clone(&table.session),
-         dataframe: Some(Arc::new(joined_df)),
-         schema: Some(Arc::new(final_arrow_schema)),
-         sort_exprs: Vec::new(),
-     })
+       // 9. Apply final SELECT to rename all columns to match the schema
+       let final_df = RUNTIME
+           .block_on(async {
+               joined_df
+                   .clone()
+                   .select(select_exprs)
+                   .map_err(|e| format!("Final column rename SELECT failed: {}", e))
+           })
+           .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+       // 10. Return new RustTable with joined and renamed data
+       Ok(RustTable {
+           session: Arc::clone(&table.session),
+           dataframe: Some(Arc::new(final_df)),
+           schema: Some(Arc::new(final_arrow_schema)),
+           sort_exprs: Vec::new(),
+       })
 }
