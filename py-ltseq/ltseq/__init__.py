@@ -1,12 +1,21 @@
-# LTSeq Python wrapper — requires native `ltseq_core` extension.
-# This module intentionally does not provide Python fallbacks for read_csv/show
-# to ensure we exercise the native DataFusion implementation during Phase 2.
+# LTSeq Python wrapper — uses native `ltseq_core` extension for CSV IO and operations.
 
 from typing import Callable, Dict, Any, Optional
 import csv
 
+# Import the expression system early
+from .expr import _lambda_to_expr, SchemaProxy
 
-def _eval_expr_on_row(expr_dict: Dict[str, Any], row_proxy: "SchemaProxy") -> Any:
+# Import the compiled Rust module
+try:
+    from . import ltseq_core
+
+    HAS_RUST_BINDING = True
+except ImportError:
+    HAS_RUST_BINDING = False
+
+
+def _eval_expr_on_row(expr_dict: Dict[str, Any], row_proxy: SchemaProxy) -> Any:
     """
     Evaluate a serialized expression tree on a given row.
 
@@ -71,145 +80,6 @@ def _eval_expr_on_row(expr_dict: Dict[str, Any], row_proxy: "SchemaProxy") -> An
 
     else:
         raise ValueError(f"Unknown expression type: {expr_type}")
-
-
-# Stub RustTable for now - actual Rust extension has GIL issues in Phase 1
-# This will be properly integrated in Phase 2
-class RustTable:
-    def __init__(self):
-        self.data: list = []  # List of dicts, one per row
-        self.schema: Dict[str, str] = {}
-
-    def read_csv(self, path: str) -> None:
-        """Read CSV file into memory."""
-        import csv
-
-        self.data = []
-        self.schema = {}
-
-        try:
-            with open(path, "r") as f:
-                reader = csv.DictReader(f)
-                if reader.fieldnames is None:
-                    return
-
-                # Initialize schema with all columns as string
-                for col in reader.fieldnames:
-                    self.schema[col] = "string"
-
-                # Read all rows
-                for row in reader:
-                    # Try to infer types from values
-                    typed_row = {}
-                    for col, value in row.items():
-                        # Attempt to convert to int, then float, else keep as string
-                        if value == "":
-                            typed_row[col] = None
-                        else:
-                            try:
-                                typed_row[col] = int(value)
-                                if self.schema[col] == "string":
-                                    self.schema[col] = "int64"
-                            except ValueError:
-                                try:
-                                    typed_row[col] = float(value)
-                                    if self.schema[col] == "string":
-                                        self.schema[col] = "float64"
-                                except ValueError:
-                                    typed_row[col] = value
-                    self.data.append(typed_row)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"CSV file not found: {path}")
-
-    def show(self, n: int = 10) -> str:
-        """Display the data as a formatted table."""
-        if not self.data:
-            return "No data loaded"
-
-        # Get column names from schema
-        cols = list(self.schema.keys())
-        if not cols:
-            return "No columns in schema"
-
-        # Format header
-        output = []
-        output.append("\t".join(cols))
-
-        # Format rows
-        for i, row in enumerate(self.data[:n]):
-            values = [str(row.get(col, "")) for col in cols]
-            output.append("\t".join(values))
-
-        return "\n".join(output)
-
-    def hello(self) -> str:
-        return "Hello from stub RustTable (Phase 1)"
-
-    def filter(self, expr_dict: Dict[str, Any]) -> "RustTable":
-        """Apply filter expression and return a new RustTable with filtered data."""
-        # Create new RustTable with same schema
-        filtered = RustTable()
-        filtered.schema = self.schema.copy()
-
-        # Evaluate expression for each row
-        for row in self.data:
-            # Create an evaluator for this row
-            evaluator = _RowEvaluator(row)
-
-            # Evaluate the expression
-            try:
-                result = _eval_expr_on_row(expr_dict, evaluator)
-                if result:  # Include row if expression is truthy
-                    filtered.data.append(row)
-            except Exception:
-                # If evaluation fails, skip this row
-                pass
-
-        return filtered
-
-    def select(self, exprs: list) -> "RustTable":
-        """Select columns and return a new RustTable."""
-        result = RustTable()
-
-        if not exprs:
-            # If no columns specified, return copy
-            result.schema = self.schema.copy()
-            result.data = [row.copy() for row in self.data]
-            return result
-
-        # Extract column names from expressions
-        selected_cols = []
-        for expr in exprs:
-            if isinstance(expr, dict) and expr.get("type") == "Column":
-                selected_cols.append(expr["name"])
-            else:
-                # For now, skip computed columns
-                pass
-
-        # Update schema to only selected columns
-        result.schema = {
-            col: self.schema[col] for col in selected_cols if col in self.schema
-        }
-
-        # Select columns from data
-        result.data = []
-        for row in self.data:
-            new_row = {col: row.get(col) for col in selected_cols if col in self.schema}
-            result.data.append(new_row)
-
-        return result
-
-    def derive(self, derived_cols: Dict[str, Dict[str, Any]]) -> "RustTable":
-        """Add derived columns and return a new RustTable."""
-        # For now, just return a copy
-        # TODO: Implement proper column derivation
-        result = RustTable()
-        result.schema = self.schema.copy()
-        result.data = [row.copy() for row in self.data]
-        return result
-
-
-from .expr import _lambda_to_expr, SchemaProxy
 
 
 class _RowEvaluator:
@@ -324,7 +194,12 @@ class LTSeq:
     """Python-visible LTSeq wrapper backed by the native Rust kernel."""
 
     def __init__(self):
-        self._inner = RustTable()
+        if not HAS_RUST_BINDING:
+            raise RuntimeError(
+                "Rust extension ltseq_core not available. "
+                "Please rebuild with `maturin develop`."
+            )
+        self._inner = ltseq_core.RustTable()
         self._schema: Dict[str, str] = {}
 
     @classmethod
@@ -346,16 +221,24 @@ class LTSeq:
         """
         t = cls()
         t._schema = _infer_schema_from_csv(path)
-        # Call RustTable.read_csv to load the actual data
+        # Call Rust RustTable.read_csv to load the actual data
         t._inner.read_csv(path)
         return t
 
     def show(self, n: int = 10) -> None:
-        # Delegate to native show — native code is responsible for printing
-        # a preview. We ignore the return string if any.
+        """
+        Display the data as a pretty-printed ASCII table.
+
+        Args:
+            n: Maximum number of rows to display (default 10)
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.show()
+        """
+        # Delegate to Rust implementation
         out = self._inner.show(n)
-        if out is not None:
-            print(out)
+        print(out)
 
     def hello(self) -> str:
         return self._inner.hello()
@@ -461,8 +344,6 @@ class LTSeq:
                 exprs.append({"type": "Column", "name": col})
             elif callable(col):
                 # Lambda that computes expressions or columns
-                from .expr import SchemaProxy
-
                 proxy = SchemaProxy(self._schema)
                 result = col(proxy)
 
