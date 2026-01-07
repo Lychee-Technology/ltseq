@@ -119,13 +119,13 @@ fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let left_item = dict.get_item("left")
                 .map_err(|_| PyExprError::MissingField("left".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("left".to_string()))?;
-            let left_dict = left_item.downcast::<PyDict>()
+            let left_dict = left_item.cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("left must be dict".to_string()))?;
             
             let right_item = dict.get_item("right")
                 .map_err(|_| PyExprError::MissingField("right".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("right".to_string()))?;
-            let right_dict = right_item.downcast::<PyDict>()
+            let right_dict = right_item.cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("right must be dict".to_string()))?;
             
             let left = Box::new(dict_to_py_expr(&left_dict)?);
@@ -143,7 +143,7 @@ fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let operand_item = dict.get_item("operand")
                 .map_err(|_| PyExprError::MissingField("operand".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("operand".to_string()))?;
-            let operand_dict = operand_item.downcast::<PyDict>()
+            let operand_dict = operand_item.cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("operand must be dict".to_string()))?;
             
             let operand = Box::new(dict_to_py_expr(&operand_dict)?);
@@ -160,18 +160,18 @@ fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let on_item = dict.get_item("on")
                 .map_err(|_| PyExprError::MissingField("on".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("on".to_string()))?;
-            let on_dict = on_item.downcast::<PyDict>()
+            let on_dict = on_item.cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("on must be dict".to_string()))?;
             
             // Deserialize args list
             let args_item = dict.get_item("args")
                 .map_err(|_| PyExprError::MissingField("args".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("args".to_string()))?;
-            let args_list = args_item.downcast::<PyList>()
+            let args_list = args_item.cast::<PyList>()
                 .map_err(|_| PyExprError::InvalidType("args must be list".to_string()))?;
             let mut args = Vec::new();
             for arg_item in args_list.iter() {
-                let arg_dict = arg_item.downcast::<PyDict>()
+                let arg_dict = arg_item.cast::<PyDict>()
                     .map_err(|_| PyExprError::InvalidType("arg must be dict".to_string()))?;
                 args.push(dict_to_py_expr(&arg_dict)?);
             }
@@ -180,13 +180,13 @@ fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let kwargs_item = dict.get_item("kwargs")
                 .map_err(|_| PyExprError::MissingField("kwargs".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("kwargs".to_string()))?;
-            let kwargs_py = kwargs_item.downcast::<PyDict>()
+            let kwargs_py = kwargs_item.cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("kwargs must be dict".to_string()))?;
             let mut kwargs = HashMap::new();
             for (key, val) in kwargs_py.iter() {
                 let key_str = key.extract::<String>()
                     .map_err(|_| PyExprError::InvalidType("kwargs key must be string".to_string()))?;
-                let val_dict = val.downcast::<PyDict>()
+                let val_dict = val.cast::<PyDict>()
                     .map_err(|_| PyExprError::InvalidType("kwargs value must be dict".to_string()))?;
                 kwargs.insert(key_str, dict_to_py_expr(&val_dict)?);
             }
@@ -734,7 +734,7 @@ impl RustTable {
          // 2. Check if any derived column contains window functions
          let mut has_window_functions = false;
          for (_, expr_item) in derived_cols.iter() {
-             let expr_dict = expr_item.downcast::<PyDict>()
+             let expr_dict = expr_item.cast::<PyDict>()
                  .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                      "Expression must be dict"
                  ))?;
@@ -769,7 +769,7 @@ impl RustTable {
                      "Column name must be string"
                  ))?;
              
-             let expr_dict = expr_item.downcast::<PyDict>()
+             let expr_dict = expr_item.cast::<PyDict>()
                  .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                      "Expression must be dict"
                  ))?;
@@ -864,7 +864,7 @@ impl RustTable {
                          "Column name must be string"
                      ))?;
                  
-                 let expr_dict = expr_item.downcast::<PyDict>()
+                 let expr_dict = expr_item.cast::<PyDict>()
                      .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                          "Expression must be dict"
                      ))?;
@@ -873,21 +873,10 @@ impl RustTable {
                      .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                  
                   // Convert expression to SQL
-                  let mut expr_sql = pyexpr_to_sql(&py_expr, schema)
+                   let expr_sql = pyexpr_to_sql(&py_expr, schema)
                       .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-                  
-                  // Build window specification if needed
-                  let window_spec = if !self.sort_exprs.is_empty() {
-                      let order_by = self.sort_exprs.iter()
-                          .map(|col| format!("\"{}\"", col))
-                          .collect::<Vec<_>>()
-                          .join(", ");
-                      format!(" OVER (ORDER BY {})", order_by)
-                  } else {
-                      " OVER ()".to_string()
-                  };
-                  
-                  // Check if this is a window function and handle rolling aggregations and diff
+                   
+                   // Check if this is a window function and handle rolling aggregations and diff
                   let is_rolling_agg = expr_sql.contains("__ROLLING_");
                   let is_diff = expr_sql.contains("__DIFF_");
                   
@@ -928,45 +917,57 @@ impl RustTable {
                               func_part, col_part, window_size - 1
                           )
                       }
-                  } else if is_diff {
-                       // Handle diff: replace marker with actual calculation
-                       // Pattern: __DIFF_periods__(col)__periods
-                       // Replace with: (col - LAG(col, periods)) OVER (ORDER BY ...)
-                       let diff_start = expr_sql.find("__DIFF_").unwrap_or(0);
-                       let periods_start = diff_start + 7; // len("__DIFF_")
-                       let periods_end = expr_sql[periods_start..].find("__").unwrap_or(0) + periods_start;
-                       let periods_str = &expr_sql[periods_start..periods_end];
-                       
-                       let col_start = expr_sql.find("__(").unwrap_or(0) + 3; // len("__(")
-                       let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
-                       let col_part = &expr_sql[col_start..col_end];
-                       
-                       let order_by = if !self.sort_exprs.is_empty() {
-                           self.sort_exprs.iter()
+                   } else if is_diff {
+                        // Handle diff: replace marker with actual calculation
+                        // Pattern: __DIFF_periods__(col)__periods
+                        // Replace with: (col - LAG(col, periods)) OVER (ORDER BY ...)
+                        let diff_start = expr_sql.find("__DIFF_").unwrap_or(0);
+                        let periods_start = diff_start + 7; // len("__DIFF_")
+                        let periods_end = expr_sql[periods_start..].find("__").unwrap_or(0) + periods_start;
+                        let periods_str = &expr_sql[periods_start..periods_end];
+                        
+                        let col_start = expr_sql.find("__(").unwrap_or(0) + 3; // len("__(")
+                        let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
+                        let col_part = &expr_sql[col_start..col_end];
+                        
+                        let order_by = if !self.sort_exprs.is_empty() {
+                            self.sort_exprs.iter()
+                                .map(|col| format!("\"{}\"", col))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        } else {
+                            "".to_string()
+                        };
+                        
+                         // We need to apply OVER clause to LAG
+                         let diff_expr = if !order_by.is_empty() {
+                             format!(
+                                 "({} - LAG({}, {}) OVER (ORDER BY {}))",
+                                 col_part, col_part, periods_str, order_by
+                             )
+                         } else {
+                             format!(
+                                 "({} - LAG({}, {}) OVER ())",
+                                 col_part, col_part, periods_str
+                             )
+                         };
+                        
+                        diff_expr
+                   } else if expr_sql.contains("LAG(") || expr_sql.contains("LEAD(") {
+                       // Handle shift() window functions (LAG/LEAD)
+                       // shift() generates LAG/LEAD but without OVER clause, so we need to add it
+                       if !self.sort_exprs.is_empty() {
+                           let order_by = self.sort_exprs.iter()
                                .map(|col| format!("\"{}\"", col))
                                .collect::<Vec<_>>()
-                               .join(", ")
+                               .join(", ");
+                           format!("{} OVER (ORDER BY {})", expr_sql, order_by)
                        } else {
-                           "".to_string()
-                       };
-                       
-                        // We need to apply OVER clause to LAG
-                        let diff_expr = if !order_by.is_empty() {
-                            format!(
-                                "({} - LAG({}, {}) OVER (ORDER BY {}))",
-                                col_part, col_part, periods_str, order_by
-                            )
-                        } else {
-                            format!(
-                                "({} - LAG({}, {}) OVER ())",
-                                col_part, col_part, periods_str
-                            )
-                        };
-                       
-                       diff_expr
-                  } else {
-                      expr_sql
-                  };
+                           format!("{} OVER ()", expr_sql)
+                       }
+                   } else {
+                       expr_sql
+                   };
                   
                   select_parts.push(format!("{} AS \"{}\"", full_expr, col_name_str));
              }
@@ -1212,7 +1213,7 @@ impl RustTable {
                   // Build schema with cumulative sum columns added
                   let mut new_fields = schema.fields().to_vec();
                   for (idx, expr_item) in cum_exprs.iter().enumerate() {
-                      let expr_dict = expr_item.downcast::<PyDict>()
+                      let expr_dict = expr_item.cast::<PyDict>()
                           .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                               "Expression must be dict"
                           ))?;
@@ -1256,7 +1257,7 @@ impl RustTable {
                       select_parts.push(format!("\"{}\"", field.name()));
                   }
                   for (idx, expr_item) in cum_exprs.iter().enumerate() {
-                      let expr_dict = expr_item.downcast::<PyDict>()
+                      let expr_dict = expr_item.cast::<PyDict>()
                           .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                               "Expression must be dict"
                           ))?;
@@ -1329,7 +1330,7 @@ impl RustTable {
              
              // Add cumulative sum columns for each input column
              for (idx, expr_item) in cum_exprs.iter().enumerate() {
-                 let expr_dict = expr_item.downcast::<PyDict>()
+                 let expr_dict = expr_item.cast::<PyDict>()
                      .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
                          "Expression must be dict"
                      ))?;

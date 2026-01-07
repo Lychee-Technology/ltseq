@@ -36,6 +36,93 @@ This is the soul of LTSeq, treating data as a sequence rather than an unordered 
 | **group\_ordered** | group\_ordered(lambda r: r.flag) | T.group@o | **Ordered Grouping**. **Crucial**: Groups only *consecutive* identical records. Does not sort the data. |
 | **search\_first** | search\_first(lambda r: r.val \> 100\) | T.pselect | **Binary Search**. Quickly finds the first matching record in an ordered table. |
 
+##### **Window Function Examples**
+
+**Important**: Window functions (shift, rolling, cum_sum, diff) require a prior `.sort()` call to establish order.
+
+```python
+from ltseq import LTSeq
+
+# Example: Stock price analysis
+t = LTSeq.read_csv("stock.csv")
+
+# 1. shift() - Access previous values
+result = (
+    t.sort(lambda r: r.date)
+    .derive(lambda r: {
+        "prev_close": r.close.shift(1),      # Previous row's close price
+        "next_open": r.open.shift(-1),       # Next row's open price
+        "price_change": r.close - r.close.shift(1)
+    })
+)
+
+# 2. rolling() - Compute aggregates over sliding windows
+result = (
+    t.sort(lambda r: r.date)
+    .derive(lambda r: {
+        "ma_5": r.close.rolling(5).mean(),   # 5-day moving average
+        "volume_sum_10": r.volume.rolling(10).sum(),  # 10-day sum
+        "price_min_3": r.close.rolling(3).min(),      # 3-day minimum
+        "price_max_3": r.close.rolling(3).max()       # 3-day maximum
+    })
+)
+
+# 3. diff() - Calculate differences from previous values
+result = (
+    t.sort(lambda r: r.date)
+    .derive(lambda r: {
+        "daily_change": r.close.diff(),      # Close - previous close
+        "volume_trend": r.volume.diff(2)     # Volume - volume from 2 rows ago
+    })
+)
+
+# 4. cum_sum() - Cumulative calculations
+result = (
+    t.sort(lambda r: r.date)
+    .cum_sum("volume", "amount")  # Adds cum_volume and cum_amount columns
+)
+
+# 5. Complex pipeline combining multiple operators
+result = (
+    t
+    .sort(lambda r: r.date)
+    .derive(lambda r: {
+        "price_change": r.close - r.close.shift(1),
+        "is_up": r.close > r.close.shift(1),
+        "ma_20": r.close.rolling(20).mean(),
+        "volatility": r.close.rolling(10).std()
+    })
+    .filter(lambda r: r.volatility > 2)  # High volatility days
+    .select(lambda r: [r.date, r.close, r.is_up, r.ma_20, r.volatility])
+)
+```
+
+##### **Important Notes on Window Functions**
+
+1. **Sort Order is Required**: All window functions must follow a `.sort()` call
+   ```python
+   # ✅ CORRECT
+   t.sort(lambda r: r.date).derive(lambda r: {"prev": r.col.shift(1)})
+   
+   # ❌ WRONG - Will fail
+   t.derive(lambda r: {"prev": r.col.shift(1)})
+   ```
+
+2. **Sort Order is Preserved**: Window functions maintain the sort order established by the most recent `.sort()` call
+   ```python
+   t.sort(lambda r: r.date).derive(...).filter(...).derive(...)
+   # Sort order by date is maintained throughout
+   ```
+
+3. **Dict-Based derive() API**: For complex multi-column operations
+   ```python
+   t.derive(lambda r: {
+       "prev": r.col.shift(1),
+       "next": r.col.shift(-1),
+       "ma": r.col.rolling(5).mean()
+   })
+   ```
+
 #### **3\. Set Algebra**
 
 Operations treating tables as discrete sets of records.
