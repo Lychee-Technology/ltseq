@@ -54,6 +54,7 @@ use crate::transpiler::pyexpr_to_datafusion;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::logical_expr::{JoinType, SortExpr};
 use datafusion::prelude::*;
+use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -294,97 +295,38 @@ pub fn join_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 8. Select columns to create the final schema, renaming right table columns
-    // to avoid conflicts and to match the expected schema with alias prefix
-    let mut final_select_exprs = Vec::new();
-    
-    // Get the schema of the joined result to use actual field names
-    let joined_schema = joined_df.schema();
-    let joined_fields: Vec<&String> = joined_schema.fields().iter().map(|f| f.name()).collect();
-    
-    // Add all left table columns (they appear in the join result without qualification)
-    for field in schema_left.fields().iter() {
-        let col_name = field.name();
-        // Find the actual field name in the joined result (might be qualified)
-        let actual_col = joined_fields.iter().find(|f| {
-            f.ends_with(&format!(".{}", col_name)) || f.as_str() == col_name
-        });
-        
-        if let Some(actual_col_name) = actual_col {
-            final_select_exprs.push(col(actual_col_name.as_str()));
-        } else {
-            final_select_exprs.push(col(col_name));
-        }
-    }
-    
-    // Add right table columns with alias prefix (skip the temporary join key)
-    // The right table columns appear with the "?table?" qualifier in the join result
-    for field in schema_right.fields().iter() {
-        let col_name = field.name();
-        if col_name == &right_col_name {
-            // The join key was renamed to "__join_key_right__", rename it back
-            final_select_exprs.push(col("__join_key_right__").alias(&format!("{}_{}", alias, right_col_name)));
-            continue;
-        }
-        
-        // Rename other columns with alias prefix
-        let new_col_name = format!("{}_{}", alias, col_name);
-        
-        // Find the actual field name in the joined result (might be qualified)
-        let actual_col = joined_fields.iter().find(|f| {
-            f.ends_with(&format!(".{}", col_name)) || f.as_str() == col_name
-        });
-        
-        if let Some(actual_col_name) = actual_col {
-            final_select_exprs.push(col(actual_col_name.as_str()).alias(&new_col_name));
-        } else {
-            final_select_exprs.push(col(col_name).alias(&new_col_name));
-        }
-    }
+    // 8. No need to rename columns in join - they are properly tracked in the schema
+     // The schema will be used by show() to display correct names
+     // For select() operations, we'll handle column mapping at the Python level
+     
+     // Build the final schema with correct column names
+     let mut final_fields = Vec::new();
+     
+     // Add left table columns
+     for field in schema_left.fields().iter() {
+         final_fields.push((**field).clone());
+     }
+     
+     // Add right table columns with alias prefix
+     for field in schema_right.fields().iter() {
+         let col_name = field.name();
+         let new_field = Field::new(
+             format!("{}_{}", alias, col_name),
+             field.data_type().clone(),
+             field.is_nullable(),
+         );
+         final_fields.push(new_field);
+     }
+     
+     let final_arrow_schema = ArrowSchema::new(final_fields);
 
-    // 9. Build the final schema manually to ensure columns have correct names
-    // (Note: We don't actually apply the final select to the DataFrame because
-    // DataFusion's alias() doesn't rename columns at the schema level. Instead,
-    // we keep joined_df as-is and just provide the schema with correct names for
-    // Python-level operations like select(). The show() method works correctly
-    // because it uses the provided schema.)
-    let mut final_fields = Vec::new();
-    
-    // Add left table columns
-    for field in schema_left.fields().iter() {
-        let new_field = (**field).clone();
-        final_fields.push(new_field);
-    }
-    
-    // Add right table columns with alias prefix
-    for field in schema_right.fields().iter() {
-        let col_name = field.name();
-        if col_name == &right_col_name {
-            // The join key, rename it
-            let new_field = Field::new(
-                format!("{}_{}", alias, right_col_name),
-                field.data_type().clone(),
-                field.is_nullable(),
-            );
-            final_fields.push(new_field);
-        } else {
-            // Rename other columns with alias prefix
-            let new_field = Field::new(
-                format!("{}_{}", alias, col_name),
-                field.data_type().clone(),
-                field.is_nullable(),
-            );
-            final_fields.push(new_field);
-        }
-    }
-    
-    let joined_arrow_schema = ArrowSchema::new(final_fields);
-
-    // 10. Return new RustTable with joined data
-    Ok(RustTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(joined_df)),
-        schema: Some(Arc::new(joined_arrow_schema)),
-        sort_exprs: Vec::new(),
-    })
+     // 9. Return new RustTable with joined data
+     // Note: The DataFrame still has its original qualified column names,
+     // but the schema reports them with alias prefixes
+     Ok(RustTable {
+         session: Arc::clone(&table.session),
+         dataframe: Some(Arc::new(joined_df)),
+         schema: Some(Arc::new(final_arrow_schema)),
+         sort_exprs: Vec::new(),
+     })
 }
