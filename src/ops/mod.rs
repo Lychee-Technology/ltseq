@@ -2,7 +2,8 @@
 //!
 //! This module organizes all table operations into logical submodules:
 //! - **basic**: Core read/write/filter/select operations
-//! - **derive**: Column derivation and window functions
+//! - **derive**: Column derivation coordination
+//! - **window**: Window functions for derived columns
 //! - **advanced**: Complex operations like sort, group_ordered, join
 //! - **display**: Formatting and display operations
 //!
@@ -46,17 +47,19 @@
 //! - Returns the result (or error) to Python
 //! - Keeps lib.rs clean and readable (~100 lines of stubs)
 //!
-//! # Module Sizes (Post-Refactoring)
+//! # Module Sizes (Post-Phase 6 Refactoring)
 //!
 //! | Module | Lines | Purpose |
 //! |--------|-------|---------|
 //! | basic.rs | 249 | I/O and core filtering/selection |
-//! | derive.rs | 597 | Column derivation and window functions |
+//! | derive.rs | 97 | Standard expression derivation |
+//! | window.rs | 336 | Window functions (shift, rolling, cumsum) |
 //! | advanced.rs | 299 | Sorting and joining |
 //! | display.rs | 174 | Table formatting and display |
-//! | **Total** | **1,319** | All operation implementations |
+//! | **Total** | **1,155** | All operation implementations (↓164 lines) |
 
 pub mod basic;
 pub mod derive;
+pub mod window;
 pub mod advanced;
 pub mod display;
