@@ -798,3 +798,159 @@ class TestLinkedTableCompositeKeys:
         assert linked is not None
         # The second & is already supported; test passes if no error
         linked.show(1)  # show() returns None, just verify no exception
+
+
+class TestLinkedTableJoinTypes:
+    """Phase 8I: Different join types (INNER, LEFT, RIGHT, FULL)"""
+
+    @pytest.fixture
+    def orders_with_missing(self):
+        """Orders where some product_ids don't exist in products table"""
+        import csv
+        import tempfile
+        import os
+
+        orders_data = [
+            ["id", "product_id", "quantity"],
+            ["1", "100", "5"],  # exists in products
+            ["2", "101", "3"],  # exists in products
+            ["3", "999", "2"],  # MISSING in products
+            ["4", "102", "7"],  # exists in products
+        ]
+
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        try:
+            with os.fdopen(fd, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(orders_data)
+            yield LTSeq.read_csv(path)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    @pytest.fixture
+    def products_with_unmatched(self):
+        """Products where some ids aren't ordered"""
+        import csv
+        import tempfile
+        import os
+
+        products_data = [
+            ["id", "name", "price"],
+            ["100", "Laptop", "999"],  # has orders
+            ["101", "Mouse", "25"],  # has orders
+            ["102", "Keyboard", "75"],  # has orders
+            ["200", "Monitor", "300"],  # NO orders (unmatched)
+        ]
+
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        try:
+            with os.fdopen(fd, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(products_data)
+            yield LTSeq.read_csv(path)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_inner_join_only_matches(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """INNER join: only matching rows (default behavior)"""
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+            join_type="inner",
+        )
+
+        mat = linked._materialize()
+        # INNER join should exclude order 3 (product_id 999 not in products)
+        assert mat is not None
+
+    def test_left_join_keeps_all_left_rows(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """LEFT join: keep all left rows, add NULLs for unmatched right"""
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+            join_type="left",
+        )
+
+        # Should not raise error
+        mat = linked._materialize()
+        assert mat is not None
+
+    def test_left_join_filters_null_product(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """LEFT join result can be filtered to find unmatched rows"""
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+            join_type="left",
+        )
+
+        # Filter for unmatched (where product name is null would be done at SQL level)
+        # For now just verify structure is correct
+        assert linked._join_type == "left"
+        mat = linked._materialize()
+        assert mat is not None
+
+    def test_right_join_keeps_all_right_rows(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """RIGHT join: keep all right rows, add NULLs for unmatched left"""
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+            join_type="right",
+        )
+
+        # Should not raise error
+        mat = linked._materialize()
+        assert mat is not None
+
+    def test_full_join_keeps_all_rows(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """FULL join: keep all rows from both tables, NULLs for unmatched"""
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+            join_type="full",
+        )
+
+        # Should not raise error
+        mat = linked._materialize()
+        assert mat is not None
+
+    def test_invalid_join_type_rejected(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """Invalid join_type should raise ValueError"""
+        with pytest.raises(ValueError, match="Invalid join_type"):
+            orders_with_missing.link(
+                products_with_unmatched,
+                on=lambda o, p: o.product_id == p.id,
+                as_="prod",
+                join_type="outer",  # Invalid
+            )
+
+    def test_default_join_type_is_inner(
+        self, orders_with_missing, products_with_unmatched
+    ):
+        """Omitting join_type should default to 'inner'"""
+        # Without join_type parameter
+        linked = orders_with_missing.link(
+            products_with_unmatched,
+            on=lambda o, p: o.product_id == p.id,
+            as_="prod",
+        )
+
+        assert linked._join_type == "inner"

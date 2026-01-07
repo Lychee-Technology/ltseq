@@ -191,7 +191,10 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
 
 
 def _extract_join_keys(
-    join_fn: Callable, source_schema: Dict[str, str], target_schema: Dict[str, str]
+    join_fn: Callable,
+    source_schema: Dict[str, str],
+    target_schema: Dict[str, str],
+    join_type: str = "inner",
 ) -> tuple:
     """
     Extract join key columns from a two-parameter lambda expression.
@@ -202,8 +205,10 @@ def _extract_join_keys(
     Phase 8H: Enhanced to support composite keys:
         lambda orders, products: (orders.product_id == products.id) & (orders.year == products.year)
 
+    Phase 8I: Enhanced to support multiple join types (inner, left, right, full)
+
     to extract:
-        left_key="product_id", right_key="id", join_type="inner"
+        left_key="product_id", right_key="id", join_type="inner" (or "left", "right", "full")
         OR for composite:
         left_key=(expr1 & expr2), right_key=(expr1 & expr2), join_type="inner"
 
@@ -212,6 +217,7 @@ def _extract_join_keys(
     2. All operands are equality comparisons between columns
     3. Left operands are from source table, right from target
     4. All columns exist in their respective schemas
+    5. join_type is one of: "inner", "left", "right", "full"
 
     Args:
         join_fn: Lambda function with two parameters (source row, target row)
@@ -219,6 +225,7 @@ def _extract_join_keys(
                 Or: lambda o, p: (o.id == p.id) & (o.year == p.year)
         source_schema: Dict mapping source column names to types
         target_schema: Dict mapping target column names to types
+        join_type: Type of join ("inner", "left", "right", "full"). Default: "inner"
 
     Returns:
         Tuple of (left_key_expr, right_key_expr, join_type) where:
@@ -283,7 +290,7 @@ def _extract_join_keys(
         # Return the original And-expression as-is
         left_key_expr = expr.serialize()
         right_key_expr = expr.serialize()
-        return left_key_expr, right_key_expr, "inner"
+        return left_key_expr, right_key_expr, join_type
 
     # Phase 8A: Handle single equality
     elif expr.op == "Eq":
@@ -307,8 +314,8 @@ def _extract_join_keys(
         left_key_expr = left_expr.serialize()
         right_key_expr = right_expr.serialize()
 
-        # Return as tuple (MVP only supports inner join)
-        return left_key_expr, right_key_expr, "inner"
+        # Return as tuple with the specified join type
+        return left_key_expr, right_key_expr, join_type
 
     else:
         raise TypeError(
@@ -1021,7 +1028,9 @@ class LTSeq:
         # Return a NestedTable wrapping this LTSeq
         return NestedTable(self, grouping_fn)
 
-    def link(self, target_table: "LTSeq", on: Callable, as_: str) -> "LinkedTable":
+    def link(
+        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+    ) -> "LinkedTable":
         """
         Link this table to another table using pointer-based foreign keys.
 
@@ -1029,30 +1038,48 @@ class LTSeq:
         based on a join condition. Unlike join(), this uses index-based lookups
         (pointer semantics) rather than expensive hash joins.
 
+        Phase 8I: Enhanced to support multiple join types (INNER, LEFT, RIGHT, FULL).
+
         Args:
             target_table: The table to link to (products, categories, etc.)
             on: Lambda with two parameters that specifies the join condition.
                 E.g., lambda orders, products: orders.product_id == products.id
+                Or: lambda orders, products: (orders.product_id == products.product_id) & (orders.year == products.year)
             as_: Alias for the linked table reference.
                 E.g., as_="prod" allows accessing linked columns via r.prod.name
+            join_type: Type of join to perform. One of: "inner", "left", "right", "full"
+                Default: "inner" (backward compatible)
 
         Returns:
             A LinkedTable that supports accessing target columns via the alias
 
         Raises:
-            ValueError: If schema is not initialized
+            ValueError: If schema is not initialized or join_type is invalid
             TypeError: If join condition is invalid
             AttributeError: If lambda references non-existent columns
 
         Example:
             >>> orders = LTSeq.read_csv("orders.csv")
             >>> products = LTSeq.read_csv("products.csv")
+            >>> # Inner join (default)
             >>> linked = orders.link(products,
             ...     on=lambda o, p: o.product_id == p.id,
             ...     as_="prod")
+            >>> # Left outer join (keep all orders, NULLs for unmatched products)
+            >>> linked_left = orders.link(products,
+            ...     on=lambda o, p: o.product_id == p.id,
+            ...     as_="prod",
+            ...     join_type="left")
             >>> result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
             >>> result.show()
         """
+        # Validate join_type
+        valid_join_types = {"inner", "left", "right", "full"}
+        if join_type not in valid_join_types:
+            raise ValueError(
+                f"Invalid join_type '{join_type}'. Must be one of: {valid_join_types}"
+            )
+
         if not self._schema:
             raise ValueError(
                 "Schema not initialized. Call read_csv() first to populate the schema."
@@ -1074,7 +1101,7 @@ class LTSeq:
             raise TypeError(f"Invalid join condition: {e}")
 
         # Return a LinkedTable wrapping both tables
-        return LinkedTable(self, target_table, on, as_)
+        return LinkedTable(self, target_table, on, as_, join_type)
 
 
 __all__ = ["LTSeq", "NestedTable", "LinkedTable"]
@@ -1222,20 +1249,25 @@ class LinkedTable:
         target_table: "LTSeq",
         join_fn: Callable,
         alias: str,
+        join_type: str = "inner",
     ):
         """
         Initialize a LinkedTable from source and target tables.
+
+        Phase 8I: Enhanced to support multiple join types.
 
         Args:
             source_table: The primary table (e.g., orders)
             target_table: The table being linked (e.g., products)
             join_fn: Lambda that specifies the join condition
             alias: Alias used for the linked reference (e.g., "prod")
+            join_type: Type of join ("inner", "left", "right", "full"). Default: "inner"
         """
         self._source = source_table
         self._target = target_table
         self._join_fn = join_fn
         self._alias = alias
+        self._join_type = join_type
         self._schema = source_table._schema.copy()
         self._materialized: Optional["LTSeq"] = None  # Phase 8B: Lazy materialization
 
@@ -1261,11 +1293,12 @@ class LinkedTable:
         if self._materialized is not None:
             return self._materialized
 
-        # Extract join keys using Phase 8A function
+        # Extract join keys using Phase 8A function (now with Phase 8I join_type support)
         left_key_expr, right_key_expr, join_type = _extract_join_keys(
             self._join_fn,
             self._source._schema,
             self._target._schema,
+            self._join_type,  # Phase 8I: Pass the join type parameter
         )
 
         # Call Rust join() method - it handles all schema conflicts and column renaming
