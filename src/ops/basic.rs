@@ -3,6 +3,56 @@
 //! This module contains helper functions for basic table operations.
 //! The actual methods are implemented in the #[pymethods] impl block in lib.rs
 //! due to PyO3 constraints (only one #[pymethods] impl block per struct is allowed).
+//!
+//! # Architecture
+//!
+//! Due to PyO3 constraints, all actual operation implementations are extracted as helper
+//! functions here. The #[pymethods] impl block in lib.rs simply delegates to these
+//! helpers via one-line stubs like:
+//!
+//! ```rust,ignore
+//! fn read_csv(&mut self, path: &str) -> PyResult<()> {
+//!     RUNTIME.block_on(read_csv_impl(self, path.to_string()))
+//! }
+//! ```
+//!
+//! # Operations Provided
+//!
+//! ## I/O Operations
+//! - **read_csv_impl**: Load CSV files into DataFusion
+//!   - Parses CSV with DataFusion's native reader
+//!   - Extracts schema from loaded data
+//!   - Stores both schema and dataframe in RustTable
+//!
+//! ## Query Operations
+//! - **filter_impl**: Apply WHERE conditions (predicates)
+//! - **select_impl**: Project columns or expressions
+//! - **slice_impl**: Get row ranges (limit/offset)
+//! - **count_impl**: Count total rows
+//! - **distinct_impl**: Remove duplicate rows
+//!
+//! # Implementation Pattern
+//!
+//! All query operations follow this pattern:
+//! 1. Validate schema and dataframe exist (return error if not)
+//! 2. For expression-based ops: deserialize Python dict → PyExpr
+//! 3. Transpile PyExpr → DataFusion Expr via pyexpr_to_datafusion()
+//! 4. Build DataFusion logical plan (filter, project, etc.)
+//! 5. Collect results via RUNTIME.block_on(df.collect())
+//! 6. Build RecordBatches and return new RustTable
+//!
+//! # Error Handling
+//!
+//! All operations return PyResult<T> for seamless Python exception handling:
+//! - Schema/dataframe missing → PyRuntimeError
+//! - Expression deserialization fails → PyValueError
+//! - DataFusion execution errors → PyRuntimeError with descriptive message
+//!
+//! # Performance Considerations
+//!
+//! - **Streaming**: Uses RecordBatches for streaming I/O (not all in-memory)
+//! - **Async**: CSV reads are async via DataFusion's session context
+//! - **Runtime**: All async operations executed via RUNTIME.block_on() in helpers
 
 use crate::RustTable;
 use crate::transpiler::pyexpr_to_datafusion;

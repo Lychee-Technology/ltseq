@@ -1,6 +1,57 @@
 //! Display and formatting operations
 //!
 //! Methods for displaying and formatting table data.
+//!
+//! # Architecture
+//!
+//! Display formatting is separated from table operations to keep the ops/ module
+//! clean and organized. This module handles all ASCII table formatting logic.
+//!
+//! Due to PyO3 constraints, the show() method in lib.rs delegates to show_impl()
+//! in this module, which handles the actual formatting.
+//!
+//! # Operations Provided
+//!
+//! ## show_impl
+//! Renders table data as a pretty-printed ASCII table.
+//!
+//! The process:
+//! 1. Collect all RecordBatches from the DataFrame
+//! 2. Scan batches to calculate optimal column widths
+//! 3. Render ASCII table with borders and padding
+//! 4. Limit output to configurable row count
+//!
+//! ## format_table
+//! Helper function that builds the ASCII table structure:
+//! - Calculates column widths based on header and data
+//! - Renders +---+---+ borders
+//! - Handles cell alignment and padding
+//! - Supports streaming display (doesn't load all rows into memory)
+//!
+//! ## format_cell
+//! Helper function that formats individual cell values:
+//! - Handles null/None values as "NULL"
+//! - Converts numeric types to strings
+//! - Handles ArrayRef and other Arrow types
+//! - Provides consistent formatting across data types
+//!
+//! # Output Format
+//!
+//! Example output:
+//! ```text
+//! +---------+---------+
+//! | name    | age     |
+//! +---------+---------+
+//! | Alice   |      30 |
+//! | Bob     |      25 |
+//! +---------+---------+
+//! ```
+//!
+//! # Performance
+//!
+//! - **Streaming**: Processes RecordBatches one at a time
+//! - **Bounded**: Row limit prevents excessive memory usage
+//! - **Two-Pass**: First pass for width calculation, second for rendering
 
 use crate::RustTable;
 use datafusion::arrow::array::*;

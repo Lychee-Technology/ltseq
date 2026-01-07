@@ -2,6 +2,45 @@
 //!
 //! This module contains helper functions for deriving new columns from existing data,
 //! including window functions like shifts, rolling windows, and cumulative sums.
+//!
+//! # Architecture
+//!
+//! Due to PyO3 constraints (only one #[pymethods] impl block per struct), all actual
+//! operation implementations are extracted as helper functions here. The #[pymethods]
+//! impl block in lib.rs delegates to these helpers via simple stubs.
+//!
+//! # Derivation Types
+//!
+//! The module handles two types of derivations:
+//!
+//! 1. **Standard Expressions** (derive_impl):
+//!    - Non-window expressions evaluated directly via DataFusion
+//!    - Examples: arithmetic, comparisons, string operations
+//!    - Performance: Single table scan
+//!
+//! 2. **Window Functions** (derive_with_window_functions_impl):
+//!    - SQL-based window operations: shift, lag, lead, rolling operations
+//!    - Examples: rolling sums, cumulative windows, ordered shifts
+//!    - Performance: Requires sorting for windowing
+//!
+//! # Implementation Pattern
+//!
+//! Each derivation:
+//! 1. Validates schema and dataframe exist
+//! 2. Deserializes Python expression dicts → PyExpr
+//! 3. Transpiles PyExpr → DataFusion Expr (or SQL for window functions)
+//! 4. Executes via DataFusion query engine
+//! 5. Collects results into new RecordBatches
+//! 6. Returns new RustTable with appended columns
+//!
+//! # Window Function SQL Translation
+//!
+//! Window functions are converted to SQL like:
+//! ```sql
+//! SELECT *,
+//!   LAG(column, 1) OVER (ORDER BY sort_key ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING) AS shifted
+//! FROM table
+//! ```
 
 use crate::RustTable;
 use crate::types::{dict_to_py_expr, PyExpr};

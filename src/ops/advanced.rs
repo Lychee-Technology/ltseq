@@ -1,6 +1,52 @@
 //! Advanced table operations
 //!
 //! This module contains helper functions for advanced operations like sorting and joining tables.
+//!
+//! # Architecture
+//!
+//! Due to PyO3 constraints (only one #[pymethods] impl block per struct), all actual
+//! operation implementations are extracted as helper functions here. The #[pymethods]
+//! impl block in lib.rs delegates to these helpers via simple stubs.
+//!
+//! # Operations Provided
+//!
+//! ## Sort (sort_impl)
+//! 
+//! Sorts table rows by one or more key expressions. The implementation:
+//! - Deserializes Python expression dicts → PyExpr
+//! - Transpiles PyExpr → DataFusion SortExpr (ascending order)
+//! - Captures sort keys for later window function use (Phase 6)
+//! - Executes multi-level sort via DataFusion
+//!
+//! **Key Feature**: Stores sort_exprs in RustTable for window function context
+//!
+//! ## Join (join_impl)
+//!
+//! Performs cross-table joins with automatic schema conflict handling.
+//!
+//! **Design Challenge**: DataFusion rejects joins where column names overlap between tables.
+//! This is resolved via:
+//! 1. Rename right table join keys temporarily (e.g., `id` → `__tmp_id`)
+//! 2. Execute join on renamed keys
+//! 3. Final SELECT renames right table columns with user-specified alias (e.g., `right_id`)
+//!
+//! **Supported Join Types**: Inner, Left, Right, Full
+//!
+//! # Implementation Pattern
+//!
+//! All operations follow:
+//! 1. Validate schema and dataframe exist
+//! 2. Deserialize Python expression dicts → PyExpr
+//! 3. Transpile PyExpr → DataFusion Expr
+//! 4. Execute via DataFusion query engine
+//! 5. Collect results into new RustTable
+//!
+//! # Schema Handling
+//!
+//! - Sort: Preserves original schema
+//! - Join: Merges schemas with:
+//!   - Left table columns (unchanged)
+//!   - Right table columns prefixed with alias (e.g., `right_id`, `right_value`)
 
 use crate::RustTable;
 use crate::types::{dict_to_py_expr, PyExpr};
