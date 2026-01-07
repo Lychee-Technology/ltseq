@@ -281,8 +281,8 @@ fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, S
         },
         
         PyExpr::Call { func, args: _, kwargs: _, on } => {
-            // For Phase 4, we don't fully support Call expressions
-            // This is prepared for Phase 6 (sequence operators)
+            // Phase 6: Window functions are now recognized but require special handling
+            // They will be transpiled at the DataFrame level in derive()
             match func.as_str() {
                 "is_null" => {
                     let on_expr = pyexpr_to_datafusion(*on, schema)?;
@@ -292,8 +292,13 @@ fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, S
                     let on_expr = pyexpr_to_datafusion(*on, schema)?;
                     Ok(on_expr.is_not_null())
                 },
+                // Window functions - these will be handled specially in derive()
+                "shift" | "rolling" | "diff" | "cum_sum" | "mean" | "sum" | "min" | "max" | "count" => {
+                    // For now, return an error indicating the window function needs DataFrame-level handling
+                    Err(format!("Window function '{}' requires DataFrame context - should be handled in derive()", func))
+                },
                 _ => {
-                    Err(format!("Method '{}' not yet supported in Phase 4", func))
+                    Err(format!("Method '{}' not yet supported", func))
                 }
             }
         },
@@ -314,6 +319,7 @@ pub struct RustTable {
     session: Arc<SessionContext>,
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
+    sort_exprs: Vec<String>,  // Column names used for sorting, for Phase 6 window functions
 }
 
 #[pymethods]
@@ -325,6 +331,7 @@ impl RustTable {
             session: Arc::new(session),
             dataframe: None,
             schema: None,
+            sort_exprs: Vec::new(),
         }
     }
 
@@ -416,6 +423,7 @@ impl RustTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: self.sort_exprs.clone(),
             });
         }
         
@@ -447,6 +455,7 @@ impl RustTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(filtered_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+        sort_exprs: self.sort_exprs.clone(),
         })
     }
 
@@ -464,6 +473,7 @@ impl RustTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: self.sort_exprs.clone(),
             });
         }
         
@@ -511,13 +521,14 @@ impl RustTable {
             .collect();
         let new_schema = ArrowSchema::new(arrow_fields);
         
-        // 6. Return new RustTable with updated schema
-        Ok(RustTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(selected_df)),
-            schema: Some(Arc::new(new_schema)),
-        })
-    }
+         // 6. Return new RustTable with updated schema
+         Ok(RustTable {
+             session: Arc::clone(&self.session),
+             dataframe: Some(Arc::new(selected_df)),
+             schema: Some(Arc::new(new_schema)),
+             sort_exprs: self.sort_exprs.clone(),
+         })
+     }
 
     /// Create derived columns based on expressions
     /// 
@@ -586,72 +597,84 @@ impl RustTable {
             .collect();
         let new_arrow_schema = ArrowSchema::new(arrow_fields);
         
-        // 6. Return new RustTable with updated schema
-        Ok(RustTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(derived_df)),
-            schema: Some(Arc::new(new_arrow_schema)),
-        })
-    }
+         // 6. Return new RustTable with updated schema
+         Ok(RustTable {
+             session: Arc::clone(&self.session),
+             dataframe: Some(Arc::new(derived_df)),
+             schema: Some(Arc::new(new_arrow_schema)),
+             sort_exprs: self.sort_exprs.clone(),
+         })
+     }
     
     /// Sort rows by one or more key expressions
     /// 
     /// Args:
     ///     sort_exprs: List of serialized expression dicts (from Python)
-    /// 
-    /// Returns:
-    ///     New RustTable with sorted data
-    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
-        // If no dataframe, return empty result (for unit tests)
-        if self.dataframe.is_none() {
-            return Ok(RustTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-            });
-        }
-        
-        // Get schema (required for transpilation)
-        let schema = self.schema.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available. Call read_csv() first."
-            ))?;
-        
-        // Deserialize and transpile each sort expression
-        let mut df_sort_exprs = Vec::new();
-        for expr_dict in sort_exprs {
-            let py_expr = dict_to_py_expr(&expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            let df_expr = pyexpr_to_datafusion(py_expr, schema)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-            // Create SortExpr with ascending order (default)
-            df_sort_exprs.push(SortExpr {
-                expr: df_expr,
-                asc: true,
-                nulls_first: false,
-            });
-        }
-        
-        // Get DataFrame
-        let df = self.dataframe.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first."
-            ))?;
-        
-        // Apply sort (async operation)
-        let sorted_df = RUNTIME.block_on(async {
-            (**df).clone().sort(df_sort_exprs)
-                .map_err(|e| format!("Sort execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-        
-        // Return new RustTable with sorted data
-        Ok(RustTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(sorted_df)),
-            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-        })
-    }
+     /// 
+     /// Returns:
+     ///     New RustTable with sorted data
+     fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+         // If no dataframe, return empty result (for unit tests)
+         if self.dataframe.is_none() {
+             return Ok(RustTable {
+                 session: Arc::clone(&self.session),
+                 dataframe: None,
+                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+                 sort_exprs: Vec::new(),
+             });
+         }
+         
+         // Get schema (required for transpilation)
+         let schema = self.schema.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "Schema not available. Call read_csv() first."
+             ))?;
+         
+         // Capture sort column names for Phase 6 window functions
+         let mut captured_sort_keys = Vec::new();
+         
+         // Deserialize and transpile each sort expression
+         let mut df_sort_exprs = Vec::new();
+         for expr_dict in sort_exprs {
+             let py_expr = dict_to_py_expr(&expr_dict)
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+             
+             // Capture column name if this is a simple column reference
+             if let PyExpr::Column(ref col_name) = py_expr {
+                 captured_sort_keys.push(col_name.clone());
+             }
+             
+             let df_expr = pyexpr_to_datafusion(py_expr, schema)
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+             // Create SortExpr with ascending order (default)
+             df_sort_exprs.push(SortExpr {
+                 expr: df_expr,
+                 asc: true,
+                 nulls_first: false,
+             });
+         }
+         
+         // Get DataFrame
+         let df = self.dataframe.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "No data loaded. Call read_csv() first."
+             ))?;
+         
+         // Apply sort (async operation)
+         let sorted_df = RUNTIME.block_on(async {
+             (**df).clone().sort(df_sort_exprs)
+                 .map_err(|e| format!("Sort execution failed: {}", e))
+         })
+         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+         
+         // Return new RustTable with sorted data and captured sort keys
+         Ok(RustTable {
+             session: Arc::clone(&self.session),
+             dataframe: Some(Arc::new(sorted_df)),
+             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+             sort_exprs: captured_sort_keys,
+         })
+     }
     
     /// Remove duplicate rows based on key columns
     /// 
@@ -668,6 +691,7 @@ impl RustTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: self.sort_exprs.clone(),
             });
         }
         
@@ -697,6 +721,7 @@ impl RustTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(distinct_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+        sort_exprs: self.sort_exprs.clone(),
         })
     }
     
@@ -715,6 +740,7 @@ impl RustTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: self.sort_exprs.clone(),
             });
         }
         
@@ -740,6 +766,7 @@ impl RustTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(sliced_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+        sort_exprs: self.sort_exprs.clone(),
         })
     }
     
@@ -758,6 +785,7 @@ impl RustTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: self.sort_exprs.clone(),
             });
         }
         
@@ -770,13 +798,13 @@ impl RustTable {
         // Phase 6 limitation: cum_sum not yet fully implemented in Rust
         // TODO: Implement window functions for proper cumulative sums
         // For now, return error indicating feature is not available
-        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "cum_sum() is not yet implemented. Phase 6 limitation: requires window function support."
-        ));
-    }
-}
-
-/// Format RecordBatches as a pretty-printed ASCII table
+         return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+             "cum_sum() is not yet implemented. Phase 6 limitation: requires window function support."
+         ));
+     }
+ }
+ 
+ /// Format RecordBatches as a pretty-printed ASCII table
 /// 
 /// Shows up to `limit` rows, streaming through batches
 fn format_table(
