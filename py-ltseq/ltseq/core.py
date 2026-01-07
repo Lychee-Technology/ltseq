@@ -1,0 +1,659 @@
+"""Core LTSeq table class with data operations."""
+
+from typing import Any, Callable, Dict, Optional, Union
+
+from .expr import SchemaProxy, _lambda_to_expr
+from .helpers import (
+    _contains_window_function,
+    _infer_schema_from_csv,
+    _normalize_schema,
+)
+
+try:
+    from . import ltseq_core
+
+    HAS_RUST_BINDING = True
+except ImportError:
+    HAS_RUST_BINDING = False
+
+
+def _process_select_col(col, schema: Dict[str, str]):
+    """Process a single column argument for select()."""
+    if isinstance(col, str):
+        # Column name reference
+        if col not in schema:
+            raise AttributeError(
+                f"Column '{col}' not found in schema. "
+                f"Available columns: {list(schema.keys())}"
+            )
+        return {"type": "Column", "name": col}
+    elif callable(col):
+        # Lambda that computes expressions or columns
+        proxy = SchemaProxy(schema)
+        result = col(proxy)
+
+        # Check if result is a list (multiple column selection)
+        if isinstance(result, list):
+            # Extract expressions from list
+            exprs = []
+            for item in result:
+                if hasattr(item, "serialize"):  # It's an Expr
+                    exprs.append(item.serialize())
+                else:
+                    raise TypeError(
+                        f"List items must be column expressions, got {type(item)}"
+                    )
+            return exprs
+        elif hasattr(result, "serialize"):
+            # Single expression result
+            return result.serialize()
+        else:
+            raise TypeError(
+                f"Lambda must return Expr(s) or list of Exprs, got {type(result)}"
+            )
+    else:
+        raise TypeError(
+            f"select() argument must be str or callable, got {type(col).__name__}"
+        )
+
+
+def _extract_derive_cols(args, kwargs, schema, capture_expr_fn):
+    """Extract derived columns from derive() arguments."""
+    if args:
+        if len(args) > 1:
+            raise TypeError(
+                f"derive() takes at most 1 positional argument ({len(args)} given)"
+            )
+        if kwargs:
+            raise TypeError(
+                "derive() cannot use both positional argument and keyword arguments"
+            )
+
+        # API 2: single callable returning dict
+        func = args[0]
+        if not callable(func):
+            raise TypeError(
+                f"derive() positional argument must be callable, got {type(func).__name__}"
+            )
+
+        # Capture the function to get the expression dict
+        expr_dict = capture_expr_fn(func)
+
+        # Extract dict literal
+        if expr_dict.get("type") == "Dict":
+            # Direct dict literal
+            derived_cols = {}
+            for key_expr, value_expr in zip(
+                expr_dict.get("keys", []), expr_dict.get("values", [])
+            ):
+                # Extract column name from key
+                if key_expr.get("type") == "Literal":
+                    col_name = key_expr.get("value", "")
+                    derived_cols[col_name] = value_expr
+                else:
+                    raise ValueError("Dict keys in derive() must be string literals")
+        else:
+            # Fallback: treat the entire expression as a single derived column
+            derived_cols = {"_derived": expr_dict}
+    else:
+        # API 1: keyword arguments
+        derived_cols = {}
+        for col_name, fn in kwargs.items():
+            if not callable(fn):
+                raise TypeError(
+                    f"derive() argument '{col_name}' must be callable, got {type(fn).__name__}"
+                )
+            derived_cols[col_name] = capture_expr_fn(fn)
+
+    return derived_cols
+
+
+def _collect_key_exprs(key_exprs, schema, capture_expr_fn):
+    """Collect key expressions from str or Callable arguments."""
+    result = []
+    for key_expr in key_exprs:
+        if isinstance(key_expr, str):
+            # String column name: create simple Column expression
+            result.append({"type": "Column", "name": key_expr})
+        elif callable(key_expr):
+            # Lambda expression: capture and serialize
+            expr_dict = capture_expr_fn(key_expr)
+            result.append(expr_dict)
+        else:
+            raise TypeError(
+                f"Argument must be str or callable, got {type(key_expr).__name__}"
+            )
+    return result
+
+
+class LTSeq:
+    """Python-visible LTSeq wrapper backed by the native Rust kernel."""
+
+    def __init__(self):
+        if not HAS_RUST_BINDING:
+            raise RuntimeError(
+                "Rust extension ltseq_core not available. "
+                "Please rebuild with `maturin develop`."
+            )
+        self._inner = ltseq_core.RustTable()
+        self._schema: Dict[str, str] = {}
+
+    @classmethod
+    def read_csv(cls, path: str) -> "LTSeq":
+        """
+        Read a CSV file and return an LTSeq instance.
+
+        Infers schema from the CSV header and first rows.
+
+        Args:
+            path: Path to CSV file
+
+        Returns:
+            New LTSeq instance with data loaded from CSV
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> filtered = t.filter(lambda r: r.age > 18)
+        """
+        t = cls()
+        t._schema = _infer_schema_from_csv(path)
+        # Call Rust RustTable.read_csv to load the actual data
+        t._inner.read_csv(path)
+        return t
+
+    def show(self, n: int = 10) -> None:
+        """
+        Display the data as a pretty-printed ASCII table.
+
+        Args:
+            n: Maximum number of rows to display (default 10)
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.show()
+        """
+        # Delegate to Rust implementation
+        out = self._inner.show(n)
+        print(out)
+
+    def hello(self) -> str:
+        return self._inner.hello()
+
+    def __len__(self) -> int:
+        """
+        Get the number of rows in the table.
+
+        Returns:
+            The count of rows
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(len(t))  # Number of rows
+        """
+        return self._inner.count()
+
+    def _capture_expr(self, fn: Callable) -> Dict[str, Any]:
+        """
+        Capture and serialize an expression tree from a lambda.
+
+        This internal method intercepts Python lambdas and converts them to
+        serializable expression dicts without executing Python logic.
+
+        Args:
+            fn: Lambda function, e.g., lambda r: r.age > 18
+
+        Returns:
+            Serialized expression dict ready for Rust deserialization
+
+        Raises:
+            TypeError: If lambda doesn't return an Expr
+            AttributeError: If lambda references a non-existent column
+            ValueError: If schema is not initialized (call read_csv first)
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> expr = t._capture_expr(lambda r: r.age > 18)
+            >>> expr["type"]
+            'BinOp'
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+        return _lambda_to_expr(fn, self._schema)
+
+    def filter(self, predicate: Callable) -> "LTSeq":
+        """
+        Filter rows where predicate lambda returns True.
+
+        Args:
+            predicate: Lambda that takes a row and returns a boolean Expr.
+                      E.g., lambda r: r.age > 18
+
+        Returns:
+            A new LTSeq with filtered data
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return a boolean Expr
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> filtered = t.filter(lambda r: r.age > 18)
+            >>> filtered.show()
+        """
+        expr_dict = self._capture_expr(predicate)
+
+        # Create a new LTSeq with the filtered result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate filtering to Rust implementation
+        result._inner = self._inner.filter(expr_dict)
+        return result
+
+    def select(self, *cols) -> "LTSeq":
+        """
+        Select specific columns or derived expressions.
+
+        Supports both column references and computed columns via lambdas.
+
+        Args:
+            *cols: Either string column names or lambdas that compute new columns.
+                   E.g., select("name", "age") or select(lambda r: [r.name, r.age])
+                   Or for computed: select(lambda r: r.price * r.qty)
+
+        Returns:
+            A new LTSeq with selected/computed columns
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return valid expressions
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> selected = t.select("name", "age")
+            >>> selected = t.select(lambda r: [r.name, r.age])
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        exprs = []
+        for col in cols:
+            col_result = _process_select_col(col, self._schema)
+            if isinstance(col_result, list):
+                exprs.extend(col_result)
+            else:
+                exprs.append(col_result)
+
+        # Create a new LTSeq with selected columns
+        result = LTSeq()
+        # Update schema based on selected columns
+        # For now, we keep the full schema (proper schema reduction requires Rust support)
+        result._schema = self._schema.copy()
+        # Delegate selection to Rust implementation
+        result._inner = self._inner.select(exprs)
+        return result
+
+    def derive(self, *args, **kwargs: Callable) -> "LTSeq":
+        """
+        Create new derived columns based on lambda expressions.
+
+        New columns are added to the dataframe; existing columns remain.
+
+        Supports two API styles:
+        1. Keyword arguments: derive(col1=lambda r: r.x, col2=lambda r: r.y)
+        2. Single callable returning dict: derive(lambda r: {"col1": r.x, "col2": r.y})
+
+        Args:
+            *args: Single optional callable that returns a dict of {col_name: expression}
+            **kwargs: Column name -> lambda expression mapping.
+                     E.g., derive(total=lambda r: r.price * r.qty, age_group=lambda r: r.age // 10)
+
+        Returns:
+            A new LTSeq with added derived columns
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return an Expr
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> # API 1: keyword arguments
+            >>> derived = t.derive(total=lambda r: r.price * r.qty)
+            >>> # API 2: lambda returning dict
+            >>> derived = t.derive(lambda r: {"total": r.price * r.qty})
+            >>> derived.show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Extract derived columns
+        derived_cols = _extract_derive_cols(
+            args, kwargs, self._schema, self._capture_expr
+        )
+
+        # Create a new LTSeq with derived columns
+        result = LTSeq()
+        # Update schema: add derived columns (assuming Int64 for now as placeholder)
+        result._schema = self._schema.copy()
+        for col_name in derived_cols:
+            # In Phase 2, we'd infer the dtype from the expression
+            result._schema[col_name] = "Unknown"
+
+        # Check if any expressions contain window functions
+        has_window_functions = any(
+            _contains_window_function(expr) for expr in derived_cols.values()
+        )
+
+        # Rust backend handles both standard and window functions
+        result._inner = self._inner.derive(derived_cols)
+
+        return result
+
+    def sort(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+        """
+        Sort rows by one or more key expressions in ascending order.
+
+        Reorders data based on column values. Multiple sort keys are applied in order.
+
+        Args:
+            *key_exprs: Column names (str) or lambda expressions that return sortable values.
+                       Examples:
+                       - sort("date") - sort by date column ascending
+                       - sort(lambda r: r.date) - same as above
+                       - sort("date", "id") - multi-key sort: first by date, then by id
+
+        Returns:
+            A new LTSeq with sorted data
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.sort("name").show()
+            >>> t.sort(lambda r: r.date, lambda r: r.id).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Collect sort expressions
+        sort_exprs = _collect_key_exprs(key_exprs, self._schema, self._capture_expr)
+
+        # Create a new LTSeq with sorted result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate sorting to Rust implementation
+        result._inner = self._inner.sort(sort_exprs)
+        return result
+
+    def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+        """
+        Remove duplicate rows based on key columns.
+
+        By default, retains the first occurrence of each unique key combination.
+
+        Args:
+            *key_exprs: Column names (str) or lambda expressions identifying duplicates.
+                       If no args provided, considers all columns for uniqueness.
+                       Examples:
+                       - distinct() - unique across all columns
+                       - distinct("id") - unique based on id column
+                       - distinct("id", "date") - unique based on id and date columns
+                       - distinct(lambda r: r.id) - unique by lambda expression
+
+        Returns:
+            A new LTSeq with duplicate rows removed
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+            TypeError: If argument is not str or callable
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.distinct("customer_id").show()
+            >>> t.distinct("date", "id").show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Collect key expressions
+        key_cols = _collect_key_exprs(key_exprs, self._schema, self._capture_expr)
+
+        # Create a new LTSeq with distinct result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate deduplication to Rust implementation
+        result._inner = self._inner.distinct(key_cols)
+        return result
+
+    def slice(self, offset: int = 0, length: Optional[int] = None) -> "LTSeq":
+        """
+        Select a contiguous range of rows.
+
+        Similar to SQL LIMIT/OFFSET operations. Zero-copy selection at the logical level.
+
+        Args:
+            offset: Starting row index (0-based). Default: 0
+            length: Number of rows to include. If None, all rows from offset to end.
+
+        Returns:
+            A new LTSeq with the selected row range
+
+        Raises:
+            ValueError: If offset < 0 or length < 0
+            ValueError: If schema is not initialized
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.slice(10, 5).show()      # Rows 10-14 (5 rows starting at index 10)
+            >>> t.slice(offset=100).show()  # From row 100 to end
+            >>> t.slice(length=10).show()   # First 10 rows
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Validate parameters
+        if offset < 0:
+            raise ValueError(f"offset must be non-negative, got {offset}")
+        if length is not None and length < 0:
+            raise ValueError(f"length must be non-negative, got {length}")
+
+        # Create a new LTSeq with sliced result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate slicing to Rust implementation
+        result._inner = self._inner.slice(offset, length)
+        return result
+
+    def cum_sum(self, *cols: Union[str, Callable]) -> "LTSeq":
+        """
+        Add cumulative sum columns for specified columns.
+
+        Calculates running sums across ordered rows. Requires data to be sorted.
+        New columns are added to the table with names suffixed by '_cumsum'.
+
+        Args:
+            *cols: Column names (str) or lambda expressions.
+                   - String: column name (e.g., "amount")
+                   - Lambda: expression (e.g., lambda r: r.price * r.qty)
+                   - Multiple args: add cumulative sum for each
+
+        Returns:
+            A new LTSeq with cumulative sum columns added
+
+        Raises:
+            ValueError: If schema is not initialized or no columns provided
+            AttributeError: If lambda references a non-existent column
+            TypeError: If column type is non-numeric
+
+        Example:
+            >>> t = LTSeq.read_csv("sales.csv").sort("date")
+            >>> t.cum_sum("revenue").show()
+            >>> t.cum_sum("revenue", "units").show()
+            >>> t.cum_sum(lambda r: r.price * r.qty).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not cols:
+            raise ValueError("cum_sum() requires at least one column argument")
+
+        # Collect cumulative sum expressions
+        cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
+
+        # Create a new LTSeq with cumulative sum columns added
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Add cumulative sum columns to schema (with _cumsum suffix)
+        for i, col_expr in enumerate(cols):
+            if isinstance(col_expr, str):
+                result._schema[f"{col_expr}_cumsum"] = result._schema.get(
+                    col_expr, "float64"
+                )
+            else:
+                # For lambda expressions, auto-name the column
+                result._schema[f"cum_sum_{i}"] = "float64"
+        # Delegate cum_sum to Rust implementation
+        result._inner = self._inner.cum_sum(cum_exprs)
+        return result
+
+    def group_ordered(self, grouping_fn: Callable) -> "NestedTable":
+        """
+        Group consecutive identical values based on a grouping function.
+
+        This is the core "state-aware grouping" operation: it groups only consecutive
+        rows with identical values in the grouping column (as determined by the lambda).
+
+        The returned NestedTable provides group-level operations like first(), last(),
+        count(), and allows filtering/deriving based on group properties.
+
+        Args:
+            grouping_fn: Lambda that extracts the grouping key from each row.
+                        E.g., lambda r: r.trend_flag
+
+        Returns:
+            A NestedTable supporting group-level operations
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("stock.csv").sort("date")
+            >>> groups = t.group_ordered(lambda r: r.is_up)
+            >>> groups.filter(lambda g: g.count() > 3).show()
+            >>> groups.derive(lambda g: {"span": g.last().date - g.first().date}).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        try:
+            # Validate the grouping function works
+            test_proxy = SchemaProxy(self._schema)
+            _ = grouping_fn(test_proxy)
+        except Exception as e:
+            raise AttributeError(f"Invalid grouping function: {e}")
+
+        # Import here to avoid circular imports
+        from .grouping import NestedTable
+
+        # Return a NestedTable wrapping this LTSeq
+        return NestedTable(self, grouping_fn)
+
+    def link(
+        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+    ) -> "LinkedTable":
+        """
+        Link this table to another table using pointer-based foreign keys.
+
+        Creates a virtual pointer column that references rows in the target table
+        based on a join condition. Unlike join(), this uses index-based lookups
+        (pointer semantics) rather than expensive hash joins.
+
+        Phase 8I: Enhanced to support multiple join types (INNER, LEFT, RIGHT, FULL).
+
+        Args:
+            target_table: The table to link to (products, categories, etc.)
+            on: Lambda with two parameters that specifies the join condition.
+                E.g., lambda orders, products: orders.product_id == products.id
+                Or: lambda orders, products: (orders.product_id == products.product_id) & (orders.year == products.year)
+            as_: Alias for the linked table reference.
+                E.g., as_="prod" allows accessing linked columns via r.prod.name
+            join_type: Type of join to perform. One of: "inner", "left", "right", "full"
+                Default: "inner" (backward compatible)
+
+        Returns:
+            A LinkedTable that supports accessing target columns via the alias
+
+        Raises:
+            ValueError: If schema is not initialized or join_type is invalid
+            TypeError: If join condition is invalid
+            AttributeError: If lambda references non-existent columns
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> # Inner join (default)
+            >>> linked = orders.link(products,
+            ...     on=lambda o, p: o.product_id == p.id,
+            ...     as_="prod")
+            >>> # Left outer join (keep all orders, NULLs for unmatched products)
+            >>> linked_left = orders.link(products,
+            ...     on=lambda o, p: o.product_id == p.id,
+            ...     as_="prod",
+            ...     join_type="left")
+            >>> result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
+            >>> result.show()
+        """
+        # Validate join_type
+        valid_join_types = {"inner", "left", "right", "full"}
+        if join_type not in valid_join_types:
+            raise ValueError(
+                f"Invalid join_type '{join_type}'. Must be one of: {valid_join_types}"
+            )
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not target_table._schema:
+            raise ValueError(
+                "Target table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate the join condition
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            target_proxy = SchemaProxy(target_table._schema)
+
+            # Call the join condition to extract the comparison expression
+            _ = on(self_proxy, target_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        # Import here to avoid circular imports
+        from .linking import LinkedTable
+
+        # Return a LinkedTable wrapping both tables
+        return LinkedTable(self, target_table, on, as_, join_type)
