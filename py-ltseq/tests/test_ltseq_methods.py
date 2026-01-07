@@ -43,12 +43,10 @@ class TestFilterBasic:
         original_schema = {"age": "int64", "name": "string"}
         t._schema = original_schema.copy()
 
-        # We can't actually filter without RustTable, but we can check
-        # that the method properly handles schema
-        # This will raise because _inner.filter() won't work without actual RustTable
-        # but it demonstrates schema is being used
-        with pytest.raises((AttributeError, TypeError)):
-            t.filter(lambda r: r.age > 18)
+        # filter should return a new LTSeq with schema preserved
+        result = t.filter(lambda r: r.age > 18)
+        assert isinstance(result, LTSeq)
+        assert result._schema == original_schema
 
 
 class TestSelectBasic:
@@ -96,10 +94,10 @@ class TestSelectBasic:
         t = LTSeq()
         t._schema = {"age": "int64", "name": "string", "salary": "float64"}
 
-        # This will fail at the RustTable level, but we're testing
-        # the Python-side schema validation and argument handling
-        with pytest.raises((AttributeError, TypeError)):
-            t.select("age", "name")
+        # select should return a new LTSeq instance with schema preserved
+        result = t.select("age", "name")
+        assert isinstance(result, LTSeq)
+        assert result._schema == t._schema
 
 
 class TestDeriveBasic:
