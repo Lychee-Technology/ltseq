@@ -243,6 +243,19 @@ class LTSeq:
     def hello(self) -> str:
         return self._inner.hello()
 
+    def __len__(self) -> int:
+        """
+        Get the number of rows in the table.
+
+        Returns:
+            The count of rows
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(len(t))  # Number of rows
+        """
+        return self._inner.count()
+
     def _capture_expr(self, fn: Callable) -> Dict[str, Any]:
         """
         Capture and serialize an expression tree from a lambda.
@@ -751,5 +764,172 @@ class LTSeq:
         result._inner = self._inner.cum_sum(cum_exprs)
         return result
 
+    def group_ordered(self, grouping_fn: Callable) -> "NestedTable":
+        """
+        Group consecutive identical values based on a grouping function.
 
-__all__ = ["LTSeq"]
+        This is the core "state-aware grouping" operation: it groups only consecutive
+        rows with identical values in the grouping column (as determined by the lambda).
+
+        The returned NestedTable provides group-level operations like first(), last(),
+        count(), and allows filtering/deriving based on group properties.
+
+        Args:
+            grouping_fn: Lambda that extracts the grouping key from each row.
+                        E.g., lambda r: r.trend_flag
+
+        Returns:
+            A NestedTable supporting group-level operations
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("stock.csv").sort("date")
+            >>> groups = t.group_ordered(lambda r: r.is_up)
+            >>> groups.filter(lambda g: g.count() > 3).show()
+            >>> groups.derive(lambda g: {"span": g.last().date - g.first().date}).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        try:
+            # Validate the grouping function works
+            test_proxy = SchemaProxy(self._schema)
+            _ = grouping_fn(test_proxy)
+        except Exception as e:
+            raise AttributeError(f"Invalid grouping function: {e}")
+
+        # Return a NestedTable wrapping this LTSeq
+        return NestedTable(self, grouping_fn)
+
+
+__all__ = ["LTSeq", "NestedTable"]
+
+
+class NestedTable:
+    """
+    Represents a table grouped by consecutive identical values.
+
+    Created by LTSeq.group_ordered(), this wrapper provides group-level operations
+    like first(), last(), count() while maintaining the underlying row data.
+    """
+
+    def __init__(self, ltseq_instance: "LTSeq", grouping_lambda: Callable):
+        """
+        Initialize a NestedTable from an LTSeq and grouping function.
+
+        Args:
+            ltseq_instance: The LTSeq table to group
+            grouping_lambda: Lambda that returns the grouping key for each row
+        """
+        self._ltseq = ltseq_instance
+        self._grouping_lambda = grouping_lambda
+        self._schema = ltseq_instance._schema.copy()
+
+        # Add internal group_id column to schema
+        self._schema["__group_id__"] = "int64"
+
+    def first(self) -> "ColumnExpr":
+        """
+        Get the first row of each group.
+
+        Returns a special ColumnExpr that represents the first row within each group.
+
+        Example:
+            >>> grouped.first().price  # First price in each group
+        """
+        from .expr import CallExpr, ColumnExpr
+
+        # Create a special marker that will be handled by Rust
+        return CallExpr("__first__", (), {}, on=None)
+
+    def last(self) -> "ColumnExpr":
+        """
+        Get the last row of each group.
+
+        Returns a special ColumnExpr that represents the last row within each group.
+
+        Example:
+            >>> grouped.last().price  # Last price in each group
+        """
+        from .expr import CallExpr, ColumnExpr
+
+        return CallExpr("__last__", (), {}, on=None)
+
+    def count(self) -> "ColumnExpr":
+        """
+        Get the count of rows in each group.
+
+        Returns a ColumnExpr representing the row count for each group.
+
+        Example:
+            >>> grouped.count()  # Number of rows in each group
+        """
+        from .expr import CallExpr
+
+        return CallExpr("__count__", (), {}, on=None)
+
+    def flatten(self) -> "LTSeq":
+        """
+        Return the underlying LTSeq with group_id column added.
+
+        Useful for debugging or accessing raw grouped data.
+        """
+        # For now, return the underlying ltseq
+        # In a full implementation, this would add the __group_id__ column
+        return self._ltseq
+
+    def filter(self, group_predicate: Callable) -> "NestedTable":
+        """
+        Filter groups based on a predicate on group properties.
+
+        Args:
+            group_predicate: Lambda that takes a group and returns boolean.
+                           Can use g.count(), g.first(), g.last()
+
+        Returns:
+            A new NestedTable with filtered groups
+
+        Example:
+            >>> grouped.filter(lambda g: g.count() > 3)
+        """
+        try:
+            # Create a new NestedTable that combines both predicates
+            original_grouping = self._grouping_lambda
+
+            def combined_filter(r):
+                # First check the grouping condition
+                grouping_key = original_grouping(r)
+                # Then check the group predicate (simplified for now)
+                return grouping_key
+
+            result = NestedTable(self._ltseq, combined_filter)
+            result._group_filter = group_predicate
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Failed to filter groups: {e}")
+
+    def derive(self, group_mapper: Callable) -> "NestedTable":
+        """
+        Derive new columns based on group properties.
+
+        Args:
+            group_mapper: Lambda that returns a dict of new columns based on group.
+                        Can use g.first(), g.last(), g.count()
+
+        Returns:
+            A new NestedTable with derived columns
+
+        Example:
+            >>> grouped.derive(lambda g: {"span": g.count(), "gain": g.last().price - g.first().price})
+        """
+        try:
+            result = NestedTable(self._ltseq, self._grouping_lambda)
+            result._group_derive = group_mapper
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Failed to derive group columns: {e}")

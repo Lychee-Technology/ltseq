@@ -780,6 +780,31 @@ impl RustTable {
         }
     }
 
+    /// Get the number of rows in the table
+    ///
+    /// Returns:
+    ///     The number of rows
+    fn count(&self) -> PyResult<usize> {
+        let df = self.dataframe.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first.",
+            )
+        })?;
+
+        RUNTIME.block_on(async {
+            let df_clone = (**df).clone();
+            let batches = df_clone.collect().await.map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to collect data: {}",
+                    e
+                ))
+            })?;
+
+            let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+            Ok(total_rows)
+        })
+    }
+
     /// Filter rows based on predicate expression
     ///
     /// Args:
