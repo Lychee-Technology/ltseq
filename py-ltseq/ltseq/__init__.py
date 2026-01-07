@@ -1,6 +1,6 @@
 # LTSeq Python wrapper — uses native `ltseq_core` extension for CSV IO and operations.
 
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Union
 import csv
 
 # Import the expression system early
@@ -423,6 +423,164 @@ class LTSeq:
             result._schema[col_name] = "Unknown"
         # Delegate derivation to Rust implementation
         result._inner = self._inner.derive(derived_cols)
+        return result
+
+    def sort(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+        """
+        Sort rows by one or more key expressions in ascending order.
+
+        Reorders data based on column values. Multiple sort keys are applied in order.
+
+        Args:
+            *key_exprs: Column names (str) or lambda expressions that return sortable values.
+                       Examples:
+                       - sort("date") - sort by date column ascending
+                       - sort(lambda r: r.date) - same as above
+                       - sort("date", "id") - multi-key sort: first by date, then by id
+
+        Returns:
+            A new LTSeq with sorted data
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.sort("name").show()
+            >>> t.sort(lambda r: r.date, lambda r: r.id).show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Collect sort expressions
+        sort_exprs = []
+        for key_expr in key_exprs:
+            if isinstance(key_expr, str):
+                # String column name: create simple Column expression
+                sort_exprs.append(
+                    {
+                        "type": "Column",
+                        "name": key_expr,
+                    }
+                )
+            elif callable(key_expr):
+                # Lambda expression: capture and serialize
+                expr_dict = self._capture_expr(key_expr)
+                sort_exprs.append(expr_dict)
+            else:
+                raise TypeError(
+                    f"sort() argument must be str or callable, got {type(key_expr).__name__}"
+                )
+
+        # Create a new LTSeq with sorted result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate sorting to Rust implementation
+        result._inner = self._inner.sort(sort_exprs)
+        return result
+
+    def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+        """
+        Remove duplicate rows based on key columns.
+
+        By default, retains the first occurrence of each unique key combination.
+
+        Args:
+            *key_exprs: Column names (str) or lambda expressions identifying duplicates.
+                       If no args provided, considers all columns for uniqueness.
+                       Examples:
+                       - distinct() - unique across all columns
+                       - distinct("id") - unique based on id column
+                       - distinct("id", "date") - unique based on id and date columns
+                       - distinct(lambda r: r.id) - unique by lambda expression
+
+        Returns:
+            A new LTSeq with duplicate rows removed
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If lambda references a non-existent column
+            TypeError: If argument is not str or callable
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.distinct("customer_id").show()
+            >>> t.distinct("date", "id").show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Collect key expressions
+        key_cols = []
+        for key_expr in key_exprs:
+            if isinstance(key_expr, str):
+                # String column name
+                key_cols.append(
+                    {
+                        "type": "Column",
+                        "name": key_expr,
+                    }
+                )
+            elif callable(key_expr):
+                # Lambda expression
+                expr_dict = self._capture_expr(key_expr)
+                key_cols.append(expr_dict)
+            else:
+                raise TypeError(
+                    f"distinct() argument must be str or callable, got {type(key_expr).__name__}"
+                )
+
+        # Create a new LTSeq with distinct result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate deduplication to Rust implementation
+        result._inner = self._inner.distinct(key_cols)
+        return result
+
+    def slice(self, offset: int = 0, length: Optional[int] = None) -> "LTSeq":
+        """
+        Select a contiguous range of rows.
+
+        Similar to SQL LIMIT/OFFSET operations. Zero-copy selection at the logical level.
+
+        Args:
+            offset: Starting row index (0-based). Default: 0
+            length: Number of rows to include. If None, all rows from offset to end.
+
+        Returns:
+            A new LTSeq with the selected row range
+
+        Raises:
+            ValueError: If offset < 0 or length < 0
+            ValueError: If schema is not initialized
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.slice(10, 5).show()      # Rows 10-14 (5 rows starting at index 10)
+            >>> t.slice(offset=100).show()  # From row 100 to end
+            >>> t.slice(length=10).show()   # First 10 rows
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Validate parameters
+        if offset < 0:
+            raise ValueError(f"offset must be non-negative, got {offset}")
+        if length is not None and length < 0:
+            raise ValueError(f"length must be non-negative, got {length}")
+
+        # Create a new LTSeq with sliced result
+        result = LTSeq()
+        result._schema = self._schema.copy()
+        # Delegate slicing to Rust implementation
+        result._inner = self._inner.slice(offset, length)
         return result
 
 

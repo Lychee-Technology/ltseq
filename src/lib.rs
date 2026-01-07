@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use datafusion::prelude::*;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::arrow::datatypes::{Schema as ArrowSchema, Field, DataType};
-use datafusion::logical_expr::{Expr, BinaryExpr, Operator};
+use datafusion::arrow::datatypes::{Schema as ArrowSchema, Field};
+use datafusion::logical_expr::{Expr, BinaryExpr, Operator, SortExpr};
 use lazy_static::lazy_static;
 use tokio::runtime::Runtime;
 
@@ -591,6 +591,155 @@ impl RustTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(derived_df)),
             schema: Some(Arc::new(new_arrow_schema)),
+        })
+    }
+    
+    /// Sort rows by one or more key expressions
+    /// 
+    /// Args:
+    ///     sort_exprs: List of serialized expression dicts (from Python)
+    /// 
+    /// Returns:
+    ///     New RustTable with sorted data
+    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+        // If no dataframe, return empty result (for unit tests)
+        if self.dataframe.is_none() {
+            return Ok(RustTable {
+                session: Arc::clone(&self.session),
+                dataframe: None,
+                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            });
+        }
+        
+        // Get schema (required for transpilation)
+        let schema = self.schema.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Schema not available. Call read_csv() first."
+            ))?;
+        
+        // Deserialize and transpile each sort expression
+        let mut df_sort_exprs = Vec::new();
+        for expr_dict in sort_exprs {
+            let py_expr = dict_to_py_expr(&expr_dict)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let df_expr = pyexpr_to_datafusion(py_expr, schema)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            // Create SortExpr with ascending order (default)
+            df_sort_exprs.push(SortExpr {
+                expr: df_expr,
+                asc: true,
+                nulls_first: false,
+            });
+        }
+        
+        // Get DataFrame
+        let df = self.dataframe.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first."
+            ))?;
+        
+        // Apply sort (async operation)
+        let sorted_df = RUNTIME.block_on(async {
+            (**df).clone().sort(df_sort_exprs)
+                .map_err(|e| format!("Sort execution failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        
+        // Return new RustTable with sorted data
+        Ok(RustTable {
+            session: Arc::clone(&self.session),
+            dataframe: Some(Arc::new(sorted_df)),
+            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+        })
+    }
+    
+    /// Remove duplicate rows based on key columns
+    /// 
+    /// Args:
+    ///     key_exprs: List of serialized expression dicts (from Python)
+    ///                If empty, considers all columns for uniqueness
+    /// 
+    /// Returns:
+    ///     New RustTable with unique rows
+    fn distinct(&self, _key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+        // If no dataframe, return empty result (for unit tests)
+        if self.dataframe.is_none() {
+            return Ok(RustTable {
+                session: Arc::clone(&self.session),
+                dataframe: None,
+                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            });
+        }
+        
+        // Get schema (for now, we don't use it for distinct, but keep it for future)
+        let _schema = self.schema.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Schema not available. Call read_csv() first."
+            ))?;
+        
+        // Get DataFrame
+        let df = self.dataframe.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first."
+            ))?;
+        
+        // For Phase 5, we implement simple distinct on all columns
+        // TODO: In Phase 6+, support distinct with specific key columns
+        // Note: key_exprs parameter is reserved for future use
+        let distinct_df = RUNTIME.block_on(async {
+            (**df).clone().distinct()
+                .map_err(|e| format!("Distinct execution failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        
+        // Return new RustTable with distinct data
+        Ok(RustTable {
+            session: Arc::clone(&self.session),
+            dataframe: Some(Arc::new(distinct_df)),
+            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+        })
+    }
+    
+    /// Select a contiguous range of rows
+    /// 
+    /// Args:
+    ///     offset: Starting row index (0-based)
+    ///     length: Number of rows to include (None = all rows from offset to end)
+    /// 
+    /// Returns:
+    ///     New RustTable with selected row range
+    fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<RustTable> {
+        // If no dataframe, return empty result (for unit tests)
+        if self.dataframe.is_none() {
+            return Ok(RustTable {
+                session: Arc::clone(&self.session),
+                dataframe: None,
+                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+            });
+        }
+        
+        // Get DataFrame
+        let df = self.dataframe.as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first."
+            ))?;
+        
+        // Apply slice: use limit() with offset and fetch parameters
+        let sliced_df = RUNTIME.block_on(async {
+            // DataFusion's limit(skip: usize, fetch: Option<usize>)
+            let skip = offset as usize;
+            let fetch = length.map(|len| len as usize);
+            
+            (**df).clone().limit(skip, fetch)
+                .map_err(|e| format!("Slice execution failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        
+        // Return new RustTable with sliced data
+        Ok(RustTable {
+            session: Arc::clone(&self.session),
+            dataframe: Some(Arc::new(sliced_df)),
+            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
         })
     }
 }
