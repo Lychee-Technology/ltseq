@@ -87,7 +87,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                 .map_err(|_| PyExprError::MissingField("left".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("left".to_string()))?;
             let left_dict = left_dict_obj
-                .downcast::<PyDict>()
+                .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("left must be a dict".to_string()))?;
 
             let right_dict_obj = dict
@@ -95,7 +95,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                 .map_err(|_| PyExprError::MissingField("right".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("right".to_string()))?;
             let right_dict = right_dict_obj
-                .downcast::<PyDict>()
+                .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("right must be a dict".to_string()))?;
 
             let left = Box::new(dict_to_py_expr(&left_dict)?);
@@ -117,7 +117,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                 .map_err(|_| PyExprError::MissingField("operand".to_string()))?
                 .ok_or_else(|| PyExprError::MissingField("operand".to_string()))?;
             let operand_dict = operand_dict_obj
-                .downcast::<PyDict>()
+                .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("operand must be a dict".to_string()))?;
 
             let operand = Box::new(dict_to_py_expr(&operand_dict)?);
@@ -139,12 +139,12 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                 .ok_or_else(|| PyExprError::MissingField("args".to_string()))?;
 
             let args_list = args_obj
-                .downcast::<pyo3::types::PyList>()
+                .cast::<pyo3::types::PyList>()
                 .map_err(|_| PyExprError::InvalidType("args must be a list".to_string()))?;
 
             let mut args = Vec::new();
             for item in args_list.iter() {
-                let arg_dict = item.downcast::<PyDict>().map_err(|_| {
+                let arg_dict = item.cast::<PyDict>().map_err(|_| {
                     PyExprError::InvalidType("args items must be dicts".to_string())
                 })?;
                 args.push(dict_to_py_expr(&arg_dict)?);
@@ -157,7 +157,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                 .ok_or_else(|| PyExprError::MissingField("kwargs".to_string()))?;
 
             let kwargs_dict = kwargs_obj
-                .downcast::<PyDict>()
+                .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("kwargs must be a dict".to_string()))?;
 
             let mut kwargs = HashMap::new();
@@ -166,7 +166,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
                     PyExprError::InvalidType("kwargs keys must be strings".to_string())
                 })?;
 
-                let value_dict: &Bound<'_, PyDict> = value.downcast::<PyDict>().map_err(|_| {
+                let value_dict: &Bound<'_, PyDict> = value.cast::<PyDict>().map_err(|_| {
                     PyExprError::InvalidType("kwargs values must be dicts".to_string())
                 })?;
                 kwargs.insert(key_str, dict_to_py_expr(value_dict)?);
@@ -179,7 +179,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
 
             let on = if let Some(on_val) = on_obj {
                 let on_dict: &Bound<'_, PyDict> = on_val
-                    .downcast::<PyDict>()
+                    .cast::<PyDict>()
                     .map_err(|_| PyExprError::InvalidType("on must be a dict".to_string()))?;
                 Box::new(dict_to_py_expr(on_dict)?)
             } else {
