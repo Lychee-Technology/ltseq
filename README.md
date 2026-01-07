@@ -10,6 +10,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Ordered Computing**: group_ordered, search_first for processing sequences
 - **Set Operations**: union, intersect, diff, subset checks
 - **Joins**: Standard SQL joins, merge joins, lookups
+- **Foreign Key Relationships**: Lightweight pointer-based linking (Phase 8)
 - **Aggregation**: group-by aggregation, partitioning, pivots
 
 ### Performance
@@ -79,6 +80,36 @@ t.distinct(lambda r: r.customer_id)
 # Slicing
 t.slice(offset=10, length=5)
 ```
+
+### Pointer-Based Linking (Foreign Keys)
+
+Link tables via foreign key relationships without materializing expensive joins:
+
+```python
+# Create a link between orders and products
+orders = LTSeq.read_csv("orders.csv")        # id, product_id, quantity
+products = LTSeq.read_csv("products.csv")    # product_id, name, price
+
+linked = orders.link(
+    products,
+    on=lambda o, p: o.product_id == p.product_id,
+    as_="prod"
+)
+
+# Filter on source columns (fast - no join yet)
+filtered = linked.filter(lambda r: r.quantity > 10)
+
+# Materialize when you need the joined data
+result = filtered._materialize()
+result.show()
+```
+
+**Features:**
+- All four join types: `join_type="inner"` (default), `"left"`, `"right"`, `"full"`
+- Composite keys: `on=lambda o, p: (o.year == p.year) & (o.product_id == p.product_id)`
+- Lazy evaluation: Link created before join is executed
+- See [Phase 8 Linking Guide](docs/phase8_linking_guide.md) for detailed documentation
+
 
 ### Window Functions (Ordered Computing)
 
@@ -200,9 +231,9 @@ LTSeq includes a comprehensive test suite covering all functionality:
 pytest py-ltseq/tests/ -v
 
 # Run specific test file
-pytest py-ltseq/tests/test_phase6_sequence_ops.py -v
+pytest py-ltseq/tests/test_phase8_linking.py -v
 
-# Current Status: 254 passing, 8 skipped
+# Current Status: 302 passing, 21 skipped
 ```
 
 ## Examples
@@ -282,8 +313,15 @@ MIT License - See LICENSE file for details.
 ## Resources
 
 - [Full API Documentation](docs/api.md)
+- [Phase 8 Linking Guide](docs/phase8_linking_guide.md) - Foreign key relationships and linking
+- [Phase 8J Linking Limitations](docs/phase8j_limitations.md) - Known limitations and workarounds
 - [Phase 6 Implementation Details](docs/phase6_session_summary.md)
 - [Design Decisions](docs/phase6_design_decisions.md)
+- **Examples** in `examples/` directory:
+  - `linking_basic.py` - Basic order-product join
+  - `linking_join_types.py` - All four join types
+  - `linking_composite_keys.py` - Multi-column join keys
+  - `linking_filtering.py` - Filtering patterns
 
 ## FAQ
 
@@ -296,8 +334,15 @@ A: Yes. Window functions require a `.sort()` call. The sort order is then preser
 **Q: What file formats are supported?**  
 A: CSV, JSON, and Parquet. Via to_csv(), to_json(), and to_parquet() methods.
 
+**Q: How do I join tables?**  
+A: LTSeq offers two approaches:
+1. **Linking** (Phase 8) - Lightweight pointer-based foreign keys with lazy evaluation
+   - `orders.link(products, on=lambda o, p: o.product_id == p.product_id, as_="prod")`
+   - See [Phase 8 Linking Guide](docs/phase8_linking_guide.md)
+2. **Traditional SQL joins** - Full data materialization
+
 **Q: Is this production-ready?**  
-A: LTSeq is stable with 254 passing tests covering all functionality. It's suitable for production use cases.
+A: LTSeq is stable with 302 passing tests covering all functionality. It's suitable for production use cases.
 
 **Q: How does performance compare to Pandas?**  
 A: LTSeq is generally faster for large datasets due to vectorized operations and the underlying DataFusion engine. For small datasets, both are comparable.
