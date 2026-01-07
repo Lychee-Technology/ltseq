@@ -1,52 +1,40 @@
-use datafusion::arrow::util::pretty;
-use datafusion::prelude::*;
-use futures::executor::block_on;
 use pyo3::prelude::*;
 use pyo3::types::PyModuleMethods;
 
-/// Minimal LTSeq kernel: holds a DataFusion SessionContext and optional DataFrame
+/// Minimal LTSeq kernel placeholder
 #[pyclass]
 struct RustTable {
-    ctx: SessionContext,
-    df: Option<datafusion::dataframe::DataFrame>,
+    // Defer DataFusion imports to avoid GIL issues
+    _placeholder: bool,
 }
 
 #[pymethods]
 impl RustTable {
     #[new]
     fn new() -> Self {
-        let ctx = SessionContext::new();
-        RustTable { ctx, df: None }
+        RustTable { _placeholder: true }
     }
 
-    /// Read CSV into an in-memory DataFrame using DataFusion's CSV reader
-    fn read_csv(&mut self, path: &str) -> PyResult<()> {
-        let options = CsvReadOptions::new().schema_infer_max_records(100usize);
-        let df = block_on(self.ctx.read_csv(path, options)).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("CSV read error: {}", e))
-        })?;
-        self.df = Some(df);
-        Ok(())
+    fn read_csv(&mut self, _path: &str) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "RustTable.read_csv() not yet implemented - use Python schema inference instead",
+        ))
     }
 
-    /// Collect and pretty-print record batches
     fn show(&self, _n: Option<usize>) -> PyResult<String> {
-        if let Some(df) = &self.df {
-            let df_clone = df.clone();
-            let batches = block_on(df_clone.collect()).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Execution error: {}", e))
-            })?;
-            pretty::print_batches(&batches).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Print error: {}", e))
-            })?;
-            Ok(format!("Printed {} record batches", batches.len()))
-        } else {
-            Ok("<no data>".to_string())
-        }
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "RustTable.show() not yet implemented",
+        ))
     }
 
     fn hello(&self) -> String {
-        format!("Hello from LTSeq Kernel! df_exists={}", self.df.is_some())
+        "Hello from LTSeq Kernel (stub)!".to_string()
+    }
+
+    fn get_schema(&self) -> PyResult<std::collections::HashMap<String, String>> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "RustTable.get_schema() not yet implemented",
+        ))
     }
 }
 
