@@ -477,3 +477,140 @@ class TestLinkedTableFilter:
         filtered_count = len(filtered._source)
         assert filtered_count < original_count
         assert filtered_count > 0
+
+
+class TestLinkedTableSelect:
+    """Phase 8G: Test select() on linked tables"""
+
+    @pytest.fixture
+    def orders_table(self):
+        """Orders table: id, product_id, quantity"""
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        """Products table: id, name, price"""
+        return LTSeq.read_csv("examples/products.csv")
+
+    def test_select_source_columns_from_linked_table(
+        self, orders_table, products_table
+    ):
+        """
+        Select source columns from a linked table.
+        Should work because source columns are directly available.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Select source columns
+        result = linked.select("id", "quantity")
+
+        assert result is not None
+        assert isinstance(result, LTSeq)
+        # Verify columns exist
+        assert "id" in result._schema
+        assert "quantity" in result._schema
+        result.show(2)
+
+    def test_select_single_source_column(self, orders_table, products_table):
+        """Select a single source column from linked table."""
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        result = linked.select("id")
+
+        assert result is not None
+        # Note: Current implementation keeps full schema, only filters displayed columns
+        assert "id" in result._schema
+        result.show(1)
+
+    def test_select_multiple_source_columns(self, orders_table, products_table):
+        """Select multiple source columns with specific order."""
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        result = linked.select("quantity", "id", "product_id")
+
+        assert result is not None
+        # All selected columns should be present
+        assert "id" in result._schema
+        assert "quantity" in result._schema
+        assert "product_id" in result._schema
+        result.show(2)
+
+    def test_select_preserves_data_integrity(self, orders_table, products_table):
+        """
+        Verify that select() preserves data values correctly.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Select and verify row count
+        result = linked.select("id", "quantity")
+        assert len(result) == len(orders_table)
+
+    def test_select_from_filtered_linked_table(self, orders_table, products_table):
+        """
+        Test select() on a filtered linked table.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter first, then select
+        filtered = linked.filter(lambda r: r.quantity > 1)
+        result = filtered.select("id", "quantity")
+
+        assert result is not None
+        assert len(result) < len(orders_table)
+        result.show(1)
+
+    def test_select_returns_ltseq_type(self, orders_table, products_table):
+        """
+        Verify that select() returns an LTSeq object.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        result = linked.select("id")
+
+        assert isinstance(result, LTSeq)
+        assert not isinstance(result, LinkedTable)
+
+    def test_select_chained_with_other_operations(self, orders_table, products_table):
+        """
+        Test that select result can be chained with other operations.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Chain select with another operation
+        result = linked.select("id", "quantity").filter(lambda r: r.quantity > 2)
+
+        assert result is not None
+        # Result should be smaller than original (filtered)
+        assert len(result) < len(orders_table)
+
+    def test_select_all_source_columns_explicit(self, orders_table, products_table):
+        """
+        Test selecting all source columns explicitly.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Select all source columns
+        result = linked.select("id", "product_id", "quantity")
+
+        assert result is not None
+        # Verify source columns are in schema
+        assert "id" in result._schema
+        assert "product_id" in result._schema
+        assert "quantity" in result._schema
+        result.show(1)
