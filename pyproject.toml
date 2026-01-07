@@ -1,0 +1,43 @@
+[build-system]
+requires = ["maturin>=1.11.2,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "py-ltseq"
+version = "0.1.0"
+description = "LTSeq: High-performance Ordered Sequence Algebra Engine."
+authors = [{name = "LTBase Team", email = "info@ltbase.dev"}]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pyarrow>=22.0.0",
+]
+
+[tool.maturin]
+# 关键设置：将 Rust 编译产物放在 ltseq 文件夹下，名字叫 ltseq_core
+module-name = "ltseq.ltseq_core"
+features = ["pyo3/extension-module"]
+# [重要] 告诉 pyo3/maturin 这是一个混合项目
+# 如果不加这行，maturin 有时会找不到 Python 源码包
+python-source = "./py-ltseq"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.11.2",
+]
+
+[tool.setuptools.package-dir]
+ltseq = "py-ltseq"
+
+[tool.uv]
+# 这里定义开发依赖 (替代 requirements-dev.txt)
+dev-dependencies = [
+    "maturin>=1.11.2",
+    "pytest>=7.0",
+    "ipdb>=0.13",  # 调试好帮手
+]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."] # 确保测试时能找到当前目录
