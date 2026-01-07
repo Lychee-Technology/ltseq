@@ -4,25 +4,27 @@ use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator, SortExpr};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
+use lazy_static::lazy_static;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 // Global Tokio runtime for async operations
 
-// Module declarations - Organized for better maintainability
+// Module declarations
 mod error;
 mod types;
 mod helpers;
-pub mod transpiler;  // PyExpr to DataFusion transpilation
-pub mod engine;      // DataFusion session and RustTable struct
-pub mod ops;         // Table operations grouped by category
 
 // Re-exports for convenience
+pub use error::*;
+pub use types::*;
 
-
-use crate::engine::RUNTIME;
+lazy_static! {
+    static ref RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
+}
 
 /// Error type for PyExpr operations
 #[derive(Debug)]
