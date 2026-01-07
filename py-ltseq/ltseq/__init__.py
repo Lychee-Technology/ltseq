@@ -378,13 +378,18 @@ class LTSeq:
         result._inner = self._inner.select(exprs)
         return result
 
-    def derive(self, **kwargs: Callable) -> "LTSeq":
+    def derive(self, *args, **kwargs: Callable) -> "LTSeq":
         """
         Create new derived columns based on lambda expressions.
 
         New columns are added to the dataframe; existing columns remain.
 
+        Supports two API styles:
+        1. Keyword arguments: derive(col1=lambda r: r.x, col2=lambda r: r.y)
+        2. Single callable returning dict: derive(lambda r: {"col1": r.x, "col2": r.y})
+
         Args:
+            *args: Single optional callable that returns a dict of {col_name: expression}
             **kwargs: Column name -> lambda expression mapping.
                      E.g., derive(total=lambda r: r.price * r.qty, age_group=lambda r: r.age // 10)
 
@@ -398,7 +403,10 @@ class LTSeq:
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
+            >>> # API 1: keyword arguments
             >>> derived = t.derive(total=lambda r: r.price * r.qty)
+            >>> # API 2: lambda returning dict
+            >>> derived = t.derive(lambda r: {"total": r.price * r.qty})
             >>> derived.show()
         """
         if not self._schema:
@@ -406,13 +414,57 @@ class LTSeq:
                 "Schema not initialized. Call read_csv() first to populate the schema."
             )
 
-        derived_cols = {}
-        for col_name, fn in kwargs.items():
-            if not callable(fn):
+        # Handle both API styles
+        if args:
+            if len(args) > 1:
                 raise TypeError(
-                    f"derive() argument '{col_name}' must be callable, got {type(fn).__name__}"
+                    f"derive() takes at most 1 positional argument ({len(args)} given)"
                 )
-            derived_cols[col_name] = self._capture_expr(fn)
+            if kwargs:
+                raise TypeError(
+                    "derive() cannot use both positional argument and keyword arguments"
+                )
+
+            # API 2: single callable returning dict
+            func = args[0]
+            if not callable(func):
+                raise TypeError(
+                    f"derive() positional argument must be callable, got {type(func).__name__}"
+                )
+
+            # Capture the function to get the expression dict
+            expr_dict = self._capture_expr(func)
+
+            # The captured expression should return a Call with type "return" or be a BinOp/etc
+            # We need to extract the column definitions from it
+            # For now, assume it's a dict literal that we can extract
+            if expr_dict.get("type") == "Dict":
+                # Direct dict literal
+                derived_cols = {}
+                for key_expr, value_expr in zip(
+                    expr_dict.get("keys", []), expr_dict.get("values", [])
+                ):
+                    # Extract column name from key
+                    if key_expr.get("type") == "Literal":
+                        col_name = key_expr.get("value", "")
+                        derived_cols[col_name] = value_expr
+                    else:
+                        raise ValueError(
+                            "Dict keys in derive() must be string literals"
+                        )
+            else:
+                # Fallback: treat the entire expression as a single derived column
+                # This shouldn't happen for well-formed calls, but we provide a default
+                derived_cols = {"_derived": expr_dict}
+        else:
+            # API 1: keyword arguments
+            derived_cols = {}
+            for col_name, fn in kwargs.items():
+                if not callable(fn):
+                    raise TypeError(
+                        f"derive() argument '{col_name}' must be callable, got {type(fn).__name__}"
+                    )
+                derived_cols[col_name] = self._capture_expr(fn)
 
         # Create a new LTSeq with derived columns
         result = LTSeq()
@@ -428,16 +480,9 @@ class LTSeq:
         )
 
         if has_window_functions:
-            # Phase 6: Window functions not fully implemented yet
-            # Users need to wait for Phase 6.1 which will have proper support
-            raise NotImplementedError(
-                "Window functions (shift, rolling, diff, cum_sum) are not yet implemented in Phase 6.\n\n"
-                "These features require DataFrame-level support with window frame specifications.\n"
-                "Expected implementation: Phase 6.1\n\n"
-                "Workaround for Phase 6: Use regular operations without window functions.\n"
-                "Example: Instead of t.derive(prev=lambda r: r.price.shift(1)),\n"
-                "         use t.sort('date').select('*').filter(...)"
-            )
+            # Phase 6.1: Window functions are now handled by Rust backend
+            # They will be transpiled to SQL and executed by DataFusion
+            result._inner = self._inner.derive(derived_cols)
         else:
             # Phase 4/5: Standard Rust-based derivation
             result._inner = self._inner.derive(derived_cols)

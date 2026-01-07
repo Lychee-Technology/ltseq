@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use datafusion::prelude::*;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::arrow::datatypes::{Schema as ArrowSchema, Field};
+use datafusion::arrow::datatypes::{Schema as ArrowSchema, Field, DataType};
 use datafusion::logical_expr::{Expr, BinaryExpr, Operator, SortExpr};
+use datafusion::datasource::MemTable;
 use lazy_static::lazy_static;
 use tokio::runtime::Runtime;
 
@@ -305,6 +306,187 @@ fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, S
     }
 }
 
+/// Helper function to detect if a PyExpr contains a window function call
+fn contains_window_function(py_expr: &PyExpr) -> bool {
+    match py_expr {
+        PyExpr::Call { func, on, .. } => {
+            // Direct window functions
+            if matches!(func.as_str(), "shift" | "rolling" | "diff" | "cum_sum") {
+                return true;
+            }
+            // Aggregation functions applied to rolling windows
+            if matches!(func.as_str(), "mean" | "sum" | "min" | "max" | "count") {
+                // Check if this is applied to a rolling() call
+                if let PyExpr::Call { func: inner_func, .. } = &**on {
+                    if matches!(inner_func.as_str(), "rolling") {
+                        return true;
+                    }
+                }
+            }
+            // Check recursively in the `on` field
+            contains_window_function(on)
+        },
+        PyExpr::BinOp { left, right, .. } => {
+            contains_window_function(left) || contains_window_function(right)
+        },
+        PyExpr::UnaryOp { operand, .. } => {
+            contains_window_function(operand)
+        },
+        _ => false,
+    }
+}
+
+/// Helper function to check if a DataType is numeric (can be summed)
+fn is_numeric_type(data_type: &DataType) -> bool {
+    matches!(data_type,
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 |
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 |
+        DataType::Float32 | DataType::Float64 |
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) |
+        DataType::Null  // Allow Null type for empty tables
+    )
+}
+
+/// Helper function to convert PyExpr to SQL string representation for window functions
+fn pyexpr_to_sql(py_expr: &PyExpr, schema: &ArrowSchema) -> Result<String, String> {
+    match py_expr {
+        PyExpr::Column(name) => {
+            if !schema.fields().iter().any(|f| f.name() == name) {
+                return Err(format!("Column '{}' not found in schema", name));
+            }
+            Ok(format!("\"{}\"", name))
+        },
+        
+        PyExpr::Literal { value, dtype } => {
+            match dtype.as_str() {
+                "String" | "Utf8" => Ok(format!("'{}'", value)),
+                _ => Ok(value.clone()),
+            }
+        },
+        
+        PyExpr::BinOp { op, left, right } => {
+            let left_sql = pyexpr_to_sql(left, schema)?;
+            let right_sql = pyexpr_to_sql(right, schema)?;
+            let op_str = match op.as_str() {
+                "Add" => "+",
+                "Sub" => "-",
+                "Mul" => "*",
+                "Div" => "/",
+                "Mod" => "%",
+                "Eq" => "=",
+                "Ne" => "!=",
+                "Lt" => "<",
+                "Le" => "<=",
+                "Gt" => ">",
+                "Ge" => ">=",
+                "And" => "AND",
+                "Or" => "OR",
+                _ => return Err(format!("Unknown binary operator: {}", op)),
+            };
+            Ok(format!("({} {} {})", left_sql, op_str, right_sql))
+        },
+        
+        PyExpr::UnaryOp { op, operand } => {
+            let operand_sql = pyexpr_to_sql(operand, schema)?;
+            match op.as_str() {
+                "Not" => Ok(format!("(NOT {})", operand_sql)),
+                _ => Err(format!("Unknown unary operator: {}", op)),
+            }
+        },
+        
+         PyExpr::Call { func, args, kwargs: _, on } => {
+             match func.as_str() {
+                 "shift" => {
+                     let on_sql = pyexpr_to_sql(on, schema)?;
+                     let offset = if args.is_empty() {
+                         1
+                     } else if let PyExpr::Literal { value, .. } = &args[0] {
+                         value.parse::<i32>().unwrap_or(1)
+                     } else {
+                         return Err("shift() offset must be a literal integer".to_string());
+                     };
+                     
+                      if offset >= 0 {
+                          Ok(format!("LAG({}, {})", on_sql, offset))
+                      } else {
+                          Ok(format!("LEAD({}, {})", on_sql, -offset))
+                      }
+                 },
+                 
+                 "rolling" => {
+                     // rolling() should not be called directly - it's handled through the agg method
+                     Err("rolling() should not reach pyexpr_to_sql - it's handled separately".to_string())
+                 },
+                 
+                 "diff" => {
+                     let on_sql = pyexpr_to_sql(on, schema)?;
+                     let periods = if args.is_empty() {
+                         1
+                     } else if let PyExpr::Literal { value, .. } = &args[0] {
+                         value.parse::<i32>().unwrap_or(1)
+                     } else {
+                         return Err("diff() periods must be a literal integer".to_string());
+                     };
+                     
+                     // diff(n) = col - LAG(col, n) - we'll handle the OVER clause in derive_with_window_functions
+                     // Mark this as a diff operation so we know to apply the window frame to LAG
+                     Ok(format!("__DIFF_{}__({})__{}", periods, on_sql, periods))
+                 },
+                 
+                 // Aggregation functions on rolling windows: mean(), sum(), min(), max(), count()
+                 "mean" | "sum" | "min" | "max" | "count" => {
+                     // Check if this is applied to a rolling() call
+                     if let PyExpr::Call { func: inner_func, args: inner_args, on: inner_on, .. } = &**on {
+                         if inner_func == "rolling" {
+                             // Get the window size from rolling() args
+                             let window_size = if inner_args.is_empty() {
+                                 return Err("rolling() requires a window size".to_string());
+                             } else if let PyExpr::Literal { value, .. } = &inner_args[0] {
+                                 value.parse::<i32>().unwrap_or(1)
+                             } else {
+                                 return Err("rolling() window size must be a literal integer".to_string());
+                             };
+                             
+                             // Get the column being aggregated
+                             let col_sql = pyexpr_to_sql(inner_on, schema)?;
+                             
+                             // Build the aggregation function name
+                             let agg_func = match func.as_str() {
+                                 "mean" => "AVG",
+                                 "sum" => "SUM",
+                                 "min" => "MIN",
+                                 "max" => "MAX",
+                                 "count" => "COUNT",
+                                 _ => unreachable!(),
+                             };
+                             
+                             // Mark this as a rolling aggregation with window size and func
+                             // The window frame will be added in derive_with_window_functions
+                             Ok(format!("__ROLLING_{}__({})__{}", agg_func, col_sql, window_size))
+                         } else {
+                             Err(format!("Aggregation function {} must be called on rolling()", func))
+                         }
+                     } else {
+                         Err(format!("Aggregation function {} requires rolling() context", func))
+                     }
+                 },
+                 
+                 "is_null" => {
+                     let on_sql = pyexpr_to_sql(on, schema)?;
+                     Ok(format!("({} IS NULL)", on_sql))
+                 },
+                 
+                 "is_not_null" => {
+                     let on_sql = pyexpr_to_sql(on, schema)?;
+                     Ok(format!("({} IS NOT NULL)", on_sql))
+                 },
+                 
+                 _ => Err(format!("Unsupported function in window context: {}", func)),
+             }
+         },
+    }
+}
+
 /// Wrapper to convert PyExprError to PyErr
 impl From<PyExprError> for PyErr {
     fn from(err: PyExprError) -> Self {
@@ -538,66 +720,89 @@ impl RustTable {
     /// Returns:
     ///     New RustTable with added derived columns
     fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<RustTable> {
-        // 1. Get schema and DataFrame
-        let schema = self.schema.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available. Call read_csv() first."
-            ))?;
-        
-        let df = self.dataframe.as_ref()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first."
-            ))?;
-        
-        // 2. Build select expressions: keep all existing columns + add derived ones
-        let mut select_exprs = Vec::new();
-        
-        // Add all existing columns
-        for field in schema.fields() {
-            select_exprs.push(col(field.name()));
-        }
-        
-        // 3. Process each derived column
-        for (col_name, expr_item) in derived_cols.iter() {
-            let col_name_str = col_name.extract::<String>()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Column name must be string"
-                ))?;
-            
-            let expr_dict = expr_item.downcast::<PyDict>()
-                .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Expression must be dict"
-                ))?;
-            
-            // Deserialize
-            let py_expr = dict_to_py_expr(&expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            
-            // Transpile
-            let df_expr = pyexpr_to_datafusion(py_expr, schema)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-            
-            // Add to select with alias
-            select_exprs.push(df_expr.alias(&col_name_str));
-        }
-        
-        // 4. Apply select to add derived columns
-        let derived_df = RUNTIME.block_on(async {
-            (**df).clone().select(select_exprs)
-                .map_err(|e| format!("Derive execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-        
-        // 5. Get new schema from derived DataFrame (type inference!)
-        let df_schema = derived_df.schema();
-        let arrow_fields: Vec<Field> = df_schema
-            .fields()
-            .iter()
-            .map(|f| (**f).clone())
-            .collect();
-        let new_arrow_schema = ArrowSchema::new(arrow_fields);
-        
-         // 6. Return new RustTable with updated schema
+         // 1. Get schema and DataFrame
+         let schema = self.schema.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "Schema not available. Call read_csv() first."
+             ))?;
+         
+         let df = self.dataframe.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "No data loaded. Call read_csv() first."
+             ))?;
+         
+         // 2. Check if any derived column contains window functions
+         let mut has_window_functions = false;
+         for (_, expr_item) in derived_cols.iter() {
+             let expr_dict = expr_item.downcast::<PyDict>()
+                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                     "Expression must be dict"
+                 ))?;
+             
+             let py_expr = dict_to_py_expr(&expr_dict)
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+             
+             if contains_window_function(&py_expr) {
+                 has_window_functions = true;
+                 break;
+             }
+         }
+         
+         // 3. Handle window functions using SQL
+         if has_window_functions {
+             return self.derive_with_window_functions(derived_cols);
+         }
+         
+         // 4. Standard (non-window) derivation using DataFusion expressions
+         // Build select expressions: keep all existing columns + add derived ones
+         let mut select_exprs = Vec::new();
+         
+         // Add all existing columns
+         for field in schema.fields() {
+             select_exprs.push(col(field.name()));
+         }
+         
+         // Process each derived column
+         for (col_name, expr_item) in derived_cols.iter() {
+             let col_name_str = col_name.extract::<String>()
+                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                     "Column name must be string"
+                 ))?;
+             
+             let expr_dict = expr_item.downcast::<PyDict>()
+                 .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                     "Expression must be dict"
+                 ))?;
+             
+             // Deserialize
+             let py_expr = dict_to_py_expr(&expr_dict)
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+             
+             // Transpile
+             let df_expr = pyexpr_to_datafusion(py_expr, schema)
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+             
+             // Add to select with alias
+             select_exprs.push(df_expr.alias(&col_name_str));
+         }
+         
+         // Apply select to add derived columns
+         let derived_df = RUNTIME.block_on(async {
+             (**df).clone().select(select_exprs)
+                 .map_err(|e| format!("Derive execution failed: {}", e))
+         })
+         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+         
+         // Get new schema from derived DataFrame (type inference!)
+         let df_schema = derived_df.schema();
+         let arrow_fields: Vec<Field> = df_schema
+             .fields()
+             .iter()
+             .map(|f| (**f).clone())
+             .collect();
+         let new_arrow_schema = ArrowSchema::new(arrow_fields);
+         
+         // Return new RustTable with updated schema
          Ok(RustTable {
              session: Arc::clone(&self.session),
              dataframe: Some(Arc::new(derived_df)),
@@ -605,6 +810,199 @@ impl RustTable {
              sort_exprs: self.sort_exprs.clone(),
          })
      }
+     
+     /// Helper method to derive columns with window functions using SQL
+     fn derive_with_window_functions(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+         let schema = self.schema.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "Schema not available"
+             ))?;
+         
+         let df = self.dataframe.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "No data loaded"
+             ))?;
+         
+         RUNTIME.block_on(async {
+             // Get the data from the current DataFrame as record batches
+             let current_batches = (**df).clone()
+                 .collect()
+                 .await
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                     format!("Failed to collect current DataFrame: {}", e)
+                 ))?;
+             
+             // Register a temporary table with the current data
+             let temp_table_name = "__ltseq_temp";
+             let arrow_schema = Arc::new((**schema).clone());
+             let temp_table = MemTable::try_new(
+                 arrow_schema,
+                 vec![current_batches]
+             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 format!("Failed to create memory table: {}", e)
+             ))?;
+             
+             self.session.register_table(
+                 temp_table_name,
+                 Arc::new(temp_table)
+             ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 format!("Failed to register temporary table: {}", e)
+             ))?;
+             
+             // Build the SELECT clause with all columns + derived ones
+             let mut select_parts = Vec::new();
+             
+             // Add all existing columns
+             for field in schema.fields() {
+                 select_parts.push(format!("\"{}\"", field.name()));
+             }
+             
+             // Add derived columns
+             for (col_name, expr_item) in derived_cols.iter() {
+                 let col_name_str = col_name.extract::<String>()
+                     .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                         "Column name must be string"
+                     ))?;
+                 
+                 let expr_dict = expr_item.downcast::<PyDict>()
+                     .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                         "Expression must be dict"
+                     ))?;
+                 
+                 let py_expr = dict_to_py_expr(&expr_dict)
+                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                 
+                  // Convert expression to SQL
+                  let mut expr_sql = pyexpr_to_sql(&py_expr, schema)
+                      .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                  
+                  // Build window specification if needed
+                  let window_spec = if !self.sort_exprs.is_empty() {
+                      let order_by = self.sort_exprs.iter()
+                          .map(|col| format!("\"{}\"", col))
+                          .collect::<Vec<_>>()
+                          .join(", ");
+                      format!(" OVER (ORDER BY {})", order_by)
+                  } else {
+                      " OVER ()".to_string()
+                  };
+                  
+                  // Check if this is a window function and handle rolling aggregations and diff
+                  let is_rolling_agg = expr_sql.contains("__ROLLING_");
+                  let is_diff = expr_sql.contains("__DIFF_");
+                  
+                  let full_expr = if is_rolling_agg {
+                      // Handle rolling aggregations: replace marker with actual window frame
+                      // Pattern: __ROLLING_FUNC__(col)__size
+                      // Replace with: FUNC(col) OVER (ORDER BY ... ROWS BETWEEN size-1 PRECEDING AND CURRENT ROW)
+                      let window_size_start = expr_sql.rfind("__").unwrap_or(0) + 2;
+                      let window_size_str = expr_sql[window_size_start..].trim_end_matches(|c: char| !c.is_ascii_digit());
+                      let window_size = window_size_str.parse::<i32>().unwrap_or(1);
+                      
+                      // Extract the FUNC(col) part
+                      let start = expr_sql.find("__ROLLING_").unwrap_or(0) + 10; // len("__ROLLING_")
+                      let end = expr_sql.find("__(").unwrap_or(start);
+                      let func_part = &expr_sql[start..end];
+                      
+                      let col_start = expr_sql.find("__(").unwrap_or(0) + 3; // len("__(")
+                      let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
+                      let col_part = &expr_sql[col_start..col_end];
+                      
+                      let order_by = if !self.sort_exprs.is_empty() {
+                          self.sort_exprs.iter()
+                              .map(|col| format!("\"{}\"", col))
+                              .collect::<Vec<_>>()
+                              .join(", ")
+                      } else {
+                          "".to_string()
+                      };
+                      
+                      if !order_by.is_empty() {
+                          format!(
+                              "{}({}) OVER (ORDER BY {} ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
+                              func_part, col_part, order_by, window_size - 1
+                          )
+                      } else {
+                          format!(
+                              "{}({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
+                              func_part, col_part, window_size - 1
+                          )
+                      }
+                  } else if is_diff {
+                       // Handle diff: replace marker with actual calculation
+                       // Pattern: __DIFF_periods__(col)__periods
+                       // Replace with: (col - LAG(col, periods)) OVER (ORDER BY ...)
+                       let diff_start = expr_sql.find("__DIFF_").unwrap_or(0);
+                       let periods_start = diff_start + 7; // len("__DIFF_")
+                       let periods_end = expr_sql[periods_start..].find("__").unwrap_or(0) + periods_start;
+                       let periods_str = &expr_sql[periods_start..periods_end];
+                       
+                       let col_start = expr_sql.find("__(").unwrap_or(0) + 3; // len("__(")
+                       let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
+                       let col_part = &expr_sql[col_start..col_end];
+                       
+                       let order_by = if !self.sort_exprs.is_empty() {
+                           self.sort_exprs.iter()
+                               .map(|col| format!("\"{}\"", col))
+                               .collect::<Vec<_>>()
+                               .join(", ")
+                       } else {
+                           "".to_string()
+                       };
+                       
+                        // We need to apply OVER clause to LAG
+                        let diff_expr = if !order_by.is_empty() {
+                            format!(
+                                "({} - LAG({}, {}) OVER (ORDER BY {}))",
+                                col_part, col_part, periods_str, order_by
+                            )
+                        } else {
+                            format!(
+                                "({} - LAG({}, {}) OVER ())",
+                                col_part, col_part, periods_str
+                            )
+                        };
+                       
+                       diff_expr
+                  } else {
+                      expr_sql
+                  };
+                  
+                  select_parts.push(format!("{} AS \"{}\"", full_expr, col_name_str));
+             }
+             
+             // Build and execute the SQL query
+             let sql = format!(
+                 "SELECT {} FROM \"{}\"",
+                 select_parts.join(", "),
+                 temp_table_name
+             );
+             
+             // Execute SQL using sql() which returns a DataFrame directly
+             let new_df = self.session.sql(&sql)
+                 .await
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                     format!("Window function query failed: {}", e)
+                 ))?;
+             
+             // Get schema from the new DataFrame
+             let df_schema = new_df.schema();
+             let arrow_fields: Vec<Field> = df_schema
+                 .fields()
+                 .iter()
+                 .map(|f| (**f).clone())
+                 .collect();
+             let new_arrow_schema = ArrowSchema::new(arrow_fields);
+             
+             // Return new RustTable
+             Ok(RustTable {
+                 session: Arc::clone(&self.session),
+                 dataframe: Some(Arc::new(new_df)),
+                 schema: Some(Arc::new(new_arrow_schema)),
+                 sort_exprs: self.sort_exprs.clone(),
+             })
+         })
+      }
     
     /// Sort rows by one or more key expressions
     /// 
@@ -785,17 +1183,244 @@ impl RustTable {
                  session: Arc::clone(&self.session),
                  dataframe: None,
                  schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-             sort_exprs: self.sort_exprs.clone(),
+                 sort_exprs: self.sort_exprs.clone(),
              });
          }
          
-         // Phase 6: Window functions deferred
-         // cum_sum requires proper window function support in DataFusion 51
-         // which has a complex API. Will be implemented in Phase 6.1
-         return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-             "cum_sum() window function implementation deferred to Phase 6.1. \
-              Use the expression system instead: .derive(cumsum=lambda r: ...)"
-         ));
+         let schema = self.schema.as_ref()
+             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                 "Schema not available. Call read_csv() first."
+             ))?;
+         
+          let df = self.dataframe.as_ref()
+              .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                  "No data loaded. Call read_csv() first."
+              ))?;
+          
+          RUNTIME.block_on(async {
+              // Get the data from the current DataFrame as record batches
+              let current_batches = (**df).clone()
+                  .collect()
+                  .await
+                  .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                      format!("Failed to collect current DataFrame: {}", e)
+                  ))?;
+              
+              // Check if the table is empty - if so, just return with new schema
+              let is_empty = current_batches.iter().all(|batch| batch.num_rows() == 0);
+              if is_empty {
+                  // Build schema with cumulative sum columns added
+                  let mut new_fields = schema.fields().to_vec();
+                  for (idx, expr_item) in cum_exprs.iter().enumerate() {
+                      let expr_dict = expr_item.downcast::<PyDict>()
+                          .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                              "Expression must be dict"
+                          ))?;
+                      
+                      let py_expr = dict_to_py_expr(&expr_dict)
+                          .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                      
+                      let col_name = if let PyExpr::Column(name) = &py_expr {
+                          name.clone()
+                      } else {
+                          format!("cum_sum_{}", idx)
+                      };
+                      
+                      // Add cumsum column with float64 type
+                      let cumsum_col_name = format!("{}_cumsum", col_name);
+                      new_fields.push(Arc::new(Field::new(cumsum_col_name, datafusion::arrow::datatypes::DataType::Float64, true)));
+                  }
+                  
+                  let new_arrow_schema = ArrowSchema::new(new_fields);
+                  
+                  // Create empty MemTable with new schema
+                  let empty_table = MemTable::try_new(
+                      Arc::new(new_arrow_schema.clone()),
+                      vec![current_batches]  // empty batches with new schema
+                  ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                      format!("Failed to create empty memory table: {}", e)
+                  ))?;
+                  
+                  // Register and query to get proper empty DataFrame
+                  let temp_table_name = "__ltseq_temp_empty";
+                  self.session.register_table(
+                      temp_table_name,
+                      Arc::new(empty_table)
+                  ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                      format!("Failed to register empty table: {}", e)
+                  ))?;
+                  
+                  // Build SELECT for all columns
+                  let mut select_parts = Vec::new();
+                  for field in schema.fields() {
+                      select_parts.push(format!("\"{}\"", field.name()));
+                  }
+                  for (idx, expr_item) in cum_exprs.iter().enumerate() {
+                      let expr_dict = expr_item.downcast::<PyDict>()
+                          .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                              "Expression must be dict"
+                          ))?;
+                      
+                      let py_expr = dict_to_py_expr(&expr_dict)
+                          .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                      
+                      let col_name = if let PyExpr::Column(name) = &py_expr {
+                          name.clone()
+                      } else {
+                          format!("cum_sum_{}", idx)
+                      };
+                      
+                      let cumsum_col_name = format!("{}_cumsum", col_name);
+                      select_parts.push(format!("CAST(0.0 AS FLOAT) AS \"{}\"", cumsum_col_name));
+                  }
+                  
+                  let sql = format!(
+                      "SELECT {} FROM \"{}\"",
+                      select_parts.join(", "),
+                      temp_table_name
+                  );
+                  
+                  let new_df = self.session.sql(&sql)
+                      .await
+                      .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                          format!("cum_sum query failed for empty table: {}", e)
+                      ))?;
+                  
+                  let df_schema = new_df.schema();
+                  let arrow_fields: Vec<Field> = df_schema
+                      .fields()
+                      .iter()
+                      .map(|f| (**f).clone())
+                      .collect();
+                  let new_arrow_schema = ArrowSchema::new(arrow_fields);
+                  
+                  return Ok(RustTable {
+                      session: Arc::clone(&self.session),
+                      dataframe: Some(Arc::new(new_df)),
+                      schema: Some(Arc::new(new_arrow_schema)),
+                      sort_exprs: self.sort_exprs.clone(),
+                  });
+              }
+              
+              // Register a temporary table with the current data
+              let temp_table_name = "__ltseq_temp";
+              let arrow_schema = Arc::new((**schema).clone());
+              let temp_table = MemTable::try_new(
+                  arrow_schema,
+                  vec![current_batches]
+              ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                  format!("Failed to create memory table: {}", e)
+              ))?;
+              
+              self.session.register_table(
+                  temp_table_name,
+                  Arc::new(temp_table)
+              ).map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                  format!("Failed to register temporary table: {}", e)
+              ))?;
+             
+             // Build the SELECT clause with all columns + cumulative sum columns
+             let mut select_parts = Vec::new();
+             
+             // Add all existing columns
+             for field in schema.fields() {
+                 select_parts.push(format!("\"{}\"", field.name()));
+             }
+             
+             // Add cumulative sum columns for each input column
+             for (idx, expr_item) in cum_exprs.iter().enumerate() {
+                 let expr_dict = expr_item.downcast::<PyDict>()
+                     .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                         "Expression must be dict"
+                     ))?;
+                 
+                 let py_expr = dict_to_py_expr(&expr_dict)
+                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                 
+                 // Convert expression to SQL
+                 let expr_sql = pyexpr_to_sql(&py_expr, schema)
+                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                 
+                  // Extract column name from expression (if it's a simple Column)
+                  let col_name = if let PyExpr::Column(name) = &py_expr {
+                      name.clone()
+                  } else {
+                      format!("cum_sum_{}", idx)
+                  };
+                  
+                  // Validate that the column type is numeric (only for direct Column expressions)
+                  if let PyExpr::Column(col_name_ref) = &py_expr {
+                      if let Some(field) = schema.field_with_name(col_name_ref).ok() {
+                          let field_type = field.data_type();
+                          if !is_numeric_type(field_type) {
+                              return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                  format!(
+                                      "cum_sum() requires numeric columns. Column '{}' has type {:?}",
+                                      col_name_ref, field_type
+                                  )
+                              ));
+                          }
+                      }
+                  }
+                  
+                  // Build cumulative sum: SUM(col) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                 let order_by = if !self.sort_exprs.is_empty() {
+                     let order_cols = self.sort_exprs.iter()
+                         .map(|col| format!("\"{}\"", col))
+                         .collect::<Vec<_>>()
+                         .join(", ");
+                     format!(" ORDER BY {}", order_cols)
+                 } else {
+                     "".to_string()
+                 };
+                 
+                 let cumsum_expr = if !order_by.is_empty() {
+                     format!(
+                         "SUM({}) OVER ({}ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                         expr_sql, order_by
+                     )
+                 } else {
+                     format!(
+                         "SUM({}) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                         expr_sql
+                     )
+                 };
+                 
+                 let cumsum_col_name = format!("{}_cumsum", col_name);
+                 select_parts.push(format!("{} AS \"{}\"", cumsum_expr, cumsum_col_name));
+             }
+             
+             // Build and execute the SQL query
+             let sql = format!(
+                 "SELECT {} FROM \"{}\"",
+                 select_parts.join(", "),
+                 temp_table_name
+             );
+             
+             // Execute SQL using sql() which returns a DataFrame directly
+             let new_df = self.session.sql(&sql)
+                 .await
+                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                     format!("cum_sum query failed: {}", e)
+                 ))?;
+             
+             // Get schema from the new DataFrame
+             let df_schema = new_df.schema();
+             let arrow_fields: Vec<Field> = df_schema
+                 .fields()
+                 .iter()
+                 .map(|f| (**f).clone())
+                 .collect();
+             let new_arrow_schema = ArrowSchema::new(arrow_fields);
+             
+             // Return new RustTable
+             Ok(RustTable {
+                 session: Arc::clone(&self.session),
+                 dataframe: Some(Arc::new(new_df)),
+                 schema: Some(Arc::new(new_arrow_schema)),
+                 sort_exprs: self.sort_exprs.clone(),
+             })
+         })
      }
  }
  

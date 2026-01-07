@@ -496,14 +496,15 @@ def _lambda_to_expr(fn, schema: Dict[str, str]) -> Dict[str, Any]:
     to serializable expression dicts without executing any Python logic.
 
     Args:
-        fn: Lambda function, e.g., lambda r: r.age > 18
+        fn: Lambda function, e.g., lambda r: r.age > 18 or lambda r: {"col": r.age}
         schema: Dict mapping column name -> type string
 
     Returns:
         Serialized expression dict, ready for Rust deserialization
+        Or for dict lambdas: {"type": "Dict", "keys": [...], "values": [...]}
 
     Raises:
-        TypeError: If lambda doesn't return an Expr
+        TypeError: If lambda doesn't return an Expr or dict
         AttributeError: If lambda references a non-existent column
 
     Example:
@@ -513,14 +514,34 @@ def _lambda_to_expr(fn, schema: Dict[str, str]) -> Dict[str, Any]:
         'BinOp'
         >>> expr_dict["op"]
         'Gt'
+        >>> # Or for dict returns:
+        >>> expr_dict = _lambda_to_expr(lambda r: {"adult": r.age > 18}, schema)
+        >>> expr_dict["type"]
+        'Dict'
     """
     proxy = SchemaProxy(schema)
-    expr = fn(proxy)
+    result = fn(proxy)
 
-    if not isinstance(expr, Expr):
+    if isinstance(result, dict):
+        # Handle dict returns: {"col_name": Expr, "col_name2": Expr}
+        keys = []
+        values = []
+        for key, value in result.items():
+            if not isinstance(key, str):
+                raise TypeError(f"Dict keys must be strings, got {type(key).__name__}")
+            if not isinstance(value, Expr):
+                raise TypeError(
+                    f"Dict values must be Expr objects, got {type(value).__name__} for key '{key}'"
+                )
+            keys.append({"type": "Literal", "value": key, "dtype": "String"})
+            values.append(value.serialize())
+
+        return {"type": "Dict", "keys": keys, "values": values}
+    elif isinstance(result, Expr):
+        # Handle Expr returns: lambda r: r.age > 18
+        return result.serialize()
+    else:
         raise TypeError(
-            f"Lambda must return an Expr, got {type(expr).__name__}. "
+            f"Lambda must return an Expr or dict, got {type(result).__name__}. "
             "Did you forget to use the 'r' parameter?"
         )
-
-    return expr.serialize()
