@@ -1,8 +1,8 @@
 [package]
 name = "ltseq_core"
 version = "0.1.0"
-edition = "2024"
-
+edition = "2021"
+build = "build.rs"
 
 [lib]
 name = "ltseq_core"
@@ -10,9 +10,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python co-op
-pyo3 = { version = "0.27.2", features = ["extension-module", "abi3-py313"] }
+pyo3 = { version = "0.27.2", features = ["extension-module", "macros"] }
 
 arrow = "57.1.0"
 datafusion = "51.0.0"
+
+# async executor utilities
+futures = "0.3"
 
 tokio = { version = "1.49", features = ["rt", "macros"] }
