@@ -1,4 +1,4 @@
-id,name,price
+product_id,name,price
 101,Widget,50
 102,Gadget,75
 103,Tool,100

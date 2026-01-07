@@ -273,18 +273,35 @@ def _extract_join_keys(
             "Complex expressions are not supported in Phase 8."
         )
 
-    # Validate that columns exist in their respective schemas
-    if left_expr.name not in source_schema:
-        raise ValueError(
-            f"Column '{left_expr.name}' not found in source schema. "
-            f"Available columns: {list(source_schema.keys())}"
-        )
+    # Validate that left operand is from source and right from target
+    # Phase 8A Validation: Ensure left operand is from source and right from target
+    # This enforces a consistent join condition order and makes the lambda more intuitive:
+    # lambda source, target: source.key == target.key (not reversed)
+    left_in_source = left_expr.name in source_schema
+    left_in_target = left_expr.name in target_schema
+    right_in_source = right_expr.name in source_schema
+    right_in_target = right_expr.name in target_schema
 
-    if right_expr.name not in target_schema:
-        raise ValueError(
-            f"Column '{right_expr.name}' not found in target schema. "
-            f"Available columns: {list(target_schema.keys())}"
-        )
+    # Left must be in source, right must be in target
+    if not left_in_source or not right_in_target:
+        # Check if they're reversed
+        if left_in_target and right_in_source:
+            raise ValueError(
+                f"Join condition has reversed order. Expected: source.col == target.col, "
+                f"but got: {left_expr.name} == {right_expr.name}. "
+                f"Please reverse the comparison: target.{left_expr.name} == source.{right_expr.name}"
+            )
+        # Otherwise, columns don't exist in expected schemas
+        if not left_in_source:
+            raise ValueError(
+                f"Column '{left_expr.name}' not found in source schema. "
+                f"Available columns: {list(source_schema.keys())}"
+            )
+        if not right_in_target:
+            raise ValueError(
+                f"Column '{right_expr.name}' not found in target schema. "
+                f"Available columns: {list(target_schema.keys())}"
+            )
 
     # Serialize the key expressions
     left_key_expr = left_expr.serialize()
@@ -1126,14 +1143,59 @@ class LinkedTable:
         self._join_fn = join_fn
         self._alias = alias
         self._schema = source_table._schema.copy()
+        self._materialized: Optional["LTSeq"] = None  # Phase 8B: Lazy materialization
 
         # Add linked column metadata to schema with prefix
         for col_name, col_type in target_table._schema.items():
             self._schema[f"{alias}_{col_name}"] = col_type
 
+    def _materialize(self) -> "LTSeq":
+        """
+        Phase 8B: Materialize the join operation.
+
+        This method performs the actual join only when data access is needed.
+        The result is cached to avoid re-joining on subsequent accesses.
+
+        Returns:
+            LTSeq instance with materialized joined data
+
+        Raises:
+            TypeError: If join condition cannot be parsed
+            ValueError: If join columns don't exist
+        """
+        # Return cached result if already materialized
+        if self._materialized is not None:
+            return self._materialized
+
+        # Extract join keys using Phase 8A function
+        left_key_expr, right_key_expr, join_type = _extract_join_keys(
+            self._join_fn,
+            self._source._schema,
+            self._target._schema,
+        )
+
+        # Call Rust join() method - it handles all schema conflicts and column renaming
+        joined_inner = self._source._inner.join(
+            self._target._inner,
+            left_key_expr,
+            right_key_expr,
+            join_type,
+            self._alias,
+        )
+
+        # Create new LTSeq wrapping the joined result
+        result = LTSeq()
+        result._inner = joined_inner
+        result._schema = self._schema.copy()
+
+        # Cache the result
+        self._materialized = result
+        return result
+
     def show(self, n: int = 10) -> None:
-        """Display linked table."""
-        self._source.show(n)
+        """Display linked table with materialized joined data."""
+        materialized = self._materialize()
+        materialized.show(n)
 
     def filter(self, predicate: Callable) -> "LinkedTable":
         """Filter rows (delegates to source for MVP)."""
@@ -1144,9 +1206,10 @@ class LinkedTable:
         """
         Select columns from linked table.
 
-        MVP: Just returns the source columns (no actual linking yet).
+        Phase 8B: Materializes the join to access linked columns
         """
-        return self._source.select(*cols)
+        materialized = self._materialize()
+        return materialized.select(*cols)
 
     def derive(self, mapper: Callable) -> "LinkedTable":
         """Derive columns (delegates to source for MVP)."""

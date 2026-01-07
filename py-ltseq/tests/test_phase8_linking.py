@@ -27,7 +27,7 @@ class TestLinkBasic:
     def test_link_creates_pointer_reference(self, orders_table, products_table):
         """link() should create a LinkedTable object"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         assert linked is not None
@@ -38,19 +38,19 @@ class TestLinkBasic:
     def test_link_schema_includes_target_columns(self, orders_table, products_table):
         """link() should update schema to include target columns with prefix"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Check that schema includes prefixed target columns
         assert "id" in linked._schema  # from source
-        assert "prod_id" in linked._schema  # from target with prefix
+        assert "prod_product_id" in linked._schema  # from target with prefix
         assert "prod_name" in linked._schema  # from target with prefix
         assert "prod_price" in linked._schema  # from target with prefix
 
     def test_link_delegates_select_to_source(self, orders_table, products_table):
         """select() should work (delegates to source in MVP)"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Select from source columns
@@ -61,7 +61,7 @@ class TestLinkBasic:
     def test_link_with_filter(self, orders_table, products_table):
         """filter() should work and return a new LinkedTable"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Filter on source columns
@@ -85,7 +85,7 @@ class TestLinkEdgeCases:
         with pytest.raises((AttributeError, TypeError)):
             orders_table.link(
                 products_table,
-                on=lambda o, p: o.nonexistent == p.id,
+                on=lambda o, p: o.nonexistent == p.product_id,
                 as_="prod",
             )
 
@@ -103,7 +103,7 @@ class TestLinkEdgeCases:
         original_len = len(orders_table)
 
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Original table should be unchanged
@@ -124,21 +124,21 @@ class TestLinkChaining:
     def test_link_then_filter(self, orders_table, products_table):
         """Can chain filter() after link()"""
         result = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         ).filter(lambda r: r.quantity > 1)
         assert result is not None
 
     def test_link_then_slice(self, orders_table, products_table):
         """Can chain slice() after link()"""
         result = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         ).slice(0, 5)
         assert result is not None
 
     def test_link_then_derive(self, orders_table, products_table):
         """Can chain derive() after link()"""
         result = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         ).derive(lambda r: {"qty_x2": r.quantity * 2})
         assert result is not None
 
@@ -146,7 +146,7 @@ class TestLinkChaining:
         """Can chain multiple operations"""
         result = (
             orders_table.link(
-                products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+                products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
             )
             .filter(lambda r: r.quantity > 1)
             .derive(lambda r: {"qty_doubled": r.quantity * 2})
@@ -169,8 +169,10 @@ class TestLinkMultiple:
     def test_link_multiple_times(self, orders_table, products_table):
         """Should be able to link the same table multiple times with different aliases"""
         result = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod1"
-        ).link(products_table, on=lambda o, p: o.product_id == p.id, as_="prod2")
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod1"
+        ).link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod2"
+        )
 
         # Should have columns from both links
         assert "prod1_name" in result._schema
@@ -193,7 +195,7 @@ class TestLinkShowOperation:
     def test_link_show_works(self, orders_table, products_table):
         """show() should work on linked table"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Should not raise an error
@@ -214,7 +216,7 @@ class TestLinkLazy:
     def test_link_is_lazy(self, orders_table, products_table):
         """link() should be lazy - no data materialization until accessed"""
         linked = orders_table.link(
-            products_table, on=lambda o, p: o.product_id == p.id, as_="prod"
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         # Just creating the link shouldn't materialize anything
@@ -228,18 +230,18 @@ class TestExtractJoinKeys:
     """Tests for Phase 8A: _extract_join_keys() function"""
 
     def test_extract_simple_equality_join(self):
-        """Should extract join keys from simple lambda: lambda o, p: o.product_id == p.id"""
+        """Should extract join keys from simple lambda: lambda o, p: o.product_id == p.product_id"""
         from ltseq import _extract_join_keys
 
         orders_schema = {"id": "int64", "product_id": "int64", "quantity": "int64"}
-        products_schema = {"id": "int64", "name": "string", "price": "float64"}
+        products_schema = {"product_id": "int64", "name": "string", "price": "float64"}
 
         left_key, right_key, join_type = _extract_join_keys(
-            lambda o, p: o.product_id == p.id, orders_schema, products_schema
+            lambda o, p: o.product_id == p.product_id, orders_schema, products_schema
         )
 
         assert left_key == {"type": "Column", "name": "product_id"}
-        assert right_key == {"type": "Column", "name": "id"}
+        assert right_key == {"type": "Column", "name": "product_id"}
         assert join_type == "inner"
 
     def test_extract_reversed_join_keys(self):
@@ -255,7 +257,9 @@ class TestExtractJoinKeys:
         # This is the user's responsibility to write the condition correctly
         with pytest.raises(ValueError):
             _extract_join_keys(
-                lambda o, p: p.id == o.product_id, orders_schema, products_schema
+                lambda o, p: p.id == o.product_id,
+                orders_schema,
+                products_schema,
             )
 
     def test_extract_rejects_non_equality_operator(self):
@@ -271,15 +275,15 @@ class TestExtractJoinKeys:
             )
 
     def test_extract_rejects_complex_expression(self):
-        """Should reject complex expressions like o.id + 1 == p.id"""
+        """Should reject complex expressions like o.id + 1 == p.product_id"""
         from ltseq import _extract_join_keys
 
-        orders_schema = {"id": "int64"}
-        products_schema = {"id": "int64"}
+        orders_schema = {"id": "int64", "product_id": "int64"}
+        products_schema = {"product_id": "int64", "name": "string"}
 
         with pytest.raises(TypeError, match="directly"):
             _extract_join_keys(
-                lambda o, p: o.id + 1 == p.id, orders_schema, products_schema
+                lambda o, p: o.id + 1 == p.product_id, orders_schema, products_schema
             )
 
     def test_extract_rejects_nonexistent_column_source(self):
@@ -291,7 +295,9 @@ class TestExtractJoinKeys:
 
         with pytest.raises((ValueError, AttributeError, TypeError)):
             _extract_join_keys(
-                lambda o, p: o.nonexistent == p.id, orders_schema, products_schema
+                lambda o, p: o.nonexistent == p.product_id,
+                orders_schema,
+                products_schema,
             )
 
     def test_extract_rejects_nonexistent_column_target(self):
@@ -333,14 +339,16 @@ class TestExtractJoinKeys:
         assert join_type == "inner"
 
     def test_extract_rejects_literal_on_left(self):
-        """Should reject joins like lambda o, p: 42 == p.id"""
+        """Should reject joins like lambda o, p: 42 == p.product_id"""
         from ltseq import _extract_join_keys
 
-        orders_schema = {"id": "int64"}
-        products_schema = {"id": "int64"}
+        orders_schema = {"id": "int64", "product_id": "int64"}
+        products_schema = {"product_id": "int64", "name": "string"}
 
         with pytest.raises(TypeError, match="directly"):
-            _extract_join_keys(lambda o, p: 42 == p.id, orders_schema, products_schema)
+            _extract_join_keys(
+                lambda o, p: 42 == p.product_id, orders_schema, products_schema
+            )
 
     def test_extract_rejects_literal_on_right(self):
         """Should reject joins like lambda o, p: o.id == 42"""

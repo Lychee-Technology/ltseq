@@ -1,0 +1,288 @@
+================================================================================
+  PHASE 8 ENHANCEMENT: FULL DATA JOINING - IMPLEMENTATION SUMMARY
+================================================================================
+
+CURRENT STATE (MVP - Lines 993-1079 in __init__.py)
+================================================================================
+✅ LinkedTable wrapper class exists
+✅ Schema management with aliased columns (prod_name, prod_price, etc.)
+✅ Basic operations delegated to source (filter, select, derive)
+❌ NO ACTUAL DATA JOINING
+❌ NO MATERIALIZATION OF JOINED DATA
+❌ NO POINTER COLUMN ACCESS (r.prod.name)
+❌ NO Rust join() METHOD
+
+WHAT NEEDS TO BE IMPLEMENTED
+================================================================================
+
+Phase 8A: Lambda Expression Parsing (50 LOC - Python)
+  ├─ Parse: lambda o, p: o.product_id == p.id
+  ├─ Extract: left_key = "product_id", right_key = "id"
+  └─ Return: (expr_dict, expr_dict, join_type)
+
+Phase 8B: Rust Join Method (150 LOC - Rust)
+  ├─ Add RustTable.join() method
+  ├─ Deserialize PyExpr to DataFusion Expr
+  ├─ Execute DataFrame.join() from DataFusion
+  ├─ Merge schemas
+  └─ Return new RustTable with joined data
+
+Phase 8C: LinkedTable Materialization (200 LOC - Python)
+  ├─ Add _materialize() method
+  ├─ Cache joined result in _materialized
+  ├─ Override select/show/filter to materialize
+  └─ Return transparent joined data
+
+Phase 8D: Pointer Column Access (120 LOC - Python)
+  ├─ Enhance SchemaProxy.__getattr__()
+  ├─ Support nested attribute access: r.prod.name
+  ├─ Map to prefixed column names: prod_name
+  └─ Serialize to DataFusion expression
+
+TOTAL ESTIMATED SCOPE: 920 LOC MVP, 1,500-2,000 LOC Production
+
+CRITICAL FILES TO MODIFY
+================================================================================
+1. src/lib.rs                          - Add Rust join() method (~150 LOC)
+2. py-ltseq/ltseq/__init__.py          - Add materialization (~250 LOC)
+3. py-ltseq/ltseq/expr.py              - Enhance SchemaProxy (~120 LOC)
+4. py-ltseq/tests/test_phase8_linking.py - Add join tests (~400 LOC)
+
+DATA FLOW: User Perspective
+================================================================================
+
+Before (MVP):
+  orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+    ↓
+  LinkedTable created but NO actual join
+  ↓
+  linked.show()  → Shows ONLY orders columns (limitation)
+  linked.select("prod_name")  → Error or empty
+
+After (Enhancement):
+  orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+    ↓
+  LinkedTable created with pointer semantics
+  ↓
+  linked.select("id", "prod_name", "prod_price")
+    ├─ Triggers _materialize()
+    ├─ Calls Rust join()
+    ├─ Executes DataFusion join
+    └─ Returns joined data with all columns
+
+  linked.filter(lambda r: r.prod_price > 100)
+    ├─ Materializes
+    ├─ Applies filter on joined data
+    └─ Returns filtered join result
+
+DATA FLOW: Technical Implementation
+================================================================================
+
+1. USER LAMBDA: lambda o, p: o.product_id == p.id
+
+2. EXPRESSION PARSING (Python):
+   ├─ Create SchemaProxy(orders_schema) → o
+   ├─ Create SchemaProxy(products_schema) → p
+   ├─ Call lambda(o, p)
+   └─ Extract: BinOpExpr(Eq, Column("product_id"), Column("id"))
+
+3. SERIALIZATION:
+   ├─ left_key:  {"type": "Column", "name": "product_id"}
+   └─ right_key: {"type": "Column", "name": "id"}
+
+4. RUST TRANSPILATION:
+   ├─ Deserialize dicts to PyExpr
+   ├─ Convert to DataFusion Expr
+   └─ Build: col("product_id") == col("id")
+
+5. DATAFUSION EXECUTION:
+   ├─ orders_df.join(products_df, JoinType::Inner, ...)
+   ├─ DataFusion optimizes and executes
+   └─ Returns merged DataFrame with all columns
+
+6. SCHEMA MERGING:
+   ├─ Left columns: id, product_id, quantity (unchanged)
+   ├─ Right columns renamed: id→prod_id, name→prod_name, price→prod_price
+   └─ Result columns: id, product_id, quantity, prod_id, prod_name, prod_price
+
+7. CACHING:
+   └─ Store result in LinkedTable._materialized for reuse
+
+IMPLEMENTATION MILESTONES
+================================================================================
+
+Milestone 1 (Day 1-2): Foundation
+  └─ Phase 8A: Lambda key extraction
+     Status: Can parse lambda and extract key columns
+     Test: test_extract_join_keys()
+
+Milestone 2 (Day 3-5): Rust Core
+  └─ Phase 8B: DataFusion join
+     Status: Rust method works standalone
+     Test: test_rust_join_basic()
+
+Milestone 3 (Day 5-7): Integration
+  └─ Phase 8C: Materialization
+     Status: link().show() and link().select() work
+     Test: test_link_materializes_data()
+
+Milestone 4 (Day 7-8): Column Access
+  └─ Phase 8D: Pointer access
+     Status: Can use r.prod.name in lambdas
+     Test: test_pointer_column_access()
+
+Milestone 5 (Day 8-10): Testing
+  └─ Comprehensive validation
+     Status: 15+ passing tests
+     Test: Full test suite
+
+RISKS & MITIGATIONS
+================================================================================
+
+Risk: DataFusion join API complexity
+  Probability: Medium | Impact: High
+  Mitigation: Check docs thoroughly, use SQL fallback if needed
+
+Risk: Lambda parameter binding
+  Probability: Low | Impact: Medium
+  Mitigation: Extensive unit tests for SchemaProxy
+
+Risk: Schema name collisions (prod_id, prod_id)
+  Probability: Medium | Impact: Medium
+  Mitigation: Careful column name handling, document limitations
+
+Risk: Performance with large joins
+  Probability: High | Impact: Medium
+  Mitigation: Lazy materialization, document caching behavior
+
+API CHANGES: BEFORE → AFTER
+================================================================================
+
+BEFORE (MVP):
+  linked = orders.link(products, on=..., as_="prod")
+  linked.show()  # Shows orders only
+
+AFTER (Enhancement):
+  linked = orders.link(products, on=..., as_="prod")
+  linked.select("id", "prod_name").show()  # Shows joined columns
+  linked.filter(lambda r: r.prod_price > 100).show()  # Filter on linked
+  linked.derive(lambda r: {"total": r.qty * r.prod_price}).show()  # Compute
+
+DATAFUSION API STATUS
+================================================================================
+
+Required APIs:
+  ✅ DataFrame.join(right, JoinType, keys, filter)
+  ✅ JoinType enum (Inner, Left, Right, Full)
+  ✅ Schema merging
+  ✅ Column aliasing
+
+All required APIs available in DataFusion 35+
+
+COLUMN NAMING STRATEGY
+================================================================================
+
+For: orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+
+Left table (orders):
+  id, product_id, quantity
+
+Right table (products):
+  id → prod_id
+  name → prod_name
+  price → prod_price
+
+Result schema:
+  [id, product_id, quantity, prod_id, prod_name, prod_price]
+
+Access in lambda:
+  lambda r: r.prod_name          # Maps to col("prod_name")
+  lambda r: r.qty * r.prod_price # Works normally
+
+VALIDATION STRATEGY
+================================================================================
+
+Unit Tests:
+  1. test_extract_join_keys() - Lambda parsing
+  2. test_rust_join_basic() - Rust method
+  3. test_materialize() - Python caching
+  4. test_schema_merge() - Column names
+  5. test_pointer_access() - r.prod.name syntax
+
+Integration Tests:
+  1. test_link_select() - End-to-end select
+  2. test_link_filter() - Filter on linked cols
+  3. test_link_derive() - Compute using linked
+  4. test_link_multiple() - Chain multiple links
+  5. test_link_show() - Display joined data
+
+Data Integrity Tests:
+  1. test_join_correctness() - Verify join semantics
+  2. test_row_counts() - Correct number of rows
+  3. test_null_handling() - NULL values in keys
+  4. test_data_values() - Actual values correct
+
+EXAMPLE WORKFLOW
+================================================================================
+
+>>> orders = LTSeq.read_csv("examples/orders.csv")
+>>> products = LTSeq.read_csv("examples/products.csv")
+
+# Create link (lazy, no join yet)
+>>> linked = orders.link(
+...     products,
+...     on=lambda o, p: o.product_id == p.id,
+...     as_="prod"
+... )
+
+# Access triggers materialization and join
+>>> linked.select("id", "prod_name", "prod_price").show()
++---------+---------+--------+
+|    id   | prod_name | price |
++---------+---------+--------+
+|    1    | Widget  |   50   |
+|    2    | Gadget  |   75   |
+|    3    | Widget  |   50   |
+...
+
+# Filter on linked columns
+>>> linked.filter(lambda r: r.prod_price > 75).select("id", "prod_name").show()
++---------+---------+
+|    id   | prod_name |
++---------+---------+
+|    2    | Gadget  |
+|    4    | Tool    |
+|    8    | Tool    |
+...
+
+# Derive using linked columns
+>>> linked.derive(
+...     lambda r: {"revenue": r.quantity * r.prod_price}
+... ).select("id", "prod_name", "revenue").show()
++---------+---------+---------+
+|    id   | prod_name | revenue |
++---------+---------+---------+
+|    1    | Widget  |   250   |
+|    2    | Gadget  |   225   |
+...
+
+CONCLUSION
+================================================================================
+
+Phase 8 Enhancement is FULLY IMPLEMENTABLE:
+
+✅ Foundation solid (LinkedTable, schema management)
+✅ Expression system capable (lambda parsing)
+✅ DataFusion APIs available (join, schema merge)
+✅ Clear implementation path (5 phases)
+✅ Well-scoped (1,500-2,000 LOC)
+✅ No blockers identified
+
+Next Steps:
+1. Start with Phase 8A (lambda parsing)
+2. Move to Phase 8B (Rust join)
+3. Continue with phases 8C-8E in sequence
+4. Validate with comprehensive test suite
+
+Estimated Timeline: 2-3 weeks for full implementation
+
