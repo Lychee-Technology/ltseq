@@ -1197,10 +1197,39 @@ class LinkedTable:
         materialized = self._materialize()
         materialized.show(n)
 
-    def filter(self, predicate: Callable) -> "LinkedTable":
-        """Filter rows (delegates to source for MVP)."""
-        filtered_source = self._source.filter(predicate)
-        return LinkedTable(filtered_source, self._target, self._join_fn, self._alias)
+    def filter(self, predicate: Callable) -> Union["LinkedTable", "LTSeq"]:
+        """
+        Filter rows with support for both source and linked columns.
+
+        Phase 8F: Enhanced to materialize join if predicate references linked columns.
+
+        If predicate uses only source columns, returns a LinkedTable with filtered source.
+        If predicate uses linked columns, materializes the join and returns filtered LTSeq.
+
+        Args:
+            predicate: Lambda taking a row, returning boolean Expr
+                      Can reference source columns (id, quantity) OR linked columns (prod.name, prod.price)
+
+        Returns:
+            LinkedTable if filtering on source columns only
+            LTSeq if filtering on linked columns (join materialized)
+
+        Raises:
+            AttributeError: If predicate references non-existent columns
+        """
+        # Try to parse with source schema only
+        try:
+            _lambda_to_expr(predicate, self._source._schema)
+            # Predicate only uses source columns - fast path
+            filtered_source = self._source.filter(predicate)
+            return LinkedTable(
+                filtered_source, self._target, self._join_fn, self._alias
+            )
+        except AttributeError:
+            # Predicate references columns not in source
+            # These must be linked columns - materialize and filter
+            materialized = self._materialize()
+            return materialized.filter(predicate)
 
     def select(self, *cols) -> "LTSeq":
         """

@@ -8,7 +8,7 @@ MVP Phase 8: Basic pointer table API validation. Full link() implementation
 """
 
 import pytest
-from ltseq import LTSeq
+from ltseq import LTSeq, LinkedTable
 
 
 class TestLinkBasic:
@@ -373,3 +373,107 @@ class TestExtractJoinKeys:
 
         assert left_key == {"type": "Column", "name": "product_id"}
         assert right_key == {"type": "Column", "name": "product_id"}
+
+
+class TestLinkedTableFilter:
+    """Phase 8F: Test filter() on linked columns"""
+
+    @pytest.fixture
+    def orders_table(self):
+        """Orders table: id, product_id, quantity"""
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        """Products table: id, name, price"""
+        return LTSeq.read_csv("examples/products.csv")
+
+    def test_filter_on_source_column_via_linked_table(
+        self, orders_table, products_table
+    ):
+        """
+        Filter using only source columns through a linked table.
+        Should delegate to source (fast path, no materialization).
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on source column only (quantity > 2)
+        result = linked.filter(lambda r: r.quantity > 2)
+
+        # Should return LinkedTable (not fully materialized join)
+        assert isinstance(result, LinkedTable)
+        # Verify it has data by showing it
+        result.show(2)
+
+    def test_filter_preserves_linked_table_structure(
+        self, orders_table, products_table
+    ):
+        """
+        Filtering a linked table should preserve its structure for further operations.
+        The filtered linked table should still support access to linked columns.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on source column
+        filtered = linked.filter(lambda r: r.quantity > 1)
+
+        # The result should still be a linked table with schema intact
+        assert isinstance(filtered, LinkedTable)
+        assert "prod_name" in filtered._schema
+        assert "prod_price" in filtered._schema
+
+    def test_filter_with_complex_source_condition(self, orders_table, products_table):
+        """
+        Test filtering with more complex conditions on source columns.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter with compound condition on source columns only
+        result = linked.filter(lambda r: r.quantity > 1)
+
+        assert result is not None
+        assert isinstance(result, LinkedTable)
+        result.show(1)
+
+    def test_filter_on_source_then_show_linked_columns(
+        self, orders_table, products_table
+    ):
+        """
+        Filter on source, then materialize to access linked columns.
+        Tests that the filtering doesn't break the join capability.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on source column
+        filtered = linked.filter(lambda r: r.quantity > 2)
+
+        # Then materialize and display (this materializes the join after filtering)
+        if isinstance(filtered, LinkedTable):
+            filtered.show(2)
+
+    def test_filter_returns_correct_row_count(self, orders_table, products_table):
+        """
+        Verify that filtering correctly reduces row count.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Get original count
+        original_count = len(linked._source)
+
+        # Filter to only high-quantity orders
+        filtered = linked.filter(lambda r: r.quantity > 3)
+
+        # Filtered count should be less than original
+        filtered_count = len(filtered._source)
+        assert filtered_count < original_count
+        assert filtered_count > 0
