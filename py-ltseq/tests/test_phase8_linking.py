@@ -222,3 +222,146 @@ class TestLinkLazy:
         assert (
             linked._materialized is None if hasattr(linked, "_materialized") else True
         )
+
+
+class TestExtractJoinKeys:
+    """Tests for Phase 8A: _extract_join_keys() function"""
+
+    def test_extract_simple_equality_join(self):
+        """Should extract join keys from simple lambda: lambda o, p: o.product_id == p.id"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64", "product_id": "int64", "quantity": "int64"}
+        products_schema = {"id": "int64", "name": "string", "price": "float64"}
+
+        left_key, right_key, join_type = _extract_join_keys(
+            lambda o, p: o.product_id == p.id, orders_schema, products_schema
+        )
+
+        assert left_key == {"type": "Column", "name": "product_id"}
+        assert right_key == {"type": "Column", "name": "id"}
+        assert join_type == "inner"
+
+    def test_extract_reversed_join_keys(self):
+        """Should handle reversed comparison: lambda o, p: p.id == o.product_id"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64", "product_id": "int64", "quantity": "int64"}
+        products_schema = {"id": "int64", "name": "string", "price": "float64"}
+
+        # Note: When we write lambda o, p: p.id == o.product_id
+        # The result is a BinOpExpr with left=p.id (target) and right=o.product_id (source)
+        # But our validation expects left to be from source and right from target
+        # This is the user's responsibility to write the condition correctly
+        with pytest.raises(ValueError):
+            _extract_join_keys(
+                lambda o, p: p.id == o.product_id, orders_schema, products_schema
+            )
+
+    def test_extract_rejects_non_equality_operator(self):
+        """Should reject comparisons with non-equality operators like >"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64", "amount": "float64"}
+        products_schema = {"id": "int64", "price": "float64"}
+
+        with pytest.raises(TypeError, match="equality"):
+            _extract_join_keys(
+                lambda o, p: o.amount > p.price, orders_schema, products_schema
+            )
+
+    def test_extract_rejects_complex_expression(self):
+        """Should reject complex expressions like o.id + 1 == p.id"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64"}
+        products_schema = {"id": "int64"}
+
+        with pytest.raises(TypeError, match="directly"):
+            _extract_join_keys(
+                lambda o, p: o.id + 1 == p.id, orders_schema, products_schema
+            )
+
+    def test_extract_rejects_nonexistent_column_source(self):
+        """Should reject when left column doesn't exist in source schema"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64", "product_id": "int64"}
+        products_schema = {"id": "int64", "name": "string"}
+
+        with pytest.raises((ValueError, AttributeError, TypeError)):
+            _extract_join_keys(
+                lambda o, p: o.nonexistent == p.id, orders_schema, products_schema
+            )
+
+    def test_extract_rejects_nonexistent_column_target(self):
+        """Should reject when right column doesn't exist in target schema"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64", "product_id": "int64"}
+        products_schema = {"id": "int64", "name": "string"}
+
+        with pytest.raises((ValueError, AttributeError, TypeError)):
+            _extract_join_keys(
+                lambda o, p: o.product_id == p.nonexistent,
+                orders_schema,
+                products_schema,
+            )
+
+    def test_extract_with_multiple_valid_columns(self):
+        """Should work with any valid columns from the schemas"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {
+            "order_id": "int64",
+            "customer_id": "int64",
+            "product_id": "int64",
+        }
+        products_schema = {
+            "product_id": "int64",
+            "category_id": "int64",
+            "name": "string",
+        }
+
+        # Join on customer_id (which doesn't actually make semantic sense, but should be allowed)
+        left_key, right_key, join_type = _extract_join_keys(
+            lambda o, p: o.customer_id == p.product_id, orders_schema, products_schema
+        )
+
+        assert left_key == {"type": "Column", "name": "customer_id"}
+        assert right_key == {"type": "Column", "name": "product_id"}
+        assert join_type == "inner"
+
+    def test_extract_rejects_literal_on_left(self):
+        """Should reject joins like lambda o, p: 42 == p.id"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64"}
+        products_schema = {"id": "int64"}
+
+        with pytest.raises(TypeError, match="directly"):
+            _extract_join_keys(lambda o, p: 42 == p.id, orders_schema, products_schema)
+
+    def test_extract_rejects_literal_on_right(self):
+        """Should reject joins like lambda o, p: o.id == 42"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"id": "int64"}
+        products_schema = {"id": "int64"}
+
+        with pytest.raises(TypeError, match="directly"):
+            _extract_join_keys(lambda o, p: o.id == 42, orders_schema, products_schema)
+
+    def test_extract_preserves_column_names_with_special_chars(self):
+        """Should work with column names containing underscores"""
+        from ltseq import _extract_join_keys
+
+        orders_schema = {"order_id": "int64", "product_id": "int64"}
+        products_schema = {"product_id": "int64", "product_name": "string"}
+
+        left_key, right_key, join_type = _extract_join_keys(
+            lambda o, p: o.product_id == p.product_id, orders_schema, products_schema
+        )
+
+        assert left_key == {"type": "Column", "name": "product_id"}
+        assert right_key == {"type": "Column", "name": "product_id"}

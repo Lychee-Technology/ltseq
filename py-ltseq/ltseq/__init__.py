@@ -4,7 +4,7 @@ from typing import Callable, Dict, Any, Optional, Union
 import csv
 
 # Import the expression system early
-from .expr import _lambda_to_expr, SchemaProxy
+from .expr import _lambda_to_expr, SchemaProxy, BinOpExpr, ColumnExpr
 
 # Import the compiled Rust module
 try:
@@ -188,6 +188,110 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
     except Exception:
         # If anything goes wrong, return empty schema
         return {}
+
+
+def _extract_join_keys(
+    join_fn: Callable, source_schema: Dict[str, str], target_schema: Dict[str, str]
+) -> tuple:
+    """
+    Extract join key columns from a two-parameter lambda expression.
+
+    Phase 8A: Parses join conditions like:
+        lambda orders, products: orders.product_id == products.id
+
+    to extract:
+        left_key="product_id", right_key="id", join_type="inner"
+
+    The function validates that:
+    1. The lambda returns a BinOpExpr with op="Eq" (only equality joins supported)
+    2. Left operand is a ColumnExpr from source table
+    3. Right operand is a ColumnExpr from target table
+    4. Both columns exist in their respective schemas
+
+    Args:
+        join_fn: Lambda function with two parameters (source row, target row)
+                E.g., lambda o, p: o.product_id == p.id
+        source_schema: Dict mapping source column names to types
+        target_schema: Dict mapping target column names to types
+
+    Returns:
+        Tuple of (left_key_expr, right_key_expr, join_type) where:
+        - left_key_expr: Serialized expression for left join key
+        - right_key_expr: Serialized expression for right join key
+        - join_type: String "inner" (only supported for MVP)
+
+    Raises:
+        TypeError: If join condition is not a simple equality comparison
+        ValueError: If columns don't exist in respective schemas
+        AttributeError: If lambda references non-existent columns
+
+    Example:
+        >>> orders_schema = {"id": "int64", "product_id": "int64"}
+        >>> products_schema = {"id": "int64", "name": "string"}
+        >>> left_key, right_key, join_type = _extract_join_keys(
+        ...     lambda o, p: o.product_id == p.id,
+        ...     orders_schema,
+        ...     products_schema
+        ... )
+        >>> left_key
+        {'type': 'Column', 'name': 'product_id'}
+        >>> right_key
+        {'type': 'Column', 'name': 'id'}
+        >>> join_type
+        'inner'
+    """
+    # Create proxies for both tables
+    source_proxy = SchemaProxy(source_schema)
+    target_proxy = SchemaProxy(target_schema)
+
+    # Call the join function to get the expression tree
+    try:
+        expr = join_fn(source_proxy, target_proxy)
+    except Exception as e:
+        raise TypeError(f"Failed to evaluate join condition: {e}")
+
+    # Validate that we got a BinOpExpr with op="Eq"
+    if not isinstance(expr, BinOpExpr):
+        raise TypeError(
+            f"Join condition must be a simple equality comparison, got {type(expr).__name__}"
+        )
+
+    if expr.op != "Eq":
+        raise TypeError(
+            f"Join condition must use equality (==), got operator: {expr.op}. "
+            "Only inner equality joins are supported in Phase 8."
+        )
+
+    # Extract left and right operands
+    left_expr = expr.left
+    right_expr = expr.right
+
+    # Validate operands are ColumnExpr
+    if not isinstance(left_expr, ColumnExpr) or not isinstance(right_expr, ColumnExpr):
+        raise TypeError(
+            "Join condition must compare two columns directly. "
+            "Complex expressions are not supported in Phase 8."
+        )
+
+    # Validate that columns exist in their respective schemas
+    if left_expr.name not in source_schema:
+        raise ValueError(
+            f"Column '{left_expr.name}' not found in source schema. "
+            f"Available columns: {list(source_schema.keys())}"
+        )
+
+    if right_expr.name not in target_schema:
+        raise ValueError(
+            f"Column '{right_expr.name}' not found in target schema. "
+            f"Available columns: {list(target_schema.keys())}"
+        )
+
+    # Serialize the key expressions
+    left_key_expr = left_expr.serialize()
+    right_key_expr = right_expr.serialize()
+
+    # Return as tuple (MVP only supports inner join)
+    return left_key_expr, right_key_expr, "inner"
 
 
 class LTSeq:
