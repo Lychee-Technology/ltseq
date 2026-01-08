@@ -4,6 +4,33 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Union
 
 
+def if_else(condition: "Expr", true_value: Any, false_value: Any) -> "CallExpr":
+    """
+    Conditional expression: returns true_value if condition else false_value.
+
+    Equivalent to SQL CASE WHEN condition THEN true_value ELSE false_value END.
+
+    Args:
+        condition: A boolean expression to evaluate
+        true_value: Value to return if condition is True
+        false_value: Value to return if condition is False
+
+    Returns:
+        Expression that evaluates to one of the two values
+
+    Example:
+        >>> t.derive(lambda r: {"category": if_else(r.price > 100, "expensive", "cheap")})
+    """
+    from .types import CallExpr
+
+    return CallExpr(
+        "if_else",
+        (condition, Expr._coerce(true_value), Expr._coerce(false_value)),
+        {},
+        on=None,
+    )
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.
@@ -158,6 +185,23 @@ class Expr(ABC):
         from .types import BinOpExpr
 
         return BinOpExpr("Mod", self._coerce(other), self)
+
+    def fill_null(self, default: Any) -> "CallExpr":
+        """
+        Replace null values with a default value.
+
+        Args:
+            default: The value to use when column is null
+
+        Returns:
+            Expression that replaces nulls with default
+
+        Example:
+            >>> t.derive(lambda r: {"email": r.email.fill_null("unknown@example.com")})
+        """
+        from .types import CallExpr
+
+        return CallExpr("fill_null", (self._coerce(default),), {}, on=self)
 
     @staticmethod
     def _coerce(value: Any) -> "Expr":

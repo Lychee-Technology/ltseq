@@ -12,6 +12,7 @@ Core Classes:
   - BinOpExpr: Binary operation (e.g., r.age + 5, r.price > 10)
   - UnaryOpExpr: Unary operation (e.g., ~r.flag)
   - CallExpr: Function/method call (e.g., r.col.shift(1), r.col.rolling(3).mean())
+  - LookupExpr: Lookup operation (e.g., r.product_id.lookup(products, "name"))
   - SchemaProxy: Row proxy for capturing expressions in lambdas
 
 Example:
@@ -23,10 +24,10 @@ Example:
 """
 
 # Re-export base expression class
-from .base import Expr
+from .base import Expr, if_else
 
 # Re-export concrete expression types
-from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, UnaryOpExpr
+from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, LookupExpr, UnaryOpExpr
 
 # Re-export schema proxies
 from .proxy import NestedSchemaProxy, SchemaProxy
@@ -41,8 +42,10 @@ __all__ = [
     "BinOpExpr",
     "UnaryOpExpr",
     "CallExpr",
+    "LookupExpr",
     "SchemaProxy",
     "NestedSchemaProxy",
+    "if_else",
     "_lambda_to_expr",
     "_transform_lambda_for_none_checks",
 ]

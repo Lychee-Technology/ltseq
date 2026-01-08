@@ -59,6 +59,145 @@ class ColumnExpr(Expr):
 
         return method_call
 
+    @property
+    def s(self):
+        """String accessor for string operations (r.col.s.contains, etc.)"""
+        return StringAccessor(self)
+
+    @property
+    def dt(self):
+        """Temporal accessor for datetime operations (r.col.dt.year, etc.)"""
+        return TemporalAccessor(self)
+
+    def lookup(
+        self, target_table: "Any", column: str, join_key: Optional[str] = None
+    ) -> "LookupExpr":
+        """
+        Lookup a value in another table using this column as the join key.
+
+        Used to fetch a single column from a related table in derived expressions.
+
+        Args:
+            target_table: The target table object (LTSeq instance)
+            column: Column name to fetch from the target table
+            join_key: Column name in target table to join on (optional)
+
+        Returns:
+            A LookupExpr that can be used in derive() or other expressions
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> enriched = orders.derive(
+            ...     product_name=lambda r: r.product_id.lookup(products, "name")
+            ... )
+        """
+        # If target_table is an LTSeq, we'll store just the table name for now
+        # The actual resolution happens during derive
+        target_name = getattr(target_table, "_name", "target")
+
+        return LookupExpr(
+            on=self,
+            target_name=target_name,
+            target_columns=[column],
+            join_key=join_key,
+        )
+
+
+class StringAccessor:
+    """
+    Accessor for string operations on columns.
+
+    Accessed via r.column.s and provides methods like:
+    - r.col.s.contains("substring")
+    - r.col.s.starts_with("prefix")
+    - r.col.s.lower()
+    """
+
+    def __init__(self, column: ColumnExpr):
+        self._column = column
+
+    def contains(self, pattern: str) -> "CallExpr":
+        """Check if string contains a substring."""
+        return CallExpr("str_contains", (pattern,), {}, on=self._column)
+
+    def starts_with(self, prefix: str) -> "CallExpr":
+        """Check if string starts with a prefix."""
+        return CallExpr("str_starts_with", (prefix,), {}, on=self._column)
+
+    def ends_with(self, suffix: str) -> "CallExpr":
+        """Check if string ends with a suffix."""
+        return CallExpr("str_ends_with", (suffix,), {}, on=self._column)
+
+    def lower(self) -> "CallExpr":
+        """Convert string to lowercase."""
+        return CallExpr("str_lower", (), {}, on=self._column)
+
+    def upper(self) -> "CallExpr":
+        """Convert string to uppercase."""
+        return CallExpr("str_upper", (), {}, on=self._column)
+
+    def strip(self) -> "CallExpr":
+        """Remove leading and trailing whitespace."""
+        return CallExpr("str_strip", (), {}, on=self._column)
+
+    def len(self) -> "CallExpr":
+        """Get string length."""
+        return CallExpr("str_len", (), {}, on=self._column)
+
+    def slice(self, start: int, length: int) -> "CallExpr":
+        """Extract substring: start position and length."""
+        return CallExpr("str_slice", (start, length), {}, on=self._column)
+
+
+class TemporalAccessor:
+    """
+    Accessor for temporal operations on date/datetime columns.
+
+    Accessed via r.column.dt and provides methods like:
+    - r.col.dt.year()
+    - r.col.dt.month()
+    - r.col.dt.add_days(30)
+    """
+
+    def __init__(self, column: ColumnExpr):
+        self._column = column
+
+    def year(self) -> "CallExpr":
+        """Extract year from date/datetime."""
+        return CallExpr("dt_year", (), {}, on=self._column)
+
+    def month(self) -> "CallExpr":
+        """Extract month from date/datetime."""
+        return CallExpr("dt_month", (), {}, on=self._column)
+
+    def day(self) -> "CallExpr":
+        """Extract day from date/datetime."""
+        return CallExpr("dt_day", (), {}, on=self._column)
+
+    def hour(self) -> "CallExpr":
+        """Extract hour from datetime."""
+        return CallExpr("dt_hour", (), {}, on=self._column)
+
+    def minute(self) -> "CallExpr":
+        """Extract minute from datetime."""
+        return CallExpr("dt_minute", (), {}, on=self._column)
+
+    def second(self) -> "CallExpr":
+        """Extract second from datetime."""
+        return CallExpr("dt_second", (), {}, on=self._column)
+
+    def add(self, days: int = 0, months: int = 0, years: int = 0) -> "CallExpr":
+        """Add days, months, and/or years to a date/datetime."""
+        return CallExpr("dt_add", (days, months, years), {}, on=self._column)
+
+    def diff(self, other: "Expr") -> "CallExpr":
+        """Calculate difference between two dates in days."""
+        from .base import Expr as BaseExpr
+
+        other_coerced = BaseExpr._coerce(other)
+        return CallExpr("dt_diff", (other_coerced,), {}, on=self._column)
+
 
 class LiteralExpr(Expr):
     """
@@ -281,3 +420,97 @@ class CallExpr(Expr):
             return CallExpr(method_name, args, kwargs, on=self)
 
         return chained_call
+
+    def lookup(
+        self, target_table: "Any", column: str, join_key: Optional[str] = None
+    ) -> "LookupExpr":
+        """
+        Lookup a value in another table using the result of this call as the join key.
+
+        Used to fetch a single column from a related table in derived expressions.
+
+        Args:
+            target_table: The target table object (LTSeq instance)
+            column: Column name to fetch from the target table
+            join_key: Column name in target table to join on (optional)
+
+        Returns:
+            A LookupExpr that can be used in derive() or other expressions
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> enriched = orders.derive(
+            ...     product_name=lambda r: r.product_id.lower().lookup(products, "name")
+            ... )
+        """
+        # If target_table is an LTSeq, we'll store just the table name for now
+        # The actual resolution happens during derive
+        target_name = getattr(target_table, "_name", "target")
+
+        return LookupExpr(
+            on=self,
+            target_name=target_name,
+            target_columns=[column],
+            join_key=join_key,
+        )
+
+
+class LookupExpr(Expr):
+    """
+    Represents a lookup operation to fetch values from another table.
+
+    Used as a shortcut for join operations in derived columns.
+    Syntax: r.product_id.lookup(products, "name")
+
+    This translates to an internal join where the left key is this expression
+    and the right key is the primary key of the target table.
+
+    Attributes:
+        on (Expr): The expression to lookup (e.g., r.product_id)
+        target_name (str): Name of the target table (for reference)
+        target_columns (list): Columns to fetch from the target table
+        join_key (str): Column name in target table to match against (default: primary key)
+    """
+
+    def __init__(
+        self,
+        on: Expr,
+        target_name: str,
+        target_columns: list,
+        join_key: Optional[str] = None,
+    ):
+        """
+        Initialize a LookupExpr.
+
+        Args:
+            on: The expression containing the lookup key(s)
+            target_name: Name/reference to the target table
+            target_columns: List of column names to fetch from target
+            join_key: Column name in target to join on (optional, defaults to primary key)
+        """
+        self.on = on
+        self.target_name = target_name
+        self.target_columns = target_columns
+        self.join_key = join_key
+
+    def serialize(self) -> Dict[str, Any]:
+        """
+        Serialize to dict.
+
+        Returns:
+            {
+                "type": "Lookup",
+                "on": serialized_on,
+                "target_name": target_name,
+                "target_columns": target_columns,
+                "join_key": join_key or null
+            }
+        """
+        return {
+            "type": "Lookup",
+            "on": self.on.serialize(),
+            "target_name": self.target_name,
+            "target_columns": self.target_columns,
+            "join_key": self.join_key,
+        }
