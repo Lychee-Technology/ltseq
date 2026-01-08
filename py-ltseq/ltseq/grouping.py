@@ -7,66 +7,63 @@ if TYPE_CHECKING:
     from .expr import ColumnExpr
 
 
-class GroupRowProxy:
+class GroupProxy:
     """
-    Proxy for accessing columns from first/last row of a group.
+    Proxy for evaluating predicates on a group during filter operations.
 
-    When you call grouped.first().price, this object handles the column access
-    and returns an expression that represents the first row's price value.
+    Provides access to group properties like count(), first(), last()
+    so that predicates can be evaluated.
     """
 
-    def __init__(self, nested_table: "NestedTable", position: str):
+    def __init__(self, group_data, nested_table):
         """
-        Initialize a group row proxy.
+        Initialize a group proxy.
 
         Args:
-            nested_table: The NestedTable this proxy is from
-            position: Either "first" or "last"
+            group_data: DataFrame containing rows for this group
+            nested_table: The NestedTable this group belongs to
         """
+        self._group_data = group_data
         self._nested_table = nested_table
-        self._position = position  # "first" or "last"
+
+    def count(self):
+        """Get the number of rows in this group."""
+        return len(self._group_data)
+
+    def first(self):
+        """Get the first row of this group as a row proxy."""
+        first_row_data = self._group_data.iloc[0]
+        return RowProxy(first_row_data)
+
+    def last(self):
+        """Get the last row of this group as a row proxy."""
+        last_row_data = self._group_data.iloc[-1]
+        return RowProxy(last_row_data)
+
+
+class RowProxy:
+    """Proxy for accessing columns of a row during predicate evaluation."""
+
+    def __init__(self, row_data):
+        """
+        Initialize a row proxy.
+
+        Args:
+            row_data: A pandas Series representing a single row
+        """
+        self._row_data = row_data
 
     def __getattr__(self, col_name: str):
-        """
-        Access a column from the first/last row of each group.
-
-        This implementation materializes the grouping and returns a filtered LTSeq
-        containing only the first/last row per group, with the column selected.
-
-        Args:
-            col_name: The column name to access
-
-        Returns:
-            An LTSeq containing the first/last rows with that column
-        """
-        # Avoid infinite recursion on internal attributes
+        """Access a column value from the row."""
         if col_name.startswith("_"):
             raise AttributeError(
                 f"'{type(self).__name__}' object has no attribute '{col_name}'"
             )
 
-        # Validate column exists in schema
-        if col_name not in self._nested_table._ltseq._schema:
-            raise AttributeError(
-                f"Column '{col_name}' not found in schema. "
-                f"Available columns: {list(self._nested_table._ltseq._schema.keys())}"
-            )
-
-        # Materialize the grouping to add __group_id__
-        flattened = self._nested_table.flatten()
-
-        # Call appropriate Rust method to filter to first/last row
-        if self._position == "first":
-            filtered = flattened.__class__()
-            filtered._schema = flattened._schema.copy()
-            filtered._inner = flattened._inner.first_row()
-        else:  # last
-            filtered = flattened.__class__()
-            filtered._schema = flattened._schema.copy()
-            filtered._inner = flattened._inner.last_row()
-
-        # Return the filtered table (so caller can do more operations or access values)
-        return filtered
+        if col_name in self._row_data.index:
+            return self._row_data[col_name]
+        else:
+            raise AttributeError(f"Column '{col_name}' not found in row")
 
 
 class NestedTable:
@@ -189,26 +186,20 @@ class NestedTable:
                            Can use g.count(), g.first(), g.last()
 
         Returns:
-            A new NestedTable with filtered groups
+            A new LTSeq with filtered groups
 
         Example:
             >>> grouped.filter(lambda g: g.count() > 3)
+            >>> grouped.filter(lambda g: g.first().price > 100)
+
+        Note: This is a placeholder implementation. For now, it returns the
+        flattened table with group information. Full predicate evaluation
+        requires materializing to pandas which adds a dependency.
         """
-        try:
-            # Create a new NestedTable that combines both predicates
-            original_grouping = self._grouping_lambda
-
-            def combined_filter(r):
-                # First check the grouping condition
-                grouping_key = original_grouping(r)
-                # Then check the group predicate (simplified for now)
-                return grouping_key
-
-            result = NestedTable(self._ltseq, combined_filter)
-            result._group_filter = group_predicate
-            return result
-        except Exception as e:
-            raise RuntimeError(f"Failed to filter groups: {e}")
+        # Phase B5: Placeholder for group filtering
+        # TODO: Implement full predicate evaluation
+        # For now, return flattened table which can be used with standard filters
+        return self.flatten()
 
     def derive(self, group_mapper: Callable) -> "NestedTable":
         """

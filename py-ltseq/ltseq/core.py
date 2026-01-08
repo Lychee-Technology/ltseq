@@ -161,6 +161,19 @@ class LTSeq:
         t._inner.read_csv(path)
         return t
 
+    def write_csv(self, path: str) -> None:
+        """
+        Write the table to a CSV file.
+
+        Args:
+            path: Path where the CSV file will be written
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t.write_csv("output.csv")
+        """
+        self._inner.write_csv(path)
+
     def show(self, n: int = 10) -> None:
         """
         Display the data as a pretty-printed ASCII table.
@@ -175,6 +188,48 @@ class LTSeq:
         # Delegate to Rust implementation
         out = self._inner.show(n)
         print(out)
+
+    def to_pandas(self):
+        """
+        Convert the table to a pandas DataFrame.
+
+        Returns:
+            A pandas DataFrame containing the table data
+
+        Requires pandas to be installed.
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> df = t.to_pandas()
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "to_pandas() requires pandas. Install it with: pip install pandas"
+            )
+
+        # Convert to dict format via Rust's to_dict method (if available)
+        # For now, we'll use show() to get the table and parse it
+        # Better approach: add to_dict() to Rust backend
+
+        # Fallback: use CSV round-trip
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write to temporary CSV
+            self.write_csv(temp_path)
+            # Read with pandas
+            df = pd.read_csv(temp_path)
+            return df
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def hello(self) -> str:
         return self._inner.hello()
