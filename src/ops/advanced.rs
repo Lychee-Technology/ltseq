@@ -24,6 +24,24 @@
 //!
 //! **Key Feature**: Stores sort_exprs in RustTable for window function context
 //!
+//! ## Group ID (group_id_impl)
+//!
+//! Adds `__group_id__` column to identify consecutive groups with identical grouping values.
+//! Foundation for group_ordered() operations.
+//!
+//! **Phase B2**: Full implementation with SQL execution:
+//! 1. Collect dataframe into record batches
+//! 2. Register as temporary memory table
+//! 3. Execute SQL with window functions:
+//!    - ROW_NUMBER() for position tracking
+//!    - CASE WHEN to detect value changes (creates mask)
+//!    - SUM(mask) OVER (ORDER BY) to compute cumulative group IDs
+//! 4. Deregister temporary table
+//! 5. Return materialized dataframe with __group_id__ column
+//!
+//! **Algorithm**: mask = col != LAG(col, 1) with first row = 1
+//!               group_id = SUM(mask) OVER (ORDER BY rownum)
+//!
 //! ## Join (join_impl)
 //!
 //! Performs cross-table joins with automatic schema conflict handling.
@@ -237,16 +255,173 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fla
 
 /// Add __group_id__ column to identify consecutive identical grouping values
 ///
-/// Phase B2: Stub implementation for group_ordered with __group_id__ assignment.
-/// Returns the input table unchanged for now (placeholder).
-/// Full implementation deferred: requires window function algorithm (mask → cumsum).
+/// Phase B2: Implements the "consecutive identical grouping" algorithm:
+/// 1. Compute mask: grouping_col != LAG(grouping_col) with first row = 1
+/// 2. Compute group_id: SUM(mask) OVER (ORDER BY rownum)
+/// 3. Add __group_id__ column to result
+///
+/// Uses SQL execution for clean, efficient implementation.
 pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<RustTable> {
-    // Return the input table unchanged for now
-    // This is a placeholder while we design the full window function implementation
+    // If no dataframe, return empty result (for unit tests)
+    if table.dataframe.is_none() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    // Get schema
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Schema not available. Call read_csv() first.",
+        )
+    })?;
+
+    // Deserialize grouping expression
+    let py_expr = dict_to_py_expr(&grouping_expr)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    // Extract column name if this is a simple column reference
+    let grouping_col_name = if let PyExpr::Column(ref col_name) = py_expr {
+        col_name.clone()
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "group_ordered currently only supports simple column references",
+        ));
+    };
+
+    // Get DataFrame
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded. Call read_csv() first.",
+        )
+    })?;
+
+    // Collect current data into record batches
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Register a temporary table with the current data
+    let temp_table_name = "__ltseq_group_id_temp";
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Execute SQL query to compute group_id
+    // Algorithm:
+    // 1. Add ROW_NUMBER() for tracking row positions
+    // 2. Use CASE WHEN to create mask (1 when value changes or first row, 0 otherwise)
+    // 3. SUM(mask) OVER (ORDER BY rownum) gives cumulative group IDs
+    let sql_query = format!(
+        r#"WITH numbered AS (
+          SELECT *, ROW_NUMBER() OVER () as __row_num FROM {}
+        ),
+        masked AS (
+          SELECT *, 
+            CASE 
+              WHEN __row_num = 1 THEN 1
+              WHEN "{}" IS DISTINCT FROM LAG("{}") OVER (ORDER BY __row_num) THEN 1
+              ELSE 0
+            END as __mask
+          FROM numbered
+        )
+        SELECT * EXCEPT (__row_num, __mask),
+          SUM(__mask) OVER (ORDER BY __row_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as __group_id__
+        FROM masked"#,
+        temp_table_name, grouping_col_name, grouping_col_name
+    );
+
+    // Execute the query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute group_id query: {}", e))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect group_id results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create a new MemTable from the result batches
+    if result_batches.is_empty() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result memory table: {}",
+            e
+        )))?;
+
+    // Create a new DataFrame from the memory table via a temporary registration
+    let result_table_name = "__ltseq_result";
+    table.session.register_table(result_table_name, Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = RUNTIME
+        .block_on(async {
+            table.session.table(result_table_name)
+                .await
+                .map_err(|e| format!("Failed to get result table: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister the result table since we're materializing it
+    table.session.deregister_table(result_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister result table: {}",
+                e
+            ))
+        })?;
+
+    // Return new RustTable with __group_id__ column
     Ok(RustTable {
         session: Arc::clone(&table.session),
-        dataframe: table.dataframe.as_ref().map(|d| Arc::clone(d)),
-        schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
         sort_exprs: Vec::new(),
     })
 }
