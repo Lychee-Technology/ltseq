@@ -1,378 +1,210 @@
-# Design Documentation Summary: Phase 11-13
+# LTSeq Design Summary
 
-**Created**: January 7, 2025  
-**Scope**: Comprehensive design for 3 consecutive phases  
-**Total Duration**: ~7-9 hours  
-**Current Status**: All designs complete, ready for implementation
+**Last Updated**: January 8, 2026  
+**Status**: Comprehensive Design Archive (Phases 1-13)
 
----
+## Overview
+LTSeq is a hybrid Python-Rust library for high-performance sequential data processing. It combines a Pythonic lambda-based DSL with the raw speed of Rust's DataFusion engine. The core philosophy is **lazy evaluation with strict ordering guarantees**, enabling complex time-series and sequential operations (shift, rolling, diff, cum_sum) that are difficult or slow in standard SQL/pandas.
 
-## Quick Reference
-
-### Three Phase Overview
-
-| Phase | Feature | Duration | Status | Complexity |
-|-------|---------|----------|--------|------------|
-| **11** | Enhanced select() on linked columns | 2.5-3h | ✅ Designed | Low |
-| **12** | Documentation polish & updates | 1-1.5h | ✅ Designed | Minimal |
-| **13** | Aggregate operations on linked tables | 3-4h | ✅ Designed | Low |
+This document consolidates design decisions, architectural patterns, and lessons learned from the first 13 development phases.
 
 ---
 
-## Document Index
-
-### Phase 11: Enhanced Select on Linked Columns
-**File**: `docs/phase11_design_decisions.md`
-
-**What it covers**:
-- Problem statement (select only works on source columns currently)
-- Solution: Detect linked columns, materialize if needed
-- 12 test cases (mirrors Phase 10 filter pattern)
-- Implementation algorithm
-- Edge cases and error handling
-- Documentation updates
-- Acceptance criteria
-
-**Key decision**: "Detect and materialize" approach
-- Transparent to user
-- Mirrors Phase 10 success
-- Return type signals what happened
-
-**Implementation time**: 2.5-3 hours
-- Code: 20-30 min
-- Tests: 30-45 min
-- Debug: 15-25 min
-- Docs: 10-15 min
+## Table of Contents
+1. [Core Architecture](#1-core-architecture)
+2. [Expression System](#2-expression-system)
+3. [Relational Operations](#3-relational-operations)
+4. [Sequence Operators](#4-sequence-operators)
+5. [Linking & Joins](#5-linking--joins)
+6. [Optimization Strategy](#6-optimization-strategy)
+7. [Grouping Operations](#7-grouping-operations)
+8. [API Design Patterns](#8-api-design-patterns)
+9. [Lessons Learned](#9-lessons-learned)
 
 ---
 
-### Phase 12: Documentation Polish
-**File**: `docs/phase12_documentation_plan.md`
+## 1. Core Architecture
 
-**What it covers**:
-- Task 1: Remove/update "chained materialization limitation" note (Phase 9 fixed it)
-- Task 2: Update README test count (250+ → 330+)
-- Task 3: Add Phase 10-11 section to linking guide
-- Task 4: Create advanced example file
+### 1.1 Hybrid Python-Rust Design
+- **Python Layer**: Handles API surface, DSL parsing, schema tracking, and high-level logic. Uses `_schema` dict to track columns without querying the engine.
+- **Rust Layer (py-ltseq)**: Exposes a `RustTable` class via PyO3. Wraps Apache DataFusion for execution.
+- **Interaction**: Python builds a logical plan; Rust executes it only when `.show()`, `.to_pandas()`, or `.count()` is called.
 
-**Each task is fully scoped**:
-- File locations specified
-- Content provided (where applicable)
-- Time estimates per task
-- Acceptance criteria
+### 1.2 Lazy Evaluation Model
+- Operations like `filter()`, `select()`, `with_columns()` return a *new* `LTSeq` instance with an updated plan.
+- No data is processed until terminal actions.
+- **Benefit**: Allows query optimization (predicate pushdown, projection pushdown) by DataFusion.
 
-**Implementation time**: 45-60 minutes
-- Task 1: 5-10 min (remove outdated limitation)
-- Task 2: 2-3 min (update count)
-- Task 3: 15-20 min (new guide section)
-- Task 4: 20-25 min (example file)
+### 1.3 Sort Order Tracking
+- **Crucial Feature**: Unlike standard SQL engines which treat tables as unordered sets, LTSeq respects order.
+- **Mechanism**: `RustTable` maintains a `sort_exprs` vector.
+- **Invariant**: Window functions (shift, rolling) require explicit sorting. If `.sort()` hasn't been called, these operations raise an error.
 
 ---
 
-### Phase 13: Aggregate Operations
-**File**: `docs/phase13_aggregate_design.md`
+## 2. Expression System (Phases 3-4)
 
-**What it covers**:
-- Problem: No aggregation on linked tables (workaround: materialize manually)
-- Solution: Add LinkedTable.aggregate() that delegates to materialized.aggregate()
-- Design decisions with rationale
-- 12-15 test cases
-- Edge cases (empty results, computed columns, chained linking)
-- Real-world use cases (revenue by product, price statistics)
+### 2.1 Lambda DSL via SchemaProxy
+- **Problem**: Python lambdas are opaque. We need to convert `lambda r: r.age > 18` into a DataFusion logical expression.
+- **Solution**: `SchemaProxy` object intercepts attribute access (`r.age`).
+- **Mechanism**:
+  1. `r` is a `SchemaProxy`.
+  2. `r.age` returns a `CallExpr` representing column "age".
+  3. `r.age > 18` returns a `CallExpr` representing "binary op >".
+- **Result**: A serializable expression tree (AST) built at runtime.
 
-**Key decision**: LinkedTable delegates to materialized table
-- No code duplication
-- Reuses existing LTSeq.aggregate()
-- Implicit materialization (consistent with Phase 10-11)
+### 2.2 CallExpr Pattern
+- Instead of complex enum variants for every operation type, we use a generic `CallExpr`.
+- **Structure**: `{ func: "gt", args: [col_expr, lit_expr] }`
+- **Benefit**: Reduced boilerplate by ~40% compared to explicit expression classes.
 
-**Implementation time**: 3-4 hours
-- Code: 5-10 min
-- Tests: 30-45 min
-- Debug: 20-30 min
-- Docs: 10-15 min
-- Slack: 30-45 min
+### 2.3 Serialization
+- Expressions are serialized to JSON-compatible dictionaries before being passed to Rust.
+- **Format**: `{"type": "Column", "name": "age"}` or `{"type": "Literal", "value": 18, "dtype": "Int64"}`.
 
----
-
-## Design Philosophy Across All Three Phases
-
-### Consistent Patterns
-
-1. **"Detect and Materialize"** approach (Phases 11-13)
-   - Filter detects linked columns → materializes if needed
-   - Select detects linked columns → materializes if needed
-   - Aggregate always requires linked columns → materializes
-   - User doesn't think about materialization - it "just works"
-
-2. **Return type signals operation** (Phases 11, 13)
-   - LinkedTable returned: No materialization happened
-   - LTSeq returned: Materialization occurred
-   - User can see what happened from type
-
-3. **Mirror existing patterns** (All phases)
-   - Phase 11 tests mirror Phase 10 filter tests
-   - Phase 13 tests mirror Phase 11 select tests
-   - Consistent code style and naming
-
-4. **Backward compatible** (All phases)
-   - Existing code continues to work
-   - New features are additive
-   - No breaking changes
-
-5. **Clear error messages**
-   - AttributeError with "available columns" list
-   - Validates early (source columns before materialization)
-   - Guides user to solution
+### 2.4 Type Inference
+- Automatic inference for literals: `bool`, `int`, `float`, `string`, `null`.
+- Rust side deserializes these into DataFusion `ScalarValue` types.
 
 ---
 
-## Key Design Decisions
+## 3. Relational Operations (Phase 5)
 
-### Question 1: Should Select Materialize on Linked Columns?
-**Answer**: YES - Detect & Materialize approach
-- ✅ Mirrors Phase 10 filter pattern
-- ✅ Intuitive (column in schema → can select it)
-- ✅ No extra API to learn
-- ❌ Trade-off: Implicit materialization might surprise users
-- **Rationale**: Phase 10 proves this pattern works well
+### 3.1 sort()
+- **Constraint**: Ascending only (in early phases), multi-column support.
+- **Requirement**: Must specify at least one key.
+- **State**: Updates the internal `sort_exprs` state, enabling sequence operations.
 
-### Question 2: What Should Aggregate Return?
-**Answer**: Always LTSeq (new aggregated table)
-- ✅ Aggregation is terminal (no detail rows)
-- ✅ Result is different structure than original
-- ❌ Can't chain linked operations on result
-- **Rationale**: SQL GROUP BY produces new table, not linked view
+### 3.2 distinct()
+- **Implementation**: Hash-based deduplication using DataFusion's `LogicalPlan::Distinct`.
+- **Scope**: Global by default (deduplicates across entire dataset).
 
-### Question 3: Should We Implement GROUP BY Aggregation?
-**Answer**: No, Phase 13 does ungrouped aggregation only
-- ✅ Simpler MVP
-- ✅ Completes "join then summarize" story
-- ✅ GROUP BY can be Phase 14+ feature
-- **Rationale**: Ungrouped aggregation covers 80% of use cases
-
-### Question 4: How Many Tests Per Phase?
-**Answer**:
-- Phase 11: 12 tests (mirrors Phase 10 filter)
-- Phase 12: No tests (documentation phase)
-- Phase 13: 12-15 tests (mirrors Phase 11 select)
-- **Rationale**: Consistent coverage, proven patterns work
+### 3.3 slice()
+- **Implementation**: Zero-copy logical operation mapping to SQL `LIMIT` / `OFFSET`.
+- **Performance**: Extremely fast as it modifies the plan limit, not the data.
 
 ---
 
-## Implementation Sequence
+## 4. Sequence Operators (Phase 6)
 
-### Recommended Order (7-9 hours total)
+### 4.1 Strict Sort Requirement
+- `shift()`, `diff()`, `rolling()`, `cum_sum()` **fail hard** if `.sort()` was not called previously.
+- **Rationale**: Sequential operations are undefined without order. Explicit is better than implicit.
 
-```
-Day 1:
-├─ Phase 11: Enhanced Select (2.5-3h)
-│  ├─ Implement LinkedTable.select()
-│  ├─ Write 12 tests
-│  ├─ Debug edge cases
-│  └─ Update docstrings
-│
-├─ Phase 12: Documentation (45-60 min)
-│  ├─ Remove limitation note
-│  ├─ Update README
-│  ├─ Update linking guide
-│  └─ Create example file
-│
-└─ Phase 13: Aggregate (3-4h) [IF TIME PERMITS]
-   ├─ Implement LinkedTable.aggregate()
-   ├─ Write 12-15 tests
-   ├─ Debug edge cases
-   └─ Update documentation
-```
+### 4.2 Sort Metadata Preservation
+- "Safe" operations (filter, derive, slice) preserve the `sort_exprs` metadata.
+- "Unsafe" operations (group by, join) might reset or invalidate sort requirements.
 
-**Total**: 6.5-8 hours
+### 4.3 NULL Handling & Boundaries
+- **shift(n)**: Introduces NULLs at boundaries (first `n` rows).
+- **diff()**: `val - shift(1)`. First row is NULL.
+- **rolling()**: Configurable `min_periods`. Defaults to window size (result is NULL until window is full).
+- **cum_sum()**: Always has value (running total).
+
+### 4.4 Expression Architecture
+- Sequence ops are implemented via pattern matching on the `CallExpr` function string in the transpiler.
+- They translate to DataFusion Window Functions (e.g., `LEAD/LAG`, `SUM() OVER (...)`).
 
 ---
 
-## Test Expansion Summary
+## 5. Linking & Joins (Phases 8-11)
 
-### Current State
-- 320 tests passing
-- 71 Phase 8 linking tests
+### 5.1 Pointer-Based LinkedTable
+- **Concept**: `left.link(right, on=...)` returns a `LinkedTable`.
+- **State**: Stores references to left/right tables and join keys. Does **not** execute join immediately.
+- **API**: Allows chaining operations on the "virtual" joined result.
 
-### After Phase 11
-- ~330 tests passing (+10 new select tests)
-- 81 Phase 8 tests
+### 5.2 Transparent Materialization ("Detect & Materialize")
+- **Phase 10 & 11 Decision**: When a user filters or selects a column belonging to the linked (right) table, the system automatically materializes the join.
+- **User Experience**: "It just works". `linked.filter(lambda r: r.right_col > 5)` triggers the join.
+- **Return Types**:
+  - `LinkedTable`: No materialization happened (operations were on left table only).
+  - `LTSeq`: Materialization occurred (result is a flat table).
 
-### After Phase 13
-- ~345 tests passing (+15 new aggregate tests)
-- 96 Phase 8 tests (complete linking story)
+### 5.3 Column Renaming Strategy
+- **Critical Issue**: DataFusion joins fail or behave unpredictably with duplicate column names.
+- **Solution**: **ALL** columns from the right table are renamed with unique temporary identifiers before joining.
+- **Restoration**: After join, columns are aliased back to their expected names (or user-provided prefixes).
 
----
+### 5.4 Join Types
+- Supported: `inner` (default), `left`, `right`, `full`.
+- Defaults to `inner` to match SQL intuition.
 
-## Files to Create/Modify
-
-### New Files (Created Today)
-✅ `docs/phase11_design_decisions.md` - Phase 11 design (comprehensive)
-✅ `docs/phase12_documentation_plan.md` - Phase 12 plan (actionable)
-✅ `docs/phase13_aggregate_design.md` - Phase 13 design (detailed)
-
-### Files to Modify (Phase 11-13)
-- `py-ltseq/ltseq/__init__.py` - Add select() and aggregate() methods
-- `py-ltseq/tests/test_phase8_linking.py` - Add 25+ new tests
-- `docs/phase8j_limitations.md` - Remove/update limitation note
-- `README.md` - Update test count
-- `docs/phase8_linking_guide.md` - Add Phase 10-11-13 sections
-- `examples/linking_advanced.py` - Create new example file
-
-### No Changes Needed
-- Rust code (no Rust changes needed for Phase 11-13)
-- LTSeq.select() or LTSeq.aggregate() (already exist)
-- Core linking logic (already works)
+### 5.5 Chained Materialization
+- **Phase 9 Fix**: Fixed a critical bug where chaining multiple links caused schema mismatches.
+- **Solution**: Ensure schema synchronization between Python `_schema` and Rust `ArrowSchema` after every materialization.
 
 ---
 
-## Pre-Implementation Checklist
+## 6. Optimization Strategy (Phase A)
 
-Before starting Phase 11:
+### 6.1 Native Rust Implementations
+- **join_merge**: Moved join logic to Rust. **5-10x speedup**.
+- **search_first**: Implemented as `Limit(1)` + `Filter` in Rust. **10-87x speedup** (dataset dependent).
 
-- [ ] Read and understand Phase 11 design (`phase11_design_decisions.md`)
-- [ ] Understand the "detect and materialize" pattern from Phase 10
-- [ ] Review existing LinkedTable.filter() implementation for pattern reference
-- [ ] Ensure all Phase 8-10 tests pass (320 tests)
-- [ ] Check that examples/categories.csv exists (needed for tests)
-
-Before starting Phase 12:
-
-- [ ] Complete Phase 11 with all tests passing
-- [ ] Have 330+ tests passing
-- [ ] Update ready to apply without breaking tests
-
-Before starting Phase 13:
-
-- [ ] Complete Phase 12 documentation updates
-- [ ] Verify LTSeq.aggregate() works on regular tables
-- [ ] Understand how aggregation produces new schema
+### 6.2 Deferred Optimizations
+- **pivot**: Analysis showed Pandas pivot is sufficient for typical result set sizes (hundreds/thousands of rows). Kept in Python for now.
+- **Window Functions**: Already optimized by DataFusion's execution planner. No custom Rust needed.
 
 ---
 
-## Success Metrics
+## 7. Grouping Operations (Phase B)
 
-### Phase 11 Success
-- ✅ 12 new tests all passing
-- ✅ 330+ total tests passing
-- ✅ `linked.select("prod_name")` works without error
-- ✅ `linked.select("id")` returns LinkedTable (no materialization)
-- ✅ Clear docstrings with examples
+### 7.1 group_ordered Algorithm
+- **Problem**: Standard `GROUP BY` destroys order. We need "group by X, but keep rows ordered by time within groups".
+- **Solution**: Window Functions.
+  - Assign `__group_id__` using dense rank or hashing.
+  - Maintain sort order within partitions.
 
-### Phase 12 Success
-- ✅ No outdated limitation notes remain
-- ✅ README shows 330+ tests
-- ✅ Linking guide has Phase 10-11-13 examples
-- ✅ Advanced example runs without errors
+### 7.2 NestedTable Structure
+- `group_ordered()` returns a `NestedTable`.
+- **Metadata**: Tracks `__group_id__` and `__group_count__`.
+- **Operations**: `aggregate()` reduces to 1 row per group. `filter()`/`derive()` maintain group structure.
 
-### Phase 13 Success
-- ✅ 12-15 new tests all passing
-- ✅ 345+ total tests passing
-- ✅ `linked.aggregate({...})` works with linked columns
-- ✅ Results match manual materialization + aggregation
-- ✅ Real-world patterns documented
+### 7.3 Context Preservation
+- `_group_assignments` dictionary preserves original group IDs even after filtering.
+- Allows operations like "filter out first 2 rows of each group" while keeping group integrity.
 
 ---
 
-## Open Questions (Not Blocking)
+## 8. API Design Patterns
 
-### Q: Should we cache materialized results?
-**A**: Phase 13 design says no (for now). Can add later if users request.
+### 8.1 Method Chaining
+- Fluent interface: `df.sort().filter().derive()`.
+- Immutability: Each call returns a new instance; original is untouched.
 
-### Q: Should we support GROUP BY in Phase 13?
-**A**: No - Phase 13 does ungrouped aggregation. GROUP BY is Phase 14+.
+### 8.2 Dual Argument Forms
+- **String Columns**: `df.select("a", "b")`
+- **Lambda Expressions**: `df.select(lambda r: r.a + r.b)`
+- **Mixed**: Supported in `with_columns` / `derive`.
 
-### Q: Should aggregate support streaming?
-**A**: No - aggregation requires full dataset. Standard SQL approach.
+### 8.3 Return Type Signals
+- The type of object returned tells the user what happened:
+  - `LinkedTable`: Virtual join.
+  - `LTSeq`: Physical table.
+  - `NestedTable`: Grouped context.
 
-### Q: Should we add window functions?
-**A**: No - separate from aggregate. Window functions are future phase.
-
----
-
-## Documentation Quality
-
-All three design documents include:
-
-✅ **Executive summaries** - 2-3 sentence overview
-✅ **Problem statements** - Why this matters
-✅ **Design decisions** - With rationale tables
-✅ **Algorithm specifications** - Pseudo-code where applicable
-✅ **Test strategies** - Coverage plans with specific test cases
-✅ **Edge cases** - Handled explicitly
-✅ **Backward compatibility** - No breaking changes noted
-✅ **Performance analysis** - Time complexity noted
-✅ **Error messages** - Specific examples
-✅ **Real-world examples** - Shows practical usage
-✅ **Acceptance criteria** - P0/P1/P2 priorities
-✅ **Implementation checklists** - Step-by-step plan
-✅ **Success metrics** - How to verify completion
+### 8.4 Error Messages
+- **Philosophy**: Helpful & specific.
+- **Example**: If column missing, list *available* columns.
+- **Example**: If sort missing for window op, explain *why* sort is needed.
 
 ---
 
-## Design Review Checklist
+## 9. Lessons Learned
 
-Document quality check:
+### 9.1 DataFusion Join Conflicts
+- **Lesson**: Never trust default name handling in joins.
+- **Fix**: Aggressively rename everything on the right side of a join to UUIDs/temps, then alias back.
 
-- ✅ All designs are written (3 comprehensive documents)
-- ✅ Design decisions clearly stated with rationale
-- ✅ No breaking changes or backward compatibility issues
-- ✅ Test coverage planned (25+ new tests total)
-- ✅ Implementation is straightforward (no complex algorithms)
-- ✅ Consistent patterns across all three phases
-- ✅ Clear success criteria defined
-- ✅ Real-world examples included
-- ✅ Edge cases identified and handled
-- ✅ Performance implications documented
+### 9.2 AST Parsing Challenges
+- **Lesson**: `inspect.getsource()` is messy. It returns the whole line/block.
+- **Fix**: Use `ast` module to parse the source, then walk the tree to find the specific lambda corresponding to the argument.
 
----
+### 9.3 Phased Implementation
+- **Strategy**: Start narrow, expand later.
+- **Example**: `cum_sum` started as "column name only". Later expanded to "arbitrary expressions". This kept momentum high.
 
-## Next Steps
-
-### Immediate (Today)
-1. ✅ Create Phase 11 design document
-2. ✅ Create Phase 12 documentation plan
-3. ✅ Create Phase 13 aggregate design
-4. ✅ Create this summary document
-
-### Near Term (When Ready to Build)
-1. Review all three design documents
-2. Ask clarifying questions if needed
-3. Approve design approach
-4. Begin Phase 11 implementation
-
-### Implementation Sequence
-1. Implement Phase 11 (2.5-3 hours)
-2. Implement Phase 12 (45-60 minutes)
-3. Implement Phase 13 (3-4 hours)
-
-**Total estimate**: 6.5-8 hours
-
----
-
-## Summary
-
-**Three comprehensive design documents are now ready for implementation**:
-
-1. **Phase 11** - Enhanced select on linked columns
-   - Mirrors Phase 10 filter pattern
-   - 12 new tests
-   - 2.5-3 hours implementation
-
-2. **Phase 12** - Documentation updates
-   - Remove obsolete limitations
-   - Add Phase 10-11-13 examples
-   - 45-60 minutes
-
-3. **Phase 13** - Aggregate operations
-   - Completes linking story
-   - "Join then summarize" pattern
-   - 3-4 hours implementation
-
-All designs follow consistent patterns, have clear success criteria, and are ready for implementation whenever you're ready to proceed.
-
----
-
-**Status**: 🟢 **Ready for Implementation**
-
-All design decisions documented, rationale provided, tests planned, and implementation paths cleared.
+### 9.4 Python 3.14 Compatibility
+- **Lesson**: `ast.NameConstant` is deprecated.
+- **Fix**: Migrated to `ast.Constant` proactively to ensure future-proofing.

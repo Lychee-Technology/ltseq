@@ -41,7 +41,7 @@ class IsNoneTransformer(ast.NodeTransformer):
             # Check if this is comparing with None
             is_none_comparison = (
                 isinstance(comparator, ast.Constant) and comparator.value is None
-            ) or (isinstance(comparator, ast.NameConstant) and comparator.value is None)
+            )
 
             if isinstance(op, ast.Is) and is_none_comparison:
                 # Transform 'x is None' to 'x == None'

@@ -108,7 +108,7 @@ result.show()
 - All four join types: `join_type="inner"` (default), `"left"`, `"right"`, `"full"`
 - Composite keys: `on=lambda o, p: (o.year == p.year) & (o.product_id == p.product_id)`
 - Lazy evaluation: Link created before join is executed
-- See [Phase 8 Linking Guide](docs/phase8_linking_guide.md) for detailed documentation
+- See [Phase 8 Linking Guide](docs/LINKING_GUIDE.md) for detailed documentation
 
 
 ### Window Functions (Ordered Computing)
@@ -197,7 +197,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 - **Python Bindings**: PyO3 27.2 for seamless Python/Rust integration
 - **SQL Engine**: Apache DataFusion 51.0 (powers Databricks, Apache Datafusion, etc.)
 - **Data Format**: Apache Arrow for zero-copy columnar operations
-- **Testing**: pytest with 351 comprehensive tests
+- **Testing**: pytest with 493+ comprehensive tests
 
 ### Performance Characteristics
 
@@ -233,7 +233,7 @@ pytest py-ltseq/tests/ -v
 # Run specific test file
 pytest py-ltseq/tests/test_phase8_linking.py -v
 
-# Current Status: 302 passing, 21 skipped
+# Current Status: 493+ tests passing
 ```
 
 ## Examples
@@ -313,7 +313,7 @@ MIT License - See LICENSE file for details.
 ## Resources
 
 - [Full API Documentation](docs/api.md)
-- [Phase 8 Linking Guide](docs/phase8_linking_guide.md) - Foreign key relationships and linking
+- [Phase 8 Linking Guide](docs/LINKING_GUIDE.md) - Foreign key relationships and linking
 - [Phase 8J Linking Limitations](docs/phase8j_limitations.md) - Known limitations and workarounds
 - [Phase 6 Implementation Details](docs/phase6_session_summary.md)
 - [Design Decisions](docs/phase6_design_decisions.md)
@@ -342,7 +342,7 @@ A: LTSeq offers two approaches:
 2. **Traditional SQL joins** - Full data materialization
 
 **Q: Is this production-ready?**  
-A: LTSeq is stable with 351 passing tests covering all functionality. It's suitable for production use cases.
+A: LTSeq is stable with 493+ passing tests covering all functionality. It's suitable for production use cases.
 
 **Q: How does performance compare to Pandas?**  
 A: LTSeq is generally faster for large datasets due to vectorized operations and the underlying DataFusion engine. For small datasets, both are comparable.
