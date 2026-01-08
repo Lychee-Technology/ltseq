@@ -1225,3 +1225,115 @@ class LTSeq:
         result = LTSeq._from_rows(rows, schema)
 
         return result
+
+    def search_first(self, predicate: Callable) -> Optional["LTSeq"]:
+        """
+        Find the first row matching a condition.
+
+        Returns a single-row LTSeq with the first row where the predicate returns True,
+        or an empty LTSeq if no match is found.
+
+        For sorted tables, this is equivalent to a binary search optimization.
+        The table should be pre-sorted by the column you're searching on for best performance.
+
+        Args:
+            predicate: Lambda that takes a row and returns a boolean.
+                      E.g., lambda r: r.price > 100
+
+        Returns:
+            LTSeq with single matching row, or empty LTSeq if not found
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return a boolean Expr
+
+        Example:
+            >>> t = LTSeq.read_csv("products.csv")
+            >>> t_sorted = t.sort("price")
+            >>> # Find first product with price > 100
+            >>> first_expensive = t_sorted.search_first(lambda r: r.price > 100)
+            >>> if len(first_expensive) > 0:
+            ...     first_expensive.show()
+            >>> # Use on pre-sorted time series
+            >>> t_sorted = t.sort("date")
+            >>> first_2024 = t_sorted.search_first(lambda r: r.date >= "2024-01-01")
+        """
+
+    def search_first(self, predicate: Callable) -> Optional["LTSeq"]:
+        """
+        Find the first row matching a condition.
+
+        Returns a single-row LTSeq with the first row where the predicate returns True,
+        or an empty LTSeq if no match is found.
+
+        For sorted tables, this is equivalent to a binary search optimization.
+        The table should be pre-sorted by the column you're searching on for best performance.
+
+        Args:
+            predicate: Lambda that takes a row and returns a boolean.
+                      E.g., lambda r: r.price > 100
+
+        Returns:
+            LTSeq with single matching row, or empty LTSeq if not found
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return a boolean Expr
+
+        Example:
+            >>> t = LTSeq.read_csv("products.csv")
+            >>> t_sorted = t.sort("price")
+            >>> # Find first product with price > 100
+            >>> first_expensive = t_sorted.search_first(lambda r: r.price > 100)
+            >>> if len(first_expensive) > 0:
+            ...     first_expensive.show()
+            >>> # Use on pre-sorted time series
+            >>> t_sorted = t.sort("date")
+            >>> first_2024 = t_sorted.search_first(lambda r: r.date >= "2024-01-01")
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "search_first() requires pandas. Install it with: pip install pandas"
+            )
+
+        # Convert to pandas for iteration
+        df = self.to_pandas()
+
+        # Validate predicate by testing with schema proxy
+        from .expr import SchemaProxy
+
+        test_proxy = SchemaProxy(self._schema)
+        try:
+            _ = predicate(test_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid predicate: {e}")
+
+        # Iterate through rows and find first match
+        for idx, row in df.iterrows():
+            # Create single-row dataframe and convert back to LTSeq
+            single_row_df = df.iloc[[idx]]
+
+            # Convert to dict and back through _from_rows to create LTSeq
+            rows = single_row_df.to_dict("records")
+
+            # Try filter on this single row
+            try:
+                single_ltseq = LTSeq._from_rows(rows, self._schema)
+                result_filtered = single_ltseq.filter(predicate)
+
+                if len(result_filtered) > 0:
+                    # Found a match, return this row
+                    return result_filtered
+            except Exception:
+                # Predicate failed for this row, continue
+                continue
+
+        # No match found - return empty LTSeq
+        return LTSeq._from_rows([], self._schema)
