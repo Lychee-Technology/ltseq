@@ -118,12 +118,11 @@ fn parse_call_expr(func: &str, on: PyExpr, schema: &ArrowSchema) -> Result<Expr,
             "Math function '{}' requires window context - should be handled in derive()",
             func
         )),
-        "shift" | "rolling" | "diff" | "cum_sum" | "mean" | "sum" | "min" | "max" | "count" => {
-            Err(format!(
-                "Window function '{}' requires DataFrame context - should be handled in derive()",
-                func
-            ))
-        }
+        "shift" | "rolling" | "diff" | "cum_sum" | "mean" | "sum" | "min" | "max" | "count"
+        | "std" => Err(format!(
+            "Window function '{}' requires DataFrame context - should be handled in derive()",
+            func
+        )),
         _ => Err(format!("Method '{}' not yet supported", func)),
     }
 }
@@ -148,7 +147,10 @@ pub fn contains_window_function(py_expr: &PyExpr) -> bool {
                 return true;
             }
             // Aggregation functions applied to rolling windows
-            if matches!(func.as_str(), "mean" | "sum" | "min" | "max" | "count") {
+            if matches!(
+                func.as_str(),
+                "mean" | "sum" | "min" | "max" | "count" | "std"
+            ) {
                 // Check if this is applied to a rolling() call
                 if let PyExpr::Call {
                     func: inner_func, ..
@@ -282,6 +284,59 @@ fn sql_call(
         "cum_sum" => {
             let on_sql = pyexpr_to_sql(on, schema)?;
             Ok(format!("SUM({}) OVER ()", on_sql))
+        }
+        // Aggregation functions that can be applied to rolling windows
+        "mean" | "sum" | "min" | "max" | "count" | "std" => {
+            // Check if this is applied to a rolling() call
+            if let PyExpr::Call {
+                func: inner_func,
+                args: inner_args,
+                on: inner_on,
+                ..
+            } = on
+            {
+                if inner_func == "rolling" {
+                    // Get the window size from rolling() args
+                    let window_size = if inner_args.is_empty() {
+                        return Err("rolling() requires a window size".to_string());
+                    } else if let PyExpr::Literal { value, .. } = &inner_args[0] {
+                        value.parse::<i32>().unwrap_or(1)
+                    } else {
+                        return Err("rolling() window size must be a literal integer".to_string());
+                    };
+
+                    // Get the column being aggregated
+                    let col_sql = pyexpr_to_sql(inner_on.as_ref(), schema)?;
+
+                    // Build the aggregation function name
+                    let agg_func = match func {
+                        "mean" => "AVG",
+                        "sum" => "SUM",
+                        "min" => "MIN",
+                        "max" => "MAX",
+                        "count" => "COUNT",
+                        "std" => "STDDEV", // Standard deviation
+                        _ => unreachable!(),
+                    };
+
+                    // Mark this as a rolling aggregation with window size and func
+                    // The window frame will be added in derive_with_window_functions
+                    Ok(format!(
+                        "__ROLLING_{}__({})__{}",
+                        agg_func, col_sql, window_size
+                    ))
+                } else {
+                    Err(format!(
+                        "Aggregation function {} must be called on rolling()",
+                        func
+                    ))
+                }
+            } else {
+                Err(format!(
+                    "Aggregation function {} must be called on rolling()",
+                    func
+                ))
+            }
         }
         "abs" => sql_abs(args, schema),
         "ceil" => sql_ceil(args, schema),

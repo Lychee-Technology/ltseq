@@ -587,7 +587,7 @@ impl RustTable {
     ///
     /// This method implements an inner join between two tables based on specified join keys.
     /// It supports lazy evaluation - the join is only executed when the result is accessed.
-    fn join(
+     fn join(
         &self,
         other: &RustTable,
         left_key_expr_dict: &Bound<'_, PyDict>,
@@ -597,7 +597,81 @@ impl RustTable {
     ) -> PyResult<RustTable> {
         crate::ops::advanced::join_impl(self, other, left_key_expr_dict, right_key_expr_dict, join_type, alias)
     }
+
+    /// Union: Vertically concatenate two tables with compatible schemas
+    ///
+    /// This is equivalent to UNION ALL in SQL - combines all rows from both
+    /// tables without removing duplicates. Schemas must match exactly.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The table to union with
+    ///
+    /// # Returns
+    ///
+    /// A new RustTable containing all rows from both input tables
+    ///
+    /// # Errors
+    ///
+    /// Returns error if schemas don't match or data operations fail
+    fn union(&self, other: &RustTable) -> PyResult<RustTable> {
+        crate::ops::basic::union_impl(self, other)
+    }
+
+    /// Intersect: Return rows present in both tables
+    ///
+    /// This is equivalent to INTERSECT in SQL - returns rows that appear in
+    /// both tables based on specified key columns.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The table to intersect with
+    /// * `key_expr_dict` - Optional serialized expression dict for join keys.
+    ///                     If None, uses all columns for matching.
+    ///
+    /// # Returns
+    ///
+    /// A new RustTable containing rows present in both tables
+    fn intersect(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+        crate::ops::basic::intersect_impl(self, other, key_expr_dict)
+    }
+
+    /// Diff: Return rows in this table but not in the other table
+    ///
+    /// This is equivalent to EXCEPT in SQL - returns rows from the left table
+    /// that don't appear in the right table.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The table to compare against
+    /// * `key_expr_dict` - Optional serialized expression dict for join keys.
+    ///                     If None, uses all columns for matching.
+    ///
+    /// # Returns
+    ///
+    /// A new RustTable with rows in left table but not in right table
+    fn diff(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+        crate::ops::basic::diff_impl(self, other, key_expr_dict)
+    }
+
+    /// Is Subset: Check if this table is a subset of another table
+    ///
+    /// Returns true if all rows in this table also appear in the other table.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The table to check against
+    /// * `key_expr_dict` - Optional serialized expression dict for join keys.
+    ///                     If None, uses all columns for matching.
+    ///
+    /// # Returns
+    ///
+    /// Boolean indicating if this table is a subset of the other
+    fn is_subset(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<bool> {
+        crate::ops::basic::is_subset_impl(self, other, key_expr_dict)
+    }
 }
+
 
 
 #[pyfunction]

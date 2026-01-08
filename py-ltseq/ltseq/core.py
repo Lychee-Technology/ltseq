@@ -724,6 +724,214 @@ class LTSeq:
 
         return result
 
+    def union(self, other: "LTSeq") -> "LTSeq":
+        """
+        Vertically concatenate two tables with the same schema.
+
+        Combines all rows from both tables into a single table. This is equivalent
+        to the SQL UNION ALL operation (preserves duplicates).
+
+        Args:
+            other: Another LTSeq table with compatible schema.
+                   Columns must match in name and order.
+
+        Returns:
+            New LTSeq with rows from both tables combined.
+
+        Raises:
+            ValueError: If schemas are not compatible or not initialized.
+            TypeError: If other is not an LTSeq instance.
+
+        Examples:
+            >>> t1 = LTSeq.read_csv("data1.csv")
+            >>> t2 = LTSeq.read_csv("data2.csv")
+            >>> combined = t1.union(t2)
+            >>> combined.show()
+        """
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"union() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate schemas match
+        if self._schema.keys() != other._schema.keys():
+            raise ValueError(
+                f"Schemas do not match. "
+                f"Left table columns: {list(self._schema.keys())}, "
+                f"Right table columns: {list(other._schema.keys())}"
+            )
+
+        # Call Rust implementation
+        result = LTSeq()
+        result._inner = self._inner.union(other._inner)
+        result._schema = self._schema.copy()
+
+        return result
+
+    def intersect(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+        """
+        Return rows present in both tables.
+
+        This is equivalent to the SQL INTERSECT operation, returning only rows
+        that appear in both tables based on the specified key columns.
+
+        Args:
+            other: Another LTSeq table to intersect with.
+            on: Optional lambda specifying which columns to use for matching.
+                If None, uses all columns for comparison.
+                E.g., lambda r: r.id (single key) or lambda r: [r.id, r.date]
+
+        Returns:
+            New LTSeq with rows present in both tables.
+
+        Raises:
+            ValueError: If schema is not initialized.
+            TypeError: If on is not callable or other is not LTSeq.
+
+        Examples:
+            >>> t1 = LTSeq.read_csv("data1.csv")
+            >>> t2 = LTSeq.read_csv("data2.csv")
+            >>> common = t1.intersect(t2, on=lambda r: r.id)
+            >>> common.show()
+        """
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"intersect() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Extract join key expression if provided
+        key_expr = None
+        if on is not None:
+            key_expr = self._capture_expr(on)
+
+        # Call Rust implementation
+        result = LTSeq()
+        result._inner = self._inner.intersect(other._inner, key_expr)
+        result._schema = self._schema.copy()
+
+        return result
+
+    def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+        """
+        Return rows in this table but not in the other table.
+
+        This is equivalent to the SQL EXCEPT (or MINUS in some databases) operation,
+        returning rows from the left table that don't appear in the right table.
+
+        Args:
+            other: Another LTSeq table to compare against.
+            on: Optional lambda specifying which columns to use for matching.
+                If None, uses all columns for comparison.
+                E.g., lambda r: r.id (single key) or lambda r: [r.id, r.date]
+
+        Returns:
+            New LTSeq with rows in left table but not in right table.
+
+        Raises:
+            ValueError: If schema is not initialized.
+            TypeError: If on is not callable or other is not LTSeq.
+
+        Examples:
+            >>> t1 = LTSeq.read_csv("data1.csv")
+            >>> t2 = LTSeq.read_csv("data2.csv")
+            >>> only_in_t1 = t1.diff(t2, on=lambda r: r.id)
+            >>> only_in_t1.show()
+        """
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"diff() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Extract join key expression if provided
+        key_expr = None
+        if on is not None:
+            key_expr = self._capture_expr(on)
+
+        # Call Rust implementation
+        result = LTSeq()
+        result._inner = self._inner.diff(other._inner, key_expr)
+        result._schema = self._schema.copy()
+
+        return result
+
+    def is_subset(self, other: "LTSeq", on: Optional[Callable] = None) -> bool:
+        """
+        Check if this table is a subset of another table.
+
+        Returns True if all rows in this table also appear in the other table
+        (based on specified key columns).
+
+        Args:
+            other: Another LTSeq table to check against.
+            on: Optional lambda specifying which columns to use for matching.
+                If None, uses all columns for comparison.
+
+        Returns:
+            Boolean indicating if this table is a subset of the other.
+
+        Raises:
+            ValueError: If schema is not initialized.
+            TypeError: If on is not callable or other is not LTSeq.
+
+        Examples:
+            >>> t1 = LTSeq.read_csv("data_small.csv")
+            >>> t2 = LTSeq.read_csv("data_large.csv")
+            >>> is_subset = t1.is_subset(t2, on=lambda r: r.id)
+            >>> print(is_subset)
+        """
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"is_subset() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Extract join key expression if provided
+        key_expr = None
+        if on is not None:
+            key_expr = self._capture_expr(on)
+
+        # Call Rust implementation - returns boolean
+        return self._inner.is_subset(other._inner, key_expr)
+
     def link(
         self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
     ) -> "LinkedTable":
