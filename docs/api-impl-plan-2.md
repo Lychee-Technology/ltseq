@@ -1,31 +1,48 @@
 # LTSeq API Implementation Plan v2
 
 **Date**: January 2025  
-**Status**: Ready for Implementation  
-**Target Completion**: 4 weeks
+**Last Updated**: January 8, 2026  
+**Status**: Phase 5 - Pandas Migration In Progress
+**Target Completion**: 2-3 weeks
 
 ---
 
 ## Executive Summary
 
-This plan addresses the gap between the promised API surface in `docs/api.md` and the current implementation. Currently, **54% of APIs are fully implemented** (30/56), with 3 partial implementations and 23 missing features.
+This plan tracks API implementation and pandas dependency migration. As of January 8, 2026:
 
-| Category | Implemented | Partial | Missing | Coverage |
-|----------|-------------|---------|---------|----------|
-| Basic Relational | 6 | 0 | 0 | 100% ✅ |
-| Ordered Computing | 8 | 1 | 2 | 73% ⚠️ |
-| Set Algebra | 0 | 0 | 4 | 0% ❌ |
-| Association/Links | 2 | 0 | 2 | 50% ⚠️ |
-| Aggregation | 0 | 0 | 3 | 0% ❌ |
-| Expressions | 7 | 0 | 12 | 37% ⚠️ |
-| Group Operations | 7 | 2 | 0 | 78% ⚠️ |
-| **TOTAL** | **30** | **3** | **23** | **54%** |
+**Current Status (493 tests passing)**:
+- ✅ **Phase 1-4**: Expression Extensions (100% complete)
+  - if_else, fill_null, is_null, is_not_null, regex_match, string ops, temporal ops, lookup
+- ✅ **Phase 8**: Linking/Joins (100% complete)
+  - link(), join types, composite keys, transparent materialization
+- ✅ **Phase 6**: Window Functions (100% complete)
+  - shift, rolling, diff, cum_sum with strict sort requirements
+- ✅ **Phase B**: Group-Ordered Operations (100% complete)
+  - group_ordered(), filter(), derive() with group context
+- **Phase 5**: Pandas Migration (In Progress)
+  - pivot() - pending Rust implementation
+  - NestedTable.filter() - pending SQL migration
+  - NestedTable.derive() - pending SQL execution
+  - partition_by() - pending implementation
 
-### Success Criteria
-1. **DSL Showcase works**: Example from `docs/api.md` lines 173-207 executes correctly
-2. **Test coverage**: All new features have >90% test coverage
-3. **No regressions**: Existing 336 passing tests remain passing
-4. **Documentation**: Each new API has docstrings and usage examples
+| Category | Status | Notes |
+|----------|--------|-------|
+| Basic Relational | ✅ 100% | filter, select, derive, sort, distinct, slice |
+| Window Functions | ✅ 100% | shift, rolling, diff, cum_sum |
+| Ordered Computing | ✅ 100% | group_ordered, search_first |
+| Linking/Joins | ✅ 100% | link, join, join_merge, lookup |
+| Expression Extensions | ✅ 100% | if_else, fill_null, string ops, temporal ops |
+| Pandas Dependency | 🟡 4/4 | pivot, NestedTable.filter, NestedTable.derive, partition |
+| Set Algebra | ❌ 0% | union, intersect, diff, is_subset |
+
+### Success Criteria (Phase 5)
+1. ✅ All 493+ existing tests pass
+2. ✅ `pivot()` works without pandas
+3. ✅ `NestedTable.filter()` works without pandas  
+4. ✅ `NestedTable.derive()` works without pandas
+5. ✅ New `partition_by()` method available
+6. ✅ Backward compatibility maintained
 
 ---
 
