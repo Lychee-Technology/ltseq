@@ -226,6 +226,193 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyRes
     })
 }
 
+/// Validate that left and right tables have data and schemas
+fn validate_join_tables(
+    table: &RustTable,
+    other: &RustTable,
+) -> PyResult<(Arc<DataFrame>, Arc<DataFrame>, Arc<ArrowSchema>, Arc<ArrowSchema>)> {
+    let df_left = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table has no data. Call read_csv() first.",
+        )
+    })?;
+
+    let df_right = other.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table has no data. Call read_csv() first.",
+        )
+    })?;
+
+    let schema_left = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table schema not available.",
+        )
+    })?;
+
+    let schema_right = other.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table schema not available.",
+        )
+    })?;
+
+    Ok((
+        Arc::clone(df_left),
+        Arc::clone(df_right),
+        Arc::clone(schema_left),
+        Arc::clone(schema_right),
+    ))
+}
+
+/// Extract and validate join key column names from expressions
+fn extract_and_validate_join_keys(
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+    schema_left: &ArrowSchema,
+    schema_right: &ArrowSchema,
+) -> PyResult<(Vec<String>, Vec<String>)> {
+    let left_key_expr = dict_to_py_expr(left_key_expr_dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let right_key_expr = dict_to_py_expr(right_key_expr_dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let (left_col_names, right_col_names) = extract_join_key_columns(&left_key_expr, &right_key_expr)?;
+
+    if left_col_names.is_empty() || right_col_names.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No join keys found in expressions",
+        ));
+    }
+
+    // Validate left columns exist
+    for left_col in &left_col_names {
+        if !schema_left.fields().iter().any(|f| f.name() == left_col) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Column '{}' not found in left table", left_col),
+            ));
+        }
+    }
+
+    // Validate right columns exist
+    for right_col in &right_col_names {
+        if !schema_right.fields().iter().any(|f| f.name() == right_col) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Column '{}' not found in right table", right_col),
+            ));
+        }
+    }
+
+    Ok((left_col_names, right_col_names))
+}
+
+/// Rename right table join keys with unique temporary names
+fn rename_right_table_keys(
+    df_right: &Arc<DataFrame>,
+    schema_right: &ArrowSchema,
+    right_col_names: &[String],
+) -> PyResult<(DataFrame, Vec<String>)> {
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let mut right_select_exprs = Vec::new();
+    let mut temp_right_col_names = Vec::new();
+
+    for field in schema_right.fields().iter() {
+        let col_name = field.name();
+        if right_col_names.contains(&col_name.to_string()) {
+            if let Some(idx) = right_col_names.iter().position(|c| c == col_name) {
+                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__", idx, unique_suffix);
+                right_select_exprs.push(col(col_name).alias(&temp_join_key_name));
+                temp_right_col_names.push(temp_join_key_name);
+            }
+        } else {
+            right_select_exprs.push(col(col_name));
+        }
+    }
+
+    let df_right_renamed = RUNTIME
+        .block_on(async {
+            (**df_right)
+                .clone()
+                .select(right_select_exprs)
+                .map_err(|e| format!("Right table join key rename failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    Ok((df_right_renamed, temp_right_col_names))
+}
+
+/// Execute the join operation
+fn execute_join(
+    df_left: &DataFrame,
+    df_right: &DataFrame,
+    left_join_keys: &[&str],
+    right_join_keys: &[&str],
+    join_type: JoinType,
+) -> PyResult<DataFrame> {
+    let joined_df = RUNTIME
+        .block_on(async {
+            df_left
+                .clone()
+                .join(
+                    df_right.clone(),
+                    join_type,
+                    left_join_keys,
+                    right_join_keys,
+                    None,
+                )
+                .map_err(|e| format!("Join execution failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    Ok(joined_df)
+}
+
+/// Build final schema and rename columns after join
+fn build_final_schema_and_select(
+    joined_df: &DataFrame,
+    schema_left: &ArrowSchema,
+    schema_right: &ArrowSchema,
+    alias: &str,
+) -> PyResult<(ArrowSchema, DataFrame)> {
+    let mut final_fields = Vec::new();
+    let mut select_exprs: Vec<Expr> = Vec::new();
+
+    // Add left table columns
+    for field in schema_left.fields().iter() {
+        final_fields.push((**field).clone());
+        select_exprs.push(col(field.name()));
+    }
+
+    // Add right table columns with alias prefix
+    for field in schema_right.fields().iter() {
+        let col_name = field.name();
+        let new_col_name = format!("{}_{}", alias, col_name);
+        let new_field = Field::new(
+            new_col_name.clone(),
+            field.data_type().clone(),
+            field.is_nullable(),
+        );
+        final_fields.push(new_field);
+        select_exprs.push(col(col_name).alias(&new_col_name));
+    }
+
+    let final_arrow_schema = ArrowSchema::new(final_fields);
+
+    let final_df = RUNTIME
+        .block_on(async {
+            joined_df
+                .clone()
+                .select(select_exprs)
+                .map_err(|e| format!("Final column rename SELECT failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    Ok((final_arrow_schema, final_df))
+}
+
 /// Helper function to join two tables using pointer-based foreign keys
 ///
 /// This method implements joins between two tables based on specified join keys.
@@ -266,73 +453,14 @@ pub fn join_impl(
     join_type: &str,
     alias: &str,
 ) -> PyResult<RustTable> {
-    // 1. Validate both tables have data and schemas
-    let df_left = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table has no data. Call read_csv() first.",
-        )
-    })?;
+    // Validate and extract tables and schemas
+    let (df_left, df_right, schema_left, schema_right) = validate_join_tables(table, other)?;
 
-    let df_right = other.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table has no data. Call read_csv() first.",
-        )
-    })?;
+    // Extract and validate join keys
+    let (left_col_names, right_col_names) =
+        extract_and_validate_join_keys(left_key_expr_dict, right_key_expr_dict, &schema_left, &schema_right)?;
 
-    let schema_left = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available.",
-        )
-    })?;
-
-    let schema_right = other.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available.",
-        )
-    })?;
-
-    // 2. Deserialize join key expressions
-    let left_key_expr = dict_to_py_expr(left_key_expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    let right_key_expr = dict_to_py_expr(right_key_expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    // 3. Extract column names from expressions
-    // Phase 8H: Support both simple columns and composite And-expressions
-    let (left_col_names, right_col_names) = extract_join_key_columns(&left_key_expr, &right_key_expr)?;
-
-    // For MVP, we only support joining on the first key pair
-    // Future phases can support true composite keys
-    if left_col_names.is_empty() || right_col_names.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "No join keys found in expressions",
-        ));
-    }
-
-    let left_col_names_copy = left_col_names.clone();
-    let right_col_names_copy = right_col_names.clone();
-    let left_col_name = left_col_names[0].clone();
-    let right_col_name = right_col_names[0].clone();
-
-    // 4. Validate columns exist in schemas
-    for left_col in &left_col_names {
-        if !schema_left.fields().iter().any(|f| f.name() == left_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Column '{}' not found in left table", left_col),
-            ));
-        }
-    }
-
-    for right_col in &right_col_names {
-        if !schema_right.fields().iter().any(|f| f.name() == right_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Column '{}' not found in right table", right_col),
-            ));
-        }
-    }
-
-    // 5. Map join type string to DataFusion JoinType
+    // Map join type string to DataFusion JoinType
     let df_join_type = match join_type {
         "inner" => JoinType::Inner,
         "left" => JoinType::Left,
@@ -345,113 +473,31 @@ pub fn join_impl(
         }
     };
 
-    // Phase 9: Simple and robust join key renaming for chained joins
-    // Key insight: Just rename the right table's join keys with unique names.
-    // Don't try to rename the left table - that's more complex with qualified names.
-    
-    let unique_suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    
-    // Don't rename left table - use columns as-is
-    let df_left_renamed = (**df_left).clone();
-    let actual_left_join_keys = left_col_names.clone();
-    
-    // 6. Rename ALL join keys from the right table
-    
-    let mut right_select_exprs = Vec::new();
-    let mut temp_right_col_names = Vec::new();  // Track the renamed column names
-    
-    for field in schema_right.fields().iter() {
-        let col_name = field.name();
-        // Check if this column is a join key
-        if right_col_names_copy.contains(&col_name.to_string()) {
-            // Find its index in the join keys
-            if let Some(idx) = right_col_names_copy.iter().position(|c| c == col_name) {
-                // Use a completely unique temporary name
-                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__", idx, unique_suffix);
-                right_select_exprs.push(col(col_name).alias(&temp_join_key_name));
-                temp_right_col_names.push(temp_join_key_name);
-            }
-        } else {
-            // Keep other columns as-is
-            right_select_exprs.push(col(col_name));
-        }
-    }
+    // Rename right table join keys
+    let (df_right_renamed, temp_right_col_names) =
+        rename_right_table_keys(&df_right, &schema_right, &right_col_names)?;
 
-    // Apply the select to rename the join keys
-    let df_right_renamed = RUNTIME
-        .block_on(async {
-            (**df_right)
-                .clone()
-                .select(right_select_exprs)
-                .map_err(|e| format!("Right table join key rename failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // 7. Execute the join with ALL join keys
-    // For composite keys, join on multiple column pairs
-    let left_join_keys: Vec<&str> = actual_left_join_keys.iter().map(|s| s.as_str()).collect();
+    // Execute join
+    let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
     let right_join_keys: Vec<&str> = temp_right_col_names.iter().map(|s| s.as_str()).collect();
-    
-    let joined_df = RUNTIME
-        .block_on(async {
-            df_left_renamed
-                .clone()
-                .join(
-                    df_right_renamed.clone(),
-                    df_join_type,
-                    left_join_keys.as_slice(),
-                    right_join_keys.as_slice(),
-                    None,
-                )
-                .map_err(|e| format!("Join execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 8. Build the final schema with correct column names AND rename DataFrame columns
-      // DataFusion joins produce qualified names like "?table?.col", we need to rename to user-facing names
-       let mut final_fields = Vec::new();
-       let mut select_exprs: Vec<Expr> = Vec::new();
-       
-       // Add left table columns - select them by their original names
-       for field in schema_left.fields().iter() {
-           final_fields.push((**field).clone());
-           select_exprs.push(col(field.name()));
-       }
-       
-       // Add right table columns with alias prefix - rename via SELECT
-       for field in schema_right.fields().iter() {
-           let col_name = field.name();
-           let new_col_name = format!("{}_{}", alias, col_name);
-           let new_field = Field::new(
-               new_col_name.clone(),
-               field.data_type().clone(),
-               field.is_nullable(),
-           );
-           final_fields.push(new_field);
-           // Select the column with its original name and alias it to the final name
-           select_exprs.push(col(col_name).alias(&new_col_name));
-       }
-       
-       let final_arrow_schema = ArrowSchema::new(final_fields);
+    let joined_df = execute_join(
+        &df_left,
+        &df_right_renamed,
+        left_join_keys.as_slice(),
+        right_join_keys.as_slice(),
+        df_join_type,
+    )?;
 
-       // 9. Apply final SELECT to rename all columns to match the schema
-       let final_df = RUNTIME
-           .block_on(async {
-               joined_df
-                   .clone()
-                   .select(select_exprs)
-                   .map_err(|e| format!("Final column rename SELECT failed: {}", e))
-           })
-           .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    // Build final schema and rename columns
+    let (final_arrow_schema, final_df) =
+        build_final_schema_and_select(&joined_df, &schema_left, &schema_right, alias)?;
 
-       // 10. Return new RustTable with joined and renamed data
-       Ok(RustTable {
-           session: Arc::clone(&table.session),
-           dataframe: Some(Arc::new(final_df)),
-           schema: Some(Arc::new(final_arrow_schema)),
-           sort_exprs: Vec::new(),
-       })
+    // Return new RustTable
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(final_df)),
+        schema: Some(Arc::new(final_arrow_schema)),
+        sort_exprs: Vec::new(),
+    })
 }

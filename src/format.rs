@@ -4,21 +4,15 @@ use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
 use pyo3::PyResult;
 
-/// Format RecordBatches as a pretty-printed ASCII table
-///
-/// Shows up to `limit` rows, streaming through batches
-pub fn format_table(
+/// Calculate optimal column widths by scanning through all rows (up to limit)
+fn calculate_column_widths(
     batches: &[RecordBatch],
     schema: &ArrowSchema,
     limit: usize,
-) -> PyResult<String> {
-    let mut output = String::new();
+) -> Vec<usize> {
     let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-
-    // Calculate column widths for pretty printing
     let mut col_widths: Vec<usize> = col_names.iter().map(|name| name.len()).collect();
 
-    // Scan through batches to find max column widths
     let mut row_count = 0;
     for batch in batches {
         let num_rows = batch.num_rows();
@@ -43,42 +37,54 @@ pub fn format_table(
         *width = (*width).min(50);
     }
 
-    // Draw top border
-    output.push('+');
-    for width in &col_widths {
-        output.push_str(&"-".repeat(width + 2));
-        output.push('+');
-    }
-    output.push('\n');
+    col_widths
+}
 
-    // Draw header
-    output.push('|');
+/// Draw a border line with given column widths
+fn draw_border(col_widths: &[usize]) -> String {
+    let mut border = String::new();
+    border.push('+');
+    for width in col_widths {
+        border.push_str(&"-".repeat(width + 2));
+        border.push('+');
+    }
+    border.push('\n');
+    border
+}
+
+/// Draw the header row with column names
+fn draw_header(schema: &ArrowSchema, col_widths: &[usize]) -> String {
+    let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let mut header = String::new();
+    header.push('|');
     for (i, col_name) in col_names.iter().enumerate() {
-        output.push(' ');
-        output.push_str(&format!("{:<width$}", col_name, width = col_widths[i]));
-        output.push_str(" |");
+        header.push(' ');
+        header.push_str(&format!("{:<width$}", col_name, width = col_widths[i]));
+        header.push_str(" |");
     }
-    output.push('\n');
+    header.push('\n');
+    header
+}
 
-    // Draw header border
-    output.push('+');
-    for width in &col_widths {
-        output.push_str(&"-".repeat(width + 2));
-        output.push('+');
-    }
-    output.push('\n');
+/// Draw data rows from batches (up to limit)
+fn draw_rows(
+    batches: &[RecordBatch],
+    schema: &ArrowSchema,
+    col_widths: &[usize],
+    limit: usize,
+) -> String {
+    let mut rows = String::new();
+    let mut row_count = 0;
 
-    // Draw rows
-    row_count = 0;
     for batch in batches {
         let num_rows = batch.num_rows();
         for row_idx in 0..num_rows {
             if row_count >= limit {
                 break;
             }
-            output.push('|');
+            rows.push('|');
             for (col_idx, _) in schema.fields().iter().enumerate() {
-                output.push(' ');
+                rows.push(' ');
                 let col = batch.column(col_idx);
                 let value_str = format_cell(col, row_idx);
                 // Truncate long values
@@ -87,14 +93,14 @@ pub fn format_table(
                 } else {
                     value_str
                 };
-                output.push_str(&format!(
+                rows.push_str(&format!(
                     "{:<width$}",
                     truncated,
                     width = col_widths[col_idx]
                 ));
-                output.push_str(" |");
+                rows.push_str(" |");
             }
-            output.push('\n');
+            rows.push('\n');
             row_count += 1;
         }
         if row_count >= limit {
@@ -102,13 +108,36 @@ pub fn format_table(
         }
     }
 
+    rows
+}
+
+/// Format RecordBatches as a pretty-printed ASCII table
+///
+/// Shows up to `limit` rows, streaming through batches
+pub fn format_table(
+    batches: &[RecordBatch],
+    schema: &ArrowSchema,
+    limit: usize,
+) -> PyResult<String> {
+    // Calculate column widths
+    let col_widths = calculate_column_widths(batches, schema, limit);
+
+    let mut output = String::new();
+
+    // Draw top border
+    output.push_str(&draw_border(&col_widths));
+
+    // Draw header
+    output.push_str(&draw_header(schema, &col_widths));
+
+    // Draw header border
+    output.push_str(&draw_border(&col_widths));
+
+    // Draw rows
+    output.push_str(&draw_rows(batches, schema, &col_widths, limit));
+
     // Draw bottom border
-    output.push('+');
-    for width in &col_widths {
-        output.push_str(&"-".repeat(width + 2));
-        output.push('+');
-    }
-    output.push('\n');
+    output.push_str(&draw_border(&col_widths));
 
     Ok(output)
 }

@@ -78,6 +78,60 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
     }
 }
 
+/// Build SELECT parts for derived window function columns
+async fn build_derived_select_parts(
+    schema: &ArrowSchema,
+    derived_cols: &Bound<'_, PyDict>,
+    table: &RustTable,
+) -> PyResult<Vec<String>> {
+    let mut select_parts = Vec::new();
+
+    // Add all existing columns
+    for field in schema.fields() {
+        select_parts.push(format!("\"{}\"", field.name()));
+    }
+
+    // Add derived columns
+    for (col_name, expr_item) in derived_cols.iter() {
+        let col_name_str = col_name.extract::<String>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
+        })?;
+
+        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+        })?;
+
+        let py_expr = dict_to_py_expr(&expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+        // Convert expression to SQL
+        let expr_sql = pyexpr_to_sql(&py_expr, schema)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Check what type of window function this is
+        let is_rolling_agg = expr_sql.contains("__ROLLING_");
+        let is_diff = expr_sql.contains("__DIFF_");
+
+        // Build ORDER BY clause from sort expressions
+        let order_by = if !table.sort_exprs.is_empty() {
+            table
+                .sort_exprs
+                .iter()
+                .map(|col| format!("\"{}\"", col))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            "".to_string()
+        };
+
+        // Apply window frame transformation
+        let full_expr = apply_window_frame(&expr_sql, &order_by, is_rolling_agg, is_diff);
+        select_parts.push(format!("{} AS \"{}\"", full_expr, col_name_str));
+    }
+
+    Ok(select_parts)
+}
+
 /// Derive columns with window functions using SQL
 ///
 /// This handles complex window functions like shifts, rolling windows, and differences
@@ -124,49 +178,8 @@ pub fn derive_with_window_functions_impl(
                 ))
             })?;
 
-        // Build the SELECT clause with all columns + derived ones
-        let mut select_parts = Vec::new();
-
-        // Add all existing columns
-        for field in schema.fields() {
-            select_parts.push(format!("\"{}\"", field.name()));
-        }
-
-        // Add derived columns
-        for (col_name, expr_item) in derived_cols.iter() {
-            let col_name_str = col_name.extract::<String>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
-            })?;
-
-            let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-            })?;
-
-            let py_expr = dict_to_py_expr(&expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-            // Convert expression to SQL
-            let expr_sql = pyexpr_to_sql(&py_expr, schema)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-            // Check what type of window function this is
-            let is_rolling_agg = expr_sql.contains("__ROLLING_");
-            let is_diff = expr_sql.contains("__DIFF_");
-
-            let order_by = if !table.sort_exprs.is_empty() {
-                table
-                    .sort_exprs
-                    .iter()
-                    .map(|col| format!("\"{}\"", col))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                "".to_string()
-            };
-
-            let full_expr = apply_window_frame(&expr_sql, &order_by, is_rolling_agg, is_diff);
-            select_parts.push(format!("{} AS \"{}\"", full_expr, col_name_str));
-        }
+        // Build SELECT parts with derived columns
+        let select_parts = build_derived_select_parts(schema, derived_cols, table).await?;
 
         // Build and execute the SQL query
         let sql = format!(
@@ -196,6 +209,85 @@ pub fn derive_with_window_functions_impl(
             sort_exprs: table.sort_exprs.clone(),
         })
     })
+}
+
+/// Process cumulative sum expressions and build SELECT parts
+async fn build_cumsum_select_parts(
+    schema: &ArrowSchema,
+    cum_exprs: &[Bound<'_, PyDict>],
+    table: &RustTable,
+) -> PyResult<Vec<String>> {
+    let mut select_parts = Vec::new();
+
+    // Add all existing columns
+    for field in schema.fields() {
+        select_parts.push(format!("\"{}\"", field.name()));
+    }
+
+    // Add cumulative sum columns for each input column
+    for (idx, expr_item) in cum_exprs.iter().enumerate() {
+        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+        })?;
+
+        let py_expr = dict_to_py_expr(&expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+        // Convert expression to SQL
+        let expr_sql = pyexpr_to_sql(&py_expr, schema)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        // Extract column name from expression
+        let col_name = if let PyExpr::Column(name) = &py_expr {
+            name.clone()
+        } else {
+            format!("cum_sum_{}", idx)
+        };
+
+        // Validate numeric column
+        if let PyExpr::Column(col_name_ref) = &py_expr {
+            if let Some(field) = schema.field_with_name(col_name_ref).ok() {
+                let field_type = field.data_type();
+                if !crate::transpiler::is_numeric_type(field_type) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "cum_sum() requires numeric columns. Column '{}' has type {:?}",
+                        col_name_ref, field_type
+                    )));
+                }
+            }
+        }
+
+        // Build ORDER BY clause from sort expressions
+        let order_by = if !table.sort_exprs.is_empty() {
+            let order_cols = table
+                .sort_exprs
+                .iter()
+                .map(|col| format!("\"{}\"", col))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" ORDER BY {}", order_cols)
+        } else {
+            "".to_string()
+        };
+
+        // Build cumulative sum expression
+        let cumsum_expr = if !order_by.is_empty() {
+            format!(
+                "SUM({}) OVER ({}ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                expr_sql, order_by
+            )
+        } else {
+            format!(
+                "SUM({}) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                expr_sql
+            )
+        };
+
+        let cumsum_col_name = format!("{}_cumsum", col_name);
+        select_parts.push(format!("{} AS \"{}\"", cumsum_expr, cumsum_col_name));
+    }
+
+    Ok(select_parts)
 }
 
 /// Add cumulative sum columns with proper window functions
@@ -231,7 +323,7 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
             ))
         })?;
 
-        // Check if the table is empty - if so, just return with new schema
+        // Check if the table is empty
         let is_empty = current_batches.iter().all(|batch| batch.num_rows() == 0);
         if is_empty {
             return handle_empty_cum_sum(table, schema, &cum_exprs).await;
@@ -257,75 +349,8 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
                 ))
             })?;
 
-        // Build the SELECT clause with all columns + cumulative sum columns
-        let mut select_parts = Vec::new();
-
-        // Add all existing columns
-        for field in schema.fields() {
-            select_parts.push(format!("\"{}\"", field.name()));
-        }
-
-        // Add cumulative sum columns for each input column
-        for (idx, expr_item) in cum_exprs.iter().enumerate() {
-            let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-            })?;
-
-            let py_expr = dict_to_py_expr(&expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-            // Convert expression to SQL
-            let expr_sql = pyexpr_to_sql(&py_expr, schema)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-            // Extract column name from expression (if it's a simple Column)
-            let col_name = if let PyExpr::Column(name) = &py_expr {
-                name.clone()
-            } else {
-                format!("cum_sum_{}", idx)
-            };
-
-            // Validate that the column type is numeric (only for direct Column expressions)
-            if let PyExpr::Column(col_name_ref) = &py_expr {
-                if let Some(field) = schema.field_with_name(col_name_ref).ok() {
-                    let field_type = field.data_type();
-                    if !crate::transpiler::is_numeric_type(field_type) {
-                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-                            "cum_sum() requires numeric columns. Column '{}' has type {:?}",
-                            col_name_ref, field_type
-                        )));
-                    }
-                }
-            }
-
-            // Build cumulative sum: SUM(col) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-            let order_by = if !table.sort_exprs.is_empty() {
-                let order_cols = table
-                    .sort_exprs
-                    .iter()
-                    .map(|col| format!("\"{}\"", col))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(" ORDER BY {}", order_cols)
-            } else {
-                "".to_string()
-            };
-
-            let cumsum_expr = if !order_by.is_empty() {
-                format!(
-                    "SUM({}) OVER ({}ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
-                    expr_sql, order_by
-                )
-            } else {
-                format!(
-                    "SUM({}) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
-                    expr_sql
-                )
-            };
-
-            let cumsum_col_name = format!("{}_cumsum", col_name);
-            select_parts.push(format!("{} AS \"{}\"", cumsum_expr, cumsum_col_name));
-        }
+        // Build SELECT parts and execute query
+        let select_parts = build_cumsum_select_parts(schema, &cum_exprs, table).await?;
 
         // Build and execute the SQL query
         let sql = format!(
@@ -334,7 +359,6 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
             temp_table_name
         );
 
-        // Execute SQL using sql() which returns a DataFrame directly
         let new_df = table.session.sql(&sql).await.map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "cum_sum query failed: {}",
