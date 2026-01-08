@@ -1004,6 +1004,351 @@ fn build_final_schema_and_select(
 /// * `right_key_expr_dict` - Serialized Column expression dict for right join key
 /// * `join_type` - Type of join (currently only "inner" is supported)
 /// * `alias` - Prefix for right table columns (used to avoid name conflicts)
+
+/// Aggregate rows into a summary table with one row per group
+///
+/// Performs SQL GROUP BY aggregation, optionally grouping by specified columns
+/// and computing aggregate functions (sum, count, min, max, avg).
+///
+/// # Arguments
+///
+/// * `table` - The table to aggregate
+/// * `group_expr` - Optional expression dict specifying grouping key(s)
+/// * `agg_dict` - Dictionary mapping {agg_name: agg_expression_dict}
+///
+/// # Returns
+///
+/// A new RustTable with one row per group (or one row for full-table agg)
+pub fn agg_impl(
+    table: &RustTable,
+    group_expr: Option<Bound<'_, PyDict>>,
+    agg_dict: &Bound<'_, PyDict>,
+) -> PyResult<RustTable> {
+    // Validate tables exist
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded. Call read_csv() first.",
+        )
+    })?;
+    
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No schema available.",
+        )
+    })?;
+
+    // Helper function to extract aggregate function from PyExpr
+    fn extract_agg_function(py_expr: &PyExpr) -> Option<(String, String)> {
+        // Pattern: g.col.sum() or g.count()
+        // These are represented as Call expressions
+        if let PyExpr::Call { func, on, .. } = py_expr {
+            // func is "sum", "count", "min", "max", "avg"
+            // on is the object we're calling on (either Column or another Call)
+            match func.as_str() {
+                "sum" | "count" | "min" | "max" | "avg" => {
+                    // Extract column name from on
+                    if let PyExpr::Column(col_name) = on.as_ref() {
+                        return Some((func.clone(), col_name.clone()));
+                    }
+                    // Special case: g.count() without column (func="count", on="g")
+                    if func == "count" {
+                        return Some((func.clone(), "*".to_string()));
+                    }
+                    None
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    // Collect all agg expressions and convert to DataFusion expressions
+    let mut agg_select_parts: Vec<String> = Vec::new();
+    
+    // Extract aggregation expressions from dict
+    for (key, value) in agg_dict.iter() {
+        let key_str = key.extract::<String>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string"))?;
+        
+        let val_dict = value.cast::<PyDict>()
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict"))?;
+        
+        let py_expr = dict_to_py_expr(&val_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse agg expr: {}", e)))?;
+        
+        // Try to extract aggregate function
+        if let Some((agg_func, col_name)) = extract_agg_function(&py_expr) {
+            // Build aggregate SQL
+            let sql_expr_str = match agg_func.as_str() {
+                "sum" => format!("SUM({})", col_name),
+                "count" => {
+                    if col_name == "*" {
+                        "COUNT(*)".to_string()
+                    } else {
+                        format!("COUNT({})", col_name)
+                    }
+                }
+                "min" => format!("MIN({})", col_name),
+                "max" => format!("MAX({})", col_name),
+                "avg" => format!("AVG({})", col_name),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        format!("Unknown aggregate function: {}", agg_func)
+                    ))
+                }
+            };
+            agg_select_parts.push(format!("{} as {}", sql_expr_str, key_str));
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Invalid aggregate expression - must be g.column.agg_func() or g.count()".to_string()
+            ));
+        }
+    }
+
+    // Build the GROUP BY clause
+    let group_cols: Option<Vec<String>> = if let Some(group_expr_dict) = group_expr {
+        let py_expr = dict_to_py_expr(&group_expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse group expr: {}", e)))?;
+        
+        // Handle both single column and list of columns
+        match py_expr {
+            PyExpr::Column(col_name) => {
+                // Single group column
+                Some(vec![col_name])
+            }
+            _ => {
+                // For complex expressions, transpile to SQL and use as-is
+                let sql_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to transpile group expr: {}", e)))?;
+                let expr_str = format!("{}", sql_expr);
+                Some(vec![expr_str])
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build SQL query
+    let temp_table_name = "__ltseq_agg_temp";
+    
+    // Register temp table
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Build SQL query
+    let sql_query = if let Some(group_cols) = group_cols {
+        let group_col_list = group_cols.join(", ");
+        let agg_col_list = agg_select_parts.join(", ");
+        format!(
+            "SELECT {}, {} FROM {} GROUP BY {}",
+            group_col_list, agg_col_list, temp_table_name, group_col_list
+        )
+    } else {
+        // Full-table aggregation (no grouping)
+        let agg_col_list = agg_select_parts.join(", ");
+        format!("SELECT {} FROM {}", agg_col_list, temp_table_name)
+    };
+
+    // Execute query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute agg query: {}", e))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect agg results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create result RustTable
+    if result_batches.is_empty() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: None,
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    // Create DataFrame from the result using read_table
+    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(Arc::clone(&result_schema)),
+        sort_exprs: Vec::new(),
+    })
+}
+
+/// Filter rows using a raw SQL WHERE clause
+///
+/// This is used internally by group_ordered().filter() to execute SQL filtering
+/// on the flattened grouped table.
+///
+/// # Arguments
+///
+/// * `table` - The table to filter
+/// * `where_clause` - Raw SQL WHERE clause string (e.g., "__group_count__ > 2")
+///
+/// # Returns
+///
+/// A new RustTable with rows matching the WHERE clause
+pub fn filter_where_impl(
+    table: &RustTable,
+    where_clause: &str,
+) -> PyResult<RustTable> {
+    // Validate table exists
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded. Call read_csv() first.",
+        )
+    })?;
+    
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No schema available.",
+        )
+    })?;
+
+    // Register the current table
+    let temp_table_name = "__ltseq_filter_temp";
+    
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Build SQL query
+    let sql_query = format!(
+        "SELECT * FROM {} WHERE {}",
+        temp_table_name, where_clause
+    );
+
+    // Execute query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute filter query: {}", e))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect filter results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create result RustTable
+    if result_batches.is_empty() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: Some(Arc::clone(schema)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    // Create DataFrame from the result using read_table
+    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(Arc::clone(&result_schema)),
+        sort_exprs: Vec::new(),
+    })
+}
+
+
 pub fn join_impl(
     table: &RustTable,
     other: &RustTable,

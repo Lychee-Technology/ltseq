@@ -499,7 +499,7 @@ impl RustTable {
         })
     }
 
-    /// Add cumulative sum columns for specified columns
+     /// Add cumulative sum columns for specified columns
     ///
     /// Args:
     ///     cum_exprs: List of serialized expression dicts (from Python)
@@ -509,6 +509,37 @@ impl RustTable {
     ///     New RustTable with cumulative sum columns added
     fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
         crate::ops::derive::cum_sum_impl(self, cum_exprs)
+    }
+
+    /// Aggregate rows into a summary table with one row per group
+    ///
+    /// Performs SQL GROUP BY aggregation, optionally grouping by specified columns
+    /// and computing aggregate functions (sum, count, min, max, avg).
+    ///
+    /// Args:
+    ///     group_expr: Optional serialized expression dict for grouping keys.
+    ///                If None, aggregates entire table into single row.
+    ///     agg_dict: Dictionary mapping {agg_name: agg_expression_dict}
+    ///              Each expression identifies an aggregate function like g.sales.sum()
+    ///
+    /// Returns:
+    ///     New RustTable with one row per group (or one row for full-table agg)
+    fn agg(&self, group_expr: Option<Bound<'_, PyDict>>, agg_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+        crate::ops::advanced::agg_impl(self, group_expr, agg_dict)
+    }
+
+    /// Filter rows using a raw SQL WHERE clause
+    ///
+    /// This is used internally by group_ordered().filter() to execute SQL filtering
+    /// on the flattened grouped table.
+    ///
+    /// Args:
+    ///     where_clause: Raw SQL WHERE clause string (e.g., "__group_count__ > 2")
+    ///
+    /// Returns:
+    ///     New RustTable with rows matching the WHERE clause
+    fn filter_where(&self, where_clause: &str) -> PyResult<RustTable> {
+        crate::ops::advanced::filter_where_impl(self, where_clause)
     }
 
     /// Phase 8B: Join two tables using pointer-based foreign keys

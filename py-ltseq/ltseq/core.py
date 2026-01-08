@@ -658,6 +658,72 @@ class LTSeq:
         # Return a NestedTable wrapping this LTSeq
         return NestedTable(self, grouping_fn)
 
+    def agg(self, by: Optional[Callable] = None, **aggregations) -> "LTSeq":
+        """
+        Aggregate rows into a summary table with one row per group.
+
+        This is the traditional SQL GROUP BY operation, returning one row
+        per unique grouping key with computed aggregates.
+
+        Args:
+            by: Optional grouping key lambda (e.g., lambda r: r.region).
+                If None, aggregates entire table into a single row.
+                Can return a single column or a list of columns for composite keys.
+            **aggregations: Named aggregation expressions using group proxies.
+                           Example: sum_sales=lambda g: g.sales.sum()
+                           Supports: g.col.sum(), g.col.count(), g.col.min(),
+                                    g.col.max(), g.col.avg(), g.count()
+
+        Returns:
+            New LTSeq with aggregated results (one row per group)
+
+        Raises:
+            ValueError: If schema is not initialized
+            TypeError: If lambda doesn't return valid expressions
+
+        Examples:
+            >>> # Total sales by region
+            >>> t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
+            >>> # Multiple aggregations
+            >>> t.agg(
+            ...     by=lambda r: [r.region, r.year],
+            ...     total_sales=lambda g: g.sales.sum(),
+            ...     avg_price=lambda g: g.price.avg(),
+            ...     max_quantity=lambda g: g.quantity.max()
+            ... )
+            >>> # Full-table aggregation (no grouping)
+            >>> t.agg(total=lambda g: g.sales.sum(), count=lambda g: g.id.count())
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Extract grouping expression if provided
+        group_expr = None
+        if by is not None:
+            group_expr = self._capture_expr(by)
+
+        # Extract aggregation expressions
+        agg_dict = {}
+        for agg_name, agg_lambda in aggregations.items():
+            agg_dict[agg_name] = self._capture_expr(agg_lambda)
+
+        # Call Rust implementation
+        result = LTSeq()
+        result._inner = self._inner.agg(group_expr, agg_dict)
+
+        # Schema will be updated by Rust side (group columns + agg columns)
+        # Infer it from the materialized data
+        try:
+            result_pd = result.to_pandas()
+            result._schema = {col: "Unknown" for col in result_pd.columns}
+        except Exception:
+            # If materialization fails, use a default schema
+            result._schema = {}
+
+        return result
+
     def link(
         self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
     ) -> "LinkedTable":
