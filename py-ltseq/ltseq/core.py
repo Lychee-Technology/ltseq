@@ -1213,7 +1213,7 @@ class LTSeq:
                 "pivot() requires pandas. Install it with: pip install pandas"
             )
 
-        # Convert to pandas DataFrame
+        # Convert to pandas DataFrame (optimization: single conversion)
         df = self.to_pandas()
 
         # Map agg_fn string to pandas aggregation function name
@@ -1225,27 +1225,52 @@ class LTSeq:
             "max": "max",
         }
 
-        # Perform pivot_table operation
-        pivoted_df = df.pivot_table(
-            index=index_cols,
-            columns=columns,
-            values=values,
-            aggfunc=agg_fn_map[agg_fn],
-        )
+        # Optimization: Use groupby().unstack() instead of pivot_table
+        # This is more efficient as it avoids internal sorting and MultiIndex creation
+        # However, when values column appears in index or columns, we must use pivot_table
+        # to avoid pandas groupby ambiguity issues
 
-        # Reset index to convert MultiIndex back to regular columns
+        if values in (index_cols + [columns]):
+            # Edge case: values column also appears as index or columns
+            # Fall back to pivot_table to handle this properly
+            pivoted_df = df.pivot_table(
+                index=index_cols,
+                columns=columns,
+                values=values,
+                aggfunc=agg_fn_map[agg_fn],
+            )
+        else:
+            # Optimized path: Use groupby().unstack()
+            # We only select the necessary columns first to minimize memory usage
+            selected_cols = index_cols + [columns, values]
+            df_subset = df[selected_cols]
+
+            # Group by index and columns, aggregate values
+            grouped = df_subset.groupby(index_cols + [columns], sort=True)[values].agg(
+                agg_fn_map[agg_fn]
+            )
+
+            # Unstack the columns parameter to create the pivot
+            pivoted_df = grouped.unstack(columns, fill_value=0)
+
+        # Reset index to convert index to regular columns
         pivoted_df = pivoted_df.reset_index()
 
-        # Flatten column names if MultiIndex (can happen with multiple value columns)
+        # Flatten column names (unstack creates MultiIndex in columns)
+        # Only flatten if MultiIndex, otherwise keep as-is
         if isinstance(pivoted_df.columns, pd.MultiIndex):
             pivoted_df.columns = [
                 "_".join(col).strip("_") for col in pivoted_df.columns.values
             ]
+        else:
+            # Ensure column names are strings (unstack may create numeric names)
+            pivoted_df.columns = [str(col) for col in pivoted_df.columns]
 
         # Infer schema from pivoted DataFrame
         schema = {col: "Unknown" for col in pivoted_df.columns}
 
         # Convert back to LTSeq using _from_rows
+        # Optimization: Convert to records only once
         rows = pivoted_df.to_dict("records")
         result = LTSeq._from_rows(rows, schema)
 
