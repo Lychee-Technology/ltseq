@@ -156,6 +156,27 @@ pub fn format_cell(column: &dyn arrow::array::Array, row_idx: usize) -> String {
         arr.value(row_idx).to_string()
     } else if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
         arr.value(row_idx).to_string()
+    } else if let Some(arr) = column.as_any().downcast_ref::<StringViewArray>() {
+        arr.value(row_idx).to_string()
+    } else if let Some(arr) = column.as_any().downcast_ref::<Date32Array>() {
+        // Format Date32 as YYYY-MM-DD
+        use arrow::temporal_conversions;
+        let date = arr.value(row_idx);
+        match temporal_conversions::date32_to_datetime(date) {
+            Some(datetime) => {
+                // NaiveDateTime has a format method
+                datetime.format("%Y-%m-%d").to_string()
+            }
+            None => "".to_string(),
+        }
+    } else if let Some(arr) = column.as_any().downcast_ref::<Date64Array>() {
+        // Format Date64 as YYYY-MM-DD
+        use arrow::temporal_conversions;
+        let ms = arr.value(row_idx);
+        match temporal_conversions::date64_to_datetime(ms) {
+            Some(datetime) => datetime.format("%Y-%m-%d").to_string(),
+            None => "".to_string(),
+        }
     } else if let Some(arr) = column.as_any().downcast_ref::<Int8Array>() {
         arr.value(row_idx).to_string()
     } else if let Some(arr) = column.as_any().downcast_ref::<Int16Array>() {

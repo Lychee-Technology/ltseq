@@ -237,6 +237,14 @@ class NestedTable:
         self._group_filter = None
         self._group_derive = None
 
+    def __len__(self) -> int:
+        """Return the number of rows in the grouped table."""
+        return len(self._ltseq.to_pandas())
+
+    def to_pandas(self):
+        """Convert the grouped table to a pandas DataFrame."""
+        return self._ltseq.to_pandas()
+
     def first(self) -> "LTSeq":
         """
         Get the first row of each group.
@@ -441,6 +449,21 @@ class NestedTable:
                 result = group_predicate(group_proxy)
                 if result:
                     passing_group_ids.add(group_id)
+            except AttributeError as e:
+                # Provide helpful error message with supported methods
+                supported_methods = """
+Supported group methods:
+- g.count() - number of rows in group
+- g.first().column - first row's column value
+- g.last().column - last row's column value
+- g.max('column') - maximum value in column
+- g.min('column') - minimum value in column
+- g.sum('column') - sum of column values
+- g.avg('column') - average of column values
+"""
+                raise ValueError(
+                    f"Error evaluating filter predicate on group {group_id}: {e}\n{supported_methods}"
+                )
             except Exception as e:
                 raise ValueError(
                     f"Error evaluating filter predicate on group {group_id}: {e}"
@@ -457,8 +480,12 @@ class NestedTable:
         rows = result_df.to_dict("records")
         schema = self._ltseq._schema.copy()
 
-        result = self._ltseq.__class__._from_rows(rows, schema)
-        return result
+        result_ltseq = self._ltseq.__class__._from_rows(rows, schema)
+
+        # Return a new NestedTable with the same grouping lambda
+        # This allows chaining filter().derive() in the same grouping context
+        result_nested = NestedTable(result_ltseq, self._grouping_lambda)
+        return result_nested
 
     def _get_unsupported_filter_error(self, source: str) -> str:
         """Generate detailed error message for unsupported filter patterns."""

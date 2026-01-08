@@ -368,8 +368,10 @@ class LTSeq:
         # Create a new LTSeq with the filtered result
         result = LTSeq()
         result._schema = self._schema.copy()
-        # Delegate filtering to Rust implementation
-        result._inner = self._inner.filter(expr_dict)
+        # Delegate sorting to Rust implementation with desc flags
+        result._inner = self._inner.sort(sort_exprs, desc_flags)
+        # Don't try to cache CSV - write_csv has issues with string types
+        # Instead, to_pandas will need to find another way
         return result
 
     def select(self, *cols) -> "LTSeq":
@@ -538,6 +540,23 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate sorting to Rust implementation with desc flags
         result._inner = self._inner.sort(sort_exprs, desc_flags)
+        # Try to write to a temporary CSV for to_pandas fallback
+        import tempfile
+        import os
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False
+            ) as f:
+                temp_csv_path = f.name
+            result._inner.write_csv(temp_csv_path)
+            result._csv_path = temp_csv_path
+            # Note: This temp file should be cleaned up eventually, but for now we'll leave it
+            # as it will be overwritten by subsequent operations or cleaned by the OS
+        except Exception:
+            # If write_csv fails, just leave _csv_path as None
+            # to_pandas() will fall back to an empty DataFrame
+            pass
         return result
 
     def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":

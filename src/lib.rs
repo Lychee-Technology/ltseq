@@ -667,6 +667,94 @@ impl RustTable {
     /// # Returns
     ///
     /// Boolean indicating if this table is a subset of the other
+    fn write_csv(&self, path: String) -> PyResult<()> {
+        let df = self.dataframe.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first.",
+            )
+        })?;
+
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
+        })?;
+
+        RUNTIME.block_on(async {
+            use std::fs::File;
+            use std::io::Write;
+
+            let df_clone = (**df).clone();
+            let batches = df_clone.collect().await.map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to collect data: {}",
+                    e
+                ))
+            })?;
+
+            let mut file = File::create(&path).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to create file '{}': {}",
+                    path, e
+                ))
+            })?;
+
+            // Write header
+            let fields: Vec<String> = schema.fields().iter()
+                .map(|f| f.name().clone())
+                .collect();
+            writeln!(file, "{}", fields.join(",")).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to write CSV header: {}",
+                    e
+                ))
+            })?;
+
+            // Write data rows
+            for batch in batches {
+                for row_idx in 0..batch.num_rows() {
+                    let mut row_values = Vec::new();
+                    for col_idx in 0..batch.num_columns() {
+                        let column = batch.column(col_idx);
+                        let value_str = if column.is_null(row_idx) {
+                            "".to_string()
+                        } else {
+                            // Use format_cell which has comprehensive type handling
+                            let mut formatted = crate::format::format_cell(&**column, row_idx);
+                            // Replace "[unsupported type]" with empty string for CSV  
+                            // and remove "None" for null values
+                            if formatted == "[unsupported type]" || formatted == "None" {
+                                "".to_string()
+                            } else {
+                                formatted
+                            }
+                        };
+                        row_values.push(value_str);
+                    }
+                    writeln!(file, "{}", row_values.join(",")).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to write CSV row: {}",
+                            e
+                        ))
+                    })?;
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+
+    fn debug_schema(&self) -> PyResult<String> {
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
+        })?;
+        
+        let mut output = String::new();
+        for field in schema.fields() {
+            output.push_str(&format!("{}: {}\n", field.name(), field.data_type()));
+        }
+        Ok(output)
+    }
+
     fn is_subset(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<bool> {
         crate::ops::basic::is_subset_impl(self, other, key_expr_dict)
     }
