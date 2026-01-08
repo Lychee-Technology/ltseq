@@ -137,6 +137,7 @@ class LTSeq:
             )
         self._inner = ltseq_core.RustTable()
         self._schema: Dict[str, str] = {}
+        self._csv_path: Optional[str] = None  # Track original CSV file for to_pandas()
 
     @classmethod
     def read_csv(cls, path: str) -> "LTSeq":
@@ -157,8 +158,64 @@ class LTSeq:
         """
         t = cls()
         t._schema = _infer_schema_from_csv(path)
+        t._csv_path = path  # Store path for to_pandas() fallback
         # Call Rust RustTable.read_csv to load the actual data
         t._inner.read_csv(path)
+        return t
+
+    @classmethod
+    def _from_rows(cls, rows: list[Dict[str, Any]], schema: Dict[str, str]) -> "LTSeq":
+        """
+        Create an LTSeq instance from a list of row dictionaries.
+
+        Internal method used by partition() and similar operations.
+
+        Args:
+            rows: List of dictionaries, one per row
+            schema: Column schema as {column_name: column_type_string}
+
+        Returns:
+            New LTSeq instance
+        """
+        import tempfile
+        import csv
+        import os
+
+        if not rows:
+            # Create empty table with schema
+            t = cls()
+            t._schema = schema
+            # Still need to initialize _inner with empty data
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False, newline=""
+            ) as f:
+                writer = csv.DictWriter(f, fieldnames=schema.keys())
+                writer.writeheader()
+                temp_path = f.name
+            try:
+                t._inner.read_csv(temp_path)
+                t._csv_path = None  # Don't use the deleted temp file
+            finally:
+                os.unlink(temp_path)
+            return t
+
+        # Convert rows to CSV and load
+        # We need to keep the CSV file around for lazy loading
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, newline=""
+        ) as f:
+            writer = csv.DictWriter(f, fieldnames=schema.keys())
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+            temp_path = f.name
+
+        # Create the LTSeq and use the temp file as the source
+        t = cls.read_csv(temp_path)
+        # The temp file will be deleted by the OS eventually, but keep it around
+        # for now by using it as _csv_path
+        # This is a limitation: temp files won't be cleaned up automatically
+        # A better solution would be to materialize the data or use a cache directory
         return t
 
     def write_csv(self, path: str) -> None:
@@ -209,11 +266,11 @@ class LTSeq:
                 "to_pandas() requires pandas. Install it with: pip install pandas"
             )
 
-        # Convert to dict format via Rust's to_dict method (if available)
-        # For now, we'll use show() to get the table and parse it
-        # Better approach: add to_dict() to Rust backend
+        # If we have the original CSV path, read it directly
+        if self._csv_path:
+            return pd.read_csv(self._csv_path)
 
-        # Fallback: use CSV round-trip
+        # Otherwise, use CSV round-trip via write_csv
         import tempfile
         import os
 
@@ -1009,3 +1066,40 @@ class LTSeq:
 
         # Return a LinkedTable wrapping both tables
         return LinkedTable(self, target_table, on, as_, join_type)
+
+    def partition(self, by: Callable) -> "PartitionedTable":
+        """
+        Partition the table into groups based on a key function.
+
+        Unlike group_ordered() which handles consecutive groups, partition()
+        groups all rows with the same key value regardless of their position
+        in the table.
+
+        Args:
+            by: Lambda that returns the partition key (e.g., lambda r: r.region).
+                Will be evaluated on each row to determine its partition.
+
+        Returns:
+            A PartitionedTable that supports dict-like access and iteration
+
+        Raises:
+            ValueError: If schema is not initialized
+
+        Example:
+            >>> t = LTSeq.read_csv("sales.csv")
+            >>> partitions = t.partition(by=lambda r: r.region)
+            >>> west_sales = partitions["West"]  # Access by key
+            >>> for region, data in partitions.items():
+            ...     print(f"{region}: {len(data)} rows")
+            >>> # Apply aggregation to each partition
+            >>> totals = partitions.map(lambda t: t.agg(total=lambda g: g.sales.sum()))
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Import here to avoid circular imports
+        from .partitioning import PartitionedTable
+
+        return PartitionedTable(self, by)
