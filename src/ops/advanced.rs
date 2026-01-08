@@ -327,11 +327,12 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
             ))
         })?;
 
-    // Execute SQL query to compute group_id
+    // Execute SQL query to compute group_id and group_count
     // Algorithm:
     // 1. Add ROW_NUMBER() for tracking row positions
     // 2. Use CASE WHEN to create mask (1 when value changes or first row, 0 otherwise)
     // 3. SUM(mask) OVER (ORDER BY rownum) gives cumulative group IDs
+    // 4. COUNT(*) OVER (PARTITION BY group_id) gives row count per group
     let sql_query = format!(
         r#"WITH numbered AS (
           SELECT *, ROW_NUMBER() OVER () as __row_num FROM {}
@@ -344,10 +345,15 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
               ELSE 0
             END as __mask
           FROM numbered
+        ),
+        grouped AS (
+          SELECT *,
+            SUM(__mask) OVER (ORDER BY __row_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as __group_id__
+          FROM masked
         )
         SELECT * EXCEPT (__row_num, __mask),
-          SUM(__mask) OVER (ORDER BY __row_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as __group_id__
-        FROM masked"#,
+          COUNT(*) OVER (PARTITION BY __group_id__) as __group_count__
+        FROM grouped"#,
         temp_table_name, grouping_col_name, grouping_col_name
     );
 

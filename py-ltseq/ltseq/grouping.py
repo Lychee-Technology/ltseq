@@ -26,8 +26,9 @@ class NestedTable:
         self._grouping_lambda = grouping_lambda
         self._schema = ltseq_instance._schema.copy()
 
-        # Add internal group_id column to schema
+        # Add internal group columns to schema
         self._schema["__group_id__"] = "int64"
+        self._schema["__group_count__"] = "int64"
 
     def first(self) -> "ColumnExpr":
         """
