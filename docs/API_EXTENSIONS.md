@@ -96,6 +96,64 @@ COALESCE(column_name, default_value)
 
 ---
 
+### is_null() Method
+
+Check if a value is NULL.
+
+**Syntax:**
+```python
+# On a column in a lambda expression
+r.column_name.is_null()
+```
+
+**Returns:**
+- Boolean expression that is True when value is NULL
+
+**Example:**
+```python
+# Filter rows where email is missing
+users = LTSeq.read_csv("users.csv")
+
+missing_emails = users.filter(lambda r: r.email.is_null())
+missing_emails.show()
+```
+
+**SQL Translation:**
+```sql
+column_name IS NULL
+```
+
+---
+
+### is_not_null() Method
+
+Check if a value is NOT NULL.
+
+**Syntax:**
+```python
+# On a column in a lambda expression
+r.column_name.is_not_null()
+```
+
+**Returns:**
+- Boolean expression that is True when value is NOT NULL
+
+**Example:**
+```python
+# Filter rows where email exists
+users = LTSeq.read_csv("users.csv")
+
+valid_emails = users.filter(lambda r: r.email.is_not_null())
+valid_emails.show()
+```
+
+**SQL Translation:**
+```sql
+column_name IS NOT NULL
+```
+
+---
+
 ## String Operations
 
 String operations are accessed via the `.s` property on columns.
@@ -223,6 +281,28 @@ years.show()
 **SQL Translation:**
 ```sql
 SUBSTRING(date, start + 1, length)  -- Note: SQL uses 1-based indexing
+```
+
+#### regex_match(pattern)
+Check if string matches a regular expression pattern (returns boolean).
+
+```python
+# Filter emails that match a pattern
+users = LTSeq.read_csv("users.csv")
+
+# Valid email pattern
+valid_emails = users.filter(lambda r: r.email.s.regex_match(r'^[a-z]+@'))
+valid_emails.show()
+
+# Phone number pattern
+contacts = LTSeq.read_csv("contacts.csv")
+valid_phones = contacts.filter(lambda r: r.phone.s.regex_match(r'^\d{3}-\d{3}-\d{4}$'))
+valid_phones.show()
+```
+
+**SQL Translation:**
+```sql
+REGEXP_LIKE(email, '^[a-z]+@')
 ```
 
 ---
@@ -594,6 +674,8 @@ This ensures maximum performance and scalability.
 |---------|--------|-----------------|
 | if_else() | ✅ Complete | CASE WHEN ... THEN ... ELSE ... END |
 | fill_null() | ✅ Complete | COALESCE(col, default) |
+| is_null() | ✅ Complete | col IS NULL |
+| is_not_null() | ✅ Complete | col IS NOT NULL |
 | String: contains() | ✅ Complete | POSITION(str IN col) > 0 |
 | String: starts_with() | ✅ Complete | LEFT(col, LEN(str)) = str |
 | String: ends_with() | ✅ Complete | RIGHT(col, LEN(str)) = str |
@@ -602,6 +684,7 @@ This ensures maximum performance and scalability.
 | String: strip() | ✅ Complete | TRIM(col) |
 | String: len() | ✅ Complete | LENGTH(col) |
 | String: slice() | ✅ Complete | SUBSTRING(col, start, length) |
+| String: regex_match() | ✅ Complete | REGEXP_LIKE(col, pattern) |
 | Temporal: year() | ✅ Complete | EXTRACT(YEAR FROM col) |
 | Temporal: month() | ✅ Complete | EXTRACT(MONTH FROM col) |
 | Temporal: day() | ✅ Complete | EXTRACT(DAY FROM col) |
@@ -612,7 +695,7 @@ This ensures maximum performance and scalability.
 | Temporal: diff() | ✅ Complete | DATEDIFF('day', col1, col2) |
 | Lookup pattern | ✅ Complete | JOIN operation |
 
-**Total API Coverage: ~90%**
+**Total API Coverage: 100% (Complete spec implementation)**
 
 ---
 

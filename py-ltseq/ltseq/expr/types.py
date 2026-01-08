@@ -149,6 +149,20 @@ class StringAccessor:
         """Extract substring: start position and length."""
         return CallExpr("str_slice", (start, length), {}, on=self._column)
 
+    def regex_match(self, pattern: str) -> "CallExpr":
+        """Check if string matches a regular expression pattern (returns boolean).
+
+        Args:
+            pattern: Regular expression pattern to match against
+
+        Returns:
+            Boolean expression that is True when pattern matches
+
+        Example:
+            >>> t.filter(lambda r: r.email.s.regex_match(r'^[a-z]+@'))
+        """
+        return CallExpr("str_regex_match", (pattern,), {}, on=self._column)
+
 
 class TemporalAccessor:
     """

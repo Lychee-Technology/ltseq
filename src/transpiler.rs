@@ -366,6 +366,14 @@ fn sql_call(
             let default_sql = pyexpr_to_sql(&args[0], schema)?;
             Ok(format!("COALESCE({}, {})", on_sql, default_sql))
         }
+        "is_null" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            Ok(format!("{} IS NULL", on_sql))
+        }
+        "is_not_null" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            Ok(format!("{} IS NOT NULL", on_sql))
+        }
         // String operations
         "str_contains" => {
             let on_sql = pyexpr_to_sql(on, schema)?;
@@ -419,6 +427,14 @@ fn sql_call(
             let length = pyexpr_to_sql(&args[1], schema)?;
             // SQL uses 1-based indexing, Python uses 0-based
             Ok(format!("SUBSTRING({}, {} + 1, {})", on_sql, start, length))
+        }
+        "str_regex_match" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            if args.is_empty() {
+                return Err("str_regex_match requires a pattern argument".to_string());
+            }
+            let pattern = pyexpr_to_sql(&args[0], schema)?;
+            Ok(format!("REGEXP_LIKE({}, {})", on_sql, pattern))
         }
         // Temporal operations
         "dt_year" => {

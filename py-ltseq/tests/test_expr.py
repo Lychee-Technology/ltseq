@@ -312,5 +312,108 @@ class TestComplexExpressions:
         assert serialized["right"]["op"] == "Sub"
 
 
+class TestNullHandling:
+    """Tests for null handling expressions"""
+
+    def test_is_null(self):
+        """col.is_null() creates CallExpr with is_null"""
+        col = ColumnExpr("email")
+        expr = col.is_null()
+        serialized = expr.serialize()
+        assert serialized["type"] == "Call"
+        assert serialized["func"] == "is_null"
+        assert serialized["on"]["type"] == "Column"
+        assert serialized["args"] == []
+
+    def test_is_not_null(self):
+        """col.is_not_null() creates CallExpr with is_not_null"""
+        col = ColumnExpr("email")
+        expr = col.is_not_null()
+        serialized = expr.serialize()
+        assert serialized["type"] == "Call"
+        assert serialized["func"] == "is_not_null"
+        assert serialized["on"]["type"] == "Column"
+
+    def test_fill_null(self):
+        """col.fill_null(default) creates CallExpr with fill_null"""
+        col = ColumnExpr("name")
+        expr = col.fill_null("unknown")
+        serialized = expr.serialize()
+        assert serialized["func"] == "fill_null"
+        assert serialized["args"][0]["value"] == "unknown"
+
+
+class TestStringAccessor:
+    """Tests for StringAccessor methods"""
+
+    def test_regex_match(self):
+        """col.s.regex_match(pattern) creates CallExpr"""
+        col = ColumnExpr("email")
+        expr = col.s.regex_match(r"^[a-z]+@")
+        serialized = expr.serialize()
+        assert serialized["type"] == "Call"
+        assert serialized["func"] == "str_regex_match"
+        assert serialized["args"][0]["value"] == r"^[a-z]+@"
+        assert serialized["on"]["type"] == "Column"
+
+    def test_contains(self):
+        """col.s.contains(pattern) creates CallExpr"""
+        col = ColumnExpr("name")
+        expr = col.s.contains("test")
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_contains"
+
+    def test_starts_with(self):
+        """col.s.starts_with(prefix) creates CallExpr"""
+        col = ColumnExpr("url")
+        expr = col.s.starts_with("https://")
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_starts_with"
+
+    def test_ends_with(self):
+        """col.s.ends_with(suffix) creates CallExpr"""
+        col = ColumnExpr("file")
+        expr = col.s.ends_with(".csv")
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_ends_with"
+
+    def test_lower(self):
+        """col.s.lower() creates CallExpr"""
+        col = ColumnExpr("name")
+        expr = col.s.lower()
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_lower"
+
+    def test_upper(self):
+        """col.s.upper() creates CallExpr"""
+        col = ColumnExpr("name")
+        expr = col.s.upper()
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_upper"
+
+    def test_strip(self):
+        """col.s.strip() creates CallExpr"""
+        col = ColumnExpr("text")
+        expr = col.s.strip()
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_strip"
+
+    def test_len(self):
+        """col.s.len() creates CallExpr"""
+        col = ColumnExpr("text")
+        expr = col.s.len()
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_len"
+
+    def test_slice(self):
+        """col.s.slice(start, length) creates CallExpr"""
+        col = ColumnExpr("text")
+        expr = col.s.slice(0, 5)
+        serialized = expr.serialize()
+        assert serialized["func"] == "str_slice"
+        assert serialized["args"][0]["value"] == 0
+        assert serialized["args"][1]["value"] == 5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

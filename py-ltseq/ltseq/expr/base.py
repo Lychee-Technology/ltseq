@@ -203,6 +203,34 @@ class Expr(ABC):
 
         return CallExpr("fill_null", (self._coerce(default),), {}, on=self)
 
+    def is_null(self) -> "CallExpr":
+        """
+        Check if the value is null.
+
+        Returns:
+            Boolean expression that is True when value is null
+
+        Example:
+            >>> t.filter(lambda r: r.email.is_null())
+        """
+        from .types import CallExpr
+
+        return CallExpr("is_null", (), {}, on=self)
+
+    def is_not_null(self) -> "CallExpr":
+        """
+        Check if the value is not null.
+
+        Returns:
+            Boolean expression that is True when value is not null
+
+        Example:
+            >>> t.filter(lambda r: r.email.is_not_null())
+        """
+        from .types import CallExpr
+
+        return CallExpr("is_not_null", (), {}, on=self)
+
     @staticmethod
     def _coerce(value: Any) -> "Expr":
         """
