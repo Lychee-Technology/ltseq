@@ -364,11 +364,12 @@ impl RustTable {
     ///
     /// Args:
     ///     sort_exprs: List of serialized expression dicts (from Python)
+    ///     desc_flags: List of boolean flags indicating descending order per sort key
     ///
     /// Returns:
     ///     New RustTable with sorted data
-    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
-        crate::ops::advanced::sort_impl(self, sort_exprs)
+    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<RustTable> {
+        crate::ops::advanced::sort_impl(self, sort_exprs, desc_flags)
     }
 
     /// Remove duplicate rows based on key columns

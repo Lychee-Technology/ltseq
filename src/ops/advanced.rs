@@ -12,11 +12,15 @@
 //!
 //! ## Sort (sort_impl)
 //! 
-//! Sorts table rows by one or more key expressions. The implementation:
+//! Sorts table rows by one or more key expressions with optional descending order. The implementation:
 //! - Deserializes Python expression dicts → PyExpr
-//! - Transpiles PyExpr → DataFusion SortExpr (ascending order)
+//! - Transpiles PyExpr → DataFusion SortExpr (with configurable asc/desc per key)
 //! - Captures sort keys for later window function use (Phase 6)
 //! - Executes multi-level sort via DataFusion
+//!
+//! **Phase B1 Enhancement**: Added desc_flags parameter to support descending sort
+//! - asc = !is_desc (invert the flag)
+//! - nulls_first = is_desc (for descending, put NULLs first by default)
 //!
 //! **Key Feature**: Stores sort_exprs in RustTable for window function context
 //!
@@ -158,7 +162,7 @@ fn extract_cols_from_and(
 /// Args:
 ///     table: Reference to RustTable
 ///     sort_exprs: List of serialized expression dicts (from Python)
-pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<RustTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
         return Ok(RustTable {
@@ -181,8 +185,8 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyRes
 
     // Deserialize and transpile each sort expression
     let mut df_sort_exprs = Vec::new();
-    for expr_dict in sort_exprs {
-        let py_expr = dict_to_py_expr(&expr_dict)
+    for (i, expr_dict) in sort_exprs.iter().enumerate() {
+        let py_expr = dict_to_py_expr(expr_dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         // Capture column name if this is a simple column reference
@@ -192,11 +196,16 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>) -> PyRes
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        // Create SortExpr with ascending order (default)
+        
+        // Get desc flag for this sort key
+        let is_desc = desc_flags.get(i).copied().unwrap_or(false);
+        
+        // Create SortExpr with asc = !is_desc
+        // For descending, nulls_first = true by default
         df_sort_exprs.push(SortExpr {
             expr: df_expr,
-            asc: true,
-            nulls_first: false,
+            asc: !is_desc,
+            nulls_first: is_desc,
         });
     }
 

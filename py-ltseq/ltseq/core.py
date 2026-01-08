@@ -357,11 +357,15 @@ class LTSeq:
 
         return result
 
-    def sort(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+    def sort(
+        self, *key_exprs: Union[str, Callable], desc: Union[bool, list] = False
+    ) -> "LTSeq":
         """
-        Sort rows by one or more key expressions in ascending order.
+        Sort rows by one or more key expressions with optional descending order.
 
         Reorders data based on column values. Multiple sort keys are applied in order.
+
+        Phase 8J: Enhanced to support descending sort via `desc` parameter.
 
         Args:
             *key_exprs: Column names (str) or lambda expressions that return sortable values.
@@ -369,18 +373,23 @@ class LTSeq:
                        - sort("date") - sort by date column ascending
                        - sort(lambda r: r.date) - same as above
                        - sort("date", "id") - multi-key sort: first by date, then by id
+            desc: Descending flag(s). Can be:
+                  - Single boolean: applies to all keys. E.g., desc=True means all keys DESC
+                  - List of booleans: one per key. E.g., desc=[False, True] means date ASC, id DESC
+                  - Default: False (all ascending)
 
         Returns:
             A new LTSeq with sorted data
 
         Raises:
-            ValueError: If schema is not initialized
+            ValueError: If schema is not initialized or desc list length doesn't match keys
             AttributeError: If lambda references a non-existent column
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
-            >>> t.sort("name").show()
-            >>> t.sort(lambda r: r.date, lambda r: r.id).show()
+            >>> t.sort("name").show()  # Ascending
+            >>> t.sort("name", desc=True).show()  # Descending
+            >>> t.sort("date", "value", desc=[False, True]).show()  # date ASC, value DESC
         """
         if not self._schema:
             raise ValueError(
@@ -390,11 +399,25 @@ class LTSeq:
         # Collect sort expressions
         sort_exprs = _collect_key_exprs(key_exprs, self._schema, self._capture_expr)
 
+        # Normalize desc parameter to a list of booleans
+        if isinstance(desc, bool):
+            # Single boolean: apply to all keys
+            desc_flags = [desc] * len(sort_exprs)
+        elif isinstance(desc, list):
+            # List of booleans: validate length matches
+            if len(desc) != len(sort_exprs):
+                raise ValueError(
+                    f"desc list length ({len(desc)}) must match number of sort keys ({len(sort_exprs)})"
+                )
+            desc_flags = desc
+        else:
+            raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+
         # Create a new LTSeq with sorted result
         result = LTSeq()
         result._schema = self._schema.copy()
-        # Delegate sorting to Rust implementation
-        result._inner = self._inner.sort(sort_exprs)
+        # Delegate sorting to Rust implementation with desc flags
+        result._inner = self._inner.sort(sort_exprs, desc_flags)
         return result
 
     def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
