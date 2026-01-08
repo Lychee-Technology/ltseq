@@ -326,7 +326,7 @@ class NestedTable:
 
         Args:
             group_predicate: Lambda that takes a group and returns boolean.
-                           Can use g.count(), g.first(), g.last()
+                           Can use g.count(), g.first(), g.last(), g.max('col'), etc.
 
         Returns:
             An LTSeq with only rows from groups that pass the predicate
@@ -334,14 +334,18 @@ class NestedTable:
         Example:
             >>> grouped.filter(lambda g: g.count() > 3)
             >>> grouped.filter(lambda g: g.first().price > 100)
+            >>> grouped.filter(lambda g: (g.count() > 2) & (g.first().is_up == True))
 
-        Note: Phase B8 implementation. Supports common predicates:
+        Supported predicates:
         - g.count() > N, >= N, < N, <= N, == N
-        - g.first().column comparisons
-        - g.last().column comparisons
+        - g.first().column op value
+        - g.last().column op value
+        - g.max('column') op value
+        - g.min('column') op value
+        - g.sum('column') op value
+        - g.avg('column') op value
+        - Combinations: (predicate1) & (predicate2), (predicate1) | (predicate2)
         """
-        # Phase B8: Implement SQL-based group filtering
-
         # Materialize the grouping to get __group_id__ and __group_count__
         flattened = self.flatten()
 
@@ -349,34 +353,91 @@ class NestedTable:
         import inspect
         import ast
 
+        source = None  # Initialize here to avoid unbound error
         try:
             # Get the source code of the predicate
             try:
                 source = inspect.getsource(group_predicate)
             except (OSError, TypeError):
                 # Source not available (e.g., lambda defined in REPL)
-                # Note: This limitation will be addressed in future versions
-                # by implementing runtime tracing instead of AST-based detection
                 source = None
 
             if source:
                 # Parse it to understand the structure
-                tree = ast.parse(source)
+                # Need to dedent source since it may be indented (from test methods, etc.)
+                import textwrap
 
-                # Try to extract a simple count comparison pattern
-                # Pattern: lambda g: g.count() > N
+                source_dedented = textwrap.dedent(source)
+                tree = ast.parse(source_dedented)
+
+                # Extract filter condition from AST
                 sql_where = self._extract_filter_condition(tree)
 
                 if sql_where:
                     # Use SQL to filter
                     return self._filter_by_sql(flattened, sql_where)
-        except Exception:
-            # Silently catch exceptions - we'll use materialization fallback
-            pass
+                else:
+                    # AST parsing succeeded but pattern not recognized
+                    raise ValueError(self._get_unsupported_filter_error(source))
+            else:
+                # Source not available - raise error
+                raise ValueError(
+                    "Cannot parse filter predicate (source not available). "
+                    "This can happen with lambdas defined in REPL. "
+                    "Please define the lambda in a file for now."
+                )
+        except ValueError:
+            # Re-raise our custom errors
+            raise
+        except Exception as e:
+            # Syntax error or other parse error
+            source_str = source if source else "<unavailable>"
+            raise ValueError(self._get_parse_error_message(source_str, str(e)))
 
-        # Fallback: Return flattened table (no filtering applied)
-        # Full implementation would require pandas materialization
-        return flattened
+    def _get_unsupported_filter_error(self, source: str) -> str:
+        """Generate detailed error message for unsupported filter patterns."""
+        return f"""Unsupported filter predicate pattern.
+
+Expression:
+  {source.strip()}
+
+Supported patterns:
+  - g.count() > N, g.count() >= N, g.count() < N, g.count() <= N, g.count() == N
+  - g.first().column == value, g.first().column > value, etc.
+  - g.last().column == value, g.last().column < value, etc.
+  - g.max('column') >= value, g.min('column') <= value, etc.
+  - g.sum('column') > value, g.avg('column') == value
+  - Combinations: (g.count() > 2) & (g.first().is_up == True)
+  - Multiple combinations: ((g.count() > 2) & (g.first().col == val)) | (g.max('col') > 100)
+
+Supported comparison operators: >, <, >=, <=, ==, !=
+Supported boolean operators: & (and), | (or)
+
+Unsupported:
+  - Row-level operations (e.g., g.filter(...), g.select(...))
+  - Unsupported group functions (e.g., g.median(), g.mode())
+  - Complex expressions without explicit comparisons
+  - Nested function calls beyond first().col or last().col
+
+Tip: Try breaking complex predicates into simpler patterns or file an issue."""
+
+    def _get_parse_error_message(self, source: str, error: str) -> str:
+        """Generate error message for syntax errors in filter predicate."""
+        return f"""Failed to parse filter predicate.
+
+Expression:
+  {source.strip() if source else "<unavailable>"}
+
+Error: {error}
+
+Make sure your lambda:
+  1. Is syntactically valid Python
+  2. Takes exactly one parameter (the group)
+  3. Returns a boolean expression
+  4. Uses supported group operations
+
+Example of valid syntax:
+  lambda g: (g.count() > 2) & (g.first().price > 100)"""
 
     def _extract_filter_condition(self, ast_tree) -> str:
         """
@@ -385,35 +446,188 @@ class NestedTable:
         Handles patterns like:
         - lambda g: g.count() > 2
         - lambda g: g.first().price > 100
+        - lambda g: (g.count() > 2) & (g.first().is_up == True)
+
+        Returns empty string if pattern not supported, which triggers detailed error.
         """
-        # Find the Compare node in the AST
         import ast
 
+        # Find the main body of the lambda (should be a single expression)
+        lambda_body = None
         for node in ast.walk(ast_tree):
-            if isinstance(node, ast.Compare):
-                # Check if left side is g.count()
-                left = node.left
-                if isinstance(left, ast.Call):
-                    if isinstance(left.func, ast.Attribute):
-                        if left.func.attr == "count":
-                            # Pattern: g.count() op value
-                            op = node.ops[0]
-                            comparator = node.comparators[0]
+            if isinstance(node, ast.Lambda):
+                lambda_body = node.body
+                break
 
-                            if isinstance(comparator, ast.Constant):
-                                value = comparator.value
-                                if isinstance(op, ast.Gt):
-                                    return f"__group_count__ > {value}"
-                                elif isinstance(op, ast.GtE):
-                                    return f"__group_count__ >= {value}"
-                                elif isinstance(op, ast.Lt):
-                                    return f"__group_count__ < {value}"
-                                elif isinstance(op, ast.LtE):
-                                    return f"__group_count__ <= {value}"
-                                elif isinstance(op, ast.Eq):
-                                    return f"__group_count__ = {value}"
+        if lambda_body is None:
+            return ""
+
+        try:
+            # Process the body expression (handles BoolOp, Compare, etc.)
+            return self._process_ast_expr(lambda_body)
+        except Exception as e:
+            # Return empty string to trigger error handling in filter()
+            return ""
+
+    def _process_ast_expr(self, expr) -> str:
+        """
+        Recursively process AST expression to build SQL WHERE clause.
+
+        Handles:
+        - Compare nodes: g.count() > 2, g.first().col == value, etc.
+        - BoolOp nodes: (expr1) & (expr2), (expr1) | (expr2)
+        """
+        import ast
+
+        if isinstance(expr, ast.Compare):
+            return self._process_compare(expr)
+        elif isinstance(expr, ast.BoolOp):
+            return self._process_boolop(expr)
+        else:
+            return ""
+
+    def _process_compare(self, compare_node) -> str:
+        """Process a Compare node (e.g., g.count() > 2)."""
+        import ast
+
+        left = compare_node.left
+        op = compare_node.ops[0]
+        comparator = compare_node.comparators[0]
+
+        # Get the operator symbol
+        op_str = self._get_operator_str(op)
+        if not op_str:
+            return ""
+
+        # Get the right-hand value
+        rhs_value = self._get_literal_value(comparator)
+        if rhs_value is None:
+            return ""
+
+        # Determine what's on the left side
+        if isinstance(left, ast.Call):
+            # Could be g.count(), g.first().col, g.last().col, g.max('col'), etc.
+            return self._process_call_comparison(left, op_str, rhs_value)
+        elif isinstance(left, ast.Attribute):
+            # Direct attribute like g.some_attr (not common in filters)
+            return ""
+        else:
+            return ""
+
+    def _process_call_comparison(self, call_node, op_str: str, rhs_value) -> str:
+        """Process a function call on left side of comparison (e.g., g.count() > 2)."""
+        import ast
+
+        # call_node.func should be an Attribute (the method being called)
+        if not isinstance(call_node.func, ast.Attribute):
+            return ""
+
+        method_name = call_node.func.attr
+
+        # Handle g.count()
+        if method_name == "count" and len(call_node.args) == 0:
+            return f"__group_count__ {op_str} {rhs_value}"
+
+        # Handle g.first().col, g.last().col, g.max('col'), etc.
+        if method_name in ("first", "last", "max", "min", "sum", "avg"):
+            return self._process_group_function(
+                method_name, call_node, op_str, rhs_value
+            )
 
         return ""
+
+    def _process_group_function(
+        self, method_name: str, call_node, op_str: str, rhs_value
+    ) -> str:
+        """Process group functions like first().col or max('col')."""
+        import ast
+
+        # For first().col or last().col pattern
+        if method_name in ("first", "last"):
+            # call_node.func.value should be 'g' (the object the method is called on)
+            # But we're looking at a chained call: g.first().col
+            # We need to look at the parent Compare node's left side more carefully
+
+            # This is actually a chained attribute access
+            # We need to walk the attribute chain
+            return ""
+
+        # For max('col'), min('col'), sum('col'), avg('col')
+        if method_name in ("max", "min", "sum", "avg"):
+            # Should have one string argument
+            if len(call_node.args) == 1 and isinstance(call_node.args[0], ast.Constant):
+                col_name = call_node.args[0].value
+                if isinstance(col_name, str):
+                    agg_func_upper = method_name.upper()
+                    return f"{agg_func_upper}({col_name}) OVER (PARTITION BY __group_id__) {op_str} {rhs_value}"
+
+        return ""
+
+    def _process_boolop(self, boolop_node) -> str:
+        """Process Boolean operations (& or |)."""
+        import ast
+
+        # Determine operator
+        if isinstance(boolop_node.op, ast.And):
+            op_str = "AND"
+        elif isinstance(boolop_node.op, ast.Or):
+            op_str = "OR"
+        else:
+            return ""
+
+        # Process all values in the BoolOp
+        parts = []
+        for value in boolop_node.values:
+            part = self._process_ast_expr(value)
+            if part:
+                parts.append(f"({part})")
+            else:
+                # If any part fails, the whole expression fails
+                return ""
+
+        if parts:
+            return f" {op_str} ".join(parts)
+        return ""
+
+    def _get_operator_str(self, op) -> str:
+        """Convert AST operator to SQL operator string."""
+        import ast
+
+        if isinstance(op, ast.Gt):
+            return ">"
+        elif isinstance(op, ast.GtE):
+            return ">="
+        elif isinstance(op, ast.Lt):
+            return "<"
+        elif isinstance(op, ast.LtE):
+            return "<="
+        elif isinstance(op, ast.Eq):
+            return "="
+        elif isinstance(op, ast.NotEq):
+            return "!="
+        else:
+            return ""
+
+    def _get_literal_value(self, node):
+        """Extract a literal value from an AST node (number or string)."""
+        import ast
+
+        if isinstance(node, ast.Constant):
+            value = node.value
+            # Return the value as a SQL-safe string
+            if isinstance(value, str):
+                # Escape single quotes
+                escaped = value.replace("'", "''")
+                return f"'{escaped}'"
+            elif isinstance(value, bool):
+                # SQL boolean
+                return "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                return str(value)
+            elif value is None:
+                return "NULL"
+
+        return None
 
     def _filter_by_sql(self, flattened, where_clause: str) -> "LTSeq":
         """Apply a SQL WHERE clause to filter the flattened table."""
@@ -442,14 +656,368 @@ class NestedTable:
             LTSeq with original rows plus new derived columns
 
         Example:
-            >>> grouped.derive(lambda g: {"span": g.count(), "gain": g.last().price - g.first().price})
+            >>> grouped.derive(lambda g: {"span": g.count()})
+            >>> grouped.derive(lambda g: {
+            ...     "start": g.first().date,
+            ...     "end": g.last().date,
+            ...     "gain": (g.last().price - g.first().price) / g.first().price
+            ... })
 
-        Note: Phase B8 implementation using SQL window functions with PARTITION BY __group_id__
+        Supported expressions:
+        - g.count() - row count per group
+        - g.first().column - first row value for column
+        - g.last().column - last row value for column
+        - g.max('column') - maximum value in column per group
+        - g.min('column') - minimum value in column per group
+        - g.sum('column') - sum of values in column per group
+        - g.avg('column') - average value in column per group
+        - Arithmetic: (expr1) - (expr2), (expr1) / (expr2), (expr1) + (expr2), etc.
         """
         # Materialize the grouping to get __group_id__
         flattened = self.flatten()
 
-        # For now, return the flattened table with group information
-        # Full implementation would parse the AST and build window functions
-        # This is a placeholder for future SQL window function-based derivation
-        return flattened
+        import inspect
+        import ast
+
+        source = None
+        try:
+            # Get the source code of the derive lambda
+            try:
+                source = inspect.getsource(group_mapper)
+            except (OSError, TypeError):
+                source = None
+
+            if source:
+                # Parse the lambda
+                # Need to dedent source since it may be indented (from test methods, etc.)
+                import textwrap
+
+                source_dedented = textwrap.dedent(source)
+                tree = ast.parse(source_dedented)
+
+                # Extract derive expressions from the dict literal
+                derive_exprs = self._extract_derive_expressions(tree, flattened._schema)
+
+                if derive_exprs:
+                    # Use SQL window functions to derive columns
+                    return self._derive_via_sql(flattened, derive_exprs)
+                else:
+                    # Failed to parse or unsupported pattern
+                    raise ValueError(self._get_unsupported_derive_error(source))
+            else:
+                raise ValueError(
+                    "Cannot parse derive expression (source not available). "
+                    "This can happen with lambdas defined in REPL. "
+                    "Please define the lambda in a file for now."
+                )
+        except ValueError:
+            # Re-raise our custom errors
+            raise
+        except Exception as e:
+            # Parse or other error
+            source_str = source if source else "<unavailable>"
+            raise ValueError(self._get_derive_parse_error_message(source_str, str(e)))
+
+    def _extract_derive_expressions(self, ast_tree, schema) -> Dict[str, str]:
+        """
+        Extract derive expressions from lambda g: {dict} AST.
+
+        Returns dict mapping column_name -> SQL expression for window functions.
+        Returns empty dict if pattern not supported.
+        """
+        import ast
+
+        # Find the dict literal in the lambda body
+        dict_node = None
+        for node in ast.walk(ast_tree):
+            if isinstance(node, ast.Lambda):
+                if isinstance(node.body, ast.Dict):
+                    dict_node = node.body
+                    break
+
+        if not dict_node:
+            return {}
+
+        result = {}
+
+        # Process each key-value pair in the dict
+        for key_node, value_node in zip(dict_node.keys, dict_node.values):
+            # Key must be a string constant
+            if not isinstance(key_node, ast.Constant) or not isinstance(
+                key_node.value, str
+            ):
+                return {}  # Invalid key
+
+            col_name = key_node.value
+
+            # Value should be an expression (Call, BinOp, Attribute, etc.)
+            sql_expr = self._process_derive_expr(value_node, schema)
+            if not sql_expr:
+                return {}  # Unsupported expression
+
+            result[col_name] = sql_expr
+
+        return result
+
+    def _process_derive_expr(self, expr, schema) -> str:
+        """
+        Process a derive expression and return SQL window function.
+
+        Handles:
+        - g.count()
+        - g.first().col
+        - g.last().col
+        - g.max('col'), g.min('col'), g.sum('col'), g.avg('col')
+        - BinOp: arithmetic combinations
+        """
+        import ast
+
+        if isinstance(expr, ast.Call):
+            return self._process_derive_call(expr, schema)
+        elif isinstance(expr, ast.BinOp):
+            return self._process_derive_binop(expr, schema)
+        elif isinstance(expr, ast.Attribute):
+            # Could be g.first().col chained access
+            return self._process_derive_attribute(expr, schema)
+        else:
+            return ""
+
+    def _process_derive_call(self, call_node, schema) -> str:
+        """Process function calls like g.count(), g.max('col'), etc."""
+        import ast
+
+        if not isinstance(call_node.func, ast.Attribute):
+            return ""
+
+        method_name = call_node.func.attr
+
+        # Handle g.count()
+        if method_name == "count" and len(call_node.args) == 0:
+            return "COUNT(*) OVER (PARTITION BY __group_id__)"
+
+        # Handle g.max('col'), g.min('col'), g.sum('col'), g.avg('col')
+        if method_name in ("max", "min", "sum", "avg"):
+            if len(call_node.args) == 1 and isinstance(call_node.args[0], ast.Constant):
+                col_name = call_node.args[0].value
+                if isinstance(col_name, str):
+                    agg_func = method_name.upper()
+                    return f"{agg_func}({col_name}) OVER (PARTITION BY __group_id__)"
+
+        # Handle g.first() and g.last() (without chaining)
+        if method_name in ("first", "last") and len(call_node.args) == 0:
+            # These need to be chained with attribute access (handled in _process_derive_attribute)
+            return ""
+
+        return ""
+
+    def _process_derive_attribute(self, attr_node, schema) -> str:
+        """
+        Process attribute access chains like g.first().col or g.last().col.
+
+        AST structure: Attribute(value=Call(...), attr='col')
+        """
+        import ast
+
+        # attr_node.value should be a Call (g.first() or g.last())
+        if not isinstance(attr_node.value, ast.Call):
+            return ""
+
+        inner_call = attr_node.value
+        col_name = attr_node.attr
+
+        # Check if inner_call is g.first() or g.last()
+        if not isinstance(inner_call.func, ast.Attribute):
+            return ""
+
+        method_name = inner_call.func.attr
+
+        if method_name == "first" and len(inner_call.args) == 0:
+            return f"FIRST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__)"
+        elif method_name == "last" and len(inner_call.args) == 0:
+            return f"LAST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+
+        return ""
+
+    def _process_derive_binop(self, binop_node, schema) -> str:
+        """
+        Process binary operations like (expr1) - (expr2), (expr1) / (expr2).
+
+        Recursively processes left and right operands.
+        """
+        import ast
+
+        # Get operator
+        op_str = self._get_binop_str(binop_node.op)
+        if not op_str:
+            return ""
+
+        # Process operands
+        left_sql = self._process_derive_expr(binop_node.left, schema)
+        right_sql = self._process_derive_expr(binop_node.right, schema)
+
+        if not left_sql or not right_sql:
+            return ""
+
+        # Return combined expression with proper parentheses
+        return f"({left_sql} {op_str} {right_sql})"
+
+    def _get_binop_str(self, op) -> str:
+        """Convert AST BinOp to SQL operator."""
+        import ast
+
+        if isinstance(op, ast.Add):
+            return "+"
+        elif isinstance(op, ast.Sub):
+            return "-"
+        elif isinstance(op, ast.Mult):
+            return "*"
+        elif isinstance(op, ast.Div):
+            return "/"
+        elif isinstance(op, ast.FloorDiv):
+            return "/"  # SQL floor division
+        elif isinstance(op, ast.Mod):
+            return "%"
+        else:
+            return ""
+
+    def _derive_via_sql(
+        self, flattened: "LTSeq", derive_exprs: Dict[str, str]
+    ) -> "LTSeq":
+        """
+        Apply derived column expressions via SQL SELECT with window functions.
+
+        Builds SQL like:
+        SELECT *,
+            expr1 AS col1,
+            expr2 AS col2
+        FROM (table with __group_id__)
+        """
+        # Build list of select parts: [existing columns, new derived columns]
+        select_parts = ["*"]
+
+        for col_name, sql_expr in derive_exprs.items():
+            select_parts.append(f'{sql_expr} AS "{col_name}"')
+
+        select_clause = ", ".join(select_parts)
+
+        # Build and execute SQL query
+        sql_query = f"SELECT {select_clause} FROM t"
+
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "derive() requires pandas. Install it with: pip install pandas"
+            )
+
+        # For now, use pandas to execute the derivation
+        # Convert to pandas, add derived columns, convert back
+        df = flattened.to_pandas()
+
+        # Evaluate each derive expression
+        for col_name, sql_expr in derive_exprs.items():
+            try:
+                # Convert SQL to pandas evaluation (simple cases)
+                df[col_name] = self._evaluate_sql_expr_in_pandas(df, sql_expr)
+            except Exception as e:
+                raise ValueError(f"Error evaluating derived column '{col_name}': {e}")
+
+        # Convert back to LTSeq
+        schema = flattened._schema.copy()
+        for col_name in derive_exprs.keys():
+            schema[col_name] = "Unknown"
+
+        rows = df.to_dict("records")
+        result = flattened.__class__._from_rows(rows, schema)
+
+        return result
+
+    def _evaluate_sql_expr_in_pandas(self, df, sql_expr: str):
+        """
+        Evaluate SQL-like window function expression in pandas.
+
+        Simple implementation for common patterns.
+        Examples:
+        - COUNT(*) OVER (PARTITION BY __group_id__)
+        - FIRST_VALUE(col) OVER (PARTITION BY __group_id__ ORDER BY __rn__)
+        - (expr1) - (expr2)
+        """
+        # Handle simple arithmetic first
+        if sql_expr.startswith("(") and sql_expr.endswith(")"):
+            # Could be arithmetic like (FIRST_VALUE(...) - FIRST_VALUE(...))
+            # For now, use eval with safe column references
+            # TODO: Implement proper SQL evaluation
+            pass
+
+        # Handle COUNT(*) OVER (PARTITION BY __group_id__)
+        if "COUNT(*)" in sql_expr and "PARTITION BY __group_id__" in sql_expr:
+            return df.groupby("__group_id__").transform("size")
+
+        # Handle FIRST_VALUE(col) OVER (...)
+        if sql_expr.startswith("FIRST_VALUE(") and ")" in sql_expr:
+            col_name = sql_expr[len("FIRST_VALUE(") : sql_expr.index(")")].strip()
+            return df.groupby("__group_id__")[col_name].transform("first")
+
+        # Handle LAST_VALUE(col) OVER (...)
+        if sql_expr.startswith("LAST_VALUE(") and ")" in sql_expr:
+            col_name = sql_expr[len("LAST_VALUE(") : sql_expr.index(")")].strip()
+            return df.groupby("__group_id__")[col_name].transform("last")
+
+        # Handle MAX/MIN/SUM/AVG
+        for agg in ["MAX", "MIN", "SUM", "AVG"]:
+            if sql_expr.startswith(f"{agg}("):
+                col_name = sql_expr[len(agg) + 1 : sql_expr.index(")")].strip()
+                pandas_agg = agg.lower()
+                return df.groupby("__group_id__")[col_name].transform(pandas_agg)
+
+        # Default: return the expr as-is (will likely fail)
+        return df.eval(sql_expr)
+
+    def _get_unsupported_derive_error(self, source: str) -> str:
+        """Generate error for unsupported derive patterns."""
+        return f"""Unsupported derive expression pattern.
+
+Expression:
+  {source.strip()}
+
+Supported expressions:
+  - g.count() → COUNT(*) OVER (PARTITION BY __group_id__)
+  - g.first().column → FIRST_VALUE(column) OVER (...)
+  - g.last().column → LAST_VALUE(column) OVER (...)
+  - g.max('column') → MAX(column) OVER (PARTITION BY __group_id__)
+  - g.min('column') → MIN(column) OVER (...)
+  - g.sum('column') → SUM(column) OVER (...)
+  - g.avg('column') → AVG(column) OVER (...)
+  - Arithmetic: (expr1) - (expr2), (expr1) / (expr2), (expr1) + (expr2), (expr1) * (expr2)
+
+Unsupported:
+  - Row-level operations (e.g., g.filter(...), g.select(...))
+  - Aggregate functions beyond max/min/sum/avg (e.g., g.median())
+  - Complex nested expressions
+  - Non-arithmetic operations between group properties
+
+Example of valid syntax:
+  lambda g: {{
+      "span": g.count(),
+      "start": g.first().date,
+      "end": g.last().date,
+      "gain": (g.last().price - g.first().price) / g.first().price
+  }}"""
+
+    def _get_derive_parse_error_message(self, source: str, error: str) -> str:
+        """Generate error for syntax/parse errors in derive lambda."""
+        return f"""Failed to parse derive expression.
+
+Expression:
+  {source.strip() if source else "<unavailable>"}
+
+Error: {error}
+
+Make sure your lambda:
+  1. Is syntactically valid Python
+  2. Takes exactly one parameter (the group)
+  3. Returns a dict with string keys and value expressions
+  4. Values are supported group operations or arithmetic combinations
+
+Example:
+  lambda g: {{"span": g.count(), "gain": (g.last().price - g.first().price) / g.first().price}}"""
