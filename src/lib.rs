@@ -269,6 +269,20 @@ impl RustTable {
         })
     }
 
+    /// Find the first row matching a predicate
+    ///
+    /// This is an optimized version of filter() that returns only the first matching row.
+    /// Much faster than filtering and then taking the first row, especially for large tables.
+    ///
+    /// Args:
+    ///     expr_dict: Serialized filter expression
+    ///
+    /// Returns:
+    ///     New RustTable with at most one row
+    fn search_first(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+        crate::ops::basic::search_first_impl(self, expr_dict)
+    }
+
     /// Select columns or derived expressions
     ///
     /// Args:

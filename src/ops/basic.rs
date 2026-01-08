@@ -170,6 +170,60 @@ pub fn filter_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult
     })
 }
 
+/// Helper function to find the first row matching a predicate
+///
+/// This is an optimized version of filter() that returns only the first matching row.
+/// Much faster than filtering and then taking the first row, especially for large tables.
+///
+/// Args:
+///     table: Reference to RustTable
+///     expr_dict: Serialized filter expression
+pub fn search_first_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded. Call read_csv() first.",
+        )
+    })?;
+
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
+    })?;
+
+    // Deserialize the expression
+    let py_expr = dict_to_py_expr(expr_dict).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+    })?;
+
+    // Transpile to DataFusion Expr
+    let df_expr = pyexpr_to_datafusion(py_expr, schema)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+    // Apply filter and limit to first result
+    let result_df = RUNTIME.block_on(async {
+        (**df)
+            .clone()
+            .filter(df_expr)
+            .map_err(|e| format!("Filter failed: {}", e))?
+            .limit(0, Some(1))
+            .map_err(|e| format!("Limit failed: {}", e))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Get schema from the result DataFrame
+    let df_schema = result_df.schema();
+    let arrow_fields: Vec<Field> =
+        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let new_arrow_schema = ArrowSchema::new(arrow_fields);
+
+    // Return new RustTable
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(Arc::new(new_arrow_schema)),
+        sort_exprs: table.sort_exprs.clone(),
+    })
+}
+
 /// Helper function to select specific columns
 ///
 /// Args:
