@@ -320,6 +320,57 @@ class NestedTable:
 
         return result
 
+    def _remove_comments_from_source(self, source: str) -> str:
+        """
+        Remove Python comments from source code while preserving string literals.
+
+        This is important for multi-line lambdas with inline comments,
+        which would otherwise break AST parsing.
+        """
+        import re
+
+        lines = source.split("\n")
+        result_lines = []
+
+        for line in lines:
+            # Remove comments that are not inside strings
+            # Simple approach: find # not inside quotes
+            in_string = False
+            quote_char = None
+            result = []
+
+            i = 0
+            while i < len(line):
+                char = line[i]
+
+                # Track string state
+                if char in ('"', "'") and (i == 0 or line[i - 1] != "\\"):
+                    if not in_string:
+                        in_string = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_string = False
+                        quote_char = None
+
+                # Handle comments
+                if char == "#" and not in_string:
+                    # Rest of line is comment, skip it
+                    break
+
+                result.append(char)
+                i += 1
+
+            # Preserve trailing whitespace context but strip trailing spaces
+            result_lines.append("".join(result).rstrip())
+
+        # Join lines, removing empty lines that could break continuation
+        final_result = []
+        for line in result_lines:
+            if line.strip():  # Only keep non-empty lines
+                final_result.append(line)
+
+        return "\n".join(final_result)
+
     def filter(self, group_predicate: Callable) -> "LTSeq":
         """
         Filter groups based on a predicate on group properties.
@@ -346,53 +397,68 @@ class NestedTable:
         - g.avg('column') op value
         - Combinations: (predicate1) & (predicate2), (predicate1) | (predicate2)
         """
-        # Materialize the grouping to get __group_id__ and __group_count__
-        flattened = self.flatten()
-
-        # Try to detect the predicate pattern and build SQL
-        import inspect
-        import ast
-
-        source = None  # Initialize here to avoid unbound error
+        # Convert to pandas for evaluation (similar to derive)
         try:
-            # Get the source code of the predicate
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "filter() requires pandas. Install it with: pip install pandas"
+            )
+
+        # Convert to pandas using the original table
+        df = self._ltseq.to_pandas()
+
+        # Add __group_id__ column by computing grouping for each row
+        group_values = []
+        group_id = 0
+        prev_group_val = None
+
+        for idx, row in df.iterrows():
+            # Call the grouping lambda on this row
+            row_proxy = RowProxy(row.to_dict())
+            group_val = self._grouping_lambda(row_proxy)
+
+            # If group value changed, increment group_id
+            if prev_group_val is None or group_val != prev_group_val:
+                group_id += 1
+                prev_group_val = group_val
+
+            group_values.append(group_id)
+
+        df["__group_id__"] = group_values
+        df["__group_count__"] = df.groupby("__group_id__").transform("size")
+
+        # Group by __group_id__ and evaluate predicate for each group
+        group_by_id = df.groupby("__group_id__")
+        passing_group_ids = set()
+
+        for group_id, group_df in group_by_id:
+            # Create a GroupProxy for this group
+            group_proxy = GroupProxy(group_df, self)
+
+            # Evaluate the predicate
             try:
-                source = inspect.getsource(group_predicate)
-            except (OSError, TypeError):
-                # Source not available (e.g., lambda defined in REPL)
-                source = None
-
-            if source:
-                # Parse it to understand the structure
-                # Need to dedent source since it may be indented (from test methods, etc.)
-                import textwrap
-
-                source_dedented = textwrap.dedent(source)
-                tree = ast.parse(source_dedented)
-
-                # Extract filter condition from AST
-                sql_where = self._extract_filter_condition(tree)
-
-                if sql_where:
-                    # Use SQL to filter
-                    return self._filter_by_sql(flattened, sql_where)
-                else:
-                    # AST parsing succeeded but pattern not recognized
-                    raise ValueError(self._get_unsupported_filter_error(source))
-            else:
-                # Source not available - raise error
+                result = group_predicate(group_proxy)
+                if result:
+                    passing_group_ids.add(group_id)
+            except Exception as e:
                 raise ValueError(
-                    "Cannot parse filter predicate (source not available). "
-                    "This can happen with lambdas defined in REPL. "
-                    "Please define the lambda in a file for now."
+                    f"Error evaluating filter predicate on group {group_id}: {e}"
                 )
-        except ValueError:
-            # Re-raise our custom errors
-            raise
-        except Exception as e:
-            # Syntax error or other parse error
-            source_str = source if source else "<unavailable>"
-            raise ValueError(self._get_parse_error_message(source_str, str(e)))
+
+        # Filter the dataframe to keep only passing groups
+        filtered_df = df[df["__group_id__"].isin(passing_group_ids)]
+
+        # Remove internal columns
+        result_cols = [c for c in filtered_df.columns if not c.startswith("__")]
+        result_df = filtered_df[result_cols]
+
+        # Convert back to LTSeq using _from_rows
+        rows = result_df.to_dict("records")
+        schema = self._ltseq._schema.copy()
+
+        result = self._ltseq.__class__._from_rows(rows, schema)
+        return result
 
     def _get_unsupported_filter_error(self, source: str) -> str:
         """Generate detailed error message for unsupported filter patterns."""
@@ -509,8 +575,9 @@ Example of valid syntax:
             # Could be g.count(), g.first().col, g.last().col, g.max('col'), etc.
             return self._process_call_comparison(left, op_str, rhs_value)
         elif isinstance(left, ast.Attribute):
-            # Direct attribute like g.some_attr (not common in filters)
-            return ""
+            # Could be chained: g.first().col or g.last().col
+            # The attribute's value should be a Call to first() or last()
+            return self._process_chained_attribute_comparison(left, op_str, rhs_value)
         else:
             return ""
 
@@ -535,6 +602,42 @@ Example of valid syntax:
             )
 
         return ""
+
+    def _process_chained_attribute_comparison(
+        self, attr_node, op_str: str, rhs_value
+    ) -> str:
+        """
+        Process a chained attribute comparison like g.first().is_up == True.
+
+        The attr_node should have:
+        - attr: the column name (e.g., 'is_up')
+        - value: a Call node to first() or last()
+        """
+        import ast
+
+        column_name = attr_node.attr
+        value_node = attr_node.value
+
+        # Check if value_node is a Call to first() or last()
+        if not isinstance(value_node, ast.Call):
+            return ""
+
+        if not isinstance(value_node.func, ast.Attribute):
+            return ""
+
+        method_name = value_node.func.attr
+        if method_name not in ("first", "last"):
+            return ""
+
+        # Get the object that first/last is called on (should be 'g')
+        if not isinstance(value_node.func.value, ast.Name):
+            return ""
+
+        # Now generate the SQL for first(col) or last(col)
+        if method_name == "first":
+            return f"(CASE WHEN ROW_NUMBER() OVER (PARTITION BY __group_id__) = 1 THEN {column_name} END) {op_str} {rhs_value}"
+        else:  # last
+            return f"(CASE WHEN ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY rowid DESC) = 1 THEN {column_name} END) {op_str} {rhs_value}"
 
     def _process_group_function(
         self, method_name: str, call_node, op_str: str, rhs_value

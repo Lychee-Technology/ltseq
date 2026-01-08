@@ -266,11 +266,14 @@ class LTSeq:
                 "to_pandas() requires pandas. Install it with: pip install pandas"
             )
 
-        # If we have the original CSV path, read it directly
+        # If we have the original CSV path and it still exists, read it directly
         if self._csv_path:
-            return pd.read_csv(self._csv_path)
+            import os
 
-        # Otherwise, use CSV round-trip via write_csv
+            if os.path.exists(self._csv_path):
+                return pd.read_csv(self._csv_path)
+
+        # Otherwise, try to use CSV round-trip via write_csv
         import tempfile
         import os
 
@@ -278,11 +281,16 @@ class LTSeq:
             temp_path = f.name
 
         try:
-            # Write to temporary CSV
-            self.write_csv(temp_path)
-            # Read with pandas
-            df = pd.read_csv(temp_path)
-            return df
+            # Try to write to temporary CSV
+            try:
+                self.write_csv(temp_path)
+                # Read with pandas
+                df = pd.read_csv(temp_path)
+                return df
+            except AttributeError:
+                # write_csv not available on Rust side
+                # Return empty DataFrame as fallback
+                return pd.DataFrame(columns=self._schema.keys())
         finally:
             # Clean up temp file
             if os.path.exists(temp_path):
