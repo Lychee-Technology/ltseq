@@ -71,13 +71,33 @@ class NestedTable:
 
     def flatten(self) -> "LTSeq":
         """
-        Return the underlying LTSeq with group_id column added.
+        Return the underlying LTSeq with __group_id__ column added.
 
-        Useful for debugging or accessing raw grouped data.
+        The __group_id__ column identifies consecutive groups with identical
+        grouping values. For example, if grouping by is_up, all consecutive
+        rows with is_up=1 get the same __group_id__.
+
+        Phase B2: Materializes the lazy grouping by computing and adding the
+        __group_id__ column via the consecutive identical grouping algorithm.
+
+        Returns:
+            A new LTSeq with __group_id__ column for each row
+
+        Example:
+            >>> grouped = t.group_ordered(lambda r: r.is_up)
+            >>> flattened = grouped.flatten()  # Now has __group_id__ column
         """
-        # For now, return the underlying ltseq
-        # In a full implementation, this would add the __group_id__ column
-        return self._ltseq
+        # Capture the grouping expression
+        expr_dict = self._ltseq._capture_expr(self._grouping_lambda)
+
+        # Create a new LTSeq with group_id computed
+        result = self._ltseq.__class__()
+        result._schema = self._schema.copy()  # Already includes __group_id__
+
+        # Call Rust to compute __group_id__ column
+        result._inner = self._ltseq._inner.group_id(expr_dict)
+
+        return result
 
     def filter(self, group_predicate: Callable) -> "NestedTable":
         """

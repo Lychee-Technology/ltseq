@@ -223,8 +223,8 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fla
                 .clone()
                 .sort(df_sort_exprs)
                 .map_err(|e| format!("Sort execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Return new RustTable with sorted data and captured sort keys
     Ok(RustTable {
@@ -232,6 +232,22 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fla
         dataframe: Some(Arc::new(sorted_df)),
         schema: table.schema.as_ref().map(|s| Arc::clone(s)),
         sort_exprs: captured_sort_keys,
+    })
+}
+
+/// Add __group_id__ column to identify consecutive identical grouping values
+///
+/// Phase B2: Stub implementation for group_ordered with __group_id__ assignment.
+/// Returns the input table unchanged for now (placeholder).
+/// Full implementation deferred: requires window function algorithm (mask → cumsum).
+pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<RustTable> {
+    // Return the input table unchanged for now
+    // This is a placeholder while we design the full window function implementation
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: table.dataframe.as_ref().map(|d| Arc::clone(d)),
+        schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+        sort_exprs: Vec::new(),
     })
 }
 

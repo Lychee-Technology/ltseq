@@ -372,6 +372,14 @@ impl RustTable {
         crate::ops::advanced::sort_impl(self, sort_exprs, desc_flags)
     }
 
+    /// Add __group_id__ column for consecutive identical grouping values
+    ///
+    /// Phase B2: Foundation for group_ordered() lazy evaluation.
+    /// Placeholder: will compute __group_id__ via window functions.
+    fn group_id(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<RustTable> {
+        crate::ops::advanced::group_id_impl(self, grouping_expr)
+    }
+
     /// Remove duplicate rows based on key columns
     ///
     /// Args:
