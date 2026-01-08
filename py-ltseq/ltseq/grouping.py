@@ -911,8 +911,30 @@ Example of valid syntax:
             )
 
         # For now, use pandas to execute the derivation
-        # Convert to pandas, add derived columns, convert back
-        df = flattened.to_pandas()
+        # Convert to pandas using the original table, then add __group_id__ column
+        df = self._ltseq.to_pandas()
+
+        # Add __rn__ (row number) column for window function ordering
+        df["__rn__"] = range(len(df))
+
+        # Add __group_id__ column by computing grouping for each row
+        group_values = []
+        group_id = 0
+        prev_group_val = None
+
+        for idx, row in df.iterrows():
+            # Call the grouping lambda on this row
+            row_proxy = RowProxy(row.to_dict())
+            group_val = self._grouping_lambda(row_proxy)
+
+            # If group value changed, increment group_id
+            if prev_group_val is None or group_val != prev_group_val:
+                group_id += 1
+                prev_group_val = group_val
+
+            group_values.append(group_id)
+
+        df["__group_id__"] = group_values
 
         # Evaluate each derive expression
         for col_name, sql_expr in derive_exprs.items():
@@ -922,13 +944,16 @@ Example of valid syntax:
             except Exception as e:
                 raise ValueError(f"Error evaluating derived column '{col_name}': {e}")
 
+        # Remove the internal columns before returning
+        df = df.drop(columns=["__group_id__", "__rn__"])
+
         # Convert back to LTSeq
-        schema = flattened._schema.copy()
+        schema = self._ltseq._schema.copy()
         for col_name in derive_exprs.keys():
             schema[col_name] = "Unknown"
 
         rows = df.to_dict("records")
-        result = flattened.__class__._from_rows(rows, schema)
+        result = self._ltseq.__class__._from_rows(rows, schema)
 
         return result
 
@@ -940,35 +965,73 @@ Example of valid syntax:
         Examples:
         - COUNT(*) OVER (PARTITION BY __group_id__)
         - FIRST_VALUE(col) OVER (PARTITION BY __group_id__ ORDER BY __rn__)
-        - (expr1) - (expr2)
+        - (expr1) - (expr2) where expr1 and expr2 are window functions
         """
-        # Handle simple arithmetic first
+        import re
+
+        # Handle arithmetic expressions recursively
+        # First extract the inner expression without outer parens
         if sql_expr.startswith("(") and sql_expr.endswith(")"):
-            # Could be arithmetic like (FIRST_VALUE(...) - FIRST_VALUE(...))
-            # For now, use eval with safe column references
-            # TODO: Implement proper SQL evaluation
-            pass
+            inner = sql_expr[1:-1]
+
+            # Try to find a top-level operator not inside window functions
+            # Count parens to find where operators are at top level
+            paren_depth = 0
+            for i, char in enumerate(inner):
+                if char == "(":
+                    paren_depth += 1
+                elif char == ")":
+                    paren_depth -= 1
+                elif paren_depth == 0 and char in ["+", "-", "*", "/"]:
+                    # Found top-level operator
+                    left_expr = inner[:i].strip()
+                    op = char
+                    right_expr = inner[i + 1 :].strip()
+
+                    # Recursively evaluate sub-expressions
+                    left_result = self._evaluate_sql_expr_in_pandas(df, left_expr)
+                    right_result = self._evaluate_sql_expr_in_pandas(df, right_expr)
+
+                    # Apply operation
+                    if op == "+":
+                        return left_result + right_result
+                    elif op == "-":
+                        return left_result - right_result
+                    elif op == "*":
+                        return left_result * right_result
+                    elif op == "/":
+                        return left_result / right_result
 
         # Handle COUNT(*) OVER (PARTITION BY __group_id__)
         if "COUNT(*)" in sql_expr and "PARTITION BY __group_id__" in sql_expr:
             return df.groupby("__group_id__").transform("size")
 
         # Handle FIRST_VALUE(col) OVER (...)
-        if sql_expr.startswith("FIRST_VALUE(") and ")" in sql_expr:
-            col_name = sql_expr[len("FIRST_VALUE(") : sql_expr.index(")")].strip()
-            return df.groupby("__group_id__")[col_name].transform("first")
+        if "FIRST_VALUE(" in sql_expr:
+            match = re.search(r"FIRST_VALUE\((\w+)\)", sql_expr)
+            if match:
+                col_name = match.group(1)
+                return df.groupby("__group_id__")[col_name].transform("first")
 
         # Handle LAST_VALUE(col) OVER (...)
-        if sql_expr.startswith("LAST_VALUE(") and ")" in sql_expr:
-            col_name = sql_expr[len("LAST_VALUE(") : sql_expr.index(")")].strip()
-            return df.groupby("__group_id__")[col_name].transform("last")
+        if "LAST_VALUE(" in sql_expr:
+            match = re.search(r"LAST_VALUE\((\w+)\)", sql_expr)
+            if match:
+                col_name = match.group(1)
+                return df.groupby("__group_id__")[col_name].transform("last")
 
         # Handle MAX/MIN/SUM/AVG
-        for agg in ["MAX", "MIN", "SUM", "AVG"]:
-            if sql_expr.startswith(f"{agg}("):
-                col_name = sql_expr[len(agg) + 1 : sql_expr.index(")")].strip()
-                pandas_agg = agg.lower()
-                return df.groupby("__group_id__")[col_name].transform(pandas_agg)
+        for agg_sql, agg_pandas in [
+            ("MAX", "max"),
+            ("MIN", "min"),
+            ("SUM", "sum"),
+            ("AVG", "mean"),
+        ]:
+            if f"{agg_sql}(" in sql_expr:
+                match = re.search(f"{agg_sql}\\((\\w+)\\)", sql_expr)
+                if match:
+                    col_name = match.group(1)
+                    return df.groupby("__group_id__")[col_name].transform(agg_pandas)
 
         # Default: return the expr as-is (will likely fail)
         return df.eval(sql_expr)
