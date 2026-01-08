@@ -305,12 +305,13 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-/// Rename right table join keys with unique temporary names
+/// Rename right table join keys with unique temporary names (using lowercase for DataFusion compatibility)
 fn rename_right_table_keys(
     df_right: &Arc<DataFrame>,
     schema_right: &ArrowSchema,
     right_col_names: &[String],
 ) -> PyResult<(DataFrame, Vec<String>)> {
+    use datafusion::common::Column;
     let unique_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -323,12 +324,17 @@ fn rename_right_table_keys(
         let col_name = field.name();
         if right_col_names.contains(&col_name.to_string()) {
             if let Some(idx) = right_col_names.iter().position(|c| c == col_name) {
-                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__", idx, unique_suffix);
-                right_select_exprs.push(col(col_name).alias(&temp_join_key_name));
+                // Use lowercase temp name since DataFusion's join() does case-insensitive matching
+                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase());
+                // Use Column::new_unqualified to preserve case on actual column name
+                right_select_exprs.push(
+                    Expr::Column(Column::new_unqualified(col_name)).alias(&temp_join_key_name)
+                );
                 temp_right_col_names.push(temp_join_key_name);
             }
         } else {
-            right_select_exprs.push(col(col_name));
+            // Use Column::new_unqualified to preserve case
+            right_select_exprs.push(Expr::Column(Column::new_unqualified(col_name)));
         }
     }
 
@@ -376,14 +382,17 @@ fn build_final_schema_and_select(
     schema_left: &ArrowSchema,
     schema_right: &ArrowSchema,
     alias: &str,
+    renamed_col_mapping: &[(String, String)], // (original_name, temp_name) pairs
 ) -> PyResult<(ArrowSchema, DataFrame)> {
+    use datafusion::common::Column;
     let mut final_fields = Vec::new();
     let mut select_exprs: Vec<Expr> = Vec::new();
 
     // Add left table columns
     for field in schema_left.fields().iter() {
         final_fields.push((**field).clone());
-        select_exprs.push(col(field.name()));
+        // Use Column::new_unqualified to preserve case
+        select_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
     }
 
     // Add right table columns with alias prefix
@@ -396,7 +405,18 @@ fn build_final_schema_and_select(
             field.is_nullable(),
         );
         final_fields.push(new_field);
-        select_exprs.push(col(col_name).alias(&new_col_name));
+        
+        // Check if this column was renamed for the join
+        let actual_col_name = renamed_col_mapping
+            .iter()
+            .find(|(orig, _)| orig == col_name)
+            .map(|(_, temp)| temp.as_str())
+            .unwrap_or(col_name);
+        
+        // Use the actual column name in the joined_df
+        select_exprs.push(
+            Expr::Column(Column::new_unqualified(actual_col_name)).alias(&new_col_name)
+        );
     }
 
     let final_arrow_schema = ArrowSchema::new(final_fields);
@@ -477,6 +497,13 @@ pub fn join_impl(
     let (df_right_renamed, temp_right_col_names) =
         rename_right_table_keys(&df_right, &schema_right, &right_col_names)?;
 
+    // Build mapping of original names to temp names
+    let renamed_mapping: Vec<(String, String)> = right_col_names
+        .iter()
+        .zip(temp_right_col_names.iter())
+        .map(|(orig, temp)| (orig.clone(), temp.clone()))
+        .collect();
+
     // Execute join
     let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
     let right_join_keys: Vec<&str> = temp_right_col_names.iter().map(|s| s.as_str()).collect();
@@ -491,7 +518,7 @@ pub fn join_impl(
 
     // Build final schema and rename columns
     let (final_arrow_schema, final_df) =
-        build_final_schema_and_select(&joined_df, &schema_left, &schema_right, alias)?;
+        build_final_schema_and_select(&joined_df, &schema_left, &schema_right, alias, &renamed_mapping)?;
 
     // Return new RustTable
     Ok(RustTable {

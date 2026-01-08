@@ -164,7 +164,10 @@ class LinkedTable:
             col.startswith(f"{self._alias}_") for col in cols if isinstance(col, str)
         )
 
-        if has_linked_columns:
+        # If a lambda is passed, we need to materialize to access linked columns
+        has_lambda = any(callable(col) for col in cols)
+
+        if has_linked_columns or has_lambda:
             # Materialize the join and select from the materialized table
             materialized = self._materialize()
             return materialized.select(*cols)
@@ -215,6 +218,21 @@ class LinkedTable:
         """Derive columns (delegates to source for MVP)."""
         derived_source = self._source.derive(mapper)
         return LinkedTable(derived_source, self._target, self._join_fn, self._alias)
+
+    def sort(self, *key_exprs) -> "LinkedTable":
+        """
+        Sort linked table rows.
+
+        Phase 11: Added sort support for LinkedTable.
+
+        Args:
+            *key_exprs: Column names or lambda expressions to sort by
+
+        Returns:
+            A new LinkedTable with sorted source data
+        """
+        sorted_source = self._source.sort(*key_exprs)
+        return LinkedTable(sorted_source, self._target, self._join_fn, self._alias)
 
     def slice(self, start: int, end: int) -> "LinkedTable":
         """Slice rows."""

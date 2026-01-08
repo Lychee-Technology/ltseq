@@ -15,7 +15,10 @@ fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, String> {
     if !schema.fields().iter().any(|f| f.name() == name) {
         return Err(format!("Column '{}' not found in schema", name));
     }
-    Ok(col(name))
+    // Use Column::new_unqualified to preserve case-sensitive column names
+    // (col() function lowercases column names, which breaks uppercase column names like 'IsOfficial')
+    use datafusion::common::Column;
+    Ok(Expr::Column(Column::new_unqualified(name)))
 }
 
 /// Parse a literal value based on its dtype into a DataFusion expression

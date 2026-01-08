@@ -98,11 +98,13 @@ pub fn derive_impl(table: &RustTable, derived_cols: &Bound<'_, PyDict>) -> PyRes
     let result_df = RUNTIME
         .block_on(async {
             // Select all existing columns + new derived columns
+            use datafusion::common::Column;
             let mut all_exprs = Vec::new();
 
             // Add all existing columns
             for field in schema.fields() {
-                all_exprs.push(col(field.name()));
+                // Use Column::new_unqualified to preserve case
+                all_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
             }
 
             // Add derived columns
