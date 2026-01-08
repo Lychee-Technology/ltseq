@@ -380,6 +380,22 @@ impl RustTable {
         crate::ops::advanced::group_id_impl(self, grouping_expr)
     }
 
+    /// Get only the first row of each group (Phase B4)
+    ///
+    /// Requires __group_id__ column to exist. Returns a new table with only the
+    /// first row per group.
+    fn first_row(&self) -> PyResult<RustTable> {
+        crate::ops::advanced::first_row_impl(self)
+    }
+
+    /// Get only the last row of each group (Phase B4)
+    ///
+    /// Requires __group_id__ column to exist. Returns a new table with only the
+    /// last row per group.
+    fn last_row(&self) -> PyResult<RustTable> {
+        crate::ops::advanced::last_row_impl(self)
+    }
+
     /// Remove duplicate rows based on key columns
     ///
     /// Args:

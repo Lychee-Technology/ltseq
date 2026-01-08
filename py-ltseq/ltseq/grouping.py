@@ -4,6 +4,69 @@ from typing import TYPE_CHECKING, Any, Callable, Dict
 
 if TYPE_CHECKING:
     from .core import LTSeq
+    from .expr import ColumnExpr
+
+
+class GroupRowProxy:
+    """
+    Proxy for accessing columns from first/last row of a group.
+
+    When you call grouped.first().price, this object handles the column access
+    and returns an expression that represents the first row's price value.
+    """
+
+    def __init__(self, nested_table: "NestedTable", position: str):
+        """
+        Initialize a group row proxy.
+
+        Args:
+            nested_table: The NestedTable this proxy is from
+            position: Either "first" or "last"
+        """
+        self._nested_table = nested_table
+        self._position = position  # "first" or "last"
+
+    def __getattr__(self, col_name: str):
+        """
+        Access a column from the first/last row of each group.
+
+        This implementation materializes the grouping and returns a filtered LTSeq
+        containing only the first/last row per group, with the column selected.
+
+        Args:
+            col_name: The column name to access
+
+        Returns:
+            An LTSeq containing the first/last rows with that column
+        """
+        # Avoid infinite recursion on internal attributes
+        if col_name.startswith("_"):
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{col_name}'"
+            )
+
+        # Validate column exists in schema
+        if col_name not in self._nested_table._ltseq._schema:
+            raise AttributeError(
+                f"Column '{col_name}' not found in schema. "
+                f"Available columns: {list(self._nested_table._ltseq._schema.keys())}"
+            )
+
+        # Materialize the grouping to add __group_id__
+        flattened = self._nested_table.flatten()
+
+        # Call appropriate Rust method to filter to first/last row
+        if self._position == "first":
+            filtered = flattened.__class__()
+            filtered._schema = flattened._schema.copy()
+            filtered._inner = flattened._inner.first_row()
+        else:  # last
+            filtered = flattened.__class__()
+            filtered._schema = flattened._schema.copy()
+            filtered._inner = flattened._inner.last_row()
+
+        # Return the filtered table (so caller can do more operations or access values)
+        return filtered
 
 
 class NestedTable:
@@ -30,32 +93,49 @@ class NestedTable:
         self._schema["__group_id__"] = "int64"
         self._schema["__group_count__"] = "int64"
 
-    def first(self) -> "ColumnExpr":
+        # Optional filters and derivations (set later if needed)
+        self._group_filter = None
+        self._group_derive = None
+
+    def first(self) -> "LTSeq":
         """
         Get the first row of each group.
 
-        Returns a special ColumnExpr that represents the first row within each group.
+        Returns an LTSeq containing only the first row within each group.
 
         Example:
-            >>> grouped.first().price  # First price in each group
+            >>> grouped.first()  # Returns LTSeq with first row per group
+            >>> grouped.first().quantity  # Column access (future enhancement)
         """
-        from .expr import CallExpr
+        # Materialize the grouping to add __group_id__
+        flattened = self.flatten()
 
-        # Create a special marker that will be handled by Rust
-        return CallExpr("__first__", (), {}, on=None)
+        # Call Rust method to filter to first row per group
+        result = flattened.__class__()
+        result._schema = flattened._schema.copy()
+        result._inner = flattened._inner.first_row()
 
-    def last(self) -> "ColumnExpr":
+        return result
+
+    def last(self) -> "LTSeq":
         """
         Get the last row of each group.
 
-        Returns a special ColumnExpr that represents the last row within each group.
+        Returns an LTSeq containing only the last row within each group.
 
         Example:
-            >>> grouped.last().price  # Last price in each group
+            >>> grouped.last()  # Returns LTSeq with last row per group
+            >>> grouped.last().quantity  # Column access (future enhancement)
         """
-        from .expr import CallExpr
+        # Materialize the grouping to add __group_id__
+        flattened = self.flatten()
 
-        return CallExpr("__last__", (), {}, on=None)
+        # Call Rust method to filter to last row per group
+        result = flattened.__class__()
+        result._schema = flattened._schema.copy()
+        result._inner = flattened._inner.last_row()
+
+        return result
 
     def count(self) -> "ColumnExpr":
         """

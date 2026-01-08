@@ -42,6 +42,18 @@
 //! **Algorithm**: mask = col != LAG(col, 1) with first row = 1
 //!               group_id = SUM(mask) OVER (ORDER BY rownum)
 //!
+//! ## First/Last Row Selection (first_row_impl, last_row_impl)
+//!
+//! **Phase B4**: Filters table to only first/last row per group.
+//! These operations assume __group_id__ column already exists.
+//! 
+//! Implementation:
+//! 1. Takes a table with existing __group_id__ column
+//! 2. Adds ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__
+//! 3. For first_row: keeps rows where __rn__ = 1
+//! 4. For last_row: computes max(__rn__) per group and filters
+//! 5. Removes temporary __rn__ column
+//!
 //! ## Join (join_impl)
 //!
 //! Performs cross-table joins with automatic schema conflict handling.
@@ -432,7 +444,306 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
     })
 }
 
-/// Validate that left and right tables have data and schemas
+/// Get only the first row of each group (Phase B4)
+///
+/// Requires __group_id__ column to already exist. Filters to rows where
+/// ROW_NUMBER() OVER (PARTITION BY __group_id__) = 1
+pub fn first_row_impl(table: &RustTable) -> PyResult<RustTable> {
+    // If no dataframe, return empty result
+    if table.dataframe.is_none() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    // Get schema
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Schema not available. Call flatten() first to add __group_id__ column.",
+        )
+    })?;
+
+    // Verify __group_id__ column exists
+    if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "__group_id__ column not found. Call flatten() first.",
+        ));
+    }
+
+    // Get DataFrame
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded.",
+        )
+    })?;
+
+    // Collect current data into record batches
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Register temporary table
+    let temp_table_name = "__ltseq_first_row_temp";
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Execute SQL query to get first row per group
+    let sql_query = format!(
+        r#"WITH ranked AS (
+          SELECT *, ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__ FROM {}
+        )
+        SELECT * EXCEPT (__rn__) FROM ranked WHERE __rn__ = 1"#,
+        temp_table_name
+    );
+
+    // Execute the query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute first_row query: {}", e))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect first_row results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create a new MemTable from the result batches
+    if result_batches.is_empty() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result memory table: {}",
+            e
+        )))?;
+
+    // Create a new DataFrame from the memory table
+    let result_table_name = "__ltseq_first_row_result";
+    table.session.register_table(result_table_name, Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = RUNTIME
+        .block_on(async {
+            table.session.table(result_table_name)
+                .await
+                .map_err(|e| format!("Failed to get result table: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister the result table
+    table.session.deregister_table(result_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister result table: {}",
+                e
+            ))
+        })?;
+
+    // Return new RustTable with only first rows
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
+        sort_exprs: Vec::new(),
+    })
+}
+
+/// Get only the last row of each group (Phase B4)
+///
+/// Requires __group_id__ column to already exist. Filters to rows where
+/// ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY desc) = 1
+pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
+    // If no dataframe, return empty result
+    if table.dataframe.is_none() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    // Get schema
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Schema not available. Call flatten() first to add __group_id__ column.",
+        )
+    })?;
+
+    // Verify __group_id__ column exists
+    if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "__group_id__ column not found. Call flatten() first.",
+        ));
+    }
+
+    // Get DataFrame
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded.",
+        )
+    })?;
+
+    // Collect current data into record batches
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Register temporary table
+    let temp_table_name = "__ltseq_last_row_temp";
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Execute SQL query to get last row per group
+    // We assign row numbers within each group (using original insertion order)
+    // and then select where that row number equals the max row number per group
+    let sql_query = format!(
+        r#"WITH ranked AS (
+          SELECT *, 
+                  ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__,
+                  COUNT(*) OVER (PARTITION BY __group_id__) as __cnt__
+          FROM {}
+        )
+        SELECT * EXCEPT (__rn__, __cnt__) FROM ranked WHERE __rn__ = __cnt__"#,
+        temp_table_name
+    );
+
+    // Execute the query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute last_row query: {}", e))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect last_row results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create a new MemTable from the result batches
+    if result_batches.is_empty() {
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result memory table: {}",
+            e
+        )))?;
+
+    // Create a new DataFrame from the memory table
+    let result_table_name = "__ltseq_last_row_result";
+    table.session.register_table(result_table_name, Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = RUNTIME
+        .block_on(async {
+            table.session.table(result_table_name)
+                .await
+                .map_err(|e| format!("Failed to get result table: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister the result table
+    table.session.deregister_table(result_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister result table: {}",
+                e
+            ))
+        })?;
+
+    // Return new RustTable with only last rows
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
+        sort_exprs: Vec::new(),
+    })
+}
 fn validate_join_tables(
     table: &RustTable,
     other: &RustTable,
