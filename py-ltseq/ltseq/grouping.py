@@ -49,6 +49,132 @@ class GroupProxy:
             last_row_data = self._group_data.iloc[-1]
         return RowProxy(last_row_data)
 
+    def max(self, column_name=None):
+        """
+        Get the maximum value in a column for this group.
+
+        Args:
+            column_name: Name of the column to find max for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The maximum value in the column for this group.
+
+        Example:
+            >>> g.max('price')  # Max price in group
+        """
+        if column_name is None:
+            # Return self to support chaining
+            return self
+
+        # Find max value in the specified column
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        # Filter out None values and return max
+        valid_values = [v for v in values if v is not None]
+        return max(valid_values) if valid_values else None
+
+    def min(self, column_name=None):
+        """
+        Get the minimum value in a column for this group.
+
+        Args:
+            column_name: Name of the column to find min for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The minimum value in the column for this group.
+
+        Example:
+            >>> g.min('price')  # Min price in group
+        """
+        if column_name is None:
+            # Return self to support chaining
+            return self
+
+        # Find min value in the specified column
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        # Filter out None values and return min
+        valid_values = [v for v in values if v is not None]
+        return min(valid_values) if valid_values else None
+
+    def sum(self, column_name=None):
+        """
+        Get the sum of values in a column for this group.
+
+        Args:
+            column_name: Name of the column to sum.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The sum of values in the column for this group.
+
+        Example:
+            >>> g.sum('quantity')  # Total quantity in group
+        """
+        if column_name is None:
+            # Return self to support chaining
+            return self
+
+        # Sum values in the specified column
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name, 0) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        # Filter out None values and sum
+        valid_values = [v for v in values if v is not None]
+        return sum(valid_values) if valid_values else 0
+
+    def avg(self, column_name=None):
+        """
+        Get the average value in a column for this group.
+
+        Args:
+            column_name: Name of the column to average.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The average value in the column for this group.
+
+        Example:
+            >>> g.avg('price')  # Average price in group
+        """
+        if column_name is None:
+            # Return self to support chaining
+            return self
+
+        # Average values in the specified column
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        # Filter out None values and compute average
+        valid_values = [v for v in values if v is not None]
+        if valid_values:
+            return sum(valid_values) / len(valid_values)
+        return None
+
 
 class RowProxy:
     """Proxy for accessing columns of a row during predicate evaluation."""
@@ -252,6 +378,8 @@ class NestedTable:
         - lambda g: g.first().price > 100
         """
         # Find the Compare node in the AST
+        import ast
+
         for node in ast.walk(ast_tree):
             if isinstance(node, ast.Compare):
                 # Check if left side is g.count()
