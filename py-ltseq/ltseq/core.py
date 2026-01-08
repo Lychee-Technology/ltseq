@@ -1431,46 +1431,67 @@ class LTSeq:
         except Exception as e:
             raise TypeError(f"Invalid join condition: {e}")
 
+        # Extract join keys using the helper function (Phase 8A pattern)
+        from .helpers import _extract_join_keys
+
+        left_key_expr, right_key_expr, join_type = _extract_join_keys(
+            on, self._schema, other._schema, how
+        )
+
+        # Call Rust join() method - it handles schema conflicts and column renaming
         try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "join_merge() requires pandas. Install it with: pip install pandas"
+            joined_inner = self._inner.join(
+                other._inner,
+                left_key_expr,
+                right_key_expr,
+                join_type,
+                "_other",  # Alias for right table columns
             )
+        except RuntimeError as e:
+            # If Rust join fails, fall back to pandas implementation
+            import warnings
 
-        # Convert both tables to pandas DataFrames
-        df1 = self.to_pandas()
-        df2 = other.to_pandas()
-
-        # Perform merge join using pandas merge
-        # Since we have difficulty extracting join keys from arbitrary lambdas,
-        # we detect common column names and use those for joining
-
-        # Convert "full" to "outer" for pandas compatibility
-        pandas_how = "outer" if how == "full" else how
-
-        # Simple approach: merge on common columns
-        common_cols = sorted(set(df1.columns) & set(df2.columns))
-
-        if common_cols:
-            # Merge on common columns
-            result_df = pd.merge(
-                df1, df2, on=common_cols, how=pandas_how, suffixes=("", "_other")
+            warnings.warn(
+                f"Rust join failed: {e}. Falling back to pandas implementation.",
+                RuntimeWarning,
             )
-        else:
-            # No common columns - use cross join
-            df1["_key"] = 1
-            df2["_key"] = 1
-            result_df = pd.merge(
-                df1, df2, on="_key", how=pandas_how, suffixes=("", "_other")
-            )
-            result_df = result_df.drop("_key", axis=1)
+            # Fall back to pandas merge
+            try:
+                import pandas as pd
+            except ImportError:
+                raise RuntimeError(
+                    "join_merge() fallback requires pandas. Install it with: pip install pandas"
+                )
 
-        # Update schema with result columns
-        result_schema = {col: "Unknown" for col in result_df.columns}
+            df1 = self.to_pandas()
+            df2 = other.to_pandas()
+            pandas_how = "outer" if how == "full" else how
+            common_cols = sorted(set(df1.columns) & set(df2.columns))
 
-        # Convert back to LTSeq
-        rows = result_df.to_dict("records")
-        result = LTSeq._from_rows(rows, result_schema)
+            if common_cols:
+                result_df = pd.merge(
+                    df1, df2, on=common_cols, how=pandas_how, suffixes=("", "_other")
+                )
+            else:
+                df1["_key"] = 1
+                df2["_key"] = 1
+                result_df = pd.merge(
+                    df1, df2, on="_key", how=pandas_how, suffixes=("", "_other")
+                )
+                result_df = result_df.drop("_key", axis=1)
 
+            result_schema = {col: "Unknown" for col in result_df.columns}
+            rows = result_df.to_dict("records")
+            return LTSeq._from_rows(rows, result_schema)
+
+        # Create new LTSeq wrapping the joined result
+        result = LTSeq()
+        result._inner = joined_inner
+
+        # Build the result schema: left columns + right columns with alias prefix
+        result_schema = self._schema.copy()
+        for col_name, col_type in other._schema.items():
+            result_schema[f"_other_{col_name}"] = col_type
+
+        result._schema = result_schema
         return result

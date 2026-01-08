@@ -844,7 +844,8 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-/// Rename right table join keys with unique temporary names (using lowercase for DataFusion compatibility)
+/// Rename right table columns with unique temporary names
+/// This renames ALL columns (both join keys and non-join keys) to avoid naming conflicts during join
 fn rename_right_table_keys(
     df_right: &Arc<DataFrame>,
     schema_right: &ArrowSchema,
@@ -859,22 +860,21 @@ fn rename_right_table_keys(
     let mut right_select_exprs = Vec::new();
     let mut temp_right_col_names = Vec::new();
 
-    for field in schema_right.fields().iter() {
+    for (idx, field) in schema_right.fields().iter().enumerate() {
         let col_name = field.name();
-        if right_col_names.contains(&col_name.to_string()) {
-            if let Some(idx) = right_col_names.iter().position(|c| c == col_name) {
-                // Use lowercase temp name since DataFusion's join() does case-insensitive matching
-                let temp_join_key_name = format!("__ltseq_rkey_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase());
-                // Use Column::new_unqualified to preserve case on actual column name
-                right_select_exprs.push(
-                    Expr::Column(Column::new_unqualified(col_name)).alias(&temp_join_key_name)
-                );
-                temp_right_col_names.push(temp_join_key_name);
-            }
+        let temp_col_name = if right_col_names.contains(&col_name.to_string()) {
+            // Join key column: use special prefix for join keys
+            format!("__ltseq_rkey_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase())
         } else {
-            // Use Column::new_unqualified to preserve case
-            right_select_exprs.push(Expr::Column(Column::new_unqualified(col_name)));
-        }
+            // Non-join-key column: use generic prefix to avoid conflicts
+            format!("__ltseq_rcol_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase())
+        };
+        
+        // Use Column::new_unqualified to preserve case on actual column name
+        right_select_exprs.push(
+            Expr::Column(Column::new_unqualified(col_name)).alias(&temp_col_name)
+        );
+        temp_right_col_names.push(temp_col_name);
     }
 
     let df_right_renamed = RUNTIME
@@ -882,7 +882,7 @@ fn rename_right_table_keys(
             (**df_right)
                 .clone()
                 .select(right_select_exprs)
-                .map_err(|e| format!("Right table join key rename failed: {}", e))
+                .map_err(|e| format!("Right table column rename failed: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
@@ -1381,16 +1381,37 @@ pub fn join_impl(
     let (df_right_renamed, temp_right_col_names) =
         rename_right_table_keys(&df_right, &schema_right, &right_col_names)?;
 
-    // Build mapping of original names to temp names
-    let renamed_mapping: Vec<(String, String)> = right_col_names
+    // Build mapping of original names to temp names for ALL columns
+    let renamed_mapping: Vec<(String, String)> = schema_right
+        .fields()
         .iter()
         .zip(temp_right_col_names.iter())
-        .map(|(orig, temp)| (orig.clone(), temp.clone()))
+        .map(|(field, temp)| (field.name().to_string(), temp.clone()))
+        .collect();
+
+    // Find indices of join key columns in the schema
+    let mut join_key_indices = Vec::new();
+    for (idx, field) in schema_right.fields().iter().enumerate() {
+        if right_col_names.contains(&field.name().to_string()) {
+            join_key_indices.push(idx);
+        }
+    }
+
+    // Extract the temp names for join keys (in the same order as right_col_names)
+    let right_join_keys: Vec<&str> = right_col_names
+        .iter()
+        .filter_map(|col_name| {
+            // Find the index of this column in the schema
+            schema_right
+                .fields()
+                .iter()
+                .position(|f| f.name() == col_name)
+                .map(|idx| temp_right_col_names[idx].as_str())
+        })
         .collect();
 
     // Execute join
     let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
-    let right_join_keys: Vec<&str> = temp_right_col_names.iter().map(|s| s.as_str()).collect();
 
     let joined_df = execute_join(
         &df_left,
