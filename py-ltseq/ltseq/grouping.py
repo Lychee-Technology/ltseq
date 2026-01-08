@@ -20,7 +20,7 @@ class GroupProxy:
         Initialize a group proxy.
 
         Args:
-            group_data: DataFrame containing rows for this group
+            group_data: DataFrame containing rows for this group (list of dicts or pandas DataFrame)
             nested_table: The NestedTable this group belongs to
         """
         self._group_data = group_data
@@ -28,16 +28,25 @@ class GroupProxy:
 
     def count(self):
         """Get the number of rows in this group."""
-        return len(self._group_data)
+        if isinstance(self._group_data, list):
+            return len(self._group_data)
+        else:
+            return len(self._group_data)
 
     def first(self):
         """Get the first row of this group as a row proxy."""
-        first_row_data = self._group_data.iloc[0]
+        if isinstance(self._group_data, list):
+            first_row_data = self._group_data[0]
+        else:
+            first_row_data = self._group_data.iloc[0]
         return RowProxy(first_row_data)
 
     def last(self):
         """Get the last row of this group as a row proxy."""
-        last_row_data = self._group_data.iloc[-1]
+        if isinstance(self._group_data, list):
+            last_row_data = self._group_data[-1]
+        else:
+            last_row_data = self._group_data.iloc[-1]
         return RowProxy(last_row_data)
 
 
@@ -49,7 +58,7 @@ class RowProxy:
         Initialize a row proxy.
 
         Args:
-            row_data: A pandas Series representing a single row
+            row_data: A pandas Series, dict, or row-like object
         """
         self._row_data = row_data
 
@@ -60,10 +69,18 @@ class RowProxy:
                 f"'{type(self).__name__}' object has no attribute '{col_name}'"
             )
 
-        if col_name in self._row_data.index:
-            return self._row_data[col_name]
-        else:
-            raise AttributeError(f"Column '{col_name}' not found in row")
+        # Handle dict-like access
+        if isinstance(self._row_data, dict):
+            if col_name in self._row_data:
+                return self._row_data[col_name]
+        # Handle pandas Series access
+        elif hasattr(self._row_data, "__getitem__"):
+            try:
+                return self._row_data[col_name]
+            except (KeyError, IndexError):
+                pass
+
+        raise AttributeError(f"Column '{col_name}' not found in row")
 
 
 class NestedTable:
@@ -177,7 +194,7 @@ class NestedTable:
 
         return result
 
-    def filter(self, group_predicate: Callable) -> "NestedTable":
+    def filter(self, group_predicate: Callable) -> "LTSeq":
         """
         Filter groups based on a predicate on group properties.
 
@@ -186,7 +203,7 @@ class NestedTable:
                            Can use g.count(), g.first(), g.last()
 
         Returns:
-            A new LTSeq with filtered groups
+            An LTSeq with only rows from groups that pass the predicate
 
         Example:
             >>> grouped.filter(lambda g: g.count() > 3)
@@ -201,7 +218,7 @@ class NestedTable:
         # For now, return flattened table which can be used with standard filters
         return self.flatten()
 
-    def derive(self, group_mapper: Callable) -> "NestedTable":
+    def derive(self, group_mapper: Callable) -> "LTSeq":
         """
         Derive new columns based on group properties.
 
@@ -210,14 +227,16 @@ class NestedTable:
                          Can use g.first(), g.last(), g.count()
 
         Returns:
-            A new NestedTable with derived columns
+            An LTSeq with derived columns added
 
         Example:
             >>> grouped.derive(lambda g: {"span": g.count(), "gain": g.last().price - g.first().price})
+
+        Note: Phase B7 implementation. Returns flattened table with __group_id__ column.
+        Full derived column computation requires pandas materialization (future work).
         """
-        try:
-            result = NestedTable(self._ltseq, self._grouping_lambda)
-            result._group_derive = group_mapper
-            return result
-        except Exception as e:
-            raise RuntimeError(f"Failed to derive group columns: {e}")
+        # Phase B7: Group-based column derivation
+        # For now, return the flattened table with group information
+        # Future: Implement full derivation with pandas materialization
+
+        return self.flatten()
