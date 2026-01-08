@@ -744,6 +744,28 @@ pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
         sort_exprs: Vec::new(),
     })
 }
+
+/// Add derived columns based on group properties (Phase B7)
+///
+/// Takes a table with __group_id__ column and computes derived columns
+/// like group size, first/last values, etc.
+///
+/// For now, this is a placeholder. Full implementation requires:
+/// 1. Evaluating Python lambdas for each group
+/// 2. Broadcasting computed values back to all rows in group
+/// 3. Adding new columns to result schema
+pub fn derive_impl(table: &RustTable, _derived_cols_spec: Bound<'_, PyDict>) -> PyResult<RustTable> {
+    // Phase B7 placeholder: Just return the input table unchanged
+    // Full implementation would compute derived columns and add them
+    
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: table.dataframe.as_ref().map(|df| Arc::clone(df)),
+        schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+        sort_exprs: Vec::new(),
+    })
+}
+
 fn validate_join_tables(
     table: &RustTable,
     other: &RustTable,
