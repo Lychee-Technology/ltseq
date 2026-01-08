@@ -1206,73 +1206,33 @@ class LTSeq:
                     f"Available columns: {list(self._schema.keys())}"
                 )
 
+        # Call Rust implementation
+        result_inner = self._inner.pivot(index_cols, columns, values, agg_fn)
+
+        # Create new LTSeq instance
+        result = LTSeq()
+        result._inner = result_inner
+
+        # Infer schema from the result by materializing to pandas
         try:
             import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "pivot() requires pandas. Install it with: pip install pandas"
-            )
+            import tempfile
+            import os
 
-        # Convert to pandas DataFrame (optimization: single conversion)
-        df = self.to_pandas()
+            # Write result to a temporary CSV to get schema
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False
+            ) as f:
+                temp_csv_path = f.name
+            result._inner.write_csv(temp_csv_path)
+            result._csv_path = temp_csv_path
 
-        # Map agg_fn string to pandas aggregation function name
-        agg_fn_map = {
-            "sum": "sum",
-            "mean": "mean",
-            "count": "count",
-            "min": "min",
-            "max": "max",
-        }
-
-        # Optimization: Use groupby().unstack() instead of pivot_table
-        # This is more efficient as it avoids internal sorting and MultiIndex creation
-        # However, when values column appears in index or columns, we must use pivot_table
-        # to avoid pandas groupby ambiguity issues
-
-        if values in (index_cols + [columns]):
-            # Edge case: values column also appears as index or columns
-            # Fall back to pivot_table to handle this properly
-            pivoted_df = df.pivot_table(
-                index=index_cols,
-                columns=columns,
-                values=values,
-                aggfunc=agg_fn_map[agg_fn],
-            )
-        else:
-            # Optimized path: Use groupby().unstack()
-            # We only select the necessary columns first to minimize memory usage
-            selected_cols = index_cols + [columns, values]
-            df_subset = df[selected_cols]
-
-            # Group by index and columns, aggregate values
-            grouped = df_subset.groupby(index_cols + [columns], sort=True)[values].agg(
-                agg_fn_map[agg_fn]
-            )
-
-            # Unstack the columns parameter to create the pivot
-            pivoted_df = grouped.unstack(columns, fill_value=0)
-
-        # Reset index to convert index to regular columns
-        pivoted_df = pivoted_df.reset_index()
-
-        # Flatten column names (unstack creates MultiIndex in columns)
-        # Only flatten if MultiIndex, otherwise keep as-is
-        if isinstance(pivoted_df.columns, pd.MultiIndex):
-            pivoted_df.columns = [
-                "_".join(col).strip("_") for col in pivoted_df.columns.values
-            ]
-        else:
-            # Ensure column names are strings (unstack may create numeric names)
-            pivoted_df.columns = [str(col) for col in pivoted_df.columns]
-
-        # Infer schema from pivoted DataFrame
-        schema = {col: "Unknown" for col in pivoted_df.columns}
-
-        # Convert back to LTSeq using _from_rows
-        # Optimization: Convert to records only once
-        rows = pivoted_df.to_dict("records")
-        result = LTSeq._from_rows(rows, schema)
+            # Infer schema from the CSV
+            df = pd.read_csv(temp_csv_path)
+            result._schema = {col: "Unknown" for col in df.columns}
+        except Exception:
+            # If we can't infer schema, at least set an empty schema
+            result._schema = {}
 
         return result
 

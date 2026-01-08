@@ -612,6 +612,37 @@ impl RustTable {
         crate::ops::advanced::join_impl(self, other, left_key_expr_dict, right_key_expr_dict, join_type, alias)
     }
 
+    /// Pivot: Transform table from long to wide format
+    ///
+    /// Reshapes data where unique values in a column become new columns,
+    /// and row groups are aggregated based on specified index columns.
+    ///
+    /// # Arguments
+    ///
+    /// * `index_cols` - Column names to keep as rows in the pivoted table
+    /// * `pivot_col` - Column whose unique values become the new column names
+    /// * `value_col` - Column containing the values to aggregate into cells
+    /// * `agg_fn` - Aggregation function: "sum", "mean", "count", "min", "max"
+    ///
+    /// # Returns
+    ///
+    /// A new RustTable with pivoted data (one row per unique index combination)
+    ///
+    /// # Example
+    ///
+    /// Input table: year, region, amount
+    /// pivot(vec!["year"], "region", "amount", "sum")
+    /// Output: year, West, East, Central (with aggregated amounts)
+    fn pivot(
+        &self,
+        index_cols: Vec<String>,
+        pivot_col: String,
+        value_col: String,
+        agg_fn: String,
+    ) -> PyResult<RustTable> {
+        crate::ops::advanced::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
+    }
+
     /// Union: Vertically concatenate two tables with compatible schemas
     ///
     /// This is equivalent to UNION ALL in SQL - combines all rows from both
