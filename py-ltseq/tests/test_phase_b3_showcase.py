@@ -279,7 +279,6 @@ class TestGroupOrderedShowcase:
             f.write("id,val\n")
             f.write("A,1\n")  # first=1, count=1 (fails count check)
             f.write("B,10\n")  # first=10, count=1 (fails count check)
-            f.write("B,11\n")
             f.write("C,3\n")  # first=3, count=1 (fails both)
             f.write("D,6\n")  # first=6, count=2 (passes both)
             f.write("D,7\n")

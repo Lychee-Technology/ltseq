@@ -368,10 +368,8 @@ class LTSeq:
         # Create a new LTSeq with the filtered result
         result = LTSeq()
         result._schema = self._schema.copy()
-        # Delegate sorting to Rust implementation with desc flags
-        result._inner = self._inner.sort(sort_exprs, desc_flags)
-        # Don't try to cache CSV - write_csv has issues with string types
-        # Instead, to_pandas will need to find another way
+        # Delegate filtering to Rust implementation
+        result._inner = self._inner.filter(expr_dict)
         return result
 
     def select(self, *cols) -> "LTSeq":

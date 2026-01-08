@@ -237,6 +237,10 @@ class NestedTable:
         self._group_filter = None
         self._group_derive = None
 
+        # Store group assignments for rows (used when filter() is applied)
+        # Maps row_index -> group_id
+        self._group_assignments = None
+
     def __len__(self) -> int:
         """Return the number of rows in the grouped table."""
         return len(self._ltseq.to_pandas())
@@ -327,6 +331,50 @@ class NestedTable:
         result._inner = self._ltseq._inner.group_id(expr_dict)
 
         return result
+
+    def _extract_lambda_from_chain(self, source: str) -> str:
+        """
+        Extract just the lambda from a source that might include method chains.
+
+        When inspect.getsource() is called on a lambda in a chained method call like
+        .filter(...).derive(lambda g: {...}), it returns the whole chain.
+        This extracts just the lambda part.
+
+        Example:
+            Input: '.derive(lambda g: {"total": g.sum("val")})'
+            Output: 'lambda g: {"total": g.sum("val")}'
+        """
+        import ast
+
+        # Find where 'lambda' starts in the source
+        lambda_pos = source.find("lambda")
+        if lambda_pos == -1:
+            # No lambda found, return original source
+            return source
+
+        # Extract from 'lambda' onwards
+        lambda_source = source[lambda_pos:].strip()
+
+        # Try to find the end of the lambda by parsing
+        # Start with the full string and progressively trim from the end
+        for end_idx in range(len(lambda_source), 0, -1):
+            candidate = lambda_source[:end_idx]
+            try:
+                ast.parse(candidate)
+                # Successfully parsed, this is the lambda
+                return candidate
+            except SyntaxError:
+                # Try removing trailing closing parens/brackets
+                if candidate and candidate[-1] in ")]}":
+                    continue
+                # Otherwise keep trying
+
+        # If we can't find a valid lambda, return the extracted part without trailing chars
+        # Remove any trailing closing parens, brackets, or commas
+        while lambda_source and lambda_source[-1] in "),]}":
+            lambda_source = lambda_source[:-1]
+
+        return lambda_source.strip()
 
     def _remove_comments_from_source(self, source: str) -> str:
         """
@@ -472,6 +520,12 @@ Supported group methods:
         # Filter the dataframe to keep only passing groups
         filtered_df = df[df["__group_id__"].isin(passing_group_ids)]
 
+        # Store the group assignments for this filtered result
+        # Map from row index in original data to group_id
+        group_assignments = {}
+        for original_idx, (_, row) in enumerate(filtered_df.iterrows()):
+            group_assignments[original_idx] = int(row["__group_id__"])
+
         # Remove internal columns
         result_cols = [c for c in filtered_df.columns if not c.startswith("__")]
         result_df = filtered_df[result_cols]
@@ -485,6 +539,7 @@ Supported group methods:
         # Return a new NestedTable with the same grouping lambda
         # This allows chaining filter().derive() in the same grouping context
         result_nested = NestedTable(result_ltseq, self._grouping_lambda)
+        result_nested._group_assignments = group_assignments
         return result_nested
 
     def _get_unsupported_filter_error(self, source: str) -> str:
@@ -823,7 +878,22 @@ Example of valid syntax:
                 import textwrap
 
                 source_dedented = textwrap.dedent(source)
-                tree = ast.parse(source_dedented)
+
+                # If source includes a method chain like .filter(...).derive(lambda...),
+                # we need to extract just the lambda part
+                source_to_parse = self._extract_lambda_from_chain(source_dedented)
+
+                try:
+                    tree = ast.parse(source_to_parse)
+                except SyntaxError:
+                    # If we can't parse it as is, try wrapping in parentheses for expression parsing
+                    try:
+                        tree = ast.parse(f"({source_to_parse})", mode="eval")
+                    except SyntaxError:
+                        raise ValueError(
+                            f"Cannot parse derive lambda expression. "
+                            f"Source: {source_to_parse}"
+                        )
 
                 # Extract derive expressions from the dict literal
                 derive_exprs = self._extract_derive_expressions(tree, flattened._schema)
@@ -1047,22 +1117,29 @@ Example of valid syntax:
         # Add __rn__ (row number) column for window function ordering
         df["__rn__"] = range(len(df))
 
-        # Add __group_id__ column by computing grouping for each row
-        group_values = []
-        group_id = 0
-        prev_group_val = None
+        # Add __group_id__ column
+        # If we have pre-computed group assignments (from filter), use them
+        # Otherwise, compute groups from the grouping lambda
+        if self._group_assignments is not None:
+            # Use the stored group assignments from filter()
+            group_values = [self._group_assignments[i] for i in range(len(df))]
+        else:
+            # Compute grouping for each row by calling the grouping lambda
+            group_values = []
+            group_id = 0
+            prev_group_val = None
 
-        for idx, row in df.iterrows():
-            # Call the grouping lambda on this row
-            row_proxy = RowProxy(row.to_dict())
-            group_val = self._grouping_lambda(row_proxy)
+            for idx, row in df.iterrows():
+                # Call the grouping lambda on this row
+                row_proxy = RowProxy(row.to_dict())
+                group_val = self._grouping_lambda(row_proxy)
 
-            # If group value changed, increment group_id
-            if prev_group_val is None or group_val != prev_group_val:
-                group_id += 1
-                prev_group_val = group_val
+                # If group value changed, increment group_id
+                if prev_group_val is None or group_val != prev_group_val:
+                    group_id += 1
+                    prev_group_val = group_val
 
-            group_values.append(group_id)
+                group_values.append(group_id)
 
         df["__group_id__"] = group_values
 
