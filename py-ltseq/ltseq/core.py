@@ -1103,3 +1103,125 @@ class LTSeq:
         from .partitioning import PartitionedTable
 
         return PartitionedTable(self, by)
+
+    def pivot(
+        self,
+        index: Union[str, list[str]],
+        columns: str,
+        values: str,
+        agg_fn: str = "sum",
+    ) -> "LTSeq":
+        """
+        Reshape table from long format to wide format (pivot table operation).
+
+        Transforms data where unique values in a column become new columns,
+        and row groups are aggregated based on specified columns.
+
+        Args:
+            index: Column name(s) to keep as rows in the pivoted table.
+                  Can be a string or list of strings for composite row keys.
+                  E.g., "year" or ["year", "category"]
+            columns: Column whose unique values will become the new column names.
+                    E.g., "region" creates columns "West", "East", etc.
+            values: Column containing the values to aggregate into cells.
+                   E.g., "amount" - will be summed into each cell
+            agg_fn: Aggregation function to apply. One of:
+                   "sum", "mean", "count", "min", "max"
+                   Default: "sum"
+
+        Returns:
+            A new LTSeq with pivoted data (one row per unique index combination)
+
+        Raises:
+            ValueError: If schema is not initialized or agg_fn is invalid
+            AttributeError: If index, columns, or values columns don't exist
+
+        Example:
+            >>> t = LTSeq.read_csv("sales.csv")  # Has columns: date, region, amount
+            >>> # Rows by date, columns by region, sum amounts
+            >>> pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
+            >>> pivoted.show()
+            >>>
+            >>> # For composite row keys
+            >>> pivoted2 = t.pivot(
+            ...     index=["date", "category"],
+            ...     columns="region",
+            ...     values="amount",
+            ...     agg_fn="mean"
+            ... )
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Validate agg_fn
+        valid_agg_fns = {"sum", "mean", "count", "min", "max"}
+        if agg_fn not in valid_agg_fns:
+            raise ValueError(
+                f"Invalid aggregation function '{agg_fn}'. Must be one of: {valid_agg_fns}"
+            )
+
+        # Normalize index to list
+        if isinstance(index, str):
+            index_cols = [index]
+        elif isinstance(index, list):
+            index_cols = index
+        else:
+            raise TypeError(
+                f"index must be str or list of str, got {type(index).__name__}"
+            )
+
+        # Validate that all required columns exist
+        required_cols = index_cols + [columns, values]
+        for col in required_cols:
+            if col not in self._schema:
+                raise AttributeError(
+                    f"Column '{col}' not found in schema. "
+                    f"Available columns: {list(self._schema.keys())}"
+                )
+
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "pivot() requires pandas. Install it with: pip install pandas"
+            )
+
+        # Convert to pandas DataFrame
+        df = self.to_pandas()
+
+        # Map agg_fn string to pandas aggregation function name
+        agg_fn_map = {
+            "sum": "sum",
+            "mean": "mean",
+            "count": "count",
+            "min": "min",
+            "max": "max",
+        }
+
+        # Perform pivot_table operation
+        pivoted_df = df.pivot_table(
+            index=index_cols,
+            columns=columns,
+            values=values,
+            aggfunc=agg_fn_map[agg_fn],
+        )
+
+        # Reset index to convert MultiIndex back to regular columns
+        pivoted_df = pivoted_df.reset_index()
+
+        # Flatten column names if MultiIndex (can happen with multiple value columns)
+        if isinstance(pivoted_df.columns, pd.MultiIndex):
+            pivoted_df.columns = [
+                "_".join(col).strip("_") for col in pivoted_df.columns.values
+            ]
+
+        # Infer schema from pivoted DataFrame
+        schema = {col: "Unknown" for col in pivoted_df.columns}
+
+        # Convert back to LTSeq using _from_rows
+        rows = pivoted_df.to_dict("records")
+        result = LTSeq._from_rows(rows, schema)
+
+        return result
