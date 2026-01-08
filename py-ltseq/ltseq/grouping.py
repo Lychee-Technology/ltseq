@@ -1,6 +1,16 @@
 """NestedTable class for group-ordered operations."""
 
-from typing import TYPE_CHECKING, Any, Callable, Dict
+import warnings
+
+# Suppress deprecation warnings for ast.Num, ast.Str, ast.NameConstant
+# These are used for Python 3.7 compatibility
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*ast\\.Num.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*ast\\.Str.*")
+warnings.filterwarnings(
+    "ignore", category=DeprecationWarning, message=".*ast\\.NameConstant.*"
+)
+
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -427,6 +437,192 @@ class NestedTable:
 
         return "\n".join(final_result)
 
+    def _try_parse_filter_to_sql(self, group_predicate: Callable) -> "Optional[str]":
+        """
+        Attempt to parse a group filter predicate to SQL with window functions.
+
+        Returns SQL WHERE clause string if successful, None if pattern not supported.
+
+        Supported patterns:
+        - g.count() > N, >= N, < N, <= N, == N
+        - g.first().col == val, g.last().col == val
+        - g.max('col') > val, etc.
+        - Combinations: (pred1) & (pred2), (pred1) | (pred2)
+        """
+        import ast
+        import inspect
+
+        try:
+            # Get the source code of the lambda
+            source = inspect.getsource(group_predicate).strip()
+            # Remove 'lambda g: ' prefix
+            if "lambda" in source:
+                source = source.split(":", 1)[1].strip()
+
+            # Parse to AST
+            expr = ast.parse(source, mode="eval").body
+
+            # Recursively convert AST to SQL
+            sql = self._ast_to_sql(expr)
+            return sql if sql else None
+        except Exception as e:
+            # If parsing fails, return None to fall back to pandas
+            return None
+
+    def _ast_to_sql(self, node):
+        """Convert an AST node to SQL WHERE clause."""
+        import ast
+
+        if isinstance(node, ast.Compare):
+            # Handle comparisons: g.count() > 3
+            left_sql = self._ast_to_sql(node.left)
+            if not left_sql:
+                return None
+
+            # Combine all ops and comparators
+            for op, comp in zip(node.ops, node.comparators):
+                comp_sql = self._ast_to_sql(comp)
+                if not comp_sql:
+                    return None
+
+                op_str = self._ast_op_to_sql(op)
+                if not op_str:
+                    return None
+
+                left_sql = f"{left_sql} {op_str} {comp_sql}"
+
+            return left_sql
+
+        elif isinstance(node, ast.BoolOp):
+            # Handle boolean operations: pred1 & pred2, pred1 | pred2
+            op_str = " AND " if isinstance(node.op, ast.And) else " OR "
+            values = []
+            for v in node.values:
+                v_sql = self._ast_to_sql(v)
+                if not v_sql:
+                    return None
+                values.append(f"({v_sql})")
+
+            return op_str.join(values)
+
+        elif isinstance(node, ast.Call):
+            # Handle function calls: g.count(), g.first().col, g.max('col')
+            return self._ast_call_to_sql(node)
+
+        elif isinstance(node, ast.Attribute):
+            # Handle attribute access: g.first().col
+            return self._ast_attribute_to_sql(node)
+
+        elif isinstance(node, ast.Constant):
+            # Handle constants: numbers, strings, True/False, None
+            if isinstance(node.value, str):
+                return f"'{node.value}'"
+            elif isinstance(node.value, bool):
+                return "TRUE" if node.value else "FALSE"
+            elif node.value is None:
+                return "NULL"
+            else:
+                return str(node.value)
+
+        # Python 3.7 compatibility (deprecated in 3.14, but keep for now)
+        elif isinstance(node, ast.Num):  # pragma: no cover
+            return str(node.n)
+
+        elif isinstance(node, ast.Str):  # pragma: no cover
+            return f"'{node.s}'"
+
+        elif isinstance(node, ast.NameConstant):  # pragma: no cover
+            if node.value is True:
+                return "TRUE"
+            elif node.value is False:
+                return "FALSE"
+            elif node.value is None:
+                return "NULL"
+
+        return None
+
+    def _ast_op_to_sql(self, op):
+        """Convert AST operator to SQL operator."""
+        import ast
+
+        op_map = {
+            ast.Gt: ">",
+            ast.GtE: ">=",
+            ast.Lt: "<",
+            ast.LtE: "<=",
+            ast.Eq: "=",
+            ast.NotEq: "!=",
+        }
+
+        return op_map.get(type(op))
+
+    def _ast_call_to_sql(self, node):
+        """Convert AST function call to SQL window function."""
+        import ast
+
+        # Check if this is a call on g (the group parameter)
+        if not (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "g"
+        ):
+            return None
+
+        method_name = node.func.attr
+
+        if method_name == "count":
+            # g.count() -> COUNT(*) OVER (PARTITION BY __group_id__)
+            return "COUNT(*) OVER (PARTITION BY __group_id__)"
+
+        elif method_name in ("first", "last"):
+            # These need chaining with attribute access, handle separately
+            # Return a marker that will be handled in _ast_attribute_to_sql
+            return None
+
+        elif method_name in ("max", "min", "sum", "avg"):
+            # g.max('col') -> MAX(col) OVER (PARTITION BY __group_id__)
+            if len(node.args) != 1:
+                return None
+
+            # Get column name from argument
+            col_arg = node.args[0]
+            if isinstance(col_arg, ast.Constant):
+                col_name = col_arg.value
+            elif isinstance(col_arg, ast.Str):
+                col_name = col_arg.s
+            else:
+                return None
+
+            func_upper = method_name.upper()
+            return f"{func_upper}({col_name}) OVER (PARTITION BY __group_id__)"
+
+        return None
+
+    def _ast_attribute_to_sql(self, node):
+        """Convert AST attribute access to SQL."""
+        import ast
+
+        # Handle g.first().col or g.last().col
+        if isinstance(node.value, ast.Call):
+            call_node = node.value
+            if (
+                isinstance(call_node.func, ast.Attribute)
+                and isinstance(call_node.func.value, ast.Name)
+                and call_node.func.value.id == "g"
+            ):
+                method_name = call_node.func.attr
+                col_name = node.attr
+
+                if method_name == "first":
+                    # g.first().col -> FIRST_VALUE(col) OVER (PARTITION BY __group_id__ ORDER BY __rn__)
+                    return f"FIRST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__)"
+
+                elif method_name == "last":
+                    # g.last().col -> LAST_VALUE(col) OVER (PARTITION BY __group_id__ ORDER BY __rn__)
+                    return f"LAST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+
+        return None
+
     def filter(self, group_predicate: Callable) -> "LTSeq":
         """
         Filter groups based on a predicate on group properties.
@@ -453,7 +649,86 @@ class NestedTable:
         - g.avg('column') op value
         - Combinations: (predicate1) & (predicate2), (predicate1) | (predicate2)
         """
-        # Convert to pandas for evaluation (similar to derive)
+        # Try SQL-based approach first
+        try:
+            where_clause = self._try_parse_filter_to_sql(group_predicate)
+            if where_clause:
+                return self._filter_via_sql(where_clause)
+        except Exception:
+            # Fall back to pandas if SQL approach fails
+            pass
+
+        # Fall back to pandas-based evaluation
+        return self._filter_via_pandas(group_predicate)
+
+    def _filter_via_sql(self, where_clause: str) -> "LTSeq":
+        """
+        Filter using SQL WHERE clause with window functions.
+
+        This is much faster than pandas iteration when the predicate
+        can be expressed as SQL.
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "filter() requires pandas. Install it with: pip install pandas"
+            )
+
+        # Convert to pandas to add __group_id__
+        df = self._ltseq.to_pandas()
+
+        # Add __group_id__ column by computing grouping for each row
+        group_values = []
+        group_id = 0
+        prev_group_val = None
+
+        for idx, row in df.iterrows():
+            # Call the grouping lambda on this row
+            row_proxy = RowProxy(row.to_dict())
+            group_val = self._grouping_lambda(row_proxy)
+
+            # If group value changed, increment group_id
+            if prev_group_val is None or group_val != prev_group_val:
+                group_id += 1
+                prev_group_val = group_val
+
+            group_values.append(group_id)
+
+        df["__group_id__"] = group_values
+
+        # Add __rn__ (row number within group) for FIRST_VALUE/LAST_VALUE
+        df["__rn__"] = df.groupby("__group_id__").cumcount() + 1
+
+        # Convert to LTSeq temporarily to apply SQL filter
+        rows = df.to_dict("records")
+        schema = self._ltseq._schema.copy()
+        schema["__group_id__"] = "Int64"
+        schema["__rn__"] = "Int64"
+
+        temp_ltseq = self._ltseq.__class__._from_rows(rows, schema)
+
+        # Apply SQL filter using filter_where
+        filtered_ltseq = temp_ltseq.filter_where(
+            f"SELECT * FROM __table__ WHERE {where_clause}"
+        )
+
+        # Remove internal columns
+        result_schema = self._ltseq._schema.copy()
+        col_list = list(result_schema.keys())
+        result_ltseq = filtered_ltseq.select(*col_list)
+
+        # Convert back to NestedTable
+        result_nested = NestedTable(result_ltseq, self._grouping_lambda)
+        return result_nested
+
+    def _filter_via_pandas(self, group_predicate: Callable) -> "LTSeq":
+        """
+        Filter using pandas iteration (fallback for complex predicates).
+
+        This is the original pandas-based approach, kept for compatibility
+        with predicates that can't be expressed in SQL.
+        """
         try:
             import pandas as pd
         except ImportError:
