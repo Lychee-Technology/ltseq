@@ -244,6 +244,23 @@ class TestRollingBasic:
         except Exception as e:
             pytest.skip(f"rolling().count() not yet implemented: {e}")
 
+    def test_rolling_std(self, sample_csv):
+        """rolling(n).std() should compute rolling standard deviation."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        result = t.derive(lambda r: {"volatility": r.price.rolling(3).std()})
+        assert isinstance(result, LTSeq)
+
+        # Verify the result has the volatility column
+        df = result.to_pandas()
+        assert "volatility" in df.columns
+
+        # First row should be None (not enough data for window)
+        assert df["volatility"].iloc[0] is None or df["volatility"].isna().iloc[0]
+
+        # Later rows should have numeric values
+        assert df["volatility"].iloc[2] is not None
+
     def test_rolling_large_window(self, sample_csv):
         """rolling() with window size > table size."""
         t = LTSeq.read_csv(sample_csv).sort("date")

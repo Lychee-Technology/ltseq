@@ -531,12 +531,39 @@ class TestNestedTableDeriveIntegration:
     """Integration tests combining derive with other operations."""
 
     def test_derive_after_filter(self):
-        """Test derive applied after filter - skipped due to filter AST parsing limitations."""
-        # This test is skipped because filter() currently requires lambdas with specific
-        # AST patterns, and named functions don't work with the current implementation.
-        # The functionality is tested separately in test_phase_b1_filter.py and
-        # derive is tested independently above.
-        pytest.skip("Filter AST parsing doesn't support named functions yet")
+        """Test derive applied after filter on group_ordered data."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("date,value,group\n")
+            f.write("2024-01-01,10,A\n")
+            f.write("2024-01-02,20,A\n")
+            f.write("2024-01-03,30,A\n")  # A has 3 rows
+            f.write("2024-01-04,40,B\n")
+            f.write("2024-01-05,50,B\n")  # B has 2 rows
+            fname = f.name
+
+        try:
+            t = LTSeq.read_csv(fname)
+
+            # Test filter -> derive chain
+            result = (
+                t.group_ordered(lambda r: r.group)
+                .filter(lambda g: g.count() > 2)  # Only A (count=3)
+                .derive(lambda g: {"group_size": g.count()})
+            )
+            df = result.to_pandas()
+
+            # Should only have group A (3 rows), not B (2 rows)
+            assert len(df) == 3
+            assert df["group"].unique().tolist() == ["A"]
+            assert df["group_size"].unique().tolist() == [3]
+
+            # Verify all original columns preserved
+            assert "date" in df.columns
+            assert "value" in df.columns
+            assert "group" in df.columns
+            assert "group_size" in df.columns
+        finally:
+            os.unlink(fname)
 
     def test_derive_with_consecutive_groups(self):
         """Test derive with data that has consecutive groups only."""
