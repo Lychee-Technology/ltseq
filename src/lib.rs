@@ -11,7 +11,7 @@ mod error;
 mod types;
 pub mod format;      // Formatting and display functions
 pub mod transpiler;  // PyExpr to DataFusion transpilation
-pub mod engine;      // DataFusion session and RustTable struct
+pub mod engine;      // DataFusion session and LTSeqTable struct
 pub mod ops;         // Table operations grouped by category
 pub mod cursor;      // Streaming cursor for lazy iteration
 
@@ -27,10 +27,10 @@ fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, S
     crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
 }
 
-/// RustTable: Holds DataFusion SessionContext and loaded data
+/// LTSeqTable: Holds DataFusion SessionContext and loaded data
 /// This is the core Rust kernel backing LTSeq
 #[pyclass]
-pub struct RustTable {
+pub struct LTSeqTable {
     session: Arc<SessionContext>,
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
@@ -97,11 +97,11 @@ fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
 }
 
 #[pymethods]
-impl RustTable {
+impl LTSeqTable {
     #[new]
     fn new() -> Self {
         let session = SessionContext::new();
-        RustTable {
+        LTSeqTable {
             session: Arc::new(session),
             dataframe: None,
             schema: None,
@@ -148,9 +148,9 @@ impl RustTable {
     ///     path: Path to CSV file
     ///
     /// Returns:
-    ///     RustCursor for lazy iteration over batches
+    ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
-    fn scan_csv(path: String) -> PyResult<crate::cursor::RustCursor> {
+    fn scan_csv(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = Arc::new(SessionContext::new());
         crate::cursor::create_cursor_from_csv(session, &path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
@@ -162,9 +162,9 @@ impl RustTable {
     ///     path: Path to Parquet file
     ///
     /// Returns:
-    ///     RustCursor for lazy iteration over batches
+    ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
-    fn scan_parquet(path: String) -> PyResult<crate::cursor::RustCursor> {
+    fn scan_parquet(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = Arc::new(SessionContext::new());
         crate::cursor::create_cursor_from_parquet(session, &path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
@@ -208,11 +208,11 @@ impl RustTable {
         match (&self.dataframe, &self.schema) {
             (Some(_), Some(schema)) => {
                 format!(
-                    "Hello from RustTable! Schema has {} columns",
+                    "Hello from LTSeqTable! Schema has {} columns",
                     schema.fields().len()
                 )
             }
-            _ => "Hello from RustTable! No data loaded yet.".to_string(),
+            _ => "Hello from LTSeqTable! No data loaded yet.".to_string(),
         }
     }
 
@@ -260,15 +260,15 @@ impl RustTable {
     ///     expr_dict: Serialized expression dict (from Python)
     ///
     /// Returns:
-    ///     New RustTable with filtered data
-    fn filter(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with filtered data
+    fn filter(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         // 1. Deserialize expression
         let py_expr = dict_to_py_expr(expr_dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(RustTable {
+            return Ok(LTSeqTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -304,8 +304,8 @@ impl RustTable {
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // 6. Return new RustTable with filtered data
-        Ok(RustTable {
+        // 6. Return new LTSeqTable with filtered data
+        Ok(LTSeqTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(filtered_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -322,8 +322,8 @@ impl RustTable {
     ///     expr_dict: Serialized filter expression
     ///
     /// Returns:
-    ///     New RustTable with at most one row
-    fn search_first(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with at most one row
+    fn search_first(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         crate::ops::basic::search_first_impl(self, expr_dict)
     }
 
@@ -333,11 +333,11 @@ impl RustTable {
     ///     exprs: List of serialized expression dicts (from Python)
     ///
     /// Returns:
-    ///     New RustTable with selected columns
-    fn select(&self, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with selected columns
+    fn select(&self, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(RustTable {
+            return Ok(LTSeqTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -390,8 +390,8 @@ impl RustTable {
         let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
         let new_schema = ArrowSchema::new(arrow_fields);
 
-        // 6. Return new RustTable with updated schema
-        Ok(RustTable {
+        // 6. Return new LTSeqTable with updated schema
+        Ok(LTSeqTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(selected_df)),
             schema: Some(Arc::new(new_schema)),
@@ -405,8 +405,8 @@ impl RustTable {
     ///     derived_cols: Dict mapping column names to serialized expression dicts
     ///
     /// Returns:
-    ///     New RustTable with added derived columns
-    fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with added derived columns
+    fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         crate::ops::derive::derive_impl(self, derived_cols)
     }
 
@@ -414,7 +414,7 @@ impl RustTable {
     fn derive_with_window_functions(
         &self,
         derived_cols: &Bound<'_, PyDict>,
-    ) -> PyResult<RustTable> {
+    ) -> PyResult<LTSeqTable> {
         crate::ops::derive::derive_with_window_functions_impl(self, derived_cols)
     }
 
@@ -425,8 +425,8 @@ impl RustTable {
     ///     desc_flags: List of boolean flags indicating descending order per sort key
     ///
     /// Returns:
-    ///     New RustTable with sorted data
-    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with sorted data
+    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<LTSeqTable> {
         crate::ops::advanced::sort_impl(self, sort_exprs, desc_flags)
     }
 
@@ -434,7 +434,7 @@ impl RustTable {
     ///
     /// Phase B2: Foundation for group_ordered() lazy evaluation.
     /// Placeholder: will compute __group_id__ via window functions.
-    fn group_id(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<RustTable> {
+    fn group_id(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         crate::ops::advanced::group_id_impl(self, grouping_expr)
     }
 
@@ -442,7 +442,7 @@ impl RustTable {
     ///
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// first row per group.
-    fn first_row(&self) -> PyResult<RustTable> {
+    fn first_row(&self) -> PyResult<LTSeqTable> {
         crate::ops::advanced::first_row_impl(self)
     }
 
@@ -450,7 +450,7 @@ impl RustTable {
     ///
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// last row per group.
-    fn last_row(&self) -> PyResult<RustTable> {
+    fn last_row(&self) -> PyResult<LTSeqTable> {
         crate::ops::advanced::last_row_impl(self)
     }
 
@@ -461,11 +461,11 @@ impl RustTable {
     ///                If empty, considers all columns for uniqueness
     ///
     /// Returns:
-    ///     New RustTable with unique rows
-    fn distinct(&self, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with unique rows
+    fn distinct(&self, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(RustTable {
+            return Ok(LTSeqTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -498,7 +498,7 @@ impl RustTable {
                 })
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-            return Ok(RustTable {
+            return Ok(LTSeqTable {
                 session: Arc::clone(&self.session),
                 dataframe: Some(Arc::new(distinct_df)),
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -599,8 +599,8 @@ impl RustTable {
             })
             .map_err(|e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // Return new RustTable with distinct data
-        Ok(RustTable {
+        // Return new LTSeqTable with distinct data
+        Ok(LTSeqTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(distinct_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -615,11 +615,11 @@ impl RustTable {
     ///     length: Number of rows to include (None = all rows from offset to end)
     ///
     /// Returns:
-    ///     New RustTable with selected row range
-    fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with selected row range
+    fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(RustTable {
+            return Ok(LTSeqTable {
                 session: Arc::clone(&self.session),
                 dataframe: None,
                 schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -648,8 +648,8 @@ impl RustTable {
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // Return new RustTable with sliced data
-        Ok(RustTable {
+        // Return new LTSeqTable with sliced data
+        Ok(LTSeqTable {
             session: Arc::clone(&self.session),
             dataframe: Some(Arc::new(sliced_df)),
             schema: self.schema.as_ref().map(|s| Arc::clone(s)),
@@ -664,8 +664,8 @@ impl RustTable {
     ///                Each expression identifies the column(s) to cumulate
     ///
     /// Returns:
-    ///     New RustTable with cumulative sum columns added
-    fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with cumulative sum columns added
+    fn cum_sum(&self, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         crate::ops::derive::cum_sum_impl(self, cum_exprs)
     }
 
@@ -681,8 +681,8 @@ impl RustTable {
     ///              Each expression identifies an aggregate function like g.sales.sum()
     ///
     /// Returns:
-    ///     New RustTable with one row per group (or one row for full-table agg)
-    fn agg(&self, group_expr: Option<Bound<'_, PyDict>>, agg_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with one row per group (or one row for full-table agg)
+    fn agg(&self, group_expr: Option<Bound<'_, PyDict>>, agg_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         crate::ops::advanced::agg_impl(self, group_expr, agg_dict)
     }
 
@@ -695,8 +695,8 @@ impl RustTable {
     ///     where_clause: Raw SQL WHERE clause string (e.g., "__group_count__ > 2")
     ///
     /// Returns:
-    ///     New RustTable with rows matching the WHERE clause
-    fn filter_where(&self, where_clause: &str) -> PyResult<RustTable> {
+    ///     New LTSeqTable with rows matching the WHERE clause
+    fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
         crate::ops::advanced::filter_where_impl(self, where_clause)
     }
 
@@ -711,8 +711,8 @@ impl RustTable {
     ///                   e.g., {"span": "COUNT(*) OVER (PARTITION BY __group_id__)"}
     ///
     /// Returns:
-    ///     New RustTable with derived columns added (and __group_id__, __rn__ removed)
-    fn derive_window_sql(&self, derive_exprs: std::collections::HashMap<String, String>) -> PyResult<RustTable> {
+    ///     New LTSeqTable with derived columns added (and __group_id__, __rn__ removed)
+    fn derive_window_sql(&self, derive_exprs: std::collections::HashMap<String, String>) -> PyResult<LTSeqTable> {
         crate::ops::advanced::derive_window_sql_impl(self, derive_exprs)
     }
 
@@ -750,7 +750,7 @@ impl RustTable {
     ///
     /// # Returns
     ///
-    /// A new RustTable containing the joined result with combined schema
+    /// A new LTSeqTable containing the joined result with combined schema
     ///
     /// # Panics
     ///
@@ -763,12 +763,12 @@ impl RustTable {
     /// It supports lazy evaluation - the join is only executed when the result is accessed.
      fn join(
         &self,
-        other: &RustTable,
+        other: &LTSeqTable,
         left_key_expr_dict: &Bound<'_, PyDict>,
         right_key_expr_dict: &Bound<'_, PyDict>,
         join_type: &str,
         alias: &str,
-    ) -> PyResult<RustTable> {
+    ) -> PyResult<LTSeqTable> {
         crate::ops::advanced::join_impl(self, other, left_key_expr_dict, right_key_expr_dict, join_type, alias)
     }
 
@@ -786,7 +786,7 @@ impl RustTable {
     ///
     /// # Returns
     ///
-    /// A new RustTable with pivoted data (one row per unique index combination)
+    /// A new LTSeqTable with pivoted data (one row per unique index combination)
     ///
     /// # Example
     ///
@@ -799,7 +799,7 @@ impl RustTable {
         pivot_col: String,
         value_col: String,
         agg_fn: String,
-    ) -> PyResult<RustTable> {
+    ) -> PyResult<LTSeqTable> {
         crate::ops::advanced::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
     }
 
@@ -814,12 +814,12 @@ impl RustTable {
     ///
     /// # Returns
     ///
-    /// A new RustTable containing all rows from both input tables
+    /// A new LTSeqTable containing all rows from both input tables
     ///
     /// # Errors
     ///
     /// Returns error if schemas don't match or data operations fail
-    fn union(&self, other: &RustTable) -> PyResult<RustTable> {
+    fn union(&self, other: &LTSeqTable) -> PyResult<LTSeqTable> {
         crate::ops::basic::union_impl(self, other)
     }
 
@@ -836,8 +836,8 @@ impl RustTable {
     ///
     /// # Returns
     ///
-    /// A new RustTable containing rows present in both tables
-    fn intersect(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    /// A new LTSeqTable containing rows present in both tables
+    fn intersect(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         crate::ops::basic::intersect_impl(self, other, key_expr_dict)
     }
 
@@ -854,8 +854,8 @@ impl RustTable {
     ///
     /// # Returns
     ///
-    /// A new RustTable with rows in left table but not in right table
-    fn diff(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    /// A new LTSeqTable with rows in left table but not in right table
+    fn diff(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         crate::ops::basic::diff_impl(self, other, key_expr_dict)
     }
 
@@ -960,7 +960,7 @@ impl RustTable {
         Ok(output)
     }
 
-    fn is_subset(&self, other: &RustTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<bool> {
+    fn is_subset(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<bool> {
         crate::ops::basic::is_subset_impl(self, other, key_expr_dict)
     }
 }
@@ -975,7 +975,7 @@ fn hello() -> PyResult<String> {
 #[pymodule]
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hello, m)?)?;
-    m.add_class::<RustTable>()?;
-    m.add_class::<cursor::RustCursor>()?;
+    m.add_class::<LTSeqTable>()?;
+    m.add_class::<cursor::LTSeqCursor>()?;
     Ok(())
 }

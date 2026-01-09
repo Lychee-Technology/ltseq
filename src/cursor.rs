@@ -1,4 +1,4 @@
-//! RustCursor: Streaming cursor for lazy batch iteration
+//! LTSeqCursor: Streaming cursor for lazy batch iteration
 //!
 //! This module provides a streaming cursor that wraps DataFusion's
 //! SendableRecordBatchStream, allowing Python to iterate over data
@@ -15,14 +15,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::engine::RUNTIME;
 
-/// RustCursor: A streaming cursor for batch-by-batch iteration
+/// LTSeqCursor: A streaming cursor for batch-by-batch iteration
 ///
-/// Unlike RustTable which materializes all data, RustCursor holds a
+/// Unlike LTSeqTable which materializes all data, LTSeqCursor holds a
 /// SendableRecordBatchStream and yields batches one at a time.
 ///
 /// The stream is wrapped in Mutex to satisfy PyO3's Sync requirement.
 #[pyclass]
-pub struct RustCursor {
+pub struct LTSeqCursor {
     /// The underlying stream wrapped in Mutex for thread safety
     stream: Mutex<Option<SendableRecordBatchStream>>,
     /// Schema for the data
@@ -31,14 +31,14 @@ pub struct RustCursor {
     source_path: String,
 }
 
-impl RustCursor {
-    /// Create a new RustCursor from a stream
+impl LTSeqCursor {
+    /// Create a new LTSeqCursor from a stream
     pub fn new(
         stream: SendableRecordBatchStream,
         schema: Arc<ArrowSchema>,
         source_path: String,
     ) -> Self {
-        RustCursor {
+        LTSeqCursor {
             stream: Mutex::new(Some(stream)),
             schema,
             source_path,
@@ -47,7 +47,7 @@ impl RustCursor {
 }
 
 #[pymethods]
-impl RustCursor {
+impl LTSeqCursor {
     /// Fetch the next batch of rows.
     ///
     /// Returns:
@@ -149,11 +149,11 @@ fn serialize_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, String> {
     Ok(buffer)
 }
 
-/// Create a RustCursor from a CSV file path (used by RustTable::scan_csv)
+/// Create a LTSeqCursor from a CSV file path (used by LTSeqTable::scan_csv)
 pub fn create_cursor_from_csv(
     session: Arc<SessionContext>,
     path: &str,
-) -> Result<RustCursor, String> {
+) -> Result<LTSeqCursor, String> {
     RUNTIME.block_on(async {
         // Read CSV into DataFrame
         let df = session
@@ -173,15 +173,15 @@ pub fn create_cursor_from_csv(
             .await
             .map_err(|e| format!("Failed to create stream: {}", e))?;
 
-        Ok(RustCursor::new(stream, arrow_schema, path.to_string()))
+        Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
     })
 }
 
-/// Create a RustCursor from a Parquet file path
+/// Create a LTSeqCursor from a Parquet file path
 pub fn create_cursor_from_parquet(
     session: Arc<SessionContext>,
     path: &str,
-) -> Result<RustCursor, String> {
+) -> Result<LTSeqCursor, String> {
     RUNTIME.block_on(async {
         // Read Parquet into DataFrame
         let df = session
@@ -201,6 +201,6 @@ pub fn create_cursor_from_parquet(
             .await
             .map_err(|e| format!("Failed to create stream: {}", e))?;
 
-        Ok(RustCursor::new(stream, arrow_schema, path.to_string()))
+        Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
     })
 }

@@ -27,12 +27,12 @@ class TestFilterBasic:
 
     def test_filter_returns_ltseq(self):
         """filter() returns a new LTSeq instance."""
-        # This test would need a mock RustTable for full testing
+        # This test would need a mock LTSeqTable for full testing
         # For now, we test the method signature and basic logic
         t = LTSeq()
         t._schema = {"age": "int64"}
 
-        # We can't actually call filter without a working RustTable,
+        # We can't actually call filter without a working LTSeqTable,
         # but we can verify the method exists and has the right signature
         assert hasattr(t, "filter")
         assert callable(t.filter)
@@ -136,7 +136,7 @@ class TestDeriveBasic:
         original_schema = {"price": "float64", "qty": "int64"}
         t._schema = original_schema.copy()
 
-        # Can't call the actual method without RustTable,
+        # Can't call the actual method without LTSeqTable,
         # but we verify the method exists
         assert hasattr(t, "derive")
 
@@ -194,7 +194,7 @@ class TestMethodChaining:
         t._schema = {"age": "int64", "salary": "float64"}
 
         # We test that the methods accept the right arguments
-        # Actual chaining would require working RustTable
+        # Actual chaining would require working LTSeqTable
         assert hasattr(t, "filter")
 
     def test_mixed_method_calls(self):
@@ -212,7 +212,7 @@ class TestMethodChaining:
         original_schema = {"age": "int64", "name": "string"}
         t._schema = original_schema.copy()
 
-        # Can't test actual execution without RustTable,
+        # Can't test actual execution without LTSeqTable,
         # but we verify schema is accessible
         assert t._schema == original_schema
 
@@ -261,7 +261,7 @@ class TestDeriveWithMultipleColumns:
         t = LTSeq()
         t._schema = {"a": "int64", "b": "int64"}
 
-        # This would need to be tested with actual RustTable for full verification
+        # This would need to be tested with actual LTSeqTable for full verification
         assert hasattr(t, "derive")
 
 
@@ -337,7 +337,7 @@ class TestTypeConsistency:
         t = LTSeq()
         t._schema = {"age": "int64"}
 
-        # We can't test the actual return without RustTable
+        # We can't test the actual return without LTSeqTable
         # but we verify method exists and would return LTSeq
         assert hasattr(t, "filter")
 

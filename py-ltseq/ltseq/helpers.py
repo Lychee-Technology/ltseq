@@ -48,7 +48,7 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
     """
     Infer schema from CSV file by reading the header and sampling rows.
 
-    This is a workaround until RustTable properly exposes schema.
+    This is a workaround until LTSeqTable properly exposes schema.
     Infers type as:
     - "int64" if all values are integers
     - "float64" if all values are floats

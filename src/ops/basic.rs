@@ -22,7 +22,7 @@
 //! - **read_csv_impl**: Load CSV files into DataFusion
 //!   - Parses CSV with DataFusion's native reader
 //!   - Extracts schema from loaded data
-//!   - Stores both schema and dataframe in RustTable
+//!   - Stores both schema and dataframe in LTSeqTable
 //!
 //! ## Query Operations
 //! - **filter_impl**: Apply WHERE conditions (predicates)
@@ -39,7 +39,7 @@
 //! 3. Transpile PyExpr → DataFusion Expr via pyexpr_to_datafusion()
 //! 4. Build DataFusion logical plan (filter, project, etc.)
 //! 5. Collect results via RUNTIME.block_on(df.collect())
-//! 6. Build RecordBatches and return new RustTable
+//! 6. Build RecordBatches and return new LTSeqTable
 //!
 //! # Error Handling
 //!
@@ -54,7 +54,7 @@
 //! - **Async**: CSV reads are async via DataFusion's session context
 //! - **Runtime**: All async operations executed via RUNTIME.block_on() in helpers
 
-use crate::RustTable;
+use crate::LTSeqTable;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
@@ -68,9 +68,9 @@ use crate::engine::RUNTIME;
 /// Helper function to read CSV file into DataFusion DataFrame
 ///
 /// Args:
-///     table: Mutable reference to RustTable
+///     table: Mutable reference to LTSeqTable
 ///     path: Path to CSV file
-pub async fn read_csv_impl(table: &mut RustTable, path: String) -> PyResult<()> {
+pub async fn read_csv_impl(table: &mut LTSeqTable, path: String) -> PyResult<()> {
     let df = table
         .session
         .read_csv(&path, CsvReadOptions::new())
@@ -97,7 +97,7 @@ pub async fn read_csv_impl(table: &mut RustTable, path: String) -> PyResult<()> 
 ///
 /// Returns:
 ///     The number of rows
-pub fn count_impl(table: &RustTable) -> PyResult<usize> {
+pub fn count_impl(table: &LTSeqTable) -> PyResult<usize> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -124,9 +124,9 @@ pub fn count_impl(table: &RustTable) -> PyResult<usize> {
 /// Helper function to filter rows based on an expression
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     expr_dict: Serialized expression dict
-pub fn filter_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -161,8 +161,8 @@ pub fn filter_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(filtered_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -176,9 +176,9 @@ pub fn filter_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult
 /// Much faster than filtering and then taking the first row, especially for large tables.
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     expr_dict: Serialized filter expression
-pub fn search_first_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+pub fn search_first_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -215,8 +215,8 @@ pub fn search_first_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> Py
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -227,9 +227,9 @@ pub fn search_first_impl(table: &RustTable, expr_dict: &Bound<'_, PyDict>) -> Py
 /// Helper function to select specific columns
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     exprs: List of serialized expression dicts
-pub fn select_impl(table: &RustTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -268,8 +268,8 @@ pub fn select_impl(table: &RustTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(selected_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -280,10 +280,10 @@ pub fn select_impl(table: &RustTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult
 /// Helper function to slice the table (offset and limit)
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     offset: Starting row index
 ///     length: Maximum number of rows to return
-pub fn slice_impl(table: &RustTable, offset: i64, length: Option<i64>) -> PyResult<RustTable> {
+pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -308,8 +308,8 @@ pub fn slice_impl(table: &RustTable, offset: i64, length: Option<i64>) -> PyResu
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(sliced_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -320,9 +320,9 @@ pub fn slice_impl(table: &RustTable, offset: i64, length: Option<i64>) -> PyResu
 /// Helper function to remove duplicate rows
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     _key_exprs: Not used in Phase 1 (future: expressions to determine uniqueness)
-pub fn distinct_impl(table: &RustTable, _key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+pub fn distinct_impl(table: &LTSeqTable, _key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",
@@ -343,8 +343,8 @@ pub fn distinct_impl(table: &RustTable, _key_exprs: Vec<Bound<'_, PyDict>>) -> P
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(distinct_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -360,7 +360,7 @@ pub fn distinct_impl(table: &RustTable, _key_exprs: Vec<Bound<'_, PyDict>>) -> P
 /// Args:
 ///     table1: First table
 ///     table2: Second table
-pub fn union_impl(table1: &RustTable, table2: &RustTable) -> PyResult<RustTable> {
+pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTable> {
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Left table has no data loaded. Call read_csv() first.",
@@ -410,8 +410,8 @@ pub fn union_impl(table1: &RustTable, table2: &RustTable) -> PyResult<RustTable>
         df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table1.session),
         dataframe: Some(Arc::new(union_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -429,10 +429,10 @@ pub fn union_impl(table1: &RustTable, table2: &RustTable) -> PyResult<RustTable>
 ///     table2: Second table
 ///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn intersect_impl(
-    table1: &RustTable,
-    table2: &RustTable,
+    table1: &LTSeqTable,
+    table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     use datafusion::datasource::MemTable;
 
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
@@ -533,7 +533,7 @@ pub fn intersect_impl(
     let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table1.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -551,10 +551,10 @@ pub fn intersect_impl(
 ///     table2: Second table
 ///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn diff_impl(
-    table1: &RustTable,
-    table2: &RustTable,
+    table1: &LTSeqTable,
+    table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     use datafusion::datasource::MemTable;
 
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
@@ -655,7 +655,7 @@ pub fn diff_impl(
     let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table1.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::new(new_arrow_schema)),
@@ -673,8 +673,8 @@ pub fn diff_impl(
 ///     table2: Second table (potential superset)
 ///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn is_subset_impl(
-    table1: &RustTable,
-    table2: &RustTable,
+    table1: &LTSeqTable,
+    table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
     use datafusion::datasource::MemTable;

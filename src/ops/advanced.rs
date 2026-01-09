@@ -22,7 +22,7 @@
 //! - asc = !is_desc (invert the flag)
 //! - nulls_first = is_desc (for descending, put NULLs first by default)
 //!
-//! **Key Feature**: Stores sort_exprs in RustTable for window function context
+//! **Key Feature**: Stores sort_exprs in LTSeqTable for window function context
 //!
 //! ## Group ID (group_id_impl)
 //!
@@ -73,7 +73,7 @@
 //! 2. Deserialize Python expression dicts → PyExpr
 //! 3. Transpile PyExpr → DataFusion Expr
 //! 4. Execute via DataFusion query engine
-//! 5. Collect results into new RustTable
+//! 5. Collect results into new LTSeqTable
 //!
 //! # Schema Handling
 //!
@@ -82,7 +82,7 @@
 //!   - Left table columns (unchanged)
 //!   - Right table columns prefixed with alias (e.g., `right_id`, `right_value`)
 
-use crate::RustTable;
+use crate::LTSeqTable;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::transpiler::pyexpr_to_datafusion;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, DataType};
@@ -191,12 +191,12 @@ fn extract_cols_from_and(
 /// for use in subsequent window function operations.
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     sort_exprs: List of serialized expression dicts (from Python)
-pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<RustTable> {
+pub fn sort_impl(table: &LTSeqTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -257,8 +257,8 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fla
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Return new RustTable with sorted data and captured sort keys
-    Ok(RustTable {
+    // Return new LTSeqTable with sorted data and captured sort keys
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(sorted_df)),
         schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -274,10 +274,10 @@ pub fn sort_impl(table: &RustTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fla
 /// 3. Add __group_id__ column to result
 ///
 /// Uses SQL execution for clean, efficient implementation.
-pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<RustTable> {
+pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -415,7 +415,7 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
 
     // Create a new MemTable from the result batches
     if result_batches.is_empty() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -457,8 +457,8 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
             ))
         })?;
 
-    // Return new RustTable with __group_id__ column
-    Ok(RustTable {
+    // Return new LTSeqTable with __group_id__ column
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(result_schema),
@@ -470,10 +470,10 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
 ///
 /// Requires __group_id__ column to already exist. Filters to rows where
 /// ROW_NUMBER() OVER (PARTITION BY __group_id__) = 1
-pub fn first_row_impl(table: &RustTable) -> PyResult<RustTable> {
+pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result
     if table.dataframe.is_none() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -585,7 +585,7 @@ pub fn first_row_impl(table: &RustTable) -> PyResult<RustTable> {
 
     // Create a new MemTable from the result batches
     if result_batches.is_empty() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -625,8 +625,8 @@ pub fn first_row_impl(table: &RustTable) -> PyResult<RustTable> {
     // Deregister the result table
     let _ = table.session.deregister_table(&result_table_name);
 
-    // Return new RustTable with only first rows
-    Ok(RustTable {
+    // Return new LTSeqTable with only first rows
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(result_schema),
@@ -638,10 +638,10 @@ pub fn first_row_impl(table: &RustTable) -> PyResult<RustTable> {
 ///
 /// Requires __group_id__ column to already exist. Filters to rows where
 /// ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY desc) = 1
-pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
+pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result
     if table.dataframe.is_none() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -759,7 +759,7 @@ pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
 
     // Create a new MemTable from the result batches
     if result_batches.is_empty() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -799,8 +799,8 @@ pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
     // Deregister the result table
     let _ = table.session.deregister_table(&result_table_name);
 
-    // Return new RustTable with only last rows
-    Ok(RustTable {
+    // Return new LTSeqTable with only last rows
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(result_schema),
@@ -817,11 +817,11 @@ pub fn last_row_impl(table: &RustTable) -> PyResult<RustTable> {
 /// 1. Evaluating Python lambdas for each group
 /// 2. Broadcasting computed values back to all rows in group
 /// 3. Adding new columns to result schema
-pub fn derive_impl(table: &RustTable, _derived_cols_spec: Bound<'_, PyDict>) -> PyResult<RustTable> {
+pub fn derive_impl(table: &LTSeqTable, _derived_cols_spec: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // Phase B7 placeholder: Just return the input table unchanged
     // Full implementation would compute derived columns and add them
     
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: table.dataframe.as_ref().map(|df| Arc::clone(df)),
         schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -944,12 +944,12 @@ fn build_join_sql(
 ///
 /// # Returns
 ///
-/// A new RustTable with one row per group (or one row for full-table agg)
+/// A new LTSeqTable with one row per group (or one row for full-table agg)
 pub fn agg_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     group_expr: Option<Bound<'_, PyDict>>,
     agg_dict: &Bound<'_, PyDict>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // Validate tables exist
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1120,9 +1120,9 @@ pub fn agg_impl(
             ))
         })?;
 
-    // Create result RustTable
+    // Create result LTSeqTable
     if result_batches.is_empty() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: None,
@@ -1146,7 +1146,7 @@ pub fn agg_impl(
         ))
     })?;
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::clone(&result_schema)),
@@ -1166,11 +1166,11 @@ pub fn agg_impl(
 ///
 /// # Returns
 ///
-/// A new RustTable with rows matching the WHERE clause
+/// A new LTSeqTable with rows matching the WHERE clause
 pub fn filter_where_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     where_clause: &str,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // Validate table exists
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1250,9 +1250,9 @@ pub fn filter_where_impl(
     // Deregister temporary table (ignore errors)
     let _ = table.session.deregister_table(&temp_table_name);
 
-    // Create result RustTable
+    // Create result LTSeqTable
     if result_batches.is_empty() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: Some(Arc::clone(schema)),
@@ -1276,7 +1276,7 @@ pub fn filter_where_impl(
         ))
     })?;
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::clone(&result_schema)),
@@ -1286,13 +1286,13 @@ pub fn filter_where_impl(
 
 
 pub fn join_impl(
-    table: &RustTable,
-    other: &RustTable,
+    table: &LTSeqTable,
+    other: &LTSeqTable,
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
     join_type: &str,
     alias: &str,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // 1. Validate both tables have data
     let df_left = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1419,7 +1419,7 @@ pub fn join_impl(
     let _ = table.session.deregister_table(&left_table_name);
     let _ = table.session.deregister_table(&right_table_name);
 
-    // 9. Build result RustTable
+    // 9. Build result LTSeqTable
     if result_batches.is_empty() {
         // Build expected schema for empty result
         let mut result_fields: Vec<Field> = Vec::new();
@@ -1439,7 +1439,7 @@ pub fn join_impl(
         }
         
         let empty_schema = Arc::new(ArrowSchema::new(result_fields));
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: Some(empty_schema),
@@ -1458,7 +1458,7 @@ pub fn join_impl(
             format!("Failed to read result table: {}", e)
         ))?;
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(result_schema),
@@ -1482,12 +1482,12 @@ pub fn join_impl(
 ///       SUM(CASE WHEN region = 'East' THEN amount ELSE NULL END) as "East"
 ///   FROM table GROUP BY year
 pub fn pivot_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     index_cols: Vec<String>,
     pivot_col: String,
     value_col: String,
     agg_fn: String,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // Validate inputs
     if table.dataframe.is_none() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -1710,8 +1710,8 @@ pub fn pivot_impl(
             ))
         })?;
 
-    // Return new RustTable
-    Ok(RustTable {
+    // Return new LTSeqTable
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(final_df)),
         schema: Some(result_schema),
@@ -1731,11 +1731,11 @@ pub fn pivot_impl(
 ///
 /// # Returns
 ///
-/// A new RustTable with the derived columns added (and __group_id__, __rn__ removed)
+/// A new LTSeqTable with the derived columns added (and __group_id__, __rn__ removed)
 pub fn derive_window_sql_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     derive_exprs: std::collections::HashMap<String, String>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // Validate table exists
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1825,7 +1825,7 @@ pub fn derive_window_sql_impl(
     // Deregister temporary table (ignore errors)
     let _ = table.session.deregister_table(&temp_table_name);
 
-    // Create result RustTable
+    // Create result LTSeqTable
     if result_batches.is_empty() {
         // Build schema for empty result
         let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
@@ -1844,7 +1844,7 @@ pub fn derive_window_sql_impl(
             ));
         }
         let empty_schema = Arc::new(ArrowSchema::new(result_fields));
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: Some(empty_schema),
@@ -1868,7 +1868,7 @@ pub fn derive_window_sql_impl(
         ))
     })?;
 
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::clone(&result_schema)),

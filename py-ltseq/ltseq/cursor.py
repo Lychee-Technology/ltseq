@@ -1,6 +1,6 @@
 """Cursor: Streaming iterator for lazy batch-by-batch data processing.
 
-This module provides a Python wrapper around RustCursor for processing
+This module provides a Python wrapper around LTSeqCursor for processing
 large datasets without loading everything into memory.
 """
 
@@ -29,10 +29,10 @@ class Cursor:
     """
 
     def __init__(self, rust_cursor):
-        """Initialize Cursor with a RustCursor instance.
+        """Initialize Cursor with a LTSeqCursor instance.
 
         Args:
-            rust_cursor: RustCursor from ltseq_core
+            rust_cursor: LTSeqCursor from ltseq_core
         """
         if not HAS_RUST_BINDING:
             raise RuntimeError(

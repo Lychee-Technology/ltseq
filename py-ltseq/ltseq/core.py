@@ -134,7 +134,7 @@ class LTSeq:
                 "Rust extension ltseq_core not available. "
                 "Please rebuild with `maturin develop`."
             )
-        self._inner = ltseq_core.RustTable()
+        self._inner = ltseq_core.LTSeqTable()
         self._schema: Dict[str, str] = {}
         self._csv_path: Optional[str] = None  # Track original CSV file for to_pandas()
 
@@ -158,7 +158,7 @@ class LTSeq:
         t = cls()
         t._schema = _infer_schema_from_csv(path)
         t._csv_path = path  # Store path for to_pandas() fallback
-        # Call Rust RustTable.read_csv to load the actual data
+        # Call Rust LTSeqTable.read_csv to load the actual data
         t._inner.read_csv(path)
         return t
 
@@ -186,7 +186,7 @@ class LTSeq:
         """
         from .cursor import Cursor
 
-        rust_cursor = ltseq_core.RustTable.scan_csv(path)
+        rust_cursor = ltseq_core.LTSeqTable.scan_csv(path)
         return Cursor(rust_cursor)
 
     @classmethod
@@ -204,7 +204,7 @@ class LTSeq:
         """
         from .cursor import Cursor
 
-        rust_cursor = ltseq_core.RustTable.scan_parquet(path)
+        rust_cursor = ltseq_core.LTSeqTable.scan_parquet(path)
         return Cursor(rust_cursor)
 
     @classmethod

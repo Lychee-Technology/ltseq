@@ -17,7 +17,7 @@
 //! - Handled by: crate::ops::window module
 //! - This module detects window functions and delegates
 
-use crate::RustTable;
+use crate::LTSeqTable;
 use crate::types::dict_to_py_expr;
 use crate::transpiler::pyexpr_to_datafusion;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
@@ -33,9 +33,9 @@ use crate::engine::RUNTIME;
 /// For window functions, it delegates to derive_with_window_functions_impl.
 ///
 /// Args:
-///     table: Reference to RustTable
+///     table: Reference to LTSeqTable
 ///     derived_cols: Dictionary mapping column names to expression dicts
-pub fn derive_impl(table: &RustTable, derived_cols: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // 1. Get schema and DataFrame
     let schema = table.schema.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -122,8 +122,8 @@ pub fn derive_impl(table: &RustTable, derived_cols: &Bound<'_, PyDict>) -> PyRes
     let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_schema = ArrowSchema::new(arrow_fields);
 
-    // 7. Return new RustTable with derived columns added
-    Ok(RustTable {
+    // 7. Return new LTSeqTable with derived columns added
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::new(new_schema)),
@@ -135,7 +135,7 @@ pub fn derive_impl(table: &RustTable, derived_cols: &Bound<'_, PyDict>) -> PyRes
 ///
 /// Delegates to window module which handles the SQL-based cumulative sum.
 /// This is a delegation point for the cum_sum() method in lib.rs.
-pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     crate::ops::window::cum_sum_impl(table, cum_exprs)
 }
 
@@ -144,8 +144,8 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
 /// This is a re-export delegation that routes to the window module.
 /// Kept here for backward compatibility with lib.rs references.
 pub fn derive_with_window_functions_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     derived_cols: &Bound<'_, PyDict>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     crate::ops::window::derive_with_window_functions_impl(table, derived_cols)
 }

@@ -53,7 +53,7 @@
 //! - **Bounded**: Row limit prevents excessive memory usage
 //! - **Two-Pass**: First pass for width calculation, second for rendering
 
-use crate::RustTable;
+use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
@@ -194,9 +194,9 @@ pub fn format_cell(column: &dyn arrow::array::Array, row_idx: usize) -> String {
     }
 }
 
-/// Helper to add show() method to RustTable
+/// Helper to add show() method to LTSeqTable
 /// This is called from the lib.rs impl block
-pub fn show_impl(table: &RustTable, n: usize) -> PyResult<String> {
+pub fn show_impl(table: &LTSeqTable, n: usize) -> PyResult<String> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "No data loaded. Call read_csv() first.",

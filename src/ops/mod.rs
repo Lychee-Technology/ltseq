@@ -10,10 +10,10 @@
 //! # Architecture: Helper Function Delegation Pattern
 //!
 //! This module exists to work around a PyO3 constraint: only ONE `#[pymethods]` impl
-//! block is allowed per struct. Since RustTable needs 14 methods exposed to Python,
+//! block is allowed per struct. Since LTSeqTable needs 14 methods exposed to Python,
 //! we use a **Logical Modularization** approach (Option A from design analysis):
 //!
-//! 1. **RustTable definition & #[pymethods]**: In lib.rs
+//! 1. **LTSeqTable definition & #[pymethods]**: In lib.rs
 //!    - Struct definition for Python compatibility
 //!    - Single `#[pymethods]` impl block with 14 method stubs
 //!    - Each method delegates to an ops/ helper function (1-3 lines)
@@ -33,10 +33,10 @@
 //!
 //! # Pattern: Delegation Stub
 //!
-//! Every RustTable method in lib.rs follows this pattern:
+//! Every LTSeqTable method in lib.rs follows this pattern:
 //!
 //! ```rust,ignore
-//! fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<RustTable> {
+//! fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
 //!     crate::ops::derive::derive_impl(self, derived_cols)
 //! }
 //! ```

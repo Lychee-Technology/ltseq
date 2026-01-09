@@ -6,7 +6,7 @@
 //! - Cumulative sums with window frames
 //! - Difference calculations
 
-use crate::RustTable;
+use crate::LTSeqTable;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::transpiler::pyexpr_to_sql;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, DataType};
@@ -82,7 +82,7 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
 async fn build_derived_select_parts(
     schema: &ArrowSchema,
     derived_cols: &Bound<'_, PyDict>,
-    table: &RustTable,
+    table: &LTSeqTable,
 ) -> PyResult<Vec<String>> {
     let mut select_parts = Vec::new();
 
@@ -137,9 +137,9 @@ async fn build_derived_select_parts(
 /// This handles complex window functions like shifts, rolling windows, and differences
 /// by translating them to SQL OVER clauses and executing via DataFusion's SQL engine.
 pub fn derive_with_window_functions_impl(
-    table: &RustTable,
+    table: &LTSeqTable,
     derived_cols: &Bound<'_, PyDict>,
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     let schema = table.schema.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available")
     })?;
@@ -217,8 +217,8 @@ pub fn derive_with_window_functions_impl(
         let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
         let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-        // Return new RustTable
-        Ok(RustTable {
+        // Return new LTSeqTable
+        Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: Some(Arc::new(new_df)),
             schema: Some(Arc::new(new_arrow_schema)),
@@ -231,7 +231,7 @@ pub fn derive_with_window_functions_impl(
 async fn build_cumsum_select_parts(
     schema: &ArrowSchema,
     cum_exprs: &[Bound<'_, PyDict>],
-    table: &RustTable,
+    table: &LTSeqTable,
 ) -> PyResult<Vec<String>> {
     let mut select_parts = Vec::new();
 
@@ -307,10 +307,10 @@ async fn build_cumsum_select_parts(
 }
 
 /// Add cumulative sum columns with proper window functions
-pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
-        return Ok(RustTable {
+        return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
             schema: table.schema.as_ref().map(|s| Arc::clone(s)),
@@ -403,8 +403,8 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
         let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
         let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
-        // Return new RustTable
-        Ok(RustTable {
+        // Return new LTSeqTable
+        Ok(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: Some(Arc::new(new_df)),
             schema: Some(Arc::new(new_arrow_schema)),
@@ -415,10 +415,10 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
 
 /// Helper function to handle empty tables for cumulative sum
 async fn handle_empty_cum_sum(
-    table: &RustTable,
+    table: &LTSeqTable,
     schema: &ArrowSchema,
     cum_exprs: &[Bound<'_, PyDict>],
-) -> PyResult<RustTable> {
+) -> PyResult<LTSeqTable> {
     // Build schema with cumulative sum columns added
     let mut new_fields = schema.fields().to_vec();
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
@@ -448,7 +448,7 @@ async fn handle_empty_cum_sum(
     let new_arrow_schema = ArrowSchema::new(new_fields);
 
     // Return table with expanded schema but no data
-    Ok(RustTable {
+    Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: table.dataframe.as_ref().map(|d| Arc::clone(d)),
         schema: Some(Arc::new(new_arrow_schema)),
