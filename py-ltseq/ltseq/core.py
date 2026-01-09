@@ -163,6 +163,51 @@ class LTSeq:
         return t
 
     @classmethod
+    def scan(cls, path: str) -> "Cursor":
+        """
+        Scan a CSV file lazily, returning a Cursor for batch-by-batch iteration.
+
+        Unlike read_csv(), this does NOT load the entire file into memory.
+        Use this for processing datasets larger than RAM.
+
+        Args:
+            path: Path to CSV file
+
+        Returns:
+            Cursor for lazy iteration over batches
+
+        Example:
+            >>> for batch in LTSeq.scan("large_file.csv"):
+            ...     df = batch.to_pandas()
+            ...     process(df)
+
+            >>> # Materialize to pandas (loads all data)
+            >>> df = LTSeq.scan("file.csv").to_pandas()
+        """
+        from .cursor import Cursor
+
+        rust_cursor = ltseq_core.RustTable.scan_csv(path)
+        return Cursor(rust_cursor)
+
+    @classmethod
+    def scan_parquet(cls, path: str) -> "Cursor":
+        """
+        Scan a Parquet file lazily, returning a Cursor for batch-by-batch iteration.
+
+        Parquet format is more efficient for large columnar datasets.
+
+        Args:
+            path: Path to Parquet file
+
+        Returns:
+            Cursor for lazy iteration over batches
+        """
+        from .cursor import Cursor
+
+        rust_cursor = ltseq_core.RustTable.scan_parquet(path)
+        return Cursor(rust_cursor)
+
+    @classmethod
     def _from_rows(cls, rows: list[Dict[str, Any]], schema: Dict[str, str]) -> "LTSeq":
         """
         Create an LTSeq instance from a list of row dictionaries.

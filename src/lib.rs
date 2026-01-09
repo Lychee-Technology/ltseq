@@ -13,6 +13,7 @@ pub mod format;      // Formatting and display functions
 pub mod transpiler;  // PyExpr to DataFusion transpilation
 pub mod engine;      // DataFusion session and RustTable struct
 pub mod ops;         // Table operations grouped by category
+pub mod cursor;      // Streaming cursor for lazy iteration
 
 // Re-exports for convenience
 pub use types::{PyExpr, dict_to_py_expr};
@@ -136,6 +137,37 @@ impl RustTable {
             self.dataframe = Some(Arc::new(df));
             Ok(())
         })
+    }
+
+    /// Scan CSV file and return a streaming cursor
+    ///
+    /// Unlike read_csv(), this returns a cursor for batch-by-batch iteration
+    /// without loading the entire file into memory.
+    ///
+    /// Args:
+    ///     path: Path to CSV file
+    ///
+    /// Returns:
+    ///     RustCursor for lazy iteration over batches
+    #[staticmethod]
+    fn scan_csv(path: String) -> PyResult<crate::cursor::RustCursor> {
+        let session = Arc::new(SessionContext::new());
+        crate::cursor::create_cursor_from_csv(session, &path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+    }
+
+    /// Scan Parquet file and return a streaming cursor
+    ///
+    /// Args:
+    ///     path: Path to Parquet file
+    ///
+    /// Returns:
+    ///     RustCursor for lazy iteration over batches
+    #[staticmethod]
+    fn scan_parquet(path: String) -> PyResult<crate::cursor::RustCursor> {
+        let session = Arc::new(SessionContext::new());
+        crate::cursor::create_cursor_from_parquet(session, &path)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
     /// Display the data as a pretty-printed ASCII table
@@ -944,5 +976,6 @@ fn hello() -> PyResult<String> {
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hello, m)?)?;
     m.add_class::<RustTable>()?;
+    m.add_class::<cursor::RustCursor>()?;
     Ok(())
 }
