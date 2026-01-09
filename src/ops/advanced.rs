@@ -88,8 +88,7 @@ use crate::transpiler::pyexpr_to_datafusion;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, DataType};
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
-use datafusion::logical_expr::{JoinType, SortExpr};
-use datafusion::prelude::*;
+use datafusion::logical_expr::SortExpr;
 use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -830,42 +829,6 @@ pub fn derive_impl(table: &RustTable, _derived_cols_spec: Bound<'_, PyDict>) -> 
     })
 }
 
-fn validate_join_tables(
-    table: &RustTable,
-    other: &RustTable,
-) -> PyResult<(Arc<DataFrame>, Arc<DataFrame>, Arc<ArrowSchema>, Arc<ArrowSchema>)> {
-    let df_left = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table has no data. Call read_csv() first.",
-        )
-    })?;
-
-    let df_right = other.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table has no data. Call read_csv() first.",
-        )
-    })?;
-
-    let schema_left = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available.",
-        )
-    })?;
-
-    let schema_right = other.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available.",
-        )
-    })?;
-
-    Ok((
-        Arc::clone(df_left),
-        Arc::clone(df_right),
-        Arc::clone(schema_left),
-        Arc::clone(schema_right),
-    ))
-}
-
 /// Extract and validate join key column names from expressions
 fn extract_and_validate_join_keys(
     left_key_expr_dict: &Bound<'_, PyDict>,
@@ -908,166 +871,65 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-/// Rename right table columns with unique temporary names
-/// This renames ALL columns (both join keys and non-join keys) to avoid naming conflicts during join
-fn rename_right_table_keys(
-    df_right: &Arc<DataFrame>,
-    schema_right: &ArrowSchema,
-    right_col_names: &[String],
-) -> PyResult<(DataFrame, Vec<String>)> {
-    use datafusion::common::Column;
-    let unique_suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-
-    let mut right_select_exprs = Vec::new();
-    let mut temp_right_col_names = Vec::new();
-
-    for (idx, field) in schema_right.fields().iter().enumerate() {
-        let col_name = field.name();
-        let temp_col_name = if right_col_names.contains(&col_name.to_string()) {
-            // Join key column: use special prefix for join keys
-            format!("__ltseq_rkey_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase())
-        } else {
-            // Non-join-key column: use generic prefix to avoid conflicts
-            format!("__ltseq_rcol_{}_{}__{}", idx, unique_suffix, col_name.to_lowercase())
-        };
-        
-        // Use Column::new_unqualified to preserve case on actual column name
-        right_select_exprs.push(
-            Expr::Column(Column::new_unqualified(col_name)).alias(&temp_col_name)
-        );
-        temp_right_col_names.push(temp_col_name);
-    }
-
-    let df_right_renamed = RUNTIME
-        .block_on(async {
-            (**df_right)
-                .clone()
-                .select(right_select_exprs)
-                .map_err(|e| format!("Right table column rename failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    Ok((df_right_renamed, temp_right_col_names))
-}
-
-/// Execute the join operation
-fn execute_join(
-    df_left: &DataFrame,
-    df_right: &DataFrame,
-    left_join_keys: &[&str],
-    right_join_keys: &[&str],
-    join_type: JoinType,
-) -> PyResult<DataFrame> {
-    let joined_df = RUNTIME
-        .block_on(async {
-            df_left
-                .clone()
-                .join(
-                    df_right.clone(),
-                    join_type,
-                    left_join_keys,
-                    right_join_keys,
-                    None,
-                )
-                .map_err(|e| format!("Join execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    Ok(joined_df)
-}
-
-/// Build final schema and rename columns after join
-fn build_final_schema_and_select(
-    joined_df: &DataFrame,
-    schema_left: &ArrowSchema,
-    schema_right: &ArrowSchema,
+/// Build SQL JOIN query with proper column aliasing for the result
+///
+/// Generates a SQL query that:
+/// - Selects all left table columns as-is
+/// - Selects all right table columns with alias prefix (e.g., "country_Name")
+/// - Joins on the specified key columns
+fn build_join_sql(
+    left_table: &str,
+    right_table: &str,
+    left_schema: &ArrowSchema,
+    right_schema: &ArrowSchema,
+    left_keys: &[String],
+    right_keys: &[String],
+    join_type: &str,
     alias: &str,
-    renamed_col_mapping: &[(String, String)], // (original_name, temp_name) pairs
-) -> PyResult<(ArrowSchema, DataFrame)> {
-    use datafusion::common::Column;
-    let mut final_fields = Vec::new();
-    let mut select_exprs: Vec<Expr> = Vec::new();
-
-    // Add left table columns
-    for field in schema_left.fields().iter() {
-        final_fields.push((**field).clone());
-        // Use Column::new_unqualified to preserve case
-        select_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
+) -> String {
+    let mut select_parts: Vec<String> = Vec::new();
+    
+    // All left columns (preserve as-is, including internal columns like __group_id__)
+    for field in left_schema.fields() {
+        select_parts.push(format!("L.\"{}\"", field.name()));
     }
-
-    // Add right table columns with alias prefix
-    for field in schema_right.fields().iter() {
-        let col_name = field.name();
-        let new_col_name = format!("{}_{}", alias, col_name);
-        let new_field = Field::new(
-            new_col_name.clone(),
-            field.data_type().clone(),
-            field.is_nullable(),
-        );
-        final_fields.push(new_field);
-        
-        // Check if this column was renamed for the join
-        let actual_col_name = renamed_col_mapping
-            .iter()
-            .find(|(orig, _)| orig == col_name)
-            .map(|(_, temp)| temp.as_str())
-            .unwrap_or(col_name);
-        
-        // Use the actual column name in the joined_df
-        select_exprs.push(
-            Expr::Column(Column::new_unqualified(actual_col_name)).alias(&new_col_name)
-        );
+    
+    // All right columns with alias prefix
+    for field in right_schema.fields() {
+        select_parts.push(format!(
+            "R.\"{}\" AS \"{}_{}\"",
+            field.name(),
+            alias,
+            field.name()
+        ));
     }
-
-    let final_arrow_schema = ArrowSchema::new(final_fields);
-
-    let final_df = RUNTIME
-        .block_on(async {
-            joined_df
-                .clone()
-                .select(select_exprs)
-                .map_err(|e| format!("Final column rename SELECT failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    Ok((final_arrow_schema, final_df))
+    
+    // Build ON clause for potentially composite keys
+    let on_conditions: Vec<String> = left_keys
+        .iter()
+        .zip(right_keys.iter())
+        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
+        .collect();
+    let on_clause = on_conditions.join(" AND ");
+    
+    // Map join_type to SQL keyword
+    let sql_join_type = match join_type {
+        "inner" => "INNER JOIN",
+        "left" => "LEFT JOIN",
+        "right" => "RIGHT JOIN",
+        "full" => "FULL OUTER JOIN",
+        _ => "INNER JOIN",
+    };
+    
+    format!(
+        "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
+        select_parts.join(", "),
+        left_table,
+        sql_join_type,
+        right_table,
+        on_clause
+    )
 }
-
-/// Helper function to join two tables using pointer-based foreign keys
-///
-/// This method implements joins between two tables based on specified join keys.
-/// It supports lazy evaluation - the join is only executed when the result is accessed.
-///
-/// # DataFusion Schema Conflict Workaround
-///
-/// DataFusion's join() API rejects tables with duplicate column names in the join input,
-/// even if the columns are from different tables. This implementation works around this
-/// limitation by:
-///
-/// 1. Temporarily renaming the right table's join key to `__join_key_right__`
-/// 2. Executing the join on `left.join_key == right.__join_key_right__`
-/// 3. After joining, selecting all columns and renaming back to the desired schema with alias
-/// 4. The final schema has: `{all_left_cols, all_right_cols_prefixed_with_alias}`
-///
-/// # Example
-///
-/// For join(orders, products, left_key="product_id", right_key="product_id", alias="prod"):
-///
-/// - orders schema: {id, product_id, quantity}
-/// - products schema: {product_id, name, price}
-/// - result schema: {id, product_id, quantity, prod_product_id, prod_name, prod_price}
-///
-/// # Arguments
-///
-/// * `table` - The left table
-/// * `other` - The table to join with (right table)
-/// * `left_key_expr_dict` - Serialized Column expression dict for left join key
-/// * `right_key_expr_dict` - Serialized Column expression dict for right join key
-/// * `join_type` - Type of join (currently only "inner" is supported)
-/// * `alias` - Prefix for right table columns (used to avoid name conflicts)
 
 /// Aggregate rows into a summary table with one row per group
 ///
@@ -1431,19 +1293,68 @@ pub fn join_impl(
     join_type: &str,
     alias: &str,
 ) -> PyResult<RustTable> {
-    // Validate and extract tables and schemas
-    let (df_left, df_right, schema_left, schema_right) = validate_join_tables(table, other)?;
+    // 1. Validate both tables have data
+    let df_left = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table has no data. Call read_csv() first.",
+        )
+    })?;
+    
+    let df_right = other.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table has no data. Call read_csv() first.",
+        )
+    })?;
+    
+    let stored_schema_left = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table schema not available.",
+        )
+    })?;
+    
+    let stored_schema_right = other.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table schema not available.",
+        )
+    })?;
 
-    // Extract and validate join keys
-    let (left_col_names, right_col_names) =
-        extract_and_validate_join_keys(left_key_expr_dict, right_key_expr_dict, &schema_left, &schema_right)?;
+    // 2. Collect both DataFrames to batches to get actual data and schemas
+    let (left_batches, right_batches) = RUNTIME
+        .block_on(async {
+            let left_future = (**df_left).clone().collect();
+            let right_future = (**df_right).clone().collect();
+            
+            let left_result = left_future.await
+                .map_err(|e| format!("Failed to collect left table: {}", e))?;
+            let right_result = right_future.await
+                .map_err(|e| format!("Failed to collect right table: {}", e))?;
+            
+            Ok::<_, String>((left_result, right_result))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Map join type string to DataFusion JoinType
-    let df_join_type = match join_type {
-        "inner" => JoinType::Inner,
-        "left" => JoinType::Left,
-        "right" => JoinType::Right,
-        "full" => JoinType::Full,
+    // 3. Get actual schemas from batches (not stored schemas which may be outdated)
+    let left_schema = left_batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema_left).clone()));
+    
+    let right_schema = right_batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema_right).clone()));
+
+    // 4. Parse and validate join keys against actual schemas
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+        left_key_expr_dict,
+        right_key_expr_dict,
+        &left_schema,
+        &right_schema,
+    )?;
+
+    // 5. Validate join type
+    match join_type {
+        "inner" | "left" | "right" | "full" => {}
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Unknown join type: {}", join_type),
@@ -1451,59 +1362,106 @@ pub fn join_impl(
         }
     };
 
-    // Rename right table join keys
-    let (df_right_renamed, temp_right_col_names) =
-        rename_right_table_keys(&df_right, &schema_right, &right_col_names)?;
+    // 6. Register both tables as temp MemTables with unique names
+    let unique_suffix = std::process::id();
+    let left_table_name = format!("__ltseq_join_left_{}", unique_suffix);
+    let right_table_name = format!("__ltseq_join_right_{}", unique_suffix);
+    
+    // Deregister if exists
+    let _ = table.session.deregister_table(&left_table_name);
+    let _ = table.session.deregister_table(&right_table_name);
+    
+    let left_mem = MemTable::try_new(Arc::clone(&left_schema), vec![left_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to create left temp table: {}", e)
+        ))?;
+    
+    let right_mem = MemTable::try_new(Arc::clone(&right_schema), vec![right_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to create right temp table: {}", e)
+        ))?;
+    
+    table.session
+        .register_table(&left_table_name, Arc::new(left_mem))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to register left temp table: {}", e)
+        ))?;
+    
+    table.session
+        .register_table(&right_table_name, Arc::new(right_mem))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to register right temp table: {}", e)
+        ))?;
 
-    // Build mapping of original names to temp names for ALL columns
-    let renamed_mapping: Vec<(String, String)> = schema_right
-        .fields()
-        .iter()
-        .zip(temp_right_col_names.iter())
-        .map(|(field, temp)| (field.name().to_string(), temp.clone()))
-        .collect();
+    // 7. Build and execute SQL JOIN query
+    let sql_query = build_join_sql(
+        &left_table_name,
+        &right_table_name,
+        &left_schema,
+        &right_schema,
+        &left_col_names,
+        &right_col_names,
+        join_type,
+        alias,
+    );
 
-    // Find indices of join key columns in the schema
-    let mut join_key_indices = Vec::new();
-    for (idx, field) in schema_right.fields().iter().enumerate() {
-        if right_col_names.contains(&field.name().to_string()) {
-            join_key_indices.push(idx);
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query).await
+                .map_err(|e| format!("Failed to execute join query: {}", e))?;
+            
+            result_df.collect().await
+                .map_err(|e| format!("Failed to collect join results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // 8. Cleanup temp tables
+    let _ = table.session.deregister_table(&left_table_name);
+    let _ = table.session.deregister_table(&right_table_name);
+
+    // 9. Build result RustTable
+    if result_batches.is_empty() {
+        // Build expected schema for empty result
+        let mut result_fields: Vec<Field> = Vec::new();
+        
+        // Left columns
+        for field in left_schema.fields() {
+            result_fields.push((**field).clone());
         }
+        
+        // Right columns with alias prefix
+        for field in right_schema.fields() {
+            result_fields.push(Field::new(
+                format!("{}_{}", alias, field.name()),
+                field.data_type().clone(),
+                true, // nullable for join results
+            ));
+        }
+        
+        let empty_schema = Arc::new(ArrowSchema::new(result_fields));
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: Some(empty_schema),
+            sort_exprs: Vec::new(),
+        });
     }
 
-    // Extract the temp names for join keys (in the same order as right_col_names)
-    let right_join_keys: Vec<&str> = right_col_names
-        .iter()
-        .filter_map(|col_name| {
-            // Find the index of this column in the schema
-            schema_right
-                .fields()
-                .iter()
-                .position(|f| f.name() == col_name)
-                .map(|idx| temp_right_col_names[idx].as_str())
-        })
-        .collect();
+    let result_schema = result_batches[0].schema();
+    let result_mem = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to create result table: {}", e)
+        ))?;
+    
+    let result_df = table.session.read_table(Arc::new(result_mem))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            format!("Failed to read result table: {}", e)
+        ))?;
 
-    // Execute join
-    let left_join_keys: Vec<&str> = left_col_names.iter().map(|s| s.as_str()).collect();
-
-    let joined_df = execute_join(
-        &df_left,
-        &df_right_renamed,
-        left_join_keys.as_slice(),
-        right_join_keys.as_slice(),
-        df_join_type,
-    )?;
-
-    // Build final schema and rename columns
-    let (final_arrow_schema, final_df) =
-        build_final_schema_and_select(&joined_df, &schema_left, &schema_right, alias, &renamed_mapping)?;
-
-    // Return new RustTable
     Ok(RustTable {
         session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(final_df)),
-        schema: Some(Arc::new(final_arrow_schema)),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
         sort_exprs: Vec::new(),
     })
 }
