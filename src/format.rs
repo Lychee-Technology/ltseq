@@ -177,6 +177,38 @@ pub fn format_cell(column: &dyn arrow::array::Array, row_idx: usize) -> String {
             Some(datetime) => datetime.format("%Y-%m-%d").to_string(),
             None => "".to_string(),
         }
+    } else if let Some(arr) = column.as_any().downcast_ref::<TimestampSecondArray>() {
+        // Format Timestamp (seconds) as YYYY-MM-DD HH:MM:SS
+        use arrow::temporal_conversions;
+        let secs = arr.value(row_idx);
+        match temporal_conversions::timestamp_s_to_datetime(secs) {
+            Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+            None => "".to_string(),
+        }
+    } else if let Some(arr) = column.as_any().downcast_ref::<TimestampMillisecondArray>() {
+        // Format Timestamp (milliseconds) as YYYY-MM-DD HH:MM:SS
+        use arrow::temporal_conversions;
+        let ms = arr.value(row_idx);
+        match temporal_conversions::timestamp_ms_to_datetime(ms) {
+            Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+            None => "".to_string(),
+        }
+    } else if let Some(arr) = column.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        // Format Timestamp (microseconds) as YYYY-MM-DD HH:MM:SS
+        use arrow::temporal_conversions;
+        let us = arr.value(row_idx);
+        match temporal_conversions::timestamp_us_to_datetime(us) {
+            Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+            None => "".to_string(),
+        }
+    } else if let Some(arr) = column.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        // Format Timestamp (nanoseconds) as YYYY-MM-DD HH:MM:SS
+        use arrow::temporal_conversions;
+        let ns = arr.value(row_idx);
+        match temporal_conversions::timestamp_ns_to_datetime(ns) {
+            Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+            None => "".to_string(),
+        }
     } else if let Some(arr) = column.as_any().downcast_ref::<Int8Array>() {
         arr.value(row_idx).to_string()
     } else if let Some(arr) = column.as_any().downcast_ref::<Int16Array>() {

@@ -1322,9 +1322,7 @@ pub fn filter_where_impl(
         )
     })?;
 
-    // Register the current table
-    let temp_table_name = "__ltseq_filter_temp";
-    
+    // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
             (**df).clone().collect().await
@@ -1332,17 +1330,28 @@ pub fn filter_where_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    let arrow_schema = Arc::new((**schema).clone());
-    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+    // Get schema from actual batches for consistency (fixes schema mismatch after window ops)
+    let batch_schema = if let Some(first_batch) = current_batches.first() {
+        first_batch.schema()
+    } else {
+        Arc::new((**schema).clone())
+    };
+
+    // Use unique temp table name to avoid conflicts
+    let temp_table_name = format!("__ltseq_filter_temp_{}", std::process::id());
+    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
             "Failed to create memory table: {}",
             e
         ))
     })?;
 
+    // Deregister existing table if it exists
+    let _ = table.session.deregister_table(&temp_table_name);
+
     table
         .session
-        .register_table(temp_table_name, Arc::new(temp_table))
+        .register_table(&temp_table_name, Arc::new(temp_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to register temp table: {}",
@@ -1350,10 +1359,17 @@ pub fn filter_where_impl(
             ))
         })?;
 
-    // Build SQL query
+    // Build SQL query with explicit column list to avoid schema issues
+    let column_list: Vec<String> = batch_schema
+        .fields()
+        .iter()
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect();
+    let columns_str = column_list.join(", ");
+    
     let sql_query = format!(
-        "SELECT * FROM {} WHERE {}",
-        temp_table_name, where_clause
+        "SELECT {} FROM \"{}\" WHERE {}",
+        columns_str, temp_table_name, where_clause
     );
 
     // Execute query
@@ -1369,14 +1385,8 @@ pub fn filter_where_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Deregister temporary table
-    table.session.deregister_table(temp_table_name)
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to deregister temp table: {}",
-                e
-            ))
-        })?;
+    // Deregister temporary table (ignore errors)
+    let _ = table.session.deregister_table(&temp_table_name);
 
     // Create result RustTable
     if result_batches.is_empty() {
@@ -1781,9 +1791,7 @@ pub fn derive_window_sql_impl(
         )
     })?;
 
-    // Register the current table
-    let temp_table_name = "__ltseq_derive_temp";
-    
+    // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
             (**df).clone().collect().await
@@ -1791,17 +1799,28 @@ pub fn derive_window_sql_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    let arrow_schema = Arc::new((**schema).clone());
-    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+    // Get schema from actual batches for consistency (fixes schema mismatch after window ops)
+    let batch_schema = if let Some(first_batch) = current_batches.first() {
+        first_batch.schema()
+    } else {
+        Arc::new((**schema).clone())
+    };
+
+    // Use unique temp table name to avoid conflicts
+    let temp_table_name = format!("__ltseq_derive_temp_{}", std::process::id());
+    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
             "Failed to create memory table: {}",
             e
         ))
     })?;
 
+    // Deregister existing table if it exists
+    let _ = table.session.deregister_table(&temp_table_name);
+
     table
         .session
-        .register_table(temp_table_name, Arc::new(temp_table))
+        .register_table(&temp_table_name, Arc::new(temp_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to register temp table: {}",
@@ -1812,8 +1831,8 @@ pub fn derive_window_sql_impl(
     // Build SELECT clause: all existing columns + derived expressions
     let mut select_parts: Vec<String> = Vec::new();
     
-    // Add all existing columns except __group_id__ and __rn__
-    for field in schema.fields() {
+    // Add all existing columns except __group_id__ and __rn__ (use batch_schema for actual columns)
+    for field in batch_schema.fields() {
         let col_name = field.name();
         if col_name != "__group_id__" && col_name != "__rn__" {
             select_parts.push(format!("\"{}\"", col_name));
@@ -1827,7 +1846,7 @@ pub fn derive_window_sql_impl(
 
     // Build SQL query
     let sql_query = format!(
-        "SELECT {} FROM {}",
+        "SELECT {} FROM \"{}\"",
         select_parts.join(", "),
         temp_table_name
     );
@@ -1845,20 +1864,14 @@ pub fn derive_window_sql_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Deregister temporary table
-    table.session.deregister_table(temp_table_name)
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to deregister temp table: {}",
-                e
-            ))
-        })?;
+    // Deregister temporary table (ignore errors)
+    let _ = table.session.deregister_table(&temp_table_name);
 
     // Create result RustTable
     if result_batches.is_empty() {
         // Build schema for empty result
         let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
-        for field in schema.fields() {
+        for field in batch_schema.fields() {
             let col_name = field.name();
             if col_name != "__group_id__" && col_name != "__rn__" {
                 result_fields.push((**field).clone());
