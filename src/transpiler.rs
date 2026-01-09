@@ -10,6 +10,17 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 
+// String functions
+use datafusion::functions::string::expr_fn::{
+    btrim, contains, ends_with, lower, starts_with, upper,
+};
+// Unicode functions (for length, substr)
+use datafusion::functions::unicode::expr_fn::{character_length, substring};
+// Datetime functions
+use datafusion::functions::datetime::expr_fn::date_part;
+// Regex functions
+use datafusion::functions::regex::expr_fn::regexp_like;
+
 /// Parse a column reference into a DataFusion expression
 fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, String> {
     if !schema.fields().iter().any(|f| f.name() == name) {
@@ -104,8 +115,40 @@ fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result
 }
 
 /// Parse a function call into a DataFusion expression
-fn parse_call_expr(func: &str, on: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
+fn parse_call_expr(
+    func: &str,
+    on: PyExpr,
+    args: Vec<PyExpr>,
+    schema: &ArrowSchema,
+) -> Result<Expr, String> {
     match func {
+        "if_else" => {
+            // if_else(condition, true_value, false_value)
+            if args.len() != 3 {
+                return Err(
+                    "if_else requires 3 arguments: condition, true_value, false_value".to_string(),
+                );
+            }
+            let cond_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let true_expr = pyexpr_to_datafusion(args[1].clone(), schema)?;
+            let false_expr = pyexpr_to_datafusion(args[2].clone(), schema)?;
+
+            // DataFusion's CASE WHEN equivalent using when().otherwise()
+            use datafusion::logical_expr::case;
+            Ok(case(cond_expr)
+                .when(lit(true), true_expr)
+                .otherwise(false_expr)
+                .map_err(|e| format!("Failed to create CASE expression: {}", e))?)
+        }
+        "fill_null" => {
+            // fill_null(default_value) - COALESCE equivalent
+            if args.is_empty() {
+                return Err("fill_null requires a default value argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let default_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            Ok(coalesce(vec![on_expr, default_expr]))
+        }
         "is_null" => {
             let on_expr = pyexpr_to_datafusion(on, schema)?;
             Ok(on_expr.is_null())
@@ -123,6 +166,149 @@ fn parse_call_expr(func: &str, on: PyExpr, schema: &ArrowSchema) -> Result<Expr,
             "Window function '{}' requires DataFrame context - should be handled in derive()",
             func
         )),
+        // ========== String Operations ==========
+        "str_contains" => {
+            validate_string_column(&on, schema, "str_contains")?;
+            if args.is_empty() {
+                return Err("str_contains requires a pattern argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let pattern_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            Ok(contains(on_expr, pattern_expr))
+        }
+        "str_starts_with" => {
+            validate_string_column(&on, schema, "str_starts_with")?;
+            if args.is_empty() {
+                return Err("str_starts_with requires a prefix argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let prefix_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            Ok(starts_with(on_expr, prefix_expr))
+        }
+        "str_ends_with" => {
+            validate_string_column(&on, schema, "str_ends_with")?;
+            if args.is_empty() {
+                return Err("str_ends_with requires a suffix argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let suffix_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            Ok(ends_with(on_expr, suffix_expr))
+        }
+        "str_lower" => {
+            validate_string_column(&on, schema, "str_lower")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(lower(on_expr))
+        }
+        "str_upper" => {
+            validate_string_column(&on, schema, "str_upper")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(upper(on_expr))
+        }
+        "str_strip" => {
+            validate_string_column(&on, schema, "str_strip")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(btrim(vec![on_expr])) // btrim with single arg = strip whitespace from both sides
+        }
+        "str_len" => {
+            validate_string_column(&on, schema, "str_len")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(character_length(on_expr))
+        }
+        "str_slice" => {
+            validate_string_column(&on, schema, "str_slice")?;
+            if args.len() < 2 {
+                return Err("str_slice requires start and length arguments".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let start_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let length_expr = pyexpr_to_datafusion(args[1].clone(), schema)?;
+            // DataFusion's substring uses 1-based indexing, Python uses 0-based
+            // substring(string, position, length) - position is 1-based
+            Ok(substring(on_expr, start_expr + lit(1), length_expr))
+        }
+        "str_regex_match" => {
+            validate_string_column(&on, schema, "str_regex_match")?;
+            if args.is_empty() {
+                return Err("str_regex_match requires a pattern argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let pattern_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            Ok(regexp_like(on_expr, pattern_expr, None))
+        }
+        // ========== Temporal Operations ==========
+        "dt_year" => {
+            validate_temporal_column(&on, schema, "dt_year")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("year"), on_expr))
+        }
+        "dt_month" => {
+            validate_temporal_column(&on, schema, "dt_month")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("month"), on_expr))
+        }
+        "dt_day" => {
+            validate_temporal_column(&on, schema, "dt_day")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("day"), on_expr))
+        }
+        "dt_hour" => {
+            validate_temporal_column(&on, schema, "dt_hour")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("hour"), on_expr))
+        }
+        "dt_minute" => {
+            validate_temporal_column(&on, schema, "dt_minute")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("minute"), on_expr))
+        }
+        "dt_second" => {
+            validate_temporal_column(&on, schema, "dt_second")?;
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            Ok(date_part(lit("second"), on_expr))
+        }
+        "dt_add" => {
+            validate_temporal_column(&on, schema, "dt_add")?;
+            if args.len() < 3 {
+                return Err("dt_add requires days, months, and years arguments".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+
+            // Extract literal values for interval construction
+            let days = match &args[0] {
+                PyExpr::Literal { value, .. } => value.parse::<i32>().unwrap_or(0),
+                _ => return Err("dt_add days must be a literal integer".to_string()),
+            };
+            let months = match &args[1] {
+                PyExpr::Literal { value, .. } => value.parse::<i32>().unwrap_or(0),
+                _ => return Err("dt_add months must be a literal integer".to_string()),
+            };
+            let years = match &args[2] {
+                PyExpr::Literal { value, .. } => value.parse::<i32>().unwrap_or(0),
+                _ => return Err("dt_add years must be a literal integer".to_string()),
+            };
+
+            // Create IntervalMonthDayNano: months include years*12, days, nanos=0
+            let total_months = years * 12 + months;
+            let interval = ScalarValue::new_interval_mdn(total_months, days, 0);
+
+            // date + interval
+            Ok(on_expr + lit(interval))
+        }
+        "dt_diff" => {
+            validate_temporal_column(&on, schema, "dt_diff")?;
+            if args.is_empty() {
+                return Err("dt_diff requires another date argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let other_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+
+            // Compute difference: subtract dates and extract days
+            // For Date32/Date64, subtraction returns an interval
+            // We use date_part to extract days from the result
+            // Note: This gives the difference in days as a float
+            let diff_expr = on_expr - other_expr;
+            Ok(date_part(lit("day"), diff_expr))
+        }
         _ => Err(format!("Method '{}' not yet supported", func)),
     }
 }
@@ -134,7 +320,7 @@ pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Exp
         PyExpr::Literal { value, dtype } => parse_literal_expr(&value, &dtype),
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
-        PyExpr::Call { func, on, .. } => parse_call_expr(&func, *on, schema),
+        PyExpr::Call { func, on, args, .. } => parse_call_expr(&func, *on, args, schema),
     }
 }
 
@@ -199,6 +385,71 @@ pub fn is_numeric_type(data_type: &DataType) -> bool {
             | DataType::Decimal256(_, _)
             | DataType::Null // Allow Null type for empty tables
     )
+}
+
+/// Check if a DataType is a string type
+fn is_string_type(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Utf8 | DataType::LargeUtf8)
+}
+
+/// Check if a DataType is a temporal type (date/datetime)
+fn is_temporal_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Date32
+            | DataType::Date64
+            | DataType::Timestamp(_, _)
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+    )
+}
+
+/// Get the column type from schema, returning None if column not found
+fn get_column_type(col_name: &str, schema: &ArrowSchema) -> Option<DataType> {
+    schema
+        .fields()
+        .iter()
+        .find(|f| f.name() == col_name)
+        .map(|f| f.data_type().clone())
+}
+
+/// Validate that a column is a string type
+fn validate_string_column(
+    on: &PyExpr,
+    schema: &ArrowSchema,
+    func_name: &str,
+) -> Result<(), String> {
+    if let PyExpr::Column(col_name) = on {
+        if let Some(dtype) = get_column_type(col_name, schema) {
+            if !is_string_type(&dtype) {
+                return Err(format!(
+                    "String function '{}' requires a string column, but '{}' has type {:?}",
+                    func_name, col_name, dtype
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that a column is a temporal type
+fn validate_temporal_column(
+    on: &PyExpr,
+    schema: &ArrowSchema,
+    func_name: &str,
+) -> Result<(), String> {
+    if let PyExpr::Column(col_name) = on {
+        if let Some(dtype) = get_column_type(col_name, schema) {
+            if !is_temporal_type(&dtype) {
+                return Err(format!(
+                    "Temporal function '{}' requires a date/datetime column, but '{}' has type {:?}. \
+                     Consider using to_date() or to_timestamp() to convert the column first.",
+                    func_name, col_name, dtype
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handle SQL for shift() window function

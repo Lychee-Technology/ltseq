@@ -1,0 +1,7 @@
+order_id,user_id,product,amount
+1,1,Widget,100
+2,1,Gadget,150
+3,2,Widget,200
+4,3,Gizmo,75
+5,4,Widget,125
+6,5,Gadget,180

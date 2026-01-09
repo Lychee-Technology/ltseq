@@ -78,42 +78,45 @@ class StringAccessor:
     - r.col.s.contains("substring")
     - r.col.s.starts_with("prefix")
     - r.col.s.lower()
+
+    Supports chaining: r.col.s.lower().s.contains("x")
     """
 
-    def __init__(self, column: ColumnExpr):
-        self._column = column
+    def __init__(self, expr: Expr):
+        """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
+        self._expr = expr
 
     def contains(self, pattern: str) -> "CallExpr":
         """Check if string contains a substring."""
-        return CallExpr("str_contains", (pattern,), {}, on=self._column)
+        return CallExpr("str_contains", (pattern,), {}, on=self._expr)
 
     def starts_with(self, prefix: str) -> "CallExpr":
         """Check if string starts with a prefix."""
-        return CallExpr("str_starts_with", (prefix,), {}, on=self._column)
+        return CallExpr("str_starts_with", (prefix,), {}, on=self._expr)
 
     def ends_with(self, suffix: str) -> "CallExpr":
         """Check if string ends with a suffix."""
-        return CallExpr("str_ends_with", (suffix,), {}, on=self._column)
+        return CallExpr("str_ends_with", (suffix,), {}, on=self._expr)
 
     def lower(self) -> "CallExpr":
         """Convert string to lowercase."""
-        return CallExpr("str_lower", (), {}, on=self._column)
+        return CallExpr("str_lower", (), {}, on=self._expr)
 
     def upper(self) -> "CallExpr":
         """Convert string to uppercase."""
-        return CallExpr("str_upper", (), {}, on=self._column)
+        return CallExpr("str_upper", (), {}, on=self._expr)
 
     def strip(self) -> "CallExpr":
         """Remove leading and trailing whitespace."""
-        return CallExpr("str_strip", (), {}, on=self._column)
+        return CallExpr("str_strip", (), {}, on=self._expr)
 
     def len(self) -> "CallExpr":
         """Get string length."""
-        return CallExpr("str_len", (), {}, on=self._column)
+        return CallExpr("str_len", (), {}, on=self._expr)
 
     def slice(self, start: int, length: int) -> "CallExpr":
         """Extract substring: start position and length."""
-        return CallExpr("str_slice", (start, length), {}, on=self._column)
+        return CallExpr("str_slice", (start, length), {}, on=self._expr)
 
     def regex_match(self, pattern: str) -> "CallExpr":
         """Check if string matches a regular expression pattern (returns boolean).
@@ -127,7 +130,7 @@ class StringAccessor:
         Example:
             >>> t.filter(lambda r: r.email.s.regex_match(r'^[a-z]+@'))
         """
-        return CallExpr("str_regex_match", (pattern,), {}, on=self._column)
+        return CallExpr("str_regex_match", (pattern,), {}, on=self._expr)
 
 
 class TemporalAccessor:
@@ -140,43 +143,44 @@ class TemporalAccessor:
     - r.col.dt.add_days(30)
     """
 
-    def __init__(self, column: ColumnExpr):
-        self._column = column
+    def __init__(self, expr: Expr):
+        """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
+        self._expr = expr
 
     def year(self) -> "CallExpr":
         """Extract year from date/datetime."""
-        return CallExpr("dt_year", (), {}, on=self._column)
+        return CallExpr("dt_year", (), {}, on=self._expr)
 
     def month(self) -> "CallExpr":
         """Extract month from date/datetime."""
-        return CallExpr("dt_month", (), {}, on=self._column)
+        return CallExpr("dt_month", (), {}, on=self._expr)
 
     def day(self) -> "CallExpr":
         """Extract day from date/datetime."""
-        return CallExpr("dt_day", (), {}, on=self._column)
+        return CallExpr("dt_day", (), {}, on=self._expr)
 
     def hour(self) -> "CallExpr":
         """Extract hour from datetime."""
-        return CallExpr("dt_hour", (), {}, on=self._column)
+        return CallExpr("dt_hour", (), {}, on=self._expr)
 
     def minute(self) -> "CallExpr":
         """Extract minute from datetime."""
-        return CallExpr("dt_minute", (), {}, on=self._column)
+        return CallExpr("dt_minute", (), {}, on=self._expr)
 
     def second(self) -> "CallExpr":
         """Extract second from datetime."""
-        return CallExpr("dt_second", (), {}, on=self._column)
+        return CallExpr("dt_second", (), {}, on=self._expr)
 
     def add(self, days: int = 0, months: int = 0, years: int = 0) -> "CallExpr":
         """Add days, months, and/or years to a date/datetime."""
-        return CallExpr("dt_add", (days, months, years), {}, on=self._column)
+        return CallExpr("dt_add", (days, months, years), {}, on=self._expr)
 
     def diff(self, other: "Expr") -> "CallExpr":
         """Calculate difference between two dates in days."""
         from .base import Expr as BaseExpr
 
         other_coerced = BaseExpr._coerce(other)
-        return CallExpr("dt_diff", (other_coerced,), {}, on=self._column)
+        return CallExpr("dt_diff", (other_coerced,), {}, on=self._expr)
 
 
 class LiteralExpr(Expr):
@@ -400,6 +404,16 @@ class CallExpr(Expr):
             return CallExpr(method_name, args, kwargs, on=self)
 
         return chained_call
+
+    @property
+    def s(self):
+        """String accessor for chaining string operations on CallExpr results."""
+        return StringAccessor(self)
+
+    @property
+    def dt(self):
+        """Temporal accessor for chaining temporal operations on CallExpr results."""
+        return TemporalAccessor(self)
 
 
 class LookupExpr(Expr):

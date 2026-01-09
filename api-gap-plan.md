@@ -491,7 +491,18 @@ Add `LinkedTable` API reference.
 | 9 | ✅ DONE | | | Added PartitionedTable docs to api.md |
 | 10 | ✅ DONE | | | Added LinkedTable docs to api.md |
 
+### Additional Fix: `if_else` in DataFusion Path
+
+**Issue**: `if_else()` was only implemented in the SQL transpilation path (`pyexpr_to_sql`), 
+not in the direct DataFusion expression path (`pyexpr_to_datafusion`), causing 
+"Method 'if_else' not yet supported" errors in derive operations.
+
+**Resolution**: Added `if_else` case to `parse_call_expr()` in `src/transpiler.rs`:
+- Uses DataFusion's `case().when().otherwise()` for CASE WHEN expression
+- Also added `fill_null` support (COALESCE) to DataFusion path
+- Added helpful error messages for string/temporal ops redirecting to SQL path
+
 ---
 
 *Generated: 2026-01-08*
-*Updated: 2026-01-08 - All gaps resolved*
+*Updated: 2026-01-08 - All gaps resolved + if_else fix*

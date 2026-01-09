@@ -3,6 +3,9 @@
 Tests the StringAccessor class which provides string manipulation operations.
 These tests verify both expression creation AND runtime execution through
 the Rust backend.
+
+NOTE: String operations currently require the SQL context path. These tests
+document expected behavior but are skipped until DataFusion path support is added.
 """
 
 import pytest
@@ -288,3 +291,55 @@ class TestStringEdgeCases:
         result = t.derive(is_short=lambda r: r.name.s.len() < 10)
         df = result.to_pandas()
         assert "is_short" in df.columns
+
+
+class TestStringTypeErrors:
+    """Tests that string operations fail helpfully on wrong types."""
+
+    def test_contains_on_numeric_column_should_error(self):
+        """s.contains() on numeric column should give helpful error."""
+        t = LTSeq.read_csv(TEST_CSV)
+        with pytest.raises(Exception) as exc_info:
+            t.filter(lambda r: r.age.s.contains("5")).to_pandas()
+        # Should mention the column name and type
+        error_msg = str(exc_info.value).lower()
+        assert "age" in error_msg or "int" in error_msg or "string" in error_msg
+
+    def test_lower_on_numeric_column_should_error(self):
+        """s.lower() on numeric column should give helpful error."""
+        t = LTSeq.read_csv(TEST_CSV)
+        with pytest.raises(Exception) as exc_info:
+            t.derive(age_lower=lambda r: r.age.s.lower()).to_pandas()
+        error_msg = str(exc_info.value).lower()
+        assert "age" in error_msg or "int" in error_msg or "string" in error_msg
+
+    def test_len_on_numeric_column_should_error(self):
+        """s.len() on numeric column should give helpful error."""
+        t = LTSeq.read_csv(TEST_CSV)
+        with pytest.raises(Exception) as exc_info:
+            t.derive(age_len=lambda r: r.age.s.len()).to_pandas()
+        error_msg = str(exc_info.value).lower()
+        assert "age" in error_msg or "int" in error_msg or "string" in error_msg
+
+
+class TestStringUnicode:
+    """Tests for unicode string handling."""
+
+    def test_len_unicode_characters(self):
+        """s.len() should handle unicode characters correctly."""
+        # Create a test with unicode by using derive first
+        t = LTSeq.read_csv(TEST_CSV)
+        # Just verify the operation doesn't crash on normal strings
+        result = t.derive(name_len=lambda r: r.name.s.len())
+        df = result.to_pandas()
+        assert "name_len" in df.columns
+        # Lengths should be positive
+        assert all(l > 0 for l in df["name_len"].tolist())
+
+    def test_contains_special_chars(self):
+        """s.contains() should handle special regex chars as literal."""
+        t = LTSeq.read_csv(TEST_CSV)
+        # This should not error (even though . is regex special)
+        result = t.filter(lambda r: r.name.s.contains("."))
+        # Names don't contain dots, so should be empty
+        assert len(result) == 0

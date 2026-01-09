@@ -158,19 +158,30 @@ pub fn derive_with_window_functions_impl(
             ))
         })?;
 
-        // Register a temporary table with the current data
-        let temp_table_name = "__ltseq_temp";
-        let arrow_schema = Arc::new((**schema).clone());
-        let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        // Get schema from the actual batches, not from the stored schema
+        // This ensures consistency between schema and data, especially after window operations
+        let batch_schema = if let Some(first_batch) = current_batches.first() {
+            first_batch.schema()
+        } else {
+            // If no batches, use the stored schema
+            Arc::new((**schema).clone())
+        };
+
+        // Use unique temp table name to avoid conflicts
+        let temp_table_name = format!("__ltseq_temp_{}", std::process::id());
+        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to create memory table: {}",
                 e
             ))
         })?;
 
+        // Deregister existing table if it exists (cleanup from previous calls)
+        let _ = table.session.deregister_table(&temp_table_name);
+
         table
             .session
-            .register_table(temp_table_name, Arc::new(temp_table))
+            .register_table(&temp_table_name, Arc::new(temp_table))
             .map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Failed to register temporary table: {}",
@@ -178,8 +189,8 @@ pub fn derive_with_window_functions_impl(
                 ))
             })?;
 
-        // Build SELECT parts with derived columns
-        let select_parts = build_derived_select_parts(schema, derived_cols, table).await?;
+        // Build SELECT parts with derived columns using the batch schema
+        let select_parts = build_derived_select_parts(&batch_schema, derived_cols, table).await?;
 
         // Build and execute the SQL query
         let sql = format!(
@@ -190,11 +201,16 @@ pub fn derive_with_window_functions_impl(
 
         // Execute SQL using sql() which returns a DataFrame directly
         let new_df = table.session.sql(&sql).await.map_err(|e| {
+            // Clean up temp table on error
+            let _ = table.session.deregister_table(&temp_table_name);
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Window function query failed: {}",
                 e
             ))
         })?;
+
+        // Clean up temporary table
+        let _ = table.session.deregister_table(&temp_table_name);
 
         // Get schema from the new DataFrame
         let df_schema = new_df.schema();
@@ -329,19 +345,30 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
             return handle_empty_cum_sum(table, schema, &cum_exprs).await;
         }
 
-        // Register a temporary table with the current data
-        let temp_table_name = "__ltseq_temp";
-        let arrow_schema = Arc::new((**schema).clone());
-        let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        // Get schema from the actual batches, not from the stored schema
+        // This ensures consistency between schema and data, especially after window operations
+        let batch_schema = if let Some(first_batch) = current_batches.first() {
+            first_batch.schema()
+        } else {
+            // If no batches, use the stored schema
+            Arc::new((**schema).clone())
+        };
+
+        // Use unique temp table name to avoid conflicts
+        let temp_table_name = format!("__ltseq_cumsum_{}", std::process::id());
+        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to create memory table: {}",
                 e
             ))
         })?;
 
+        // Deregister existing table if it exists (cleanup from previous calls)
+        let _ = table.session.deregister_table(&temp_table_name);
+
         table
             .session
-            .register_table(temp_table_name, Arc::new(temp_table))
+            .register_table(&temp_table_name, Arc::new(temp_table))
             .map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Failed to register temporary table: {}",
@@ -349,8 +376,8 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
                 ))
             })?;
 
-        // Build SELECT parts and execute query
-        let select_parts = build_cumsum_select_parts(schema, &cum_exprs, table).await?;
+        // Build SELECT parts and execute query using batch schema
+        let select_parts = build_cumsum_select_parts(&batch_schema, &cum_exprs, table).await?;
 
         // Build and execute the SQL query
         let sql = format!(
@@ -360,11 +387,16 @@ pub fn cum_sum_impl(table: &RustTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyR
         );
 
         let new_df = table.session.sql(&sql).await.map_err(|e| {
+            // Clean up temp table on error
+            let _ = table.session.deregister_table(&temp_table_name);
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "cum_sum query failed: {}",
                 e
             ))
         })?;
+
+        // Clean up temporary table
+        let _ = table.session.deregister_table(&temp_table_name);
 
         // Get schema from the new DataFrame
         let df_schema = new_df.schema();

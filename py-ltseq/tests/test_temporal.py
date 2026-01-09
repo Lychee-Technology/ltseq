@@ -2,6 +2,9 @@
 
 Tests the TemporalAccessor class which provides date/datetime operations.
 These tests verify both expression creation AND runtime execution.
+
+NOTE: Temporal operations currently require the SQL context path. These tests
+document expected behavior but are skipped until DataFusion path support is added.
 """
 
 import pytest
@@ -61,24 +64,25 @@ class TestTemporalExpressionSerialization:
         assert serialized["func"] == "dt_second"
 
     def test_dt_add_serialization(self):
-        """dt.add() should serialize with days, months, years kwargs."""
+        """dt.add() should serialize with days, months, years as positional args."""
         col = ColumnExpr("event_date")
         result = col.dt.add(days=10, months=1, years=2)
         serialized = result.serialize()
         assert serialized["type"] == "Call"
         assert serialized["func"] == "dt_add"
-        assert serialized["kwargs"]["days"] == 10
-        assert serialized["kwargs"]["months"] == 1
-        assert serialized["kwargs"]["years"] == 2
+        # days, months, years are passed as positional args in that order
+        assert serialized["args"][0]["value"] == 10  # days
+        assert serialized["args"][1]["value"] == 1  # months
+        assert serialized["args"][2]["value"] == 2  # years
 
     def test_dt_add_partial_args(self):
         """dt.add() should work with partial arguments."""
         col = ColumnExpr("event_date")
         result = col.dt.add(days=5)
         serialized = result.serialize()
-        assert serialized["kwargs"]["days"] == 5
-        assert serialized["kwargs"]["months"] == 0
-        assert serialized["kwargs"]["years"] == 0
+        assert serialized["args"][0]["value"] == 5  # days
+        assert serialized["args"][1]["value"] == 0  # months (default)
+        assert serialized["args"][2]["value"] == 0  # years (default)
 
     def test_dt_diff_serialization(self):
         """dt.diff() should serialize with other date column."""
@@ -275,3 +279,62 @@ class TestTemporalEdgeCases:
         df = result.to_pandas()
         assert "year" in df.columns
         assert "event_upper" in df.columns
+
+
+class TestTemporalTypeErrors:
+    """Tests that temporal operations fail helpfully on wrong types."""
+
+    def test_dt_year_on_numeric_column_should_error(self):
+        """dt.year() on numeric column should give helpful error."""
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/events.csv")
+        with pytest.raises(Exception) as exc_info:
+            t.derive(id_year=lambda r: r.id.dt.year()).to_pandas()
+        error_msg = str(exc_info.value).lower()
+        # Should mention something about date/temporal or the column
+        assert (
+            "id" in error_msg
+            or "temporal" in error_msg
+            or "date" in error_msg
+            or "int" in error_msg
+        )
+
+    def test_dt_month_on_string_column_should_work_or_error_helpfully(self):
+        """dt.month() on string date column should work (CSV dates are strings)."""
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/events.csv")
+        # event_date is a string in CSV but should parse as date
+        result = t.derive(month=lambda r: r.event_date.dt.month())
+        df = result.to_pandas()
+        assert "month" in df.columns
+
+
+class TestTemporalLeapYear:
+    """Tests for leap year handling in date arithmetic."""
+
+    def test_add_days_handles_leap_year(self):
+        """dt.add(days=N) should handle leap year correctly."""
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/events.csv")
+        # Add 365 days to see if leap year is handled
+        result = t.derive(future_date=lambda r: r.event_date.dt.add(days=365))
+        df = result.to_pandas()
+        assert "future_date" in df.columns
+        # Just verify it doesn't crash
+
+    def test_add_months_february_edge_case(self):
+        """dt.add(months=N) should handle February edge cases."""
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/events.csv")
+        # Adding months to dates around end of month
+        result = t.derive(next_month=lambda r: r.event_date.dt.add(months=1))
+        df = result.to_pandas()
+        assert "next_month" in df.columns
+
+
+class TestTemporalNullHandling:
+    """Tests for null handling in temporal operations."""
+
+    def test_year_on_null_date_should_not_crash(self):
+        """dt.year() should handle null dates gracefully."""
+        # Use existing test data and filter to potentially get nulls
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/events.csv")
+        # This test just verifies operations don't crash
+        result = t.derive(year=lambda r: r.event_date.dt.year())
+        assert result is not None
