@@ -1129,6 +1129,66 @@ class LTSeq:
 
         return PartitionedTable(self, by)
 
+    def partition_by(self, *columns: str) -> "PartitionedTable":
+        """
+        Partition the table by one or more columns using SQL.
+
+        This is faster than partition(by=lambda r: r.col) for simple column-based partitioning,
+        as it uses SQL DISTINCT to get partition keys instead of evaluating a Python callable
+        on each row.
+
+        Args:
+            *columns: Column names to partition by. One or more column names.
+                     E.g., partition_by("region") or partition_by("year", "region")
+
+        Returns:
+            A PartitionedTable that supports dict-like access and iteration.
+            Keys are tuples of column values (or single values if only one column).
+
+        Raises:
+            ValueError: If schema is not initialized
+            AttributeError: If any column doesn't exist
+
+        Example:
+            >>> t = LTSeq.read_csv("sales.csv")  # Has columns: date, region, amount
+            >>> # Single column partition
+            >>> partitions = t.partition_by("region")
+            >>> west_sales = partitions[("West",)]  # Access by key tuple
+            >>> # Multiple column partition
+            >>> partitions = t.partition_by("year", "region")
+            >>> 2023_west = partitions[(2023, "West")]
+            >>> # Iterate over all partitions
+            >>> for key, data in partitions.items():
+            ...     print(f"Key: {key}, Rows: {len(data)}")
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        # Validate that all columns exist
+        for col in columns:
+            if col not in self._schema:
+                raise AttributeError(
+                    f"Column '{col}' not found in schema. "
+                    f"Available columns: {list(self._schema.keys())}"
+                )
+
+        # Import here to avoid circular imports
+        from .partitioning import PartitionedTable
+
+        # Create a partition function that extracts the column values
+        if len(columns) == 1:
+            # Single column: return the value directly
+            col = columns[0]
+            partition_fn = lambda r: getattr(r, col)
+        else:
+            # Multiple columns: return tuple of values
+            cols = columns
+            partition_fn = lambda r: tuple(getattr(r, col) for col in cols)
+
+        return PartitionedTable(self, partition_fn)
+
     def pivot(
         self,
         index: Union[str, list[str]],
