@@ -141,7 +141,7 @@ pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Exp
 /// Helper function to detect if a PyExpr contains a window function call
 pub fn contains_window_function(py_expr: &PyExpr) -> bool {
     match py_expr {
-        PyExpr::Call { func, on, .. } => {
+        PyExpr::Call { func, on, args, .. } => {
             // Direct window functions
             if matches!(func.as_str(), "shift" | "rolling" | "diff" | "cum_sum") {
                 return true;
@@ -162,7 +162,16 @@ pub fn contains_window_function(py_expr: &PyExpr) -> bool {
                 }
             }
             // Check recursively in the `on` field
-            contains_window_function(on)
+            if contains_window_function(on) {
+                return true;
+            }
+            // Check recursively in the `args` field (for standalone functions like abs(x))
+            for arg in args {
+                if contains_window_function(arg) {
+                    return true;
+                }
+            }
+            false
         }
         PyExpr::BinOp { left, right, .. } => {
             contains_window_function(left) || contains_window_function(right)

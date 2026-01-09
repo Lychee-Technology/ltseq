@@ -185,6 +185,19 @@ impl RustTable {
         }
     }
 
+    /// Get column names from the table schema
+    ///
+    /// Returns:
+    ///     List of column names as strings
+    fn get_column_names(&self) -> PyResult<Vec<String>> {
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Schema not available.",
+            )
+        })?;
+        Ok(schema.fields().iter().map(|f| f.name().to_string()).collect())
+    }
+
     /// Get the number of rows in the table
     ///
     /// Returns:
@@ -418,7 +431,7 @@ impl RustTable {
     ///
     /// Returns:
     ///     New RustTable with unique rows
-    fn distinct(&self, _key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
+    fn distinct(&self, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<RustTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
             return Ok(RustTable {
@@ -429,8 +442,8 @@ impl RustTable {
             });
         }
 
-        // Get schema (for now, we don't use it for distinct, but keep it for future)
-        let _schema = self.schema.as_ref().ok_or_else(|| {
+        // Get schema
+        let schema = self.schema.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Schema not available. Call read_csv() first.",
             )
@@ -443,17 +456,117 @@ impl RustTable {
             )
         })?;
 
-        // For Phase 5, we implement simple distinct on all columns
-        // TODO: In Phase 6+, support distinct with specific key columns
-        // Note: key_exprs parameter is reserved for future use
+        // If no key columns specified, use simple distinct on all columns
+        if key_exprs.is_empty() {
+            let distinct_df = RUNTIME
+                .block_on(async {
+                    (**df)
+                        .clone()
+                        .distinct()
+                        .map_err(|e| format!("Distinct execution failed: {}", e))
+                })
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+            return Ok(RustTable {
+                session: Arc::clone(&self.session),
+                dataframe: Some(Arc::new(distinct_df)),
+                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
+                sort_exprs: self.sort_exprs.clone(),
+            });
+        }
+
+        // Convert key expressions to column names
+        let mut key_cols = Vec::new();
+        for expr_dict in key_exprs.iter() {
+            let py_expr = crate::types::dict_to_py_expr(expr_dict)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+            // Get column name from expression
+            let col_name = match &py_expr {
+                crate::types::PyExpr::Column(name) => name.clone(),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "distinct() key expressions must be simple column references",
+                    ))
+                }
+            };
+
+            // Verify column exists
+            if !schema.fields().iter().any(|f| f.name() == &col_name) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Column '{}' not found in schema",
+                    col_name
+                )));
+            }
+
+            key_cols.push(col_name);
+        }
+
+        // Build SQL query using ROW_NUMBER() window function
+        // SELECT * FROM (
+        //   SELECT *, ROW_NUMBER() OVER (PARTITION BY key_cols ORDER BY key_cols) as __rn
+        //   FROM __distinct_source
+        // ) WHERE __rn = 1
+        let all_cols: Vec<String> = schema
+            .fields()
+            .iter()
+            .map(|f| format!("\"{}\"", f.name()))
+            .collect();
+        let all_cols_str = all_cols.join(", ");
+
+        let partition_by = key_cols
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Use the key columns for ordering (first occurrence based on natural order)
+        // If there's no sort expression, use ROWID-like ordering
+        let order_by = if !key_cols.is_empty() {
+            partition_by.clone()
+        } else {
+            "1".to_string()
+        };
+
+        let sql = format!(
+            "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) as __rn FROM __distinct_source) WHERE __rn = 1",
+            all_cols_str, partition_by, order_by
+        );
+
+        // Register DataFrame as a temporary table and execute SQL
+        let session = &self.session;
+        let schema_clone = Arc::clone(schema);
         let distinct_df = RUNTIME
             .block_on(async {
-                (**df)
-                    .clone()
-                    .distinct()
-                    .map_err(|e| format!("Distinct execution failed: {}", e))
+                // Collect DataFrame to batches
+                let batches = (**df).clone().collect().await.map_err(|e| {
+                    format!("Failed to collect data for distinct: {}", e)
+                })?;
+
+                // Create a MemTable from the batches
+                let temp_table = datafusion::datasource::MemTable::try_new(
+                    schema_clone,
+                    vec![batches],
+                )
+                .map_err(|e| format!("Failed to create temp table: {}", e))?;
+
+                // Register the source DataFrame
+                session
+                    .register_table("__distinct_source", Arc::new(temp_table))
+                    .map_err(|e| format!("Failed to register source table: {}", e))?;
+
+                // Execute SQL
+                let result = session
+                    .sql(&sql)
+                    .await
+                    .map_err(|e| format!("Distinct SQL failed: {}", e))?;
+
+                // Deregister temp table
+                let _ = session.deregister_table("__distinct_source");
+
+                Ok(result)
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
         // Return new RustTable with distinct data
         Ok(RustTable {
@@ -554,6 +667,22 @@ impl RustTable {
     ///     New RustTable with rows matching the WHERE clause
     fn filter_where(&self, where_clause: &str) -> PyResult<RustTable> {
         crate::ops::advanced::filter_where_impl(self, where_clause)
+    }
+
+    /// Derive columns using raw SQL window expressions
+    ///
+    /// This method executes SQL window function expressions on a table that already
+    /// has __group_id__ and __rn__ columns. Used by NestedTable.derive() to execute
+    /// group aggregations via pure SQL.
+    ///
+    /// Args:
+    ///     derive_exprs: HashMap mapping column names to SQL expressions
+    ///                   e.g., {"span": "COUNT(*) OVER (PARTITION BY __group_id__)"}
+    ///
+    /// Returns:
+    ///     New RustTable with derived columns added (and __group_id__, __rn__ removed)
+    fn derive_window_sql(&self, derive_exprs: std::collections::HashMap<String, String>) -> PyResult<RustTable> {
+        crate::ops::advanced::derive_window_sql_impl(self, derive_exprs)
     }
 
     /// Phase 8B: Join two tables using pointer-based foreign keys

@@ -1,12 +1,12 @@
 # LTSeq Design Summary
 
 **Last Updated**: January 8, 2026  
-**Status**: Comprehensive Design Archive (Phases 1-13)
+**Status**: Comprehensive Design Archive
 
 ## Overview
 LTSeq is a hybrid Python-Rust library for high-performance sequential data processing. It combines a Pythonic lambda-based DSL with the raw speed of Rust's DataFusion engine. The core philosophy is **lazy evaluation with strict ordering guarantees**, enabling complex time-series and sequential operations (shift, rolling, diff, cum_sum) that are difficult or slow in standard SQL/pandas.
 
-This document consolidates design decisions, architectural patterns, and lessons learned from the first 13 development phases.
+This document consolidates design decisions, architectural patterns, and lessons learned throughout development.
 
 ---
 
@@ -42,7 +42,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 
 ---
 
-## 2. Expression System (Phases 3-4)
+## 2. Expression System
 
 ### 2.1 Lambda DSL via SchemaProxy
 - **Problem**: Python lambdas are opaque. We need to convert `lambda r: r.age > 18` into a DataFusion logical expression.
@@ -68,7 +68,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 
 ---
 
-## 3. Relational Operations (Phase 5)
+## 3. Relational Operations
 
 ### 3.1 sort()
 - **Constraint**: Ascending only (in early phases), multi-column support.
@@ -85,7 +85,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 
 ---
 
-## 4. Sequence Operators (Phase 6)
+## 4. Sequence Operators
 
 ### 4.1 Strict Sort Requirement
 - `shift()`, `diff()`, `rolling()`, `cum_sum()` **fail hard** if `.sort()` was not called previously.
@@ -107,7 +107,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 
 ---
 
-## 5. Linking & Joins (Phases 8-11)
+## 5. Linking & Joins
 
 ### 5.1 Pointer-Based LinkedTable
 - **Concept**: `left.link(right, on=...)` returns a `LinkedTable`.
@@ -115,7 +115,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 - **API**: Allows chaining operations on the "virtual" joined result.
 
 ### 5.2 Transparent Materialization ("Detect & Materialize")
-- **Phase 10 & 11 Decision**: When a user filters or selects a column belonging to the linked (right) table, the system automatically materializes the join.
+- **Design Decision**: When a user filters or selects a column belonging to the linked (right) table, the system automatically materializes the join.
 - **User Experience**: "It just works". `linked.filter(lambda r: r.right_col > 5)` triggers the join.
 - **Return Types**:
   - `LinkedTable`: No materialization happened (operations were on left table only).
@@ -131,12 +131,12 @@ This document consolidates design decisions, architectural patterns, and lessons
 - Defaults to `inner` to match SQL intuition.
 
 ### 5.5 Chained Materialization
-- **Phase 9 Fix**: Fixed a critical bug where chaining multiple links caused schema mismatches.
+- **Bug Fix**: Fixed a critical bug where chaining multiple links caused schema mismatches.
 - **Solution**: Ensure schema synchronization between Python `_schema` and Rust `ArrowSchema` after every materialization.
 
 ---
 
-## 6. Optimization Strategy (Phase A)
+## 6. Optimization Strategy
 
 ### 6.1 Native Rust Implementations
 - **join_merge**: Moved join logic to Rust. **5-10x speedup**.
@@ -148,7 +148,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 
 ---
 
-## 7. Grouping Operations (Phase B)
+## 7. Grouping Operations
 
 ### 7.1 group_ordered Algorithm
 - **Problem**: Standard `GROUP BY` destroys order. We need "group by X, but keep rows ordered by time within groups".

@@ -341,12 +341,13 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
             ))
         })?;
 
-    // Execute SQL query to compute group_id and group_count
+    // Execute SQL query to compute group_id, group_count, and row number within group
     // Algorithm:
     // 1. Add ROW_NUMBER() for tracking row positions
     // 2. Use CASE WHEN to create mask (1 when value changes or first row, 0 otherwise)
     // 3. SUM(mask) OVER (ORDER BY rownum) gives cumulative group IDs
     // 4. COUNT(*) OVER (PARTITION BY group_id) gives row count per group
+    // 5. ROW_NUMBER() OVER (PARTITION BY group_id) gives row number within each group
     let sql_query = format!(
         r#"WITH numbered AS (
           SELECT *, ROW_NUMBER() OVER () as __row_num FROM {}
@@ -366,7 +367,8 @@ pub fn group_id_impl(table: &RustTable, grouping_expr: Bound<'_, PyDict>) -> PyR
           FROM masked
         )
         SELECT * EXCEPT (__row_num, __mask),
-          COUNT(*) OVER (PARTITION BY __group_id__) as __group_count__
+          COUNT(*) OVER (PARTITION BY __group_id__) as __group_count__,
+          ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY __row_num) as __rn__
         FROM grouped"#,
         temp_table_name, grouping_col_name, grouping_col_name
     );
@@ -1685,6 +1687,160 @@ pub fn pivot_impl(
         session: Arc::clone(&table.session),
         dataframe: Some(Arc::new(final_df)),
         schema: Some(result_schema),
+        sort_exprs: Vec::new(),
+    })
+}
+
+/// Derive columns using raw SQL window expressions
+///
+/// This function executes a SELECT query with the provided SQL expressions,
+/// typically containing window functions like FIRST_VALUE, LAST_VALUE, COUNT, etc.
+///
+/// # Arguments
+///
+/// * `table` - The source table (must already have __group_id__ and __rn__ columns)
+/// * `derive_exprs` - HashMap mapping column name -> SQL expression string
+///
+/// # Returns
+///
+/// A new RustTable with the derived columns added (and __group_id__, __rn__ removed)
+pub fn derive_window_sql_impl(
+    table: &RustTable,
+    derive_exprs: std::collections::HashMap<String, String>,
+) -> PyResult<RustTable> {
+    // Validate table exists
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No data loaded. Call read_csv() first.",
+        )
+    })?;
+    
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No schema available.",
+        )
+    })?;
+
+    // Register the current table
+    let temp_table_name = "__ltseq_derive_temp";
+    
+    let current_batches = RUNTIME
+        .block_on(async {
+            (**df).clone().collect().await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let arrow_schema = Arc::new((**schema).clone());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    // Build SELECT clause: all existing columns + derived expressions
+    let mut select_parts: Vec<String> = Vec::new();
+    
+    // Add all existing columns except __group_id__ and __rn__
+    for field in schema.fields() {
+        let col_name = field.name();
+        if col_name != "__group_id__" && col_name != "__rn__" {
+            select_parts.push(format!("\"{}\"", col_name));
+        }
+    }
+    
+    // Add derived columns
+    for (col_name, sql_expr) in &derive_exprs {
+        select_parts.push(format!("{} AS \"{}\"", sql_expr, col_name));
+    }
+
+    // Build SQL query
+    let sql_query = format!(
+        "SELECT {} FROM {}",
+        select_parts.join(", "),
+        temp_table_name
+    );
+
+    // Execute query
+    let result_batches = RUNTIME
+        .block_on(async {
+            let result_df = table.session.sql(&sql_query)
+                .await
+                .map_err(|e| format!("Failed to execute derive query: {} -- SQL: {}", e, sql_query))?;
+            
+            result_df.collect()
+                .await
+                .map_err(|e| format!("Failed to collect derive results: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Deregister temporary table
+    table.session.deregister_table(temp_table_name)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to deregister temp table: {}",
+                e
+            ))
+        })?;
+
+    // Create result RustTable
+    if result_batches.is_empty() {
+        // Build schema for empty result
+        let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
+        for field in schema.fields() {
+            let col_name = field.name();
+            if col_name != "__group_id__" && col_name != "__rn__" {
+                result_fields.push((**field).clone());
+            }
+        }
+        // Add derived columns as nullable Float64 (common for aggregates)
+        for col_name in derive_exprs.keys() {
+            result_fields.push(datafusion::arrow::datatypes::Field::new(
+                col_name,
+                datafusion::arrow::datatypes::DataType::Float64,
+                true,
+            ));
+        }
+        let empty_schema = Arc::new(ArrowSchema::new(result_fields));
+        return Ok(RustTable {
+            session: Arc::clone(&table.session),
+            dataframe: None,
+            schema: Some(empty_schema),
+            sort_exprs: Vec::new(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    // Create DataFrame from the result using read_table
+    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result table: {}",
+            e
+        ))
+    })?;
+
+    Ok(RustTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(Arc::clone(&result_schema)),
         sort_exprs: Vec::new(),
     })
 }

@@ -701,10 +701,9 @@ This ensures maximum performance and scalability.
 
 ## Future Enhancements
 
-Planned future work includes:
-- **Phase 5a**: SQL-based pivot() implementation
-- **Phase 5b**: Optimized partition() with callback support
-- **Phase 5c**: Window function optimization for NestedTable.filter()
-- **Phase 5d**: Window function optimization for NestedTable.derive()
+All planned expression extensions have been implemented. Future work may include:
+- Additional string methods (replace, split, join)
+- Additional temporal methods (week, quarter, day of week)
+- Expression-based alternatives for callable-dependent operations
 
-These phases will further reduce pandas dependency and improve performance for advanced grouping operations.
+See [ROADMAP.md](ROADMAP.md) for the overall development roadmap.

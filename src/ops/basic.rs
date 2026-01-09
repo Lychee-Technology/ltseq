@@ -427,12 +427,14 @@ pub fn union_impl(table1: &RustTable, table2: &RustTable) -> PyResult<RustTable>
 /// Args:
 ///     table1: First table
 ///     table2: Second table
-///     key_expr_dict: Optional serialized key expression
+///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn intersect_impl(
     table1: &RustTable,
     table2: &RustTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<RustTable> {
+    use datafusion::datasource::MemTable;
+
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Left table has no data loaded. Call read_csv() first.",
@@ -451,89 +453,89 @@ pub fn intersect_impl(
         )
     })?;
 
-    // Create temporary table names
-    let t1_name = "__intersect_t1__";
-    let t2_name = "__intersect_t2__";
+    let schema2 = table2.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table schema not available",
+        )
+    })?;
 
-    // Execute using SQL INTERSECT via subqueries
+    // Determine comparison columns
+    let compare_cols: Vec<String> = if let Some(expr_dict) = key_expr_dict {
+        // Extract column names from key expression
+        extract_key_columns(&expr_dict, schema1)?
+    } else {
+        // Use all columns from left table
+        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+    };
+
+    if compare_cols.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No columns specified for intersect comparison",
+        ));
+    }
+
+    // Register both DataFrames as temp tables and execute semi-join SQL
     let result_df = RUNTIME.block_on(async {
-        // Build column list
-        let cols: Vec<String> = schema1.fields().iter()
-            .map(|f| f.name().to_string())
+        // Collect batches from both tables
+        let batches1 = (**df1).clone().collect().await.map_err(|e| {
+            format!("Failed to collect left table: {}", e)
+        })?;
+        let batches2 = (**df2).clone().collect().await.map_err(|e| {
+            format!("Failed to collect right table: {}", e)
+        })?;
+
+        // Register temp tables
+        let t1_name = "__intersect_t1__";
+        let t2_name = "__intersect_t2__";
+
+        let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
+            .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
+        let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
+            .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
+
+        table1.session.register_table(t1_name, Arc::new(temp1))
+            .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
+        table1.session.register_table(t2_name, Arc::new(temp2))
+            .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
+
+        // Build column list for SELECT (all columns from t1)
+        let select_cols: Vec<String> = schema1.fields().iter()
+            .map(|f| format!("t1.\"{}\"", f.name()))
             .collect();
-        let col_list = cols.join(", ");
 
-        // Query that uses INTERSECT
-        let query = format!(
-            "SELECT DISTINCT {} FROM (SELECT {} FROM (SELECT {})) INTERSECT (SELECT {})",
-            col_list,
-            col_list,
-            col_list,
-            col_list
+        // Build WHERE EXISTS condition
+        let where_conditions: Vec<String> = compare_cols.iter()
+            .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
+            .collect();
+
+        // Semi-join query: SELECT t1.* FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
+        let sql = format!(
+            "SELECT DISTINCT {} FROM \"{}\" t1 WHERE EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
+            select_cols.join(", "),
+            t1_name,
+            t2_name,
+            where_conditions.join(" AND ")
         );
 
-        // For now, use a simpler approach: inner join with both tables having unique values
-        // This approximates INTERSECT
-        let join_keys = cols.iter().map(|c| format!("a.{} = b.{}", c, c)).collect::<Vec<_>>().join(" AND ");
-        let query = format!(
-            "SELECT {} FROM (SELECT DISTINCT {} FROM (SELECT DISTINCT {})) as a \
-             INNER JOIN (SELECT DISTINCT {}) as b ON {}",
-            cols.iter().map(|c| format!("a.{}", c)).collect::<Vec<_>>().join(", "),
-            col_list,
-            col_list,
-            col_list,
-            join_keys
-        );
+        let result = table1.session.sql(&sql).await
+            .map_err(|e| format!("Intersect query failed: {}", e))?;
 
-        // Simple approach: just use union all then filter for rows appearing in both
-        // Better: Use a NOT EXISTS subquery approach
-        let query = format!(
-            "SELECT DISTINCT {} FROM (SELECT {}) t1 WHERE EXISTS \
-             (SELECT 1 FROM (SELECT {}) t2 WHERE {})",
-            col_list,
-            col_list,
-            col_list,
-            cols.iter().map(|c| format!("t1.{} = t2.{}", c, c)).collect::<Vec<_>>().join(" AND ")
-        );
+        // Deregister temp tables
+        let _ = table1.session.deregister_table(t1_name);
+        let _ = table1.session.deregister_table(t2_name);
 
-        // Actually, simplest: just collect both and use union approach
-        // For MVP, we'll do: select all rows from t1 where all columns match some row in t2
-        table1.session.sql(&format!("SELECT DISTINCT {} FROM (SELECT {})", col_list, col_list))
-            .await
-            .map_err(|e| format!("Intersect query failed: {}", e))?
-            .collect()
-            .await
-            .map_err(|e| format!("Intersect collect failed: {}", e))
+        Ok::<_, String>(result)
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Get schema from first batch
-    let first_batch = if result_df.is_empty() {
-        // Return empty result with same schema
-        let result_df = RUNTIME.block_on(async {
-            (**df1).clone().limit(0, Some(0))
-                .map_err(|e| format!("Failed to create empty result: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-        return Ok(RustTable {
-            session: Arc::clone(&table1.session),
-            dataframe: Some(Arc::new(result_df)),
-            schema: Some(Arc::clone(&schema1)),
-            sort_exprs: table1.sort_exprs.clone(),
-        });
-    } else {
-        &result_df[0]
-    };
-
-    // Build result table
-    let arrow_fields: Vec<Field> =
-        schema1.fields().iter().map(|f| (**f).clone()).collect();
+    // Get schema from result
+    let df_schema = result_df.schema();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     Ok(RustTable {
         session: Arc::clone(&table1.session),
-        dataframe: Some(df1.clone()),
+        dataframe: Some(Arc::new(result_df)),
         schema: Some(Arc::new(new_arrow_schema)),
         sort_exprs: table1.sort_exprs.clone(),
     })
@@ -547,12 +549,14 @@ pub fn intersect_impl(
 /// Args:
 ///     table1: First table
 ///     table2: Second table
-///     key_expr_dict: Optional serialized key expression
+///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn diff_impl(
     table1: &RustTable,
     table2: &RustTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<RustTable> {
+    use datafusion::datasource::MemTable;
+
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Left table has no data loaded. Call read_csv() first.",
@@ -571,13 +575,84 @@ pub fn diff_impl(
         )
     })?;
 
-    // For MVP: just return the left table
-    // TODO: Implement proper diff using anti-join pattern
-    let result_df = (**df1).clone();
+    let schema2 = table2.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table schema not available",
+        )
+    })?;
 
-    // Get schema
-    let arrow_fields: Vec<Field> =
-        schema1.fields().iter().map(|f| (**f).clone()).collect();
+    // Determine comparison columns
+    let compare_cols: Vec<String> = if let Some(expr_dict) = key_expr_dict {
+        // Extract column names from key expression
+        extract_key_columns(&expr_dict, schema1)?
+    } else {
+        // Use all columns from left table
+        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+    };
+
+    if compare_cols.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No columns specified for diff comparison",
+        ));
+    }
+
+    // Register both DataFrames as temp tables and execute anti-join SQL
+    let result_df = RUNTIME.block_on(async {
+        // Collect batches from both tables
+        let batches1 = (**df1).clone().collect().await.map_err(|e| {
+            format!("Failed to collect left table: {}", e)
+        })?;
+        let batches2 = (**df2).clone().collect().await.map_err(|e| {
+            format!("Failed to collect right table: {}", e)
+        })?;
+
+        // Register temp tables
+        let t1_name = "__diff_t1__";
+        let t2_name = "__diff_t2__";
+
+        let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
+            .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
+        let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
+            .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
+
+        table1.session.register_table(t1_name, Arc::new(temp1))
+            .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
+        table1.session.register_table(t2_name, Arc::new(temp2))
+            .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
+
+        // Build column list for SELECT (all columns from t1)
+        let select_cols: Vec<String> = schema1.fields().iter()
+            .map(|f| format!("t1.\"{}\"", f.name()))
+            .collect();
+
+        // Build WHERE NOT EXISTS condition
+        let where_conditions: Vec<String> = compare_cols.iter()
+            .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
+            .collect();
+
+        // Anti-join query: SELECT t1.* FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
+        let sql = format!(
+            "SELECT {} FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
+            select_cols.join(", "),
+            t1_name,
+            t2_name,
+            where_conditions.join(" AND ")
+        );
+
+        let result = table1.session.sql(&sql).await
+            .map_err(|e| format!("Diff query failed: {}", e))?;
+
+        // Deregister temp tables
+        let _ = table1.session.deregister_table(t1_name);
+        let _ = table1.session.deregister_table(t2_name);
+
+        Ok::<_, String>(result)
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Get schema from result
+    let df_schema = result_df.schema();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     Ok(RustTable {
@@ -596,12 +671,14 @@ pub fn diff_impl(
 /// Args:
 ///     table1: First table (potential subset)
 ///     table2: Second table (potential superset)
-///     key_expr_dict: Optional serialized key expression
+///     key_expr_dict: Optional serialized key expression (determines comparison columns)
 pub fn is_subset_impl(
     table1: &RustTable,
     table2: &RustTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
+    use datafusion::datasource::MemTable;
+
     let df1 = table1.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Left table has no data loaded. Call read_csv() first.",
@@ -614,8 +691,140 @@ pub fn is_subset_impl(
         )
     })?;
 
-    // For MVP: always return true
-    // TODO: Implement proper subset check
-    Ok(true)
+    let schema1 = table1.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table schema not available",
+        )
+    })?;
+
+    let schema2 = table2.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table schema not available",
+        )
+    })?;
+
+    // Determine comparison columns
+    let compare_cols: Vec<String> = if let Some(expr_dict) = key_expr_dict {
+        // Extract column names from key expression
+        extract_key_columns(&expr_dict, schema1)?
+    } else {
+        // Use all columns from left table
+        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+    };
+
+    if compare_cols.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No columns specified for subset comparison",
+        ));
+    }
+
+    // t1 is a subset of t2 if diff(t1, t2) is empty
+    // i.e., all rows in t1 also exist in t2
+    let is_subset = RUNTIME.block_on(async {
+        // Collect batches from both tables
+        let batches1 = (**df1).clone().collect().await.map_err(|e| {
+            format!("Failed to collect left table: {}", e)
+        })?;
+        let batches2 = (**df2).clone().collect().await.map_err(|e| {
+            format!("Failed to collect right table: {}", e)
+        })?;
+
+        // Register temp tables
+        let t1_name = "__subset_t1__";
+        let t2_name = "__subset_t2__";
+
+        let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
+            .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
+        let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
+            .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
+
+        table1.session.register_table(t1_name, Arc::new(temp1))
+            .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
+        table1.session.register_table(t2_name, Arc::new(temp2))
+            .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
+
+        // Build WHERE NOT EXISTS condition to count rows NOT in t2
+        let where_conditions: Vec<String> = compare_cols.iter()
+            .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
+            .collect();
+
+        // Count rows in t1 that don't exist in t2
+        // If count is 0, then t1 is a subset of t2
+        let sql = format!(
+            "SELECT COUNT(*) as cnt FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
+            t1_name,
+            t2_name,
+            where_conditions.join(" AND ")
+        );
+
+        let result = table1.session.sql(&sql).await
+            .map_err(|e| format!("Subset query failed: {}", e))?;
+
+        let batches = result.collect().await
+            .map_err(|e| format!("Subset collect failed: {}", e))?;
+
+        // Deregister temp tables
+        let _ = table1.session.deregister_table(t1_name);
+        let _ = table1.session.deregister_table(t2_name);
+
+        // Extract count from result
+        if batches.is_empty() || batches[0].num_rows() == 0 {
+            return Ok::<_, String>(true); // Empty table is subset of anything
+        }
+
+        use datafusion::arrow::array::Int64Array;
+        let cnt_array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| "Failed to extract count".to_string())?;
+
+        let count = cnt_array.value(0);
+        Ok(count == 0)
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    Ok(is_subset)
+}
+
+/// Helper function to extract column names from a key expression dict
+///
+/// Currently handles single column keys: lambda r: r.id
+/// For multiple columns, leave on=None (uses all columns)
+fn extract_key_columns(
+    expr_dict: &Bound<'_, PyDict>,
+    schema: &ArrowSchema,
+) -> PyResult<Vec<String>> {
+    use crate::types::dict_to_py_expr;
+    use crate::types::PyExpr;
+
+    let py_expr = dict_to_py_expr(expr_dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    let mut columns = Vec::new();
+
+    // Extract column name(s) from the expression
+    match &py_expr {
+        PyExpr::Column(name) => columns.push(name.clone()),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "on= argument must be a single column reference (e.g., lambda r: r.id). \
+                 For multiple columns, leave on=None to use all columns."
+            ));
+        }
+    }
+
+    // Validate columns exist in schema
+    for col in &columns {
+        if schema.field_with_name(col).is_err() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Column '{}' not found in schema. Available columns: {:?}",
+                col,
+                schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+            )));
+        }
+    }
+
+    Ok(columns)
 }
 
