@@ -1335,6 +1335,149 @@ class LTSeq:
         result._schema = self._schema.copy()
         return result
 
+    def join(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+        """
+        Standard SQL-style hash join between two tables.
+
+        Joins two tables based on a condition. Unlike join_merge(), this does
+        not require tables to be pre-sorted and uses a hash-based algorithm.
+
+        Args:
+            other: Another LTSeq table to join with
+            on: Lambda with two parameters specifying the join condition.
+                E.g., lambda a, b: a.user_id == b.user_id
+            how: Join type. One of: "inner", "left", "right", "full"
+                 Default: "inner" (only matching rows)
+
+        Returns:
+            New LTSeq with joined results. Columns from both tables are included.
+            Conflicting column names from the right table get "_other" suffix.
+
+        Raises:
+            ValueError: If schema not initialized or invalid join type
+            TypeError: If other is not LTSeq or join condition is invalid
+
+        Example:
+            >>> users = LTSeq.read_csv("users.csv")
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> # Inner join - only matching rows
+            >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id)
+            >>> result.show()
+            >>>
+            >>> # Left join - all users, matching orders or NULL
+            >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"join() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate join type
+        valid_join_types = {"inner", "left", "right", "full"}
+        if how not in valid_join_types:
+            raise ValueError(
+                f"Invalid join type '{how}'. Must be one of: {valid_join_types}"
+            )
+
+        # Validate join condition
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            other_proxy = SchemaProxy(other._schema)
+            _ = on(self_proxy, other_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        # Extract join keys using the helper function
+        from .helpers import _extract_join_keys
+
+        left_key_expr, right_key_expr, jtype = _extract_join_keys(
+            on, self._schema, other._schema, how
+        )
+
+        # Call Rust join() method
+        try:
+            joined_inner = self._inner.join(
+                other._inner,
+                left_key_expr,
+                right_key_expr,
+                jtype,
+                "_other",  # Alias for right table columns
+            )
+        except RuntimeError as e:
+            # If Rust join fails, fall back to pandas implementation
+            import warnings
+
+            warnings.warn(
+                f"Rust join failed: {e}. Falling back to pandas implementation.",
+                RuntimeWarning,
+            )
+            # Fall back to pandas merge
+            try:
+                import pandas as pd
+            except ImportError:
+                raise RuntimeError(
+                    "join() fallback requires pandas. Install it with: pip install pandas"
+                )
+
+            df1 = self.to_pandas()
+            df2 = other.to_pandas()
+            pandas_how = "outer" if how == "full" else how
+            common_cols = sorted(set(df1.columns) & set(df2.columns))
+
+            if common_cols:
+                result_df = pd.merge(
+                    df1, df2, on=common_cols, how=pandas_how, suffixes=("", "_other")
+                )
+            else:
+                df1["_key"] = 1
+                df2["_key"] = 1
+                result_df = pd.merge(
+                    df1, df2, on="_key", how=pandas_how, suffixes=("", "_other")
+                )
+                result_df = result_df.drop(columns=["_key"])
+
+            # Build schema from result
+            new_schema = {}
+            for col in result_df.columns:
+                if col in self._schema:
+                    new_schema[col] = self._schema[col]
+                elif col in other._schema:
+                    new_schema[col] = other._schema[col]
+                elif col.endswith("_other"):
+                    orig_col = col[:-6]  # Remove '_other' suffix
+                    if orig_col in other._schema:
+                        new_schema[col] = other._schema[orig_col]
+                    else:
+                        new_schema[col] = "String"
+                else:
+                    new_schema[col] = "String"
+
+            return LTSeq._from_rows(result_df.to_dict("records"), new_schema)
+
+        # Build merged schema
+        new_schema = self._schema.copy()
+        for col, dtype in other._schema.items():
+            if col in new_schema:
+                new_schema[col + "_other"] = dtype
+            else:
+                new_schema[col] = dtype
+
+        # Create new LTSeq wrapping the result
+        result = LTSeq()
+        result._inner = joined_inner
+        result._schema = new_schema
+        return result
+
     def join_merge(
         self, other: "LTSeq", on: Callable, join_type: str = "inner"
     ) -> "LTSeq":

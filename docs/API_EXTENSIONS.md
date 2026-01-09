@@ -438,11 +438,20 @@ enriched.show()
 Lookups can be chained with other operations:
 
 ```python
-# Normalize the key before lookup
+# Basic lookup - join key matches target table's primary key
 enriched = orders.derive(
-    product_name=lambda r: r.product_id.lower().lookup(products, "name")
+    product_name=lambda r: r.product_id.lookup(products, "name")
+)
+
+# Lookup with explicit join key (when target column name differs)
+enriched = orders.derive(
+    product_name=lambda r: r.prod_code.lookup(products, "name", join_key="product_code")
 )
 ```
+
+> **Note**: The lookup key should match the target table's key column.
+> Transformations like `.lower()` on the key may cause lookup failures if
+> the target table uses different casing.
 
 ---
 
@@ -462,7 +471,7 @@ products = LTSeq.read_csv("products.csv")
 # Rich derivation using new features
 enriched = orders.derive(
     # String operations
-    clean_order_id=lambda r: r.order_id.s.trim(),
+    clean_order_id=lambda r: r.order_id.s.strip(),
     is_premium_customer=lambda r: r.customer_id.s.starts_with("PREM"),
     
     # Lookup pattern
@@ -621,7 +630,7 @@ table.derive(
 # Old: Pandas string methods
 # New: Clean chaining
 table.derive(
-    clean_email=lambda r: r.email.s.lower().s.trim()
+    clean_email=lambda r: r.email.s.lower().s.strip()
 )
 ```
 
@@ -695,7 +704,10 @@ This ensures maximum performance and scalability.
 | Temporal: diff() | ✅ Complete | DATEDIFF('day', col1, col2) |
 | Lookup pattern | ✅ Complete | JOIN operation |
 
-**Total API Coverage: 100% (Complete spec implementation)**
+**Total Expression API Coverage: 100% of documented expressions implemented**
+
+> **Note**: This covers expression-level APIs. See `api.md` for table-level operations.
+> Window functions (shift, rolling, cum_sum, diff) have implementation but require further testing.
 
 ---
 

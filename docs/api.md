@@ -205,3 +205,112 @@ result = (
 )
 
 ```
+
+---
+
+### **📦 Advanced Data Structures**
+
+#### **NestedTable (from `group_ordered`)**
+
+When you call `group_ordered()`, you get a `NestedTable` that represents groups of consecutive rows.
+
+| Method | Usage Example | Description |
+| :---- | :---- | :---- |
+| **first()** | `g.first()` | Get first row of each group (returns LTSeq) |
+| **last()** | `g.last()` | Get last row of each group (returns LTSeq) |
+| **count()** | `g.count()` | Get count of rows in each group |
+| **flatten()** | `nested.flatten()` | Return LTSeq with `__group_id__` column |
+| **filter** | `nested.filter(lambda g: g.count() > 3)` | Filter groups by predicate |
+| **derive** | `nested.derive(lambda g: {"size": g.count()})` | Derive columns from group properties |
+
+**GroupProxy Methods** (available in filter/derive lambdas):
+
+```python
+# Inside filter() or derive() on a NestedTable, 'g' is a GroupProxy
+nested.filter(lambda g: g.count() > 5)                    # Row count
+nested.derive(lambda g: {"start": g.first().date})        # First row's value
+nested.derive(lambda g: {"end": g.last().price})          # Last row's value
+nested.derive(lambda g: {"total": g.sum("amount")})       # Sum of column
+nested.derive(lambda g: {"avg": g.avg("price")})          # Average of column
+nested.derive(lambda g: {"hi": g.max("price")})           # Max of column
+nested.derive(lambda g: {"lo": g.min("price")})           # Min of column
+```
+
+---
+
+#### **PartitionedTable (from `partition`)**
+
+When you call `partition()`, you get a `PartitionedTable` that acts like a dictionary of sub-tables.
+
+| Method | Usage Example | Description |
+| :---- | :---- | :---- |
+| **keys()** | `partitioned.keys()` | List all partition keys |
+| **values()** | `partitioned.values()` | List all partition tables (LTSeq instances) |
+| **items()** | `partitioned.items()` | Iterate (key, table) pairs |
+| **\_\_getitem\_\_** | `partitioned["West"]` | Access partition by key |
+| **\_\_iter\_\_** | `for t in partitioned:` | Iterate through partition tables |
+| **\_\_len\_\_** | `len(partitioned)` | Number of partitions |
+| **map** | `partitioned.map(lambda t: t.filter(...))` | Apply function to each partition |
+| **to_list()** | `partitioned.to_list()` | Convert to list of LTSeq |
+
+**Example:**
+
+```python
+# Partition by region
+partitioned = sales.partition(by=lambda r: r.region)
+
+# Access a specific partition
+west_sales = partitioned["West"]
+
+# Apply operation to all partitions
+normalized = partitioned.map(lambda t: t.derive(
+    pct=lambda r: r.amount / t.agg(total=lambda g: g.amount.sum()).first().total
+))
+
+# Iterate through partitions
+for region, table in partitioned.items():
+    print(f"{region}: {len(table)} rows")
+```
+
+---
+
+#### **LinkedTable (from `link`)**
+
+When you call `link()`, you get a `LinkedTable` that maintains pointer relationships to other tables.
+
+| Method | Usage Example | Description |
+| :---- | :---- | :---- |
+| **show** | `linked.show()` | Display linked table |
+| **filter** | `linked.filter(lambda r: r.amount > 100)` | Filter on source or linked columns |
+| **select** | `linked.select(lambda r: [r.id, r.customer.name])` | Select columns (materializes join) |
+| **derive** | `linked.derive(customer_name=lambda r: r.customer.name)` | Derive from linked tables |
+| **sort** | `linked.sort(lambda r: r.date)` | Sort rows |
+| **slice** | `linked.slice(0, 10)` | Slice rows |
+| **distinct** | `linked.distinct()` | Get distinct rows |
+| **link** | `linked.link(another_table, ...)` | Chain another link |
+
+**Chained Linking Example:**
+
+```python
+# Create multi-table relationships
+orders = LTSeq.read_csv("orders.csv")
+customers = LTSeq.read_csv("customers.csv")
+products = LTSeq.read_csv("products.csv")
+
+# Link orders to customers, then to products
+enriched = (
+    orders
+    .link(customers, on=lambda o, c: o.customer_id == c.id, as_="customer")
+    .link(products, on=lambda o, p: o.product_id == p.id, as_="product")
+    .derive(
+        customer_name=lambda r: r.customer.name,
+        product_name=lambda r: r.product.name,
+        total=lambda r: r.quantity * r.product.price
+    )
+    .select(lambda r: [r.order_id, r.customer_name, r.product_name, r.total])
+)
+```
+
+**Link vs Join:**
+- Use `link()` when you need to access related data without materializing a full join
+- Use `join()` or `join_merge()` when you need all columns from both tables in the result
