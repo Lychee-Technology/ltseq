@@ -6,9 +6,8 @@ from .grouping import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable
 
-# Re-export expression utilities
+# Re-export public expression types
 from .expr import (
-    _lambda_to_expr,
     SchemaProxy,
     BinOpExpr,
     ColumnExpr,
@@ -22,7 +21,6 @@ __all__ = [
     "NestedTable",
     "LinkedTable",
     "PartitionedTable",
-    "_lambda_to_expr",
     "SchemaProxy",
     "BinOpExpr",
     "ColumnExpr",

@@ -1,4 +1,4 @@
-"""Tests for Phase 3.4: join_merge() functionality.
+"""Tests for join_merge() functionality.
 
 Tests the join_merge() method which performs efficient merge joins on
 pre-sorted tables.
@@ -24,7 +24,9 @@ class TestJoinMergeBasic:
         t1 = LTSeq.read_csv("test_agg.csv")
         t2 = LTSeq.read_csv("test_agg.csv")
 
-        result = t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="inner")
+        result = t1.join_merge(
+            t2, on=lambda a, b: a.region == b.region, join_type="inner"
+        )
 
         # Should have matches for regions with data
         assert len(result) > 0
@@ -34,7 +36,9 @@ class TestJoinMergeBasic:
         t1 = LTSeq.read_csv("test_agg.csv")
         t2 = LTSeq.read_csv("test_agg.csv")
 
-        result = t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="left")
+        result = t1.join_merge(
+            t2, on=lambda a, b: a.region == b.region, join_type="left"
+        )
 
         # Left join should have at least as many rows as inner join
         assert len(result) > 0
@@ -44,7 +48,9 @@ class TestJoinMergeBasic:
         t1 = LTSeq.read_csv("test_agg.csv")
         t2 = LTSeq.read_csv("test_agg.csv")
 
-        result = t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="right")
+        result = t1.join_merge(
+            t2, on=lambda a, b: a.region == b.region, join_type="right"
+        )
 
         assert len(result) > 0
 
@@ -53,7 +59,9 @@ class TestJoinMergeBasic:
         t1 = LTSeq.read_csv("test_agg.csv")
         t2 = LTSeq.read_csv("test_agg.csv")
 
-        result = t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="full")
+        result = t1.join_merge(
+            t2, on=lambda a, b: a.region == b.region, join_type="full"
+        )
 
         assert len(result) > 0
 
@@ -75,7 +83,7 @@ class TestJoinMergeValidation:
         t2 = LTSeq.read_csv("test_agg.csv")
 
         with pytest.raises(ValueError, match="Invalid join type"):
-            t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="invalid")
+            t1.join_merge(t2, on=lambda a, b: a.region == b.region, join_type="invalid")
 
     def test_join_merge_invalid_table_raises_error(self):
         """join_merge() should raise error if other is not LTSeq."""
@@ -152,7 +160,9 @@ class TestJoinMergeRegressions:
         t2 = LTSeq.read_csv("test_agg.csv")
 
         result1 = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
-        result2 = t1.join_merge(t2, on=lambda a, b: a.region == b.region, how="left")
+        result2 = t1.join_merge(
+            t2, on=lambda a, b: a.region == b.region, join_type="left"
+        )
 
         # Both should work
         assert len(result1) > 0

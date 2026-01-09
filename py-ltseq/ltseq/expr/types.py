@@ -69,40 +69,6 @@ class ColumnExpr(Expr):
         """Temporal accessor for datetime operations (r.col.dt.year, etc.)"""
         return TemporalAccessor(self)
 
-    def lookup(
-        self, target_table: "Any", column: str, join_key: Optional[str] = None
-    ) -> "LookupExpr":
-        """
-        Lookup a value in another table using this column as the join key.
-
-        Used to fetch a single column from a related table in derived expressions.
-
-        Args:
-            target_table: The target table object (LTSeq instance)
-            column: Column name to fetch from the target table
-            join_key: Column name in target table to join on (optional)
-
-        Returns:
-            A LookupExpr that can be used in derive() or other expressions
-
-        Example:
-            >>> orders = LTSeq.read_csv("orders.csv")
-            >>> products = LTSeq.read_csv("products.csv")
-            >>> enriched = orders.derive(
-            ...     product_name=lambda r: r.product_id.lookup(products, "name")
-            ... )
-        """
-        # If target_table is an LTSeq, we'll store just the table name for now
-        # The actual resolution happens during derive
-        target_name = getattr(target_table, "_name", "target")
-
-        return LookupExpr(
-            on=self,
-            target_name=target_name,
-            target_columns=[column],
-            join_key=join_key,
-        )
-
 
 class StringAccessor:
     """
@@ -434,40 +400,6 @@ class CallExpr(Expr):
             return CallExpr(method_name, args, kwargs, on=self)
 
         return chained_call
-
-    def lookup(
-        self, target_table: "Any", column: str, join_key: Optional[str] = None
-    ) -> "LookupExpr":
-        """
-        Lookup a value in another table using the result of this call as the join key.
-
-        Used to fetch a single column from a related table in derived expressions.
-
-        Args:
-            target_table: The target table object (LTSeq instance)
-            column: Column name to fetch from the target table
-            join_key: Column name in target table to join on (optional)
-
-        Returns:
-            A LookupExpr that can be used in derive() or other expressions
-
-        Example:
-            >>> orders = LTSeq.read_csv("orders.csv")
-            >>> products = LTSeq.read_csv("products.csv")
-            >>> enriched = orders.derive(
-            ...     product_name=lambda r: r.product_id.lower().lookup(products, "name")
-            ... )
-        """
-        # If target_table is an LTSeq, we'll store just the table name for now
-        # The actual resolution happens during derive
-        target_name = getattr(target_table, "_name", "target")
-
-        return LookupExpr(
-            on=self,
-            target_name=target_name,
-            target_columns=[column],
-            join_key=join_key,
-        )
 
 
 class LookupExpr(Expr):

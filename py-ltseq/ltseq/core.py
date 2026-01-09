@@ -4,7 +4,6 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from .expr import SchemaProxy, _lambda_to_expr
 from .helpers import (
-    _contains_window_function,
     _infer_schema_from_csv,
     _normalize_schema,
 )
@@ -296,9 +295,6 @@ class LTSeq:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    def hello(self) -> str:
-        return self._inner.hello()
-
     def __len__(self) -> int:
         """
         Get the number of rows in the table.
@@ -461,16 +457,10 @@ class LTSeq:
 
         # Create a new LTSeq with derived columns
         result = LTSeq()
-        # Update schema: add derived columns (assuming Int64 for now as placeholder)
+        # Update schema: add derived columns (type inference is TODO)
         result._schema = self._schema.copy()
         for col_name in derived_cols:
-            # In Phase 2, we'd infer the dtype from the expression
             result._schema[col_name] = "Unknown"
-
-        # Check if any expressions contain window functions
-        has_window_functions = any(
-            _contains_window_function(expr) for expr in derived_cols.values()
-        )
 
         # Rust backend handles both standard and window functions
         result._inner = self._inner.derive(derived_cols)
@@ -484,8 +474,6 @@ class LTSeq:
         Sort rows by one or more key expressions with optional descending order.
 
         Reorders data based on column values. Multiple sort keys are applied in order.
-
-        Phase 8J: Enhanced to support descending sort via `desc` parameter.
 
         Args:
             *key_exprs: Column names (str) or lambda expressions that return sortable values.
@@ -1024,7 +1012,7 @@ class LTSeq:
         based on a join condition. Unlike join(), this uses index-based lookups
         (pointer semantics) rather than expensive hash joins.
 
-        Phase 8I: Enhanced to support multiple join types (INNER, LEFT, RIGHT, FULL).
+        Supports multiple join types (INNER, LEFT, RIGHT, FULL).
 
         Args:
             target_table: The table to link to (products, categories, etc.)
@@ -1092,53 +1080,24 @@ class LTSeq:
         # Return a LinkedTable wrapping both tables
         return LinkedTable(self, target_table, on, as_, join_type)
 
-    def partition(self, by: Callable) -> "PartitionedTable":
+    def partition(self, *args, by: Callable | None = None) -> "PartitionedTable":
         """
-        Partition the table into groups based on a key function.
+        Partition the table into groups based on columns or a key function.
 
         Unlike group_ordered() which handles consecutive groups, partition()
         groups all rows with the same key value regardless of their position
         in the table.
 
-        Args:
-            by: Lambda that returns the partition key (e.g., lambda r: r.region).
-                Will be evaluated on each row to determine its partition.
-
-        Returns:
-            A PartitionedTable that supports dict-like access and iteration
-
-        Raises:
-            ValueError: If schema is not initialized
-
-        Example:
-            >>> t = LTSeq.read_csv("sales.csv")
-            >>> partitions = t.partition(by=lambda r: r.region)
-            >>> west_sales = partitions["West"]  # Access by key
-            >>> for region, data in partitions.items():
-            ...     print(f"{region}: {len(data)} rows")
-            >>> # Apply aggregation to each partition
-            >>> totals = partitions.map(lambda t: t.agg(total=lambda g: g.sales.sum()))
-        """
-        if not self._schema:
-            raise ValueError(
-                "Schema not initialized. Call read_csv() first to populate the schema."
-            )
-
-        # Import here to avoid circular imports
-        from .partitioning import PartitionedTable
-
-        return PartitionedTable(self, by)
-
-    def partition_by(self, *columns: str) -> "PartitionedTable":
-        """
-        Partition the table by one or more columns using SQL.
-
-        This is faster than partition(by=lambda r: r.col) for simple column-based partitioning,
-        as it uses SQL DISTINCT to get partition keys and SQL WHERE to filter each partition.
+        Smart dispatch:
+        - String arguments use fast SQL path (column-based partitioning)
+        - Callable argument uses flexible Python path (lambda-based partitioning)
 
         Args:
-            *columns: Column names to partition by. One or more column names.
-                     E.g., partition_by("region") or partition_by("year", "region")
+            *args: Either column name(s) as strings, or a single callable.
+                   - Strings: Use SQL-based partitioning (faster)
+                   - Callable: Use Python-based partitioning (more flexible)
+            by: Alternative way to pass a callable for partitioning.
+                (e.g., by=lambda r: r.region)
 
         Returns:
             A PartitionedTable that supports dict-like access and iteration.
@@ -1146,37 +1105,55 @@ class LTSeq:
 
         Raises:
             ValueError: If schema is not initialized
-            AttributeError: If any column doesn't exist
+            AttributeError: If any column doesn't exist (for SQL path)
+            TypeError: If arguments are invalid
 
         Example:
-            >>> t = LTSeq.read_csv("sales.csv")  # Has columns: date, region, amount
-            >>> # Single column partition
-            >>> partitions = t.partition_by("region")
-            >>> west_sales = partitions["West"]  # Access by single value
-            >>> # Multiple column partition
-            >>> partitions = t.partition_by("year", "region")
-            >>> 2023_west = partitions[(2023, "West")]  # Access by tuple
-            >>> # Iterate over all partitions
-            >>> for key, data in partitions.items():
-            ...     print(f"Key: {key}, Rows: {len(data)}")
+            >>> t = LTSeq.read_csv("sales.csv")
+            >>> # Column-based partitioning (fast SQL path)
+            >>> partitions = t.partition("region")
+            >>> partitions = t.partition("year", "region")  # Multiple columns
+            >>> # Lambda-based partitioning (flexible Python path)
+            >>> partitions = t.partition(lambda r: r.region)
+            >>> partitions = t.partition(by=lambda r: custom_hash(r.id))
+            >>> # Access partitions
+            >>> west_sales = partitions["West"]
+            >>> for region, data in partitions.items():
+            ...     print(f"{region}: {len(data)} rows")
         """
         if not self._schema:
             raise ValueError(
                 "Schema not initialized. Call read_csv() first to populate the schema."
             )
 
-        # Validate that all columns exist
-        for col in columns:
-            if col not in self._schema:
-                raise AttributeError(
-                    f"Column '{col}' not found in schema. "
-                    f"Available columns: {list(self._schema.keys())}"
-                )
-
         # Import here to avoid circular imports
-        from .partitioning import SQLPartitionedTable
+        from .partitioning import PartitionedTable, SQLPartitionedTable
 
-        return SQLPartitionedTable(self, columns)
+        # Smart dispatch based on argument types
+        if by is not None:
+            # Lambda path via keyword argument
+            if not callable(by):
+                raise TypeError(f"'by' must be callable, got {type(by).__name__}")
+            return PartitionedTable(self, by)
+        elif len(args) == 1 and callable(args[0]):
+            # Lambda path via positional argument
+            return PartitionedTable(self, args[0])
+        elif len(args) == 0:
+            raise TypeError("partition() requires at least one argument")
+        else:
+            # All args should be strings - SQL path
+            for col in args:
+                if not isinstance(col, str):
+                    raise TypeError(
+                        f"Expected column name (str), got {type(col).__name__}. "
+                        f"Use partition(by=func) for callable-based partitioning."
+                    )
+                if col not in self._schema:
+                    raise AttributeError(
+                        f"Column '{col}' not found in schema. "
+                        f"Available columns: {list(self._schema.keys())}"
+                    )
+            return SQLPartitionedTable(self, args)
 
     def pivot(
         self,
@@ -1358,7 +1335,9 @@ class LTSeq:
         result._schema = self._schema.copy()
         return result
 
-    def join_merge(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+    def join_merge(
+        self, other: "LTSeq", on: Callable, join_type: str = "inner"
+    ) -> "LTSeq":
         """
         High-speed O(N) merge join for two sorted tables.
 
@@ -1372,8 +1351,8 @@ class LTSeq:
             other: Another LTSeq table (should be sorted by join key)
             on: Lambda with two parameters specifying the join condition.
                 E.g., lambda t1, t2: t1.id == t2.id
-            how: Join type. One of: "inner", "left", "right", "full"
-                 Default: "inner" (only matching rows)
+            join_type: Join type. One of: "inner", "left", "right", "full"
+                       Default: "inner" (only matching rows)
 
         Returns:
             New LTSeq with joined results. Columns from both tables are included.
@@ -1392,7 +1371,7 @@ class LTSeq:
             >>> result = t1_sorted.join_merge(
             ...     t2_sorted,
             ...     on=lambda t1, t2: t1.user_id == t2.user_id,
-            ...     how="inner"
+            ...     join_type="inner"
             ... )
             >>> result.show()
         """
@@ -1413,9 +1392,9 @@ class LTSeq:
 
         # Validate join type
         valid_join_types = {"inner", "left", "right", "full"}
-        if how not in valid_join_types:
+        if join_type not in valid_join_types:
             raise ValueError(
-                f"Invalid join type '{how}'. Must be one of: {valid_join_types}"
+                f"Invalid join type '{join_type}'. Must be one of: {valid_join_types}"
             )
 
         # Validate join condition
@@ -1426,11 +1405,11 @@ class LTSeq:
         except Exception as e:
             raise TypeError(f"Invalid join condition: {e}")
 
-        # Extract join keys using the helper function (Phase 8A pattern)
+        # Extract join keys using the helper function
         from .helpers import _extract_join_keys
 
-        left_key_expr, right_key_expr, join_type = _extract_join_keys(
-            on, self._schema, other._schema, how
+        left_key_expr, right_key_expr, jtype = _extract_join_keys(
+            on, self._schema, other._schema, join_type
         )
 
         # Call Rust join() method - it handles schema conflicts and column renaming
@@ -1439,7 +1418,7 @@ class LTSeq:
                 other._inner,
                 left_key_expr,
                 right_key_expr,
-                join_type,
+                jtype,
                 "_other",  # Alias for right table columns
             )
         except RuntimeError as e:
@@ -1460,7 +1439,7 @@ class LTSeq:
 
             df1 = self.to_pandas()
             df2 = other.to_pandas()
-            pandas_how = "outer" if how == "full" else how
+            pandas_how = "outer" if join_type == "full" else join_type
             common_cols = sorted(set(df1.columns) & set(df2.columns))
 
             if common_cols:

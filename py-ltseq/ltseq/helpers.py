@@ -1,86 +1,9 @@
 """Helper functions for LTSeq core operations."""
 
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any
 import csv
 
 from .expr import SchemaProxy, BinOpExpr, ColumnExpr
-
-
-def _eval_expr_on_row(expr_dict: Dict[str, Any], row_proxy: SchemaProxy) -> Any:
-    """
-    Evaluate a serialized expression tree on a given row.
-
-    Args:
-        expr_dict: Serialized expression dict
-        row_proxy: SchemaProxy instance bound to current row
-
-    Returns:
-        The result of evaluating the expression
-    """
-    expr_type = expr_dict.get("type")
-
-    if expr_type == "Column":
-        col_name = expr_dict["name"]
-        return row_proxy[col_name]
-
-    elif expr_type == "Literal":
-        return expr_dict["value"]
-
-    elif expr_type == "BinOp":
-        op = expr_dict["op"]
-        left = _eval_expr_on_row(expr_dict["left"], row_proxy)
-        right = _eval_expr_on_row(expr_dict["right"], row_proxy)
-
-        if op == "Add":
-            return left + right
-        elif op == "Sub":
-            return left - right
-        elif op == "Mul":
-            return left * right
-        elif op == "Div":
-            return left / right if right != 0 else None
-        elif op == "Mod":
-            return left % right if right != 0 else None
-        elif op == "Eq":
-            return left == right
-        elif op == "Ne":
-            return left != right
-        elif op == "Lt":
-            return left < right
-        elif op == "Le":
-            return left <= right
-        elif op == "Gt":
-            return left > right
-        elif op == "Ge":
-            return left >= right
-        elif op == "And":
-            return left and right
-        elif op == "Or":
-            return left or right
-        else:
-            raise ValueError(f"Unknown binary operator: {op}")
-
-    elif expr_type == "UnaryOp":
-        op = expr_dict["op"]
-        operand = _eval_expr_on_row(expr_dict["operand"], row_proxy)
-
-        if op == "Not":
-            return not operand
-        else:
-            raise ValueError(f"Unknown unary operator: {op}")
-
-    else:
-        raise ValueError(f"Unknown expression type: {expr_type}")
-
-
-class _RowEvaluator:
-    """Helper to evaluate expressions on actual row data."""
-
-    def __init__(self, row_data: Dict[str, Any]):
-        self._row = row_data
-
-    def __getitem__(self, key: str) -> Any:
-        return self._row.get(key)
 
 
 def _normalize_schema(schema_dict: Dict[str, str]) -> Dict[str, str]:
@@ -125,7 +48,7 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
     """
     Infer schema from CSV file by reading the header and sampling rows.
 
-    For Phase 2, this is a workaround until RustTable properly exposes schema.
+    This is a workaround until RustTable properly exposes schema.
     Infers type as:
     - "int64" if all values are integers
     - "float64" if all values are floats
@@ -190,13 +113,13 @@ def _extract_join_keys(
     """
     Extract join key columns from a two-parameter lambda expression.
 
-    Phase 8A: Parses join conditions like:
+    Parses join conditions like:
         lambda orders, products: orders.product_id == products.id
 
-    Phase 8H: Enhanced to support composite keys:
+    Supports composite keys:
         lambda orders, products: (orders.product_id == products.id) & (orders.year == products.year)
 
-    Phase 8I: Enhanced to support multiple join types (inner, left, right, full)
+    Supports multiple join types (inner, left, right, full).
 
     Args:
         join_fn: Lambda function with two parameters (source row, target row)
@@ -229,7 +152,7 @@ def _extract_join_keys(
             f"Join condition must be a simple equality comparison or composite And-expression, got {type(expr).__name__}"
         )
 
-    # Phase 8H: Handle composite keys with And operator
+    # Handle composite keys with And operator
     if expr.op == "And":
         # Recursively extract all equality pairs from And-expression
         all_equalities = _extract_all_equalities_from_and(expr)
@@ -248,7 +171,7 @@ def _extract_join_keys(
         right_key_expr = expr.serialize()
         return left_key_expr, right_key_expr, join_type
 
-    # Phase 8A: Handle single equality
+    # Handle single equality
     elif expr.op == "Eq":
         # Extract left and right operands
         left_expr = expr.left
@@ -260,7 +183,7 @@ def _extract_join_keys(
         ):
             raise TypeError(
                 "Join condition must compare two columns directly. "
-                "Complex expressions are not supported in Phase 8."
+                "Complex expressions are not supported."
             )
 
         # Validate the pair
@@ -275,7 +198,7 @@ def _extract_join_keys(
     else:
         raise TypeError(
             f"Join condition must use equality (==), got operator: {expr.op}. "
-            "Only inner equality joins are supported in Phase 8."
+            "Only equality joins are supported."
         )
 
 
@@ -336,7 +259,7 @@ def _validate_equality_pair(
     if not isinstance(left_expr, ColumnExpr) or not isinstance(right_expr, ColumnExpr):
         raise TypeError(
             "Join condition must compare two columns directly. "
-            "Complex expressions are not supported in Phase 8."
+            "Complex expressions are not supported."
         )
 
     # Validate that left operand is from source and right from target
@@ -365,43 +288,3 @@ def _validate_equality_pair(
                 f"Column '{right_expr.name}' not found in target schema. "
                 f"Available columns: {list(target_schema.keys())}"
             )
-
-
-def _contains_window_function(expr_dict: Dict[str, Any]) -> bool:
-    """
-    Check if an expression tree contains window function calls.
-
-    Window functions include: shift, rolling, diff, cum_sum, etc.
-
-    Args:
-        expr_dict: Serialized expression dict
-
-    Returns:
-        True if the expression contains a window function, False otherwise
-    """
-    if expr_dict.get("type") == "Call":
-        func_name = expr_dict.get("func", "")
-        if func_name in ("shift", "rolling", "diff", "cum_sum"):
-            return True
-
-    # Recurse into sub-expressions
-    if expr_dict.get("type") == "BinOp":
-        return _contains_window_function(
-            expr_dict["left"]
-        ) or _contains_window_function(expr_dict["right"])
-    elif expr_dict.get("type") == "UnaryOp":
-        return _contains_window_function(expr_dict["operand"])
-    elif expr_dict.get("type") == "Call":
-        # Check arguments
-        for arg in expr_dict.get("args", []):
-            if _contains_window_function(arg):
-                return True
-        for val in expr_dict.get("kwargs", {}).values():
-            if _contains_window_function(val):
-                return True
-        # Check nested call
-        if expr_dict.get("on"):
-            if _contains_window_function(expr_dict["on"]):
-                return True
-
-    return False

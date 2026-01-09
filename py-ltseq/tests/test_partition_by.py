@@ -1,11 +1,11 @@
-"""Tests for partition_by() method - SQL-based column partitioning."""
+"""Tests for partition() method with SQL-based column partitioning."""
 
 import pytest
 from ltseq import LTSeq
 
 
-class TestPartitionBySingle:
-    """Test partition_by() with single column."""
+class TestPartitionSQLSingle:
+    """Test partition() with single column (SQL path)."""
 
     @pytest.fixture
     def sample_csv(self, tmp_path):
@@ -21,10 +21,10 @@ class TestPartitionBySingle:
         )
         return str(csv_file)
 
-    def test_partition_by_single_column(self, sample_csv):
+    def test_partition_single_column(self, sample_csv):
         """Partition by single column should create correct groups."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         # Check that we have the right number of partitions
         assert len(partitions) == 3
@@ -33,20 +33,20 @@ class TestPartitionBySingle:
         keys = set(partitions.keys())
         assert keys == {"West", "East", "Central"}
 
-    def test_partition_by_single_column_access(self, sample_csv):
+    def test_partition_single_column_access(self, sample_csv):
         """Access partitions by key should work."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         # Access specific partition
         west = partitions["West"]
         assert isinstance(west, LTSeq)
         assert len(west) == 2  # Two West entries
 
-    def test_partition_by_iteration(self, sample_csv):
+    def test_partition_iteration(self, sample_csv):
         """Iterate over partitions should work."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         partition_dict = dict(partitions.items())
         assert len(partition_dict) == 3
@@ -55,8 +55,8 @@ class TestPartitionBySingle:
         assert len(partition_dict["Central"]) == 1
 
 
-class TestPartitionByMultiple:
-    """Test partition_by() with multiple columns."""
+class TestPartitionSQLMultiple:
+    """Test partition() with multiple columns (SQL path)."""
 
     @pytest.fixture
     def sample_csv(self, tmp_path):
@@ -72,28 +72,28 @@ class TestPartitionByMultiple:
         )
         return str(csv_file)
 
-    def test_partition_by_multiple_columns(self, sample_csv):
+    def test_partition_multiple_columns(self, sample_csv):
         """Partition by multiple columns should create correct groups."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("year", "region")
+        partitions = t.partition("year", "region")
 
         # Check that we have the right number of partitions
         assert len(partitions) == 4
 
-    def test_partition_by_multiple_columns_access(self, sample_csv):
+    def test_partition_multiple_columns_access(self, sample_csv):
         """Access partitions by tuple key should work."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("year", "region")
+        partitions = t.partition("year", "region")
 
         # Access specific partition (tuple key)
         p_2023_west = partitions[(2023, "West")]
         assert isinstance(p_2023_west, LTSeq)
         assert len(p_2023_west) == 1
 
-    def test_partition_by_multiple_columns_iteration(self, sample_csv):
+    def test_partition_multiple_columns_iteration(self, sample_csv):
         """Iterate over multi-column partitions should work."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("year", "region")
+        partitions = t.partition("year", "region")
 
         partition_dict = dict(partitions.items())
         assert len(partition_dict) == 4
@@ -103,8 +103,8 @@ class TestPartitionByMultiple:
         assert len(partition_dict[(2024, "Central")]) == 1
 
 
-class TestPartitionByValidation:
-    """Test error handling for partition_by()."""
+class TestPartitionValidation:
+    """Test error handling for partition()."""
 
     @pytest.fixture
     def sample_csv(self, tmp_path):
@@ -115,23 +115,37 @@ class TestPartitionByValidation:
         )
         return str(csv_file)
 
-    def test_partition_by_invalid_column(self, sample_csv):
-        """partition_by() should raise error for non-existent column."""
+    def test_partition_invalid_column(self, sample_csv):
+        """partition() should raise error for non-existent column."""
         t = LTSeq.read_csv(sample_csv)
 
         with pytest.raises(AttributeError):
-            t.partition_by("nonexistent")
+            t.partition("nonexistent")
 
-    def test_partition_by_without_schema(self):
-        """partition_by() should raise error if schema not initialized."""
+    def test_partition_without_schema(self):
+        """partition() should raise error if schema not initialized."""
         t = LTSeq()
 
         with pytest.raises(ValueError):
-            t.partition_by("region")
+            t.partition("region")
+
+    def test_partition_no_args(self, sample_csv):
+        """partition() should raise error with no arguments."""
+        t = LTSeq.read_csv(sample_csv)
+
+        with pytest.raises(TypeError):
+            t.partition()
+
+    def test_partition_invalid_type(self, sample_csv):
+        """partition() should raise error for non-string, non-callable args."""
+        t = LTSeq.read_csv(sample_csv)
+
+        with pytest.raises(TypeError):
+            t.partition(123)
 
 
-class TestPartitionByEquivalence:
-    """Test that partition_by() produces same results as partition()."""
+class TestPartitionEquivalence:
+    """Test that partition(col) produces same results as partition(lambda)."""
 
     @pytest.fixture
     def sample_csv(self, tmp_path):
@@ -147,12 +161,12 @@ class TestPartitionByEquivalence:
         )
         return str(csv_file)
 
-    def test_partition_by_vs_partition_single_column(self, sample_csv):
-        """partition_by and partition should produce same results for single column."""
+    def test_partition_sql_vs_lambda_single_column(self, sample_csv):
+        """SQL path and lambda path should produce same results for single column."""
         t = LTSeq.read_csv(sample_csv)
 
-        p1 = t.partition_by("region")
-        p2 = t.partition(by=lambda r: r.region)
+        p1 = t.partition("region")  # SQL path
+        p2 = t.partition(by=lambda r: r.region)  # Lambda path
 
         # Same number of partitions
         assert len(p1) == len(p2)
@@ -166,12 +180,13 @@ class TestPartitionByEquivalence:
         for key in keys1:
             assert len(p1[key]) == len(p2[key])
 
-    def test_partition_by_vs_partition_multiple_columns(self, sample_csv):
-        """partition_by and partition should produce same results for multiple columns."""
+    def test_partition_positional_lambda(self, sample_csv):
+        """Lambda as positional argument should work."""
         t = LTSeq.read_csv(sample_csv)
 
-        # partition_by("region") on this data
-        p1 = t.partition_by("region")
+        # Lambda as positional arg (without `by=`)
+        p1 = t.partition(lambda r: r.region)
+        # Lambda as keyword arg
         p2 = t.partition(by=lambda r: r.region)
 
         # Both should have same partitions
@@ -179,8 +194,8 @@ class TestPartitionByEquivalence:
         assert set(p1.keys()) == set(p2.keys())
 
 
-class TestPartitionByChaining:
-    """Test that partition_by() results support chaining operations."""
+class TestPartitionChaining:
+    """Test that partition() results support chaining operations."""
 
     @pytest.fixture
     def sample_csv(self, tmp_path):
@@ -196,10 +211,10 @@ class TestPartitionByChaining:
         )
         return str(csv_file)
 
-    def test_partition_by_map_operation(self, sample_csv):
-        """partition_by() result should support map() for applying operations."""
+    def test_partition_map_operation(self, sample_csv):
+        """partition() result should support map() for applying operations."""
         t = LTSeq.read_csv(sample_csv)
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         # Map should work on partitions
         results = partitions.map(lambda partition: len(partition))
@@ -210,27 +225,27 @@ class TestPartitionByChaining:
         assert set(result_list) == {1, 2}  # Central has 1, West and East have 2 each
 
 
-class TestPartitionByEmptyResult:
-    """Test partition_by() with various data scenarios."""
+class TestPartitionEmptyResult:
+    """Test partition() with various data scenarios."""
 
-    def test_partition_by_single_row(self, tmp_path):
-        """partition_by() should work with single row table."""
+    def test_partition_single_row(self, tmp_path):
+        """partition() should work with single row table."""
         csv_file = tmp_path / "test_single_row.csv"
         csv_file.write_text("region,amount\nWest,100\n")
 
         t = LTSeq.read_csv(str(csv_file))
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         assert len(partitions) == 1
         assert len(partitions["West"]) == 1
 
-    def test_partition_by_all_same_key(self, tmp_path):
-        """partition_by() should work when all rows have same key."""
+    def test_partition_all_same_key(self, tmp_path):
+        """partition() should work when all rows have same key."""
         csv_file = tmp_path / "test_same_key.csv"
         csv_file.write_text("region,amount\nWest,100\nWest,200\nWest,300\n")
 
         t = LTSeq.read_csv(str(csv_file))
-        partitions = t.partition_by("region")
+        partitions = t.partition("region")
 
         assert len(partitions) == 1
         assert len(partitions["West"]) == 3

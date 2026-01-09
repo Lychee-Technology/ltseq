@@ -2,8 +2,8 @@
 Expression system for LTSeq: Captures Python lambdas as serializable AST trees.
 
 This module provides a set of classes that intercept Python operators and method
-calls without executing them. Instead, it builds a tree representation that Phase 4
-will transpile to DataFusion logical plans.
+calls without executing them. Instead, it builds a tree representation that
+is transpiled to DataFusion logical plans.
 
 Core Classes:
   - Expr: Abstract base class for all expressions

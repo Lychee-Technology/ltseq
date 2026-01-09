@@ -16,8 +16,6 @@ class LinkedTable:
     Created by LTSeq.link(), this wrapper maintains pointers to rows in a target
     table without materializing an expensive join. Accessing linked columns is
     translated to index-based lookups (take operations) during execution.
-
-    MVP Phase 8: Basic pointer table support with schema awareness.
     """
 
     def __init__(
@@ -30,8 +28,6 @@ class LinkedTable:
     ):
         """
         Initialize a LinkedTable from source and target tables.
-
-        Phase 8I: Enhanced to support multiple join types.
 
         Args:
             source_table: The primary table (e.g., orders)
@@ -46,7 +42,7 @@ class LinkedTable:
         self._alias = alias
         self._join_type = join_type
         self._schema = source_table._schema.copy()
-        self._materialized: Optional["LTSeq"] = None  # Phase 8B: Lazy materialization
+        self._materialized: Optional["LTSeq"] = None  # Lazy materialization
 
         # Add linked column metadata to schema with prefix
         for col_name, col_type in target_table._schema.items():
@@ -54,7 +50,7 @@ class LinkedTable:
 
     def _materialize(self) -> "LTSeq":
         """
-        Phase 8B: Materialize the join operation.
+        Materialize the join operation.
 
         This method performs the actual join only when data access is needed.
         The result is cached to avoid re-joining on subsequent accesses.
@@ -70,12 +66,12 @@ class LinkedTable:
         if self._materialized is not None:
             return self._materialized
 
-        # Extract join keys using Phase 8A function (now with Phase 8I join_type support)
+        # Extract join keys
         left_key_expr, right_key_expr, join_type = _extract_join_keys(
             self._join_fn,
             self._source._schema,
             self._target._schema,
-            self._join_type,  # Phase 8I: Pass the join type parameter
+            self._join_type,
         )
 
         # Call Rust join() method - it handles all schema conflicts and column renaming
@@ -106,8 +102,6 @@ class LinkedTable:
     def filter(self, predicate: Callable) -> Union["LinkedTable", "LTSeq"]:
         """
         Filter rows with support for both source and linked columns.
-
-        Phase 8F: Enhanced to materialize join if predicate references linked columns.
 
         If predicate uses only source columns, returns a LinkedTable with filtered source.
         If predicate uses linked columns, materializes the join and returns filtered LTSeq.
@@ -141,7 +135,7 @@ class LinkedTable:
         """
         Select columns from linked table.
 
-        Phase 11: Enhanced to transparently materialize join if selecting linked columns.
+        Transparently materializes join if selecting linked columns.
         Detects whether selected columns include linked columns (with alias prefix like 'prod_*')
         and materializes the join automatically if needed.
 
@@ -154,9 +148,9 @@ class LinkedTable:
 
         Example:
             >>> linked = orders.link(products, on=lambda o,p: o.product_id==p.product_id, as_="prod")
-            >>> result = linked.select("id", "quantity")  # ✓ Works: source columns only
-            >>> result = linked.select("prod_name")  # ✓ Works: linked column (materializes transparently)
-            >>> result = linked.select("id", "prod_price")  # ✓ Works: mixed source and linked
+            >>> result = linked.select("id", "quantity")  # Works: source columns only
+            >>> result = linked.select("prod_name")  # Works: linked column (materializes transparently)
+            >>> result = linked.select("id", "prod_price")  # Works: mixed source and linked
         """
         # Check if any selected columns are linked columns
         # Linked columns have the format: "{alias}_{column_name}"
@@ -175,45 +169,6 @@ class LinkedTable:
             # Select only from source columns (don't materialize)
             return self._source.select(*cols)
 
-    def aggregate(self, *agg_specs, **named_aggs) -> "LTSeq":
-        """
-        Aggregate data from linked table.
-
-        Phase 13: Perform aggregation on linked table data.
-        Automatically materializes the join, making all columns available
-        (both source and linked columns) for use with group_ordered.
-
-        For true aggregation, use the pattern:
-            linked.group_ordered(lambda r: grouping_key).derive(aggregation_dict)
-
-        Args:
-            *agg_specs: Not currently used (reserved for future aggregate API)
-            **named_aggs: Not currently used (reserved for future aggregate API)
-
-        Returns:
-            LTSeq (materialized result with all columns available)
-
-        Example:
-            >>> linked = orders.link(products, on=..., as_="prod")
-            >>> # Simple grouping and aggregation
-            >>> grouped = linked.group_ordered(lambda r: r.prod_id)
-            >>> result = grouped.derive(lambda g: {
-            ...     "total_quantity": g.quantity.sum(),
-            ...     "avg_price": g.prod_price.mean()
-            ... })
-            >>> result.flatten().show()
-        """
-        # Materialize the join and return it
-        # This makes all columns (source + linked) available for further operations
-        materialized = self._materialize()
-
-        if agg_specs or named_aggs:
-            # Support for explicit aggregation specifications is reserved for Phase 13+
-            # For now, just materialize (which enables group_ordered + derive workflow)
-            pass
-
-        return materialized
-
     def derive(self, mapper: Callable) -> "LinkedTable":
         """Derive columns (delegates to source for MVP)."""
         derived_source = self._source.derive(mapper)
@@ -222,8 +177,6 @@ class LinkedTable:
     def sort(self, *key_exprs) -> "LinkedTable":
         """
         Sort linked table rows.
-
-        Phase 11: Added sort support for LinkedTable.
 
         Args:
             *key_exprs: Column names or lambda expressions to sort by
@@ -254,8 +207,6 @@ class LinkedTable:
         Link this linked table to another table.
 
         Allows chaining multiple links while preserving previous schemas.
-
-        Phase 8I: Enhanced to support join_type parameter.
 
         Args:
             target_table: The table to link to

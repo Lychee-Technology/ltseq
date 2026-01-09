@@ -1,7 +1,7 @@
 """Base expression class for LTSeq."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 
 def if_else(condition: "Expr", true_value: Any, false_value: Any) -> "CallExpr":
@@ -247,3 +247,43 @@ class Expr(ABC):
         from .types import LiteralExpr
 
         return LiteralExpr(value)
+
+    def lookup(
+        self, target_table: Any, column: str, join_key: Optional[str] = None
+    ) -> "LookupExpr":
+        """
+        Lookup a value in another table using this expression as the join key.
+
+        Used to fetch a single column from a related table in derived expressions.
+        Works on any expression type (column reference, method call result, etc.).
+
+        Args:
+            target_table: The target table object (LTSeq instance)
+            column: Column name to fetch from the target table
+            join_key: Column name in target table to join on (optional)
+
+        Returns:
+            A LookupExpr that can be used in derive() or other expressions
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> # Simple lookup on column
+            >>> enriched = orders.derive(
+            ...     product_name=lambda r: r.product_id.lookup(products, "name")
+            ... )
+            >>> # Lookup on transformed value
+            >>> enriched = orders.derive(
+            ...     product_name=lambda r: r.product_id.lower().lookup(products, "name")
+            ... )
+        """
+        from .types import LookupExpr
+
+        target_name = getattr(target_table, "_name", "target")
+
+        return LookupExpr(
+            on=self,
+            target_name=target_name,
+            target_columns=[column],
+            join_key=join_key,
+        )
