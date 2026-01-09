@@ -54,7 +54,6 @@
 //! - **Two-Pass**: First pass for width calculation, second for rendering
 
 use crate::RustTable;
-use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;

@@ -9,7 +9,6 @@ use std::sync::Arc;
 // Module declarations - Organized for better maintainability
 mod error;
 mod types;
-mod helpers;
 pub mod format;      // Formatting and display functions
 pub mod transpiler;  // PyExpr to DataFusion transpilation
 pub mod engine;      // DataFusion session and RustTable struct
@@ -892,7 +891,7 @@ impl RustTable {
                             "".to_string()
                         } else {
                             // Use format_cell which has comprehensive type handling
-                            let mut formatted = crate::format::format_cell(&**column, row_idx);
+                            let formatted = crate::format::format_cell(&**column, row_idx);
                             // Replace "[unsupported type]" with empty string for CSV  
                             // and remove "None" for null values
                             if formatted == "[unsupported type]" || formatted == "None" {
