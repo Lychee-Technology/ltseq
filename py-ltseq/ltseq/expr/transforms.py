@@ -84,6 +84,16 @@ def _transform_lambda_for_none_checks(fn):
         if "lambda" not in source:
             return fn
 
+        # Skip transformation if source doesn't contain 'is' comparisons
+        # This avoids issues with multiple lambdas on the same line
+        if " is " not in source and " is not " not in source:
+            return fn
+
+        # Check if there are multiple lambdas in the source
+        # If so, skip transformation to avoid picking the wrong one
+        if source.count("lambda") > 1:
+            return fn
+
         # Extract just the lambda expression
         lambda_start = source.find("lambda")
         if lambda_start == -1:

@@ -1134,8 +1134,7 @@ class LTSeq:
         Partition the table by one or more columns using SQL.
 
         This is faster than partition(by=lambda r: r.col) for simple column-based partitioning,
-        as it uses SQL DISTINCT to get partition keys instead of evaluating a Python callable
-        on each row.
+        as it uses SQL DISTINCT to get partition keys and SQL WHERE to filter each partition.
 
         Args:
             *columns: Column names to partition by. One or more column names.
@@ -1143,7 +1142,7 @@ class LTSeq:
 
         Returns:
             A PartitionedTable that supports dict-like access and iteration.
-            Keys are tuples of column values (or single values if only one column).
+            Keys are single values (if one column) or tuples (if multiple columns).
 
         Raises:
             ValueError: If schema is not initialized
@@ -1153,10 +1152,10 @@ class LTSeq:
             >>> t = LTSeq.read_csv("sales.csv")  # Has columns: date, region, amount
             >>> # Single column partition
             >>> partitions = t.partition_by("region")
-            >>> west_sales = partitions[("West",)]  # Access by key tuple
+            >>> west_sales = partitions["West"]  # Access by single value
             >>> # Multiple column partition
             >>> partitions = t.partition_by("year", "region")
-            >>> 2023_west = partitions[(2023, "West")]
+            >>> 2023_west = partitions[(2023, "West")]  # Access by tuple
             >>> # Iterate over all partitions
             >>> for key, data in partitions.items():
             ...     print(f"Key: {key}, Rows: {len(data)}")
@@ -1175,19 +1174,9 @@ class LTSeq:
                 )
 
         # Import here to avoid circular imports
-        from .partitioning import PartitionedTable
+        from .partitioning import SQLPartitionedTable
 
-        # Create a partition function that extracts the column values
-        if len(columns) == 1:
-            # Single column: return the value directly
-            col = columns[0]
-            partition_fn = lambda r: getattr(r, col)
-        else:
-            # Multiple columns: return tuple of values
-            cols = columns
-            partition_fn = lambda r: tuple(getattr(r, col) for col in cols)
-
-        return PartitionedTable(self, partition_fn)
+        return SQLPartitionedTable(self, columns)
 
     def pivot(
         self,
@@ -1273,23 +1262,10 @@ class LTSeq:
         result = LTSeq()
         result._inner = result_inner
 
-        # Infer schema from the result by materializing to pandas
+        # Get schema from Rust directly (no pandas needed)
         try:
-            import pandas as pd
-            import tempfile
-            import os
-
-            # Write result to a temporary CSV to get schema
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".csv", delete=False
-            ) as f:
-                temp_csv_path = f.name
-            result._inner.write_csv(temp_csv_path)
-            result._csv_path = temp_csv_path
-
-            # Infer schema from the CSV
-            df = pd.read_csv(temp_csv_path)
-            result._schema = {col: "Unknown" for col in df.columns}
+            column_names = result._inner.get_column_names()
+            result._schema = {col: "Unknown" for col in column_names}
         except Exception:
             # If we can't infer schema, at least set an empty schema
             result._schema = {}

@@ -5,7 +5,197 @@ Unlike group_ordered() which handles consecutive groups, partition() groups
 all rows with the same key value regardless of position.
 """
 
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+
+
+class SQLPartitionedTable:
+    """
+    SQL-based partitioned table for fast column-based partitioning.
+
+    This implementation uses SQL (DISTINCT, WHERE) for partitioning instead
+    of evaluating Python lambdas on each row. Much faster for large datasets.
+
+    Supports the same interface as PartitionedTable:
+    - Dict-like access: partitioned[key]
+    - Iteration: for key, table in partitioned.items()
+    - Mapping: partitioned.map(lambda t: t.agg(...))
+
+    Example:
+        >>> t = LTSeq.read_csv("sales.csv")
+        >>> partitions = t.partition_by("region")
+        >>> west_sales = partitions["West"]  # Single column: key is the value
+        >>> partitions = t.partition_by("year", "region")
+        >>> 2023_west = partitions[(2023, "West")]  # Multiple columns: key is tuple
+    """
+
+    def __init__(self, ltseq_instance: "LTSeq", columns: Tuple[str, ...]):
+        """
+        Initialize SQLPartitionedTable.
+
+        Args:
+            ltseq_instance: The LTSeq table to partition
+            columns: Tuple of column names to partition by
+        """
+        self._ltseq = ltseq_instance
+        self._columns = columns
+        self._keys_cache: Optional[List[Any]] = None
+        self._partitions_cache: Optional[Dict[Any, "LTSeq"]] = None
+
+    def __getitem__(self, key: Any) -> "LTSeq":
+        """
+        Access partition by key.
+
+        Args:
+            key: The partition key value (single value or tuple)
+
+        Returns:
+            LTSeq table containing all rows with that partition key
+
+        Raises:
+            KeyError: If the key doesn't exist in the partitions
+        """
+        if self._partitions_cache is None:
+            self._partitions_cache = {}
+
+        # Normalize key to tuple
+        if len(self._columns) == 1:
+            key_tuple = (key,) if not isinstance(key, tuple) else key
+        else:
+            key_tuple = key if isinstance(key, tuple) else (key,)
+
+        # Check cache first
+        if key_tuple in self._partitions_cache:
+            return self._partitions_cache[key_tuple]
+
+        # Build WHERE clause for this key
+        conditions = []
+        for col, val in zip(self._columns, key_tuple):
+            if val is None:
+                conditions.append(f'"{col}" IS NULL')
+            elif isinstance(val, str):
+                escaped_val = val.replace("'", "''")
+                conditions.append(f"\"{col}\" = '{escaped_val}'")
+            elif isinstance(val, bool):
+                conditions.append(f'"{col}" = {str(val).lower()}')
+            else:
+                conditions.append(f'"{col}" = {val}')
+
+        where_clause = " AND ".join(conditions)
+
+        # Use filter_where to get the partition
+        try:
+            filtered_inner = self._ltseq._inner.filter_where(where_clause)
+            partition = self._ltseq.__class__()
+            partition._schema = self._ltseq._schema.copy()
+            partition._inner = filtered_inner
+            self._partitions_cache[key_tuple] = partition
+            return partition
+        except Exception as e:
+            raise KeyError(f"Failed to access partition for key {key}: {e}")
+
+    def keys(self) -> List[Any]:
+        """
+        Return all partition keys.
+
+        Returns:
+            List of unique partition key values
+        """
+        if self._keys_cache is None:
+            self._compute_keys()
+        return self._keys_cache
+
+    def _compute_keys(self) -> None:
+        """Compute distinct keys using SQL."""
+        # Select just the partition columns
+        distinct_ltseq = self._ltseq.select(*self._columns).distinct()
+        df = distinct_ltseq.to_pandas()
+
+        # Extract keys from the distinct result
+        keys = []
+        for _, row in df.iterrows():
+            if len(self._columns) == 1:
+                keys.append(row[self._columns[0]])
+            else:
+                keys.append(tuple(row[col] for col in self._columns))
+
+        self._keys_cache = keys
+
+    def values(self) -> List["LTSeq"]:
+        """
+        Return all partition tables.
+
+        Returns:
+            List of LTSeq objects, one per partition
+        """
+        if self._keys_cache is None:
+            self._compute_keys()
+
+        return [self[key] for key in self._keys_cache]
+
+    def items(self) -> Iterator[Tuple[Any, "LTSeq"]]:
+        """
+        Iterate through (key, table) pairs.
+
+        Returns:
+            Iterator of (partition_key, partition_table) tuples
+        """
+        if self._keys_cache is None:
+            self._compute_keys()
+
+        for key in self._keys_cache:
+            yield key, self[key]
+
+    def __iter__(self) -> Iterator["LTSeq"]:
+        """
+        Iterate through partition tables (values only).
+
+        Returns:
+            Iterator of LTSeq partition tables
+        """
+        return iter(self.values())
+
+    def __len__(self) -> int:
+        """
+        Return number of partitions.
+
+        Returns:
+            Count of distinct partition keys
+        """
+        if self._keys_cache is None:
+            self._compute_keys()
+        return len(self._keys_cache)
+
+    def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
+        """
+        Apply function to each partition and return new PartitionedTable.
+
+        Args:
+            fn: Function that takes LTSeq and returns LTSeq
+
+        Returns:
+            New PartitionedTable with transformed partitions
+        """
+        if self._keys_cache is None:
+            self._compute_keys()
+
+        transformed_partitions = {}
+        for key in self._keys_cache:
+            try:
+                result = fn(self[key])
+                transformed_partitions[key] = result
+            except Exception as e:
+                raise RuntimeError(f"Error applying function to partition '{key}': {e}")
+
+        return _PrecomputedPartitionedTable(transformed_partitions)
+
+    def to_list(self) -> List["LTSeq"]:
+        """
+        Convert to list of LTSeq objects.
+
+        Returns:
+            List of partition tables in arbitrary order
+        """
+        return self.values()
 
 
 class PartitionedTable:

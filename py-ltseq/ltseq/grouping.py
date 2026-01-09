@@ -1,15 +1,5 @@
 """NestedTable class for group-ordered operations."""
 
-import warnings
-
-# Suppress deprecation warnings for ast.Num, ast.Str, ast.NameConstant
-# These are used for Python 3.7 compatibility
-warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*ast\\.Num.*")
-warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*ast\\.Str.*")
-warnings.filterwarnings(
-    "ignore", category=DeprecationWarning, message=".*ast\\.NameConstant.*"
-)
-
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 if TYPE_CHECKING:
@@ -242,6 +232,7 @@ class NestedTable:
         # Add internal group columns to schema
         self._schema["__group_id__"] = "int64"
         self._schema["__group_count__"] = "int64"
+        self._schema["__rn__"] = "int64"  # Row number within each group
 
         # Optional filters and derivations (set later if needed)
         self._group_filter = None
@@ -524,21 +515,6 @@ class NestedTable:
             else:
                 return str(node.value)
 
-        # Python 3.7 compatibility (deprecated in 3.14, but keep for now)
-        elif isinstance(node, ast.Num):  # pragma: no cover
-            return str(node.n)
-
-        elif isinstance(node, ast.Str):  # pragma: no cover
-            return f"'{node.s}'"
-
-        elif isinstance(node, ast.NameConstant):  # pragma: no cover
-            if node.value is True:
-                return "TRUE"
-            elif node.value is False:
-                return "FALSE"
-            elif node.value is None:
-                return "NULL"
-
         return None
 
     def _ast_op_to_sql(self, op):
@@ -588,8 +564,6 @@ class NestedTable:
             col_arg = node.args[0]
             if isinstance(col_arg, ast.Constant):
                 col_name = col_arg.value
-            elif isinstance(col_arg, ast.Str):
-                col_name = col_arg.s
             else:
                 return None
 
@@ -666,59 +640,23 @@ class NestedTable:
         Filter using SQL WHERE clause with window functions.
 
         This is much faster than pandas iteration when the predicate
-        can be expressed as SQL.
+        can be expressed as SQL. Uses Rust/DataFusion for all processing.
         """
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "filter() requires pandas. Install it with: pip install pandas"
-            )
+        # Get flattened data with __group_id__, __group_count__, __rn__ columns from Rust
+        flattened = self.flatten()
 
-        # Convert to pandas to add __group_id__
-        df = self._ltseq.to_pandas()
+        # Apply SQL filter using Rust's filter_where
+        filtered_inner = flattened._inner.filter_where(where_clause)
 
-        # Add __group_id__ column by computing grouping for each row
-        group_values = []
-        group_id = 0
-        prev_group_val = None
+        # Create result LTSeq
+        result_ltseq = self._ltseq.__class__()
+        result_ltseq._inner = filtered_inner
 
-        for idx, row in df.iterrows():
-            # Call the grouping lambda on this row
-            row_proxy = RowProxy(row.to_dict())
-            group_val = self._grouping_lambda(row_proxy)
+        # Update schema (includes internal columns)
+        result_ltseq._schema = flattened._schema.copy()
 
-            # If group value changed, increment group_id
-            if prev_group_val is None or group_val != prev_group_val:
-                group_id += 1
-                prev_group_val = group_val
-
-            group_values.append(group_id)
-
-        df["__group_id__"] = group_values
-
-        # Add __rn__ (row number within group) for FIRST_VALUE/LAST_VALUE
-        df["__rn__"] = df.groupby("__group_id__").cumcount() + 1
-
-        # Convert to LTSeq temporarily to apply SQL filter
-        rows = df.to_dict("records")
-        schema = self._ltseq._schema.copy()
-        schema["__group_id__"] = "Int64"
-        schema["__rn__"] = "Int64"
-
-        temp_ltseq = self._ltseq.__class__._from_rows(rows, schema)
-
-        # Apply SQL filter using filter_where
-        filtered_ltseq = temp_ltseq.filter_where(
-            f"SELECT * FROM __table__ WHERE {where_clause}"
-        )
-
-        # Remove internal columns
-        result_schema = self._ltseq._schema.copy()
-        col_list = list(result_schema.keys())
-        result_ltseq = filtered_ltseq.select(*col_list)
-
-        # Convert back to NestedTable
+        # Return a new NestedTable with the same grouping lambda
+        # This allows chaining filter().derive() in the same grouping context
         result_nested = NestedTable(result_ltseq, self._grouping_lambda)
         return result_nested
 
@@ -1133,6 +1071,11 @@ Example of valid syntax:
         - g.avg('column') - average value in column per group
         - Arithmetic: (expr1) - (expr2), (expr1) / (expr2), (expr1) + (expr2), etc.
         """
+        # Check if we have stored group assignments from a filter operation
+        # In this case, we must use pandas to preserve the original group boundaries
+        if self._group_assignments is not None:
+            return self._derive_via_pandas_with_stored_groups(group_mapper)
+
         # Materialize the grouping to get __group_id__
         flattened = self.flatten()
 
@@ -1361,67 +1304,111 @@ Example of valid syntax:
         """
         Apply derived column expressions via SQL SELECT with window functions.
 
-        Builds SQL like:
-        SELECT *,
-            expr1 AS col1,
-            expr2 AS col2
-        FROM (table with __group_id__)
+        This method uses Rust/DataFusion to execute the SQL window functions,
+        providing much better performance than the pandas-based approach.
+
+        The flattened LTSeq already has __group_id__ and __rn__ columns from
+        the flatten() call in derive().
+
+        Args:
+            flattened: LTSeq with __group_id__ and __rn__ columns
+            derive_exprs: Dict mapping column name -> SQL expression
+                         e.g., {"span": "COUNT(*) OVER (PARTITION BY __group_id__)"}
+
+        Returns:
+            New LTSeq with derived columns (and __group_id__, __rn__ removed)
         """
-        # Build list of select parts: [existing columns, new derived columns]
-        select_parts = ["*"]
+        # Call Rust's derive_window_sql() with the SQL expressions
+        # This will:
+        # 1. Execute the window functions via DataFusion SQL
+        # 2. Add the derived columns
+        # 3. Remove __group_id__ and __rn__ columns
+        result = flattened.__class__()
 
-        for col_name, sql_expr in derive_exprs.items():
-            select_parts.append(f'{sql_expr} AS "{col_name}"')
+        # Build schema: original columns (without internal) + derived columns
+        result._schema = {}
+        for col_name, col_type in self._ltseq._schema.items():
+            if col_name not in ("__group_id__", "__rn__", "__group_count__"):
+                result._schema[col_name] = col_type
+        for col_name in derive_exprs.keys():
+            result._schema[col_name] = "Unknown"
 
-        select_clause = ", ".join(select_parts)
+        # Call Rust to execute the window functions
+        result._inner = flattened._inner.derive_window_sql(derive_exprs)
 
-        # Build and execute SQL query
-        sql_query = f"SELECT {select_clause} FROM t"
+        return result
 
+    def _derive_via_pandas_with_stored_groups(self, group_mapper: Callable) -> "LTSeq":
+        """
+        Derive columns using pandas when we have stored group assignments from filter().
+
+        This is used when derive() is called on a NestedTable that came from filter().
+        The stored _group_assignments preserve the original group boundaries that would
+        be lost if we recomputed groups from the grouping lambda on the filtered data.
+
+        Args:
+            group_mapper: Lambda taking a group proxy (g) and returning a dict
+                         of new columns.
+
+        Returns:
+            LTSeq with derived columns added
+        """
         try:
             import pandas as pd
         except ImportError:
             raise RuntimeError(
-                "derive() requires pandas. Install it with: pip install pandas"
+                "derive() with stored group assignments requires pandas. "
+                "Install it with: pip install pandas"
             )
 
-        # For now, use pandas to execute the derivation
-        # Convert to pandas using the original table, then add __group_id__ column
+        import inspect
+        import ast
+        import textwrap
+
+        # Get the source code of the derive lambda
+        try:
+            source = inspect.getsource(group_mapper)
+        except (OSError, TypeError):
+            raise ValueError(
+                "Cannot parse derive expression (source not available). "
+                "This can happen with lambdas defined in REPL. "
+                "Please define the lambda in a file for now."
+            )
+
+        # Parse the lambda to extract SQL expressions
+        source_dedented = textwrap.dedent(source)
+        source_to_parse = self._extract_lambda_from_chain(source_dedented)
+
+        try:
+            tree = ast.parse(source_to_parse)
+        except SyntaxError:
+            try:
+                tree = ast.parse(f"({source_to_parse})", mode="eval")
+            except SyntaxError:
+                raise ValueError(
+                    f"Cannot parse derive lambda expression. Source: {source_to_parse}"
+                )
+
+        # Extract derive expressions
+        schema = self._ltseq._schema.copy()
+        derive_exprs = self._extract_derive_expressions(tree, schema)
+
+        if not derive_exprs:
+            raise ValueError(self._get_unsupported_derive_error(source))
+
+        # Convert to pandas and add group columns
         df = self._ltseq.to_pandas()
 
         # Add __rn__ (row number) column for window function ordering
         df["__rn__"] = range(len(df))
 
-        # Add __group_id__ column
-        # If we have pre-computed group assignments (from filter), use them
-        # Otherwise, compute groups from the grouping lambda
-        if self._group_assignments is not None:
-            # Use the stored group assignments from filter()
-            group_values = [self._group_assignments[i] for i in range(len(df))]
-        else:
-            # Compute grouping for each row by calling the grouping lambda
-            group_values = []
-            group_id = 0
-            prev_group_val = None
-
-            for idx, row in df.iterrows():
-                # Call the grouping lambda on this row
-                row_proxy = RowProxy(row.to_dict())
-                group_val = self._grouping_lambda(row_proxy)
-
-                # If group value changed, increment group_id
-                if prev_group_val is None or group_val != prev_group_val:
-                    group_id += 1
-                    prev_group_val = group_val
-
-                group_values.append(group_id)
-
+        # Add __group_id__ column using stored assignments
+        group_values = [self._group_assignments[i] for i in range(len(df))]
         df["__group_id__"] = group_values
 
-        # Evaluate each derive expression
+        # Evaluate each derive expression using pandas
         for col_name, sql_expr in derive_exprs.items():
             try:
-                # Convert SQL to pandas evaluation (simple cases)
                 df[col_name] = self._evaluate_sql_expr_in_pandas(df, sql_expr)
             except Exception as e:
                 raise ValueError(f"Error evaluating derived column '{col_name}': {e}")
@@ -1430,12 +1417,12 @@ Example of valid syntax:
         df = df.drop(columns=["__group_id__", "__rn__"])
 
         # Convert back to LTSeq
-        schema = self._ltseq._schema.copy()
+        result_schema = self._ltseq._schema.copy()
         for col_name in derive_exprs.keys():
-            schema[col_name] = "Unknown"
+            result_schema[col_name] = "Unknown"
 
         rows = df.to_dict("records")
-        result = self._ltseq.__class__._from_rows(rows, schema)
+        result = self._ltseq.__class__._from_rows(rows, result_schema)
 
         return result
 
