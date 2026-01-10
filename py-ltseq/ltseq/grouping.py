@@ -175,6 +175,74 @@ class GroupProxy:
             return sum(valid_values) / len(valid_values)
         return None
 
+    def all(self, predicate):
+        """
+        Check if predicate holds for ALL rows in this group.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+                      E.g., lambda r: r.amount > 0
+
+        Returns:
+            True if predicate is True for all rows, False otherwise.
+
+        Example:
+            >>> g.all(lambda r: r.price > 0)  # All prices positive?
+        """
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if not predicate(row_proxy):
+                return False
+        return True
+
+    def any(self, predicate):
+        """
+        Check if predicate holds for ANY row in this group.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+                      E.g., lambda r: r.status == "error"
+
+        Returns:
+            True if predicate is True for at least one row, False otherwise.
+
+        Example:
+            >>> g.any(lambda r: r.is_vip == True)  # Any VIP customers?
+        """
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                return True
+        return False
+
+    def none(self, predicate):
+        """
+        Check if predicate holds for NO rows in this group.
+
+        Equivalent to `not any(predicate)`.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+                      E.g., lambda r: r.is_deleted == True
+
+        Returns:
+            True if predicate is False for all rows, False otherwise.
+
+        Example:
+            >>> g.none(lambda r: r.is_deleted == True)  # No deleted rows?
+        """
+        return not self.any(predicate)
+
+    def _iterate_rows(self):
+        """Iterate over rows in the group, yielding dict-like objects."""
+        if isinstance(self._group_data, list):
+            for row in self._group_data:
+                yield row if isinstance(row, dict) else row.to_dict()
+        else:
+            # pandas DataFrame
+            for _, row in self._group_data.iterrows():
+                yield row.to_dict()
+
 
 class RowProxy:
     """Proxy for accessing columns of a row during predicate evaluation."""
@@ -213,21 +281,38 @@ class NestedTable:
     """
     Represents a table grouped by consecutive identical values.
 
-    Created by LTSeq.group_ordered(), this wrapper provides group-level operations
-    like first(), last(), count() while maintaining the underlying row data.
+    Created by LTSeq.group_ordered() or LTSeq.group_sorted(), this wrapper provides
+    group-level operations like first(), last(), count() while maintaining the
+    underlying row data.
+
+    The difference between group_ordered and group_sorted is semantic:
+    - group_ordered: groups consecutive identical values (no assumption about sorting)
+    - group_sorted: assumes data is globally sorted by key (consecutive = all same key)
+
+    Both use the same underlying algorithm (consecutive grouping), but group_sorted
+    documents the expectation that data is pre-sorted.
     """
 
-    def __init__(self, ltseq_instance: "LTSeq", grouping_lambda: Callable):
+    def __init__(
+        self,
+        ltseq_instance: "LTSeq",
+        grouping_lambda: Callable,
+        is_sorted: bool = False,
+    ):
         """
         Initialize a NestedTable from an LTSeq and grouping function.
 
         Args:
             ltseq_instance: The LTSeq table to group
             grouping_lambda: Lambda that returns the grouping key for each row
+            is_sorted: If True, indicates the data is globally sorted by the key
+                      (from group_sorted). If False, groups only consecutive
+                      identical values (from group_ordered).
         """
         self._ltseq = ltseq_instance
         self._grouping_lambda = grouping_lambda
         self._schema = ltseq_instance._schema.copy()
+        self._is_sorted = is_sorted
 
         # Add internal group columns to schema
         self._schema["__group_id__"] = "int64"
@@ -570,6 +655,128 @@ class NestedTable:
             func_upper = method_name.upper()
             return f"{func_upper}({col_name}) OVER (PARTITION BY __group_id__)"
 
+        elif method_name in ("all", "any", "none"):
+            # g.all(lambda r: r.col > val) -> MIN(CASE WHEN col > val THEN 1 ELSE 0 END) OVER (...) = 1
+            # g.any(lambda r: r.col > val) -> MAX(CASE WHEN col > val THEN 1 ELSE 0 END) OVER (...) = 1
+            # g.none(lambda r: r.col > val) -> MAX(CASE WHEN col > val THEN 1 ELSE 0 END) OVER (...) = 0
+            if len(node.args) != 1:
+                return None
+
+            inner_predicate = node.args[0]
+            if not isinstance(inner_predicate, ast.Lambda):
+                return None
+
+            # Parse the inner lambda body to SQL condition
+            inner_sql = self._ast_inner_predicate_to_sql(inner_predicate.body)
+            if not inner_sql:
+                return None
+
+            case_expr = f"CASE WHEN {inner_sql} THEN 1 ELSE 0 END"
+
+            if method_name == "all":
+                return f"MIN({case_expr}) OVER (PARTITION BY __group_id__) = 1"
+            elif method_name == "any":
+                return f"MAX({case_expr}) OVER (PARTITION BY __group_id__) = 1"
+            else:  # none
+                return f"MAX({case_expr}) OVER (PARTITION BY __group_id__) = 0"
+
+        return None
+
+    def _ast_inner_predicate_to_sql(self, node):
+        """
+        Convert an inner predicate (r.col op val) to SQL condition.
+
+        Used for parsing predicates inside g.all(), g.any(), g.none().
+        """
+        import ast
+
+        if isinstance(node, ast.Compare):
+            # Handle r.col > val, r.col == val, etc.
+            left_sql = self._ast_row_expr_to_sql(node.left)
+            if not left_sql:
+                return None
+
+            for op, comp in zip(node.ops, node.comparators):
+                op_str = self._ast_op_to_sql(op)
+                if not op_str:
+                    return None
+
+                # Handle the right side (constant or another column)
+                if isinstance(comp, ast.Constant):
+                    if isinstance(comp.value, str):
+                        right_sql = f"'{comp.value}'"
+                    elif isinstance(comp.value, bool):
+                        right_sql = "TRUE" if comp.value else "FALSE"
+                    elif comp.value is None:
+                        right_sql = "NULL"
+                    else:
+                        right_sql = str(comp.value)
+                elif isinstance(comp, ast.Attribute):
+                    # r.other_col
+                    right_sql = self._ast_row_expr_to_sql(comp)
+                    if not right_sql:
+                        return None
+                else:
+                    return None
+
+                left_sql = f"{left_sql} {op_str} {right_sql}"
+
+            return left_sql
+
+        elif isinstance(node, ast.BoolOp):
+            # Handle (pred1) & (pred2) or (pred1) | (pred2)
+            op_str = " AND " if isinstance(node.op, ast.And) else " OR "
+            values = []
+            for v in node.values:
+                v_sql = self._ast_inner_predicate_to_sql(v)
+                if not v_sql:
+                    return None
+                values.append(f"({v_sql})")
+            return op_str.join(values)
+
+        elif isinstance(node, ast.Call):
+            # Handle method calls like r.col.is_null()
+            return self._ast_row_method_to_sql(node)
+
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            # Handle ~predicate or not predicate
+            inner = self._ast_inner_predicate_to_sql(node.operand)
+            if inner:
+                return f"NOT ({inner})"
+            return None
+
+        return None
+
+    def _ast_row_expr_to_sql(self, node):
+        """Convert r.col to column name."""
+        import ast
+
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == "r":
+                return node.attr
+        return None
+
+    def _ast_row_method_to_sql(self, node):
+        """Convert r.col.is_null() or similar method calls to SQL."""
+        import ast
+
+        if not isinstance(node.func, ast.Attribute):
+            return None
+
+        method_name = node.func.attr
+
+        # Handle r.col.is_null() -> col IS NULL
+        if method_name == "is_null" and isinstance(node.func.value, ast.Attribute):
+            col_name = self._ast_row_expr_to_sql(node.func.value)
+            if col_name:
+                return f"{col_name} IS NULL"
+
+        # Handle r.col.is_not_null() -> col IS NOT NULL
+        if method_name == "is_not_null" and isinstance(node.func.value, ast.Attribute):
+            col_name = self._ast_row_expr_to_sql(node.func.value)
+            if col_name:
+                return f"{col_name} IS NOT NULL"
+
         return None
 
     def _ast_attribute_to_sql(self, node):
@@ -612,6 +819,9 @@ class NestedTable:
             >>> grouped.filter(lambda g: g.count() > 3)
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: (g.count() > 2) & (g.first().is_up == True))
+            >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
+            >>> grouped.filter(lambda g: g.any(lambda r: r.status == "error"))
+            >>> grouped.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
         Supported predicates:
         - g.count() > N, >= N, < N, <= N, == N
@@ -621,6 +831,9 @@ class NestedTable:
         - g.min('column') op value
         - g.sum('column') op value
         - g.avg('column') op value
+        - g.all(lambda r: predicate) - True if all rows match
+        - g.any(lambda r: predicate) - True if any row matches
+        - g.none(lambda r: predicate) - True if no rows match
         - Combinations: (predicate1) & (predicate2), (predicate1) | (predicate2)
         """
         # Try SQL-based approach first
@@ -657,7 +870,9 @@ class NestedTable:
 
         # Return a new NestedTable with the same grouping lambda
         # This allows chaining filter().derive() in the same grouping context
-        result_nested = NestedTable(result_ltseq, self._grouping_lambda)
+        result_nested = NestedTable(
+            result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
+        )
         return result_nested
 
     def _filter_via_pandas(self, group_predicate: Callable) -> "LTSeq":
@@ -751,7 +966,9 @@ Supported group methods:
 
         # Return a new NestedTable with the same grouping lambda
         # This allows chaining filter().derive() in the same grouping context
-        result_nested = NestedTable(result_ltseq, self._grouping_lambda)
+        result_nested = NestedTable(
+            result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
+        )
         result_nested._group_assignments = group_assignments
         return result_nested
 

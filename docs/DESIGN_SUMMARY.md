@@ -273,3 +273,120 @@ let session = SessionContext::new_with_config(config);
 3. **Window**: LAG/LEAD, running sum, rolling average
 4. **Group**: group_ordered + aggregate
 5. **Chain**: filter → derive → select (typical workflow)
+
+---
+
+## 11. As-Of Join (Phase 1.3)
+
+### 11.1 Overview
+
+As-of join is a specialized join operation for time-series data that matches each row from the left table with the "nearest" row from the right table based on a time/key column. This is commonly used in financial applications (e.g., matching trades with quotes).
+
+### 11.2 API Design
+
+```python
+def asof_join(
+    self,
+    other: LTSeq,
+    on: Callable,
+    direction: str = "backward",
+    is_sorted: bool = False
+) -> LTSeq
+```
+
+**Parameters:**
+- `other`: Right table to join with
+- `on`: Lambda with inequality condition, e.g., `lambda t, q: t.time >= q.time`
+- `direction`: One of `"backward"` (default), `"forward"`, `"nearest"`
+- `is_sorted`: If `True`, trust that both tables are sorted by time column (skip verification/sorting)
+
+**Direction Semantics:**
+- **backward**: Find largest `right.time` where `right.time <= left.time` (most recent quote before trade)
+- **forward**: Find smallest `right.time` where `right.time >= left.time` (next quote after trade)
+- **nearest**: Find closest `right.time` (backward bias on ties)
+
+**Example:**
+```python
+# Auto-sort (safe, default)
+result = trades.asof_join(quotes, lambda t, q: t.time >= q.time)
+
+# Skip sort verification (faster, requires pre-sorted data)
+trades_sorted = trades.sort("time")
+quotes_sorted = quotes.sort("time")
+result = trades_sorted.asof_join(
+    quotes_sorted,
+    lambda t, q: t.time >= q.time,
+    is_sorted=True
+)
+```
+
+### 11.3 Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Pure Rust binary search** | O(N log M) complexity; more efficient than SQL window function workarounds |
+| **NULL for unmatched rows** | LEFT JOIN semantics - keep all left rows, NULL for missing right columns |
+| **`_other_` column prefix** | Consistent with `join_merge()` for right table column naming |
+| **Optional `is_sorted` parameter** | Allow users who know their data is sorted to skip sort overhead |
+| **Default `is_sorted=False`** | Safe default - auto-sort tables if not explicitly marked as sorted |
+| **Backward bias on ties** | For `direction="nearest"` with equal distances, prefer earlier timestamp |
+| **Inequality-based `on` condition** | Parse `>=` or `<=` from lambda to extract time columns (not equality like regular joins) |
+
+### 11.4 Algorithm Details
+
+**Binary Search Implementation (Rust):**
+
+```rust
+// For direction="backward": find largest index where right[i] <= left_time
+fn find_asof_backward(left_time: i64, right_times: &[i64]) -> Option<usize> {
+    let idx = right_times.partition_point(|&t| t <= left_time);
+    if idx == 0 { None } else { Some(idx - 1) }
+}
+
+// For direction="forward": find smallest index where right[i] >= left_time
+fn find_asof_forward(left_time: i64, right_times: &[i64]) -> Option<usize> {
+    let idx = right_times.partition_point(|&t| t < left_time);
+    if idx >= right_times.len() { None } else { Some(idx) }
+}
+
+// For direction="nearest": compute both, pick closer (backward bias on ties)
+fn find_asof_nearest(left_time: i64, right_times: &[i64]) -> Option<usize> {
+    match (find_asof_backward(left_time, right_times),
+           find_asof_forward(left_time, right_times)) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(f)) => Some(f),
+        (Some(b), Some(f)) => {
+            let diff_back = left_time - right_times[b];
+            let diff_fwd = right_times[f] - left_time;
+            if diff_back <= diff_fwd { Some(b) } else { Some(f) }
+        }
+    }
+}
+```
+
+**Complexity:** O(N log M) where N = left rows, M = right rows
+
+### 11.5 Expression Parsing
+
+Unlike regular joins that use equality (`==`), asof_join uses inequality operators (`>=`, `<=`). The helper `_extract_asof_keys()` parses:
+
+```python
+lambda t, q: t.time >= q.time  # -> ("time", "time", "Gte")
+lambda t, q: t.trade_time <= q.quote_time  # -> ("trade_time", "quote_time", "Lte")
+```
+
+### 11.6 Result Schema
+
+- All columns from left table (unchanged)
+- All columns from right table with `_other_` prefix
+- For unmatched rows (no right match): right columns are NULL
+
+### 11.7 Why Not SQL/DataFusion Native?
+
+DataFusion does not support:
+- `ASOF JOIN` syntax (like DuckDB)
+- `LATERAL JOIN` (PostgreSQL-style)
+- `RANGE` frame in window functions for this use case
+
+Custom Rust implementation with binary search is the most efficient approach.

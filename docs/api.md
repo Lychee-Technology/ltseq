@@ -311,6 +311,54 @@ spans = groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
 groups.derive(lambda g: {"avg": g.price.avg(), "hi": g.price.max()})
 ```
 
+#### `GroupProxy.all`
+- **Signature**: `g.all(predicate: Callable[[Row], Expr]) -> Expr`
+- **Behavior**: Returns True if predicate holds for ALL rows in the group
+- **Parameters**: `predicate` row-level predicate function
+- **Returns**: boolean expression
+- **SPL Equivalent**: Universal quantifier
+- **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# Filter groups where ALL rows have positive amounts
+groups.filter(lambda g: g.all(lambda r: r.amount > 0))
+
+# Derive a flag for groups where all items are in stock
+groups.derive(lambda g: {"all_in_stock": g.all(lambda r: r.quantity > 0)})
+```
+
+#### `GroupProxy.any`
+- **Signature**: `g.any(predicate: Callable[[Row], Expr]) -> Expr`
+- **Behavior**: Returns True if predicate holds for AT LEAST ONE row in the group
+- **Parameters**: `predicate` row-level predicate function
+- **Returns**: boolean expression
+- **SPL Equivalent**: Existential quantifier
+- **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# Filter groups where ANY row has an error
+groups.filter(lambda g: g.any(lambda r: r.status == "error"))
+
+# Derive a flag for groups containing VIP customers
+groups.derive(lambda g: {"has_vip": g.any(lambda r: r.is_vip == True)})
+```
+
+#### `GroupProxy.none`
+- **Signature**: `g.none(predicate: Callable[[Row], Expr]) -> Expr`
+- **Behavior**: Returns True if predicate holds for NO rows in the group (equivalent to `not any`)
+- **Parameters**: `predicate` row-level predicate function
+- **Returns**: boolean expression
+- **SPL Equivalent**: Negated existential quantifier
+- **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# Filter groups where NO rows are marked as deleted
+groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
+
+# Derive a flag for groups with no null values
+groups.derive(lambda g: {"complete": g.none(lambda r: r.value.is_null())})
+```
+
 ## 5. Set Algebra
 
 ### `LTSeq.union`

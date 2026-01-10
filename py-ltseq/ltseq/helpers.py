@@ -44,7 +44,7 @@ def _normalize_schema(schema_dict: Dict[str, str]) -> Dict[str, str]:
     return normalized
 
 
-def _infer_schema_from_csv(path: str) -> Dict[str, str]:
+def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]:
     """
     Infer schema from CSV file by reading the header and sampling rows.
 
@@ -56,6 +56,8 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
 
     Args:
         path: Path to CSV file
+        has_header: Whether the CSV file has a header row. If False,
+                   generates column names like "column_0", "column_1", etc.
 
     Returns:
         Dict mapping column names to inferred type strings
@@ -64,39 +66,84 @@ def _infer_schema_from_csv(path: str) -> Dict[str, str]:
 
     try:
         with open(path, "r") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                return schema
+            if has_header:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    return schema
 
-            # Initialize schema with all columns as string
-            for col in reader.fieldnames:
-                schema[col] = "string"
+                # Initialize schema with all columns as string
+                for col in reader.fieldnames:
+                    schema[col] = "string"
 
-            # Sample rows to infer types
-            for i, row in enumerate(reader):
-                if i >= 100:  # Sample first 100 rows
-                    break
+                # Sample rows to infer types
+                for i, row in enumerate(reader):
+                    if i >= 100:  # Sample first 100 rows
+                        break
 
-                for col, value in row.items():
-                    if value == "":
-                        continue
+                    for col, value in row.items():
+                        if value == "":
+                            continue
 
-                    # Try to infer type
-                    current_type = schema[col]
+                        # Try to infer type
+                        current_type = schema[col]
 
-                    if current_type == "string":
-                        continue
+                        if current_type == "string":
+                            continue
 
-                    try:
-                        int(value)
-                        if current_type != "int64":
-                            schema[col] = "int64"
-                    except ValueError:
                         try:
-                            float(value)
-                            schema[col] = "float64"
+                            int(value)
+                            if current_type != "int64":
+                                schema[col] = "int64"
                         except ValueError:
-                            schema[col] = "string"
+                            try:
+                                float(value)
+                                schema[col] = "float64"
+                            except ValueError:
+                                schema[col] = "string"
+            else:
+                # No header: read first row to determine column count
+                reader = csv.reader(f)
+                first_row = next(reader, None)
+                if first_row is None:
+                    return schema
+
+                # Generate column names: column_1, column_2, ... (1-based to match DataFusion)
+                num_cols = len(first_row)
+                columns = [f"column_{i + 1}" for i in range(num_cols)]
+
+                # Initialize schema with all columns as string
+                for col in columns:
+                    schema[col] = "string"
+
+                # First row is data, so include it in type inference
+                all_rows = [first_row]
+                for i, row in enumerate(reader):
+                    if i >= 99:  # Sample first 100 rows (99 more + 1 already read)
+                        break
+                    all_rows.append(row)
+
+                # Infer types from sampled rows
+                for row in all_rows:
+                    for col_idx, value in enumerate(row):
+                        if col_idx >= num_cols or value == "":
+                            continue
+
+                        col = columns[col_idx]
+                        current_type = schema[col]
+
+                        if current_type == "string":
+                            continue
+
+                        try:
+                            int(value)
+                            if current_type != "int64":
+                                schema[col] = "int64"
+                        except ValueError:
+                            try:
+                                float(value)
+                                schema[col] = "float64"
+                            except ValueError:
+                                schema[col] = "string"
 
             return schema
     except Exception:
@@ -288,3 +335,91 @@ def _validate_equality_pair(
                 f"Column '{right_expr.name}' not found in target schema. "
                 f"Available columns: {list(target_schema.keys())}"
             )
+
+
+def _extract_asof_keys(
+    join_fn: Callable,
+    source_schema: Dict[str, str],
+    target_schema: Dict[str, str],
+) -> tuple:
+    """
+    Extract time column names and operator from an asof join condition.
+
+    Parses inequality conditions like:
+        lambda t, q: t.time >= q.time  -> ("time", "time", "Ge")
+        lambda t, q: t.trade_time <= q.quote_time  -> ("trade_time", "quote_time", "Le")
+
+    Args:
+        join_fn: Lambda function with two parameters (source row, target row)
+                E.g., lambda t, q: t.time >= q.time
+        source_schema: Dict mapping source column names to types
+        target_schema: Dict mapping target column names to types
+
+    Returns:
+        Tuple of (left_col_name, right_col_name, operator)
+        where operator is one of "Ge", "Le", "Gt", "Lt"
+
+    Raises:
+        TypeError: If join condition is not an inequality comparison
+        ValueError: If columns don't exist in respective schemas
+    """
+    # Create proxies for both tables
+    source_proxy = SchemaProxy(source_schema)
+    target_proxy = SchemaProxy(target_schema)
+
+    # Call the join function to get the expression tree
+    try:
+        expr = join_fn(source_proxy, target_proxy)
+    except Exception as e:
+        raise TypeError(f"Failed to evaluate asof join condition: {e}")
+
+    # Validate and extract key expressions
+    if not isinstance(expr, BinOpExpr):
+        raise TypeError(
+            f"Asof join condition must be an inequality comparison, got {type(expr).__name__}"
+        )
+
+    # Check for valid inequality operators
+    # Note: BinOpExpr uses "Ge", "Le", "Gt", "Lt" for >=, <=, >, <
+    valid_ops = {"Ge", "Le", "Gt", "Lt"}
+    if expr.op not in valid_ops:
+        raise TypeError(
+            f"Asof join condition must use inequality (>=, <=, >, <), got operator: {expr.op}. "
+            f"Valid operators: {valid_ops}"
+        )
+
+    # Extract left and right operands
+    left_expr = expr.left
+    right_expr = expr.right
+
+    # Validate operands are ColumnExpr
+    if not isinstance(left_expr, ColumnExpr) or not isinstance(right_expr, ColumnExpr):
+        raise TypeError(
+            "Asof join condition must compare two columns directly. "
+            "Complex expressions are not supported."
+        )
+
+    # Validate that left operand is from source and right from target
+    left_in_source = left_expr.name in source_schema
+    right_in_target = right_expr.name in target_schema
+
+    if not left_in_source:
+        # Check if reversed
+        if left_expr.name in target_schema and right_expr.name in source_schema:
+            raise ValueError(
+                f"Asof join condition has reversed order. Expected: left_table.col >= right_table.col, "
+                f"but got: {left_expr.name} {expr.op} {right_expr.name}. "
+                f"Please reverse the comparison."
+            )
+        raise ValueError(
+            f"Column '{left_expr.name}' not found in source (left) schema. "
+            f"Available columns: {list(source_schema.keys())}"
+        )
+
+    if not right_in_target:
+        raise ValueError(
+            f"Column '{right_expr.name}' not found in target (right) schema. "
+            f"Available columns: {list(target_schema.keys())}"
+        )
+
+    return (left_expr.name, right_expr.name, expr.op)

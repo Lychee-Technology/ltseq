@@ -11,7 +11,7 @@
 //! # Operations Provided
 //!
 //! ## Sort (sort_impl)
-//! 
+//!
 //! Sorts table rows by one or more key expressions with optional descending order. The implementation:
 //! - Deserializes Python expression dicts → PyExpr
 //! - Transpiles PyExpr → DataFusion SortExpr (with configurable asc/desc per key)
@@ -46,7 +46,7 @@
 //!
 //! **Phase B4**: Filters table to only first/last row per group.
 //! These operations assume __group_id__ column already exists.
-//! 
+//!
 //! Implementation:
 //! 1. Takes a table with existing __group_id__ column
 //! 2. Adds ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__
@@ -82,14 +82,14 @@
 //!   - Left table columns (unchanged)
 //!   - Right table columns prefixed with alias (e.g., `right_id`, `right_value`)
 
-use crate::LTSeqTable;
-use crate::types::{dict_to_py_expr, PyExpr};
 use crate::transpiler::pyexpr_to_datafusion;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, DataType};
+use crate::types::{dict_to_py_expr, PyExpr};
+use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
-use datafusion::logical_expr::SortExpr;
+use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::datasource::MemTable;
+use datafusion::logical_expr::SortExpr;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -97,37 +97,42 @@ use std::sync::Arc;
 use crate::engine::RUNTIME;
 
 /// Extract join key column names from either a Column or And-expression
-/// 
+///
 /// Phase 8H: Support both simple column references and composite And-expressions
-/// 
+///
 /// For composite keys like: (o.id == p.id) & (o.year == p.year)
 /// This function extracts the column pairs:
 /// - Returns (left_cols, right_cols) where left_cols[i] should equal right_cols[i]
-/// 
+///
 /// Examples:
 /// - Column("id") passed as left_key_expr → returns (["id"], [])
 /// - Column("id") passed as right_key_expr → returns ([], ["id"])
 /// - And( Eq(Column("id"), Column("id")), Eq(Column("year"), Column("year")) )
 ///   → (["id", "year"], ["id", "year"])  // Composite case (same tree)
-/// 
+///
 /// Returns: (left_col_names, right_col_names) tuple of column names
-fn extract_join_key_columns(left_expr: &PyExpr, right_expr: &PyExpr) -> PyResult<(Vec<String>, Vec<String>)> {
+fn extract_join_key_columns(
+    left_expr: &PyExpr,
+    right_expr: &PyExpr,
+) -> PyResult<(Vec<String>, Vec<String>)> {
     // Handle simple case: single column on each side
     if let (PyExpr::Column(left_name), PyExpr::Column(right_name)) = (left_expr, right_expr) {
         return Ok((vec![left_name.clone()], vec![right_name.clone()]));
     }
-    
+
     // Handle composite case: And-expressions (should be same tree)
-    if let (PyExpr::BinOp { op: op_left, .. }, PyExpr::BinOp { op: op_right, .. }) = (left_expr, right_expr) {
+    if let (PyExpr::BinOp { op: op_left, .. }, PyExpr::BinOp { op: op_right, .. }) =
+        (left_expr, right_expr)
+    {
         if op_left == "And" && op_right == "And" {
             let mut left_cols = Vec::new();
             let mut right_cols = Vec::new();
-            
+
             extract_cols_from_and(left_expr, &mut left_cols, &mut right_cols)?;
             return Ok((left_cols, right_cols));
         }
     }
-    
+
     Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
         "Join keys must be either simple columns or matching And-expressions",
     ))
@@ -157,7 +162,7 @@ fn extract_cols_from_and(
                             "Left side of join equality must be a column reference",
                         ));
                     }
-                    
+
                     if let PyExpr::Column(right_name) = right.as_ref() {
                         right_cols.push(right_name.clone());
                     } else {
@@ -167,21 +172,15 @@ fn extract_cols_from_and(
                     }
                     Ok(())
                 }
-                other => {
-                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!(
-                            "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
-                            other
-                        ),
-                    ))
-                }
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
+                    other
+                ))),
             }
         }
-        _ => {
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Expected And or Eq expression in composite join",
-            ))
-        }
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Expected And or Eq expression in composite join",
+        )),
     }
 }
 
@@ -193,7 +192,11 @@ fn extract_cols_from_and(
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     sort_exprs: List of serialized expression dicts (from Python)
-pub fn sort_impl(table: &LTSeqTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<LTSeqTable> {
+pub fn sort_impl(
+    table: &LTSeqTable,
+    sort_exprs: Vec<Bound<'_, PyDict>>,
+    desc_flags: Vec<bool>,
+) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
         return Ok(LTSeqTable {
@@ -227,10 +230,10 @@ pub fn sort_impl(table: &LTSeqTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fl
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-        
+
         // Get desc flag for this sort key
         let is_desc = desc_flags.get(i).copied().unwrap_or(false);
-        
+
         // Create SortExpr with asc = !is_desc
         // For descending, nulls_first = true by default
         df_sort_exprs.push(SortExpr {
@@ -242,9 +245,7 @@ pub fn sort_impl(table: &LTSeqTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fl
 
     // Get DataFrame
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     // Apply sort (async operation)
@@ -254,8 +255,8 @@ pub fn sort_impl(table: &LTSeqTable, sort_exprs: Vec<Bound<'_, PyDict>>, desc_fl
                 .clone()
                 .sort(df_sort_exprs)
                 .map_err(|e| format!("Sort execution failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Return new LTSeqTable with sorted data and captured sort keys
     Ok(LTSeqTable {
@@ -307,15 +308,16 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     // Get DataFrame
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -329,12 +331,13 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     // Use unique temp table name to avoid conflicts
     let temp_table_name = format!("__ltseq_group_id_temp_{}", std::process::id());
-    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
-    })?;
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create memory table: {}",
+                e
+            ))
+        })?;
 
     // Deregister existing table if it exists
     let _ = table.session.deregister_table(&temp_table_name);
@@ -394,18 +397,23 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
     // Execute the query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
+            let result_df = table
+                .session
+                .sql(&sql_query)
                 .await
                 .map_err(|e| format!("Failed to execute group_id query: {}", e))?;
-            
-            result_df.collect()
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect group_id results: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Deregister temporary table
-    table.session.deregister_table(temp_table_name)
+    table
+        .session
+        .deregister_table(temp_table_name)
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to deregister temp table: {}",
@@ -424,15 +432,19 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result memory table: {}",
-            e
-        )))?;
+    let result_mem_table =
+        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result memory table: {}",
+                e
+            ))
+        })?;
 
     // Create a new DataFrame from the memory table via a temporary registration
     let result_table_name = "__ltseq_result";
-    table.session.register_table(result_table_name, Arc::new(result_mem_table))
+    table
+        .session
+        .register_table(result_table_name, Arc::new(result_mem_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to register result table: {}",
@@ -442,14 +454,18 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     let result_df = RUNTIME
         .block_on(async {
-            table.session.table(result_table_name)
+            table
+                .session
+                .table(result_table_name)
                 .await
                 .map_err(|e| format!("Failed to get result table: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Deregister the result table since we're materializing it
-    table.session.deregister_table(result_table_name)
+    table
+        .session
+        .deregister_table(result_table_name)
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to deregister result table: {}",
@@ -496,16 +512,18 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     }
 
     // Get DataFrame
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded.",
-        )
-    })?;
+    let df = table
+        .dataframe
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded."))?;
 
     // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -519,12 +537,13 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
     // Use unique temp table name to avoid conflicts
     let temp_table_name = format!("__ltseq_first_row_temp_{}", std::process::id());
-    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
-    })?;
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create memory table: {}",
+                e
+            ))
+        })?;
 
     // Deregister existing table if it exists
     let _ = table.session.deregister_table(&temp_table_name);
@@ -548,7 +567,9 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
         .filter(|f| {
             let name = f.name();
             // Keep user columns and our group columns, but filter out internal temp columns
-            !name.starts_with("__rn") && !name.starts_with("__row_num") && !name.starts_with("__mask")
+            !name.starts_with("__rn")
+                && !name.starts_with("__row_num")
+                && !name.starts_with("__mask")
         })
         .map(|f| format!("\"{}\"", f.name()))
         .collect();
@@ -570,11 +591,14 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     // Execute the query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
+            let result_df = table
+                .session
+                .sql(&sql_query)
                 .await
                 .map_err(|e| format!("Failed to execute first_row query: {}", e))?;
-            
-            result_df.collect()
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect first_row results: {}", e))
         })
@@ -594,19 +618,23 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result memory table: {}",
-            e
-        )))?;
+    let result_mem_table =
+        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result memory table: {}",
+                e
+            ))
+        })?;
 
     // Create a new DataFrame from the memory table
     let result_table_name = format!("__ltseq_first_row_result_{}", std::process::id());
-    
+
     // Deregister existing result table if it exists
     let _ = table.session.deregister_table(&result_table_name);
-    
-    table.session.register_table(&result_table_name, Arc::new(result_mem_table))
+
+    table
+        .session
+        .register_table(&result_table_name, Arc::new(result_mem_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to register result table: {}",
@@ -616,7 +644,9 @@ pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
     let result_df = RUNTIME
         .block_on(async {
-            table.session.table(&result_table_name)
+            table
+                .session
+                .table(&result_table_name)
                 .await
                 .map_err(|e| format!("Failed to get result table: {}", e))
         })
@@ -664,16 +694,18 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     }
 
     // Get DataFrame
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded.",
-        )
-    })?;
+    let df = table
+        .dataframe
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded."))?;
 
     // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -687,12 +719,13 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
     // Use unique temp table name to avoid conflicts
     let temp_table_name = format!("__ltseq_last_row_temp_{}", std::process::id());
-    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
-    })?;
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create memory table: {}",
+                e
+            ))
+        })?;
 
     // Deregister existing table if it exists
     let _ = table.session.deregister_table(&temp_table_name);
@@ -715,7 +748,10 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
         .filter(|f| {
             let name = f.name();
             // Keep user columns and our group columns, but filter out internal temp columns
-            !name.starts_with("__rn") && !name.starts_with("__row_num") && !name.starts_with("__mask") && !name.starts_with("__cnt")
+            !name.starts_with("__rn")
+                && !name.starts_with("__row_num")
+                && !name.starts_with("__mask")
+                && !name.starts_with("__cnt")
         })
         .map(|f| format!("\"{}\"", f.name()))
         .collect();
@@ -744,11 +780,14 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     // Execute the query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
+            let result_df = table
+                .session
+                .sql(&sql_query)
                 .await
                 .map_err(|e| format!("Failed to execute last_row query: {}", e))?;
-            
-            result_df.collect()
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect last_row results: {}", e))
         })
@@ -768,19 +807,23 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(result_schema.clone(), vec![result_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result memory table: {}",
-            e
-        )))?;
+    let result_mem_table =
+        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result memory table: {}",
+                e
+            ))
+        })?;
 
     // Create a new DataFrame from the memory table
     let result_table_name = format!("__ltseq_last_row_result_{}", std::process::id());
-    
+
     // Deregister existing result table if it exists
     let _ = table.session.deregister_table(&result_table_name);
-    
-    table.session.register_table(&result_table_name, Arc::new(result_mem_table))
+
+    table
+        .session
+        .register_table(&result_table_name, Arc::new(result_mem_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to register result table: {}",
@@ -790,7 +833,9 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
     let result_df = RUNTIME
         .block_on(async {
-            table.session.table(&result_table_name)
+            table
+                .session
+                .table(&result_table_name)
                 .await
                 .map_err(|e| format!("Failed to get result table: {}", e))
         })
@@ -817,16 +862,581 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 /// 1. Evaluating Python lambdas for each group
 /// 2. Broadcasting computed values back to all rows in group
 /// 3. Adding new columns to result schema
-pub fn derive_impl(table: &LTSeqTable, _derived_cols_spec: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+pub fn derive_impl(
+    table: &LTSeqTable,
+    _derived_cols_spec: Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
     // Phase B7 placeholder: Just return the input table unchanged
     // Full implementation would compute derived columns and add them
-    
+
     Ok(LTSeqTable {
         session: Arc::clone(&table.session),
         dataframe: table.dataframe.as_ref().map(|df| Arc::clone(df)),
         schema: table.schema.as_ref().map(|s| Arc::clone(s)),
         sort_exprs: Vec::new(),
     })
+}
+
+/// As-of Join: Time-series join matching each left row with nearest right row
+///
+/// For each row in the left table, finds the "nearest" matching row in the right table
+/// based on a time/key column. This is commonly used in financial applications.
+///
+/// # Algorithm
+///
+/// Uses binary search for O(N log M) complexity where N = left rows, M = right rows.
+/// Both tables must be sorted by their respective time columns.
+///
+/// # Direction Semantics
+///
+/// * `backward`: Find largest right.time where right.time <= left.time
+/// * `forward`: Find smallest right.time where right.time >= left.time  
+/// * `nearest`: Find closest right.time (backward bias on ties)
+///
+/// # Arguments
+///
+/// * `table` - Left table (must be sorted by left_time_col)
+/// * `other` - Right table (must be sorted by right_time_col)
+/// * `left_time_col` - Column name for time/key in left table
+/// * `right_time_col` - Column name for time/key in right table
+/// * `direction` - Match direction: "backward", "forward", or "nearest"
+/// * `alias` - Prefix for right table columns (e.g., "_other")
+///
+/// # Returns
+///
+/// A new LTSeqTable with combined columns (right columns prefixed with alias).
+/// Unmatched left rows have NULL for right columns (LEFT JOIN semantics).
+pub fn asof_join_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_time_col: &str,
+    right_time_col: &str,
+    direction: &str,
+    alias: &str,
+) -> PyResult<LTSeqTable> {
+    // 1. Validate both tables have data
+    let df_left = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Left table has no data. Call read_csv() first.",
+        )
+    })?;
+
+    let df_right = other.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "Right table has no data. Call read_csv() first.",
+        )
+    })?;
+
+    let stored_schema_left = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available.")
+    })?;
+
+    let stored_schema_right = other.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available.")
+    })?;
+
+    // 2. Validate direction
+    match direction {
+        "backward" | "forward" | "nearest" => {}
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid direction '{}'. Must be 'backward', 'forward', or 'nearest'",
+                direction
+            )))
+        }
+    }
+
+    // 3. Collect both DataFrames to batches
+    let (left_batches, right_batches) = RUNTIME
+        .block_on(async {
+            let left_future = (**df_left).clone().collect();
+            let right_future = (**df_right).clone().collect();
+
+            let left_result = left_future
+                .await
+                .map_err(|e| format!("Failed to collect left table: {}", e))?;
+            let right_result = right_future
+                .await
+                .map_err(|e| format!("Failed to collect right table: {}", e))?;
+
+            Ok::<_, String>((left_result, right_result))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // 4. Get actual schemas from batches
+    let left_schema = left_batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema_left).clone()));
+
+    let right_schema = right_batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema_right).clone()));
+
+    // 5. Find time column indices
+    let left_time_idx = left_schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == left_time_col)
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Time column '{}' not found in left table. Available: {:?}",
+                left_time_col,
+                left_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            ))
+        })?;
+
+    let right_time_idx = right_schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == right_time_col)
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Time column '{}' not found in right table. Available: {:?}",
+                right_time_col,
+                right_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            ))
+        })?;
+
+    // 6. Flatten batches into single vectors for easier processing
+    // Extract all left rows and right time values
+    let mut left_rows: Vec<(usize, usize)> = Vec::new(); // (batch_idx, row_idx)
+    let mut left_times: Vec<i64> = Vec::new();
+
+    for (batch_idx, batch) in left_batches.iter().enumerate() {
+        let time_col = batch.column(left_time_idx);
+        let times = extract_time_values(time_col)?;
+        for (row_idx, time) in times.into_iter().enumerate() {
+            left_rows.push((batch_idx, row_idx));
+            left_times.push(time);
+        }
+    }
+
+    let mut right_times: Vec<i64> = Vec::new();
+    let mut right_row_indices: Vec<(usize, usize)> = Vec::new(); // (batch_idx, row_idx)
+
+    for (batch_idx, batch) in right_batches.iter().enumerate() {
+        let time_col = batch.column(right_time_idx);
+        let times = extract_time_values(time_col)?;
+        for (row_idx, time) in times.into_iter().enumerate() {
+            right_row_indices.push((batch_idx, row_idx));
+            right_times.push(time);
+        }
+    }
+
+    // 7. For each left row, find matching right row using binary search
+    let mut matched_right_indices: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
+
+    for &left_time in &left_times {
+        let match_idx = match direction {
+            "backward" => find_asof_backward(left_time, &right_times),
+            "forward" => find_asof_forward(left_time, &right_times),
+            "nearest" => find_asof_nearest(left_time, &right_times),
+            _ => unreachable!(),
+        };
+        matched_right_indices.push(match_idx);
+    }
+
+    // 8. Build result schema: left columns + aliased right columns
+    let mut result_fields: Vec<Field> = Vec::new();
+
+    // Left columns (unchanged)
+    for field in left_schema.fields() {
+        result_fields.push((**field).clone());
+    }
+
+    // Right columns with alias prefix (nullable for unmatched rows)
+    for field in right_schema.fields() {
+        result_fields.push(Field::new(
+            format!("{}_{}", alias, field.name()),
+            field.data_type().clone(),
+            true, // Always nullable for asof join (unmatched rows get NULL)
+        ));
+    }
+
+    let result_schema = Arc::new(ArrowSchema::new(result_fields));
+
+    // 9. Build result arrays
+    let num_result_rows = left_times.len();
+
+    // Create builders for each result column
+    let mut result_columns: Vec<Arc<dyn Array>> = Vec::new();
+
+    // Copy left columns
+    for col_idx in 0..left_schema.fields().len() {
+        let result_array = copy_column_from_batches(&left_batches, col_idx, &left_rows)?;
+        result_columns.push(result_array);
+    }
+
+    // Build right columns with matches or NULLs
+    for col_idx in 0..right_schema.fields().len() {
+        let result_array = build_matched_column(
+            &right_batches,
+            col_idx,
+            &right_row_indices,
+            &matched_right_indices,
+            num_result_rows,
+        )?;
+        result_columns.push(result_array);
+    }
+
+    // 10. Create result RecordBatch
+    let result_batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&result_schema),
+        result_columns,
+    )
+    .map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create result batch: {}",
+            e
+        ))
+    })?;
+
+    // 11. Create result LTSeqTable
+    let result_mem = MemTable::try_new(Arc::clone(&result_schema), vec![vec![result_batch]])
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = table
+        .session
+        .read_table(Arc::new(result_mem))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to read result table: {}",
+                e
+            ))
+        })?;
+
+    Ok(LTSeqTable {
+        session: Arc::clone(&table.session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
+        sort_exprs: Vec::new(),
+    })
+}
+
+/// Find the largest index where right_times[idx] <= target (backward match)
+fn find_asof_backward(target: i64, right_times: &[i64]) -> Option<usize> {
+    if right_times.is_empty() {
+        return None;
+    }
+
+    // Find the first position where right_time > target
+    let idx = right_times.partition_point(|&t| t <= target);
+
+    if idx == 0 {
+        // No right time <= target
+        None
+    } else {
+        Some(idx - 1)
+    }
+}
+
+/// Find the smallest index where right_times[idx] >= target (forward match)
+fn find_asof_forward(target: i64, right_times: &[i64]) -> Option<usize> {
+    if right_times.is_empty() {
+        return None;
+    }
+
+    // Find the first position where right_time >= target
+    let idx = right_times.partition_point(|&t| t < target);
+
+    if idx >= right_times.len() {
+        // No right time >= target
+        None
+    } else {
+        Some(idx)
+    }
+}
+
+/// Find the nearest index (backward bias on ties)
+fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
+    let backward = find_asof_backward(target, right_times);
+    let forward = find_asof_forward(target, right_times);
+
+    match (backward, forward) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(f)) => Some(f),
+        (Some(b), Some(f)) => {
+            let diff_back = target - right_times[b];
+            let diff_fwd = right_times[f] - target;
+            // Backward bias on ties (prefer <= over >=)
+            if diff_back <= diff_fwd {
+                Some(b)
+            } else {
+                Some(f)
+            }
+        }
+    }
+}
+
+/// Extract time values from an Arrow array column as i64
+/// Supports Int64, Int32, Float64, Timestamp, Date32, Date64
+fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
+    let len = col.len();
+    let mut values = Vec::with_capacity(len);
+
+    match col.data_type() {
+        DataType::Int64 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::Int64Array>()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Int64Array")
+                })?;
+            for i in 0..len {
+                values.push(if arr.is_null(i) {
+                    i64::MIN
+                } else {
+                    arr.value(i)
+                });
+            }
+        }
+        DataType::Int32 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::Int32Array>()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Int32Array")
+                })?;
+            for i in 0..len {
+                values.push(if arr.is_null(i) {
+                    i64::MIN
+                } else {
+                    arr.value(i) as i64
+                });
+            }
+        }
+        DataType::Float64 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::Float64Array>()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Failed to cast to Float64Array",
+                    )
+                })?;
+            for i in 0..len {
+                values.push(if arr.is_null(i) {
+                    i64::MIN
+                } else {
+                    arr.value(i) as i64
+                });
+            }
+        }
+        DataType::Timestamp(_, _) => {
+            // Try to cast to Int64 for timestamp types
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::TimestampMicrosecondArray>();
+            if let Some(arr) = arr {
+                for i in 0..len {
+                    values.push(if arr.is_null(i) {
+                        i64::MIN
+                    } else {
+                        arr.value(i)
+                    });
+                }
+            } else {
+                // Try nanosecond
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<array::TimestampNanosecondArray>();
+                if let Some(arr) = arr {
+                    for i in 0..len {
+                        values.push(if arr.is_null(i) {
+                            i64::MIN
+                        } else {
+                            arr.value(i)
+                        });
+                    }
+                } else {
+                    // Try millisecond
+                    let arr = col
+                        .as_any()
+                        .downcast_ref::<array::TimestampMillisecondArray>();
+                    if let Some(arr) = arr {
+                        for i in 0..len {
+                            values.push(if arr.is_null(i) {
+                                i64::MIN
+                            } else {
+                                arr.value(i)
+                            });
+                        }
+                    } else {
+                        // Try second
+                        let arr = col.as_any().downcast_ref::<array::TimestampSecondArray>();
+                        if let Some(arr) = arr {
+                            for i in 0..len {
+                                values.push(if arr.is_null(i) {
+                                    i64::MIN
+                                } else {
+                                    arr.value(i)
+                                });
+                            }
+                        } else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "Unsupported timestamp type for asof join time column",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        DataType::Date32 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::Date32Array>()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Date32Array")
+                })?;
+            for i in 0..len {
+                values.push(if arr.is_null(i) {
+                    i64::MIN
+                } else {
+                    arr.value(i) as i64
+                });
+            }
+        }
+        DataType::Date64 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<array::Date64Array>()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Date64Array")
+                })?;
+            for i in 0..len {
+                values.push(if arr.is_null(i) {
+                    i64::MIN
+                } else {
+                    arr.value(i)
+                });
+            }
+        }
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unsupported data type '{}' for asof join time column. Supported: Int32, Int64, Float64, Timestamp, Date32, Date64",
+                other
+            )));
+        }
+    }
+
+    Ok(values)
+}
+
+/// Copy a column from source batches to result, selecting rows by index
+fn copy_column_from_batches(
+    batches: &[datafusion::arrow::record_batch::RecordBatch],
+    col_idx: usize,
+    row_indices: &[(usize, usize)], // (batch_idx, row_idx)
+) -> PyResult<Arc<dyn Array>> {
+    if batches.is_empty() || row_indices.is_empty() {
+        // Return empty array of appropriate type
+        let dtype = if let Some(batch) = batches.first() {
+            batch.column(col_idx).data_type().clone()
+        } else {
+            DataType::Null
+        };
+        return Ok(datafusion::arrow::array::new_empty_array(&dtype));
+    }
+
+    // Use a generic approach with take kernel
+    // First, concatenate all batches for this column
+    let arrays: Vec<&dyn Array> = batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
+
+    let concatenated = datafusion::arrow::compute::concat(&arrays).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to concatenate arrays: {}",
+            e
+        ))
+    })?;
+
+    // Build indices for take operation
+    // row_indices contains (batch_idx, row_idx), we need to convert to global indices
+    let mut global_indices: Vec<u32> = Vec::with_capacity(row_indices.len());
+
+    // Calculate batch offsets
+    let batch_offsets: Vec<usize> = batches
+        .iter()
+        .scan(0usize, |acc, b| {
+            let prev = *acc;
+            *acc += b.num_rows();
+            Some(prev)
+        })
+        .collect();
+
+    for &(batch_idx, row_idx) in row_indices {
+        let global_idx = batch_offsets[batch_idx] + row_idx;
+        global_indices.push(global_idx as u32);
+    }
+
+    let indices = array::UInt32Array::from(global_indices);
+    let result = datafusion::arrow::compute::take(&concatenated, &indices, None).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to take values: {}", e))
+    })?;
+
+    Ok(result)
+}
+
+/// Build a column for matched right rows, with NULLs for unmatched
+fn build_matched_column(
+    right_batches: &[datafusion::arrow::record_batch::RecordBatch],
+    col_idx: usize,
+    _right_row_indices: &[(usize, usize)], // Map from flat index to (batch_idx, row_idx)
+    matched_indices: &[Option<usize>],     // For each left row, matched right flat index
+    num_rows: usize,
+) -> PyResult<Arc<dyn Array>> {
+    if right_batches.is_empty() {
+        // No right data, return all NULLs
+        let dtype = DataType::Null;
+        let null_arr = datafusion::arrow::array::new_null_array(&dtype, num_rows);
+        return Ok(null_arr);
+    }
+
+    // Concatenate all right batches for this column
+    let arrays: Vec<&dyn Array> = right_batches
+        .iter()
+        .map(|b| b.column(col_idx).as_ref())
+        .collect();
+
+    let concatenated = datafusion::arrow::compute::concat(&arrays).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to concatenate right arrays: {}",
+            e
+        ))
+    })?;
+
+    // Build nullable indices for take operation
+    let indices: Vec<Option<u32>> = matched_indices
+        .iter()
+        .map(|opt| opt.map(|idx| idx as u32))
+        .collect();
+
+    let indices_array = array::UInt32Array::from(indices);
+
+    let result =
+        datafusion::arrow::compute::take(&concatenated, &indices_array, None).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to take right values: {}",
+                e
+            ))
+        })?;
+
+    Ok(result)
 }
 
 /// Extract and validate join key column names from expressions
@@ -842,7 +1452,8 @@ fn extract_and_validate_join_keys(
     let right_key_expr = dict_to_py_expr(right_key_expr_dict)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let (left_col_names, right_col_names) = extract_join_key_columns(&left_key_expr, &right_key_expr)?;
+    let (left_col_names, right_col_names) =
+        extract_join_key_columns(&left_key_expr, &right_key_expr)?;
 
     if left_col_names.is_empty() || right_col_names.is_empty() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -853,18 +1464,20 @@ fn extract_and_validate_join_keys(
     // Validate left columns exist
     for left_col in &left_col_names {
         if !schema_left.fields().iter().any(|f| f.name() == left_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Column '{}' not found in left table", left_col),
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Column '{}' not found in left table",
+                left_col
+            )));
         }
     }
 
     // Validate right columns exist
     for right_col in &right_col_names {
         if !schema_right.fields().iter().any(|f| f.name() == right_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Column '{}' not found in right table", right_col),
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Column '{}' not found in right table",
+                right_col
+            )));
         }
     }
 
@@ -888,12 +1501,12 @@ fn build_join_sql(
     alias: &str,
 ) -> String {
     let mut select_parts: Vec<String> = Vec::new();
-    
+
     // All left columns (preserve as-is, including internal columns like __group_id__)
     for field in left_schema.fields() {
         select_parts.push(format!("L.\"{}\"", field.name()));
     }
-    
+
     // All right columns with alias prefix
     for field in right_schema.fields() {
         select_parts.push(format!(
@@ -903,7 +1516,7 @@ fn build_join_sql(
             field.name()
         ));
     }
-    
+
     // Build ON clause for potentially composite keys
     let on_conditions: Vec<String> = left_keys
         .iter()
@@ -911,7 +1524,7 @@ fn build_join_sql(
         .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
         .collect();
     let on_clause = on_conditions.join(" AND ");
-    
+
     // Map join_type to SQL keyword
     let sql_join_type = match join_type {
         "inner" => "INNER JOIN",
@@ -920,7 +1533,7 @@ fn build_join_sql(
         "full" => "FULL OUTER JOIN",
         _ => "INNER JOIN",
     };
-    
+
     format!(
         "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
         select_parts.join(", "),
@@ -952,16 +1565,13 @@ pub fn agg_impl(
 ) -> PyResult<LTSeqTable> {
     // Validate tables exist
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
-    
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No schema available.",
-        )
-    })?;
+
+    let schema = table
+        .schema
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
 
     // Helper function to extract aggregate function from PyExpr
     fn extract_agg_function(py_expr: &PyExpr) -> Option<(String, String)> {
@@ -991,18 +1601,24 @@ pub fn agg_impl(
 
     // Collect all agg expressions and convert to DataFusion expressions
     let mut agg_select_parts: Vec<String> = Vec::new();
-    
+
     // Extract aggregation expressions from dict
     for (key, value) in agg_dict.iter() {
-        let key_str = key.extract::<String>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string"))?;
-        
-        let val_dict = value.cast::<PyDict>()
-            .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict"))?;
-        
-        let py_expr = dict_to_py_expr(&val_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse agg expr: {}", e)))?;
-        
+        let key_str = key.extract::<String>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
+        })?;
+
+        let val_dict = value.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
+        })?;
+
+        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse agg expr: {}",
+                e
+            ))
+        })?;
+
         // Try to extract aggregate function
         if let Some((agg_func, col_name)) = extract_agg_function(&py_expr) {
             // Build aggregate SQL
@@ -1019,24 +1635,30 @@ pub fn agg_impl(
                 "max" => format!("MAX({})", col_name),
                 "avg" => format!("AVG({})", col_name),
                 _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        format!("Unknown aggregate function: {}", agg_func)
-                    ))
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unknown aggregate function: {}",
+                        agg_func
+                    )))
                 }
             };
             agg_select_parts.push(format!("{} as {}", sql_expr_str, key_str));
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid aggregate expression - must be g.column.agg_func() or g.count()".to_string()
+                "Invalid aggregate expression - must be g.column.agg_func() or g.count()"
+                    .to_string(),
             ));
         }
     }
 
     // Build the GROUP BY clause
     let group_cols: Option<Vec<String>> = if let Some(group_expr_dict) = group_expr {
-        let py_expr = dict_to_py_expr(&group_expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse group expr: {}", e)))?;
-        
+        let py_expr = dict_to_py_expr(&group_expr_dict).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse group expr: {}",
+                e
+            ))
+        })?;
+
         // Handle both single column and list of columns
         match py_expr {
             PyExpr::Column(col_name) => {
@@ -1045,8 +1667,13 @@ pub fn agg_impl(
             }
             _ => {
                 // For complex expressions, transpile to SQL and use as-is
-                let sql_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to transpile group expr: {}", e)))?;
+                let sql_expr =
+                    crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Failed to transpile group expr: {}",
+                            e
+                        ))
+                    })?;
                 let expr_str = format!("{}", sql_expr);
                 Some(vec![expr_str])
             }
@@ -1057,11 +1684,14 @@ pub fn agg_impl(
 
     // Build SQL query
     let temp_table_name = "__ltseq_agg_temp";
-    
+
     // Register temp table
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -1101,18 +1731,23 @@ pub fn agg_impl(
     // Execute query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
+            let result_df = table
+                .session
+                .sql(&sql_query)
                 .await
                 .map_err(|e| format!("Failed to execute agg query: {}", e))?;
-            
-            result_df.collect()
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect agg results: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Deregister temporary table
-    table.session.deregister_table(temp_table_name)
+    table
+        .session
+        .deregister_table(temp_table_name)
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to deregister temp table: {}",
@@ -1131,20 +1766,24 @@ pub fn agg_impl(
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     // Create DataFrame from the result using read_table
-    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_df = table
+        .session
+        .read_table(Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     Ok(LTSeqTable {
         session: Arc::clone(&table.session),
@@ -1167,27 +1806,24 @@ pub fn agg_impl(
 /// # Returns
 ///
 /// A new LTSeqTable with rows matching the WHERE clause
-pub fn filter_where_impl(
-    table: &LTSeqTable,
-    where_clause: &str,
-) -> PyResult<LTSeqTable> {
+pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTSeqTable> {
     // Validate table exists
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
-    
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No schema available.",
-        )
-    })?;
+
+    let schema = table
+        .schema
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
 
     // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -1201,12 +1837,13 @@ pub fn filter_where_impl(
 
     // Use unique temp table name to avoid conflicts
     let temp_table_name = format!("__ltseq_filter_temp_{}", std::process::id());
-    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
-    })?;
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create memory table: {}",
+                e
+            ))
+        })?;
 
     // Deregister existing table if it exists
     let _ = table.session.deregister_table(&temp_table_name);
@@ -1228,7 +1865,7 @@ pub fn filter_where_impl(
         .map(|f| format!("\"{}\"", f.name()))
         .collect();
     let columns_str = column_list.join(", ");
-    
+
     let sql_query = format!(
         "SELECT {} FROM \"{}\" WHERE {}",
         columns_str, temp_table_name, where_clause
@@ -1237,11 +1874,14 @@ pub fn filter_where_impl(
     // Execute query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
+            let result_df = table
+                .session
+                .sql(&sql_query)
                 .await
                 .map_err(|e| format!("Failed to execute filter query: {}", e))?;
-            
-            result_df.collect()
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect filter results: {}", e))
         })
@@ -1261,20 +1901,24 @@ pub fn filter_where_impl(
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     // Create DataFrame from the result using read_table
-    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_df = table
+        .session
+        .read_table(Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     Ok(LTSeqTable {
         session: Arc::clone(&table.session),
@@ -1283,7 +1927,6 @@ pub fn filter_where_impl(
         sort_exprs: Vec::new(),
     })
 }
-
 
 pub fn join_impl(
     table: &LTSeqTable,
@@ -1299,23 +1942,19 @@ pub fn join_impl(
             "Left table has no data. Call read_csv() first.",
         )
     })?;
-    
+
     let df_right = other.dataframe.as_ref().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "Right table has no data. Call read_csv() first.",
         )
     })?;
-    
+
     let stored_schema_left = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available.")
     })?;
-    
+
     let stored_schema_right = other.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available.")
     })?;
 
     // 2. Collect both DataFrames to batches to get actual data and schemas
@@ -1323,12 +1962,14 @@ pub fn join_impl(
         .block_on(async {
             let left_future = (**df_left).clone().collect();
             let right_future = (**df_right).clone().collect();
-            
-            let left_result = left_future.await
+
+            let left_result = left_future
+                .await
                 .map_err(|e| format!("Failed to collect left table: {}", e))?;
-            let right_result = right_future.await
+            let right_result = right_future
+                .await
                 .map_err(|e| format!("Failed to collect right table: {}", e))?;
-            
+
             Ok::<_, String>((left_result, right_result))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -1338,7 +1979,7 @@ pub fn join_impl(
         .first()
         .map(|b| b.schema())
         .unwrap_or_else(|| Arc::new((**stored_schema_left).clone()));
-    
+
     let right_schema = right_batches
         .first()
         .map(|b| b.schema())
@@ -1356,9 +1997,10 @@ pub fn join_impl(
     match join_type {
         "inner" | "left" | "right" | "full" => {}
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Unknown join type: {}", join_type),
-            ))
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown join type: {}",
+                join_type
+            )))
         }
     };
 
@@ -1366,32 +2008,46 @@ pub fn join_impl(
     let unique_suffix = std::process::id();
     let left_table_name = format!("__ltseq_join_left_{}", unique_suffix);
     let right_table_name = format!("__ltseq_join_right_{}", unique_suffix);
-    
+
     // Deregister if exists
     let _ = table.session.deregister_table(&left_table_name);
     let _ = table.session.deregister_table(&right_table_name);
-    
-    let left_mem = MemTable::try_new(Arc::clone(&left_schema), vec![left_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to create left temp table: {}", e)
-        ))?;
-    
-    let right_mem = MemTable::try_new(Arc::clone(&right_schema), vec![right_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to create right temp table: {}", e)
-        ))?;
-    
-    table.session
+
+    let left_mem =
+        MemTable::try_new(Arc::clone(&left_schema), vec![left_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create left temp table: {}",
+                e
+            ))
+        })?;
+
+    let right_mem =
+        MemTable::try_new(Arc::clone(&right_schema), vec![right_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create right temp table: {}",
+                e
+            ))
+        })?;
+
+    table
+        .session
         .register_table(&left_table_name, Arc::new(left_mem))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to register left temp table: {}", e)
-        ))?;
-    
-    table.session
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register left temp table: {}",
+                e
+            ))
+        })?;
+
+    table
+        .session
         .register_table(&right_table_name, Arc::new(right_mem))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to register right temp table: {}", e)
-        ))?;
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register right temp table: {}",
+                e
+            ))
+        })?;
 
     // 7. Build and execute SQL JOIN query
     let sql_query = build_join_sql(
@@ -1407,10 +2063,15 @@ pub fn join_impl(
 
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query).await
+            let result_df = table
+                .session
+                .sql(&sql_query)
+                .await
                 .map_err(|e| format!("Failed to execute join query: {}", e))?;
-            
-            result_df.collect().await
+
+            result_df
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect join results: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -1423,12 +2084,12 @@ pub fn join_impl(
     if result_batches.is_empty() {
         // Build expected schema for empty result
         let mut result_fields: Vec<Field> = Vec::new();
-        
+
         // Left columns
         for field in left_schema.fields() {
             result_fields.push((**field).clone());
         }
-        
+
         // Right columns with alias prefix
         for field in right_schema.fields() {
             result_fields.push(Field::new(
@@ -1437,7 +2098,7 @@ pub fn join_impl(
                 true, // nullable for join results
             ));
         }
-        
+
         let empty_schema = Arc::new(ArrowSchema::new(result_fields));
         return Ok(LTSeqTable {
             session: Arc::clone(&table.session),
@@ -1448,15 +2109,23 @@ pub fn join_impl(
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to create result table: {}", e)
-        ))?;
-    
-    let result_df = table.session.read_table(Arc::new(result_mem))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to read result table: {}", e)
-        ))?;
+    let result_mem =
+        MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = table
+        .session
+        .read_table(Arc::new(result_mem))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to read result table: {}",
+                e
+            ))
+        })?;
 
     Ok(LTSeqTable {
         session: Arc::clone(&table.session),
@@ -1499,36 +2168,44 @@ pub fn pivot_impl(
     let schema = table.schema.as_ref().unwrap();
 
     // Validate that all required columns exist
-    let col_names: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
-    
+    let col_names: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+
     for col in &index_cols {
         if !col_names.contains(col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Index column '{}' not found in table", col),
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Index column '{}' not found in table",
+                col
+            )));
         }
     }
-    
+
     if !col_names.contains(&pivot_col) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Pivot column '{}' not found in table", pivot_col),
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Pivot column '{}' not found in table",
+            pivot_col
+        )));
     }
-    
+
     if !col_names.contains(&value_col) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Value column '{}' not found in table", value_col),
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Value column '{}' not found in table",
+            value_col
+        )));
     }
 
     // Validate aggregation function
     let agg_fn_upper = agg_fn.to_uppercase();
     match agg_fn_upper.as_str() {
-        "SUM" | "MEAN" | "COUNT" | "MIN" | "MAX" => {},
+        "SUM" | "MEAN" | "COUNT" | "MIN" | "MAX" => {}
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Invalid aggregation function '{}'. Must be one of: sum, mean, count, min, max", agg_fn),
-            ));
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid aggregation function '{}'. Must be one of: sum, mean, count, min, max",
+                agg_fn
+            )));
         }
     }
 
@@ -1538,20 +2215,19 @@ pub fn pivot_impl(
         .iter()
         .position(|f| f.name() == &pivot_col)
         .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Pivot column '{}' not found", pivot_col),
-            )
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Pivot column '{}' not found",
+                pivot_col
+            ))
         })?;
 
     // Collect all batches from the dataframe
-    let all_batches = RUNTIME
-        .block_on((**df).clone().collect())
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to collect data from table: {}",
-                e
-            ))
-        })?;
+    let all_batches = RUNTIME.block_on((**df).clone().collect()).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to collect data from table: {}",
+            e
+        ))
+    })?;
 
     // Extract distinct pivot values from all batches
     let mut pivot_values_set = std::collections::HashSet::new();
@@ -1617,15 +2293,15 @@ pub fn pivot_impl(
 
     // Register the source data as a temporary table
     let source_table_name = "__pivot_source";
-    let source_mem_table =
-        MemTable::try_new(schema.clone(), vec![all_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create source table: {}",
-                e
-            ))
-        })?;
+    let source_mem_table = MemTable::try_new(schema.clone(), vec![all_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create source table: {}",
+            e
+        ))
+    })?;
 
-    table.session
+    table
+        .session
         .register_table(source_table_name, Arc::new(source_mem_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -1648,7 +2324,11 @@ pub fn pivot_impl(
             // String value (quote it)
             format!(
                 "{}(CASE WHEN {} = '{}' THEN {} ELSE NULL END) as \"{}\"",
-                agg_fn_upper, pivot_col, val.replace("'", "''"), value_col, val
+                agg_fn_upper,
+                pivot_col,
+                val.replace("'", "''"),
+                value_col,
+                val
             )
         };
         case_exprs.push(value_expr);
@@ -1663,7 +2343,8 @@ pub fn pivot_impl(
     );
 
     // Step 3: Execute pivot query
-    let result_df = RUNTIME.block_on(table.session.sql(&pivot_sql))
+    let result_df = RUNTIME
+        .block_on(table.session.sql(&pivot_sql))
         .map_err(|e| {
             let _ = table.session.deregister_table(source_table_name);
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
@@ -1673,15 +2354,13 @@ pub fn pivot_impl(
         })?;
 
     // Step 4: Collect result
-    let result_batches = RUNTIME
-        .block_on(result_df.collect())
-        .map_err(|e| {
-            let _ = table.session.deregister_table(source_table_name);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to collect pivot results: {}",
-                e
-            ))
-        })?;
+    let result_batches = RUNTIME.block_on(result_df.collect()).map_err(|e| {
+        let _ = table.session.deregister_table(source_table_name);
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to collect pivot results: {}",
+            e
+        ))
+    })?;
 
     // Deregister source table
     let _ = table.session.deregister_table(source_table_name);
@@ -1702,7 +2381,9 @@ pub fn pivot_impl(
             ))
         })?;
 
-    let final_df = table.session.read_table(Arc::new(result_mem_table))
+    let final_df = table
+        .session
+        .read_table(Arc::new(result_mem_table))
         .map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to create result dataframe: {}",
@@ -1738,21 +2419,21 @@ pub fn derive_window_sql_impl(
 ) -> PyResult<LTSeqTable> {
     // Validate table exists
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
-    
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No schema available.",
-        )
-    })?;
+
+    let schema = table
+        .schema
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
 
     // Collect current data into record batches
     let current_batches = RUNTIME
         .block_on(async {
-            (**df).clone().collect().await
+            (**df)
+                .clone()
+                .collect()
+                .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
@@ -1766,12 +2447,13 @@ pub fn derive_window_sql_impl(
 
     // Use unique temp table name to avoid conflicts
     let temp_table_name = format!("__ltseq_derive_temp_{}", std::process::id());
-    let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
-    })?;
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create memory table: {}",
+                e
+            ))
+        })?;
 
     // Deregister existing table if it exists
     let _ = table.session.deregister_table(&temp_table_name);
@@ -1788,7 +2470,7 @@ pub fn derive_window_sql_impl(
 
     // Build SELECT clause: all existing columns + derived expressions
     let mut select_parts: Vec<String> = Vec::new();
-    
+
     // Add all existing columns except __group_id__ and __rn__ (use batch_schema for actual columns)
     for field in batch_schema.fields() {
         let col_name = field.name();
@@ -1796,7 +2478,7 @@ pub fn derive_window_sql_impl(
             select_parts.push(format!("\"{}\"", col_name));
         }
     }
-    
+
     // Add derived columns
     for (col_name, sql_expr) in &derive_exprs {
         select_parts.push(format!("{} AS \"{}\"", sql_expr, col_name));
@@ -1812,11 +2494,15 @@ pub fn derive_window_sql_impl(
     // Execute query
     let result_batches = RUNTIME
         .block_on(async {
-            let result_df = table.session.sql(&sql_query)
-                .await
-                .map_err(|e| format!("Failed to execute derive query: {} -- SQL: {}", e, sql_query))?;
-            
-            result_df.collect()
+            let result_df = table.session.sql(&sql_query).await.map_err(|e| {
+                format!(
+                    "Failed to execute derive query: {} -- SQL: {}",
+                    e, sql_query
+                )
+            })?;
+
+            result_df
+                .collect()
                 .await
                 .map_err(|e| format!("Failed to collect derive results: {}", e))
         })
@@ -1853,20 +2539,24 @@ pub fn derive_window_sql_impl(
     }
 
     let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     // Create DataFrame from the result using read_table
-    let result_df = table.session.read_table(Arc::new(result_mem_table)).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create result table: {}",
-            e
-        ))
-    })?;
+    let result_df = table
+        .session
+        .read_table(Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
 
     Ok(LTSeqTable {
         session: Arc::clone(&table.session),

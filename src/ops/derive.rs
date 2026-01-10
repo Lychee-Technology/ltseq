@@ -17,15 +17,15 @@
 //! - Handled by: crate::ops::window module
 //! - This module detects window functions and delegates
 
-use crate::LTSeqTable;
-use crate::types::dict_to_py_expr;
+use crate::engine::RUNTIME;
 use crate::transpiler::pyexpr_to_datafusion;
+use crate::types::dict_to_py_expr;
+use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
-use crate::engine::RUNTIME;
 
 /// Helper function to derive new columns from expressions
 ///
@@ -44,9 +44,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     })?;
 
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     // 2. Check if any derived column contains window functions

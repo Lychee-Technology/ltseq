@@ -137,9 +137,10 @@ class LTSeq:
         self._inner = ltseq_core.LTSeqTable()
         self._schema: Dict[str, str] = {}
         self._csv_path: Optional[str] = None  # Track original CSV file for to_pandas()
+        self._has_header: bool = True  # Track header setting for to_pandas()
 
     @classmethod
-    def read_csv(cls, path: str) -> "LTSeq":
+    def read_csv(cls, path: str, has_header: bool = True) -> "LTSeq":
         """
         Read a CSV file and return an LTSeq instance.
 
@@ -147,6 +148,9 @@ class LTSeq:
 
         Args:
             path: Path to CSV file
+            has_header: Whether the CSV file has a header row. If False,
+                       column names are auto-generated as "column_0", "column_1", etc.
+                       Default is True.
 
         Returns:
             New LTSeq instance with data loaded from CSV
@@ -154,16 +158,22 @@ class LTSeq:
         Example:
             >>> t = LTSeq.read_csv("data.csv")
             >>> filtered = t.filter(lambda r: r.age > 18)
+
+            >>> # CSV without header
+            >>> t = LTSeq.read_csv("no_header.csv", has_header=False)
+            >>> # Access columns as column_1, column_2, etc. (1-based)
+            >>> t.select(lambda r: {"first": r.column_1, "second": r.column_2})
         """
         t = cls()
-        t._schema = _infer_schema_from_csv(path)
+        t._schema = _infer_schema_from_csv(path, has_header=has_header)
         t._csv_path = path  # Store path for to_pandas() fallback
+        t._has_header = has_header  # Store for to_pandas()
         # Call Rust LTSeqTable.read_csv to load the actual data
-        t._inner.read_csv(path)
+        t._inner.read_csv(path, has_header)
         return t
 
     @classmethod
-    def scan(cls, path: str) -> "Cursor":
+    def scan(cls, path: str, has_header: bool = True) -> "Cursor":
         """
         Scan a CSV file lazily, returning a Cursor for batch-by-batch iteration.
 
@@ -172,6 +182,9 @@ class LTSeq:
 
         Args:
             path: Path to CSV file
+            has_header: Whether the CSV file has a header row. If False,
+                       column names are auto-generated as "column_0", "column_1", etc.
+                       Default is True.
 
         Returns:
             Cursor for lazy iteration over batches
@@ -183,10 +196,14 @@ class LTSeq:
 
             >>> # Materialize to pandas (loads all data)
             >>> df = LTSeq.scan("file.csv").to_pandas()
+
+            >>> # CSV without header
+            >>> for batch in LTSeq.scan("no_header.csv", has_header=False):
+            ...     print(batch.to_pandas().columns)  # column_0, column_1, ...
         """
         from .cursor import Cursor
 
-        rust_cursor = ltseq_core.LTSeqTable.scan_csv(path)
+        rust_cursor = ltseq_core.LTSeqTable.scan_csv(path, has_header)
         return Cursor(rust_cursor)
 
     @classmethod
@@ -315,7 +332,17 @@ class LTSeq:
             import os
 
             if os.path.exists(self._csv_path):
-                return pd.read_csv(self._csv_path)
+                # Use has_header setting when reading CSV
+                has_header = getattr(self, "_has_header", True)
+                if has_header:
+                    return pd.read_csv(self._csv_path)
+                else:
+                    # Read without header; pandas will auto-generate 0-based names
+                    # but DataFusion uses 1-based column_1, column_2, etc.
+                    df = pd.read_csv(self._csv_path, header=None)
+                    # Rename to match DataFusion's naming convention (1-based)
+                    df.columns = [f"column_{i + 1}" for i in range(len(df.columns))]
+                    return df
 
         # Otherwise, try to use CSV round-trip via write_csv
         import tempfile
@@ -772,6 +799,68 @@ class LTSeq:
 
         # Return a NestedTable wrapping this LTSeq
         return NestedTable(self, grouping_fn)
+
+    def group_sorted(self, key: Callable) -> "NestedTable":
+        """
+        Group rows by key, assuming the table is already sorted by that key.
+
+        Unlike group_ordered() which groups only consecutive identical values,
+        group_sorted() assumes the data is globally sorted by the grouping key,
+        enabling one-pass O(N) grouping without hashing.
+
+        This is more efficient than hash-based grouping when data is pre-sorted,
+        as it only needs to detect key changes during a single pass.
+
+        The returned NestedTable provides group-level operations like first(), last(),
+        count(), and allows filtering/deriving based on group properties.
+
+        Args:
+            key: Lambda that extracts the grouping key from each row.
+                 E.g., lambda r: r.user_id
+
+        Returns:
+            A NestedTable supporting group-level operations
+
+        Raises:
+            ValueError: If schema is not initialized or data appears unsorted
+            AttributeError: If lambda references a non-existent column
+
+        SPL Equivalent:
+            groups@o (sorted grouping)
+
+        Example:
+            >>> # Data must be sorted by the grouping key first
+            >>> t = LTSeq.read_csv("events.csv").sort("user_id")
+            >>> groups = t.group_sorted(lambda r: r.user_id)
+            >>> # Get first event per user
+            >>> first_events = groups.first()
+            >>> # Get users with more than 5 events
+            >>> active_users = groups.filter(lambda g: g.count() > 5)
+
+        Note:
+            For best results, ensure the table is sorted by the grouping key
+            before calling group_sorted(). If the data is not sorted, the
+            behavior is the same as group_ordered() (consecutive grouping).
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        try:
+            # Validate the grouping function works
+            test_proxy = SchemaProxy(self._schema)
+            _ = key(test_proxy)
+        except Exception as e:
+            raise AttributeError(f"Invalid grouping function: {e}")
+
+        # Import here to avoid circular imports
+        from .grouping import NestedTable
+
+        # Return a NestedTable wrapping this LTSeq
+        # For sorted data, group_ordered semantics work correctly because
+        # consecutive identical values = all values with same key when sorted
+        return NestedTable(self, key, is_sorted=True)
 
     def agg(self, by: Optional[Callable] = None, **aggregations) -> "LTSeq":
         """
@@ -1645,6 +1734,134 @@ class LTSeq:
             result_schema = {col: "Unknown" for col in result_df.columns}
             rows = result_df.to_dict("records")
             return LTSeq._from_rows(rows, result_schema)
+
+        # Create new LTSeq wrapping the joined result
+        result = LTSeq()
+        result._inner = joined_inner
+
+        # Build the result schema: left columns + right columns with alias prefix
+        result_schema = self._schema.copy()
+        for col_name, col_type in other._schema.items():
+            result_schema[f"_other_{col_name}"] = col_type
+
+        result._schema = result_schema
+        return result
+
+    def asof_join(
+        self,
+        other: "LTSeq",
+        on: Callable,
+        direction: str = "backward",
+        is_sorted: bool = False,
+    ) -> "LTSeq":
+        """
+        As-of join for nearest time match in time-series data.
+
+        Matches each row from the left table with the "nearest" row from the
+        right table based on a time/key column. This is commonly used in
+        financial applications (e.g., matching trades with quotes).
+
+        Args:
+            other: Right table to join with
+            on: Lambda with inequality condition specifying the time columns.
+                E.g., lambda t, q: t.time >= q.time
+            direction: Match direction. One of:
+                - "backward" (default): Find largest right.time <= left.time
+                - "forward": Find smallest right.time >= left.time
+                - "nearest": Find closest right.time (backward bias on ties)
+            is_sorted: If True, trust that both tables are sorted by time column
+                       and skip sort verification/auto-sort. If False (default),
+                       tables will be sorted automatically.
+
+        Returns:
+            New LTSeq with joined results. Columns from the right table are
+            prefixed with "_other_". Unmatched left rows have NULL for right columns.
+
+        Raises:
+            ValueError: If schema not initialized or invalid direction
+            TypeError: If other is not LTSeq or join condition is invalid
+
+        SPL Equivalent:
+            joinx (range/nearest)
+
+        Example:
+            >>> trades = LTSeq.read_csv("trades.csv")
+            >>> quotes = LTSeq.read_csv("quotes.csv")
+            >>>
+            >>> # Auto-sort (safe, default behavior)
+            >>> result = trades.asof_join(
+            ...     quotes,
+            ...     on=lambda t, q: t.time >= q.time,
+            ...     direction="backward"
+            ... )
+            >>>
+            >>> # Skip sort verification (faster, for pre-sorted data)
+            >>> trades_sorted = trades.sort("time")
+            >>> quotes_sorted = quotes.sort("time")
+            >>> result = trades_sorted.asof_join(
+            ...     quotes_sorted,
+            ...     on=lambda t, q: t.time >= q.time,
+            ...     is_sorted=True
+            ... )
+            >>> result.show()
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"asof_join() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate direction
+        valid_directions = {"backward", "forward", "nearest"}
+        if direction not in valid_directions:
+            raise ValueError(
+                f"Invalid direction '{direction}'. Must be one of: {valid_directions}"
+            )
+
+        # Validate join condition and extract time columns
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            other_proxy = SchemaProxy(other._schema)
+            _ = on(self_proxy, other_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid asof join condition: {e}")
+
+        # Extract time columns using the helper function
+        from .helpers import _extract_asof_keys
+
+        left_time_col, right_time_col, operator = _extract_asof_keys(
+            on, self._schema, other._schema
+        )
+
+        # Determine source tables to use (may need sorting)
+        left_table = self
+        right_table = other
+
+        if not is_sorted:
+            # Auto-sort both tables by their respective time columns
+            left_table = self.sort(left_time_col)
+            right_table = other.sort(right_time_col)
+
+        # Call Rust asof_join() method
+        try:
+            joined_inner = left_table._inner.asof_join(
+                right_table._inner,
+                left_time_col,
+                right_time_col,
+                direction,
+                "_other",  # Alias for right table columns
+            )
+        except RuntimeError as e:
+            raise RuntimeError(f"Asof join failed: {e}")
 
         # Create new LTSeq wrapping the joined result
         result = LTSeq()

@@ -58,8 +58,8 @@
 //! | display.rs | 174 | Table formatting and display |
 //! | **Total** | **1,155** | All operation implementations (↓164 lines) |
 
+pub mod advanced;
 pub mod basic;
 pub mod derive;
-pub mod window;
-pub mod advanced;
 pub mod display;
+pub mod window;

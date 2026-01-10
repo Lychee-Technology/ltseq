@@ -153,11 +153,13 @@ fn serialize_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, String> {
 pub fn create_cursor_from_csv(
     session: Arc<SessionContext>,
     path: &str,
+    has_header: bool,
 ) -> Result<LTSeqCursor, String> {
     RUNTIME.block_on(async {
-        // Read CSV into DataFrame
+        // Read CSV into DataFrame with has_header option
+        let options = CsvReadOptions::new().has_header(has_header);
         let df = session
-            .read_csv(path, CsvReadOptions::new())
+            .read_csv(path, options)
             .await
             .map_err(|e| format!("Failed to read CSV: {}", e))?;
 

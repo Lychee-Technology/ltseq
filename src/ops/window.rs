@@ -6,15 +6,15 @@
 //! - Cumulative sums with window frames
 //! - Difference calculations
 
-use crate::LTSeqTable;
-use crate::types::{dict_to_py_expr, PyExpr};
+use crate::engine::RUNTIME;
 use crate::transpiler::pyexpr_to_sql;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, DataType};
+use crate::types::{dict_to_py_expr, PyExpr};
+use crate::LTSeqTable;
+use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
-use crate::engine::RUNTIME;
 
 /// Helper function to apply window function SQL transformations
 ///
@@ -25,7 +25,8 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
         // Handle rolling aggregations: replace marker with actual window frame
         // Pattern: __ROLLING_FUNC__(col)__size
         let window_size_start = expr_sql.rfind("__").unwrap_or(0) + 2;
-        let window_size_str = expr_sql[window_size_start..].trim_end_matches(|c: char| !c.is_ascii_digit());
+        let window_size_str =
+            expr_sql[window_size_start..].trim_end_matches(|c: char| !c.is_ascii_digit());
         let window_size = window_size_str.parse::<i32>().unwrap_or(1);
 
         let start = expr_sql.find("__ROLLING_").unwrap_or(0) + 10;
@@ -39,12 +40,17 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
         if !order_by.is_empty() {
             format!(
                 "{}({}) OVER (ORDER BY {} ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
-                func_part, col_part, order_by, window_size - 1
+                func_part,
+                col_part,
+                order_by,
+                window_size - 1
             )
         } else {
             format!(
                 "{}({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
-                func_part, col_part, window_size - 1
+                func_part,
+                col_part,
+                window_size - 1
             )
         }
     } else if is_diff {
@@ -140,9 +146,10 @@ pub fn derive_with_window_functions_impl(
     table: &LTSeqTable,
     derived_cols: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available")
-    })?;
+    let schema = table
+        .schema
+        .as_ref()
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available"))?;
 
     let df = table
         .dataframe
@@ -169,12 +176,13 @@ pub fn derive_with_window_functions_impl(
 
         // Use unique temp table name to avoid conflicts
         let temp_table_name = format!("__ltseq_temp_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
+        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to create memory table: {}",
+                    e
+                ))
+            })?;
 
         // Deregister existing table if it exists (cleanup from previous calls)
         let _ = table.session.deregister_table(&temp_table_name);
@@ -325,9 +333,7 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
     })?;
 
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     RUNTIME.block_on(async {
@@ -356,12 +362,13 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
 
         // Use unique temp table name to avoid conflicts
         let temp_table_name = format!("__ltseq_cumsum_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
+        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to create memory table: {}",
+                    e
+                ))
+            })?;
 
         // Deregister existing table if it exists (cleanup from previous calls)
         let _ = table.session.deregister_table(&temp_table_name);
@@ -426,9 +433,8 @@ async fn handle_empty_cum_sum(
             PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-        })?;
+        let py_expr = dict_to_py_expr(&expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let col_name = if let PyExpr::Column(name) = &py_expr {
             name.clone()

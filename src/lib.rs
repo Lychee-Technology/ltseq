@@ -7,20 +7,20 @@ use std::sync::Arc;
 // Global Tokio runtime for async operations
 
 // Module declarations - Organized for better maintainability
+pub mod cursor;
+pub mod engine; // DataFusion session and LTSeqTable struct
 mod error;
-mod types;
-pub mod format;      // Formatting and display functions
-pub mod transpiler;  // PyExpr to DataFusion transpilation
-pub mod engine;      // DataFusion session and LTSeqTable struct
-pub mod ops;         // Table operations grouped by category
-pub mod cursor;      // Streaming cursor for lazy iteration
+pub mod format; // Formatting and display functions
+pub mod ops; // Table operations grouped by category
+pub mod transpiler; // PyExpr to DataFusion transpilation
+mod types; // Streaming cursor for lazy iteration
 
 // Re-exports for convenience
-pub use types::{PyExpr, dict_to_py_expr};
 pub use error::PyExprError;
-pub use format::{format_table, format_cell};
+pub use format::{format_cell, format_table};
+pub use types::{dict_to_py_expr, PyExpr};
 
-use crate::engine::{RUNTIME, create_session_context};
+use crate::engine::{create_session_context, RUNTIME};
 
 /// Convert PyExpr to DataFusion Expr
 fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
@@ -113,19 +113,18 @@ impl LTSeqTable {
     ///
     /// Args:
     ///     path: Path to CSV file
-    fn read_csv(&mut self, path: String) -> PyResult<()> {
+    ///     has_header: Whether the CSV file has a header row (default: true)
+    #[pyo3(signature = (path, has_header=true))]
+    fn read_csv(&mut self, path: String, has_header: bool) -> PyResult<()> {
         RUNTIME.block_on(async {
-            // Use DataFusion's built-in CSV reader
-            let df = self
-                .session
-                .read_csv(&path, CsvReadOptions::new())
-                .await
-                .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to read CSV: {}",
-                        e
-                    ))
-                })?;
+            // Use DataFusion's built-in CSV reader with has_header option
+            let options = CsvReadOptions::new().has_header(has_header);
+            let df = self.session.read_csv(&path, options).await.map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to read CSV: {}",
+                    e
+                ))
+            })?;
 
             // Get the DFSchema and convert to Arrow schema
             let df_schema = df.schema();
@@ -146,13 +145,15 @@ impl LTSeqTable {
     ///
     /// Args:
     ///     path: Path to CSV file
+    ///     has_header: Whether the CSV file has a header row (default: true)
     ///
     /// Returns:
     ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
-    fn scan_csv(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
+    #[pyo3(signature = (path, has_header=true))]
+    fn scan_csv(path: String, has_header: bool) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        crate::cursor::create_cursor_from_csv(session, &path)
+        crate::cursor::create_cursor_from_csv(session, &path, has_header)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
@@ -222,11 +223,13 @@ impl LTSeqTable {
     ///     List of column names as strings
     fn get_column_names(&self) -> PyResult<Vec<String>> {
         let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available.",
-            )
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
         })?;
-        Ok(schema.fields().iter().map(|f| f.name().to_string()).collect())
+        Ok(schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect())
     }
 
     /// Get the number of rows in the table
@@ -426,7 +429,11 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with sorted data
-    fn sort(&self, sort_exprs: Vec<Bound<'_, PyDict>>, desc_flags: Vec<bool>) -> PyResult<LTSeqTable> {
+    fn sort(
+        &self,
+        sort_exprs: Vec<Bound<'_, PyDict>>,
+        desc_flags: Vec<bool>,
+    ) -> PyResult<LTSeqTable> {
         crate::ops::advanced::sort_impl(self, sort_exprs, desc_flags)
     }
 
@@ -570,16 +577,16 @@ impl LTSeqTable {
         let distinct_df = RUNTIME
             .block_on(async {
                 // Collect DataFrame to batches
-                let batches = (**df).clone().collect().await.map_err(|e| {
-                    format!("Failed to collect data for distinct: {}", e)
-                })?;
+                let batches = (**df)
+                    .clone()
+                    .collect()
+                    .await
+                    .map_err(|e| format!("Failed to collect data for distinct: {}", e))?;
 
                 // Create a MemTable from the batches
-                let temp_table = datafusion::datasource::MemTable::try_new(
-                    schema_clone,
-                    vec![batches],
-                )
-                .map_err(|e| format!("Failed to create temp table: {}", e))?;
+                let temp_table =
+                    datafusion::datasource::MemTable::try_new(schema_clone, vec![batches])
+                        .map_err(|e| format!("Failed to create temp table: {}", e))?;
 
                 // Register the source DataFrame
                 session
@@ -657,7 +664,7 @@ impl LTSeqTable {
         })
     }
 
-     /// Add cumulative sum columns for specified columns
+    /// Add cumulative sum columns for specified columns
     ///
     /// Args:
     ///     cum_exprs: List of serialized expression dicts (from Python)
@@ -682,7 +689,11 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with one row per group (or one row for full-table agg)
-    fn agg(&self, group_expr: Option<Bound<'_, PyDict>>, agg_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+    fn agg(
+        &self,
+        group_expr: Option<Bound<'_, PyDict>>,
+        agg_dict: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
         crate::ops::advanced::agg_impl(self, group_expr, agg_dict)
     }
 
@@ -712,7 +723,10 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with derived columns added (and __group_id__, __rn__ removed)
-    fn derive_window_sql(&self, derive_exprs: std::collections::HashMap<String, String>) -> PyResult<LTSeqTable> {
+    fn derive_window_sql(
+        &self,
+        derive_exprs: std::collections::HashMap<String, String>,
+    ) -> PyResult<LTSeqTable> {
         crate::ops::advanced::derive_window_sql_impl(self, derive_exprs)
     }
 
@@ -761,7 +775,7 @@ impl LTSeqTable {
     ///
     /// This method implements an inner join between two tables based on specified join keys.
     /// It supports lazy evaluation - the join is only executed when the result is accessed.
-     fn join(
+    fn join(
         &self,
         other: &LTSeqTable,
         left_key_expr_dict: &Bound<'_, PyDict>,
@@ -769,7 +783,61 @@ impl LTSeqTable {
         join_type: &str,
         alias: &str,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::join_impl(self, other, left_key_expr_dict, right_key_expr_dict, join_type, alias)
+        crate::ops::advanced::join_impl(
+            self,
+            other,
+            left_key_expr_dict,
+            right_key_expr_dict,
+            join_type,
+            alias,
+        )
+    }
+
+    /// As-of Join: Time-series join matching each left row with nearest right row
+    ///
+    /// This operation finds, for each row in the left table, the "nearest" matching
+    /// row in the right table based on a time/key column. Commonly used in financial
+    /// applications (e.g., matching trades with quotes).
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The right table to join with
+    /// * `left_time_col` - Column name for time/key in left table
+    /// * `right_time_col` - Column name for time/key in right table  
+    /// * `direction` - Match direction: "backward", "forward", or "nearest"
+    /// * `alias` - Prefix for right table columns (e.g., "_other")
+    ///
+    /// # Direction Semantics
+    ///
+    /// * `backward`: Find largest right.time where right.time <= left.time
+    /// * `forward`: Find smallest right.time where right.time >= left.time
+    /// * `nearest`: Find closest right.time (backward bias on ties)
+    ///
+    /// # Returns
+    ///
+    /// A new LTSeqTable with combined columns (right columns prefixed with alias).
+    /// Unmatched left rows have NULL for right columns.
+    ///
+    /// # Algorithm
+    ///
+    /// Uses binary search for O(N log M) complexity where N = left rows, M = right rows.
+    /// Both tables must be sorted by their respective time columns.
+    fn asof_join(
+        &self,
+        other: &LTSeqTable,
+        left_time_col: &str,
+        right_time_col: &str,
+        direction: &str,
+        alias: &str,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::advanced::asof_join_impl(
+            self,
+            other,
+            left_time_col,
+            right_time_col,
+            direction,
+            alias,
+        )
     }
 
     /// Pivot: Transform table from long to wide format
@@ -837,7 +905,11 @@ impl LTSeqTable {
     /// # Returns
     ///
     /// A new LTSeqTable containing rows present in both tables
-    fn intersect(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
+    fn intersect(
+        &self,
+        other: &LTSeqTable,
+        key_expr_dict: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<LTSeqTable> {
         crate::ops::basic::intersect_impl(self, other, key_expr_dict)
     }
 
@@ -855,7 +927,11 @@ impl LTSeqTable {
     /// # Returns
     ///
     /// A new LTSeqTable with rows in left table but not in right table
-    fn diff(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
+    fn diff(
+        &self,
+        other: &LTSeqTable,
+        key_expr_dict: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<LTSeqTable> {
         crate::ops::basic::diff_impl(self, other, key_expr_dict)
     }
 
@@ -903,9 +979,7 @@ impl LTSeqTable {
             })?;
 
             // Write header
-            let fields: Vec<String> = schema.fields().iter()
-                .map(|f| f.name().clone())
-                .collect();
+            let fields: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
             writeln!(file, "{}", fields.join(",")).map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Failed to write CSV header: {}",
@@ -924,7 +998,7 @@ impl LTSeqTable {
                         } else {
                             // Use format_cell which has comprehensive type handling
                             let formatted = crate::format::format_cell(&**column, row_idx);
-                            // Replace "[unsupported type]" with empty string for CSV  
+                            // Replace "[unsupported type]" with empty string for CSV
                             // and remove "None" for null values
                             if formatted == "[unsupported type]" || formatted == "None" {
                                 "".to_string()
@@ -947,12 +1021,11 @@ impl LTSeqTable {
         })
     }
 
-
     fn debug_schema(&self) -> PyResult<String> {
         let schema = self.schema.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
         })?;
-        
+
         let mut output = String::new();
         for field in schema.fields() {
             output.push_str(&format!("{}: {}\n", field.name(), field.data_type()));
@@ -960,12 +1033,14 @@ impl LTSeqTable {
         Ok(output)
     }
 
-    fn is_subset(&self, other: &LTSeqTable, key_expr_dict: Option<Bound<'_, PyDict>>) -> PyResult<bool> {
+    fn is_subset(
+        &self,
+        other: &LTSeqTable,
+        key_expr_dict: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
         crate::ops::basic::is_subset_impl(self, other, key_expr_dict)
     }
 }
-
-
 
 #[pyfunction]
 fn hello() -> PyResult<String> {

@@ -66,7 +66,11 @@ use crate::engine::RUNTIME;
 /// Format RecordBatches as a pretty-printed ASCII table
 ///
 /// Shows up to `limit` rows, streaming through batches
-pub fn format_table(batches: &[RecordBatch], schema: &ArrowSchema, limit: usize) -> PyResult<String> {
+pub fn format_table(
+    batches: &[RecordBatch],
+    schema: &ArrowSchema,
+    limit: usize,
+) -> PyResult<String> {
     let mut output = String::new();
     let col_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
 
@@ -147,7 +151,10 @@ pub fn format_table(batches: &[RecordBatch], schema: &ArrowSchema, limit: usize)
     output.push('\n');
 
     if total_rows > limit {
-        output.push_str(&format!("... ({} total rows, showing first {})\n", total_rows, limit));
+        output.push_str(&format!(
+            "... ({} total rows, showing first {})\n",
+            total_rows, limit
+        ));
     }
 
     Ok(output)
@@ -198,9 +205,7 @@ pub fn format_cell(column: &dyn arrow::array::Array, row_idx: usize) -> String {
 /// This is called from the lib.rs impl block
 pub fn show_impl(table: &LTSeqTable, n: usize) -> PyResult<String> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     let schema = table.schema.as_ref().ok_or_else(|| {
@@ -221,4 +226,3 @@ pub fn show_impl(table: &LTSeqTable, n: usize) -> PyResult<String> {
         Ok(output)
     })
 }
-

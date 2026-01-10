@@ -54,9 +54,9 @@
 //! - **Async**: CSV reads are async via DataFusion's session context
 //! - **Runtime**: All async operations executed via RUNTIME.block_on() in helpers
 
-use crate::LTSeqTable;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
+use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::prelude::*;
 use pyo3::prelude::*;
@@ -70,22 +70,16 @@ use crate::engine::RUNTIME;
 /// Args:
 ///     table: Mutable reference to LTSeqTable
 ///     path: Path to CSV file
-pub async fn read_csv_impl(table: &mut LTSeqTable, path: String) -> PyResult<()> {
-    let df = table
-        .session
-        .read_csv(&path, CsvReadOptions::new())
-        .await
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read CSV: {}",
-                e
-            ))
-        })?;
+///     has_header: Whether the CSV file has a header row
+pub async fn read_csv_impl(table: &mut LTSeqTable, path: String, has_header: bool) -> PyResult<()> {
+    let options = CsvReadOptions::new().has_header(has_header);
+    let df = table.session.read_csv(&path, options).await.map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read CSV: {}", e))
+    })?;
 
     // Get the DFSchema and convert to Arrow schema
     let df_schema = df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let arrow_schema = ArrowSchema::new(arrow_fields);
 
     table.schema = Some(Arc::new(arrow_schema));
@@ -99,9 +93,7 @@ pub async fn read_csv_impl(table: &mut LTSeqTable, path: String) -> PyResult<()>
 ///     The number of rows
 pub fn count_impl(table: &LTSeqTable) -> PyResult<usize> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     let mut row_count = 0;
@@ -128,9 +120,7 @@ pub fn count_impl(table: &LTSeqTable) -> PyResult<usize> {
 ///     expr_dict: Serialized expression dict
 pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     let schema = table.schema.as_ref().ok_or_else(|| {
@@ -138,27 +128,26 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
     })?;
 
     // Deserialize the expression
-    let py_expr = dict_to_py_expr(expr_dict).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-    })?;
+    let py_expr = dict_to_py_expr(expr_dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
     // Apply filter
-    let filtered_df = RUNTIME.block_on(async {
-        (**df)
-            .clone()
-            .filter(df_expr)
-            .map_err(|e| format!("Filter failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let filtered_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .filter(df_expr)
+                .map_err(|e| format!("Filter failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema from the new DataFrame
     let df_schema = filtered_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -178,11 +167,12 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     expr_dict: Serialized filter expression
-pub fn search_first_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+pub fn search_first_impl(
+    table: &LTSeqTable,
+    expr_dict: &Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     let schema = table.schema.as_ref().ok_or_else(|| {
@@ -190,29 +180,28 @@ pub fn search_first_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> P
     })?;
 
     // Deserialize the expression
-    let py_expr = dict_to_py_expr(expr_dict).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-    })?;
+    let py_expr = dict_to_py_expr(expr_dict)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
     // Apply filter and limit to first result
-    let result_df = RUNTIME.block_on(async {
-        (**df)
-            .clone()
-            .filter(df_expr)
-            .map_err(|e| format!("Filter failed: {}", e))?
-            .limit(0, Some(1))
-            .map_err(|e| format!("Limit failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let result_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .filter(df_expr)
+                .map_err(|e| format!("Filter failed: {}", e))?
+                .limit(0, Some(1))
+                .map_err(|e| format!("Limit failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema from the result DataFrame
     let df_schema = result_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -231,9 +220,7 @@ pub fn search_first_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> P
 ///     exprs: List of serialized expression dicts
 pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
     let schema = table.schema.as_ref().ok_or_else(|| {
@@ -243,9 +230,8 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // Transpile all expressions
     let mut df_exprs = Vec::new();
     for expr_dict in exprs {
-        let py_expr = dict_to_py_expr(&expr_dict).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-        })?;
+        let py_expr = dict_to_py_expr(&expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
@@ -254,18 +240,18 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     }
 
     // Apply select
-    let selected_df = RUNTIME.block_on(async {
-        (**df)
-            .clone()
-            .select(df_exprs)
-            .map_err(|e| format!("Select failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let selected_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .select(df_exprs)
+                .map_err(|e| format!("Select failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema
     let df_schema = selected_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -285,27 +271,25 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
 ///     length: Maximum number of rows to return
 pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
-    let sliced_df = RUNTIME.block_on(async {
-        // DataFusion's limit(skip: usize, fetch: Option<usize>)
-        let skip = offset as usize;
-        let fetch = length.map(|len| len as usize);
+    let sliced_df = RUNTIME
+        .block_on(async {
+            // DataFusion's limit(skip: usize, fetch: Option<usize>)
+            let skip = offset as usize;
+            let fetch = length.map(|len| len as usize);
 
-        (**df)
-            .clone()
-            .limit(skip, fetch)
-            .map_err(|e| format!("Slice execution failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            (**df)
+                .clone()
+                .limit(skip, fetch)
+                .map_err(|e| format!("Slice execution failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema from the new DataFrame (or reuse existing)
     let df_schema = sliced_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -322,25 +306,26 @@ pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyRes
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     _key_exprs: Not used in Phase 1 (future: expressions to determine uniqueness)
-pub fn distinct_impl(table: &LTSeqTable, _key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
+pub fn distinct_impl(
+    table: &LTSeqTable,
+    _key_exprs: Vec<Bound<'_, PyDict>>,
+) -> PyResult<LTSeqTable> {
     let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "No data loaded. Call read_csv() first.",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
     })?;
 
-    let distinct_df = RUNTIME.block_on(async {
-        (**df)
-            .clone()
-            .distinct()
-            .map_err(|e| format!("Distinct failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let distinct_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .distinct()
+                .map_err(|e| format!("Distinct failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema
     let df_schema = distinct_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -375,15 +360,11 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
 
     // Validate schemas match
     let schema1 = table1.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available")
     })?;
 
     let schema2 = table2.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available")
     })?;
 
     // Check that column names match
@@ -391,23 +372,24 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
     let cols2: Vec<&str> = schema2.fields().iter().map(|f| f.name().as_str()).collect();
 
     if cols1 != cols2 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            format!("Schema mismatch: {:?} vs {:?}", cols1, cols2),
-        ));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Schema mismatch: {:?} vs {:?}",
+            cols1, cols2
+        )));
     }
 
-    let union_df = RUNTIME.block_on(async {
-        (**df1)
-            .clone()
-            .union((**df2).clone())
-            .map_err(|e| format!("Union failed: {}", e))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let union_df = RUNTIME
+        .block_on(async {
+            (**df1)
+                .clone()
+                .union((**df2).clone())
+                .map_err(|e| format!("Union failed: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema
     let df_schema = union_df.schema();
-    let arrow_fields: Vec<Field> =
-        df_schema.fields().iter().map(|f| (**f).clone()).collect();
+    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
     let new_arrow_schema = ArrowSchema::new(arrow_fields);
 
     // Return new LTSeqTable
@@ -448,15 +430,11 @@ pub fn intersect_impl(
     })?;
 
     let schema1 = table1.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available")
     })?;
 
     let schema2 = table2.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available")
     })?;
 
     // Determine comparison columns
@@ -465,7 +443,11 @@ pub fn intersect_impl(
         extract_key_columns(&expr_dict, schema1)?
     } else {
         // Use all columns from left table
-        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+        schema1
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
     };
 
     if compare_cols.is_empty() {
@@ -475,58 +457,73 @@ pub fn intersect_impl(
     }
 
     // Register both DataFrames as temp tables and execute semi-join SQL
-    let result_df = RUNTIME.block_on(async {
-        // Collect batches from both tables
-        let batches1 = (**df1).clone().collect().await.map_err(|e| {
-            format!("Failed to collect left table: {}", e)
-        })?;
-        let batches2 = (**df2).clone().collect().await.map_err(|e| {
-            format!("Failed to collect right table: {}", e)
-        })?;
+    let result_df = RUNTIME
+        .block_on(async {
+            // Collect batches from both tables
+            let batches1 = (**df1)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect left table: {}", e))?;
+            let batches2 = (**df2)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect right table: {}", e))?;
 
-        // Register temp tables
-        let t1_name = "__intersect_t1__";
-        let t2_name = "__intersect_t2__";
+            // Register temp tables
+            let t1_name = "__intersect_t1__";
+            let t2_name = "__intersect_t2__";
 
-        let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
-            .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
-        let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
-            .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
+            let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
+                .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
+            let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
+                .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
 
-        table1.session.register_table(t1_name, Arc::new(temp1))
-            .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
-        table1.session.register_table(t2_name, Arc::new(temp2))
-            .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
+            table1
+                .session
+                .register_table(t1_name, Arc::new(temp1))
+                .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
+            table1
+                .session
+                .register_table(t2_name, Arc::new(temp2))
+                .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
 
-        // Build column list for SELECT (all columns from t1)
-        let select_cols: Vec<String> = schema1.fields().iter()
-            .map(|f| format!("t1.\"{}\"", f.name()))
-            .collect();
+            // Build column list for SELECT (all columns from t1)
+            let select_cols: Vec<String> = schema1
+                .fields()
+                .iter()
+                .map(|f| format!("t1.\"{}\"", f.name()))
+                .collect();
 
-        // Build WHERE EXISTS condition
-        let where_conditions: Vec<String> = compare_cols.iter()
-            .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
-            .collect();
+            // Build WHERE EXISTS condition
+            let where_conditions: Vec<String> = compare_cols
+                .iter()
+                .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
+                .collect();
 
-        // Semi-join query: SELECT t1.* FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
-        let sql = format!(
-            "SELECT DISTINCT {} FROM \"{}\" t1 WHERE EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-            select_cols.join(", "),
-            t1_name,
-            t2_name,
-            where_conditions.join(" AND ")
-        );
+            // Semi-join query: SELECT t1.* FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
+            let sql = format!(
+                "SELECT DISTINCT {} FROM \"{}\" t1 WHERE EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
+                select_cols.join(", "),
+                t1_name,
+                t2_name,
+                where_conditions.join(" AND ")
+            );
 
-        let result = table1.session.sql(&sql).await
-            .map_err(|e| format!("Intersect query failed: {}", e))?;
+            let result = table1
+                .session
+                .sql(&sql)
+                .await
+                .map_err(|e| format!("Intersect query failed: {}", e))?;
 
-        // Deregister temp tables
-        let _ = table1.session.deregister_table(t1_name);
-        let _ = table1.session.deregister_table(t2_name);
+            // Deregister temp tables
+            let _ = table1.session.deregister_table(t1_name);
+            let _ = table1.session.deregister_table(t2_name);
 
-        Ok::<_, String>(result)
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            Ok::<_, String>(result)
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema from result
     let df_schema = result_df.schema();
@@ -570,15 +567,11 @@ pub fn diff_impl(
     })?;
 
     let schema1 = table1.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available")
     })?;
 
     let schema2 = table2.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available")
     })?;
 
     // Determine comparison columns
@@ -587,7 +580,11 @@ pub fn diff_impl(
         extract_key_columns(&expr_dict, schema1)?
     } else {
         // Use all columns from left table
-        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+        schema1
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
     };
 
     if compare_cols.is_empty() {
@@ -597,58 +594,73 @@ pub fn diff_impl(
     }
 
     // Register both DataFrames as temp tables and execute anti-join SQL
-    let result_df = RUNTIME.block_on(async {
-        // Collect batches from both tables
-        let batches1 = (**df1).clone().collect().await.map_err(|e| {
-            format!("Failed to collect left table: {}", e)
-        })?;
-        let batches2 = (**df2).clone().collect().await.map_err(|e| {
-            format!("Failed to collect right table: {}", e)
-        })?;
+    let result_df = RUNTIME
+        .block_on(async {
+            // Collect batches from both tables
+            let batches1 = (**df1)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect left table: {}", e))?;
+            let batches2 = (**df2)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect right table: {}", e))?;
 
-        // Register temp tables
-        let t1_name = "__diff_t1__";
-        let t2_name = "__diff_t2__";
+            // Register temp tables
+            let t1_name = "__diff_t1__";
+            let t2_name = "__diff_t2__";
 
-        let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
-            .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
-        let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
-            .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
+            let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
+                .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
+            let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
+                .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
 
-        table1.session.register_table(t1_name, Arc::new(temp1))
-            .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
-        table1.session.register_table(t2_name, Arc::new(temp2))
-            .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
+            table1
+                .session
+                .register_table(t1_name, Arc::new(temp1))
+                .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
+            table1
+                .session
+                .register_table(t2_name, Arc::new(temp2))
+                .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
 
-        // Build column list for SELECT (all columns from t1)
-        let select_cols: Vec<String> = schema1.fields().iter()
-            .map(|f| format!("t1.\"{}\"", f.name()))
-            .collect();
+            // Build column list for SELECT (all columns from t1)
+            let select_cols: Vec<String> = schema1
+                .fields()
+                .iter()
+                .map(|f| format!("t1.\"{}\"", f.name()))
+                .collect();
 
-        // Build WHERE NOT EXISTS condition
-        let where_conditions: Vec<String> = compare_cols.iter()
-            .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
-            .collect();
+            // Build WHERE NOT EXISTS condition
+            let where_conditions: Vec<String> = compare_cols
+                .iter()
+                .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
+                .collect();
 
-        // Anti-join query: SELECT t1.* FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
-        let sql = format!(
-            "SELECT {} FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-            select_cols.join(", "),
-            t1_name,
-            t2_name,
-            where_conditions.join(" AND ")
-        );
+            // Anti-join query: SELECT t1.* FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE t1.key = t2.key)
+            let sql = format!(
+                "SELECT {} FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
+                select_cols.join(", "),
+                t1_name,
+                t2_name,
+                where_conditions.join(" AND ")
+            );
 
-        let result = table1.session.sql(&sql).await
-            .map_err(|e| format!("Diff query failed: {}", e))?;
+            let result = table1
+                .session
+                .sql(&sql)
+                .await
+                .map_err(|e| format!("Diff query failed: {}", e))?;
 
-        // Deregister temp tables
-        let _ = table1.session.deregister_table(t1_name);
-        let _ = table1.session.deregister_table(t2_name);
+            // Deregister temp tables
+            let _ = table1.session.deregister_table(t1_name);
+            let _ = table1.session.deregister_table(t2_name);
 
-        Ok::<_, String>(result)
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            Ok::<_, String>(result)
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
     // Get schema from result
     let df_schema = result_df.schema();
@@ -692,15 +704,11 @@ pub fn is_subset_impl(
     })?;
 
     let schema1 = table1.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available")
     })?;
 
     let schema2 = table2.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table schema not available",
-        )
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available")
     })?;
 
     // Determine comparison columns
@@ -709,7 +717,11 @@ pub fn is_subset_impl(
         extract_key_columns(&expr_dict, schema1)?
     } else {
         // Use all columns from left table
-        schema1.fields().iter().map(|f| f.name().to_string()).collect()
+        schema1
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
     };
 
     if compare_cols.is_empty() {
@@ -809,7 +821,7 @@ fn extract_key_columns(
         _ => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "on= argument must be a single column reference (e.g., lambda r: r.id). \
-                 For multiple columns, leave on=None to use all columns."
+                 For multiple columns, leave on=None to use all columns.",
             ));
         }
     }
@@ -827,4 +839,3 @@ fn extract_key_columns(
 
     Ok(columns)
 }
-
