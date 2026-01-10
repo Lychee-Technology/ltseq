@@ -300,17 +300,22 @@
 **Status**: NOT STARTED
 
 #### 4.9 Semi/Anti Joins
-- [ ] Add `semi_join(other, on)` - rows in left that have match in right
-- [ ] Add `anti_join(other, on)` - rows in left that have NO match in right
-- [ ] Add tests in `tests/test_semi_anti_joins.py`
+- [x] Add `semi_join(other, on)` - rows in left that have match in right
+- [x] Add `anti_join(other, on)` - rows in left that have NO match in right
+- [x] Add tests in `tests/test_semi_anti_joins.py`
 
 **Implementation Notes:**
-- Semi-join: `WHERE EXISTS (SELECT 1 FROM right WHERE left.key = right.key)`
-- Anti-join: `WHERE NOT EXISTS (SELECT 1 FROM right WHERE left.key = right.key)`
-- Or implement via LEFT JOIN + filter on NULL/NOT NULL
+- Uses join-style API with two-param lambda: `lambda a, b: a.key == b.key`
+- Supports different column names between tables (unlike `intersect`/`diff`)
+- Semi-join: `SELECT DISTINCT L.* FROM L WHERE EXISTS (SELECT 1 FROM R WHERE L.key = R.key)`
+- Anti-join: `SELECT L.* FROM L WHERE NOT EXISTS (SELECT 1 FROM R WHERE L.key = R.key)`
+- Returns only left table schema (no merged columns)
+- Semi-join uses DISTINCT to deduplicate when right table has multiple matches
+- Warns if tables have no overlapping column names (likely user error)
+- Preserves sort keys from left table
 
-**Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `src/ops/join.rs`, `py-ltseq/tests/test_semi_anti_joins.py`
-**Status**: NOT STARTED
+**Files**: `src/ops/join.rs`, `src/lib.rs`, `py-ltseq/ltseq/joins.py`, `py-ltseq/tests/test_semi_anti_joins.py`
+**Status**: COMPLETED
 
 ---
 
@@ -363,4 +368,4 @@
 - [ ] Phase 4.6: Additional Temporal Ops (`week`, `quarter`, `day_of_week`, `day_of_year`)
 - [ ] Phase 4.7: Unpivot/Melt (wide-to-long transformation)
 - [ ] Phase 4.8: Sample/Random (`sample(n)`, `sample_fraction(p)`)
-- [ ] Phase 4.9: Semi/Anti Joins (`semi_join`, `anti_join`)
+- [x] Phase 4.9: Semi/Anti Joins (`semi_join`, `anti_join`) - **COMPLETED**

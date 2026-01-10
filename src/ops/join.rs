@@ -20,10 +20,178 @@ use crate::engine::RUNTIME;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
+use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Get validated dataframe and schema from a table
+fn get_df_and_schema<'a>(
+    table: &'a LTSeqTable,
+    table_name: &str,
+) -> PyResult<(
+    &'a Arc<datafusion::dataframe::DataFrame>,
+    &'a Arc<ArrowSchema>,
+)> {
+    let df = table.dataframe.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "{} table has no data. Call read_csv() first.",
+            table_name
+        ))
+    })?;
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "{} table schema not available.",
+            table_name
+        ))
+    })?;
+    Ok((df, schema))
+}
+
+/// Collect both left and right DataFrames to batches
+async fn collect_both_tables(
+    df_left: &datafusion::dataframe::DataFrame,
+    df_right: &datafusion::dataframe::DataFrame,
+) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>), String> {
+    let left_result = df_left
+        .clone()
+        .collect()
+        .await
+        .map_err(|e| format!("Failed to collect left table: {}", e))?;
+    let right_result = df_right
+        .clone()
+        .collect()
+        .await
+        .map_err(|e| format!("Failed to collect right table: {}", e))?;
+    Ok((left_result, right_result))
+}
+
+/// Get schema from batches or use stored schema as fallback
+fn get_schema_from_batches(
+    batches: &[RecordBatch],
+    stored_schema: &Arc<ArrowSchema>,
+) -> Arc<ArrowSchema> {
+    batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema).clone()))
+}
+
+/// Register both tables as temp MemTables and return their names
+fn register_join_tables(
+    session: &SessionContext,
+    left_schema: &Arc<ArrowSchema>,
+    left_batches: Vec<RecordBatch>,
+    right_schema: &Arc<ArrowSchema>,
+    right_batches: Vec<RecordBatch>,
+    prefix: &str,
+) -> PyResult<(String, String)> {
+    let unique_suffix = std::process::id();
+    let left_name = format!("__ltseq_{}_left_{}", prefix, unique_suffix);
+    let right_name = format!("__ltseq_{}_right_{}", prefix, unique_suffix);
+
+    // Deregister any existing tables
+    let _ = session.deregister_table(&left_name);
+    let _ = session.deregister_table(&right_name);
+
+    let left_mem = MemTable::try_new(Arc::clone(left_schema), vec![left_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create left temp table: {}",
+            e
+        ))
+    })?;
+
+    let right_mem =
+        MemTable::try_new(Arc::clone(right_schema), vec![right_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create right temp table: {}",
+                e
+            ))
+        })?;
+
+    session
+        .register_table(&left_name, Arc::new(left_mem))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register left temp table: {}",
+                e
+            ))
+        })?;
+
+    session
+        .register_table(&right_name, Arc::new(right_mem))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register right temp table: {}",
+                e
+            ))
+        })?;
+
+    Ok((left_name, right_name))
+}
+
+/// Execute SQL query and collect results
+async fn execute_and_collect(
+    session: &SessionContext,
+    sql: &str,
+    op_name: &str,
+) -> Result<Vec<RecordBatch>, String> {
+    let result_df = session
+        .sql(sql)
+        .await
+        .map_err(|e| format!("Failed to execute {} query: {}", op_name, e))?;
+
+    result_df
+        .collect()
+        .await
+        .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
+}
+
+/// Build result LTSeqTable from batches
+fn build_result_table(
+    session: &Arc<SessionContext>,
+    result_batches: Vec<RecordBatch>,
+    empty_schema: Arc<ArrowSchema>,
+    sort_exprs: &[String],
+) -> PyResult<LTSeqTable> {
+    if result_batches.is_empty() {
+        return Ok(LTSeqTable {
+            session: Arc::clone(session),
+            dataframe: None,
+            schema: Some(empty_schema),
+            sort_exprs: sort_exprs.to_vec(),
+        });
+    }
+
+    let result_schema = result_batches[0].schema();
+    let result_mem =
+        MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = session.read_table(Arc::new(result_mem)).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to read result table: {}",
+            e
+        ))
+    })?;
+
+    Ok(LTSeqTable {
+        session: Arc::clone(session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
+        sort_exprs: sort_exprs.to_vec(),
+    })
+}
 
 /// Extract join key column names from either a Column or And-expression
 ///
@@ -203,6 +371,10 @@ fn build_join_sql(
     )
 }
 
+// ============================================================================
+// Public API Functions
+// ============================================================================
+
 /// Perform cross-table join with automatic schema conflict handling
 pub fn join_impl(
     table: &LTSeqTable,
@@ -212,56 +384,26 @@ pub fn join_impl(
     join_type: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
-    // 1. Validate both tables have data
-    let df_left = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table has no data. Call read_csv() first.",
-        )
-    })?;
+    let (df_left, stored_schema_left) = get_df_and_schema(table, "Left")?;
+    let (df_right, stored_schema_right) = get_df_and_schema(other, "Right")?;
 
-    let df_right = other.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table has no data. Call read_csv() first.",
-        )
-    })?;
+    // Validate join type
+    if !matches!(join_type, "inner" | "left" | "right" | "full") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unknown join type: {}",
+            join_type
+        )));
+    }
 
-    let stored_schema_left = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available.")
-    })?;
-
-    let stored_schema_right = other.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available.")
-    })?;
-
-    // 2. Collect both DataFrames to batches
+    // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
-        .block_on(async {
-            let left_future = (**df_left).clone().collect();
-            let right_future = (**df_right).clone().collect();
-
-            let left_result = left_future
-                .await
-                .map_err(|e| format!("Failed to collect left table: {}", e))?;
-            let right_result = right_future
-                .await
-                .map_err(|e| format!("Failed to collect right table: {}", e))?;
-
-            Ok::<_, String>((left_result, right_result))
-        })
+        .block_on(collect_both_tables(df_left, df_right))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 3. Get actual schemas from batches
-    let left_schema = left_batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new((**stored_schema_left).clone()));
+    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
+    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
 
-    let right_schema = right_batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new((**stored_schema_right).clone()));
-
-    // 4. Parse and validate join keys
+    // Parse and validate join keys
     let (left_col_names, right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
@@ -269,65 +411,19 @@ pub fn join_impl(
         &right_schema,
     )?;
 
-    // 5. Validate join type
-    match join_type {
-        "inner" | "left" | "right" | "full" => {}
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Unknown join type: {}",
-                join_type
-            )))
-        }
-    };
+    // Register temp tables and execute query
+    let (left_name, right_name) = register_join_tables(
+        &table.session,
+        &left_schema,
+        left_batches,
+        &right_schema,
+        right_batches,
+        "join",
+    )?;
 
-    // 6. Register both tables as temp MemTables
-    let unique_suffix = std::process::id();
-    let left_table_name = format!("__ltseq_join_left_{}", unique_suffix);
-    let right_table_name = format!("__ltseq_join_right_{}", unique_suffix);
-
-    let _ = table.session.deregister_table(&left_table_name);
-    let _ = table.session.deregister_table(&right_table_name);
-
-    let left_mem =
-        MemTable::try_new(Arc::clone(&left_schema), vec![left_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create left temp table: {}",
-                e
-            ))
-        })?;
-
-    let right_mem =
-        MemTable::try_new(Arc::clone(&right_schema), vec![right_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create right temp table: {}",
-                e
-            ))
-        })?;
-
-    table
-        .session
-        .register_table(&left_table_name, Arc::new(left_mem))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register left temp table: {}",
-                e
-            ))
-        })?;
-
-    table
-        .session
-        .register_table(&right_table_name, Arc::new(right_mem))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register right temp table: {}",
-                e
-            ))
-        })?;
-
-    // 7. Build and execute SQL JOIN query
     let sql_query = build_join_sql(
-        &left_table_name,
-        &right_table_name,
+        &left_name,
+        &right_name,
         &left_schema,
         &right_schema,
         &left_col_names,
@@ -337,72 +433,162 @@ pub fn join_impl(
     );
 
     let result_batches = RUNTIME
-        .block_on(async {
-            let result_df = table
-                .session
-                .sql(&sql_query)
-                .await
-                .map_err(|e| format!("Failed to execute join query: {}", e))?;
-
-            result_df
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect join results: {}", e))
-        })
+        .block_on(execute_and_collect(&table.session, &sql_query, "join"))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 8. Cleanup temp tables
-    let _ = table.session.deregister_table(&left_table_name);
-    let _ = table.session.deregister_table(&right_table_name);
+    // Cleanup
+    let _ = table.session.deregister_table(&left_name);
+    let _ = table.session.deregister_table(&right_name);
 
-    // 9. Build result LTSeqTable
-    if result_batches.is_empty() {
-        let mut result_fields: Vec<Field> = Vec::new();
+    // Build empty schema for empty results
+    let empty_schema = build_join_result_schema(&left_schema, &right_schema, alias);
 
-        for field in left_schema.fields() {
-            result_fields.push((**field).clone());
-        }
+    build_result_table(&table.session, result_batches, empty_schema, &[])
+}
 
-        for field in right_schema.fields() {
-            result_fields.push(Field::new(
-                format!("{}_{}", alias, field.name()),
-                field.data_type().clone(),
-                true,
-            ));
-        }
-
-        let empty_schema = Arc::new(ArrowSchema::new(result_fields));
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: Some(empty_schema),
-            sort_exprs: Vec::new(),
-        });
+/// Build the result schema for a join (combines left + aliased right)
+fn build_join_result_schema(
+    left_schema: &ArrowSchema,
+    right_schema: &ArrowSchema,
+    alias: &str,
+) -> Arc<ArrowSchema> {
+    let mut result_fields: Vec<Field> = Vec::new();
+    for field in left_schema.fields() {
+        result_fields.push((**field).clone());
     }
+    for field in right_schema.fields() {
+        result_fields.push(Field::new(
+            format!("{}_{}", alias, field.name()),
+            field.data_type().clone(),
+            true,
+        ));
+    }
+    Arc::new(ArrowSchema::new(result_fields))
+}
 
-    let result_schema = result_batches[0].schema();
-    let result_mem =
-        MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
+/// Build SQL for semi-join or anti-join (returns only left table columns)
+fn build_semi_anti_join_sql(
+    left_table: &str,
+    right_table: &str,
+    left_schema: &ArrowSchema,
+    left_keys: &[String],
+    right_keys: &[String],
+    is_anti: bool,
+) -> String {
+    // Select all columns from left table only
+    let select_parts: Vec<String> = left_schema
+        .fields()
+        .iter()
+        .map(|f| format!("L.\"{}\"", f.name()))
+        .collect();
 
-    let result_df = table
-        .session
-        .read_table(Arc::new(result_mem))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read result table: {}",
-                e
-            ))
-        })?;
+    // Build WHERE EXISTS/NOT EXISTS condition
+    let where_conditions: Vec<String> = left_keys
+        .iter()
+        .zip(right_keys.iter())
+        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
+        .collect();
 
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
+
+    // Semi-join uses DISTINCT to deduplicate when right table has multiple matches
+    let distinct = if is_anti { "" } else { "DISTINCT " };
+
+    format!(
+        "SELECT {}{} FROM \"{}\" L WHERE {} (SELECT 1 FROM \"{}\" R WHERE {})",
+        distinct,
+        select_parts.join(", "),
+        left_table,
+        exists_keyword,
+        right_table,
+        where_conditions.join(" AND ")
+    )
+}
+
+/// Semi-join: Return rows from left table where keys exist in right table
+pub fn semi_join_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
+    semi_anti_join_impl(table, other, left_key_expr_dict, right_key_expr_dict, false)
+}
+
+/// Anti-join: Return rows from left table where keys do NOT exist in right table
+pub fn anti_join_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
+    semi_anti_join_impl(table, other, left_key_expr_dict, right_key_expr_dict, true)
+}
+
+/// Shared implementation for semi-join and anti-join
+fn semi_anti_join_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+    is_anti: bool,
+) -> PyResult<LTSeqTable> {
+    let (df_left, stored_schema_left) = get_df_and_schema(table, "Left")?;
+    let (df_right, stored_schema_right) = get_df_and_schema(other, "Right")?;
+
+    // Collect batches and get schemas
+    let (left_batches, right_batches) = RUNTIME
+        .block_on(collect_both_tables(df_left, df_right))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
+    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
+
+    // Parse and validate join keys
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+        left_key_expr_dict,
+        right_key_expr_dict,
+        &left_schema,
+        &right_schema,
+    )?;
+
+    // Register temp tables
+    let join_type_name = if is_anti { "anti" } else { "semi" };
+    let (left_name, right_name) = register_join_tables(
+        &table.session,
+        &left_schema,
+        left_batches,
+        &right_schema,
+        right_batches,
+        join_type_name,
+    )?;
+
+    // Build and execute SQL query
+    let sql_query = build_semi_anti_join_sql(
+        &left_name,
+        &right_name,
+        &left_schema,
+        &left_col_names,
+        &right_col_names,
+        is_anti,
+    );
+
+    let result_batches = RUNTIME
+        .block_on(execute_and_collect(
+            &table.session,
+            &sql_query,
+            join_type_name,
+        ))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Cleanup
+    let _ = table.session.deregister_table(&left_name);
+    let _ = table.session.deregister_table(&right_name);
+
+    build_result_table(
+        &table.session,
+        result_batches,
+        Arc::clone(&left_schema),
+        &table.sort_exprs,
+    )
 }

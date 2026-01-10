@@ -18,42 +18,204 @@
 use crate::engine::RUNTIME;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
+use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-/// Add __group_id__ column to identify consecutive identical grouping values
-///
-/// Phase B2: Implements the "consecutive identical grouping" algorithm:
-/// 1. Compute mask: grouping_col != LAG(grouping_col) with first row = 1
-/// 2. Compute group_id: SUM(mask) OVER (ORDER BY rownum)
-/// 3. Add __group_id__ column to result
-///
-/// Uses SQL execution for clean, efficient implementation.
-pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result (for unit tests)
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Get validated dataframe and schema, or return empty table
+fn get_df_and_schema_or_empty(
+    table: &LTSeqTable,
+) -> Result<(&Arc<datafusion::dataframe::DataFrame>, &Arc<ArrowSchema>), LTSeqTable> {
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable {
+        return Err(LTSeqTable {
             session: Arc::clone(&table.session),
             dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
+            schema: table.schema.as_ref().map(Arc::clone),
+            sort_exprs: Vec::new(),
+        });
+    }
+    let df = table.dataframe.as_ref().unwrap();
+    let schema = table.schema.as_ref().ok_or_else(|| LTSeqTable {
+        session: Arc::clone(&table.session),
+        dataframe: None,
+        schema: None,
+        sort_exprs: Vec::new(),
+    })?;
+    Ok((df, schema))
+}
+
+/// Collect DataFrame to batches and get schema
+fn collect_and_get_schema(
+    df: &datafusion::dataframe::DataFrame,
+    stored_schema: &Arc<ArrowSchema>,
+) -> PyResult<(Vec<RecordBatch>, Arc<ArrowSchema>)> {
+    let batches = RUNTIME
+        .block_on(async {
+            df.clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect data: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let batch_schema = batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new((**stored_schema).clone()));
+
+    Ok((batches, batch_schema))
+}
+
+/// Register a temp table and return its name
+fn register_temp_table(
+    session: &SessionContext,
+    schema: &Arc<ArrowSchema>,
+    batches: Vec<RecordBatch>,
+    prefix: &str,
+) -> PyResult<String> {
+    let table_name = format!("__ltseq_{}_temp_{}", prefix, std::process::id());
+    let _ = session.deregister_table(&table_name);
+
+    let temp_table = MemTable::try_new(Arc::clone(schema), vec![batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create memory table: {}",
+            e
+        ))
+    })?;
+
+    session
+        .register_table(&table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register temp table: {}",
+                e
+            ))
+        })?;
+
+    Ok(table_name)
+}
+
+/// Execute SQL query and collect results
+fn execute_sql_query(
+    session: &SessionContext,
+    sql: &str,
+    op_name: &str,
+) -> PyResult<Vec<RecordBatch>> {
+    RUNTIME
+        .block_on(async {
+            let result_df = session
+                .sql(sql)
+                .await
+                .map_err(|e| format!("Failed to execute {} query: {}", op_name, e))?;
+
+            result_df
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+}
+
+/// Create result LTSeqTable from batches
+fn create_result_from_batches(
+    session: &Arc<SessionContext>,
+    result_batches: Vec<RecordBatch>,
+    fallback_schema: Option<&Arc<ArrowSchema>>,
+    prefix: &str,
+) -> PyResult<LTSeqTable> {
+    if result_batches.is_empty() {
+        return Ok(LTSeqTable {
+            session: Arc::clone(session),
+            dataframe: None,
+            schema: fallback_schema.map(Arc::clone),
             sort_exprs: Vec::new(),
         });
     }
 
-    // Get schema
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Schema not available. Call read_csv() first.",
-        )
-    })?;
+    let result_schema = result_batches[0].schema();
+    let result_mem_table =
+        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create result memory table: {}",
+                e
+            ))
+        })?;
 
-    // Deserialize grouping expression
+    let result_table_name = format!("__ltseq_{}_result_{}", prefix, std::process::id());
+    let _ = session.deregister_table(&result_table_name);
+
+    session
+        .register_table(&result_table_name, Arc::new(result_mem_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to register result table: {}",
+                e
+            ))
+        })?;
+
+    let result_df = RUNTIME
+        .block_on(async {
+            session
+                .table(&result_table_name)
+                .await
+                .map_err(|e| format!("Failed to get result table: {}", e))
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let _ = session.deregister_table(&result_table_name);
+
+    Ok(LTSeqTable {
+        session: Arc::clone(session),
+        dataframe: Some(Arc::new(result_df)),
+        schema: Some(result_schema),
+        sort_exprs: Vec::new(),
+    })
+}
+
+/// Build column list string from schema, optionally filtering internal columns
+fn build_column_list(schema: &ArrowSchema, filter_internal: bool) -> String {
+    schema
+        .fields()
+        .iter()
+        .filter(|f| {
+            if filter_internal {
+                let name = f.name();
+                !name.starts_with("__rn")
+                    && !name.starts_with("__row_num")
+                    && !name.starts_with("__mask")
+                    && !name.starts_with("__cnt")
+            } else {
+                true
+            }
+        })
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+// ============================================================================
+// Public API Functions
+// ============================================================================
+
+/// Add __group_id__ column to identify consecutive identical grouping values
+pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+    let (df, schema) = match get_df_and_schema_or_empty(table) {
+        Ok(v) => v,
+        Err(empty_table) => return Ok(empty_table),
+    };
+
+    // Deserialize grouping expression and extract column name
     let py_expr = dict_to_py_expr(&grouping_expr)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    // Extract column name if this is a simple column reference
     let grouping_col_name = if let PyExpr::Column(ref col_name) = py_expr {
         col_name.clone()
     } else {
@@ -62,61 +224,12 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         ));
     };
 
-    // Get DataFrame
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
+    // Collect data and register temp table
+    let (batches, batch_schema) = collect_and_get_schema(df, schema)?;
+    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, "group_id")?;
+    let columns_str = build_column_list(&batch_schema, false);
 
-    // Collect current data into record batches
-    let current_batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect data: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema from actual batches for consistency
-    let batch_schema = if let Some(first_batch) = current_batches.first() {
-        first_batch.schema()
-    } else {
-        Arc::new((**schema).clone())
-    };
-
-    // Use unique temp table name to avoid conflicts
-    let temp_table_name = format!("__ltseq_group_id_temp_{}", std::process::id());
-    let temp_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
-
-    // Deregister existing table if it exists
-    let _ = table.session.deregister_table(&temp_table_name);
-
-    table
-        .session
-        .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register temp table: {}",
-                e
-            ))
-        })?;
-
-    // Build list of columns for explicit SELECT instead of SELECT *
-    let column_list: Vec<String> = batch_schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect();
-    let columns_str = column_list.join(", ");
-
-    // Execute SQL query to compute group_id, group_count, and row number within group
+    // Build and execute SQL query
     let sql_query = format!(
         r#"WITH numbered AS (
           SELECT {cols}, ROW_NUMBER() OVER () as __row_num FROM "{table}"
@@ -144,293 +257,34 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         groupcol = grouping_col_name
     );
 
-    // Execute the query
-    let result_batches = RUNTIME
-        .block_on(async {
-            let result_df = table
-                .session
-                .sql(&sql_query)
-                .await
-                .map_err(|e| format!("Failed to execute group_id query: {}", e))?;
+    let result_batches = execute_sql_query(&table.session, &sql_query, "group_id")?;
 
-            result_df
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect group_id results: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister temporary table
-    table
-        .session
-        .deregister_table(temp_table_name)
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to deregister temp table: {}",
-                e
-            ))
-        })?;
-
-    // Create a new MemTable from the result batches
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem_table =
-        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result memory table: {}",
-                e
-            ))
-        })?;
-
-    // Create a new DataFrame from the memory table via a temporary registration
-    let result_table_name = "__ltseq_result";
-    table
-        .session
-        .register_table(result_table_name, Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = RUNTIME
-        .block_on(async {
-            table
-                .session
-                .table(result_table_name)
-                .await
-                .map_err(|e| format!("Failed to get result table: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister the result table since we're materializing it
-    table
-        .session
-        .deregister_table(result_table_name)
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to deregister result table: {}",
-                e
-            ))
-        })?;
-
-    // Return new LTSeqTable with __group_id__ column
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    // Cleanup and return result
+    let _ = table.session.deregister_table(&temp_table_name);
+    create_result_from_batches(
+        &table.session,
+        result_batches,
+        table.schema.as_ref(),
+        "group_id",
+    )
 }
 
-/// Get only the first row of each group (Phase B4)
-///
-/// Requires __group_id__ column to already exist. Filters to rows where
-/// ROW_NUMBER() OVER (PARTITION BY __group_id__) = 1
+/// Get only the first row of each group
 pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result
-    if table.dataframe.is_none() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    // Get schema
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Schema not available. Call flatten() first to add __group_id__ column.",
-        )
-    })?;
-
-    // Verify __group_id__ column exists
-    if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "__group_id__ column not found. Call flatten() first.",
-        ));
-    }
-
-    // Get DataFrame
-    let df = table
-        .dataframe
-        .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded."))?;
-
-    // Collect current data into record batches
-    let current_batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect data: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema from actual batches for consistency
-    let batch_schema = if let Some(first_batch) = current_batches.first() {
-        first_batch.schema()
-    } else {
-        Arc::new((**schema).clone())
-    };
-
-    // Use unique temp table name to avoid conflicts
-    let temp_table_name = format!("__ltseq_first_row_temp_{}", std::process::id());
-    let temp_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
-
-    // Deregister existing table if it exists
-    let _ = table.session.deregister_table(&temp_table_name);
-
-    table
-        .session
-        .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register temp table: {}",
-                e
-            ))
-        })?;
-
-    // Build list of columns - filter out internal temp columns
-    let column_list: Vec<String> = batch_schema
-        .fields()
-        .iter()
-        .filter(|f| {
-            let name = f.name();
-            !name.starts_with("__rn")
-                && !name.starts_with("__row_num")
-                && !name.starts_with("__mask")
-        })
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect();
-    let columns_str = column_list.join(", ");
-
-    // Execute SQL query to get first row per group
-    let rn_alias = format!("__rn_first_{}", std::process::id());
-    let sql_query = format!(
-        r#"WITH ranked AS (
-          SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}" FROM "{table}"
-        )
-        SELECT {cols} FROM ranked WHERE "{rn}" = 1"#,
-        cols = columns_str,
-        table = temp_table_name,
-        rn = rn_alias
-    );
-
-    // Execute the query
-    let result_batches = RUNTIME
-        .block_on(async {
-            let result_df = table
-                .session
-                .sql(&sql_query)
-                .await
-                .map_err(|e| format!("Failed to execute first_row query: {}", e))?;
-
-            result_df
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect first_row results: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister temporary table
-    let _ = table.session.deregister_table(&temp_table_name);
-
-    // Create a new MemTable from the result batches
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem_table =
-        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result memory table: {}",
-                e
-            ))
-        })?;
-
-    // Create a new DataFrame from the memory table
-    let result_table_name = format!("__ltseq_first_row_result_{}", std::process::id());
-
-    // Deregister existing result table if it exists
-    let _ = table.session.deregister_table(&result_table_name);
-
-    table
-        .session
-        .register_table(&result_table_name, Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = RUNTIME
-        .block_on(async {
-            table
-                .session
-                .table(&result_table_name)
-                .await
-                .map_err(|e| format!("Failed to get result table: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister the result table
-    let _ = table.session.deregister_table(&result_table_name);
-
-    // Return new LTSeqTable with only first rows
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    first_or_last_row_impl(table, true)
 }
 
-/// Get only the last row of each group (Phase B4)
-///
-/// Requires __group_id__ column to already exist. Filters to rows where
-/// ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY desc) = 1
+/// Get only the last row of each group
 pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result
-    if table.dataframe.is_none() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
-    }
+    first_or_last_row_impl(table, false)
+}
 
-    // Get schema
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Schema not available. Call flatten() first to add __group_id__ column.",
-        )
-    })?;
+/// Shared implementation for first_row and last_row
+fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqTable> {
+    let (df, schema) = match get_df_and_schema_or_empty(table) {
+        Ok(v) => v,
+        Err(empty_table) => return Ok(empty_table),
+    };
 
     // Verify __group_id__ column exists
     if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
@@ -439,157 +293,49 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
         ));
     }
 
-    // Get DataFrame
-    let df = table
-        .dataframe
-        .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded."))?;
+    // Collect data and register temp table
+    let (batches, batch_schema) = collect_and_get_schema(df, schema)?;
+    let op_name = if is_first { "first_row" } else { "last_row" };
+    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, op_name)?;
+    let columns_str = build_column_list(&batch_schema, true);
 
-    // Collect current data into record batches
-    let current_batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect data: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema from actual batches for consistency
-    let batch_schema = if let Some(first_batch) = current_batches.first() {
-        first_batch.schema()
+    // Build SQL query
+    let rn_alias = format!("__rn_{}_{}", op_name, std::process::id());
+    let sql_query = if is_first {
+        format!(
+            r#"WITH ranked AS (
+              SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}" FROM "{table}"
+            )
+            SELECT {cols} FROM ranked WHERE "{rn}" = 1"#,
+            cols = columns_str,
+            table = temp_table_name,
+            rn = rn_alias
+        )
     } else {
-        Arc::new((**schema).clone())
+        let cnt_alias = format!("__cnt_{}_{}", op_name, std::process::id());
+        format!(
+            r#"WITH ranked AS (
+              SELECT {cols}, 
+                      ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}",
+                      COUNT(*) OVER (PARTITION BY "__group_id__") as "{cnt}"
+              FROM "{table}"
+            )
+            SELECT {cols} FROM ranked WHERE "{rn}" = "{cnt}""#,
+            cols = columns_str,
+            table = temp_table_name,
+            rn = rn_alias,
+            cnt = cnt_alias
+        )
     };
 
-    // Use unique temp table name to avoid conflicts
-    let temp_table_name = format!("__ltseq_last_row_temp_{}", std::process::id());
-    let temp_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
+    let result_batches = execute_sql_query(&table.session, &sql_query, op_name)?;
 
-    // Deregister existing table if it exists
+    // Cleanup and return result
     let _ = table.session.deregister_table(&temp_table_name);
-
-    table
-        .session
-        .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register temp table: {}",
-                e
-            ))
-        })?;
-
-    // Build list of columns - filter out internal temp columns
-    let column_list: Vec<String> = batch_schema
-        .fields()
-        .iter()
-        .filter(|f| {
-            let name = f.name();
-            !name.starts_with("__rn")
-                && !name.starts_with("__row_num")
-                && !name.starts_with("__mask")
-                && !name.starts_with("__cnt")
-        })
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect();
-    let columns_str = column_list.join(", ");
-
-    // Execute SQL query to get last row per group
-    let rn_alias = format!("__rn_last_{}", std::process::id());
-    let cnt_alias = format!("__cnt_last_{}", std::process::id());
-    let sql_query = format!(
-        r#"WITH ranked AS (
-          SELECT {cols}, 
-                  ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}",
-                  COUNT(*) OVER (PARTITION BY "__group_id__") as "{cnt}"
-          FROM "{table}"
-        )
-        SELECT {cols} FROM ranked WHERE "{rn}" = "{cnt}""#,
-        cols = columns_str,
-        table = temp_table_name,
-        rn = rn_alias,
-        cnt = cnt_alias
-    );
-
-    // Execute the query
-    let result_batches = RUNTIME
-        .block_on(async {
-            let result_df = table
-                .session
-                .sql(&sql_query)
-                .await
-                .map_err(|e| format!("Failed to execute last_row query: {}", e))?;
-
-            result_df
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect last_row results: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister temporary table
-    let _ = table.session.deregister_table(&temp_table_name);
-
-    // Create a new MemTable from the result batches
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem_table =
-        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result memory table: {}",
-                e
-            ))
-        })?;
-
-    // Create a new DataFrame from the memory table
-    let result_table_name = format!("__ltseq_last_row_result_{}", std::process::id());
-
-    // Deregister existing result table if it exists
-    let _ = table.session.deregister_table(&result_table_name);
-
-    table
-        .session
-        .register_table(&result_table_name, Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = RUNTIME
-        .block_on(async {
-            table
-                .session
-                .table(&result_table_name)
-                .await
-                .map_err(|e| format!("Failed to get result table: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Deregister the result table
-    let _ = table.session.deregister_table(&result_table_name);
-
-    // Return new LTSeqTable with only last rows
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    create_result_from_batches(
+        &table.session,
+        result_batches,
+        table.schema.as_ref(),
+        op_name,
+    )
 }

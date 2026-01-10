@@ -65,22 +65,10 @@ def _build_join_result_schema(left_schema, right_schema, suffix="_other"):
 class JoinMixin:
     """Mixin class providing join operations for LTSeq."""
 
-    def join(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
-        """
-        Standard SQL-style hash join between two tables.
-
-        Args:
-            other: Another LTSeq table to join with
-            on: Lambda specifying join condition.
-                E.g., lambda a, b: a.user_id == b.user_id
-            how: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq with columns from both tables
-
-        Example:
-            >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id)
-        """
+    def _execute_join(
+        self, other: "LTSeq", on: Callable, how: str, method_name: str = "join"
+    ) -> "LTSeq":
+        """Core join implementation shared by join() and join_merge()."""
         from .core import LTSeq
 
         _validate_join_inputs(self, other, how)
@@ -107,7 +95,7 @@ class JoinMixin:
             import warnings
 
             warnings.warn(
-                f"Rust join failed: {e}. Falling back to pandas implementation.",
+                f"Rust {method_name} failed: {e}. Falling back to pandas.",
                 RuntimeWarning,
             )
             return self._join_pandas_fallback(other, on, how, left_key_expr)
@@ -144,11 +132,26 @@ class JoinMixin:
         result_schema = _build_join_result_schema(self._schema, other._schema, "_other")
         return LTSeq._from_rows(rows, result_schema)
 
+    def join(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+        """
+        Standard SQL-style hash join between two tables.
+
+        Args:
+            other: Another LTSeq table to join with
+            on: Lambda specifying join condition.
+                E.g., lambda a, b: a.user_id == b.user_id
+            how: Join type: "inner", "left", "right", "full"
+
+        Returns:
+            Joined LTSeq with columns from both tables
+
+        Example:
+            >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id)
+        """
+        return self._execute_join(other, on, how, "join")
+
     def join_merge(
-        self,
-        other: "LTSeq",
-        on: Callable,
-        join_type: str = "inner",
+        self, other: "LTSeq", on: Callable, join_type: str = "inner"
     ) -> "LTSeq":
         """
         Merge join for pre-sorted tables.
@@ -166,42 +169,7 @@ class JoinMixin:
         Example:
             >>> result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
         """
-        from .core import LTSeq
-
-        _validate_join_inputs(self, other, join_type)
-
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            other_proxy = SchemaProxy(other._schema)
-            _ = on(self_proxy, other_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid join condition: {e}")
-
-        from .helpers import _extract_join_keys
-
-        left_key_expr, right_key_expr, jtype = _extract_join_keys(
-            on, self._schema, other._schema, join_type
-        )
-
-        try:
-            joined_inner = self._inner.join(
-                other._inner, left_key_expr, right_key_expr, jtype, "_other"
-            )
-        except RuntimeError as e:
-            import warnings
-
-            warnings.warn(
-                f"Rust join_merge failed: {e}. Falling back to pandas.",
-                RuntimeWarning,
-            )
-            return self._join_pandas_fallback(other, on, join_type, left_key_expr)
-
-        result = LTSeq()
-        result._inner = joined_inner
-        result._schema = _build_join_result_schema(
-            self._schema, other._schema, "_other"
-        )
-        return result
+        return self._execute_join(other, on, join_type, "join_merge")
 
     def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
         """
@@ -397,3 +365,117 @@ class JoinMixin:
             self._schema, other._schema, "_other"
         )
         return result
+
+    def _filtering_join(self, other: "LTSeq", on: Callable, join_type: str) -> "LTSeq":
+        """
+        Shared implementation for semi-join and anti-join.
+
+        Args:
+            other: Right table to match against
+            on: Lambda specifying join condition
+            join_type: "semi" or "anti"
+
+        Returns:
+            LTSeq with filtered rows from left table
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"{join_type}_join() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate join condition
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            other_proxy = SchemaProxy(other._schema)
+            _ = on(self_proxy, other_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        # Warn if no schema overlap (likely user error)
+        left_cols = set(self._schema.keys())
+        right_cols = set(other._schema.keys())
+        if not left_cols & right_cols:
+            import warnings
+
+            warnings.warn(
+                "No overlapping column names between tables. "
+                "This may indicate an error in join condition. "
+                "Use lambda a, b: a.left_key == b.right_key syntax.",
+                UserWarning,
+            )
+
+        from .helpers import _extract_join_keys
+
+        left_key_expr, right_key_expr, _ = _extract_join_keys(
+            on, self._schema, other._schema, "inner"
+        )
+
+        try:
+            if join_type == "semi":
+                joined_inner = self._inner.semi_join(
+                    other._inner, left_key_expr, right_key_expr
+                )
+            else:
+                joined_inner = self._inner.anti_join(
+                    other._inner, left_key_expr, right_key_expr
+                )
+        except RuntimeError as e:
+            raise RuntimeError(f"{join_type.capitalize()}-join failed: {e}")
+
+        result = LTSeq()
+        result._inner = joined_inner
+        result._schema = self._schema.copy()
+        result._sort_keys = self._sort_keys
+        return result
+
+    def semi_join(self, other: "LTSeq", on: Callable) -> "LTSeq":
+        """
+        Semi-join: return rows from left table where keys exist in right table.
+
+        Unlike regular joins, semi-join returns only left table columns,
+        with no duplicates from multiple matches in the right table.
+
+        Args:
+            other: Right table to match against
+            on: Lambda specifying join condition (e.g., lambda a, b: a.user_id == b.id)
+
+        Returns:
+            LTSeq with rows from left table that have matching keys in right
+
+        Example:
+            >>> # Users who have placed at least one order
+            >>> active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
+        """
+        return self._filtering_join(other, on, "semi")
+
+    def anti_join(self, other: "LTSeq", on: Callable) -> "LTSeq":
+        """
+        Anti-join: return rows from left table where keys do NOT exist in right table.
+
+        Unlike regular joins, anti-join returns only left table columns,
+        containing rows that have NO match in the right table.
+
+        Args:
+            other: Right table to match against
+            on: Lambda specifying join condition (e.g., lambda a, b: a.user_id == b.id)
+
+        Returns:
+            LTSeq with rows from left table that have NO matching keys in right
+
+        Example:
+            >>> # Users who have never placed an order
+            >>> inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
+        """
+        return self._filtering_join(other, on, "anti")

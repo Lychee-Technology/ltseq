@@ -104,7 +104,8 @@ class LTSeq(
                 self.write_csv(temp_path)
                 df = pd.read_csv(temp_path)
                 return df
-            except AttributeError:
+            except (AttributeError, RuntimeError):
+                # Empty table or no data loaded - return empty DataFrame with schema
                 return pd.DataFrame(columns=self._schema.keys())
         finally:
             if os.path.exists(temp_path):

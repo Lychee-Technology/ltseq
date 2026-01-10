@@ -639,6 +639,70 @@ impl LTSeqTable {
         )
     }
 
+    /// Semi-join: Return rows from left table where keys exist in right table
+    ///
+    /// Unlike regular joins, semi-join:
+    /// - Returns only columns from the left table (not merged schema)
+    /// - Uses DISTINCT to avoid duplicate rows from multiple matches
+    /// - Preserves sort order from the left table
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The right table to match against
+    /// * `left_key_expr_dict` - Serialized expression for left join key
+    /// * `right_key_expr_dict` - Serialized expression for right join key
+    ///
+    /// # Returns
+    ///
+    /// A new LTSeqTable containing only rows from the left table that have
+    /// matching keys in the right table.
+    ///
+    /// # Example Use Cases
+    ///
+    /// * Find users who have placed at least one order
+    /// * Filter products that have been reviewed
+    /// * Select customers who have active subscriptions
+    fn semi_join(
+        &self,
+        other: &LTSeqTable,
+        left_key_expr_dict: &Bound<'_, PyDict>,
+        right_key_expr_dict: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::join::semi_join_impl(self, other, left_key_expr_dict, right_key_expr_dict)
+    }
+
+    /// Anti-join: Return rows from left table where keys do NOT exist in right table
+    ///
+    /// Unlike regular joins, anti-join:
+    /// - Returns only columns from the left table (not merged schema)
+    /// - Returns rows that have NO match in the right table
+    /// - Preserves sort order from the left table
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The right table to match against
+    /// * `left_key_expr_dict` - Serialized expression for left join key
+    /// * `right_key_expr_dict` - Serialized expression for right join key
+    ///
+    /// # Returns
+    ///
+    /// A new LTSeqTable containing only rows from the left table that have
+    /// NO matching keys in the right table.
+    ///
+    /// # Example Use Cases
+    ///
+    /// * Find users who have never placed an order
+    /// * Filter products that have not been reviewed
+    /// * Select customers who have no active subscriptions
+    fn anti_join(
+        &self,
+        other: &LTSeqTable,
+        left_key_expr_dict: &Bound<'_, PyDict>,
+        right_key_expr_dict: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::join::anti_join_impl(self, other, left_key_expr_dict, right_key_expr_dict)
+    }
+
     /// Align table rows to a reference sequence
     ///
     /// Reorders rows to match the order of ref_sequence and inserts NULL rows

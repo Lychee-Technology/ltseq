@@ -1,8 +1,22 @@
-"""Concrete expression types for LTSeq."""
+"""Concrete expression types for LTSeq.
+
+This module re-exports all expression types from their respective modules
+for backward compatibility. The main types defined here are:
+- ColumnExpr: Column reference (e.g., r.age)
+- CallExpr: Function/method call (e.g., r.col.shift(1))
+
+Other types are imported from:
+- core_types: LiteralExpr, BinOpExpr, UnaryOpExpr
+- accessors: StringAccessor, TemporalAccessor
+- lookup_expr: LookupExpr
+"""
 
 from typing import Any, Dict, Optional
 
 from .base import Expr
+from .accessors import StringAccessor, TemporalAccessor
+from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
+from .lookup_expr import LookupExpr
 
 
 class ColumnExpr(Expr):
@@ -17,21 +31,11 @@ class ColumnExpr(Expr):
     """
 
     def __init__(self, name: str):
-        """
-        Initialize a ColumnExpr.
-
-        Args:
-            name: Column name (e.g., "age", "price")
-        """
+        """Initialize a ColumnExpr with a column name."""
         self.name = name
 
     def serialize(self) -> Dict[str, Any]:
-        """
-        Serialize to dict.
-
-        Returns:
-            {"type": "Column", "name": self.name}
-        """
+        """Serialize to dict: {"type": "Column", "name": self.name}"""
         return {"type": "Column", "name": self.name}
 
     def __getattr__(self, method_name: str):
@@ -39,22 +43,11 @@ class ColumnExpr(Expr):
         Handle method calls like r.col.shift(1), r.col.rolling(3), etc.
 
         Returns a callable that, when invoked with arguments, creates a CallExpr.
-
-        Args:
-            method_name: Method to call (e.g., "shift", "rolling", "contains")
-
-        Returns:
-            A callable that accepts (*args, **kwargs) and returns CallExpr
-
-        Raises:
-            AttributeError: If method_name starts with underscore (private)
         """
         if method_name.startswith("_"):
-            # Avoid issues with __dict__, __class__, etc.
             raise AttributeError(f"No attribute {method_name}")
 
         def method_call(*args, **kwargs):
-            """Create a CallExpr when the method is invoked."""
             return CallExpr(method_name, args, kwargs, on=self)
 
         return method_call
@@ -68,251 +61,6 @@ class ColumnExpr(Expr):
     def dt(self):
         """Temporal accessor for datetime operations (r.col.dt.year, etc.)"""
         return TemporalAccessor(self)
-
-
-class StringAccessor:
-    """
-    Accessor for string operations on columns.
-
-    Accessed via r.column.s and provides methods like:
-    - r.col.s.contains("substring")
-    - r.col.s.starts_with("prefix")
-    - r.col.s.lower()
-
-    Supports chaining: r.col.s.lower().s.contains("x")
-    """
-
-    def __init__(self, expr: Expr):
-        """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
-        self._expr = expr
-
-    def contains(self, pattern: str) -> "CallExpr":
-        """Check if string contains a substring."""
-        return CallExpr("str_contains", (pattern,), {}, on=self._expr)
-
-    def starts_with(self, prefix: str) -> "CallExpr":
-        """Check if string starts with a prefix."""
-        return CallExpr("str_starts_with", (prefix,), {}, on=self._expr)
-
-    def ends_with(self, suffix: str) -> "CallExpr":
-        """Check if string ends with a suffix."""
-        return CallExpr("str_ends_with", (suffix,), {}, on=self._expr)
-
-    def lower(self) -> "CallExpr":
-        """Convert string to lowercase."""
-        return CallExpr("str_lower", (), {}, on=self._expr)
-
-    def upper(self) -> "CallExpr":
-        """Convert string to uppercase."""
-        return CallExpr("str_upper", (), {}, on=self._expr)
-
-    def strip(self) -> "CallExpr":
-        """Remove leading and trailing whitespace."""
-        return CallExpr("str_strip", (), {}, on=self._expr)
-
-    def len(self) -> "CallExpr":
-        """Get string length."""
-        return CallExpr("str_len", (), {}, on=self._expr)
-
-    def slice(self, start: int, length: int) -> "CallExpr":
-        """Extract substring: start position and length."""
-        return CallExpr("str_slice", (start, length), {}, on=self._expr)
-
-    def regex_match(self, pattern: str) -> "CallExpr":
-        """Check if string matches a regular expression pattern (returns boolean).
-
-        Args:
-            pattern: Regular expression pattern to match against
-
-        Returns:
-            Boolean expression that is True when pattern matches
-
-        Example:
-            >>> t.filter(lambda r: r.email.s.regex_match(r'^[a-z]+@'))
-        """
-        return CallExpr("str_regex_match", (pattern,), {}, on=self._expr)
-
-
-class TemporalAccessor:
-    """
-    Accessor for temporal operations on date/datetime columns.
-
-    Accessed via r.column.dt and provides methods like:
-    - r.col.dt.year()
-    - r.col.dt.month()
-    - r.col.dt.add_days(30)
-    """
-
-    def __init__(self, expr: Expr):
-        """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
-        self._expr = expr
-
-    def year(self) -> "CallExpr":
-        """Extract year from date/datetime."""
-        return CallExpr("dt_year", (), {}, on=self._expr)
-
-    def month(self) -> "CallExpr":
-        """Extract month from date/datetime."""
-        return CallExpr("dt_month", (), {}, on=self._expr)
-
-    def day(self) -> "CallExpr":
-        """Extract day from date/datetime."""
-        return CallExpr("dt_day", (), {}, on=self._expr)
-
-    def hour(self) -> "CallExpr":
-        """Extract hour from datetime."""
-        return CallExpr("dt_hour", (), {}, on=self._expr)
-
-    def minute(self) -> "CallExpr":
-        """Extract minute from datetime."""
-        return CallExpr("dt_minute", (), {}, on=self._expr)
-
-    def second(self) -> "CallExpr":
-        """Extract second from datetime."""
-        return CallExpr("dt_second", (), {}, on=self._expr)
-
-    def add(self, days: int = 0, months: int = 0, years: int = 0) -> "CallExpr":
-        """Add days, months, and/or years to a date/datetime."""
-        return CallExpr("dt_add", (days, months, years), {}, on=self._expr)
-
-    def diff(self, other: "Expr") -> "CallExpr":
-        """Calculate difference between two dates in days."""
-        from .base import Expr as BaseExpr
-
-        other_coerced = BaseExpr._coerce(other)
-        return CallExpr("dt_diff", (other_coerced,), {}, on=self._expr)
-
-
-class LiteralExpr(Expr):
-    """
-    Represents a constant value: int, float, str, bool, None.
-
-    Includes type inference to determine the appropriate Arrow/DataFusion type.
-
-    Attributes:
-        value: The Python value
-    """
-
-    def __init__(self, value: Any):
-        """
-        Initialize a LiteralExpr.
-
-        Args:
-            value: The constant value (int, float, str, bool, None, etc.)
-        """
-        self.value = value
-
-    def serialize(self) -> Dict[str, Any]:
-        """
-        Serialize to dict with inferred dtype.
-
-        Returns:
-            {
-                "type": "Literal",
-                "value": self.value,
-                "dtype": inferred_type_string
-            }
-        """
-        return {"type": "Literal", "value": self.value, "dtype": self._infer_dtype()}
-
-    def _infer_dtype(self) -> str:
-        """
-        Infer Arrow/DataFusion type from Python value.
-
-        Returns:
-            A type string: "Boolean", "Int64", "Float64", "String", "Null"
-        """
-        if isinstance(self.value, bool):
-            # Must check bool before int (bool is subclass of int)
-            return "Boolean"
-        elif isinstance(self.value, int):
-            return "Int64"
-        elif isinstance(self.value, float):
-            return "Float64"
-        elif isinstance(self.value, str):
-            return "String"
-        elif self.value is None:
-            return "Null"
-        else:
-            # Fallback: serialize as string
-            return "String"
-
-
-class BinOpExpr(Expr):
-    """
-    Represents a binary operation: +, -, >, <, ==, &, |, etc.
-
-    Attributes:
-        op (str): Operation name ("Add", "Gt", "And", etc.)
-        left (Expr): Left operand
-        right (Expr): Right operand
-    """
-
-    def __init__(self, op: str, left: Expr, right: Expr):
-        """
-        Initialize a BinOpExpr.
-
-        Args:
-            op: Operation name (e.g., "Add", "Gt", "And")
-            left: Left operand (Expr)
-            right: Right operand (Expr)
-        """
-        self.op = op
-        self.left = left
-        self.right = right
-
-    def serialize(self) -> Dict[str, Any]:
-        """
-        Serialize to dict with recursive serialization of operands.
-
-        Returns:
-            {
-                "type": "BinOp",
-                "op": self.op,
-                "left": self.left.serialize(),
-                "right": self.right.serialize()
-            }
-        """
-        return {
-            "type": "BinOp",
-            "op": self.op,
-            "left": self.left.serialize(),
-            "right": self.right.serialize(),
-        }
-
-
-class UnaryOpExpr(Expr):
-    """
-    Represents a unary operation: NOT (~), etc.
-
-    Attributes:
-        op (str): Operation name ("Not", etc.)
-        operand (Expr): The operand
-    """
-
-    def __init__(self, op: str, operand: Expr):
-        """
-        Initialize a UnaryOpExpr.
-
-        Args:
-            op: Operation name (e.g., "Not")
-            operand: The operand (Expr)
-        """
-        self.op = op
-        self.operand = operand
-
-    def serialize(self) -> Dict[str, Any]:
-        """
-        Serialize to dict with recursive serialization of operand.
-
-        Returns:
-            {
-                "type": "UnaryOp",
-                "op": self.op,
-                "operand": self.operand.serialize()
-            }
-        """
-        return {"type": "UnaryOp", "op": self.op, "operand": self.operand.serialize()}
 
 
 class CallExpr(Expr):
@@ -336,15 +84,7 @@ class CallExpr(Expr):
         kwargs: Optional[Dict[str, Any]] = None,
         on: Optional[Expr] = None,
     ):
-        """
-        Initialize a CallExpr.
-
-        Args:
-            func: Function/method name (e.g., "shift", "rolling", "sum")
-            args: Positional arguments (tuple, may contain Exprs)
-            kwargs: Keyword arguments (dict, may contain Exprs)
-            on: Object the method is called on, or None for functions
-        """
+        """Initialize a CallExpr with function name, args, kwargs, and target."""
         self.func = func
         self.args = args
         self.kwargs = kwargs if kwargs is not None else {}
@@ -355,22 +95,11 @@ class CallExpr(Expr):
         Serialize to dict with recursive serialization of args/kwargs/on.
 
         Args are serialized if they're Exprs; literals are converted to LiteralExpr first.
-
-        Returns:
-            {
-                "type": "Call",
-                "func": self.func,
-                "args": [...],  # serialized args
-                "kwargs": {...},  # serialized kwargs
-                "on": serialized_on or None
-            }
         """
 
         def serialize_value(v):
-            """Serialize a value: Expr -> dict, literal -> LiteralExpr -> dict"""
             if isinstance(v, Expr):
                 return v.serialize()
-            # Convert literal to LiteralExpr for serialization
             return LiteralExpr(v).serialize()
 
         return {
@@ -386,21 +115,11 @@ class CallExpr(Expr):
         Allow chaining: r.col.rolling(3).mean().
 
         This CallExpr becomes the 'on' of the next CallExpr.
-
-        Args:
-            method_name: Method to call on the result of this call
-
-        Returns:
-            A callable that accepts (*args, **kwargs) and returns CallExpr
-
-        Raises:
-            AttributeError: If method_name starts with underscore
         """
         if method_name.startswith("_"):
             raise AttributeError(f"No attribute {method_name}")
 
         def chained_call(*args, **kwargs):
-            """Create a CallExpr with self as the 'on' target."""
             return CallExpr(method_name, args, kwargs, on=self)
 
         return chained_call
@@ -416,98 +135,14 @@ class CallExpr(Expr):
         return TemporalAccessor(self)
 
 
-class LookupExpr(Expr):
-    """
-    Represents a lookup operation to fetch values from another table.
-
-    Used as a shortcut for join operations in derived columns.
-    Syntax: r.product_id.lookup(products, "name")
-
-    This translates to an internal join where the left key is this expression
-    and the right key is the primary key of the target table.
-
-    Attributes:
-        on (Expr): The expression to lookup (e.g., r.product_id)
-        target_table: The actual target table object (LTSeq instance)
-        target_name (str): Name of the target table (for reference)
-        target_columns (list): Columns to fetch from the target table
-        join_key (str): Column name in target table to match against (default: primary key)
-
-    Class Attributes:
-        _table_registry: Class-level dict mapping target_name -> table object.
-                        Used to retrieve table references after serialization.
-    """
-
-    # Class-level registry for lookup tables
-    # Maps target_name -> actual table object
-    _table_registry: Dict[str, Any] = {}
-
-    def __init__(
-        self,
-        on: Expr,
-        target_table: Any,
-        target_name: str,
-        target_columns: list,
-        join_key: Optional[str] = None,
-    ):
-        """
-        Initialize a LookupExpr.
-
-        Args:
-            on: The expression containing the lookup key(s)
-            target_table: The actual target table object (stored for later retrieval)
-            target_name: Name/reference to the target table
-            target_columns: List of column names to fetch from target
-            join_key: Column name in target to join on (optional, defaults to primary key)
-        """
-        self.on = on
-        self.target_table = target_table
-        self.target_name = target_name
-        self.target_columns = target_columns
-        self.join_key = join_key
-
-        # Register table for later retrieval during derive()
-        if target_table is not None:
-            LookupExpr._table_registry[target_name] = target_table
-
-    @classmethod
-    def get_table(cls, name: str) -> Any:
-        """
-        Retrieve a registered table by name.
-
-        Args:
-            name: The target_name used when creating the LookupExpr
-
-        Returns:
-            The table object, or None if not found
-        """
-        return cls._table_registry.get(name)
-
-    @classmethod
-    def clear_registry(cls) -> None:
-        """Clear the table registry. Call after derive() completes."""
-        cls._table_registry.clear()
-
-    def serialize(self) -> Dict[str, Any]:
-        """
-        Serialize to dict.
-
-        Note: The actual table reference is stored in _table_registry
-        and can be retrieved via LookupExpr.get_table(target_name).
-
-        Returns:
-            {
-                "type": "Lookup",
-                "on": serialized_on,
-                "target_name": target_name,
-                "target_columns": target_columns,
-                "join_key": join_key or null
-            }
-        """
-        return {
-            "type": "Lookup",
-            "on": self.on.serialize(),
-            "target_name": self.target_name,
-            "target_columns": self.target_columns,
-            "join_key": self.join_key,
-        }
+# Re-export all types for backward compatibility
+__all__ = [
+    "ColumnExpr",
+    "CallExpr",
+    "LiteralExpr",
+    "BinOpExpr",
+    "UnaryOpExpr",
+    "LookupExpr",
+    "StringAccessor",
+    "TemporalAccessor",
+]
