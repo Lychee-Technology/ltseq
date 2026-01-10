@@ -3,6 +3,14 @@
 //! This module handles the conversion of serialized Python expressions (PyExpr)
 //! into DataFusion's native expression format, including detection of window functions
 //! and SQL transpilation for complex operations.
+//!
+//! ## Expression Optimization
+//!
+//! This module includes compile-time optimizations:
+//! - **Constant Folding**: Arithmetic operations on literals are evaluated at compile time
+//!   (e.g., `1 + 2 + r.col` → `3 + r.col`)
+//! - **Boolean Simplification**: Trivial boolean expressions are simplified
+//!   (e.g., `x & True` → `x`, `x | False` → `x`)
 
 use crate::types::PyExpr;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -61,13 +69,220 @@ fn parse_literal_expr(value: &str, dtype: &str) -> Result<Expr, String> {
         }
         "String" | "Utf8" => Ok(lit(value)),
         "Boolean" | "Bool" => {
-            let bool_val = value
-                .parse::<bool>()
-                .map_err(|_| format!("Failed to parse '{}' as Boolean", value))?;
+            // Python uses "True"/"False" (capitalized), Rust expects "true"/"false"
+            let bool_val = match value.to_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
+            };
             Ok(lit(bool_val))
         }
         "Null" => Ok(lit(ScalarValue::Null)),
         _ => Err(format!("Unknown dtype: {}", dtype)),
+    }
+}
+
+// ============================================================================
+// Constant Folding Optimization
+// ============================================================================
+
+/// Extract numeric value from a literal PyExpr (for constant folding)
+fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
+    match expr {
+        PyExpr::Literal { value, dtype } => match dtype.as_str() {
+            "Int64" | "Int32" => value.parse::<i64>().ok().map(|v| v as f64),
+            "Float64" | "Float32" => value.parse::<f64>().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Extract boolean value from a literal PyExpr
+fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
+    match expr {
+        PyExpr::Literal { value, dtype } => match dtype.as_str() {
+            "Boolean" | "Bool" => match value.to_lowercase().as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Create a literal PyExpr from a float value
+fn make_literal_f64(value: f64) -> PyExpr {
+    // If it's a whole number, prefer Int64 representation
+    if value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
+        PyExpr::Literal {
+            value: (value as i64).to_string(),
+            dtype: "Int64".to_string(),
+        }
+    } else {
+        PyExpr::Literal {
+            value: value.to_string(),
+            dtype: "Float64".to_string(),
+        }
+    }
+}
+
+/// Create a literal PyExpr from a boolean value
+fn make_literal_bool(value: bool) -> PyExpr {
+    PyExpr::Literal {
+        value: value.to_string(),
+        dtype: "Boolean".to_string(),
+    }
+}
+
+/// Try to fold a binary operation on two literals into a single literal
+fn try_fold_binop(op: &str, left: &PyExpr, right: &PyExpr) -> Option<PyExpr> {
+    // Try arithmetic folding
+    if let (Some(l), Some(r)) = (get_literal_f64(left), get_literal_f64(right)) {
+        let result = match op {
+            "Add" => Some(l + r),
+            "Sub" => Some(l - r),
+            "Mul" => Some(l * r),
+            "Div" if r != 0.0 => Some(l / r),
+            "Mod" if r != 0.0 => Some(l % r),
+            _ => None,
+        };
+        if let Some(v) = result {
+            return Some(make_literal_f64(v));
+        }
+
+        // Try comparison folding
+        let cmp_result = match op {
+            "Eq" => Some(l == r),
+            "Ne" => Some(l != r),
+            "Lt" => Some(l < r),
+            "Le" => Some(l <= r),
+            "Gt" => Some(l > r),
+            "Ge" => Some(l >= r),
+            _ => None,
+        };
+        if let Some(b) = cmp_result {
+            return Some(make_literal_bool(b));
+        }
+    }
+
+    // Try boolean folding
+    if let (Some(l), Some(r)) = (get_literal_bool(left), get_literal_bool(right)) {
+        let result = match op {
+            "And" => Some(l && r),
+            "Or" => Some(l || r),
+            _ => None,
+        };
+        if let Some(b) = result {
+            return Some(make_literal_bool(b));
+        }
+    }
+
+    None
+}
+
+/// Boolean simplification: x & True → x, x | False → x, etc.
+fn try_simplify_boolean(op: &str, left: &PyExpr, right: &PyExpr) -> Option<PyExpr> {
+    // Check for identity operations with True/False literals
+    let left_bool = get_literal_bool(left);
+    let right_bool = get_literal_bool(right);
+
+    match op {
+        "And" => {
+            // x & True → x
+            if right_bool == Some(true) {
+                return Some(left.clone());
+            }
+            // True & x → x
+            if left_bool == Some(true) {
+                return Some(right.clone());
+            }
+            // x & False → False
+            if right_bool == Some(false) || left_bool == Some(false) {
+                return Some(make_literal_bool(false));
+            }
+        }
+        "Or" => {
+            // x | False → x
+            if right_bool == Some(false) {
+                return Some(left.clone());
+            }
+            // False | x → x
+            if left_bool == Some(false) {
+                return Some(right.clone());
+            }
+            // x | True → True
+            if right_bool == Some(true) || left_bool == Some(true) {
+                return Some(make_literal_bool(true));
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
+/// Recursively optimize a PyExpr tree with constant folding
+pub fn optimize_expr(expr: PyExpr) -> PyExpr {
+    match expr {
+        PyExpr::BinOp { op, left, right } => {
+            // First, recursively optimize children
+            let opt_left = optimize_expr(*left);
+            let opt_right = optimize_expr(*right);
+
+            // Try constant folding (both operands are literals)
+            if let Some(folded) = try_fold_binop(&op, &opt_left, &opt_right) {
+                return folded;
+            }
+
+            // Try boolean simplification (one operand is True/False literal)
+            if let Some(simplified) = try_simplify_boolean(&op, &opt_left, &opt_right) {
+                return simplified;
+            }
+
+            // No optimization possible, return optimized children
+            PyExpr::BinOp {
+                op,
+                left: Box::new(opt_left),
+                right: Box::new(opt_right),
+            }
+        }
+        PyExpr::UnaryOp { op, operand } => {
+            let opt_operand = optimize_expr(*operand);
+
+            // Try to fold unary operations
+            if op == "Not" {
+                if let Some(b) = get_literal_bool(&opt_operand) {
+                    return make_literal_bool(!b);
+                }
+            }
+
+            PyExpr::UnaryOp {
+                op,
+                operand: Box::new(opt_operand),
+            }
+        }
+        PyExpr::Call {
+            func,
+            on,
+            args,
+            kwargs,
+        } => {
+            // Optimize the 'on' expression and all arguments
+            let opt_on = optimize_expr(*on);
+            let opt_args: Vec<PyExpr> = args.into_iter().map(optimize_expr).collect();
+
+            PyExpr::Call {
+                func,
+                on: Box::new(opt_on),
+                args: opt_args,
+                kwargs,
+            }
+        }
+        // Column and Literal expressions are already optimal
+        _ => expr,
     }
 }
 
@@ -78,8 +293,8 @@ fn parse_binop_expr(
     right: PyExpr,
     schema: &ArrowSchema,
 ) -> Result<Expr, String> {
-    let left_expr = pyexpr_to_datafusion(left, schema)?;
-    let right_expr = pyexpr_to_datafusion(right, schema)?;
+    let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
+    let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
 
     let operator = match op {
         "Add" => Operator::Plus,
@@ -107,7 +322,7 @@ fn parse_binop_expr(
 
 /// Parse a unary operation into a DataFusion expression
 fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    let operand_expr = pyexpr_to_datafusion(operand, schema)?;
+    let operand_expr = pyexpr_to_datafusion_inner(operand, schema)?;
     match op {
         "Not" => Ok(operand_expr.not()),
         _ => Err(format!("Unknown unary operator: {}", op)),
@@ -129,9 +344,9 @@ fn parse_call_expr(
                     "if_else requires 3 arguments: condition, true_value, false_value".to_string(),
                 );
             }
-            let cond_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
-            let true_expr = pyexpr_to_datafusion(args[1].clone(), schema)?;
-            let false_expr = pyexpr_to_datafusion(args[2].clone(), schema)?;
+            let cond_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let true_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            let false_expr = pyexpr_to_datafusion_inner(args[2].clone(), schema)?;
 
             // DataFusion's CASE WHEN equivalent using when().otherwise()
             use datafusion::logical_expr::case;
@@ -145,16 +360,16 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("fill_null requires a default value argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let default_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(coalesce(vec![on_expr, default_expr]))
         }
         "is_null" => {
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(on_expr.is_null())
         }
         "is_not_null" => {
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(on_expr.is_not_null())
         }
         "abs" | "ceil" | "floor" | "round" => Err(format!(
@@ -172,8 +387,8 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("str_contains requires a pattern argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let pattern_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(contains(on_expr, pattern_expr))
         }
         "str_starts_with" => {
@@ -181,8 +396,8 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("str_starts_with requires a prefix argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let prefix_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let prefix_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(starts_with(on_expr, prefix_expr))
         }
         "str_ends_with" => {
@@ -190,28 +405,28 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("str_ends_with requires a suffix argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let suffix_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let suffix_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(ends_with(on_expr, suffix_expr))
         }
         "str_lower" => {
             validate_string_column(&on, schema, "str_lower")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(lower(on_expr))
         }
         "str_upper" => {
             validate_string_column(&on, schema, "str_upper")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(upper(on_expr))
         }
         "str_strip" => {
             validate_string_column(&on, schema, "str_strip")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(btrim(vec![on_expr])) // btrim with single arg = strip whitespace from both sides
         }
         "str_len" => {
             validate_string_column(&on, schema, "str_len")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(character_length(on_expr))
         }
         "str_slice" => {
@@ -219,9 +434,9 @@ fn parse_call_expr(
             if args.len() < 2 {
                 return Err("str_slice requires start and length arguments".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let start_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
-            let length_expr = pyexpr_to_datafusion(args[1].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let start_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let length_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
             // DataFusion's substring uses 1-based indexing, Python uses 0-based
             // substring(string, position, length) - position is 1-based
             Ok(substring(on_expr, start_expr + lit(1), length_expr))
@@ -231,39 +446,39 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("str_regex_match requires a pattern argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let pattern_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(regexp_like(on_expr, pattern_expr, None))
         }
         // ========== Temporal Operations ==========
         "dt_year" => {
             validate_temporal_column(&on, schema, "dt_year")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("year"), on_expr))
         }
         "dt_month" => {
             validate_temporal_column(&on, schema, "dt_month")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("month"), on_expr))
         }
         "dt_day" => {
             validate_temporal_column(&on, schema, "dt_day")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("day"), on_expr))
         }
         "dt_hour" => {
             validate_temporal_column(&on, schema, "dt_hour")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("hour"), on_expr))
         }
         "dt_minute" => {
             validate_temporal_column(&on, schema, "dt_minute")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("minute"), on_expr))
         }
         "dt_second" => {
             validate_temporal_column(&on, schema, "dt_second")?;
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(date_part(lit("second"), on_expr))
         }
         "dt_add" => {
@@ -271,7 +486,7 @@ fn parse_call_expr(
             if args.len() < 3 {
                 return Err("dt_add requires days, months, and years arguments".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
 
             // Extract literal values for interval construction
             let days = match &args[0] {
@@ -299,8 +514,8 @@ fn parse_call_expr(
             if args.is_empty() {
                 return Err("dt_diff requires another date argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion(on, schema)?;
-            let other_expr = pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
 
             // Compute difference: subtract dates and extract days
             // For Date32/Date64, subtraction returns an interval
@@ -314,7 +529,18 @@ fn parse_call_expr(
 }
 
 /// Convert PyExpr to DataFusion Expr
+///
+/// This function first applies expression optimization (constant folding,
+/// boolean simplification) before converting to DataFusion expressions.
 pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
+    // Apply optimization pass first
+    let optimized = optimize_expr(py_expr);
+
+    pyexpr_to_datafusion_inner(optimized, schema)
+}
+
+/// Internal conversion without optimization (used after optimization pass)
+fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, schema),
         PyExpr::Literal { value, dtype } => parse_literal_expr(&value, &dtype),

@@ -99,6 +99,22 @@ class LinkedTable:
         materialized = self._materialize()
         materialized.show(n)
 
+    def __len__(self) -> int:
+        """
+        Get the number of rows in the linked table.
+
+        This triggers materialization of the join to count rows.
+
+        Returns:
+            The count of rows in the materialized result
+
+        Example:
+            >>> linked = orders.link(products, on=..., as_="prod")
+            >>> print(len(linked))  # Materializes and counts
+        """
+        materialized = self._materialize()
+        return len(materialized)
+
     def filter(self, predicate: Callable) -> Union["LinkedTable", "LTSeq"]:
         """
         Filter rows with support for both source and linked columns.

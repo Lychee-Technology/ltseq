@@ -20,7 +20,7 @@ pub use types::{PyExpr, dict_to_py_expr};
 pub use error::PyExprError;
 pub use format::{format_table, format_cell};
 
-use crate::engine::RUNTIME;
+use crate::engine::{RUNTIME, create_session_context};
 
 /// Convert PyExpr to DataFusion Expr
 fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
@@ -100,9 +100,9 @@ fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
 impl LTSeqTable {
     #[new]
     fn new() -> Self {
-        let session = SessionContext::new();
+        let session = create_session_context();
         LTSeqTable {
-            session: Arc::new(session),
+            session,
             dataframe: None,
             schema: None,
             sort_exprs: Vec::new(),
@@ -151,7 +151,7 @@ impl LTSeqTable {
     ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
     fn scan_csv(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
-        let session = Arc::new(SessionContext::new());
+        let session = create_session_context();
         crate::cursor::create_cursor_from_csv(session, &path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
@@ -165,7 +165,7 @@ impl LTSeqTable {
     ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
     fn scan_parquet(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
-        let session = Arc::new(SessionContext::new());
+        let session = create_session_context();
         crate::cursor::create_cursor_from_parquet(session, &path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }

@@ -24,19 +24,12 @@ python-source = "./py-ltseq"
 [dependency-groups]
 dev = [
     "maturin>=1.11.2",
-]
-
-[tool.setuptools.package-dir]
-ltseq = "py-ltseq"
-
-[tool.uv]
-# 这里定义开发依赖 (替代 requirements-dev.txt)
-dev-dependencies = [
-    "maturin>=1.11.2",
     "pytest>=7.0",
     "ipdb>=0.13",  # 调试好帮手
 ]
 
+[tool.setuptools.package-dir]
+ltseq = "py-ltseq"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

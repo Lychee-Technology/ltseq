@@ -1,6 +1,6 @@
 # LTSeq Design Summary
 
-**Last Updated**: January 8, 2026  
+**Last Updated**: January 9, 2026  
 **Status**: Comprehensive Design Archive
 
 ## Overview
@@ -20,6 +20,7 @@ This document consolidates design decisions, architectural patterns, and lessons
 7. [Grouping Operations](#7-grouping-operations)
 8. [API Design Patterns](#8-api-design-patterns)
 9. [Lessons Learned](#9-lessons-learned)
+10. [Phase 10: Performance Optimization](#10-phase-10-performance-optimization)
 
 ---
 
@@ -208,3 +209,67 @@ This document consolidates design decisions, architectural patterns, and lessons
 ### 9.4 Python 3.14 Compatibility
 - **Lesson**: `ast.NameConstant` is deprecated.
 - **Fix**: Migrated to `ast.Constant` proactively to ensure future-proofing.
+
+---
+
+## 10. Phase 10: Performance Optimization
+
+### 10.1 Analysis Summary (January 2026)
+
+**Key Finding**: DataFusion and Arrow already handle low-level optimizations.
+- **SIMD**: Arrow arrays use SIMD-optimized compute kernels automatically.
+- **Multi-threading**: DataFusion parallelizes partition-level operations; Tokio runtime is multi-threaded.
+- **Batch processing**: Default batch size (8192 rows) is cache-optimized.
+
+**Actual Bottleneck**: The **materialization pattern** used for complex operations.
+```rust
+// This pattern appears in 15+ places:
+let batches = df.collect().await?;           // Full materialization
+let temp = MemTable::try_new(schema, batches)?;
+session.register_table("__temp", temp)?;
+session.sql("SELECT ... FROM __temp").await?; // SQL execution
+```
+Operations using this pattern: window functions, joins, group_by, pivot.
+
+### 10.2 Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **No custom SIMD code** | Arrow/DataFusion already optimized; custom SIMD adds maintenance burden with minimal gain |
+| **No custom threading** | DataFusion + Tokio handle parallelization; adding custom threading risks contention |
+| **Focus on configuration** | SessionContext uses bare defaults; proper tuning gives easy wins |
+| **Focus on materialization** | Reducing collect() → MemTable round-trips has highest impact |
+| **Smart defaults, no config API** | 80% of users won't tune; add Python config API later if requested |
+| **Benchmark suite required** | Can't optimize what we don't measure |
+
+### 10.3 Implementation Plan
+
+| # | Task | Description | Effort |
+|---|------|-------------|--------|
+| 1 | Benchmark suite | 5-10 key benchmarks (filter, join, window, group, chain) | 0.5 day |
+| 2 | DataFusion configuration | Configure SessionContext with batch_size, target_partitions, memory settings | 1 day |
+| 3 | Reduce join materialization | Refactor join_impl to avoid double-collection where possible | 1-2 days |
+| 4 | Reduce window materialization | Optimize derive_with_window_functions_impl to batch operations | 1 day |
+| 5 | Expression optimization | Constant folding, predicate combining in transpiler | 1 day |
+
+### 10.4 Configuration Strategy
+
+**SessionContext** (to be implemented in `src/lib.rs`):
+```rust
+let config = SessionConfig::new()
+    .with_target_partitions(num_cpus::get())  // Match CPU cores
+    .with_batch_size(8192)                     // DataFusion default, tunable
+    .with_information_schema(false);           // Disable unused feature
+
+let session = SessionContext::new_with_config(config);
+```
+
+**Tokio Runtime** (already multi-threaded, minimal changes needed).
+
+### 10.5 Benchmark Categories
+
+1. **Filter**: 10K, 1M, 10M rows with simple and complex predicates
+2. **Join**: Small×Small, Large×Small, Large×Large
+3. **Window**: LAG/LEAD, running sum, rolling average
+4. **Group**: group_ordered + aggregate
+5. **Chain**: filter → derive → select (typical workflow)

@@ -123,3 +123,73 @@ class TestLinkShowOperation:
         # Check that output was printed
         captured = capsys.readouterr()
         assert len(captured.out) > 0
+
+
+class TestLinkLenOperation:
+    """Tests for len() on linked tables"""
+
+    @pytest.fixture
+    def orders_table(self):
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        return LTSeq.read_csv("examples/products.csv")
+
+    def test_link_len_returns_row_count(self, orders_table, products_table):
+        """
+        len() should return the number of rows in the materialized join.
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # len() should work and return a positive count
+        count = len(linked)
+        assert isinstance(count, int)
+        assert count > 0
+
+    def test_link_len_matches_materialized_count(self, orders_table, products_table):
+        """
+        len(linked) should equal len(linked._materialize()).
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Compare len() with explicit materialization
+        linked_len = len(linked)
+        materialized_len = len(linked._materialize())
+        assert linked_len == materialized_len
+
+    def test_link_len_after_filter_source_columns(self, orders_table, products_table):
+        """
+        len() should work on filtered LinkedTable (source columns only).
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on source column returns LinkedTable
+        filtered = linked.filter(lambda r: r.quantity > 2)
+
+        # len() should work on the filtered LinkedTable
+        count = len(filtered)
+        assert isinstance(count, int)
+        assert count >= 0
+
+    def test_link_len_after_filter_linked_columns(self, orders_table, products_table):
+        """
+        len() should work on filtered result (linked columns, returns LTSeq).
+        """
+        linked = orders_table.link(
+            products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
+        )
+
+        # Filter on linked column returns LTSeq
+        filtered = linked.filter(lambda r: r.prod_price > 50)
+
+        # len() should work on the result
+        count = len(filtered)
+        assert isinstance(count, int)
+        assert count >= 0

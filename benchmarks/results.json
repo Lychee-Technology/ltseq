@@ -1,0 +1,143 @@
+{
+  "timestamp": "2026-01-09 16:04:56",
+  "results": [
+    {
+      "name": "filter_10000",
+      "rows": 10000,
+      "time_ms": 41.6,
+      "rows_per_sec": 240378.0
+    },
+    {
+      "name": "filter_100000",
+      "rows": 100000,
+      "time_ms": 318.43,
+      "rows_per_sec": 314043.0
+    },
+    {
+      "name": "filter_1000000",
+      "rows": 1000000,
+      "time_ms": 486.34,
+      "rows_per_sec": 2056162.0
+    },
+    {
+      "name": "filter_complex_100000",
+      "rows": 100000,
+      "time_ms": 317.99,
+      "rows_per_sec": 314477.0
+    },
+    {
+      "name": "derive_10000",
+      "rows": 10000,
+      "time_ms": 39.79,
+      "rows_per_sec": 251304.0
+    },
+    {
+      "name": "derive_100000",
+      "rows": 100000,
+      "time_ms": 316.31,
+      "rows_per_sec": 316141.0
+    },
+    {
+      "name": "derive_1000000",
+      "rows": 1000000,
+      "time_ms": 468.22,
+      "rows_per_sec": 2135739.0
+    },
+    {
+      "name": "derive_multi_100000",
+      "rows": 100000,
+      "time_ms": 318.1,
+      "rows_per_sec": 314368.0
+    },
+    {
+      "name": "join_10000x10000",
+      "rows": 20000,
+      "time_ms": 81.57,
+      "rows_per_sec": 245173.0
+    },
+    {
+      "name": "join_100000x10000",
+      "rows": 110000,
+      "time_ms": 358.67,
+      "rows_per_sec": 306689.0
+    },
+    {
+      "name": "join_100000x100000",
+      "rows": 200000,
+      "time_ms": 643.21,
+      "rows_per_sec": 310941.0
+    },
+    {
+      "name": "window_lag_10000",
+      "rows": 10000,
+      "time_ms": 138.36,
+      "rows_per_sec": 72274.0
+    },
+    {
+      "name": "window_lag_100000",
+      "rows": 100000,
+      "time_ms": 1322.2,
+      "rows_per_sec": 75631.0
+    },
+    {
+      "name": "window_cumsum_10000",
+      "rows": 10000,
+      "time_ms": 130.48,
+      "rows_per_sec": 76638.0
+    },
+    {
+      "name": "window_cumsum_100000",
+      "rows": 100000,
+      "time_ms": 1254.46,
+      "rows_per_sec": 79715.0
+    },
+    {
+      "name": "group_agg_10000",
+      "rows": 10000,
+      "time_ms": 48.75,
+      "rows_per_sec": 205126.0
+    },
+    {
+      "name": "group_agg_100000",
+      "rows": 100000,
+      "time_ms": 332.6,
+      "rows_per_sec": 300657.0
+    },
+    {
+      "name": "chain_10000",
+      "rows": 10000,
+      "time_ms": 35.44,
+      "rows_per_sec": 282175.0
+    },
+    {
+      "name": "chain_100000",
+      "rows": 100000,
+      "time_ms": 243.73,
+      "rows_per_sec": 410296.0
+    },
+    {
+      "name": "chain_1000000",
+      "rows": 1000000,
+      "time_ms": 358.51,
+      "rows_per_sec": 2789304.0
+    },
+    {
+      "name": "read_csv_10000",
+      "rows": 10000,
+      "time_ms": 38.03,
+      "rows_per_sec": 262935.0
+    },
+    {
+      "name": "read_csv_100000",
+      "rows": 100000,
+      "time_ms": 314.5,
+      "rows_per_sec": 317968.0
+    },
+    {
+      "name": "read_csv_1000000",
+      "rows": 1000000,
+      "time_ms": 462.68,
+      "rows_per_sec": 2161336.0
+    }
+  ]
+}
