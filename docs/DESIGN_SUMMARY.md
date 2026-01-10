@@ -390,3 +390,140 @@ DataFusion does not support:
 - `RANGE` frame in window functions for this use case
 
 Custom Rust implementation with binary search is the most efficient approach.
+
+---
+
+## 12. Sort Order Tracking (Phase 3.1)
+
+### 12.1 Overview
+
+Sort order tracking is a metadata system that tracks which columns an `LTSeq` table is sorted by. This enables:
+- Efficient `join_sorted()` with validation
+- Smart auto-detection in `asof_join()` (skip unnecessary sorting)
+- Clear user feedback about table state
+
+### 12.2 Core Data Structure
+
+```python
+class LTSeq:
+    _sort_keys: Optional[List[Tuple[str, bool]]] = None  # [(col_name, is_desc), ...]
+```
+
+- `None`: Sort order unknown (unsorted or invalidated)
+- `[(col, False), ...]`: Sorted ascending by columns in order
+- `[(col, True), ...]`: Sorted descending
+
+### 12.3 API Design
+
+**Property: `sort_keys`**
+```python
+@property
+def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
+    """Return current sort keys or None if unknown."""
+```
+
+**Method: `is_sorted_by()`**
+```python
+def is_sorted_by(self, *keys: str, desc: Union[bool, List[bool]] = False) -> bool:
+    """
+    Check if table is sorted by specified keys using prefix matching.
+    
+    Example:
+        t.sort("a", "b").is_sorted_by("a")  # True (prefix match)
+        t.sort("a", "b").is_sorted_by("a", "b")  # True (exact match)
+        t.sort("a", "b").is_sorted_by("b")  # False (wrong order)
+    """
+```
+
+**Method: `join_sorted()`**
+```python
+def join_sorted(self, other: LTSeq, on: Callable, how: str = "inner") -> LTSeq:
+    """
+    Merge join with sort validation. Raises ValueError if either table
+    is not sorted by join keys.
+    """
+```
+
+### 12.4 Operation Classification
+
+| Operation | Sort Behavior | Rationale |
+|-----------|---------------|-----------|
+| `filter()` | Preserves | Row subset, order unchanged |
+| `derive()` | Preserves | Adds columns, order unchanged |
+| `slice()` | Preserves | Contiguous row subset |
+| `select()` | Conditional | Preserves if sort key columns included |
+| `cum_sum()` | Preserves | Adds columns, order unchanged |
+| `sort()` | Sets new | Explicitly sets sort order |
+| `distinct()` | Invalidates | Row reordering may occur |
+| `union()` | Invalidates | Combines tables, no guaranteed order |
+| `join()` | Invalidates | Hash join doesn't preserve order |
+| `agg()` | Invalidates | Creates new rows |
+| `pivot()` | Invalidates | Creates new structure |
+
+### 12.5 Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Prefix matching for `is_sorted_by()`** | `t.sort("a", "b")` is sorted by "a" (prefix), enabling flexible checks |
+| **Descending support** | Both ascending and descending sorts are tracked; merge join works with either direction as long as both tables match |
+| **Strict validation in `join_sorted()`** | Raises `ValueError` rather than silent fallback; users should know if their data isn't sorted |
+| **Lambda-only sort keys not tracked** | Complex expressions like `lambda r: r.a + r.b` result in `_sort_keys = None` (can't reliably track computed sorts) |
+| **Direction matching required** | Both tables in `join_sorted()` must have same direction (both ASC or both DESC) |
+
+### 12.6 Integration with `asof_join()`
+
+`asof_join()` now uses `is_sorted_by()` for smart auto-detection:
+
+```python
+# Before: Always sorted when is_sorted=False
+if not is_sorted:
+    left_table = self.sort(left_time_col)
+    right_table = other.sort(right_time_col)
+
+# After: Check sort tracking, only sort if needed
+if is_sorted:
+    pass  # Trust user
+else:
+    # Auto-detect using sort tracking
+    if not self.is_sorted_by(left_time_col):
+        left_table = self.sort(left_time_col)
+    if not other.is_sorted_by(right_time_col):
+        right_table = other.sort(right_time_col)
+```
+
+**Benefit**: If user has already sorted the tables, `asof_join()` skips redundant sorting automatically.
+
+### 12.7 Example Usage
+
+```python
+# Basic sort tracking
+t = LTSeq.read_csv("data.csv")
+print(t.sort_keys)  # None (unsorted)
+
+t_sorted = t.sort("id", "date")
+print(t_sorted.sort_keys)  # [('id', False), ('date', False)]
+
+# Prefix matching
+t_sorted.is_sorted_by("id")  # True
+t_sorted.is_sorted_by("id", "date")  # True
+t_sorted.is_sorted_by("date")  # False (wrong position)
+
+# Sort-preserving operations
+t_filtered = t_sorted.filter(lambda r: r.value > 100)
+print(t_filtered.sort_keys)  # [('id', False), ('date', False)] - preserved
+
+# Sort-invalidating operations
+t_distinct = t_sorted.distinct("id")
+print(t_distinct.sort_keys)  # None - invalidated
+
+# join_sorted() with validation
+users = LTSeq.read_csv("users.csv").sort("user_id")
+orders = LTSeq.read_csv("orders.csv").sort("user_id")
+result = users.join_sorted(orders, on=lambda u, o: u.user_id == o.user_id)
+
+# This would raise ValueError:
+# users_unsorted = LTSeq.read_csv("users.csv")  # Not sorted
+# result = users_unsorted.join_sorted(orders, on=lambda u, o: u.user_id == o.user_id)
+# ValueError: Left table is not sorted by join keys: ['user_id']
+```
+

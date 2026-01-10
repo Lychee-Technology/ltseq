@@ -1,6 +1,6 @@
 """Core LTSeq table class with data operations."""
 
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .expr import SchemaProxy, _lambda_to_expr
 from .helpers import (
@@ -138,6 +138,9 @@ class LTSeq:
         self._schema: Dict[str, str] = {}
         self._csv_path: Optional[str] = None  # Track original CSV file for to_pandas()
         self._has_header: bool = True  # Track header setting for to_pandas()
+        self._sort_keys: Optional[List[Tuple[str, bool]]] = (
+            None  # [(col, is_desc), ...]
+        )
 
     @classmethod
     def read_csv(cls, path: str, has_header: bool = True) -> "LTSeq":
@@ -380,6 +383,82 @@ class LTSeq:
         """
         return self._inner.count()
 
+    @property
+    def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
+        """
+        Get the current sort keys for this table.
+
+        Returns the list of (column_name, is_descending) tuples representing
+        the sort order, or None if the sort order is unknown.
+
+        Returns:
+            List of (column_name, is_desc) tuples, or None if unknown
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv").sort("date", "id")
+            >>> t.sort_keys
+            [('date', False), ('id', False)]
+            >>> t2 = t.sort("value", desc=True)
+            >>> t2.sort_keys
+            [('value', True)]
+        """
+        return self._sort_keys
+
+    def is_sorted_by(self, *keys: str, desc: Union[bool, List[bool]] = False) -> bool:
+        """
+        Check if this table is sorted by the specified keys.
+
+        Uses prefix matching: if the table is sorted by ["a", "b", "c"],
+        then is_sorted_by("a") and is_sorted_by("a", "b") both return True.
+
+        Args:
+            *keys: Column names to check (in order)
+            desc: Expected descending flag(s). Can be:
+                  - Single boolean: applies to all keys
+                  - List of booleans: one per key
+                  Default: False (all ascending)
+
+        Returns:
+            True if table is sorted by the specified keys with matching direction
+
+        Raises:
+            ValueError: If desc list length doesn't match number of keys
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv").sort("date", "id")
+            >>> t.is_sorted_by("date")  # True (prefix match)
+            >>> t.is_sorted_by("date", "id")  # True (exact match)
+            >>> t.is_sorted_by("id")  # False (wrong order)
+            >>> t.is_sorted_by("date", desc=True)  # False (wrong direction)
+        """
+        if self._sort_keys is None:
+            return False
+
+        if not keys:
+            return False
+
+        # Normalize desc parameter to a list of booleans
+        if isinstance(desc, bool):
+            desc_flags = [desc] * len(keys)
+        elif isinstance(desc, list):
+            if len(desc) != len(keys):
+                raise ValueError(
+                    f"desc list length ({len(desc)}) must match number of keys ({len(keys)})"
+                )
+            desc_flags = desc
+        else:
+            raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+
+        # Check prefix match
+        for i, key in enumerate(keys):
+            if i >= len(self._sort_keys):
+                return False
+            col, is_desc = self._sort_keys[i]
+            if col != key or is_desc != desc_flags[i]:
+                return False
+
+        return True
+
     def _capture_expr(self, fn: Callable) -> Dict[str, Any]:
         """
         Capture and serialize an expression tree from a lambda.
@@ -438,6 +517,8 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate filtering to Rust implementation
         result._inner = self._inner.filter(expr_dict)
+        # Filter preserves sort order
+        result._sort_keys = self._sort_keys
         return result
 
     def select(self, *cols) -> "LTSeq":
@@ -484,6 +565,21 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate selection to Rust implementation
         result._inner = self._inner.select(exprs)
+
+        # Select preserves sort order only if all sort key columns are still present
+        # Extract selected column names from expressions
+        selected_cols = set()
+        for expr in exprs:
+            if expr.get("type") == "Column" and "name" in expr:
+                selected_cols.add(expr["name"])
+
+        if self._sort_keys is not None:
+            # Check if all sort key columns are in selected columns
+            all_keys_present = all(col in selected_cols for col, _ in self._sort_keys)
+            result._sort_keys = self._sort_keys if all_keys_present else None
+        else:
+            result._sort_keys = None
+
         return result
 
     def derive(self, *args, **kwargs: Callable) -> "LTSeq":
@@ -536,6 +632,8 @@ class LTSeq:
 
         # Rust backend handles both standard and window functions
         result._inner = self._inner.derive(derived_cols)
+        # Derive preserves sort order (only adds new columns)
+        result._sort_keys = self._sort_keys
 
         return result
 
@@ -598,6 +696,21 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate sorting to Rust implementation with desc flags
         result._inner = self._inner.sort(sort_exprs, desc_flags)
+
+        # Track sort keys for sort order tracking
+        # Only track if all expressions are simple column references
+        sort_keys: List[Tuple[str, bool]] = []
+        can_track = True
+        for i, expr in enumerate(sort_exprs):
+            if expr.get("type") == "Column" and "name" in expr:
+                sort_keys.append((expr["name"], desc_flags[i]))
+            else:
+                # Complex expression - can't reliably track sort order
+                can_track = False
+                break
+
+        result._sort_keys = sort_keys if can_track else None
+
         # Try to write to a temporary CSV for to_pandas fallback
         import tempfile
         import os
@@ -658,6 +771,8 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate deduplication to Rust implementation
         result._inner = self._inner.distinct(key_cols)
+        # Distinct invalidates sort order (row reordering may occur)
+        # result._sort_keys = None  # Already None from __init__
         return result
 
     def slice(self, offset: int = 0, length: Optional[int] = None) -> "LTSeq":
@@ -699,6 +814,8 @@ class LTSeq:
         result._schema = self._schema.copy()
         # Delegate slicing to Rust implementation
         result._inner = self._inner.slice(offset, length)
+        # Slice preserves sort order (contiguous rows)
+        result._sort_keys = self._sort_keys
         return result
 
     def cum_sum(self, *cols: Union[str, Callable]) -> "LTSeq":
@@ -753,6 +870,8 @@ class LTSeq:
                 result._schema[f"cum_sum_{i}"] = "float64"
         # Delegate cum_sum to Rust implementation
         result._inner = self._inner.cum_sum(cum_exprs)
+        # Cum_sum preserves sort order (only adds new columns)
+        result._sort_keys = self._sort_keys
         return result
 
     def group_ordered(self, grouping_fn: Callable) -> "NestedTable":
@@ -1469,6 +1588,97 @@ class LTSeq:
         result._schema = self._schema.copy()
         return result
 
+    def align(self, ref_sequence: list, key: Callable) -> "LTSeq":
+        """
+        Align table rows to a reference sequence.
+
+        Reorders rows to match the order of ref_sequence and inserts NULL rows
+        for keys in ref_sequence that don't exist in the table. Rows with keys
+        not in ref_sequence are excluded from the result.
+
+        This is useful for:
+        - Time series gap filling (insert NULL rows for missing dates)
+        - Sequence synchronization (align multiple tables to same key order)
+        - Master data alignment (align transactions to master list)
+
+        Args:
+            ref_sequence: List of key values defining the output order.
+                         Keys can be strings, numbers, or dates.
+                         Duplicate keys are allowed and produce duplicate rows.
+            key: Lambda extracting the key column from each row.
+                 E.g., lambda r: r.date
+
+        Returns:
+            New LTSeq with:
+            - Rows reordered to match ref_sequence
+            - NULL rows inserted for missing keys
+            - Original schema preserved
+
+        Raises:
+            ValueError: If ref_sequence is empty or schema not initialized
+            TypeError: If key is not callable or doesn't reference a column
+
+        SPL Equivalent:
+            align
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")  # Has dates: 01-02, 01-04, 01-05
+            >>> # Align to continuous date sequence
+            >>> ref_dates = ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
+            >>> aligned = t.align(ref_dates, key=lambda r: r.date)
+            >>> aligned.show()
+            # Output:
+            # 2024-01-01: NULL row
+            # 2024-01-02: actual data
+            # 2024-01-03: NULL row
+            # 2024-01-04: actual data
+            # (2024-01-05 excluded - not in ref_sequence)
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not ref_sequence:
+            raise ValueError("ref_sequence cannot be empty")
+
+        if not callable(key):
+            raise TypeError(f"key must be callable, got {type(key).__name__}")
+
+        # Extract key column name from lambda
+        key_expr = self._capture_expr(key)
+
+        # Validate it's a simple column reference
+        if key_expr.get("type") != "Column" or "name" not in key_expr:
+            raise TypeError(
+                "key must be a simple column reference (e.g., lambda r: r.date). "
+                "Complex expressions are not supported."
+            )
+
+        key_col = key_expr["name"]
+
+        # Validate column exists
+        if key_col not in self._schema:
+            raise AttributeError(
+                f"Column '{key_col}' not found in schema. "
+                f"Available columns: {list(self._schema.keys())}"
+            )
+
+        # Call Rust align() method
+        try:
+            result_inner = self._inner.align(ref_sequence, key_col)
+        except RuntimeError as e:
+            raise RuntimeError(f"align() failed: {e}")
+
+        # Create new LTSeq with result
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+        # Sort order is unknown after align (order comes from ref_sequence, not data)
+        result._sort_keys = None
+
+        return result
+
     def join(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
         """
         Standard SQL-style hash join between two tables.
@@ -1747,6 +1957,154 @@ class LTSeq:
         result._schema = result_schema
         return result
 
+    def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+        """
+        Merge join with sort order validation.
+
+        Similar to join_merge(), but validates that both tables are sorted by
+        their respective join keys before performing the join. Raises an error
+        if either table is not properly sorted.
+
+        This method leverages sort order tracking to ensure correctness of
+        merge join operations.
+
+        Args:
+            other: Another LTSeq table (must be sorted by join key)
+            on: Lambda with two parameters specifying the join condition.
+                E.g., lambda t1, t2: t1.id == t2.id
+            how: Join type. One of: "inner", "left", "right", "full"
+                 Default: "inner" (only matching rows)
+
+        Returns:
+            New LTSeq with joined results. Columns from both tables are included.
+
+        Raises:
+            ValueError: If either table is not sorted by the join keys
+            ValueError: If sort directions don't match between tables
+            ValueError: If schema not initialized or invalid join type
+            TypeError: If join condition is invalid
+
+        Example:
+            >>> t1 = LTSeq.read_csv("users.csv").sort("user_id")
+            >>> t2 = LTSeq.read_csv("orders.csv").sort("user_id")
+            >>> # This will succeed because both are sorted
+            >>> result = t1.join_sorted(t2, on=lambda t1, t2: t1.user_id == t2.user_id)
+            >>>
+            >>> # This will raise ValueError because t1 is not sorted
+            >>> t1_unsorted = LTSeq.read_csv("users.csv")
+            >>> result = t1_unsorted.join_sorted(t2, on=lambda t1, t2: t1.user_id == t2.user_id)
+            ValueError: Left table is not sorted by join keys: ['user_id']
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not isinstance(other, LTSeq):
+            raise TypeError(
+                f"join_sorted() argument must be LTSeq, got {type(other).__name__}"
+            )
+
+        if not other._schema:
+            raise ValueError(
+                "Other table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate join type
+        valid_join_types = {"inner", "left", "right", "full"}
+        if how not in valid_join_types:
+            raise ValueError(
+                f"Invalid join type '{how}'. Must be one of: {valid_join_types}"
+            )
+
+        # Validate join condition and extract column names
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            other_proxy = SchemaProxy(other._schema)
+            expr = on(self_proxy, other_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        # Extract join key column names from the expression
+        # We need to get column names for validation
+        left_keys: List[str] = []
+        right_keys: List[str] = []
+
+        def extract_keys_from_expr(expr) -> None:
+            """Recursively extract column names from join condition."""
+            from .expr import BinOpExpr, ColumnExpr
+
+            if isinstance(expr, BinOpExpr):
+                if expr.op == "Eq":
+                    # Found an equality: extract column names
+                    if hasattr(expr.left, "name") and hasattr(expr.right, "name"):
+                        left_col = expr.left.name
+                        right_col = expr.right.name
+                        # Determine which side each column belongs to
+                        if left_col in self._schema:
+                            left_keys.append(left_col)
+                        if right_col in other._schema:
+                            right_keys.append(right_col)
+                elif expr.op == "And":
+                    # Composite key: recursively extract from both sides
+                    extract_keys_from_expr(expr.left)
+                    extract_keys_from_expr(expr.right)
+
+        extract_keys_from_expr(expr)
+
+        if not left_keys:
+            raise ValueError(
+                "Could not extract join keys from condition. "
+                "Ensure the join condition uses simple column equality."
+            )
+
+        # Determine expected sort direction from the tables
+        # Both tables should have matching sort directions
+        left_desc = False
+        right_desc = False
+
+        if self._sort_keys:
+            # Get direction from first matching sort key
+            for col, is_desc in self._sort_keys:
+                if col in left_keys:
+                    left_desc = is_desc
+                    break
+
+        if other._sort_keys:
+            # Get direction from first matching sort key
+            for col, is_desc in other._sort_keys:
+                if col in right_keys:
+                    right_desc = is_desc
+                    break
+
+        # Validate left table is sorted by join keys
+        if not self.is_sorted_by(*left_keys, desc=left_desc):
+            raise ValueError(
+                f"Left table is not sorted by join keys: {left_keys}. "
+                f"Current sort keys: {self._sort_keys}. "
+                f"Use t.sort({', '.join(repr(k) for k in left_keys)}) before join_sorted()."
+            )
+
+        # Validate right table is sorted by join keys
+        if not other.is_sorted_by(*right_keys, desc=right_desc):
+            raise ValueError(
+                f"Right table is not sorted by join keys: {right_keys}. "
+                f"Current sort keys: {other._sort_keys}. "
+                f"Use t.sort({', '.join(repr(k) for k in right_keys)}) before join_sorted()."
+            )
+
+        # Validate sort directions match
+        if left_desc != right_desc:
+            raise ValueError(
+                f"Sort directions don't match: left table sorted "
+                f"{'descending' if left_desc else 'ascending'}, "
+                f"right table sorted {'descending' if right_desc else 'ascending'}. "
+                f"Both tables must be sorted in the same direction for merge join."
+            )
+
+        # Delegate to join_merge for the actual join operation
+        return self.join_merge(other, on=on, join_type=how)
+
     def asof_join(
         self,
         other: "LTSeq",
@@ -1846,10 +2204,18 @@ class LTSeq:
         left_table = self
         right_table = other
 
-        if not is_sorted:
-            # Auto-sort both tables by their respective time columns
-            left_table = self.sort(left_time_col)
-            right_table = other.sort(right_time_col)
+        if is_sorted:
+            # User explicitly says data is sorted, trust them
+            pass
+        else:
+            # Auto-detect using sort tracking, or sort if needed
+            left_needs_sort = not self.is_sorted_by(left_time_col)
+            right_needs_sort = not other.is_sorted_by(right_time_col)
+
+            if left_needs_sort:
+                left_table = self.sort(left_time_col)
+            if right_needs_sort:
+                right_table = other.sort(right_time_col)
 
         # Call Rust asof_join() method
         try:
@@ -1873,4 +2239,152 @@ class LTSeq:
             result_schema[f"_other_{col_name}"] = col_type
 
         result._schema = result_schema
+        return result
+
+    def stateful_scan(
+        self,
+        func: Callable,
+        init: Any,
+        output_col: str = "scan_result",
+    ) -> "LTSeq":
+        """
+        Stateful scan over ordered rows with user-defined state transition function.
+
+        Iterates through rows in order, maintaining and updating state at each row.
+        The state transition function receives the current state and row, returning
+        the new state. The accumulated state at each row is stored in a new column.
+
+        This is useful for:
+        - Running totals with complex logic
+        - Compound interest/growth calculations
+        - State machines (tracking sequences of events)
+        - Any computation where each row depends on previous results
+
+        Args:
+            func: State transition function taking (state, row) and returning new state.
+                  - state: Current accumulated state (starts as `init`)
+                  - row: Current row as a dict-like object with column access
+                  - Returns: New state value (can be any numeric type)
+            init: Initial state value before processing any rows.
+            output_col: Name for the output column containing state values.
+                       Default: "scan_result"
+
+        Returns:
+            New LTSeq with original columns plus the output column containing
+            the accumulated state at each row.
+
+        Raises:
+            ValueError: If schema not initialized or output_col conflicts
+            TypeError: If func is not callable
+            RuntimeError: If state computation fails
+
+        SPL Equivalent:
+            iterate
+
+        Example:
+            >>> t = LTSeq.read_csv("returns.csv")
+            >>> # Compound growth: state = state * (1 + return_rate)
+            >>> result = t.sort("date").stateful_scan(
+            ...     func=lambda s, r: s * (1 + r["rate"]),
+            ...     init=1.0,
+            ...     output_col="cumulative_return"
+            ... )
+            >>> result.show()
+
+            >>> # Running max
+            >>> result = t.sort("date").stateful_scan(
+            ...     func=lambda s, r: max(s, r["price"]),
+            ...     init=float("-inf"),
+            ...     output_col="running_max"
+            ... )
+
+            >>> # Count positive values so far
+            >>> result = t.sort("date").stateful_scan(
+            ...     func=lambda s, r: s + (1 if r["value"] > 0 else 0),
+            ...     init=0,
+            ...     output_col="positive_count"
+            ... )
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not callable(func):
+            raise TypeError(f"func must be callable, got {type(func).__name__}")
+
+        if output_col in self._schema:
+            raise ValueError(
+                f"Output column '{output_col}' already exists in schema. "
+                f"Use a different name or remove the existing column first."
+            )
+
+        # Get data as pandas DataFrame for row-by-row processing
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "stateful_scan() requires pandas. Install it with: pip install pandas"
+            )
+
+        df = self.to_pandas()
+
+        if df.empty:
+            # Handle empty table: return with new column but no data
+            result_schema = self._schema.copy()
+            # Infer type from init value
+            if isinstance(init, float):
+                result_schema[output_col] = "float64"
+            elif isinstance(init, int):
+                result_schema[output_col] = "int64"
+            else:
+                result_schema[output_col] = "object"
+            return LTSeq._from_rows([], result_schema)
+
+        # Execute stateful scan
+        state = init
+        results = []
+
+        for idx, row in df.iterrows():
+            # Convert row to dict for user function
+            row_dict = row.to_dict()
+            try:
+                # Call user's state transition function
+                state = func(state, row_dict)
+                results.append(state)
+            except Exception as e:
+                raise RuntimeError(
+                    f"State transition function failed at row {idx}: {e}"
+                ) from e
+
+        # Add results as new column
+        df[output_col] = results
+
+        # Update schema with new column
+        result_schema = self._schema.copy()
+        # Infer type from results
+        if results:
+            sample = results[0]
+            if isinstance(sample, float):
+                result_schema[output_col] = "float64"
+            elif isinstance(sample, int):
+                result_schema[output_col] = "int64"
+            elif isinstance(sample, bool):
+                result_schema[output_col] = "bool"
+            elif isinstance(sample, str):
+                result_schema[output_col] = "string"
+            else:
+                result_schema[output_col] = "object"
+        else:
+            result_schema[output_col] = "float64"  # Default
+
+        # Create new LTSeq from the result
+        # Note: We use CSV round-trip which may convert types to strings.
+        # For operations that need type preservation, use the result directly
+        # or convert numeric columns explicitly in subsequent derives.
+        rows = df.to_dict("records")
+
+        result = LTSeq._from_rows(rows, result_schema)
+        # Preserve sort order (scan adds column but maintains row order)
+        result._sort_keys = self._sort_keys
         return result

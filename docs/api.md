@@ -83,14 +83,49 @@ with_tax = t.derive(lambda r: {"tax": r.price * 0.1})
 
 ### `LTSeq.sort`
 - **Signature**: `LTSeq.sort(*keys: Union[str, Callable], desc: Union[bool, list] = False) -> LTSeq`
-- **Behavior**: Sort by one or more keys; required for window/ordered computing
+- **Behavior**: Sort by one or more keys; required for window/ordered computing. Also populates `sort_keys` for sort order tracking.
 - **Parameters**: `keys` column names or expressions; `desc` (or `descending`) global or per-key descending flags
-- **Returns**: sorted `LTSeq`
+- **Returns**: sorted `LTSeq` with tracked sort keys
 - **SPL Equivalent**: `sort()`
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid key type), `AttributeError` (column not found)
 - **Example**:
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
+print(t_sorted.sort_keys)  # [("date", False), ("id", True)]
+```
+
+### `LTSeq.sort_keys` (property)
+- **Signature**: `LTSeq.sort_keys -> Optional[List[Tuple[str, bool]]]`
+- **Behavior**: Returns the current sort keys as a list of (column_name, is_descending) tuples, or None if sort order is unknown
+- **Parameters**: none (property)
+- **Returns**: `Optional[List[Tuple[str, bool]]]` - list of (column, descending) tuples or None
+- **Exceptions**: none
+- **Example**:
+```python
+t = LTSeq.read_csv("data.csv")
+print(t.sort_keys)  # None (unknown sort order)
+
+t_sorted = t.sort("date", "id")
+print(t_sorted.sort_keys)  # [("date", False), ("id", False)]
+
+t_desc = t.sort("price", desc=True)
+print(t_desc.sort_keys)  # [("price", True)]
+```
+
+### `LTSeq.is_sorted_by`
+- **Signature**: `LTSeq.is_sorted_by(*keys: str, desc: Union[bool, List[bool]] = False) -> bool`
+- **Behavior**: Check if the table is sorted by the given keys (uses prefix matching)
+- **Parameters**: `keys` column names to check; `desc` expected descending flags (single bool or per-key list)
+- **Returns**: `bool` - True if sorted by the given keys (as a prefix), False otherwise
+- **Exceptions**: `ValueError` (no keys provided or desc length mismatch)
+- **Example**:
+```python
+t_sorted = t.sort("a", "b", "c")
+t_sorted.is_sorted_by("a")          # True (prefix match)
+t_sorted.is_sorted_by("a", "b")     # True (prefix match)
+t_sorted.is_sorted_by("a", "b", "c") # True (exact match)
+t_sorted.is_sorted_by("b")          # False (not a prefix)
+t_sorted.is_sorted_by("a", desc=True)  # False (direction mismatch)
 ```
 
 ### `LTSeq.distinct`
@@ -435,15 +470,32 @@ result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
 ```
 
 ### `LTSeq.join_sorted`
-- **Signature**: `LTSeq.join_sorted(other: LTSeq, on: Callable, how: str = "inner") -> LTSeq`
-- **Behavior**: Same semantics as merge join; emphasizes pre-sorted inputs
-- **Parameters**: `other` other table; `on` join condition; `how` in {inner,left,right,full}
+- **Signature**: `LTSeq.join_sorted(other: LTSeq, on: Union[str, List[str]], how: str = "inner") -> LTSeq`
+- **Behavior**: Merge join with strict validation that both tables are sorted by join keys. Validates sort order using `is_sorted_by()` before executing.
+- **Parameters**: `other` other table (must be sorted by join key); `on` join column name(s); `how` in {inner,left,right,full}
 - **Returns**: joined `LTSeq`
 - **SPL Equivalent**: `joinx`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how or unsorted)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (tables not sorted by join keys, or sort directions don't match)
 - **Example**:
 ```python
-result = t1.sort("id").join_sorted(t2.sort("id"), on=lambda a, b: a.id == b.id)
+# Both tables must be sorted by their join keys
+t1_sorted = t1.sort("id")
+t2_sorted = t2.sort("id")
+result = t1_sorted.join_sorted(t2_sorted, on="id")
+
+# Composite keys: both tables must be sorted by all join keys
+t1_sorted = t1.sort("region", "date")
+t2_sorted = t2.sort("region", "date")
+result = t1_sorted.join_sorted(t2_sorted, on=["region", "date"])
+
+# Descending sort also supported (must match)
+t1_desc = t1.sort("id", desc=True)
+t2_desc = t2.sort("id", desc=True)
+result = t1_desc.join_sorted(t2_desc, on="id")
+
+# Raises ValueError if not sorted correctly
+t_unsorted = LTSeq.read_csv("data.csv")
+t_unsorted.join_sorted(t2_sorted, on="id")  # ValueError!
 ```
 
 ### `LTSeq.asof_join`

@@ -840,6 +840,31 @@ impl LTSeqTable {
         )
     }
 
+    /// Align table rows to a reference sequence
+    ///
+    /// Reorders rows to match the order of ref_sequence and inserts NULL rows
+    /// for keys in ref_sequence that don't exist in the table. Rows with keys
+    /// not in ref_sequence are excluded from the result.
+    ///
+    /// # Arguments
+    ///
+    /// * `ref_sequence` - List of key values defining the output order
+    /// * `key_col` - Column name to match against ref_sequence
+    ///
+    /// # Returns
+    ///
+    /// A new LTSeqTable with rows reordered and NULL rows for missing keys
+    ///
+    /// # Algorithm
+    ///
+    /// Uses SQL LEFT JOIN approach:
+    /// 1. Create temp table from ref_sequence with position column
+    /// 2. LEFT JOIN original table ON key
+    /// 3. ORDER BY position
+    fn align(&self, ref_sequence: Vec<PyObject>, key_col: &str) -> PyResult<LTSeqTable> {
+        crate::ops::advanced::align_impl(self, ref_sequence, key_col)
+    }
+
     /// Pivot: Transform table from long to wide format
     ///
     /// Reshapes data where unique values in a column become new columns,

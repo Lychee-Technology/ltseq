@@ -28,12 +28,12 @@
 
 | Feature | API Method | Gap | Priority |
 |---------|-----------|-----|----------|
-| **read_csv has_header** | `read_csv(path, has_header=True)` | Implemented - `has_header` parameter added | Medium |
-| **group_sorted** | `group_sorted(key)` | Not implemented - one-pass grouping on pre-sorted data | High |
-| **scan (stateful)** | `scan(func, init)` | Not implemented - stateful scan/iterate | High |
-| **align** | `align(ref_sequence, key)` | Not implemented - align to reference sequence | Medium |
-| **asof_join** | `asof_join(other, on, direction)` | Implemented - time-series as-of joins | High |
-| **join_sorted** | `join_sorted(other, on, how)` | Not implemented (alias for join_merge) | Low |
+| **read_csv has_header** | `read_csv(path, has_header=True)` | **IMPLEMENTED** - `has_header` parameter added | Medium |
+| **group_sorted** | `group_sorted(key)` | **IMPLEMENTED** - one-pass grouping on pre-sorted data | High |
+| **scan (stateful)** | `scan(func, init)` | **IMPLEMENTED** as `stateful_scan()` - Python-based stateful iteration | High |
+| **align** | `align(ref_sequence, key)` | **IMPLEMENTED** - align to reference sequence | Medium |
+| **asof_join** | `asof_join(other, on, direction)` | **IMPLEMENTED** - time-series as-of joins | High |
+| **join_sorted** | `join_sorted(other, on, how)` | **IMPLEMENTED** - merge join with sort validation | Low |
 | **lookup (table-level)** | `LTSeq.lookup(dim_table, on, as_)` | Partially implemented (Expr.lookup exists, not table-level) | Medium |
 | **top_k** | `top_k(col, k)` | Not implemented - aggregate function for Top-K | Low |
 | **Expr.lookup** | `r.key.lookup(target_table, column, join_key)` | Expression defined but not fully wired to execution | Medium |
@@ -54,13 +54,21 @@
 **Status**: COMPLETED
 
 #### 1.2 `scan(func, init)` - Stateful Scan/Iterate
-- [ ] Add `scan(func, init)` method to `LTSeq`
-- [ ] Create expression serialization for state transition function
-- [ ] Implement in Rust transpiler to generate SQL with window functions or custom UDF
-- [ ] Handle state serialization/deserialization
-- [ ] Add tests
+- [x] Add `stateful_scan(func, init, output_col)` method to `LTSeq`
+- [x] Implement Python-based row-by-row state iteration
+- [x] Handle empty tables and single-row tables
+- [x] Preserve sort keys after scan
+- [x] Add comprehensive tests in `tests/test_stateful_scan.py`
 
-**Files**: `py-ltseq/ltseq/core.py`, `src/transpiler.rs`, `src/ops/window.rs`
+**Implementation Notes:**
+- Implemented as Python-side iteration (not Rust transpiled) for maximum flexibility
+- Uses pandas DataFrame for row iteration
+- State can be any Python type (int, float, bool, string)
+- CSV round-trip may convert types to strings; subsequent derives should account for this
+- Named `stateful_scan()` to avoid conflict with existing `scan()` (file streaming)
+
+**Files**: `py-ltseq/ltseq/core.py`, `py-ltseq/tests/test_stateful_scan.py`
+**Status**: COMPLETED
 
 #### 1.3 `asof_join(other, on, direction)` - Time-Series As-Of Join
 - [x] Add `asof_join()` method to `LTSeq`
@@ -76,13 +84,14 @@
 ### Phase 2: Secondary Features (Medium Priority)
 
 #### 2.1 `align(ref_sequence, key)` - Sequence Alignment
-- [ ] Add `align()` method to `LTSeq`
-- [ ] Create a reference sequence from the provided list
-- [ ] Insert NULL rows for missing keys
-- [ ] Reorder to match reference sequence
-- [ ] Add tests
+- [x] Add `align()` method to `LTSeq`
+- [x] Create a reference sequence from the provided list
+- [x] Insert NULL rows for missing keys
+- [x] Reorder to match reference sequence
+- [x] Add tests in `tests/test_align.py`
 
-**Files**: `py-ltseq/ltseq/core.py`, `src/ops/advanced.rs`
+**Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `src/ops/advanced.rs`, `py-ltseq/tests/test_align.py`
+**Status**: COMPLETED
 
 #### 2.2 `read_csv(path, has_header=True)` - Header Parameter
 - [x] Add `has_header` parameter to `read_csv()`
@@ -113,12 +122,16 @@
 
 ### Phase 3: Enhancement Features (Low Priority)
 
-#### 3.1 `join_sorted(other, on, how)` - Alias for Merge Join
-- [ ] Add as an alias for `join_merge()` with same semantics
-- [ ] Validate inputs are sorted
-- [ ] Add tests
+#### 3.1 `join_sorted(other, on, how)` - Merge Join with Sort Validation
+- [x] Add `join_sorted()` method that delegates to `join_merge()`
+- [x] Validate inputs are sorted using `is_sorted_by()` (strict validation)
+- [x] Support composite keys (multiple join columns)
+- [x] Validate sort directions match (both ASC or both DESC)
+- [x] Add `sort_keys` property and `is_sorted_by()` method for sort order tracking
+- [x] Add tests in `tests/test_sort_tracking.py` and `tests/test_join_sorted.py`
 
-**Files**: `py-ltseq/ltseq/core.py`
+**Files**: `py-ltseq/ltseq/core.py`, `py-ltseq/tests/test_sort_tracking.py`, `py-ltseq/tests/test_join_sorted.py`
+**Status**: COMPLETED
 
 #### 3.2 `top_k(col, k)` - Top-K Aggregate
 - [ ] Add `top_k` function to expression system
@@ -159,12 +172,12 @@
 ## Progress Tracking
 
 - [x] Phase 1.1: `group_sorted` - **COMPLETED**
-- [ ] Phase 1.2: `scan` (stateful)
+- [x] Phase 1.2: `scan` (stateful) - **COMPLETED** (as `stateful_scan()`)
 - [x] Phase 1.3: `asof_join` - **COMPLETED**
-- [ ] Phase 2.1: `align`
+- [x] Phase 2.1: `align` - **COMPLETED**
 - [x] Phase 2.2: `read_csv has_header` - **COMPLETED**
 - [ ] Phase 2.3: `LTSeq.lookup`
 - [ ] Phase 2.4: Wire `Expr.lookup`
-- [ ] Phase 3.1: `join_sorted`
+- [x] Phase 3.1: `join_sorted` - **COMPLETED**
 - [ ] Phase 3.2: `top_k`
 - [x] Phase 3.3: `GroupProxy.all/any/none` - **COMPLETED**
