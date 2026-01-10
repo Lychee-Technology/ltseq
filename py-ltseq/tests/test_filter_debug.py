@@ -4,7 +4,7 @@ import inspect
 import ast
 
 # Create test table
-t = LTSeq.read_csv("test_group_filter.csv")
+t = LTSeq.read_csv("test_data/test_group_filter.csv")
 grouped = t.sort(lambda r: r.date).group_ordered(lambda r: r.is_up)
 
 

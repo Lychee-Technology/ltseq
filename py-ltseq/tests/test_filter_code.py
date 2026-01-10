@@ -1,6 +1,6 @@
 from ltseq import LTSeq
 
-t = LTSeq.read_csv("test_group_filter.csv")
+t = LTSeq.read_csv("test_data/test_group_filter.csv")
 print("Loaded table:")
 t.show()
 
