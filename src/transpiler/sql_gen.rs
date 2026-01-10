@@ -278,6 +278,62 @@ fn sql_call(
             let pattern = pyexpr_to_sql(&args[0], schema)?;
             Ok(format!("REGEXP_LIKE({}, {})", on_sql, pattern))
         }
+        // New string operations
+        "str_replace" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            if args.len() < 2 {
+                return Err("str_replace requires 'old' and 'new' arguments".to_string());
+            }
+            let old_sql = pyexpr_to_sql(&args[0], schema)?;
+            let new_sql = pyexpr_to_sql(&args[1], schema)?;
+            Ok(format!("REPLACE({}, {}, {})", on_sql, old_sql, new_sql))
+        }
+        "str_concat" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            let mut all_parts = vec![on_sql];
+            for arg in args {
+                all_parts.push(pyexpr_to_sql(arg, schema)?);
+            }
+            Ok(format!("CONCAT({})", all_parts.join(", ")))
+        }
+        "str_pad_left" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            if args.is_empty() {
+                return Err("str_pad_left requires a width argument".to_string());
+            }
+            let width_sql = pyexpr_to_sql(&args[0], schema)?;
+            let char_sql = if args.len() > 1 {
+                pyexpr_to_sql(&args[1], schema)?
+            } else {
+                "' '".to_string()
+            };
+            Ok(format!("LPAD({}, {}, {})", on_sql, width_sql, char_sql))
+        }
+        "str_pad_right" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            if args.is_empty() {
+                return Err("str_pad_right requires a width argument".to_string());
+            }
+            let width_sql = pyexpr_to_sql(&args[0], schema)?;
+            let char_sql = if args.len() > 1 {
+                pyexpr_to_sql(&args[1], schema)?
+            } else {
+                "' '".to_string()
+            };
+            Ok(format!("RPAD({}, {}, {})", on_sql, width_sql, char_sql))
+        }
+        "str_split" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            if args.len() < 2 {
+                return Err("str_split requires delimiter and index arguments".to_string());
+            }
+            let delimiter_sql = pyexpr_to_sql(&args[0], schema)?;
+            let index_sql = pyexpr_to_sql(&args[1], schema)?;
+            Ok(format!(
+                "SPLIT_PART({}, {}, {})",
+                on_sql, delimiter_sql, index_sql
+            ))
+        }
         // Temporal operations
         "dt_year" => {
             let on_sql = pyexpr_to_sql(on, schema)?;
@@ -380,5 +436,76 @@ pub fn pyexpr_to_sql(py_expr: &PyExpr, schema: &ArrowSchema) -> Result<String, S
             kwargs,
             on,
         } => sql_call(func, on, args, kwargs, schema),
+
+        PyExpr::Window {
+            expr,
+            partition_by,
+            order_by,
+            descending,
+        } => sql_window(
+            expr,
+            partition_by.as_deref(),
+            order_by.as_deref(),
+            *descending,
+            schema,
+        ),
     }
+}
+
+/// Handle SQL for window expressions with OVER clause
+fn sql_window(
+    expr: &PyExpr,
+    partition_by: Option<&PyExpr>,
+    order_by: Option<&PyExpr>,
+    descending: bool,
+    schema: &ArrowSchema,
+) -> Result<String, String> {
+    // Get the inner function call
+    let (func_name, args) = match expr {
+        PyExpr::Call { func, args, .. } => (func.as_str(), args),
+        _ => return Err("Window expression must wrap a function call".to_string()),
+    };
+
+    // Generate the function part
+    let func_sql = match func_name {
+        "row_number" => "ROW_NUMBER()".to_string(),
+        "rank" => "RANK()".to_string(),
+        "dense_rank" => "DENSE_RANK()".to_string(),
+        "ntile" => {
+            if args.is_empty() {
+                return Err("ntile() requires a bucket count argument".to_string());
+            }
+            if let PyExpr::Literal { value, .. } = &args[0] {
+                format!("NTILE({})", value)
+            } else {
+                return Err("ntile() bucket count must be a literal integer".to_string());
+            }
+        }
+        _ => return Err(format!("Unsupported window function: {}", func_name)),
+    };
+
+    // Build OVER clause parts
+    let mut over_parts = Vec::new();
+
+    // PARTITION BY clause
+    if let Some(pb) = partition_by {
+        let pb_sql = pyexpr_to_sql(pb, schema)?;
+        over_parts.push(format!("PARTITION BY {}", pb_sql));
+    }
+
+    // ORDER BY clause
+    if let Some(ob) = order_by {
+        let ob_sql = pyexpr_to_sql(ob, schema)?;
+        let direction = if descending { " DESC" } else { "" };
+        over_parts.push(format!("ORDER BY {}{}", ob_sql, direction));
+    }
+
+    // Combine into final SQL
+    let over_clause = if over_parts.is_empty() {
+        "OVER ()".to_string()
+    } else {
+        format!("OVER ({})", over_parts.join(" "))
+    };
+
+    Ok(format!("{} {}", func_sql, over_clause))
 }

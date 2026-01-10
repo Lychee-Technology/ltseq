@@ -24,7 +24,19 @@ Example:
 """
 
 # Re-export base expression class
-from .base import Expr, if_else, count_if, sum_if, avg_if, min_if, max_if
+from .base import (
+    Expr,
+    if_else,
+    count_if,
+    sum_if,
+    avg_if,
+    min_if,
+    max_if,
+    row_number,
+    rank,
+    dense_rank,
+    ntile,
+)
 
 # Re-export concrete expression types
 from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, LookupExpr, UnaryOpExpr
@@ -51,6 +63,10 @@ __all__ = [
     "avg_if",
     "min_if",
     "max_if",
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
     "_lambda_to_expr",
     "_transform_lambda_for_none_checks",
 ]

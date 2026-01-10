@@ -134,11 +134,85 @@ class CallExpr(Expr):
         """Temporal accessor for chaining temporal operations on CallExpr results."""
         return TemporalAccessor(self)
 
+    def over(
+        self,
+        partition_by: Optional[Expr] = None,
+        order_by: Optional[Expr] = None,
+        descending: bool = False,
+    ) -> "WindowExpr":
+        """
+        Apply a window specification to this expression.
+
+        Used with ranking functions (row_number, rank, dense_rank, ntile)
+        to specify partitioning and ordering.
+
+        Args:
+            partition_by: Column(s) to partition by (optional)
+            order_by: Column(s) to order by (required for ranking functions)
+            descending: If True, order in descending order (default False)
+
+        Returns:
+            WindowExpr with the window specification
+
+        Example:
+            >>> row_number().over(order_by=r.date)
+            >>> rank().over(partition_by=r.group, order_by=r.score)
+            >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, descending=True)
+        """
+        return WindowExpr(
+            self, partition_by=partition_by, order_by=order_by, descending=descending
+        )
+
+
+class WindowExpr(Expr):
+    """
+    Represents a window function with OVER clause.
+
+    Wraps a ranking function (row_number, rank, dense_rank, ntile) with
+    partition_by and order_by specifications.
+
+    Attributes:
+        expr (CallExpr): The underlying function call (row_number(), rank(), etc.)
+        partition_by (Expr or None): Column(s) to partition by
+        order_by (Expr or None): Column(s) to order by
+        descending (bool): Whether to order descending
+    """
+
+    def __init__(
+        self,
+        expr: CallExpr,
+        partition_by: Optional[Expr] = None,
+        order_by: Optional[Expr] = None,
+        descending: bool = False,
+    ):
+        """Initialize a WindowExpr with expression and window specification."""
+        self.expr = expr
+        self.partition_by = partition_by
+        self.order_by = order_by
+        self.descending = descending
+
+    def serialize(self) -> Dict[str, Any]:
+        """
+        Serialize to dict with window specification.
+
+        Returns dict with type "Window" and nested expr, partition_by, order_by.
+        """
+        return {
+            "type": "Window",
+            "expr": self.expr.serialize(),
+            "partition_by": self.partition_by.serialize()
+            if self.partition_by
+            else None,
+            "order_by": self.order_by.serialize() if self.order_by else None,
+            "descending": self.descending,
+        }
+
 
 # Re-export all types for backward compatibility
 __all__ = [
     "ColumnExpr",
     "CallExpr",
+    "WindowExpr",
     "LiteralExpr",
     "BinOpExpr",
     "UnaryOpExpr",

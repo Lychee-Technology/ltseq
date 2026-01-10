@@ -31,6 +31,14 @@ pub enum PyExpr {
         kwargs: HashMap<String, PyExpr>,
         on: Box<PyExpr>,
     },
+
+    /// Window expression: {"type": "Window", "expr": {...}, "partition_by": {...}, "order_by": {...}, "descending": bool}
+    Window {
+        expr: Box<PyExpr>,
+        partition_by: Option<Box<PyExpr>>,
+        order_by: Option<Box<PyExpr>>,
+        descending: bool,
+    },
 }
 
 /// Deserialize a Column expression
@@ -206,6 +214,68 @@ fn parse_call_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     })
 }
 
+/// Deserialize a Window expression
+fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
+    // Parse the inner expression (e.g., row_number(), rank(), etc.)
+    let expr_obj = dict
+        .get_item("expr")
+        .map_err(|_| PyExprError::MissingField("expr".to_string()))?
+        .ok_or_else(|| PyExprError::MissingField("expr".to_string()))?;
+    let expr_dict = expr_obj
+        .cast::<PyDict>()
+        .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
+    let expr = Box::new(dict_to_py_expr(&expr_dict)?);
+
+    // Parse partition_by (optional)
+    let partition_by = if let Some(pb_obj) = dict
+        .get_item("partition_by")
+        .map_err(|_| PyExprError::MissingField("partition_by".to_string()))?
+    {
+        if pb_obj.is_none() {
+            None
+        } else {
+            let pb_dict = pb_obj
+                .cast::<PyDict>()
+                .map_err(|_| PyExprError::InvalidType("partition_by must be a dict".to_string()))?;
+            Some(Box::new(dict_to_py_expr(&pb_dict)?))
+        }
+    } else {
+        None
+    };
+
+    // Parse order_by (optional)
+    let order_by = if let Some(ob_obj) = dict
+        .get_item("order_by")
+        .map_err(|_| PyExprError::MissingField("order_by".to_string()))?
+    {
+        if ob_obj.is_none() {
+            None
+        } else {
+            let ob_dict = ob_obj
+                .cast::<PyDict>()
+                .map_err(|_| PyExprError::InvalidType("order_by must be a dict".to_string()))?;
+            Some(Box::new(dict_to_py_expr(&ob_dict)?))
+        }
+    } else {
+        None
+    };
+
+    // Parse descending (default false)
+    let descending = dict
+        .get_item("descending")
+        .ok()
+        .flatten()
+        .and_then(|v| v.extract::<bool>().ok())
+        .unwrap_or(false);
+
+    Ok(PyExpr::Window {
+        expr,
+        partition_by,
+        order_by,
+        descending,
+    })
+}
+
 /// Recursively deserialize a Python dict to PyExpr
 pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     // Get "type" field
@@ -223,6 +293,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
         "BinOp" => parse_binop_expr(dict),
         "UnaryOp" => parse_unaryop_expr(dict),
         "Call" => parse_call_expr(dict),
+        "Window" => parse_window_expr(dict),
         _ => Err(PyExprError::UnknownVariant(expr_type)),
     }
 }

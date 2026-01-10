@@ -20,7 +20,7 @@
 | **Search** | `search_first` | Complete |
 | **Expression Ops** | `+`, `-`, `*`, `/`, `//`, `%`, `==`, `!=`, `>`, `>=`, `<`, `<=`, `&`, `|`, `~` | Complete |
 | **Null Handling** | `is_null`, `is_not_null`, `fill_null` | Complete |
-| **String Ops** | `s.contains`, `s.starts_with`, `s.ends_with`, `s.lower`, `s.upper`, `s.strip`, `s.len`, `s.slice`, `s.regex_match` | Complete |
+| **String Ops** | `s.contains`, `s.starts_with`, `s.ends_with`, `s.lower`, `s.upper`, `s.strip`, `s.len`, `s.slice`, `s.regex_match`, `s.replace`, `s.concat`, `s.pad_left`, `s.pad_right`, `s.split` | Complete |
 | **Temporal Ops** | `dt.year/month/day/hour/minute/second`, `dt.add`, `dt.diff` | Complete |
 | **Conditional** | `if_else` | Complete |
 
@@ -194,19 +194,22 @@
 **Status**: COMPLETED
 
 #### 4.2 Row Numbering/Ranking Functions
-- [ ] Add `row_number()` window function
-- [ ] Add `rank()` window function (with gaps)
-- [ ] Add `dense_rank()` window function (without gaps)
-- [ ] Add `ntile(n)` window function (bucket assignment)
-- [ ] Add tests in `tests/test_ranking.py`
+- [x] Add `row_number()` window function
+- [x] Add `rank()` window function (with gaps)
+- [x] Add `dense_rank()` window function (without gaps)
+- [x] Add `ntile(n)` window function (bucket assignment)
+- [x] Add tests in `tests/test_ranking.py`
 
 **Implementation Notes:**
-- All are standard SQL window functions supported by DataFusion
-- Need to extend expression system to capture OVER clause with PARTITION BY and ORDER BY
-- Consider adding as `derive()` expressions: `lambda r: r.col.row_number().over(partition_by="group", order_by="date")`
+- Module-level functions `row_number()`, `rank()`, `dense_rank()`, `ntile(n)` return `CallExpr`
+- `.over(partition_by=, order_by=, descending=)` method on `CallExpr` returns `WindowExpr`
+- `WindowExpr` serializes to `{"type": "Window", "expr": {...}, "partition_by": {...}, "order_by": {...}, "descending": bool}`
+- Rust `PyExpr::Window` variant handles parsing and SQL generation
+- SQL generated: `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ... [DESC])`
+- All ranking functions exported from `ltseq` and `ltseq.expr` modules
 
-**Files**: `src/ops/window.rs`, `py-ltseq/ltseq/expr/types.py`, `py-ltseq/tests/test_ranking.py`
-**Status**: NOT STARTED
+**Files**: `py-ltseq/ltseq/expr/base.py`, `py-ltseq/ltseq/expr/types.py`, `src/types.rs`, `src/transpiler/sql_gen.rs`, `py-ltseq/tests/test_ranking.py`
+**Status**: COMPLETED
 
 #### 4.3 Conditional Aggregations
 - [x] Add `count_if(predicate)` aggregate function
@@ -244,19 +247,21 @@
 **Status**: COMPLETED
 
 #### 4.5 Additional String Operations
-- [ ] Add `s.replace(old, new)` - replace substring
-- [ ] Add `s.split(delimiter)` - split string into array
-- [ ] Add `s.concat(*others)` - concatenate strings
-- [ ] Add `s.pad_left(width, char)` - left pad string
-- [ ] Add `s.pad_right(width, char)` - right pad string
-- [ ] Add tests in `tests/test_string_ops_extended.py`
+- [x] Add `s.replace(old, new)` - replace substring
+- [x] Add `s.split(delimiter, index)` - split string and get part at index (1-based)
+- [x] Add `s.concat(*others)` - concatenate strings
+- [x] Add `s.pad_left(width, char)` - left pad string
+- [x] Add `s.pad_right(width, char)` - right pad string
+- [x] Add tests in `tests/test_string_ops_extended.py`
 
 **Implementation Notes:**
 - DataFusion: `REPLACE(str, from, to)`, `SPLIT_PART(str, delim, n)`, `CONCAT(...)`, `LPAD(str, len, pad)`, `RPAD(str, len, pad)`
-- Split may need special handling for array return (semicolon-delimited like top_k)
+- `s.split(delim, index)` uses 1-based indexing to match SQL SPLIT_PART convention
+- `s.pad_left` and `s.pad_right` truncate strings longer than width (SQL behavior, unlike Python's ljust/rjust)
+- All operations chainable with existing string methods (e.g., `r.col.s.replace("a", "b").s.lower()`)
 
-**Files**: `src/ops/expressions.rs`, `py-ltseq/ltseq/expr/string.py`, `py-ltseq/tests/test_string_ops_extended.py`
-**Status**: NOT STARTED
+**Files**: `py-ltseq/ltseq/expr/accessors.py`, `src/transpiler/mod.rs`, `src/transpiler/sql_gen.rs`, `py-ltseq/tests/test_string_ops_extended.py`
+**Status**: COMPLETED
 
 #### 4.6 Additional Temporal Operations
 - [ ] Add `dt.week()` - ISO week number
@@ -361,10 +366,10 @@
 
 ### Phase 4 (Extended Features)
 - [x] Phase 4.1: Statistical Aggregations (`median`, `percentile`, `variance`, `std`, `mode`) - **COMPLETED**
-- [ ] Phase 4.2: Row Numbering/Ranking (`row_number`, `rank`, `dense_rank`, `ntile`)
+- [x] Phase 4.2: Row Numbering/Ranking (`row_number`, `rank`, `dense_rank`, `ntile`) - **COMPLETED**
 - [x] Phase 4.3: Conditional Aggregations (`count_if`, `sum_if`, `avg_if`, `min_if`, `max_if`) - **COMPLETED**
 - [x] Phase 4.4: Window Default Values (`shift(n, default=value)`) - **COMPLETED**
-- [ ] Phase 4.5: Additional String Ops (`replace`, `split`, `concat`, `pad_left/right`)
+- [x] Phase 4.5: Additional String Ops (`replace`, `split`, `concat`, `pad_left/right`) - **COMPLETED**
 - [ ] Phase 4.6: Additional Temporal Ops (`week`, `quarter`, `day_of_week`, `day_of_year`)
 - [ ] Phase 4.7: Unpivot/Melt (wide-to-long transformation)
 - [ ] Phase 4.8: Sample/Random (`sample(n)`, `sample_fraction(p)`)
@@ -372,7 +377,7 @@
 
 ### Phase 5 (Known Limitations & Fixes)
 - [x] Phase 5.1: Filter `is None` in dynamic contexts - **COMPLETED** (use `is_null()` / `is_not_null()` methods)
-- [ ] Phase 5.2: NestedTable.derive() source parsing (lambda source unavailable in pytest/REPL)
+- [x] Phase 5.2: NestedTable.derive() source parsing - **COMPLETED** (proxy-based expression capture)
 
 ---
 
@@ -400,20 +405,33 @@ t.filter(lambda r: r.col.is_null())        # For null checks
 
 **Symptom:** `Cannot parse derive expression (source not available)`
 
-**Root Cause:** `NestedTable.derive()` uses `inspect.getsource()` to parse group-level derive lambdas. This fails in pytest/REPL/exec contexts.
+**Root Cause:** `NestedTable.derive()` previously used `inspect.getsource()` to parse group-level derive lambdas. This failed in pytest/REPL/exec contexts.
 
-**Affected Operations:**
-- `table.group_ordered(...).derive(lambda g: {...})`
-- Chained operations: `.filter(...).derive(...)`
+**Solution:** Implemented proxy-based expression capture using `DeriveGroupProxy` class:
+- `DeriveGroupProxy` returns `GroupExpr` objects instead of actual values
+- `GroupExpr` classes (`GroupCountExpr`, `GroupAggExpr`, `GroupRowColumnExpr`, `BinOpGroupExpr`) capture operations as serializable expression trees
+- `group_expr_to_sql()` converts serialized expressions to SQL window functions
+- `NestedTable.derive()` tries proxy capture first, falls back to source parsing
 
-**Skipped Tests:**
-- `test_derive_group_span`
-- `test_chain_filter_derive`
-- `test_complex_stock_analysis`
+**Supported Operations:**
+```python
+grouped.derive(lambda g: {
+    "size": g.count(),                              # Group count
+    "start": g.first().date,                        # First row column
+    "end": g.last().price,                          # Last row column
+    "change": g.last().price - g.first().price,     # Arithmetic
+    "max_vol": g.max("volume"),                     # Group aggregation
+    "min_price": g.min("price"),
+    "total": g.sum("amount"),
+    "average": g.avg("value"),
+})
+```
 
-**Potential Solutions (not yet implemented):**
-1. Alternative expression capture via decorator/builder pattern
-2. Fallback to Python-based evaluation when source unavailable
-3. Accept expression dicts directly as alternative API
+**Files:**
+- `py-ltseq/ltseq/grouping/expr.py` - GroupExpr expression classes
+- `py-ltseq/ltseq/grouping/proxies/derive_proxy.py` - DeriveGroupProxy class
+- `py-ltseq/ltseq/grouping/sql_parsing.py` - `group_expr_to_sql()` function
+- `py-ltseq/ltseq/grouping/nested_table.py` - Updated `derive()` with proxy capture
+- `py-ltseq/tests/test_nested_derive_proxy.py` - 22 tests
 
-**Status:** ON HOLD - Documented limitation, workaround is to define lambdas in source files
+**Status:** RESOLVED - Works in all contexts (pytest, REPL, exec)

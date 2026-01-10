@@ -76,6 +76,85 @@ class StringAccessor:
         """
         return self._make_call("str_regex_match", (pattern,))
 
+    def replace(self, old: str, new: str) -> "CallExpr":
+        """Replace all occurrences of a substring with another string.
+
+        Args:
+            old: The substring to search for
+            new: The replacement string
+
+        Returns:
+            Expression with all occurrences of 'old' replaced with 'new'
+
+        Example:
+            >>> t.derive(clean_name=lambda r: r.name.s.replace("-", "_"))
+        """
+        return self._make_call("str_replace", (old, new))
+
+    def concat(self, *others) -> "CallExpr":
+        """Concatenate this string with other strings.
+
+        Args:
+            *others: Additional strings or column expressions to concatenate
+
+        Returns:
+            Expression representing the concatenated string
+
+        Example:
+            >>> t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
+        """
+        return self._make_call("str_concat", others)
+
+    def pad_left(self, width: int, char: str = " ") -> "CallExpr":
+        """Pad string on the left to reach specified width.
+
+        Args:
+            width: Target width of the resulting string
+            char: Character to use for padding (default: space)
+
+        Returns:
+            Left-padded string expression
+
+        Example:
+            >>> t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
+        """
+        return self._make_call("str_pad_left", (width, char))
+
+    def pad_right(self, width: int, char: str = " ") -> "CallExpr":
+        """Pad string on the right to reach specified width.
+
+        Args:
+            width: Target width of the resulting string
+            char: Character to use for padding (default: space)
+
+        Returns:
+            Right-padded string expression
+
+        Example:
+            >>> t.derive(padded_name=lambda r: r.name.s.pad_right(20, "."))
+        """
+        return self._make_call("str_pad_right", (width, char))
+
+    def split(self, delimiter: str, index: int) -> "CallExpr":
+        """Split string by delimiter and return the part at specified index.
+
+        Args:
+            delimiter: String to split on
+            index: 1-based index of the part to return (1 = first part)
+
+        Returns:
+            Expression representing the specified part of the split string
+
+        Note:
+            Index is 1-based to match SQL SPLIT_PART convention.
+            Returns empty string if index is out of range.
+
+        Example:
+            >>> # Get domain from email "user@example.com"
+            >>> t.derive(domain=lambda r: r.email.s.split("@", 2))
+        """
+        return self._make_call("str_split", (delimiter, index))
+
 
 class TemporalAccessor:
     """

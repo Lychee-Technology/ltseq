@@ -86,10 +86,7 @@ class TestGroupOrderedFilter:
         t = LTSeq.read_csv(sample_csv).sort("date")
         try:
             # Get only groups with > 2 rows
-            result = (
-                t.group_ordered(lambda r: r.is_up)
-                .filter(lambda g: g.count() > 2)
-            )
+            result = t.group_ordered(lambda r: r.is_up).filter(lambda g: g.count() > 2)
             # Should have groups: [3 up, 4 up] = 7 rows total
             assert result is not None
         except Exception as e:
@@ -100,9 +97,8 @@ class TestGroupOrderedFilter:
         t = LTSeq.read_csv(sample_csv).sort("date")
         try:
             # Keep only groups that start with is_up=1
-            result = (
-                t.group_ordered(lambda r: r.is_up)
-                .filter(lambda g: g.first().is_up == 1)
+            result = t.group_ordered(lambda r: r.is_up).filter(
+                lambda g: g.first().is_up == 1
             )
             assert result is not None
         except Exception as e:
@@ -115,17 +111,15 @@ class TestGroupOrderedDerive:
     def test_derive_group_span(self, sample_csv):
         """Add columns based on group properties."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        try:
-            result = (
-                t.group_ordered(lambda r: r.is_up)
-                .derive(lambda g: {
-                    "group_size": g.count(),
-                    "price_change": g.last().price - g.first().price,
-                })
-            )
-            assert result is not None
-        except Exception as e:
-            pytest.skip(f"group derive not yet implemented: {e}")
+        result = t.group_ordered(lambda r: r.is_up).derive(
+            lambda g: {
+                "group_size": g.count(),
+                "price_change": g.last().price - g.first().price,
+            }
+        )
+        assert result is not None
+        assert "group_size" in result._schema
+        assert "price_change" in result._schema
 
 
 class TestGroupOrderedChaining:
@@ -134,33 +128,35 @@ class TestGroupOrderedChaining:
     def test_chain_filter_derive(self, sample_csv):
         """Chain filter and derive on grouped data."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        try:
-            result = (
-                t.group_ordered(lambda r: r.is_up)
-                .filter(lambda g: g.count() > 2)
-                .derive(lambda g: {
+        result = (
+            t.group_ordered(lambda r: r.is_up)
+            .filter(lambda g: g.count() > 2)
+            .derive(
+                lambda g: {
                     "start_price": g.first().price,
                     "end_price": g.last().price,
-                })
+                }
             )
-            assert result is not None
-        except Exception as e:
-            pytest.skip(f"group chaining not yet implemented: {e}")
+        )
+        assert result is not None
+        assert "start_price" in result._schema
+        assert "end_price" in result._schema
 
     def test_complex_stock_analysis(self, sample_csv):
         """Reproduce the stock analysis example from docs."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        try:
-            result = (
-                t
-                .group_ordered(lambda r: r.is_up)
-                .filter(lambda g: g.count() > 2)  # Only groups with > 2 days
-                .derive(lambda g: {
+        result = (
+            t.group_ordered(lambda r: r.is_up)
+            .filter(lambda g: g.count() > 2)  # Only groups with > 2 days
+            .derive(
+                lambda g: {
                     "start": g.first().date,
                     "end": g.last().date,
                     "gain": (g.last().price - g.first().price) / g.first().price,
-                })
+                }
             )
-            assert result is not None
-        except Exception as e:
-            pytest.skip(f"complex group_ordered not yet implemented: {e}")
+        )
+        assert result is not None
+        assert "start" in result._schema
+        assert "end" in result._schema
+        assert "gain" in result._schema

@@ -480,3 +480,58 @@ def get_derive_parse_error_message(source: str, error: str) -> str:
     """Generate error for syntax/parse errors in derive lambda."""
     src = source.strip() if source else "<unavailable>"
     return f"Failed to parse derive: {src}\nError: {error}"
+
+
+def group_expr_to_sql(expr: Dict) -> str:
+    """
+    Convert a serialized GroupExpr to SQL window function.
+
+    Args:
+        expr: Serialized GroupExpr dictionary with 'type' key
+
+    Returns:
+        SQL window function string
+
+    Raises:
+        ValueError: If expression type is not supported
+    """
+    expr_type = expr.get("type")
+
+    if expr_type == "GroupCount":
+        return "COUNT(*) OVER (PARTITION BY __group_id__)"
+
+    elif expr_type == "GroupAgg":
+        func = expr["func"].upper()
+        col = expr["column"]
+        return f'{func}("{col}") OVER (PARTITION BY __group_id__)'
+
+    elif expr_type == "GroupRowColumn":
+        row = expr["row"]  # "first" or "last"
+        col = expr["column"]
+        if row == "first":
+            return (
+                f'FIRST_VALUE("{col}") OVER (PARTITION BY __group_id__ ORDER BY __rn__)'
+            )
+        else:  # last
+            return f'LAST_VALUE("{col}") OVER (PARTITION BY __group_id__ ORDER BY __rn__ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)'
+
+    elif expr_type == "BinOp":
+        left = group_expr_to_sql(expr["left"])
+        right = group_expr_to_sql(expr["right"])
+        op = expr["op"]
+        return f"({left} {op} {right})"
+
+    elif expr_type == "Literal":
+        value = expr["value"]
+        if isinstance(value, str):
+            escaped = value.replace("'", "''")
+            return f"'{escaped}'"
+        elif isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        elif value is None:
+            return "NULL"
+        else:
+            return str(value)
+
+    else:
+        raise ValueError(f"Unsupported GroupExpr type: {expr_type}")

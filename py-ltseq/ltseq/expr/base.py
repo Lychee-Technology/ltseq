@@ -125,6 +125,97 @@ def max_if(predicate: "Expr", column: "Expr") -> "CallExpr":
     return CallExpr("max_if", (predicate, column), {}, on=None)
 
 
+# =============================================================================
+# Ranking / Window Functions
+# =============================================================================
+
+
+def row_number() -> "CallExpr":
+    """
+    Assign a unique sequential number to each row starting from 1.
+
+    Unlike rank() and dense_rank(), row_number() always produces distinct values
+    even for rows with identical ordering values.
+
+    Must be used with .over() to specify ordering.
+
+    Returns:
+        Expression representing the row number
+
+    Example:
+        >>> t.derive(lambda r: {"rn": row_number().over(order_by=r.date)})
+        >>> t.derive(lambda r: {"rn": row_number().over(partition_by=r.group, order_by=r.date)})
+    """
+    from .types import CallExpr
+
+    return CallExpr("row_number", (), {}, on=None)
+
+
+def rank() -> "CallExpr":
+    """
+    Assign a rank to each row, with gaps for ties.
+
+    Rows with equal values get the same rank, and the next rank is skipped.
+    For example: 1, 2, 2, 4, 5 (rank 3 is skipped because there are two rank 2s).
+
+    Must be used with .over() to specify ordering.
+
+    Returns:
+        Expression representing the rank
+
+    Example:
+        >>> t.derive(lambda r: {"rank": rank().over(order_by=r.score)})
+        >>> t.derive(lambda r: {"rank": rank().over(partition_by=r.dept, order_by=r.salary)})
+    """
+    from .types import CallExpr
+
+    return CallExpr("rank", (), {}, on=None)
+
+
+def dense_rank() -> "CallExpr":
+    """
+    Assign a rank to each row, without gaps for ties.
+
+    Rows with equal values get the same rank, but the next rank is not skipped.
+    For example: 1, 2, 2, 3, 4 (no gap after the tied rank 2s).
+
+    Must be used with .over() to specify ordering.
+
+    Returns:
+        Expression representing the dense rank
+
+    Example:
+        >>> t.derive(lambda r: {"drank": dense_rank().over(order_by=r.score)})
+        >>> t.derive(lambda r: {"drank": dense_rank().over(partition_by=r.dept, order_by=r.salary)})
+    """
+    from .types import CallExpr
+
+    return CallExpr("dense_rank", (), {}, on=None)
+
+
+def ntile(n: int) -> "CallExpr":
+    """
+    Divide rows into n roughly equal buckets (1 to n).
+
+    Useful for creating quantiles, percentiles, or distributing rows evenly.
+
+    Must be used with .over() to specify ordering.
+
+    Args:
+        n: Number of buckets to divide into
+
+    Returns:
+        Expression representing the bucket number (1 to n)
+
+    Example:
+        >>> t.derive(lambda r: {"quartile": ntile(4).over(order_by=r.score)})
+        >>> t.derive(lambda r: {"decile": ntile(10).over(partition_by=r.group, order_by=r.value)})
+    """
+    from .types import CallExpr
+
+    return CallExpr("ntile", (n,), {}, on=None)
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.

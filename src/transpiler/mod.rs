@@ -31,10 +31,10 @@ use datafusion::scalar::ScalarValue;
 
 // String functions
 use datafusion::functions::string::expr_fn::{
-    btrim, contains, ends_with, lower, starts_with, upper,
+    btrim, concat, contains, ends_with, lower, replace, split_part, starts_with, upper,
 };
-// Unicode functions (for length, substr)
-use datafusion::functions::unicode::expr_fn::{character_length, substring};
+// Unicode functions (for length, substr, padding)
+use datafusion::functions::unicode::expr_fn::{character_length, lpad, rpad, substring};
 // Datetime functions
 use datafusion::functions::datetime::expr_fn::date_part;
 // Regex functions
@@ -257,6 +257,69 @@ fn parse_call_expr(
             let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(regexp_like(on_expr, pattern_expr, None))
         }
+        // New string operations
+        "str_replace" => {
+            validate_string_column(&on, schema, "str_replace")?;
+            if args.len() < 2 {
+                return Err("str_replace requires 'old' and 'new' arguments".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let old_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let new_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            Ok(replace(on_expr, old_expr, new_expr))
+        }
+        "str_concat" => {
+            // Concatenate the source column with all arguments
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let mut all_args = vec![on_expr];
+            for arg in args {
+                all_args.push(pyexpr_to_datafusion_inner(arg, schema)?);
+            }
+            Ok(concat(all_args))
+        }
+        "str_pad_left" => {
+            validate_string_column(&on, schema, "str_pad_left")?;
+            if args.is_empty() {
+                return Err("str_pad_left requires a width argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            // Default padding character is space
+            let char_expr = if args.len() > 1 {
+                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+            } else {
+                lit(" ")
+            };
+            // lpad(string, length, fill_string)
+            Ok(lpad(vec![on_expr, width_expr, char_expr]))
+        }
+        "str_pad_right" => {
+            validate_string_column(&on, schema, "str_pad_right")?;
+            if args.is_empty() {
+                return Err("str_pad_right requires a width argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            // Default padding character is space
+            let char_expr = if args.len() > 1 {
+                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+            } else {
+                lit(" ")
+            };
+            // rpad(string, length, fill_string)
+            Ok(rpad(vec![on_expr, width_expr, char_expr]))
+        }
+        "str_split" => {
+            validate_string_column(&on, schema, "str_split")?;
+            if args.len() < 2 {
+                return Err("str_split requires delimiter and index arguments".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let delimiter_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let index_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            // split_part(string, delimiter, index) - 1-based index
+            Ok(split_part(on_expr, delimiter_expr, index_expr))
+        }
         // ========== Temporal Operations ==========
         "dt_year" => {
             validate_temporal_column(&on, schema, "dt_year")?;
@@ -354,12 +417,19 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
         PyExpr::Call { func, on, args, .. } => parse_call_expr(&func, *on, args, schema),
+        PyExpr::Window { .. } => {
+            // Window expressions should be handled via SQL path in derive_with_window_functions
+            Err("Window expressions must be handled via SQL transpilation".to_string())
+        }
     }
 }
 
 /// Helper function to detect if a PyExpr contains a window function call
 pub fn contains_window_function(py_expr: &PyExpr) -> bool {
     match py_expr {
+        // Window expressions always require window function handling
+        PyExpr::Window { .. } => true,
+
         PyExpr::Call { func, on, args, .. } => {
             // Direct window functions
             if matches!(func.as_str(), "shift" | "rolling" | "diff" | "cum_sum") {

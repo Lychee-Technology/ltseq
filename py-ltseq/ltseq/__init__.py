@@ -20,6 +20,10 @@ from .expr import (
     avg_if,
     min_if,
     max_if,
+    row_number,
+    rank,
+    dense_rank,
+    ntile,
 )
 
 __all__ = [
@@ -39,4 +43,8 @@ __all__ = [
     "avg_if",
     "min_if",
     "max_if",
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
 ]

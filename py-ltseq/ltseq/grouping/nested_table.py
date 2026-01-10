@@ -11,6 +11,7 @@ from .sql_parsing import (
     extract_lambda_from_chain,
     get_derive_parse_error_message,
     get_unsupported_derive_error,
+    group_expr_to_sql,
 )
 
 if TYPE_CHECKING:
@@ -295,6 +296,15 @@ Supported group methods:
 
         flattened = self.flatten()
 
+        # Try proxy-based expression capture first (works in all contexts)
+        try:
+            derive_exprs = self._capture_derive_via_proxy(group_mapper)
+            if derive_exprs:
+                return self._derive_via_sql(flattened, derive_exprs)
+        except Exception:
+            pass  # Fall through to source parsing
+
+        # Fall back to source code parsing (for backward compatibility)
         import ast
         import inspect
 
@@ -339,6 +349,46 @@ Supported group methods:
         except Exception as e:
             source_str = source if source else "<unavailable>"
             raise ValueError(get_derive_parse_error_message(source_str, str(e)))
+
+    def _capture_derive_via_proxy(self, group_mapper: Callable) -> Dict[str, str]:
+        """
+        Capture derive expressions using proxy pattern.
+
+        This approach works in all contexts (pytest, REPL, exec) because it
+        doesn't rely on source code inspection.
+
+        Args:
+            group_mapper: Lambda taking a group proxy and returning dict of expressions
+
+        Returns:
+            Dict mapping column name to SQL window function expression
+
+        Raises:
+            ValueError: If the lambda doesn't return a dict of GroupExpr objects
+        """
+        from .proxies.derive_proxy import DeriveGroupProxy
+        from .expr import GroupExpr
+
+        proxy = DeriveGroupProxy()
+        result = group_mapper(proxy)
+
+        if not isinstance(result, dict):
+            raise ValueError("Derive lambda must return a dict")
+
+        derive_exprs = {}
+        for col_name, expr in result.items():
+            if not isinstance(col_name, str):
+                raise ValueError(f"Column name must be a string, got {type(col_name)}")
+
+            if isinstance(expr, GroupExpr):
+                derive_exprs[col_name] = group_expr_to_sql(expr.serialize())
+            else:
+                raise ValueError(
+                    f"Unsupported expression type for column '{col_name}': {type(expr)}. "
+                    f"Expected GroupExpr (from g.count(), g.first().col, etc.)"
+                )
+
+        return derive_exprs
 
     def _derive_via_sql(
         self, flattened: "LTSeq", derive_exprs: Dict[str, str]

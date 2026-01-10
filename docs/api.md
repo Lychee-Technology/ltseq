@@ -216,6 +216,94 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 first_big = t.sort("price").search_first(lambda r: r.price > 100)
 ```
 
+### Ranking Functions
+
+Ranking functions assign positions or ranks to rows within partitions. They must be used with `.over()` to specify ordering.
+
+#### `row_number`
+- **Signature**: `row_number().over(partition_by=None, order_by=Expr, descending=False) -> Expr`
+- **Behavior**: Assign a unique sequential number to each row (1, 2, 3, ...). Unlike `rank()`, always produces distinct values even for ties.
+- **Parameters**: Use `.over()` to specify `partition_by` (optional), `order_by` (required), `descending` (optional)
+- **Returns**: integer expression
+- **Exceptions**: `RuntimeError` (no order_by specified)
+- **Example**:
+```python
+from ltseq.expr import row_number
+
+# Simple row numbering
+t.derive(rn=lambda r: row_number().over(order_by=r.date))
+
+# Row number within partitions
+t.derive(rn=lambda r: row_number().over(partition_by=r.group, order_by=r.date))
+```
+
+#### `rank`
+- **Signature**: `rank().over(partition_by=None, order_by=Expr, descending=False) -> Expr`
+- **Behavior**: Assign rank with gaps for ties. Rows with equal values get the same rank; next rank is skipped (1, 2, 2, 4, 5).
+- **Parameters**: Use `.over()` to specify `partition_by` (optional), `order_by` (required), `descending` (optional)
+- **Returns**: integer expression
+- **Exceptions**: `RuntimeError` (no order_by specified)
+- **Example**:
+```python
+from ltseq.expr import rank
+
+# Rank by score (ties get same rank, gaps after)
+t.derive(rnk=lambda r: rank().over(order_by=r.score))
+
+# Rank within departments
+t.derive(rnk=lambda r: rank().over(partition_by=r.dept, order_by=r.salary, descending=True))
+```
+
+#### `dense_rank`
+- **Signature**: `dense_rank().over(partition_by=None, order_by=Expr, descending=False) -> Expr`
+- **Behavior**: Assign rank without gaps for ties. Rows with equal values get the same rank; next rank is NOT skipped (1, 2, 2, 3, 4).
+- **Parameters**: Use `.over()` to specify `partition_by` (optional), `order_by` (required), `descending` (optional)
+- **Returns**: integer expression
+- **Exceptions**: `RuntimeError` (no order_by specified)
+- **Example**:
+```python
+from ltseq.expr import dense_rank
+
+# Dense rank by score (no gaps after ties)
+t.derive(drnk=lambda r: dense_rank().over(order_by=r.score))
+
+# Dense rank within departments
+t.derive(drnk=lambda r: dense_rank().over(partition_by=r.dept, order_by=r.salary))
+```
+
+#### `ntile`
+- **Signature**: `ntile(n: int).over(partition_by=None, order_by=Expr, descending=False) -> Expr`
+- **Behavior**: Divide rows into `n` roughly equal buckets (1 to n). Useful for percentiles and quantiles.
+- **Parameters**: `n` number of buckets; use `.over()` for partitioning/ordering
+- **Returns**: integer expression (bucket number 1 to n)
+- **Exceptions**: `ValueError` (n <= 0), `RuntimeError` (no order_by specified)
+- **Example**:
+```python
+from ltseq.expr import ntile
+
+# Divide into quartiles
+t.derive(quartile=lambda r: ntile(4).over(order_by=r.score))
+
+# Deciles within groups
+t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value))
+```
+
+#### `CallExpr.over` (Window Specification)
+- **Signature**: `expr.over(partition_by: Optional[Expr] = None, order_by: Optional[Expr] = None, descending: bool = False) -> WindowExpr`
+- **Behavior**: Apply window specification to a ranking function
+- **Parameters**: `partition_by` column(s) to partition by; `order_by` column(s) to order by; `descending` sort direction
+- **Returns**: `WindowExpr` ready for use in derive()
+- **Exceptions**: `TypeError` (invalid partition_by/order_by types)
+- **Example**:
+```python
+# Partition by region, order by date descending
+t.derive(rn=lambda r: row_number().over(
+    partition_by=r.region,
+    order_by=r.date,
+    descending=True
+))
+```
+
 ### `LTSeq.align`
 - **Signature**: `LTSeq.align(ref_sequence: list, key: Callable) -> LTSeq`
 - **Behavior**: Align to `ref_sequence` order and insert NULLs for missing keys
@@ -346,6 +434,72 @@ spans = groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
 groups.derive(lambda g: {"avg": g.price.avg(), "hi": g.price.max()})
 ```
 
+#### `GroupProxy.median`
+- **Signature**: `g.median(column: str) -> Any`
+- **Behavior**: Get the median value of a column in the group
+- **Parameters**: `column` column name
+- **Returns**: median value (or None if empty)
+- **Exceptions**: `TypeError` (non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"med_price": g.median("price")})
+```
+
+#### `GroupProxy.percentile`
+- **Signature**: `g.percentile(column: str, p: float) -> Any`
+- **Behavior**: Get the p-th percentile value of a column in the group
+- **Parameters**: `column` column name; `p` percentile (0-1, e.g., 0.95 for 95th percentile)
+- **Returns**: percentile value (uses linear interpolation)
+- **Exceptions**: `ValueError` (p not in 0-1), `TypeError` (non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"p95": g.percentile("latency", 0.95)})
+```
+
+#### `GroupProxy.variance` / `GroupProxy.var`
+- **Signature**: `g.variance(column: str) -> Any` or `g.var(column: str) -> Any`
+- **Behavior**: Get the sample variance of a column in the group
+- **Parameters**: `column` column name
+- **Returns**: sample variance (None if fewer than 2 values)
+- **Exceptions**: `TypeError` (non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"price_var": g.variance("price")})
+```
+
+#### `GroupProxy.std` / `GroupProxy.stddev`
+- **Signature**: `g.std(column: str) -> Any` or `g.stddev(column: str) -> Any`
+- **Behavior**: Get the sample standard deviation of a column in the group
+- **Parameters**: `column` column name
+- **Returns**: sample standard deviation (None if fewer than 2 values)
+- **Exceptions**: `TypeError` (non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"price_std": g.std("price")})
+```
+
+#### `GroupProxy.mode`
+- **Signature**: `g.mode(column: str) -> Any`
+- **Behavior**: Get the most frequent value (mode) of a column in the group
+- **Parameters**: `column` column name
+- **Returns**: most frequent value (one of the modes if multiple)
+- **Exceptions**: none
+- **Example**:
+```python
+groups.derive(lambda g: {"common_category": g.mode("category")})
+```
+
+#### `GroupProxy.top_k`
+- **Signature**: `g.top_k(column: str, k: int) -> List[Any]`
+- **Behavior**: Get the top K values from a column in the group (sorted descending)
+- **Parameters**: `column` column name; `k` number of values
+- **Returns**: list of top K values
+- **Exceptions**: `ValueError` (k <= 0)
+- **Example**:
+```python
+groups.derive(lambda g: {"top_3_prices": g.top_k("price", 3)})
+```
+
 #### `GroupProxy.all`
 - **Signature**: `g.all(predicate: Callable[[Row], Expr]) -> Expr`
 - **Behavior**: Returns True if predicate holds for ALL rows in the group
@@ -392,6 +546,61 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 # Derive a flag for groups with no null values
 groups.derive(lambda g: {"complete": g.none(lambda r: r.value.is_null())})
+```
+
+#### `GroupProxy.count_if`
+- **Signature**: `g.count_if(predicate: Callable[[Row], bool]) -> int`
+- **Behavior**: Count rows in the group where predicate is True
+- **Parameters**: `predicate` row-level predicate function
+- **Returns**: integer count
+- **Exceptions**: `TypeError` (invalid predicate)
+- **Example**:
+```python
+groups.derive(lambda g: {"high_value_count": g.count_if(lambda r: r.price > 100)})
+```
+
+#### `GroupProxy.sum_if`
+- **Signature**: `g.sum_if(predicate: Callable[[Row], bool], column: str) -> Any`
+- **Behavior**: Sum column values in the group where predicate is True
+- **Parameters**: `predicate` row-level predicate function; `column` column name to sum
+- **Returns**: sum of matching values
+- **Exceptions**: `TypeError` (invalid predicate or non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"vip_sales": g.sum_if(lambda r: r.is_vip, "amount")})
+```
+
+#### `GroupProxy.avg_if`
+- **Signature**: `g.avg_if(predicate: Callable[[Row], bool], column: str) -> Any`
+- **Behavior**: Average column values in the group where predicate is True
+- **Parameters**: `predicate` row-level predicate function; `column` column name to average
+- **Returns**: average of matching values (None if no matches)
+- **Exceptions**: `TypeError` (invalid predicate or non-numeric column)
+- **Example**:
+```python
+groups.derive(lambda g: {"active_avg_score": g.avg_if(lambda r: r.status == "active", "score")})
+```
+
+#### `GroupProxy.min_if`
+- **Signature**: `g.min_if(predicate: Callable[[Row], bool], column: str) -> Any`
+- **Behavior**: Minimum column value in the group where predicate is True
+- **Parameters**: `predicate` row-level predicate function; `column` column name
+- **Returns**: minimum of matching values (None if no matches)
+- **Exceptions**: `TypeError` (invalid predicate)
+- **Example**:
+```python
+groups.derive(lambda g: {"min_valid_price": g.min_if(lambda r: r.is_valid, "price")})
+```
+
+#### `GroupProxy.max_if`
+- **Signature**: `g.max_if(predicate: Callable[[Row], bool], column: str) -> Any`
+- **Behavior**: Maximum column value in the group where predicate is True
+- **Parameters**: `predicate` row-level predicate function; `column` column name
+- **Returns**: maximum of matching values (None if no matches)
+- **Exceptions**: `TypeError` (invalid predicate)
+- **Example**:
+```python
+groups.derive(lambda g: {"max_valid_price": g.max_if(lambda r: r.is_valid, "price")})
 ```
 
 ## 5. Set Algebra
@@ -510,6 +719,32 @@ t_unsorted.join_sorted(t2_sorted, on="id")  # ValueError!
 quotes = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="backward")
 ```
 
+### `LTSeq.semi_join`
+- **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Behavior**: Return rows from left table where keys exist in right table. Returns only left table columns with no duplicates from multiple matches.
+- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Returns**: `LTSeq` with matching rows from left table
+- **SPL Equivalent**: Semi-join / EXISTS subquery
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
+- **Example**:
+```python
+# Users who have placed at least one order
+active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
+```
+
+### `LTSeq.anti_join`
+- **Signature**: `LTSeq.anti_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Behavior**: Return rows from left table where keys do NOT exist in right table. Returns only left table columns.
+- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Returns**: `LTSeq` with non-matching rows from left table
+- **SPL Equivalent**: Anti-join / NOT EXISTS subquery
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
+- **Example**:
+```python
+# Users who have never placed an order
+inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
+```
+
 ### `LTSeq.link`
 - **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str, join_type: str = "inner") -> LinkedTable`
 - **Behavior**: Pointer-style association; not materialized; access via alias
@@ -541,6 +776,8 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 | --- | --- | --- | --- |
 | `join` | Unsorted general data | Hash Join | SQL Join |
 | `join_sorted` / `join_merge` | Pre-sorted large tables | Merge Join | `joinx` / `join@m` |
+| `semi_join` | Filter by key existence | Hash Semi-Join | EXISTS |
+| `anti_join` | Filter by key non-existence | Hash Anti-Join | NOT EXISTS |
 | `link` | Fact-to-dimension pointer access | Pointer | `switch` |
 | `lookup` | Fact + small dimension in memory | Direct Address | `switch` (addressization) |
 | `asof_join` | Financial time series | Ordered Search | `joinx` (range) |
@@ -756,6 +993,71 @@ year = t.derive(year=lambda r: r.date.s.slice(0, 4))
 valid = t.filter(lambda r: r.email.s.regex_match(r"^[a-z]+@"))
 ```
 
+#### `replace`
+- **Signature**: `r.col.s.replace(old: str, new: str) -> Expr`
+- **Behavior**: Replace all occurrences of a substring with another string
+- **Parameters**: `old` substring to find; `new` replacement string
+- **Returns**: string expression
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+clean = t.derive(clean_name=lambda r: r.name.s.replace("-", "_"))
+```
+
+#### `concat`
+- **Signature**: `r.col.s.concat(*others) -> Expr`
+- **Behavior**: Concatenate this string with other strings or column expressions
+- **Parameters**: `others` strings or column expressions to concatenate
+- **Returns**: string expression
+- **Exceptions**: `TypeError` (non-string arguments)
+- **Example**:
+```python
+# Concatenate with literal string
+greeting = t.derive(msg=lambda r: r.name.s.concat(" says hello"))
+
+# Concatenate multiple columns
+full = t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
+```
+
+#### `pad_left`
+- **Signature**: `r.col.s.pad_left(width: int, char: str = " ") -> Expr`
+- **Behavior**: Pad string on the left to reach specified width. Note: truncates if string is longer than width (SQL LPAD behavior).
+- **Parameters**: `width` target width; `char` padding character (default: space)
+- **Returns**: string expression
+- **Exceptions**: `TypeError` (non-string column), `ValueError` (invalid width)
+- **Example**:
+```python
+# Zero-pad IDs to 5 characters
+padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
+```
+
+#### `pad_right`
+- **Signature**: `r.col.s.pad_right(width: int, char: str = " ") -> Expr`
+- **Behavior**: Pad string on the right to reach specified width. Note: truncates if string is longer than width (SQL RPAD behavior).
+- **Parameters**: `width` target width; `char` padding character (default: space)
+- **Returns**: string expression
+- **Exceptions**: `TypeError` (non-string column), `ValueError` (invalid width)
+- **Example**:
+```python
+# Pad names with dots to 20 characters
+padded = t.derive(padded_name=lambda r: r.name.s.pad_right(20, "."))
+```
+
+#### `split`
+- **Signature**: `r.col.s.split(delimiter: str, index: int) -> Expr`
+- **Behavior**: Split string by delimiter and return the part at specified index. Index is 1-based (1 = first part) to match SQL SPLIT_PART convention.
+- **Parameters**: `delimiter` string to split on; `index` 1-based index of part to return
+- **Returns**: string expression (empty string if index out of range)
+- **Exceptions**: `TypeError` (non-string column), `ValueError` (index <= 0)
+- **Example**:
+```python
+# Get domain from email "user@example.com"
+domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
+
+# Get first name from "first.last" format
+first = t.derive(first_name=lambda r: r.username.s.split(".", 1))
+```
+
 ### Temporal Operations (`r.col.dt.*`)
 
 #### `year` / `month` / `day`
@@ -811,6 +1113,75 @@ age_days = t.derive(age=lambda r: r.end_date.dt.diff(r.start_date))
 - **Example**:
 ```python
 enriched = orders.derive(product_name=lambda r: r.product_id.lookup(products, "name"))
+```
+
+### Conditional Aggregation Functions
+
+Module-level functions for conditional aggregation in `.agg()` contexts. These take expression predicates (not lambdas) and are designed for use with the GroupProxy `g` parameter.
+
+#### `count_if`
+- **Signature**: `count_if(predicate: Expr) -> Expr`
+- **Behavior**: Count rows where predicate expression is True
+- **Parameters**: `predicate` boolean expression
+- **Returns**: integer expression
+- **Exceptions**: `TypeError` (non-boolean predicate)
+- **Example**:
+```python
+from ltseq.expr import count_if
+
+result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 100))
+```
+
+#### `sum_if`
+- **Signature**: `sum_if(predicate: Expr, column: Expr) -> Expr`
+- **Behavior**: Sum column values where predicate expression is True
+- **Parameters**: `predicate` boolean expression; `column` column expression to sum
+- **Returns**: numeric expression
+- **Exceptions**: `TypeError` (non-boolean predicate or non-numeric column)
+- **Example**:
+```python
+from ltseq.expr import sum_if
+
+result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100, g.quantity))
+```
+
+#### `avg_if`
+- **Signature**: `avg_if(predicate: Expr, column: Expr) -> Expr`
+- **Behavior**: Average column values where predicate expression is True
+- **Parameters**: `predicate` boolean expression; `column` column expression to average
+- **Returns**: numeric expression
+- **Exceptions**: `TypeError` (non-boolean predicate or non-numeric column)
+- **Example**:
+```python
+from ltseq.expr import avg_if
+
+result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g.sales))
+```
+
+#### `min_if`
+- **Signature**: `min_if(predicate: Expr, column: Expr) -> Expr`
+- **Behavior**: Minimum column value where predicate expression is True
+- **Parameters**: `predicate` boolean expression; `column` column expression
+- **Returns**: expression of column type
+- **Exceptions**: `TypeError` (non-boolean predicate)
+- **Example**:
+```python
+from ltseq.expr import min_if
+
+result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g.score))
+```
+
+#### `max_if`
+- **Signature**: `max_if(predicate: Expr, column: Expr) -> Expr`
+- **Behavior**: Maximum column value where predicate expression is True
+- **Parameters**: `predicate` boolean expression; `column` column expression
+- **Returns**: expression of column type
+- **Exceptions**: `TypeError` (non-boolean predicate)
+- **Example**:
+```python
+from ltseq.expr import max_if
+
+result = t.agg(by=lambda r: r.region, max_active=lambda g: max_if(g.is_active, g.score))
 ```
 
 ## 9. End-to-End Examples

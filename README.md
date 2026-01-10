@@ -7,11 +7,17 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 ### Core Capabilities
 - **Relational Operations**: filter, select, derive, sort, distinct, slice
 - **Window Functions**: shift, rolling aggregates, cumulative sums, differences
+- **Ranking Functions**: row_number, rank, dense_rank, ntile with window specifications
 - **Ordered Computing**: group_ordered, search_first for processing sequences
 - **Set Operations**: union, intersect, diff, subset checks
-- **Joins**: Standard SQL joins, merge joins, lookups
+- **Joins**: Standard SQL joins, merge joins, semi/anti joins, as-of joins, lookups
 - **Foreign Key Relationships**: Lightweight pointer-based linking
-- **Aggregation**: group-by aggregation, partitioning, pivots
+- **Aggregation**: group-by aggregation with statistical functions, partitioning, pivots
+- **String Operations**: contains, replace, concat, pad, split, regex matching
+- **Temporal Operations**: year, month, day, hour extraction, date arithmetic
+- **Conditional Expressions**: if_else, null handling (fill_null, is_null)
+- **Conditional Aggregations**: count_if, sum_if, avg_if, min_if, max_if
+- **Streaming**: Cursor-based iteration for large datasets
 
 ### Performance
 - Built on **DataFusion 51.0** - battle-tested SQL engine
@@ -47,8 +53,10 @@ result = t.derive(lambda r: {
     "prev_close": r.close.shift(1),        # Previous row's value
     "price_change": r.close - r.close.shift(1),
     "ma_5": r.close.rolling(5).mean(),     # 5-day moving average
-    "cumulative_volume": r.volume.cum_sum()
 })
+
+# Add cumulative sum columns
+result = result.cum_sum("volume")  # Adds volume_cumsum column
 
 # Filter and select
 result = result.filter(lambda r: r.price_change > 0).select(lambda r: [
@@ -143,6 +151,172 @@ t.derive(lambda r: {
 })
 ```
 
+### Ranking Functions
+
+Assign positions or ranks to rows with `.over()` for window specification:
+
+```python
+from ltseq.expr import row_number, rank, dense_rank, ntile
+
+t = LTSeq.read_csv("employees.csv")
+
+# Row number within each department, ordered by salary
+result = t.derive(lambda r: {
+    "rn": row_number().over(partition_by=r.dept, order_by=r.salary, descending=True),
+    "rnk": rank().over(partition_by=r.dept, order_by=r.salary, descending=True),
+    "drnk": dense_rank().over(partition_by=r.dept, order_by=r.salary, descending=True),
+    "quartile": ntile(4).over(partition_by=r.dept, order_by=r.salary)
+})
+
+# Simple global ranking
+result = t.derive(lambda r: {
+    "global_rank": rank().over(order_by=r.score)
+})
+```
+
+### String Operations
+
+Powerful string manipulation via the `.s` accessor:
+
+```python
+t = LTSeq.read_csv("data.csv")
+
+result = t.derive(lambda r: {
+    # Search and match
+    "has_gmail": r.email.s.contains("gmail"),
+    "is_order": r.code.s.starts_with("ORD"),
+    "is_pdf": r.filename.s.ends_with(".pdf"),
+    "valid_email": r.email.s.regex_match(r"^[a-z]+@[a-z]+\.[a-z]+$"),
+    
+    # Transform
+    "lower_name": r.name.s.lower(),
+    "upper_code": r.code.s.upper(),
+    "clean_text": r.input.s.strip(),
+    
+    # Manipulate
+    "clean_name": r.name.s.replace("-", "_"),
+    "full_name": r.first.s.concat(" ", r.last),
+    "padded_id": r.id.s.pad_left(5, "0"),
+    "domain": r.email.s.split("@", 2),        # 1-based index
+    "prefix": r.code.s.slice(0, 3)
+})
+```
+
+### Temporal Operations
+
+Date and time manipulation via the `.dt` accessor:
+
+```python
+from ltseq import LTSeq
+
+t = LTSeq.read_csv("orders.csv")
+
+result = t.derive(lambda r: {
+    # Extract date components
+    "year": r.order_date.dt.year(),
+    "month": r.order_date.dt.month(),
+    "day": r.order_date.dt.day(),
+    
+    # Extract time components  
+    "hour": r.created_at.dt.hour(),
+    "minute": r.created_at.dt.minute(),
+    "second": r.created_at.dt.second(),
+    
+    # Date arithmetic
+    "delivery_date": r.order_date.dt.add(days=5),
+    "next_month": r.order_date.dt.add(months=1),
+    "next_year": r.order_date.dt.add(years=1),
+    
+    # Date difference (in days)
+    "days_since_order": r.ship_date.dt.diff(r.order_date)
+})
+```
+
+### Conditional Expressions and Null Handling
+
+```python
+from ltseq import LTSeq
+from ltseq.expr import if_else
+
+t = LTSeq.read_csv("data.csv")
+
+# Conditional expressions (SQL CASE WHEN)
+result = t.derive(lambda r: {
+    "category": if_else(r.price > 100, "expensive", "cheap"),
+    "status": if_else(r.quantity > 0, "in_stock", "out_of_stock"),
+    "discount": if_else(r.is_member, r.price * 0.1, 0)
+})
+
+# Null handling
+result = t.derive(lambda r: {
+    "safe_email": r.email.fill_null("unknown@example.com"),
+    "safe_price": r.price.fill_null(0),
+})
+
+# Filter by null status
+missing_emails = t.filter(lambda r: r.email.is_null())
+valid_emails = t.filter(lambda r: r.email.is_not_null())
+```
+
+### Set Operations
+
+```python
+t1 = LTSeq.read_csv("dataset1.csv")
+t2 = LTSeq.read_csv("dataset2.csv")
+
+# Union (vertical concatenation, like SQL UNION ALL)
+combined = t1.union(t2)
+
+# Intersection (rows in both tables)
+common = t1.intersect(t2, on=lambda r: r.id)
+
+# Difference (rows in t1 but not in t2)
+only_in_t1 = t1.diff(t2, on=lambda r: r.id)
+
+# Subset check
+is_sub = t1.is_subset(t2, on=lambda r: r.id)  # Returns bool
+```
+
+### Join Operations
+
+```python
+users = LTSeq.read_csv("users.csv")
+orders = LTSeq.read_csv("orders.csv")
+quotes = LTSeq.read_csv("quotes.csv")
+
+# Standard hash join
+joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+
+# Merge join (for pre-sorted tables - more efficient)
+users_sorted = users.sort("id")
+orders_sorted = orders.sort("user_id")
+merged = users_sorted.join_sorted(orders_sorted, on="id", how="inner")
+
+# As-of join (time-series: find closest match)
+trades = LTSeq.read_csv("trades.csv").sort("timestamp")
+quotes = LTSeq.read_csv("quotes.csv").sort("timestamp")
+with_quotes = trades.asof_join(
+    quotes, 
+    on=lambda t, q: t.symbol == q.symbol,
+    direction="backward"  # Find most recent quote before trade
+)
+```
+
+### Semi and Anti Joins
+
+Filter rows based on key existence in another table:
+
+```python
+users = LTSeq.read_csv("users.csv")
+orders = LTSeq.read_csv("orders.csv")
+
+# Semi-join: Users who have placed at least one order
+active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
+
+# Anti-join: Users who have never placed an order  
+inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
+```
+
 ### Advanced Patterns
 
 ```python
@@ -169,6 +343,29 @@ t = (
     .group_ordered(lambda r: r.status_changed)
 )
 
+# Group aggregations with statistical methods
+groups = t.sort("date").group_ordered(lambda r: r.category)
+stats = groups.derive(lambda g: {
+    "median_price": g.median("price"),
+    "p95_price": g.percentile("price", 0.95),
+    "price_std": g.std("price"),
+    "price_var": g.variance("price"),
+    "most_common": g.mode("status"),
+    "top_3": g.top_k("amount", 3)
+})
+
+# Conditional aggregations within groups
+stats = groups.derive(lambda g: {
+    "high_value_count": g.count_if(lambda r: r.price > 100),
+    "vip_total": g.sum_if(lambda r: r.is_vip, "amount"),
+    "active_avg": g.avg_if(lambda r: r.status == "active", "score")
+})
+
+# Group quantifiers (all/any/none)
+filtered_groups = groups.filter(lambda g: g.all(lambda r: r.price > 0))   # All positive
+filtered_groups = groups.filter(lambda g: g.any(lambda r: r.is_vip))      # Has any VIP
+filtered_groups = groups.filter(lambda g: g.none(lambda r: r.is_deleted)) # No deleted
+
 # Method chaining
 result = (
     t
@@ -177,6 +374,29 @@ result = (
     .filter(lambda r: r.change.is_null() == False)
     .select(lambda r: [r.date, r.value, r.change])
 )
+```
+
+### Streaming Large Datasets
+
+For datasets too large to fit in memory, use cursor-based streaming:
+
+```python
+from ltseq import LTSeq
+
+# Create streaming cursor (doesn't load entire file)
+cursor = LTSeq.scan("huge_file.csv")
+
+# Process in batches
+for batch in cursor:
+    # batch is a RecordBatch (Arrow format)
+    print(f"Processing {len(batch)} rows")
+    
+# Or materialize when needed
+df = cursor.to_pandas()
+
+# Parquet streaming
+cursor = LTSeq.scan_parquet("data.parquet")
+total_rows = cursor.count()  # Counts without loading all data
 ```
 
 ## Architecture
@@ -197,7 +417,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 - **Python Bindings**: PyO3 27.2 for seamless Python/Rust integration
 - **SQL Engine**: Apache DataFusion 51.0 (powers Databricks, Apache Datafusion, etc.)
 - **Data Format**: Apache Arrow for zero-copy columnar operations
-- **Testing**: pytest with 549+ comprehensive tests
+- **Testing**: pytest with 999+ comprehensive tests
 
 ### Performance Characteristics
 
@@ -217,10 +437,18 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 See [docs/api.md](docs/api.md) for the complete API specification including:
 - Relational operations (filter, select, derive, sort, distinct, slice)
 - Window functions (shift, rolling, cum_sum, diff)
-- Ordered grouping (group_ordered, search_first)
-- Set operations (union, intersect, diff)
-- Joins and lookups (join, merge_join, lookup)
+- Ranking functions (row_number, rank, dense_rank, ntile)
+- Ordered grouping (group_ordered, group_sorted, search_first)
+- Set operations (union, intersect, diff, is_subset)
+- Joins (join, join_merge, join_sorted, asof_join, semi_join, anti_join)
+- Linking and lookups (link, lookup)
 - Aggregation (agg, partition, pivot)
+- String operations (contains, replace, concat, pad_left, pad_right, split, regex_match)
+- Temporal operations (year, month, day, hour, minute, second, add, diff)
+- Conditional expressions (if_else, fill_null, is_null, is_not_null)
+- Conditional aggregations (count_if, sum_if, avg_if, min_if, max_if)
+- GroupProxy methods (median, percentile, variance, std, mode, top_k, all, any, none)
+- Streaming (scan, scan_parquet, Cursor)
 
 ## Testing
 
@@ -233,7 +461,7 @@ pytest py-ltseq/tests/ -v
 # Run specific test file
 pytest py-ltseq/tests/test_linking_basic.py -v
 
-# Current Status: 680+ tests passing
+# Current Status: 999+ tests passing
 ```
 
 ## Examples
@@ -340,7 +568,7 @@ A: LTSeq offers two approaches:
 2. **Traditional SQL joins** - Full data materialization
 
 **Q: Is this production-ready?**  
-A: LTSeq is stable with 680+ passing tests covering all functionality. It's suitable for production use cases.
+A: LTSeq is stable with 999+ passing tests covering all functionality. It's suitable for production use cases.
 
 **Q: How does performance compare to Pandas?**  
 A: LTSeq is generally faster for large datasets due to vectorized operations and the underlying DataFusion engine. For small datasets, both are comparable.
