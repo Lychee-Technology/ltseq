@@ -125,21 +125,23 @@ class TestSequenceWithFilter:
         """Complex pipeline with multiple sequence ops."""
         t = LTSeq.read_csv(sample_csv)
 
-        try:
-            result = (
-                t.sort("date")
-                .derive(
-                    lambda r: {
-                        "ma_3": r.price.rolling(3).mean(),
-                        "change": r.price.diff(),
-                    }
-                )
-                .filter(lambda r: r.ma_3 is not None)
-                .slice(0, 3)
+        # Use is_not_null() instead of 'is not None' for compatibility with
+        # pytest/exec contexts where inspect.getsource() may fail
+        result = (
+            t.sort("date")
+            .derive(
+                lambda r: {
+                    "ma_3": r.price.rolling(3).mean(),
+                    "change": r.price.diff(),
+                }
             )
-            assert isinstance(result, LTSeq)
-        except Exception as e:
-            pytest.skip(f"Complex pipeline not yet implemented: {e}")
+            .filter(lambda r: r.ma_3.is_not_null())
+            .slice(0, 3)
+        )
+        assert isinstance(result, LTSeq)
+        # Should have filtered out rows where ma_3 is NULL (first 2 rows)
+        df = result.to_pandas()
+        assert len(df) <= 3  # slice(0, 3) limits to 3 rows
 
 
 class TestSequenceEdgeCases:
@@ -280,18 +282,20 @@ class TestPhase6Integration:
         """Financial analysis use case: daily change and moving average."""
         t = LTSeq.read_csv(sample_csv).sort("date")
 
-        try:
-            result = t.derive(
-                lambda r: {
-                    "daily_change": r.price - r.price.shift(1),
-                    "change_pct": (r.price - r.price.shift(1)) / r.price.shift(1) * 100,
-                    "ma_3d": r.price.rolling(3).mean(),
-                }
-            ).filter(lambda r: r.daily_change is not None)
+        # Use is_not_null() instead of 'is not None' for compatibility with
+        # pytest/exec contexts where inspect.getsource() may fail
+        result = t.derive(
+            lambda r: {
+                "daily_change": r.price - r.price.shift(1),
+                "change_pct": (r.price - r.price.shift(1)) / r.price.shift(1) * 100,
+                "ma_3d": r.price.rolling(3).mean(),
+            }
+        ).filter(lambda r: r.daily_change.is_not_null())
 
-            assert isinstance(result, LTSeq)
-        except Exception as e:
-            pytest.skip(f"Financial use case not yet implemented: {e}")
+        assert isinstance(result, LTSeq)
+        # First row should be filtered out (no previous value for shift)
+        df = result.to_pandas()
+        assert len(df) < len(t.to_pandas())
 
     def test_trend_detection(self, sample_csv):
         """Detect price trends using sequence operators."""

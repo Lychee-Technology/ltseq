@@ -173,12 +173,14 @@ class TestShiftExpressions:
         """shift() can be used in filter conditions (via derive + filter)."""
         t = LTSeq.read_csv(sample_csv).sort("date")
 
-        try:
-            with_prev = t.derive(lambda r: {"prev_price": r.price.shift(1)})
-            result = with_prev.filter(lambda r: r.prev_price is not None)
-            assert isinstance(result, LTSeq)
-        except Exception as e:
-            pytest.skip(f"shift() in filter not yet implemented: {e}")
+        # Use is_not_null() instead of 'is not None' for compatibility with
+        # pytest/exec contexts where inspect.getsource() may fail
+        with_prev = t.derive(lambda r: {"prev_price": r.price.shift(1)})
+        result = with_prev.filter(lambda r: r.prev_price.is_not_null())
+        assert isinstance(result, LTSeq)
+        # First row should be filtered out (no previous value)
+        df = result.to_pandas()
+        assert len(df) < len(t.to_pandas())
 
     def test_shift_comparison(self, sample_csv):
         """shift() in comparison expressions."""

@@ -369,3 +369,51 @@
 - [ ] Phase 4.7: Unpivot/Melt (wide-to-long transformation)
 - [ ] Phase 4.8: Sample/Random (`sample(n)`, `sample_fraction(p)`)
 - [x] Phase 4.9: Semi/Anti Joins (`semi_join`, `anti_join`) - **COMPLETED**
+
+### Phase 5 (Known Limitations & Fixes)
+- [x] Phase 5.1: Filter `is None` in dynamic contexts - **COMPLETED** (use `is_null()` / `is_not_null()` methods)
+- [ ] Phase 5.2: NestedTable.derive() source parsing (lambda source unavailable in pytest/REPL)
+
+---
+
+## Known Limitations
+
+### 5.1 Filter with `is None` / `is not None` in Dynamic Contexts
+
+**Symptom:** `Lambda must return an Expr or dict, got bool`
+
+**Root Cause:** `inspect.getsource()` fails when code is executed via `exec()` (pytest), REPL, or `eval()`. The `IsNoneTransformer` in `expr/transforms.py` cannot rewrite `is None` to `== None`, causing the expression to return Python `bool` instead of `Expr`.
+
+**Workaround:** Use `is_null()` and `is_not_null()` methods instead:
+```python
+# Instead of:
+t.filter(lambda r: r.col is not None)      # Fails in pytest/REPL
+
+# Use:
+t.filter(lambda r: r.col.is_not_null())    # Works everywhere
+t.filter(lambda r: r.col.is_null())        # For null checks
+```
+
+**Status:** RESOLVED - Methods exist, tests updated to use them
+
+### 5.2 NestedTable.derive() Lambda Source Parsing
+
+**Symptom:** `Cannot parse derive expression (source not available)`
+
+**Root Cause:** `NestedTable.derive()` uses `inspect.getsource()` to parse group-level derive lambdas. This fails in pytest/REPL/exec contexts.
+
+**Affected Operations:**
+- `table.group_ordered(...).derive(lambda g: {...})`
+- Chained operations: `.filter(...).derive(...)`
+
+**Skipped Tests:**
+- `test_derive_group_span`
+- `test_chain_filter_derive`
+- `test_complex_stock_analysis`
+
+**Potential Solutions (not yet implemented):**
+1. Alternative expression capture via decorator/builder pattern
+2. Fallback to Python-based evaluation when source unavailable
+3. Accept expression dicts directly as alternative API
+
+**Status:** ON HOLD - Documented limitation, workaround is to define lambdas in source files

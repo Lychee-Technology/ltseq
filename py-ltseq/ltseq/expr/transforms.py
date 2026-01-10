@@ -230,7 +230,18 @@ def _lambda_to_expr(fn, schema: Dict[str, str]) -> Dict[str, Any]:
         # Handle Expr returns: lambda r: r.age > 18
         return result.serialize()
     else:
+        # Check if this might be an 'is None' / 'is not None' issue
+        hint = ""
+        if result is True or result is False:
+            hint = (
+                "\n\nHint: If you're using 'is None' or 'is not None', use the "
+                "is_null() or is_not_null() methods instead:\n"
+                "  - r.col.is_null()      instead of  r.col is None\n"
+                "  - r.col.is_not_null()  instead of  r.col is not None\n"
+                "This is required in pytest/REPL contexts where source code "
+                "inspection is unavailable."
+            )
         raise TypeError(
             f"Lambda must return an Expr or dict, got {type(result).__name__}. "
-            "Did you forget to use the 'r' parameter?"
+            f"Did you forget to use the 'r' parameter?{hint}"
         )
