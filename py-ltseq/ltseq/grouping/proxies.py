@@ -422,6 +422,133 @@ class GroupProxy:
         """
         return not self.any(predicate)
 
+    def count_if(self, predicate: Callable) -> int:
+        """
+        Count rows where predicate is True.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+                      E.g., lambda r: r.price > 100
+
+        Returns:
+            Number of rows where predicate is True.
+
+        Example:
+            >>> g.count_if(lambda r: r.price > 100)  # Count expensive items
+        """
+        count = 0
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                count += 1
+        return count
+
+    def sum_if(self, predicate: Callable, column_name: str) -> Any:
+        """
+        Sum column values where predicate is True.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+            column_name: Name of the column to sum.
+
+        Returns:
+            Sum of column values where predicate is True.
+
+        Example:
+            >>> g.sum_if(lambda r: r.category == "A", "amount")  # Sum amounts for category A
+        """
+        total = 0
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                if isinstance(row, dict):
+                    val = row.get(column_name)
+                else:
+                    val = row[column_name]
+                if val is not None:
+                    total += val
+        return total
+
+    def avg_if(self, predicate: Callable, column_name: str) -> Any:
+        """
+        Average column values where predicate is True.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+            column_name: Name of the column to average.
+
+        Returns:
+            Average of column values where predicate is True, or None if no matching rows.
+
+        Example:
+            >>> g.avg_if(lambda r: r.status == "active", "score")  # Avg score for active
+        """
+        total = 0
+        count = 0
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                if isinstance(row, dict):
+                    val = row.get(column_name)
+                else:
+                    val = row[column_name]
+                if val is not None:
+                    total += val
+                    count += 1
+        return total / count if count > 0 else None
+
+    def min_if(self, predicate: Callable, column_name: str) -> Any:
+        """
+        Minimum column value where predicate is True.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+            column_name: Name of the column to find minimum.
+
+        Returns:
+            Minimum column value where predicate is True, or None if no matching rows.
+
+        Example:
+            >>> g.min_if(lambda r: r.is_valid, "price")  # Min price for valid items
+        """
+        values = []
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                if isinstance(row, dict):
+                    val = row.get(column_name)
+                else:
+                    val = row[column_name]
+                if val is not None:
+                    values.append(val)
+        return min(values) if values else None
+
+    def max_if(self, predicate: Callable, column_name: str) -> Any:
+        """
+        Maximum column value where predicate is True.
+
+        Args:
+            predicate: Lambda function that takes a row proxy and returns boolean.
+            column_name: Name of the column to find maximum.
+
+        Returns:
+            Maximum column value where predicate is True, or None if no matching rows.
+
+        Example:
+            >>> g.max_if(lambda r: r.is_valid, "price")  # Max price for valid items
+        """
+        values = []
+        for row in self._iterate_rows():
+            row_proxy = RowProxy(row)
+            if predicate(row_proxy):
+                if isinstance(row, dict):
+                    val = row.get(column_name)
+                else:
+                    val = row[column_name]
+                if val is not None:
+                    values.append(val)
+        return max(values) if values else None
+
     def top_k(self, column_name: str, k: int) -> List[Any]:
         """
         Get the top K values from a column in this group.

@@ -209,32 +209,39 @@
 **Status**: NOT STARTED
 
 #### 4.3 Conditional Aggregations
-- [ ] Add `count_if(predicate)` aggregate function
-- [ ] Add `sum_if(predicate, col)` aggregate function
-- [ ] Add `avg_if(predicate, col)` aggregate function
-- [ ] Add tests in `tests/test_conditional_aggs.py`
+- [x] Add `count_if(predicate)` aggregate function
+- [x] Add `sum_if(predicate, col)` aggregate function
+- [x] Add `avg_if(predicate, col)` aggregate function
+- [x] Add `min_if(predicate, col)` aggregate function
+- [x] Add `max_if(predicate, col)` aggregate function
+- [x] Add tests in `tests/test_conditional_aggs.py`
 
 **Implementation Notes:**
-- Implement via `SUM(CASE WHEN pred THEN 1 ELSE 0 END)` for count_if
-- Implement via `SUM(CASE WHEN pred THEN col ELSE 0 END)` for sum_if
-- Implement via `AVG(CASE WHEN pred THEN col ELSE NULL END)` for avg_if
-- Predicate should be a lambda expression on the group proxy
+- Implemented via `SUM(CASE WHEN pred THEN 1 ELSE 0 END)` for count_if
+- Implemented via `SUM(CASE WHEN pred THEN col ELSE 0 END)` for sum_if
+- Implemented via `AVG(CASE WHEN pred THEN col ELSE NULL END)` for avg_if
+- Implemented via `MIN(CASE WHEN pred THEN col ELSE NULL END)` for min_if
+- Implemented via `MAX(CASE WHEN pred THEN col ELSE NULL END)` for max_if
+- Helper functions exported from `ltseq.expr` and top-level `ltseq` module
+- Also available via GroupProxy methods for Python-side evaluation
 
-**Files**: `src/ops/aggregation.rs`, `py-ltseq/ltseq/grouping/proxies.py`, `py-ltseq/tests/test_conditional_aggs.py`
-**Status**: NOT STARTED
+**Files**: `src/ops/aggregation.rs`, `py-ltseq/ltseq/expr/base.py`, `py-ltseq/ltseq/grouping/proxies.py`, `py-ltseq/tests/test_conditional_aggs.py`
+**Status**: COMPLETED
 
 #### 4.4 Window Default Values
-- [ ] Extend `shift(n)` to accept `default=value` parameter
-- [ ] Handle NULL values at boundaries with user-specified defaults
-- [ ] Add tests in `tests/test_shift_default.py`
+- [x] Extend `shift(n)` to accept `default=value` parameter
+- [x] Handle NULL values at boundaries with user-specified defaults
+- [x] Add tests in `tests/test_shift_default.py`
 
 **Implementation Notes:**
 - SQL: `LAG(col, n, default_value)` or `LEAD(col, n, default_value)`
-- Need to extend `ShiftExpr` to capture default parameter
-- Pass default value through to SQL generation
+- Default value is passed through kwargs in expression serialization
+- Works with numeric and string defaults
+- Note: String defaults like "N/A", "NA", "NULL", "None", "NaN" are interpreted as missing values by pandas during CSV round-trip
+- Integer division with integer columns truncates; use float columns for decimal results
 
-**Files**: `src/ops/window.rs`, `py-ltseq/ltseq/expr/types.py`, `py-ltseq/tests/test_shift_default.py`
-**Status**: NOT STARTED
+**Files**: `src/transpiler/sql_gen.rs`, `py-ltseq/tests/test_shift_default.py`
+**Status**: COMPLETED
 
 #### 4.5 Additional String Operations
 - [ ] Add `s.replace(old, new)` - replace substring
@@ -350,8 +357,8 @@
 ### Phase 4 (Extended Features)
 - [x] Phase 4.1: Statistical Aggregations (`median`, `percentile`, `variance`, `std`, `mode`) - **COMPLETED**
 - [ ] Phase 4.2: Row Numbering/Ranking (`row_number`, `rank`, `dense_rank`, `ntile`)
-- [ ] Phase 4.3: Conditional Aggregations (`count_if`, `sum_if`, `avg_if`)
-- [ ] Phase 4.4: Window Default Values (`shift(n, default=value)`)
+- [x] Phase 4.3: Conditional Aggregations (`count_if`, `sum_if`, `avg_if`, `min_if`, `max_if`) - **COMPLETED**
+- [x] Phase 4.4: Window Default Values (`shift(n, default=value)`) - **COMPLETED**
 - [ ] Phase 4.5: Additional String Ops (`replace`, `split`, `concat`, `pad_left/right`)
 - [ ] Phase 4.6: Additional Temporal Ops (`week`, `quarter`, `day_of_week`, `day_of_year`)
 - [ ] Phase 4.7: Unpivot/Melt (wide-to-long transformation)

@@ -3,8 +3,10 @@
 //! Provides SQL GROUP BY aggregation and raw SQL WHERE filtering.
 
 use crate::engine::RUNTIME;
+use crate::transpiler::pyexpr_to_sql;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -29,18 +31,25 @@ pub fn agg_impl(
         .as_ref()
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
 
+    // Result type for aggregate function extraction
+    enum AggResult {
+        // Simple aggregate: (func_name, col_name, optional_arg)
+        Simple(String, String, Option<String>),
+        // Conditional aggregate: (func_name, predicate_sql, optional_col_name)
+        Conditional(String, String, Option<String>),
+    }
+
     // Helper function to extract aggregate function from PyExpr
-    // Returns (func_name, col_name, optional_arg for top_k/percentile)
-    fn extract_agg_function(py_expr: &PyExpr) -> Option<(String, String, Option<String>)> {
+    fn extract_agg_function(py_expr: &PyExpr, schema: &ArrowSchema) -> Option<AggResult> {
         if let PyExpr::Call { func, on, args, .. } = py_expr {
             match func.as_str() {
                 "sum" | "count" | "min" | "max" | "avg" | "median" | "variance" | "var"
                 | "stddev" | "std" | "mode" => {
                     if let PyExpr::Column(col_name) = on.as_ref() {
-                        return Some((func.clone(), col_name.clone(), None));
+                        return Some(AggResult::Simple(func.clone(), col_name.clone(), None));
                     }
                     if func == "count" {
-                        return Some((func.clone(), "*".to_string(), None));
+                        return Some(AggResult::Simple(func.clone(), "*".to_string(), None));
                     }
                     None
                 }
@@ -54,7 +63,7 @@ pub fn agg_impl(
                                 None
                             }
                         });
-                        return Some((func.clone(), col_name.clone(), k));
+                        return Some(AggResult::Simple(func.clone(), col_name.clone(), k));
                     }
                     None
                 }
@@ -68,7 +77,85 @@ pub fn agg_impl(
                                 None
                             }
                         });
-                        return Some((func.clone(), col_name.clone(), p));
+                        return Some(AggResult::Simple(func.clone(), col_name.clone(), p));
+                    }
+                    None
+                }
+                // Conditional aggregations: count_if, sum_if, avg_if
+                "count_if" => {
+                    // count_if(predicate) - predicate is args[0]
+                    if let Some(predicate) = args.first() {
+                        if let Ok(pred_sql) = pyexpr_to_sql(predicate, schema) {
+                            return Some(AggResult::Conditional(func.clone(), pred_sql, None));
+                        }
+                    }
+                    None
+                }
+                "sum_if" => {
+                    // sum_if(predicate, column) - predicate is args[0], column is args[1]
+                    if args.len() >= 2 {
+                        let predicate = &args[0];
+                        let col_expr = &args[1];
+                        if let Ok(pred_sql) = pyexpr_to_sql(predicate, schema) {
+                            if let Ok(col_sql) = pyexpr_to_sql(col_expr, schema) {
+                                return Some(AggResult::Conditional(
+                                    func.clone(),
+                                    pred_sql,
+                                    Some(col_sql),
+                                ));
+                            }
+                        }
+                    }
+                    None
+                }
+                "avg_if" => {
+                    // avg_if(predicate, column) - predicate is args[0], column is args[1]
+                    if args.len() >= 2 {
+                        let predicate = &args[0];
+                        let col_expr = &args[1];
+                        if let Ok(pred_sql) = pyexpr_to_sql(predicate, schema) {
+                            if let Ok(col_sql) = pyexpr_to_sql(col_expr, schema) {
+                                return Some(AggResult::Conditional(
+                                    func.clone(),
+                                    pred_sql,
+                                    Some(col_sql),
+                                ));
+                            }
+                        }
+                    }
+                    None
+                }
+                "min_if" => {
+                    // min_if(predicate, column) - predicate is args[0], column is args[1]
+                    if args.len() >= 2 {
+                        let predicate = &args[0];
+                        let col_expr = &args[1];
+                        if let Ok(pred_sql) = pyexpr_to_sql(predicate, schema) {
+                            if let Ok(col_sql) = pyexpr_to_sql(col_expr, schema) {
+                                return Some(AggResult::Conditional(
+                                    func.clone(),
+                                    pred_sql,
+                                    Some(col_sql),
+                                ));
+                            }
+                        }
+                    }
+                    None
+                }
+                "max_if" => {
+                    // max_if(predicate, column) - predicate is args[0], column is args[1]
+                    if args.len() >= 2 {
+                        let predicate = &args[0];
+                        let col_expr = &args[1];
+                        if let Ok(pred_sql) = pyexpr_to_sql(predicate, schema) {
+                            if let Ok(col_sql) = pyexpr_to_sql(col_expr, schema) {
+                                return Some(AggResult::Conditional(
+                                    func.clone(),
+                                    pred_sql,
+                                    Some(col_sql),
+                                ));
+                            }
+                        }
                     }
                     None
                 }
@@ -98,74 +185,84 @@ pub fn agg_impl(
             ))
         })?;
 
-        if let Some((agg_func, col_name, arg_opt)) = extract_agg_function(&py_expr) {
-            let sql_expr_str = match agg_func.as_str() {
-                "sum" => format!("SUM({})", col_name),
-                "count" => {
-                    if col_name == "*" {
-                        "COUNT(*)".to_string()
-                    } else {
-                        format!("COUNT({})", col_name)
+        if let Some(agg_result) = extract_agg_function(&py_expr, schema) {
+            let sql_expr_str = match agg_result {
+                AggResult::Simple(agg_func, col_name, arg_opt) => match agg_func.as_str() {
+                    "sum" => format!("SUM({})", col_name),
+                    "count" => {
+                        if col_name == "*" {
+                            "COUNT(*)".to_string()
+                        } else {
+                            format!("COUNT({})", col_name)
+                        }
                     }
-                }
-                "min" => format!("MIN({})", col_name),
-                "max" => format!("MAX({})", col_name),
-                "avg" => format!("AVG({})", col_name),
-                "median" => format!("MEDIAN({})", col_name),
-                "variance" | "var" => format!("VAR_SAMP({})", col_name),
-                "stddev" | "std" => format!("STDDEV_SAMP({})", col_name),
-                "percentile" => {
-                    let p_val = arg_opt
-                        .as_ref()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .unwrap_or(0.5); // default to median if not specified
-                    format!("APPROX_PERCENTILE_CONT({}, {})", col_name, p_val)
-                }
-                "mode" => {
-                    // Mode requires a subquery approach since DataFusion doesn't have native MODE
-                    // We'll use ARRAY_AGG with ORDER BY count and pick the first
-                    // However, that's complex. For simplicity, use APPROX_MEDIAN as a placeholder
-                    // or use a workaround:
-                    // SELECT val FROM (SELECT val, COUNT(*) as cnt FROM t GROUP BY val ORDER BY cnt DESC LIMIT 1)
-                    // This is complex in aggregation context. Use a simpler approach:
-                    // Get most frequent value using FIRST_VALUE in a window... also complex.
-                    // For now, implement as a workaround using subquery-like approach:
-                    // We'll create a correlated aggregation using ARRAY_AGG to get all values
-                    // then extract the mode via string manipulation (not ideal but works)
-                    //
-                    // Actually, let's use a simpler approach: collect all values, find most common
-                    // DataFusion supports: ARRAY_AGG. We can process in post.
-                    // For proper mode, we need to do it client-side. Let's just note this.
-                    //
-                    // Alternative: Use APPROX_MODE if available (not in standard DataFusion)
-                    // Let's implement a workaround using the first value of the most common group
-                    // This requires a nested query which is hard in aggregation context.
-                    //
-                    // Simplest: return all values as array and let Python compute mode
-                    // But that defeats the purpose. Let's try a SQL workaround.
-                    //
-                    // For now, use FIRST_VALUE as a placeholder that at least returns valid data
-                    // and document that mode() is approximate/limited
-                    format!("FIRST_VALUE({} ORDER BY {} ASC)", col_name, col_name)
-                }
-                "top_k" => {
-                    let k_val = arg_opt
-                        .as_ref()
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(10); // default k=10
-                                        // Use ARRAY_AGG with ORDER BY, then convert to string for CSV compatibility
-                                        // Use semicolon as delimiter to avoid CSV parsing issues
-                    format!(
-                        "ARRAY_TO_STRING(ARRAY_SLICE(ARRAY_AGG(CAST({} AS DOUBLE) ORDER BY CAST({} AS DOUBLE) DESC), 1, {}), ';')",
-                        col_name, col_name, k_val
-                    )
-                }
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Unknown aggregate function: {}",
-                        agg_func
-                    )))
-                }
+                    "min" => format!("MIN({})", col_name),
+                    "max" => format!("MAX({})", col_name),
+                    "avg" => format!("AVG({})", col_name),
+                    "median" => format!("MEDIAN({})", col_name),
+                    "variance" | "var" => format!("VAR_SAMP({})", col_name),
+                    "stddev" | "std" => format!("STDDEV_SAMP({})", col_name),
+                    "percentile" => {
+                        let p_val = arg_opt
+                            .as_ref()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.5); // default to median if not specified
+                        format!("APPROX_PERCENTILE_CONT({}, {})", col_name, p_val)
+                    }
+                    "mode" => {
+                        // Mode requires a subquery approach since DataFusion doesn't have native MODE
+                        // For now, use FIRST_VALUE as a placeholder
+                        format!("FIRST_VALUE({} ORDER BY {} ASC)", col_name, col_name)
+                    }
+                    "top_k" => {
+                        let k_val = arg_opt
+                            .as_ref()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(10); // default k=10
+                        format!(
+                            "ARRAY_TO_STRING(ARRAY_SLICE(ARRAY_AGG(CAST({} AS DOUBLE) ORDER BY CAST({} AS DOUBLE) DESC), 1, {}), ';')",
+                            col_name, col_name, k_val
+                        )
+                    }
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Unknown aggregate function: {}",
+                            agg_func
+                        )))
+                    }
+                },
+                AggResult::Conditional(agg_func, pred_sql, col_opt) => match agg_func.as_str() {
+                    "count_if" => {
+                        // COUNT rows where predicate is true
+                        format!("SUM(CASE WHEN {} THEN 1 ELSE 0 END)", pred_sql)
+                    }
+                    "sum_if" => {
+                        // SUM column where predicate is true
+                        let col_sql = col_opt.unwrap_or_else(|| "1".to_string());
+                        format!("SUM(CASE WHEN {} THEN {} ELSE 0 END)", pred_sql, col_sql)
+                    }
+                    "avg_if" => {
+                        // AVG column where predicate is true (NULL for false to exclude from avg)
+                        let col_sql = col_opt.unwrap_or_else(|| "1".to_string());
+                        format!("AVG(CASE WHEN {} THEN {} ELSE NULL END)", pred_sql, col_sql)
+                    }
+                    "min_if" => {
+                        // MIN column where predicate is true
+                        let col_sql = col_opt.unwrap_or_else(|| "1".to_string());
+                        format!("MIN(CASE WHEN {} THEN {} ELSE NULL END)", pred_sql, col_sql)
+                    }
+                    "max_if" => {
+                        // MAX column where predicate is true
+                        let col_sql = col_opt.unwrap_or_else(|| "1".to_string());
+                        format!("MAX(CASE WHEN {} THEN {} ELSE NULL END)", pred_sql, col_sql)
+                    }
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Unknown conditional aggregate function: {}",
+                            agg_func
+                        )))
+                    }
+                },
             };
             agg_select_parts.push(format!("{} as {}", sql_expr_str, key_str));
         } else {

@@ -8,7 +8,17 @@ use crate::types::PyExpr;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 
 /// Handle SQL for shift() window function
-fn sql_shift(on: &PyExpr, args: &[PyExpr], schema: &ArrowSchema) -> Result<String, String> {
+///
+/// Supports optional default value via kwargs:
+/// - shift(1) -> LAG(col, 1)
+/// - shift(1, default=0) -> LAG(col, 1, 0)
+/// - shift(-1, default=0) -> LEAD(col, 1, 0)
+fn sql_shift(
+    on: &PyExpr,
+    args: &[PyExpr],
+    kwargs: &std::collections::HashMap<String, PyExpr>,
+    schema: &ArrowSchema,
+) -> Result<String, String> {
     let on_sql = pyexpr_to_sql(on, schema)?;
     let offset = if args.is_empty() {
         1
@@ -18,10 +28,23 @@ fn sql_shift(on: &PyExpr, args: &[PyExpr], schema: &ArrowSchema) -> Result<Strin
         return Err("shift() offset must be a literal integer".to_string());
     };
 
-    if offset >= 0 {
-        Ok(format!("LAG({}, {})", on_sql, offset))
+    // Check for default value in kwargs
+    let default_sql = if let Some(default_expr) = kwargs.get("default") {
+        Some(pyexpr_to_sql(default_expr, schema)?)
     } else {
-        Ok(format!("LEAD({}, {})", on_sql, -offset))
+        None
+    };
+
+    if offset >= 0 {
+        match default_sql {
+            Some(def) => Ok(format!("LAG({}, {}, {})", on_sql, offset, def)),
+            None => Ok(format!("LAG({}, {})", on_sql, offset)),
+        }
+    } else {
+        match default_sql {
+            Some(def) => Ok(format!("LEAD({}, {}, {})", on_sql, -offset, def)),
+            None => Ok(format!("LEAD({}, {})", on_sql, -offset)),
+        }
     }
 }
 
@@ -142,10 +165,11 @@ fn sql_call(
     func: &str,
     on: &PyExpr,
     args: &[PyExpr],
+    kwargs: &std::collections::HashMap<String, PyExpr>,
     schema: &ArrowSchema,
 ) -> Result<String, String> {
     match func {
-        "shift" => sql_shift(on, args, schema),
+        "shift" => sql_shift(on, args, kwargs, schema),
         "rolling" => {
             Err("rolling() should not reach pyexpr_to_sql - it's handled separately".to_string())
         }
@@ -350,6 +374,11 @@ pub fn pyexpr_to_sql(py_expr: &PyExpr, schema: &ArrowSchema) -> Result<String, S
             }
         }
 
-        PyExpr::Call { func, args, on, .. } => sql_call(func, on, args, schema),
+        PyExpr::Call {
+            func,
+            args,
+            kwargs,
+            on,
+        } => sql_call(func, on, args, kwargs, schema),
     }
 }

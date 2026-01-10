@@ -31,6 +31,100 @@ def if_else(condition: "Expr", true_value: Any, false_value: Any) -> "CallExpr":
     )
 
 
+def count_if(predicate: "Expr") -> "CallExpr":
+    """
+    Count rows where predicate is True.
+
+    Args:
+        predicate: A boolean expression to evaluate
+
+    Returns:
+        Expression that counts matching rows
+
+    Example:
+        >>> t.agg(by=lambda r: r.region, high_value=lambda g: count_if(g.price > 100))
+    """
+    from .types import CallExpr
+
+    return CallExpr("count_if", (predicate,), {}, on=None)
+
+
+def sum_if(predicate: "Expr", column: "Expr") -> "CallExpr":
+    """
+    Sum column values where predicate is True.
+
+    Args:
+        predicate: A boolean expression to evaluate
+        column: The column to sum
+
+    Returns:
+        Expression that sums matching values
+
+    Example:
+        >>> t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100, g.sales))
+    """
+    from .types import CallExpr
+
+    return CallExpr("sum_if", (predicate, column), {}, on=None)
+
+
+def avg_if(predicate: "Expr", column: "Expr") -> "CallExpr":
+    """
+    Average column values where predicate is True.
+
+    Args:
+        predicate: A boolean expression to evaluate
+        column: The column to average
+
+    Returns:
+        Expression that averages matching values
+
+    Example:
+        >>> t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g.sales))
+    """
+    from .types import CallExpr
+
+    return CallExpr("avg_if", (predicate, column), {}, on=None)
+
+
+def min_if(predicate: "Expr", column: "Expr") -> "CallExpr":
+    """
+    Minimum column value where predicate is True.
+
+    Args:
+        predicate: A boolean expression to evaluate
+        column: The column to find minimum
+
+    Returns:
+        Expression that returns minimum of matching values
+
+    Example:
+        >>> t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g.score))
+    """
+    from .types import CallExpr
+
+    return CallExpr("min_if", (predicate, column), {}, on=None)
+
+
+def max_if(predicate: "Expr", column: "Expr") -> "CallExpr":
+    """
+    Maximum column value where predicate is True.
+
+    Args:
+        predicate: A boolean expression to evaluate
+        column: The column to find maximum
+
+    Returns:
+        Expression that returns maximum of matching values
+
+    Example:
+        >>> t.agg(by=lambda r: r.region, max_active=lambda g: max_if(g.is_active, g.score))
+    """
+    from .types import CallExpr
+
+    return CallExpr("max_if", (predicate, column), {}, on=None)
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.

@@ -24,7 +24,7 @@ Example:
 """
 
 # Re-export base expression class
-from .base import Expr, if_else
+from .base import Expr, if_else, count_if, sum_if, avg_if, min_if, max_if
 
 # Re-export concrete expression types
 from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, LookupExpr, UnaryOpExpr
@@ -46,6 +46,11 @@ __all__ = [
     "SchemaProxy",
     "NestedSchemaProxy",
     "if_else",
+    "count_if",
+    "sum_if",
+    "avg_if",
+    "min_if",
+    "max_if",
     "_lambda_to_expr",
     "_transform_lambda_for_none_checks",
 ]

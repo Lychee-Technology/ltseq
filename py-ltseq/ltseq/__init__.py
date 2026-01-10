@@ -14,6 +14,12 @@ from .expr import (
     UnaryOpExpr,
     CallExpr,
     Expr,
+    if_else,
+    count_if,
+    sum_if,
+    avg_if,
+    min_if,
+    max_if,
 )
 
 __all__ = [
@@ -27,4 +33,10 @@ __all__ = [
     "UnaryOpExpr",
     "CallExpr",
     "Expr",
+    "if_else",
+    "count_if",
+    "sum_if",
+    "avg_if",
+    "min_if",
+    "max_if",
 ]
