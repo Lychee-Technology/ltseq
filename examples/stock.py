@@ -28,7 +28,7 @@ result = (
     # 3. Filtering on Sub-tables (Groups)
     #    'g' represents a sub-table object
     .filter(lambda g: 
-        (g.min('is_up')) and           # Must be a rising group
+        (g.first().is_up) and           # Must be a rising group
         (g.count() >= 3)               # Must last >= 3 days
     )
     # 4. Extract info from the group
@@ -42,4 +42,4 @@ result = (
     .select(lambda r: r.CODE, lambda r: r.start, lambda r:r.end, lambda r:r.days, lambda r:r.gain)
 )
 
-result.show(40)
+result.show()
