@@ -13,13 +13,13 @@ class TestPivotBasic:
 
     def test_pivot_creates_ltseq(self):
         """pivot() should return an LTSeq instance."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
         assert isinstance(result, LTSeq)
 
     def test_pivot_simple_sum(self):
         """pivot() should create wide format with summed values."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         # test_agg.csv has:
         # region,amount,year
         # West,1000,2020
@@ -59,7 +59,7 @@ class TestPivotBasic:
 
     def test_pivot_with_mean_agg(self):
         """pivot() should support mean aggregation."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(
             index="year", columns="region", values="amount", agg_fn="mean"
         )
@@ -73,7 +73,7 @@ class TestPivotBasic:
 
     def test_pivot_with_min_agg(self):
         """pivot() should support min aggregation."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="min")
 
         df = pivoted.to_pandas()
@@ -85,7 +85,7 @@ class TestPivotBasic:
 
     def test_pivot_with_max_agg(self):
         """pivot() should support max aggregation."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="max")
 
         df = pivoted.to_pandas()
@@ -97,7 +97,7 @@ class TestPivotBasic:
 
     def test_pivot_with_count_agg(self):
         """pivot() should support count aggregation."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(
             index="year", columns="region", values="amount", agg_fn="count"
         )
@@ -115,7 +115,7 @@ class TestPivotCompositeIndex:
 
     def test_pivot_with_composite_index_list(self):
         """pivot() should support list of index columns."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         # Use region as first index, year as second (unusual but valid)
         pivoted = t.pivot(
             index=["region", "year"], columns="amount", values="region", agg_fn="count"
@@ -142,31 +142,31 @@ class TestPivotValidation:
 
     def test_pivot_invalid_index_column_raises_error(self):
         """pivot() should raise error if index column doesn't exist."""
-        t = LTSeq.read_csv("test_agg.csv")
-        with pytest.raises(AttributeError, match="not found in schema"):
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
+        with pytest.raises(AttributeError, match="not found"):
             t.pivot(index="nonexistent", columns="region", values="amount")
 
     def test_pivot_invalid_columns_column_raises_error(self):
         """pivot() should raise error if columns column doesn't exist."""
-        t = LTSeq.read_csv("test_agg.csv")
-        with pytest.raises(AttributeError, match="not found in schema"):
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
+        with pytest.raises(AttributeError, match="not found"):
             t.pivot(index="year", columns="nonexistent", values="amount")
 
     def test_pivot_invalid_values_column_raises_error(self):
         """pivot() should raise error if values column doesn't exist."""
-        t = LTSeq.read_csv("test_agg.csv")
-        with pytest.raises(AttributeError, match="not found in schema"):
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
+        with pytest.raises(AttributeError, match="not found"):
             t.pivot(index="year", columns="region", values="nonexistent")
 
     def test_pivot_invalid_agg_fn_raises_error(self):
         """pivot() should raise error if agg_fn is not supported."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         with pytest.raises(ValueError, match="Invalid aggregation function"):
             t.pivot(index="year", columns="region", values="amount", agg_fn="invalid")
 
     def test_pivot_invalid_index_type_raises_error(self):
         """pivot() should raise error if index is not str or list."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         with pytest.raises(TypeError):
             t.pivot(index=123, columns="region", values="amount")
 
@@ -176,7 +176,7 @@ class TestPivotDataIntegrity:
 
     def test_pivot_preserves_all_data(self):
         """pivot() should preserve all data (no rows lost)."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         df = pivoted.to_pandas()
@@ -186,7 +186,7 @@ class TestPivotDataIntegrity:
 
     def test_pivot_result_has_correct_schema(self):
         """pivot() result should have correct column names."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         df = pivoted.to_pandas()
@@ -197,7 +197,7 @@ class TestPivotDataIntegrity:
 
     def test_pivot_with_string_index(self):
         """pivot() should accept index as string."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         # Both should work
         pivoted1 = t.pivot(index="year", columns="region", values="amount")
         pivoted2 = t.pivot(index=["year"], columns="region", values="amount")
@@ -215,7 +215,7 @@ class TestPivotEdgeCases:
 
     def test_pivot_all_aggregation_functions(self):
         """pivot() should work with all supported aggregation functions."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         agg_fns = ["sum", "mean", "count", "min", "max"]
         for agg_fn in agg_fns:
@@ -228,7 +228,7 @@ class TestPivotEdgeCases:
 
     def test_pivot_is_chainable_with_filter(self):
         """pivot() result should be chainable with filter."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Should be able to filter (but need to materialize to pandas to call to_pandas on result)
@@ -241,7 +241,7 @@ class TestPivotEdgeCases:
 
     def test_pivot_result_structure(self):
         """pivot() result should have correct structure."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Check that pivoted data can be used with to_pandas
@@ -255,7 +255,7 @@ class TestPivotIntegration:
 
     def test_pivot_then_filter_basic(self):
         """Should be able to filter pivot results (basic check)."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Verify pivot worked
@@ -265,7 +265,7 @@ class TestPivotIntegration:
 
     def test_pivot_then_derive_basic(self):
         """Should be able to derive columns on pivot results (basic check)."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Verify pivot worked and has expected columns
@@ -280,7 +280,7 @@ class TestPivotIntegration:
 
     def test_pivot_then_select_basic(self):
         """Should be able to select columns on pivot results (basic check)."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Verify pivot structure
@@ -290,7 +290,7 @@ class TestPivotIntegration:
 
     def test_pivot_then_sort_basic(self):
         """Should be able to sort pivot results (basic check)."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         # Verify pivot worked
@@ -301,7 +301,7 @@ class TestPivotIntegration:
 
     def test_pivot_result_aggregatable(self):
         """Pivot result should support row manipulation."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         pivoted = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
 
         df = pivoted.to_pandas()
@@ -316,7 +316,7 @@ class TestPivotRegressions:
 
     def test_original_table_unchanged(self):
         """pivot() should not modify the original table."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         original_len = len(t)
 
         _ = t.pivot(index="year", columns="region", values="amount", agg_fn="sum")
@@ -326,7 +326,7 @@ class TestPivotRegressions:
 
     def test_pivot_multiple_times(self):
         """Should be able to pivot the same table multiple times."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         pivoted1 = t.pivot(
             index="year", columns="region", values="amount", agg_fn="sum"

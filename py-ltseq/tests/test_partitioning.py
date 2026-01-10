@@ -14,13 +14,13 @@ class TestPartitionBasic:
 
     def test_partition_creates_partitioned_table(self):
         """partition() should return a PartitionedTable."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.partition(by=lambda r: r.region)
         assert isinstance(result, PartitionedTable)
 
     def test_partition_dict_like_access(self):
         """PartitionedTable should support dict-like access by key."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         # Access a partition by key
@@ -30,7 +30,7 @@ class TestPartitionBasic:
 
     def test_partition_missing_key_raises_keyerror(self):
         """Accessing non-existent partition key should raise KeyError."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         with pytest.raises(KeyError):
@@ -38,7 +38,7 @@ class TestPartitionBasic:
 
     def test_partition_keys(self):
         """PartitionedTable.keys() should return all partition keys."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         keys = partitions.keys()
@@ -49,7 +49,7 @@ class TestPartitionBasic:
 
     def test_partition_values(self):
         """PartitionedTable.values() should return all partition tables."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         values = partitions.values()
@@ -59,7 +59,7 @@ class TestPartitionBasic:
 
     def test_partition_items(self):
         """PartitionedTable.items() should iterate (key, table) pairs."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         items = list(partitions.items())
@@ -71,7 +71,7 @@ class TestPartitionBasic:
 
     def test_partition_iteration(self):
         """PartitionedTable should be iterable over partition tables."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         tables = list(partitions)
@@ -80,7 +80,7 @@ class TestPartitionBasic:
 
     def test_partition_len(self):
         """len(PartitionedTable) should return number of partitions."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         count = len(partitions)
@@ -94,7 +94,7 @@ class TestPartitionMap:
 
     def test_partition_map_basic(self):
         """map() should apply function to each partition."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         # Simple identity map - just return each partition as-is
@@ -104,7 +104,7 @@ class TestPartitionMap:
 
     def test_partition_map_preserves_keys(self):
         """map() should preserve partition keys."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
         original_keys = partitions.keys()
 
@@ -119,7 +119,7 @@ class TestPartitionRowCoverage:
 
     def test_partition_no_rows_lost(self):
         """All rows should be in some partition."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         original_count = len(t)
 
         partitions = t.partition(by=lambda r: r.region)
@@ -130,7 +130,7 @@ class TestPartitionRowCoverage:
 
     def test_partition_no_duplicate_rows(self):
         """Rows should not appear in multiple partitions."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         # Count rows in each partition
@@ -146,7 +146,7 @@ class TestPartitionWithDifferentKeys:
 
     def test_partition_string_key(self):
         """partition() should work with string keys."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         partitions = t.partition(by=lambda r: r.region)
         assert len(partitions) >= 2
@@ -155,7 +155,7 @@ class TestPartitionWithDifferentKeys:
 
     def test_partition_numeric_key(self):
         """partition() should work with numeric partition keys."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Partition by amount range
         partitions = t.partition(by=lambda r: "low" if int(r.amount) < 1000 else "high")
@@ -177,7 +177,7 @@ class TestPartitionErrorHandling:
 
     def test_partition_with_invalid_column_raises(self):
         """partition() with non-existent column should raise."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.nonexistent_column)
 
         # Error should occur when we try to access partitions
@@ -190,7 +190,7 @@ class TestPartitionCaching:
 
     def test_partition_cache_efficiency(self):
         """Multiple accesses to same partition should use cache."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.region)
 
         # First access - computes partitions
@@ -208,7 +208,7 @@ class TestPartitionScenarios:
 
     def test_partition_multiway_split(self):
         """Partition by year to split data multiple ways."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         partitions = t.partition(by=lambda r: r.year)
 
         # Should have partitions for each year
@@ -219,7 +219,7 @@ class TestPartitionScenarios:
     def test_partition_nonconsequtive_groups(self):
         """partition() should group non-consecutive rows with same key."""
         # This is a key difference from group_ordered()
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Partition by region
         partitions = t.partition(by=lambda r: r.region)

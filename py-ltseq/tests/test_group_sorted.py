@@ -269,7 +269,7 @@ class TestGroupSortedErrors(unittest.TestCase):
             t.group_sorted(lambda r: r.id)
 
     def test_group_sorted_invalid_column_raises_error(self):
-        """group_sorted() should raise error for non-existent column."""
+        """group_sorted() should raise error for non-existent column when evaluated."""
         csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
         csv.write("id,name\n")
         csv.write("1,Alice\n")
@@ -278,7 +278,8 @@ class TestGroupSortedErrors(unittest.TestCase):
         try:
             t = LTSeq.read_csv(csv.name)
             with self.assertRaises(AttributeError):
-                t.group_sorted(lambda r: r.nonexistent_column)
+                # group_sorted is lazy, error is raised when flatten() triggers evaluation
+                t.group_sorted(lambda r: r.nonexistent_column).flatten()
         finally:
             os.unlink(csv.name)
 

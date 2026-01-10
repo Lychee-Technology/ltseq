@@ -50,13 +50,15 @@ def _validate_join_inputs(self_table, other, how: str):
 
 
 def _build_join_result_schema(left_schema, right_schema, suffix="_other"):
-    """Build result schema for join operations."""
+    """Build result schema for join operations.
+
+    Rust joins always prefix ALL right columns with {suffix}_{col},
+    so we must match that behavior here.
+    """
     result_schema = left_schema.copy()
     for col_name, col_type in right_schema.items():
-        if col_name in result_schema:
-            result_schema[f"{col_name}{suffix}"] = col_type
-        else:
-            result_schema[col_name] = col_type
+        # Always add suffix prefix to right columns (matching Rust behavior)
+        result_schema[f"{suffix}_{col_name}"] = col_type
     return result_schema
 
 

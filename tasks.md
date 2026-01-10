@@ -35,8 +35,8 @@
 | **asof_join** | `asof_join(other, on, direction)` | **IMPLEMENTED** - time-series as-of joins | High |
 | **join_sorted** | `join_sorted(other, on, how)` | **IMPLEMENTED** - merge join with sort validation | Low |
 | **lookup (table-level)** | `LTSeq.lookup(dim_table, on, as_)` | Partially implemented (Expr.lookup exists, not table-level) | Medium |
-| **top_k** | `top_k(col, k)` | Not implemented - aggregate function for Top-K | Low |
-| **Expr.lookup** | `r.key.lookup(target_table, column, join_key)` | Expression defined but not fully wired to execution | Medium |
+| **top_k** | `top_k(col, k)` | **IMPLEMENTED** - aggregate returning semicolon-delimited top K values | Low |
+| **Expr.lookup** | `r.key.lookup(target_table, column, join_key)` | **IMPLEMENTED** - Expression wired to execution via Python-side join rewriting | Medium |
 
 ---
 
@@ -112,11 +112,24 @@
 **Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `src/ops/advanced.rs`
 
 #### 2.4 Wire `Expr.lookup` to Execution
-- [ ] Implement transpilation in `src/transpiler.rs`
-- [ ] Generate join SQL for the lookup expression
-- [ ] Add tests
+- [x] Store target table reference in `LookupExpr` class
+- [x] Add table registry to `LookupExpr` for retrieval after serialization
+- [x] Add `_contains_lookup()` helper to detect lookup expressions in derive
+- [x] Add `_extract_lookup_info()` to extract lookup metadata from expression
+- [x] Add `_resolve_lookups()` to perform LEFT JOIN and rewrite expressions
+- [x] Add `_perform_lookup_join()` to execute the join via Rust
+- [x] Set `_name` on LTSeq tables from CSV file basename
+- [x] Add integration tests for lookup execution
 
-**Files**: `src/transpiler.rs`
+**Implementation Notes:**
+- Implemented via Python-side join rewriting (not Rust transpiler modification)
+- Lookups are detected in `derive()` before calling Rust
+- LEFT JOIN brings in lookup columns; expression is rewritten to reference joined columns
+- Unmatched keys return NULL values
+- Table registry tracks table references by name for retrieval after serialization
+
+**Files**: `py-ltseq/ltseq/transforms.py`, `py-ltseq/ltseq/expr/types.py`, `py-ltseq/ltseq/expr/base.py`, `py-ltseq/ltseq/io_ops.py`, `py-ltseq/ltseq/core.py`, `py-ltseq/tests/test_lookup.py`
+**Status**: COMPLETED
 
 ---
 
@@ -134,12 +147,19 @@
 **Status**: COMPLETED
 
 #### 3.2 `top_k(col, k)` - Top-K Aggregate
-- [ ] Add `top_k` function to expression system
-- [ ] Implement as aggregate inside `agg()`
-- [ ] Return array/list of top K values
-- [ ] Add tests
+- [x] Add `top_k` function to expression system (works automatically via CallExpr)
+- [x] Implement in Rust `agg()` using ARRAY_AGG + ARRAY_SLICE + ARRAY_TO_STRING
+- [x] Add `top_k()` method to GroupProxy for Python-side evaluation
+- [x] Add tests in `tests/test_top_k.py`
 
-**Files**: `py-ltseq/ltseq/expr/`, `src/transpiler.rs`
+**Implementation Notes:**
+- Returns values as semicolon-delimited string (due to CSV round-trip in `to_pandas()`)
+- Use `parse_top_k(value)` helper to convert string to list of floats
+- Values are sorted in descending order (highest first)
+- Default k=10 if not specified
+
+**Files**: `src/ops/aggregation.rs`, `py-ltseq/ltseq/grouping/proxies.py`, `py-ltseq/tests/test_top_k.py`
+**Status**: COMPLETED
 
 #### 3.3 `GroupProxy.all/any/none` - Quantifier Functions
 - [x] Add `all()`, `any()`, `none()` methods to GroupProxy in `grouping.py`
@@ -149,6 +169,141 @@
 
 **Files**: `py-ltseq/ltseq/grouping.py`, `py-ltseq/tests/test_nested_quantifiers.py`
 **Status**: COMPLETED
+
+---
+
+### Phase 4: Extended Features
+
+#### 4.1 Statistical Aggregations
+- [x] Add `median()` aggregate function
+- [x] Add `percentile(p)` aggregate function (e.g., `percentile(0.95)`)
+- [x] Add `variance()` / `var()` aggregate function
+- [x] Add `std()` / `stddev()` (standard deviation) aggregate function
+- [x] Add `mode()` aggregate function (most frequent value) - GroupProxy only
+- [x] Add tests in `tests/test_statistical_aggs.py`
+
+**Implementation Notes:**
+- `median()`: Uses DataFusion `MEDIAN()` function
+- `percentile(p)`: Uses DataFusion `APPROX_PERCENTILE_CONT(col, p)`
+- `variance()` / `var()`: Uses DataFusion `VAR_SAMP()` (sample variance)
+- `std()` / `stddev()`: Uses DataFusion `STDDEV_SAMP()` (sample standard deviation)
+- `mode()`: Implemented in GroupProxy only (Python-side) using `statistics.mode()`
+- All functions also available via GroupProxy for Python-side evaluation
+
+**Files**: `src/ops/aggregation.rs`, `py-ltseq/ltseq/grouping/proxies.py`, `py-ltseq/tests/test_statistical_aggs.py`
+**Status**: COMPLETED
+
+#### 4.2 Row Numbering/Ranking Functions
+- [ ] Add `row_number()` window function
+- [ ] Add `rank()` window function (with gaps)
+- [ ] Add `dense_rank()` window function (without gaps)
+- [ ] Add `ntile(n)` window function (bucket assignment)
+- [ ] Add tests in `tests/test_ranking.py`
+
+**Implementation Notes:**
+- All are standard SQL window functions supported by DataFusion
+- Need to extend expression system to capture OVER clause with PARTITION BY and ORDER BY
+- Consider adding as `derive()` expressions: `lambda r: r.col.row_number().over(partition_by="group", order_by="date")`
+
+**Files**: `src/ops/window.rs`, `py-ltseq/ltseq/expr/types.py`, `py-ltseq/tests/test_ranking.py`
+**Status**: NOT STARTED
+
+#### 4.3 Conditional Aggregations
+- [ ] Add `count_if(predicate)` aggregate function
+- [ ] Add `sum_if(predicate, col)` aggregate function
+- [ ] Add `avg_if(predicate, col)` aggregate function
+- [ ] Add tests in `tests/test_conditional_aggs.py`
+
+**Implementation Notes:**
+- Implement via `SUM(CASE WHEN pred THEN 1 ELSE 0 END)` for count_if
+- Implement via `SUM(CASE WHEN pred THEN col ELSE 0 END)` for sum_if
+- Implement via `AVG(CASE WHEN pred THEN col ELSE NULL END)` for avg_if
+- Predicate should be a lambda expression on the group proxy
+
+**Files**: `src/ops/aggregation.rs`, `py-ltseq/ltseq/grouping/proxies.py`, `py-ltseq/tests/test_conditional_aggs.py`
+**Status**: NOT STARTED
+
+#### 4.4 Window Default Values
+- [ ] Extend `shift(n)` to accept `default=value` parameter
+- [ ] Handle NULL values at boundaries with user-specified defaults
+- [ ] Add tests in `tests/test_shift_default.py`
+
+**Implementation Notes:**
+- SQL: `LAG(col, n, default_value)` or `LEAD(col, n, default_value)`
+- Need to extend `ShiftExpr` to capture default parameter
+- Pass default value through to SQL generation
+
+**Files**: `src/ops/window.rs`, `py-ltseq/ltseq/expr/types.py`, `py-ltseq/tests/test_shift_default.py`
+**Status**: NOT STARTED
+
+#### 4.5 Additional String Operations
+- [ ] Add `s.replace(old, new)` - replace substring
+- [ ] Add `s.split(delimiter)` - split string into array
+- [ ] Add `s.concat(*others)` - concatenate strings
+- [ ] Add `s.pad_left(width, char)` - left pad string
+- [ ] Add `s.pad_right(width, char)` - right pad string
+- [ ] Add tests in `tests/test_string_ops_extended.py`
+
+**Implementation Notes:**
+- DataFusion: `REPLACE(str, from, to)`, `SPLIT_PART(str, delim, n)`, `CONCAT(...)`, `LPAD(str, len, pad)`, `RPAD(str, len, pad)`
+- Split may need special handling for array return (semicolon-delimited like top_k)
+
+**Files**: `src/ops/expressions.rs`, `py-ltseq/ltseq/expr/string.py`, `py-ltseq/tests/test_string_ops_extended.py`
+**Status**: NOT STARTED
+
+#### 4.6 Additional Temporal Operations
+- [ ] Add `dt.week()` - ISO week number
+- [ ] Add `dt.quarter()` - quarter of year (1-4)
+- [ ] Add `dt.day_of_week()` - day of week (0-6 or 1-7)
+- [ ] Add `dt.day_of_year()` - day of year (1-366)
+- [ ] Add tests in `tests/test_temporal_ops_extended.py`
+
+**Implementation Notes:**
+- DataFusion: `EXTRACT(WEEK FROM date)`, `EXTRACT(QUARTER FROM date)`, `EXTRACT(DOW FROM date)`, `EXTRACT(DOY FROM date)`
+- Extend existing `DateTimeAccessor` in expression system
+
+**Files**: `src/ops/expressions.rs`, `py-ltseq/ltseq/expr/temporal.py`, `py-ltseq/tests/test_temporal_ops_extended.py`
+**Status**: NOT STARTED
+
+#### 4.7 Unpivot/Melt Operation
+- [ ] Add `unpivot(id_cols, value_cols, var_name, value_name)` method
+- [ ] Transform wide format to long format (inverse of pivot)
+- [ ] Add tests in `tests/test_unpivot.py`
+
+**Implementation Notes:**
+- Example: columns `[id, jan, feb, mar]` -> `[id, month, value]`
+- Can implement via UNION ALL of multiple selects
+- Or use DataFusion's UNPIVOT if available
+
+**Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `py-ltseq/tests/test_unpivot.py`
+**Status**: NOT STARTED
+
+#### 4.8 Sampling Operations
+- [ ] Add `sample(n)` - random sample of n rows
+- [ ] Add `sample_fraction(p)` - random sample of p% of rows
+- [ ] Add optional `seed` parameter for reproducibility
+- [ ] Add tests in `tests/test_sampling.py`
+
+**Implementation Notes:**
+- Can implement via `ORDER BY RANDOM() LIMIT n`
+- For fraction: `WHERE RANDOM() < p`
+- Seed support may require custom random function
+
+**Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `py-ltseq/tests/test_sampling.py`
+**Status**: NOT STARTED
+
+#### 4.9 Semi/Anti Joins
+- [ ] Add `semi_join(other, on)` - rows in left that have match in right
+- [ ] Add `anti_join(other, on)` - rows in left that have NO match in right
+- [ ] Add tests in `tests/test_semi_anti_joins.py`
+
+**Implementation Notes:**
+- Semi-join: `WHERE EXISTS (SELECT 1 FROM right WHERE left.key = right.key)`
+- Anti-join: `WHERE NOT EXISTS (SELECT 1 FROM right WHERE left.key = right.key)`
+- Or implement via LEFT JOIN + filter on NULL/NOT NULL
+
+**Files**: `py-ltseq/ltseq/core.py`, `src/lib.rs`, `src/ops/join.rs`, `py-ltseq/tests/test_semi_anti_joins.py`
+**Status**: NOT STARTED
 
 ---
 
@@ -166,18 +321,39 @@
 | 3.1 | `join_sorted` alias | 0.5 day | Low |
 | 3.2 | `top_k` | 2 days | Low |
 | 3.3 | `GroupProxy.all/any/none` | 1-2 days | Low |
+| 4.1 | Statistical Aggregations | 2-3 days | Medium |
+| 4.2 | Row Numbering/Ranking | 2-3 days | Medium |
+| 4.3 | Conditional Aggregations | 1-2 days | Medium |
+| 4.4 | Window Default Values | 1 day | Low |
+| 4.5 | Additional String Ops | 2-3 days | Low |
+| 4.6 | Additional Temporal Ops | 1-2 days | Low |
+| 4.7 | Unpivot/Melt | 1-2 days | Low |
+| 4.8 | Sample/Random | 1 day | Low |
+| 4.9 | Semi/Anti Joins | 1-2 days | Medium |
 
 ---
 
 ## Progress Tracking
 
+### Phase 1-3 (Core Features)
 - [x] Phase 1.1: `group_sorted` - **COMPLETED**
 - [x] Phase 1.2: `scan` (stateful) - **COMPLETED** (as `stateful_scan()`)
 - [x] Phase 1.3: `asof_join` - **COMPLETED**
 - [x] Phase 2.1: `align` - **COMPLETED**
 - [x] Phase 2.2: `read_csv has_header` - **COMPLETED**
-- [ ] Phase 2.3: `LTSeq.lookup`
-- [ ] Phase 2.4: Wire `Expr.lookup`
+- [ ] Phase 2.3: `LTSeq.lookup` - ON HOLD
+- [x] Phase 2.4: Wire `Expr.lookup` - **COMPLETED**
 - [x] Phase 3.1: `join_sorted` - **COMPLETED**
-- [ ] Phase 3.2: `top_k`
+- [x] Phase 3.2: `top_k` - **COMPLETED**
 - [x] Phase 3.3: `GroupProxy.all/any/none` - **COMPLETED**
+
+### Phase 4 (Extended Features)
+- [x] Phase 4.1: Statistical Aggregations (`median`, `percentile`, `variance`, `std`, `mode`) - **COMPLETED**
+- [ ] Phase 4.2: Row Numbering/Ranking (`row_number`, `rank`, `dense_rank`, `ntile`)
+- [ ] Phase 4.3: Conditional Aggregations (`count_if`, `sum_if`, `avg_if`)
+- [ ] Phase 4.4: Window Default Values (`shift(n, default=value)`)
+- [ ] Phase 4.5: Additional String Ops (`replace`, `split`, `concat`, `pad_left/right`)
+- [ ] Phase 4.6: Additional Temporal Ops (`week`, `quarter`, `day_of_week`, `day_of_year`)
+- [ ] Phase 4.7: Unpivot/Melt (wide-to-long transformation)
+- [ ] Phase 4.8: Sample/Random (`sample(n)`, `sample_fraction(p)`)
+- [ ] Phase 4.9: Semi/Anti Joins (`semi_join`, `anti_join`)

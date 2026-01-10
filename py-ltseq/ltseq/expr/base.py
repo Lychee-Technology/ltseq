@@ -279,10 +279,14 @@ class Expr(ABC):
         """
         from .types import LookupExpr
 
-        target_name = getattr(target_table, "_name", "target")
+        # Generate a unique target name based on table identity
+        target_name = getattr(target_table, "_name", None)
+        if target_name is None:
+            target_name = f"lookup_table_{id(target_table)}"
 
         return LookupExpr(
             on=self,
+            target_table=target_table,
             target_name=target_name,
             target_columns=[column],
             join_key=join_key,

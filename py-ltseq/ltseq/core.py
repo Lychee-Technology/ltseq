@@ -43,6 +43,7 @@ class LTSeq(
         self._sort_keys: Optional[List[Tuple[str, bool]]] = (
             None  # [(col, is_desc), ...]
         )
+        self._name: Optional[str] = None  # Table name for lookup operations
 
     def show(self, n: int = 10) -> None:
         """

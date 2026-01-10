@@ -8,21 +8,25 @@ import pytest
 from ltseq import LTSeq
 
 
+# Test data file path (relative to project root)
+TEST_AGG_CSV = "py-ltseq/tests/test_data/test_agg.csv"
+
+
 class TestJoinMergeBasic:
     """Basic join_merge() functionality tests."""
 
     def test_join_merge_creates_ltseq(self):
         """join_merge() should return an LTSeq instance."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
         assert isinstance(result, LTSeq)
 
     def test_join_merge_inner_join(self):
         """join_merge() should perform inner join by default."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(
             t2, on=lambda a, b: a.region == b.region, join_type="inner"
@@ -33,8 +37,8 @@ class TestJoinMergeBasic:
 
     def test_join_merge_left_join(self):
         """join_merge() should support left outer join."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(
             t2, on=lambda a, b: a.region == b.region, join_type="left"
@@ -45,8 +49,8 @@ class TestJoinMergeBasic:
 
     def test_join_merge_right_join(self):
         """join_merge() should support right outer join."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(
             t2, on=lambda a, b: a.region == b.region, join_type="right"
@@ -56,8 +60,8 @@ class TestJoinMergeBasic:
 
     def test_join_merge_full_outer_join(self):
         """join_merge() should support full outer join."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(
             t2, on=lambda a, b: a.region == b.region, join_type="full"
@@ -72,30 +76,30 @@ class TestJoinMergeValidation:
     def test_join_merge_missing_schema_raises_error(self):
         """join_merge() should raise error if schema not initialized."""
         t1 = LTSeq()
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         with pytest.raises(ValueError, match="Schema not initialized"):
             t1.join_merge(t2, on=lambda a, b: a.region == b.region)
 
     def test_join_merge_invalid_join_type_raises_error(self):
         """join_merge() should raise error for invalid join type."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         with pytest.raises(ValueError, match="Invalid join type"):
             t1.join_merge(t2, on=lambda a, b: a.region == b.region, join_type="invalid")
 
     def test_join_merge_invalid_table_raises_error(self):
         """join_merge() should raise error if other is not LTSeq."""
-        t1 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
 
         with pytest.raises(TypeError):
             t1.join_merge("not a table", on=lambda a, b: a.region == b.region)
 
     def test_join_merge_invalid_condition_raises_error(self):
         """join_merge() should raise error for invalid join condition."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         with pytest.raises(TypeError, match="Invalid join condition"):
             t1.join_merge(t2, on=lambda a, b: a.nonexistent == b.nonexistent)
@@ -106,8 +110,8 @@ class TestJoinMergeSchemas:
 
     def test_join_merge_result_has_columns_from_both_tables(self):
         """join_merge() result should have columns from both tables."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
 
@@ -118,8 +122,8 @@ class TestJoinMergeSchemas:
 
     def test_join_merge_result_is_chainable(self):
         """join_merge() result should be chainable."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
 
@@ -128,8 +132,8 @@ class TestJoinMergeSchemas:
 
     def test_join_merge_preserves_data_integrity(self):
         """join_merge() should preserve data integrity."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
 
@@ -142,8 +146,8 @@ class TestJoinMergeRegressions:
 
     def test_join_merge_does_not_modify_source(self):
         """join_merge() should not modify source tables."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         original_len_t1 = len(t1)
         original_len_t2 = len(t2)
@@ -156,8 +160,8 @@ class TestJoinMergeRegressions:
 
     def test_join_merge_multiple_calls(self):
         """Should be able to call join_merge() multiple times."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         result1 = t1.join_merge(t2, on=lambda a, b: a.region == b.region)
         result2 = t1.join_merge(
@@ -170,8 +174,8 @@ class TestJoinMergeRegressions:
 
     def test_join_merge_with_different_tables(self):
         """join_merge() should work with different table combinations."""
-        t1 = LTSeq.read_csv("test_agg.csv")
-        t2 = LTSeq.read_csv("test_agg.csv")
+        t1 = LTSeq.read_csv(TEST_AGG_CSV)
+        t2 = LTSeq.read_csv(TEST_AGG_CSV)
 
         # Same table joined with itself
         result = t1.join_merge(t1, on=lambda a, b: a.region == b.region)

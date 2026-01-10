@@ -1,5 +1,6 @@
 """Proxy classes for group and row access in NestedTable operations."""
 
+import statistics
 from typing import TYPE_CHECKING, Any, Callable, List, Union
 
 if TYPE_CHECKING:
@@ -195,6 +196,174 @@ class GroupProxy:
             return sum(valid_values) / len(valid_values)
         return None
 
+    def median(self, column_name: str = None) -> Any:
+        """
+        Get the median value in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute median for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The median value in the column for this group.
+
+        Example:
+            >>> g.median('price')  # Median price in group
+        """
+        if column_name is None:
+            return self
+
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        valid_values = [v for v in values if v is not None]
+        if valid_values:
+            return statistics.median(valid_values)
+        return None
+
+    def percentile(self, column_name: str, p: float) -> Any:
+        """
+        Get the p-th percentile value in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute percentile for.
+            p: Percentile value between 0 and 1 (e.g., 0.95 for 95th percentile).
+
+        Returns:
+            The p-th percentile value in the column for this group.
+
+        Example:
+            >>> g.percentile('price', 0.95)  # 95th percentile price in group
+        """
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        valid_values = sorted([v for v in values if v is not None])
+        if not valid_values:
+            return None
+
+        # Use linear interpolation for percentile
+        n = len(valid_values)
+        idx = p * (n - 1)
+        lower = int(idx)
+        upper = min(lower + 1, n - 1)
+        weight = idx - lower
+        return valid_values[lower] * (1 - weight) + valid_values[upper] * weight
+
+    def variance(self, column_name: str = None) -> Any:
+        """
+        Get the sample variance of values in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute variance for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The sample variance of values in the column for this group.
+
+        Example:
+            >>> g.variance('price')  # Variance of prices in group
+        """
+        if column_name is None:
+            return self
+
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        valid_values = [v for v in values if v is not None]
+        if len(valid_values) >= 2:
+            return statistics.variance(valid_values)
+        return None
+
+    # Alias for variance
+    var = variance
+
+    def std(self, column_name: str = None) -> Any:
+        """
+        Get the sample standard deviation of values in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute standard deviation for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The sample standard deviation of values in the column for this group.
+
+        Example:
+            >>> g.std('price')  # Std dev of prices in group
+        """
+        if column_name is None:
+            return self
+
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        valid_values = [v for v in values if v is not None]
+        if len(valid_values) >= 2:
+            return statistics.stdev(valid_values)
+        return None
+
+    # Alias for std
+    stddev = std
+
+    def mode(self, column_name: str = None) -> Any:
+        """
+        Get the mode (most frequent value) in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute mode for.
+                        If not provided, returns self for chaining.
+
+        Returns:
+            The most frequent value in the column for this group.
+            If there are multiple modes, returns one of them.
+
+        Example:
+            >>> g.mode('category')  # Most common category in group
+        """
+        if column_name is None:
+            return self
+
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].values
+
+        valid_values = [v for v in values if v is not None]
+        if valid_values:
+            try:
+                return statistics.mode(valid_values)
+            except statistics.StatisticsError:
+                # No unique mode - return first most common
+                from collections import Counter
+
+                counter = Counter(valid_values)
+                return counter.most_common(1)[0][0]
+        return None
+
     def all(self, predicate: Callable) -> bool:
         """
         Check if predicate holds for ALL rows in this group.
@@ -252,6 +421,35 @@ class GroupProxy:
             >>> g.none(lambda r: r.is_deleted == True)  # No deleted rows?
         """
         return not self.any(predicate)
+
+    def top_k(self, column_name: str, k: int) -> List[Any]:
+        """
+        Get the top K values from a column in this group.
+
+        Returns values sorted in descending order.
+
+        Args:
+            column_name: Name of the column to get top values from.
+            k: Number of top values to return.
+
+        Returns:
+            List of top K values sorted descending.
+
+        Example:
+            >>> g.top_k('price', 3)  # Top 3 prices in group
+        """
+        if isinstance(self._group_data, list):
+            values = [
+                row.get(column_name) if isinstance(row, dict) else row[column_name]
+                for row in self._group_data
+            ]
+        else:
+            values = self._group_data[column_name].tolist()
+
+        # Filter out None values, sort descending, take top k
+        valid_values = [v for v in values if v is not None]
+        valid_values.sort(reverse=True)
+        return valid_values[:k]
 
     def _iterate_rows(self):
         """Iterate over rows in the group, yielding dict-like objects."""

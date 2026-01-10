@@ -37,10 +37,13 @@ class IOMixin:
             >>> t_no_header = LTSeq.read_csv("data.csv", has_header=False)
         """
         from .core import LTSeq
+        import os
 
         t = LTSeq()
         t._csv_path = path
         t._has_header = has_header
+        # Set table name from file basename (without extension) for lookup support
+        t._name = os.path.splitext(os.path.basename(path))[0]
         t._inner.read_csv(path, has_header)
         t._schema = _infer_schema_from_csv(path, has_header)
         return t

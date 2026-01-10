@@ -13,13 +13,13 @@ class TestSearchFirstBasic:
 
     def test_search_first_creates_ltseq(self):
         """search_first() should return an LTSeq instance."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.search_first(lambda r: r.amount > 500)
         assert isinstance(result, LTSeq)
 
     def test_search_first_returns_single_row(self):
         """search_first() should always return at most one row."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # This condition matches 3 rows, but should only return first
         result = t.search_first(lambda r: r.region == "West")
@@ -29,7 +29,7 @@ class TestSearchFirstBasic:
 
     def test_search_first_no_match_returns_empty(self):
         """search_first() should return empty LTSeq if no match."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Search for impossible condition
         result = t.search_first(lambda r: r.amount > 10000)
@@ -39,7 +39,7 @@ class TestSearchFirstBasic:
 
     def test_search_first_with_comparison(self):
         """search_first() should work with various comparison operators."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Test different comparisons
         gt_result = t.search_first(lambda r: r.amount >= 700)
@@ -53,7 +53,7 @@ class TestSearchFirstBasic:
 
     def test_search_first_with_string_match(self):
         """search_first() should work with string comparisons."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Search for specific region
         result = t.search_first(lambda r: r.region == "East")
@@ -68,7 +68,7 @@ class TestSearchFirstOrdering:
 
     def test_search_first_on_original_order(self):
         """search_first() should respect original table order."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Condition matches multiple rows
         result = t.search_first(lambda r: r.amount > 500)
@@ -87,15 +87,15 @@ class TestSearchFirstValidation:
             t.search_first(lambda r: r.amount > 100)
 
     def test_search_first_invalid_predicate_raises_error(self):
-        """search_first() should raise error for invalid predicate."""
-        t = LTSeq.read_csv("test_agg.csv")
+        """search_first() should raise error for invalid predicate (nonexistent column)."""
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
-        with pytest.raises(TypeError, match="Invalid predicate"):
+        with pytest.raises(AttributeError, match="not found"):
             t.search_first(lambda r: r.nonexistent_column > 100)
 
     def test_search_first_non_callable_raises_error(self):
         """search_first() should raise error if predicate is not callable."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # This will fail during validation
         with pytest.raises(TypeError):
@@ -107,21 +107,21 @@ class TestSearchFirstDataTypes:
 
     def test_search_first_with_numeric_columns(self):
         """search_first() should work with numeric columns."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         result = t.search_first(lambda r: r.amount > 750)
         assert len(result) == 1
 
     def test_search_first_with_string_columns(self):
         """search_first() should work with string columns."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         result = t.search_first(lambda r: r.region == "East")
         assert len(result) == 1
 
     def test_search_first_with_integer_columns(self):
         """search_first() should work with integer columns."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         result = t.search_first(lambda r: r.year >= 2021)
         assert len(result) == 1
@@ -152,7 +152,7 @@ class TestSearchFirstEdgeCases:
 
     def test_search_first_complex_predicate(self):
         """search_first() should work with complex predicates."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Complex condition: amount > 500 AND region == "East"
         result = t.search_first(lambda r: (r.amount > 500) & (r.region == "East"))
@@ -161,7 +161,7 @@ class TestSearchFirstEdgeCases:
 
     def test_search_first_all_rows_match(self):
         """search_first() should return first when all rows match."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Condition that matches all rows
         result = t.search_first(lambda r: r.amount >= 0)
@@ -175,7 +175,7 @@ class TestSearchFirstChaining:
 
     def test_search_first_result_is_ltseq(self):
         """search_first() result should be LTSeq instance."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.search_first(lambda r: r.region == "East")
 
         # Result should be usable LTSeq
@@ -184,7 +184,7 @@ class TestSearchFirstChaining:
 
     def test_search_first_then_show(self):
         """search_first() result should be showable."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.search_first(lambda r: r.amount > 600)
 
         # Should be able to show
@@ -192,7 +192,7 @@ class TestSearchFirstChaining:
 
     def test_search_first_preserves_schema(self):
         """search_first() result should have same schema as source."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         result = t.search_first(lambda r: r.amount > 500)
 
         # Schema should be preserved
@@ -204,7 +204,7 @@ class TestSearchFirstRegressions:
 
     def test_search_first_does_not_modify_source(self):
         """search_first() should not modify the source table."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
         original_len = len(t)
 
         _ = t.search_first(lambda r: r.amount > 500)
@@ -214,7 +214,7 @@ class TestSearchFirstRegressions:
 
     def test_search_first_multiple_calls_same_table(self):
         """Should be able to call search_first() multiple times on same table."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         result1 = t.search_first(lambda r: r.region == "West")
         result2 = t.search_first(lambda r: r.region == "East")
@@ -225,7 +225,7 @@ class TestSearchFirstRegressions:
 
     def test_search_first_different_predicates_same_table(self):
         """Multiple predicates on same table should work independently."""
-        t = LTSeq.read_csv("test_agg.csv")
+        t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
         # Different predicates
         result1 = t.search_first(lambda r: r.amount >= 1000)

@@ -30,7 +30,7 @@ class TestNestedTableDeriveBasic:
     @pytest.fixture
     def basic_table(self):
         """Create basic test table."""
-        return LTSeq.read_csv("test_derive_basic.csv")
+        return LTSeq.read_csv("py-ltseq/tests/test_data/test_derive_basic.csv")
 
     def test_derive_count(self, basic_table):
         """Test g.count() broadcasted to all rows in group."""
