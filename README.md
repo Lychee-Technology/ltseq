@@ -10,7 +10,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Ordered Computing**: group_ordered, search_first for processing sequences
 - **Set Operations**: union, intersect, diff, subset checks
 - **Joins**: Standard SQL joins, merge joins, lookups
-- **Foreign Key Relationships**: Lightweight pointer-based linking (Phase 8)
+- **Foreign Key Relationships**: Lightweight pointer-based linking
 - **Aggregation**: group-by aggregation, partitioning, pivots
 
 ### Performance
@@ -37,7 +37,7 @@ pip install ltseq
 from ltseq import LTSeq
 
 # Load data
-t = LTSeq.from_csv("stock.csv")
+t = LTSeq.read_csv("stock.csv")
 
 # Sort by date (required for window functions)
 t = t.sort(lambda r: r.date)
@@ -108,7 +108,7 @@ result.show()
 - All four join types: `join_type="inner"` (default), `"left"`, `"right"`, `"full"`
 - Composite keys: `on=lambda o, p: (o.year == p.year) & (o.product_id == p.product_id)`
 - Lazy evaluation: Link created before join is executed
-- See [Phase 8 Linking Guide](docs/LINKING_GUIDE.md) for detailed documentation
+- See [Linking Guide](docs/LINKING_GUIDE.md) for detailed documentation
 
 
 ### Window Functions (Ordered Computing)
@@ -148,7 +148,7 @@ t.derive(lambda r: {
 ```python
 # Financial metrics
 t = (
-    LTSeq.from_csv("daily_prices.csv")
+    LTSeq.read_csv("daily_prices.csv")
     .sort(lambda r: r.date)
     .derive(lambda r: {
         "daily_return": (r.close - r.close.shift(1)) / r.close.shift(1),
@@ -161,7 +161,7 @@ t = (
 
 # Ordered grouping (consecutive identical values)
 t = (
-    LTSeq.from_csv("events.csv")
+    LTSeq.read_csv("events.csv")
     .sort(lambda r: r.timestamp)
     .derive(lambda r: {
         "status_changed": r.status != r.status.shift(1)
@@ -231,16 +231,16 @@ LTSeq includes a comprehensive test suite covering all functionality:
 pytest py-ltseq/tests/ -v
 
 # Run specific test file
-pytest py-ltseq/tests/test_phase8_linking.py -v
+pytest py-ltseq/tests/test_linking_basic.py -v
 
-# Current Status: 549+ tests passing
+# Current Status: 680+ tests passing
 ```
 
 ## Examples
 
 ### Example 1: Stock Price Analysis
 ```python
-t = LTSeq.from_csv("stock.csv")
+t = LTSeq.read_csv("stock.csv")
 
 analysis = (
     t.sort(lambda r: r.date)
@@ -258,7 +258,7 @@ results = analysis.to_pandas()
 
 ### Example 2: Trend Detection
 ```python
-t = LTSeq.from_csv("data.csv")
+t = LTSeq.read_csv("data.csv")
 
 # Find periods with 3+ consecutive increases
 trends = (
@@ -276,7 +276,7 @@ trends = (
 
 ### Example 3: Event Duration Tracking
 ```python
-t = LTSeq.from_csv("events.csv")
+t = LTSeq.read_csv("events.csv")
 
 # Track consecutive event durations
 durations = (
@@ -313,10 +313,8 @@ MIT License - See LICENSE file for details.
 ## Resources
 
 - [Full API Documentation](docs/api.md)
-- [Phase 8 Linking Guide](docs/LINKING_GUIDE.md) - Foreign key relationships and linking
-- [Phase 8J Linking Limitations](docs/phase8j_limitations.md) - Known limitations and workarounds
-- [Phase 6 Implementation Details](docs/phase6_session_summary.md)
-- [Design Decisions](docs/phase6_design_decisions.md)
+- [Linking Guide](docs/LINKING_GUIDE.md) - Foreign key relationships and linking
+- [Design Summary](docs/DESIGN_SUMMARY.md) - Architecture and design decisions
 - **Examples** in `examples/` directory:
   - `linking_basic.py` - Basic order-product join
   - `linking_join_types.py` - All four join types
@@ -336,13 +334,13 @@ A: CSV, JSON, and Parquet. Via to_csv(), to_json(), and to_parquet() methods.
 
 **Q: How do I join tables?**  
 A: LTSeq offers two approaches:
-1. **Linking** (Phase 8) - Lightweight pointer-based foreign keys with lazy evaluation
+1. **Linking**  - Lightweight pointer-based foreign keys with lazy evaluation
    - `orders.link(products, on=lambda o, p: o.product_id == p.product_id, as_="prod")`
-   - See [Phase 8 Linking Guide](docs/phase8_linking_guide.md)
+   - See [Linking Guide](docs/LINKING_GUIDE.md)
 2. **Traditional SQL joins** - Full data materialization
 
 **Q: Is this production-ready?**  
-A: LTSeq is stable with 549+ passing tests covering all functionality. It's suitable for production use cases.
+A: LTSeq is stable with 680+ passing tests covering all functionality. It's suitable for production use cases.
 
 **Q: How does performance compare to Pandas?**  
 A: LTSeq is generally faster for large datasets due to vectorized operations and the underlying DataFusion engine. For small datasets, both are comparable.
