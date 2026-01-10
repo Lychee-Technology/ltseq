@@ -16,6 +16,74 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
+/// Apply OVER clause to all nested LAG/LEAD functions in an expression
+///
+/// This recursively finds all LAG(...) and LEAD(...) calls and adds the proper OVER clause.
+/// Used by window function operations to ensure proper SQL generation.
+///
+/// # Arguments
+/// * `expr` - SQL expression string potentially containing LAG/LEAD calls
+/// * `order_by` - ORDER BY clause for the OVER clause (empty string for no ordering)
+///
+/// # Returns
+/// The expression with OVER clauses added to all LAG/LEAD functions
+pub fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    let bytes = expr.as_bytes();
+
+    while i < bytes.len() {
+        // Look for LAG(
+        if i + 4 <= bytes.len() && &expr[i..i + 4] == "LAG(" {
+            result.push_str("LAG(");
+            i += 4;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                let ch = bytes[i] as char;
+                result.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else if ch == ')' {
+                    depth -= 1;
+                }
+                i += 1;
+            }
+            // Add OVER clause
+            if !order_by.is_empty() {
+                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
+            } else {
+                result.push_str(" OVER ()");
+            }
+        }
+        // Look for LEAD(
+        else if i + 5 <= bytes.len() && &expr[i..i + 5] == "LEAD(" {
+            result.push_str("LEAD(");
+            i += 5;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                let ch = bytes[i] as char;
+                result.push(ch);
+                if ch == '(' {
+                    depth += 1;
+                } else if ch == ')' {
+                    depth -= 1;
+                }
+                i += 1;
+            }
+            // Add OVER clause
+            if !order_by.is_empty() {
+                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
+            } else {
+                result.push_str(" OVER ()");
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Helper function to apply window function SQL transformations
 ///
 /// Converts special window function markers (e.g., __ROLLING_SUM__(col)__size)
@@ -78,7 +146,7 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
         }
     } else if expr_sql.contains("LAG(") || expr_sql.contains("LEAD(") {
         // Handle shift() window functions - apply OVER to LAG/LEAD
-        crate::apply_over_to_window_functions(expr_sql, order_by)
+        apply_over_to_window_functions(expr_sql, order_by)
     } else {
         expr_sql.to_string()
     }

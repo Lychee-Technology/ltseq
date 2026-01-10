@@ -37,65 +37,6 @@ pub struct LTSeqTable {
     sort_exprs: Vec<String>, // Column names used for sorting, for Phase 6 window functions
 }
 
-/// Helper function: Apply OVER clause to all nested LAG/LEAD functions in an expression
-/// This recursively finds all LAG(...) and LEAD(...) calls and adds the proper OVER clause
-fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
-    let mut result = String::new();
-    let mut i = 0;
-    let bytes = expr.as_bytes();
-
-    while i < bytes.len() {
-        // Look for LAG(
-        if i + 4 <= bytes.len() && &expr[i..i + 4] == "LAG(" {
-            result.push_str("LAG(");
-            i += 4;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                let ch = bytes[i] as char;
-                result.push(ch);
-                if ch == '(' {
-                    depth += 1;
-                } else if ch == ')' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            // Add OVER clause
-            if !order_by.is_empty() {
-                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
-            } else {
-                result.push_str(" OVER ()");
-            }
-        }
-        // Look for LEAD(
-        else if i + 5 <= bytes.len() && &expr[i..i + 5] == "LEAD(" {
-            result.push_str("LEAD(");
-            i += 5;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                let ch = bytes[i] as char;
-                result.push(ch);
-                if ch == '(' {
-                    depth += 1;
-                } else if ch == ')' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            // Add OVER clause
-            if !order_by.is_empty() {
-                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
-            } else {
-                result.push_str(" OVER ()");
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    result
-}
-
 #[pymethods]
 impl LTSeqTable {
     #[new]
@@ -470,149 +411,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with unique rows
     fn distinct(&self, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-        // If no dataframe, return empty result (for unit tests)
-        if self.dataframe.is_none() {
-            return Ok(LTSeqTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-                sort_exprs: self.sort_exprs.clone(),
-            });
-        }
-
-        // Get schema
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available. Call read_csv() first.",
-            )
-        })?;
-
-        // Get DataFrame
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
-
-        // If no key columns specified, use simple distinct on all columns
-        if key_exprs.is_empty() {
-            let distinct_df = RUNTIME
-                .block_on(async {
-                    (**df)
-                        .clone()
-                        .distinct()
-                        .map_err(|e| format!("Distinct execution failed: {}", e))
-                })
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-            return Ok(LTSeqTable {
-                session: Arc::clone(&self.session),
-                dataframe: Some(Arc::new(distinct_df)),
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-                sort_exprs: self.sort_exprs.clone(),
-            });
-        }
-
-        // Convert key expressions to column names
-        let mut key_cols = Vec::new();
-        for expr_dict in key_exprs.iter() {
-            let py_expr = crate::types::dict_to_py_expr(expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-            // Get column name from expression
-            let col_name = match &py_expr {
-                crate::types::PyExpr::Column(name) => name.clone(),
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "distinct() key expressions must be simple column references",
-                    ))
-                }
-            };
-
-            // Verify column exists
-            if !schema.fields().iter().any(|f| f.name() == &col_name) {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Column '{}' not found in schema",
-                    col_name
-                )));
-            }
-
-            key_cols.push(col_name);
-        }
-
-        // Build SQL query using ROW_NUMBER() window function
-        // SELECT * FROM (
-        //   SELECT *, ROW_NUMBER() OVER (PARTITION BY key_cols ORDER BY key_cols) as __rn
-        //   FROM __distinct_source
-        // ) WHERE __rn = 1
-        let all_cols: Vec<String> = schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name()))
-            .collect();
-        let all_cols_str = all_cols.join(", ");
-
-        let partition_by = key_cols
-            .iter()
-            .map(|c| format!("\"{}\"", c))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        // Use the key columns for ordering (first occurrence based on natural order)
-        // If there's no sort expression, use ROWID-like ordering
-        let order_by = if !key_cols.is_empty() {
-            partition_by.clone()
-        } else {
-            "1".to_string()
-        };
-
-        let sql = format!(
-            "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) as __rn FROM __distinct_source) WHERE __rn = 1",
-            all_cols_str, partition_by, order_by
-        );
-
-        // Register DataFrame as a temporary table and execute SQL
-        let session = &self.session;
-        let schema_clone = Arc::clone(schema);
-        let distinct_df = RUNTIME
-            .block_on(async {
-                // Collect DataFrame to batches
-                let batches = (**df)
-                    .clone()
-                    .collect()
-                    .await
-                    .map_err(|e| format!("Failed to collect data for distinct: {}", e))?;
-
-                // Create a MemTable from the batches
-                let temp_table =
-                    datafusion::datasource::MemTable::try_new(schema_clone, vec![batches])
-                        .map_err(|e| format!("Failed to create temp table: {}", e))?;
-
-                // Register the source DataFrame
-                session
-                    .register_table("__distinct_source", Arc::new(temp_table))
-                    .map_err(|e| format!("Failed to register source table: {}", e))?;
-
-                // Execute SQL
-                let result = session
-                    .sql(&sql)
-                    .await
-                    .map_err(|e| format!("Distinct SQL failed: {}", e))?;
-
-                // Deregister temp table
-                let _ = session.deregister_table("__distinct_source");
-
-                Ok(result)
-            })
-            .map_err(|e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-        // Return new LTSeqTable with distinct data
-        Ok(LTSeqTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(distinct_df)),
-            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: self.sort_exprs.clone(),
-        })
+        crate::ops::set_ops::distinct_impl(self, key_exprs)
     }
 
     /// Select a contiguous range of rows
@@ -913,7 +712,7 @@ impl LTSeqTable {
     ///
     /// Returns error if schemas don't match or data operations fail
     fn union(&self, other: &LTSeqTable) -> PyResult<LTSeqTable> {
-        crate::ops::basic::union_impl(self, other)
+        crate::ops::set_ops::union_impl(self, other)
     }
 
     /// Intersect: Return rows present in both tables
@@ -935,7 +734,7 @@ impl LTSeqTable {
         other: &LTSeqTable,
         key_expr_dict: Option<Bound<'_, PyDict>>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::basic::intersect_impl(self, other, key_expr_dict)
+        crate::ops::set_ops::intersect_impl(self, other, key_expr_dict)
     }
 
     /// Diff: Return rows in this table but not in the other table
@@ -957,7 +756,27 @@ impl LTSeqTable {
         other: &LTSeqTable,
         key_expr_dict: Option<Bound<'_, PyDict>>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::basic::diff_impl(self, other, key_expr_dict)
+        crate::ops::set_ops::diff_impl(self, other, key_expr_dict)
+    }
+
+    /// Write table data to a CSV file
+    ///
+    /// Args:
+    ///     path: Path to the output CSV file
+    fn write_csv(&self, path: String) -> PyResult<()> {
+        crate::ops::io::write_csv_impl(self, path)
+    }
+
+    fn debug_schema(&self) -> PyResult<String> {
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
+        })?;
+
+        let mut output = String::new();
+        for field in schema.fields() {
+            output.push_str(&format!("{}: {}\n", field.name(), field.data_type()));
+        }
+        Ok(output)
     }
 
     /// Is Subset: Check if this table is a subset of another table
@@ -973,97 +792,12 @@ impl LTSeqTable {
     /// # Returns
     ///
     /// Boolean indicating if this table is a subset of the other
-    fn write_csv(&self, path: String) -> PyResult<()> {
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
-
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-        })?;
-
-        RUNTIME.block_on(async {
-            use std::fs::File;
-            use std::io::Write;
-
-            let df_clone = (**df).clone();
-            let batches = df_clone.collect().await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to collect data: {}",
-                    e
-                ))
-            })?;
-
-            let mut file = File::create(&path).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create file '{}': {}",
-                    path, e
-                ))
-            })?;
-
-            // Write header
-            let fields: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-            writeln!(file, "{}", fields.join(",")).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to write CSV header: {}",
-                    e
-                ))
-            })?;
-
-            // Write data rows
-            for batch in batches {
-                for row_idx in 0..batch.num_rows() {
-                    let mut row_values = Vec::new();
-                    for col_idx in 0..batch.num_columns() {
-                        let column = batch.column(col_idx);
-                        let value_str = if column.is_null(row_idx) {
-                            "".to_string()
-                        } else {
-                            // Use format_cell which has comprehensive type handling
-                            let formatted = crate::format::format_cell(&**column, row_idx);
-                            // Replace "[unsupported type]" with empty string for CSV
-                            // and remove "None" for null values
-                            if formatted == "[unsupported type]" || formatted == "None" {
-                                "".to_string()
-                            } else {
-                                formatted
-                            }
-                        };
-                        row_values.push(value_str);
-                    }
-                    writeln!(file, "{}", row_values.join(",")).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Failed to write CSV row: {}",
-                            e
-                        ))
-                    })?;
-                }
-            }
-
-            Ok(())
-        })
-    }
-
-    fn debug_schema(&self) -> PyResult<String> {
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-        })?;
-
-        let mut output = String::new();
-        for field in schema.fields() {
-            output.push_str(&format!("{}: {}\n", field.name(), field.data_type()));
-        }
-        Ok(output)
-    }
-
     fn is_subset(
         &self,
         other: &LTSeqTable,
         key_expr_dict: Option<Bound<'_, PyDict>>,
     ) -> PyResult<bool> {
-        crate::ops::basic::is_subset_impl(self, other, key_expr_dict)
+        crate::ops::set_ops::is_subset_impl(self, other, key_expr_dict)
     }
 }
 

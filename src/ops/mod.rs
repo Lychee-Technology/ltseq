@@ -4,23 +4,32 @@
 //! - **basic**: Core read/write/filter/select operations
 //! - **derive**: Column derivation coordination
 //! - **window**: Window functions for derived columns
-//! - **advanced**: Complex operations like sort, group_ordered, join
+//! - **io**: File I/O operations (CSV writing, etc.)
+//! - **sort**: Sort operations
+//! - **grouping**: Consecutive group identification, first/last row selection
+//! - **join**: Cross-table join operations
+//! - **asof_join**: Time-series as-of join operations
+//! - **aggregation**: SQL GROUP BY and filtering
+//! - **pivot**: Long-to-wide table transformation
+//! - **align**: Row alignment to reference sequence
+//! - **derive_sql**: SQL-based derive operations
 //! - **display**: Formatting and display operations
+//! - **advanced**: Re-exports for backward compatibility
 //!
 //! # Architecture: Helper Function Delegation Pattern
 //!
 //! This module exists to work around a PyO3 constraint: only ONE `#[pymethods]` impl
 //! block is allowed per struct. Since LTSeqTable needs 14 methods exposed to Python,
-//! we use a **Logical Modularization** approach (Option A from design analysis):
+//! we use a **Logical Modularization** approach:
 //!
 //! 1. **LTSeqTable definition & #[pymethods]**: In lib.rs
 //!    - Struct definition for Python compatibility
-//!    - Single `#[pymethods]` impl block with 14 method stubs
+//!    - Single `#[pymethods]` impl block with method stubs
 //!    - Each method delegates to an ops/ helper function (1-3 lines)
 //!
 //! 2. **Operation implementations**: Extracted to ops/ submodules
 //!    - All actual logic in pub helper functions (e.g., `derive_impl()`)
-//!    - Organized by operation category (basic, derive, advanced, display)
+//!    - Organized by operation category
 //!    - Pure Rust functions that don't depend on PyO3
 //!
 //! # Design Benefits
@@ -30,36 +39,24 @@
 //! - **Testability**: Helper functions can be unit tested without PyO3 overhead
 //! - **Extensibility**: Easy to add new operations or refactor existing ones
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
-//!
-//! # Pattern: Delegation Stub
-//!
-//! Every LTSeqTable method in lib.rs follows this pattern:
-//!
-//! ```rust,ignore
-//! fn derive(&self, derived_cols: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-//!     crate::ops::derive::derive_impl(self, derived_cols)
-//! }
-//! ```
-//!
-//! This stub:
-//! - Takes PyO3-compatible parameters
-//! - Calls the ops/ helper function
-//! - Returns the result (or error) to Python
-//! - Keeps lib.rs clean and readable (~100 lines of stubs)
-//!
-//! # Module Sizes (Post-Phase 6 Refactoring)
-//!
-//! | Module | Lines | Purpose |
-//! |--------|-------|---------|
-//! | basic.rs | 249 | I/O and core filtering/selection |
-//! | derive.rs | 97 | Standard expression derivation |
-//! | window.rs | 336 | Window functions (shift, rolling, cumsum) |
-//! | advanced.rs | 299 | Sorting and joining |
-//! | display.rs | 174 | Table formatting and display |
-//! | **Total** | **1,155** | All operation implementations (↓164 lines) |
 
-pub mod advanced;
+// Core modules
 pub mod basic;
 pub mod derive;
 pub mod display;
+pub mod io;
+pub mod set_ops;
 pub mod window;
+
+// Split from advanced.rs (Phase 3 refactoring)
+pub mod aggregation;
+pub mod align;
+pub mod asof_join;
+pub mod derive_sql;
+pub mod grouping;
+pub mod join;
+pub mod pivot;
+pub mod sort;
+
+// Re-export module for backward compatibility with lib.rs imports
+pub mod advanced;
