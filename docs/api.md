@@ -82,7 +82,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 |-----------|--------|---------|
 | Union | `.union()` | `t1.union(t2)` |
 | Intersect | `.intersect()` | `t1.intersect(t2)` |
-| Except | `.except_()` | `t1.except_(t2)` |
+| Diff | `.diff()` | `t1.diff(t2)` |
 
 ## 1. Input / Output
 
@@ -786,16 +786,16 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.except_` (set difference)
-- **Signature**: `LTSeq.except_(other: LTSeq, on: Optional[Callable] = None) -> LTSeq`
-- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics)
+### `LTSeq.diff` (set difference)
+- **Signature**: `LTSeq.diff(other: LTSeq, on: Optional[Callable] = None) -> LTSeq`
+- **Behavior**: Rows in left table but not in right table
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
 - **SQL Equivalent**: `EXCEPT` / `MINUS`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
-only_left = t1.except_(t2, on=lambda r: r.id)
+only_left = t1.diff(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.is_subset`

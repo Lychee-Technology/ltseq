@@ -421,3 +421,45 @@ class TransformMixin(LookupMixin):
         result._schema = self._schema.copy()
         result._sort_keys = self._sort_keys
         return result
+
+    def head(self, n: int = 10) -> "LTSeq":
+        """
+        Return the first n rows.
+
+        Args:
+            n: Number of rows to return (default 10)
+
+        Returns:
+            LTSeq with first n rows
+
+        Raises:
+            ValueError: If n is negative
+
+        Example:
+            >>> top_10 = t.sort("score", desc=True).head(10)
+        """
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+        return self.slice(offset=0, length=n)
+
+    def tail(self, n: int = 10) -> "LTSeq":
+        """
+        Return the last n rows.
+
+        Args:
+            n: Number of rows to return (default 10)
+
+        Returns:
+            LTSeq with last n rows
+
+        Raises:
+            ValueError: If n is negative
+
+        Example:
+            >>> recent = t.sort("date").tail(5)
+        """
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+        total = len(self)
+        offset = max(0, total - n)
+        return self.slice(offset=offset, length=n)

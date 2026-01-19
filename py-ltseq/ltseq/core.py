@@ -124,6 +124,67 @@ class LTSeq(
         """
         return self._inner.count()
 
+    def count(self) -> int:
+        """
+        Return the number of rows in the table.
+
+        Returns:
+            Integer row count
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> n = t.filter(lambda r: r.status == "active").count()
+        """
+        return len(self)
+
+    def collect(self) -> List[Dict[str, Any]]:
+        """
+        Materialize all rows as a list of dictionaries.
+
+        Returns:
+            List of row dictionaries, where each dict maps column names to values
+
+        Raises:
+            MemoryError: If the dataset is too large to fit in memory
+            RuntimeError: If execution fails
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> rows = t.filter(lambda r: r.age > 18).collect()
+            >>> for row in rows:
+            ...     print(row["name"])
+        """
+        df = self.to_pandas()
+        return df.to_dict("records")
+
+    @property
+    def schema(self) -> Dict[str, str]:
+        """
+        Return the table schema with column names and types.
+
+        Returns:
+            Dictionary mapping column names to their data types
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.schema)  # {"id": "Int64", "name": "Utf8", ...}
+        """
+        return self._schema.copy()
+
+    @property
+    def columns(self) -> List[str]:
+        """
+        Return list of column names.
+
+        Returns:
+            List of column name strings
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.columns)  # ["id", "name", "age"]
+        """
+        return list(self._schema.keys())
+
     @property
     def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
         """
