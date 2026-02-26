@@ -28,15 +28,39 @@ def download_data():
     """Download the ClickBench hits.parquet (~14GB)."""
     if os.path.exists(HITS_RAW):
         size_gb = os.path.getsize(HITS_RAW) / (1024**3)
-        print(f"  hits.parquet already exists ({size_gb:.1f} GB), skipping download")
-        return
+        if size_gb > 13:
+            print(
+                f"  hits.parquet already exists ({size_gb:.1f} GB), skipping download"
+            )
+            return
+        else:
+            print(
+                f"  hits.parquet exists but is only {size_gb:.1f} GB (expected ~14 GB)"
+            )
+            print("  Resuming download...")
 
     print(f"  Downloading hits.parquet from {HITS_URL}")
     print("  This is ~14GB and may take a while...")
-    import urllib.request
+    import subprocess
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    urllib.request.urlretrieve(HITS_URL, HITS_RAW)
+    # Use curl with retries for large download (CDN doesn't support resume)
+    subprocess.run(
+        [
+            "curl",
+            "-L",
+            "--retry",
+            "10",
+            "--retry-delay",
+            "5",
+            "--retry-max-time",
+            "7200",
+            "-o",
+            HITS_RAW,
+            HITS_URL,
+        ],
+        check=True,
+    )
     size_gb = os.path.getsize(HITS_RAW) / (1024**3)
     print(f"  Downloaded: {size_gb:.1f} GB")
 
@@ -113,8 +137,8 @@ def investigate_urls():
     result = con.execute(f"""
         SELECT
             CASE
-                WHEN position('/', URL, 9) > 0
-                THEN substring(URL, 1, position('/', URL, 9))
+                WHEN strpos(substring(URL, 9), '/') > 0
+                THEN substring(URL, 1, 8 + strpos(substring(URL, 9), '/'))
                 ELSE URL
             END as prefix,
             count(*) as cnt

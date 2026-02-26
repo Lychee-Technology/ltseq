@@ -59,11 +59,14 @@ ITERATIONS = 3
 # ---------------------------------------------------------------------------
 
 # The ClickBench dataset contains Yandex Metrica data with real Russian website URLs.
-# After investigation, replace these with actual high-frequency URL patterns.
-# For sample data, these match the synthetic URL patterns:
-FUNNEL_PATTERN_1 = "http://site.ru/catalog/"  # Step 1: catalog page
-FUNNEL_PATTERN_2 = "http://site.ru/product/"  # Step 2: product page
-FUNNEL_PATTERN_3 = "http://site.ru/cart/"  # Step 3: cart
+# These patterns were discovered via prepare_data.py --investigate on the 1M-row sample.
+# The liver.ru site has the strongest sequential funnel: users browse city listings
+# in a consistent pattern (Saint Petersburg -> craft listings -> Belgorod pages).
+# ~1,600 matches per 1M rows = ~160K+ matches on the full 100M dataset.
+FUNNEL_PATTERN_1 = "http://liver.ru/saint-peterburg"  # Step 1: Saint Petersburg page
+FUNNEL_PATTERN_2 = "http://liver.ru/place_rukodel"  # Step 2: craft/handmade listings
+FUNNEL_PATTERN_3 = "http://liver.ru/belgorod"  # Step 3: Belgorod page
+
 
 # ---------------------------------------------------------------------------
 # Measurement infrastructure
