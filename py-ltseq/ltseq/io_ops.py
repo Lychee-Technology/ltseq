@@ -2,7 +2,7 @@
 
 from typing import Any, Dict
 
-from .helpers import _infer_schema_from_csv
+from .helpers import _infer_schema_from_csv, _infer_schema_from_parquet
 
 try:
     from . import ltseq_core
@@ -46,6 +46,33 @@ class IOMixin:
         t._name = os.path.splitext(os.path.basename(path))[0]
         t._inner.read_csv(path, has_header)
         t._schema = _infer_schema_from_csv(path, has_header)
+        return t
+
+    @classmethod
+    def read_parquet(cls, path: str) -> "LTSeq":
+        """
+        Load a Parquet file and return an LTSeq table.
+
+        Args:
+            path: Path to the Parquet file
+
+        Returns:
+            New LTSeq instance with loaded data
+
+        Raises:
+            FileNotFoundError: If path does not exist
+            RuntimeError: If Parquet parsing fails
+
+        Example:
+            >>> t = LTSeq.read_parquet("data.parquet")
+        """
+        from .core import LTSeq
+        import os
+
+        t = LTSeq()
+        t._name = os.path.splitext(os.path.basename(path))[0]
+        t._inner.read_parquet(path)
+        t._schema = _infer_schema_from_parquet(path)
         return t
 
     @classmethod

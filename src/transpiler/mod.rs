@@ -492,7 +492,10 @@ pub fn is_numeric_type(data_type: &DataType) -> bool {
 
 /// Check if a DataType is a string type
 fn is_string_type(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Utf8 | DataType::LargeUtf8)
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 /// Check if a DataType is a temporal type (date/datetime)

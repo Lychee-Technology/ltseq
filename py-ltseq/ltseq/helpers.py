@@ -151,6 +151,55 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
         return {}
 
 
+def _infer_schema_from_parquet(path: str) -> Dict[str, str]:
+    """
+    Infer schema from a Parquet file by reading its metadata.
+
+    Parquet files are self-describing, so this reads only the footer
+    metadata without scanning any row data.
+
+    Args:
+        path: Path to the Parquet file
+
+    Returns:
+        Dict mapping column names to type strings (e.g., "int64", "string")
+    """
+    try:
+        import pyarrow.parquet as pq
+
+        pq_schema = pq.read_schema(path)
+        # Map PyArrow types to LTSeq's internal type names
+        arrow_type_map = {
+            "int8": "int8",
+            "int16": "int16",
+            "int32": "int32",
+            "int64": "int64",
+            "uint8": "uint8",
+            "uint16": "uint16",
+            "uint32": "uint32",
+            "uint64": "uint64",
+            "float": "float32",
+            "float16": "float32",
+            "float32": "float32",
+            "double": "float64",
+            "float64": "float64",
+            "bool": "bool",
+            "string": "string",
+            "large_string": "string",
+            "utf8": "string",
+            "large_utf8": "string",
+            "binary": "binary",
+            "large_binary": "binary",
+        }
+        schema = {}
+        for field in pq_schema:
+            type_str = str(field.type)
+            schema[field.name] = arrow_type_map.get(type_str, type_str)
+        return schema
+    except Exception:
+        return {}
+
+
 def _extract_join_keys(
     join_fn: Callable,
     source_schema: Dict[str, str],

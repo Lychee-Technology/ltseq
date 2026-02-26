@@ -79,6 +79,33 @@ impl LTSeqTable {
         })
     }
 
+    /// Read Parquet file into DataFusion DataFrame
+    ///
+    /// Args:
+    ///     path: Path to Parquet file
+    #[pyo3(signature = (path))]
+    fn read_parquet(&mut self, path: String) -> PyResult<()> {
+        RUNTIME.block_on(async {
+            let options = ParquetReadOptions::default();
+            let df = self.session.read_parquet(&path, options).await.map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to read Parquet: {}",
+                    e
+                ))
+            })?;
+
+            // Get the DFSchema and convert to Arrow schema
+            let df_schema = df.schema();
+            let arrow_fields: Vec<arrow::datatypes::Field> =
+                df_schema.fields().iter().map(|f| (**f).clone()).collect();
+            let arrow_schema = ArrowSchema::new(arrow_fields);
+
+            self.schema = Some(Arc::new(arrow_schema));
+            self.dataframe = Some(Arc::new(df));
+            Ok(())
+        })
+    }
+
     /// Scan CSV file and return a streaming cursor
     ///
     /// Unlike read_csv(), this returns a cursor for batch-by-batch iteration
