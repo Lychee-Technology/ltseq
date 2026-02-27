@@ -41,7 +41,7 @@ use crate::LTSeqTable;
 /// - UnaryOp: Not
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
-fn eval_predicate(
+pub(crate) fn eval_predicate(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &std::collections::HashMap<String, usize>,
@@ -268,7 +268,7 @@ fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
 /// Try to extract a starts_with prefix from a predicate expression.
 /// Returns Some(prefix) if the expression is `column.starts_with("prefix")`,
 /// None otherwise.
-fn extract_starts_with_prefix(expr: &PyExpr) -> Option<String> {
+pub(crate) fn extract_starts_with_prefix(expr: &PyExpr) -> Option<String> {
     match expr {
         PyExpr::Call { func, args, on: _, kwargs: _ } => {
             if (func == "starts_with" || func == "str_starts_with") && args.len() == 1 {
@@ -794,7 +794,6 @@ pub fn search_pattern_count_impl(
     step_predicates: Vec<Bound<'_, PyDict>>,
     partition_by: Option<String>,
 ) -> PyResult<usize> {
-    let (df, schema) = table.require_df_and_schema()?;
     let num_steps = step_predicates.len();
 
     if num_steps == 0 {
@@ -803,7 +802,7 @@ pub fn search_pattern_count_impl(
         ));
     }
 
-    // 1. Deserialize all step predicates
+    // 1. Deserialize all step predicates (lightweight, no DataFusion needed)
     let py_exprs: Vec<PyExpr> = step_predicates
         .iter()
         .map(|d| {
@@ -811,6 +810,35 @@ pub fn search_pattern_count_impl(
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         })
         .collect::<PyResult<Vec<_>>>()?;
+
+    // Try parallel fast path BEFORE creating DataFusion session.
+    // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
+    if let (Some(ref parquet_path), Some(ref part_col)) =
+        (&table.source_parquet_path, &partition_by)
+    {
+        if !table.sort_exprs.is_empty() {
+            match crate::ops::parallel_scan::parallel_pattern_match_count(
+                table,
+                &py_exprs,
+                part_col,
+                parquet_path,
+            ) {
+                Ok(count) => {
+                    return Ok(count);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("PARALLEL_FALLBACK") {
+                        return Err(e);
+                    }
+                    // Fall through to general path
+                }
+            }
+        }
+    }
+
+    // Fallback: use DataFusion path (only reached if parallel path not viable)
+    let (df, schema) = table.require_df_and_schema()?;
 
     // 2. Extract referenced columns for projection pruning
     let mut referenced_cols = HashSet::new();
