@@ -60,3 +60,28 @@ pub fn create_session_context() -> Arc<SessionContext> {
 
     Arc::new(SessionContext::new_with_config(config))
 }
+
+/// Create a SessionContext optimized for sequential/streaming operations.
+///
+/// Uses `target_partitions=1` to avoid the "parallelize then serialize" pattern
+/// that hurts sequential operations on pre-sorted data:
+///   - No SortPreservingMergeExec (single partition preserves order natively)
+///   - No CoalescePartitionsExec overhead
+///   - `execute_stream()` returns batches directly from the single partition
+///
+/// All other settings match `create_session_context()` (pushdown filters, etc.)
+pub fn create_sequential_session() -> Arc<SessionContext> {
+    let mut config = SessionConfig::new()
+        .with_target_partitions(1)
+        .with_batch_size(DEFAULT_BATCH_SIZE)
+        .with_information_schema(false)
+        .with_repartition_joins(false)
+        .with_repartition_aggregations(false)
+        .with_coalesce_batches(true);
+
+    // Enable Parquet filter pushdown for predicate skipping
+    config.options_mut().execution.parquet.pushdown_filters = true;
+    config.options_mut().execution.parquet.reorder_filters = true;
+
+    Arc::new(SessionContext::new_with_config(config))
+}

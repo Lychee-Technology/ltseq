@@ -824,56 +824,7 @@ pub fn search_pattern_count_impl(
     // 3. Project only needed columns, add sort, collect
     let sort_keys = &table.sort_exprs;
 
-    let projected_df = {
-        let select_exprs: Vec<Expr> = referenced_cols
-            .iter()
-            .filter(|col_name| {
-                schema
-                    .fields()
-                    .iter()
-                    .any(|f| f.name() == col_name.as_str())
-            })
-            .map(|col_name| col(col_name.as_str()))
-            .collect();
-
-        if select_exprs.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No valid columns found in step predicates",
-            ));
-        }
-
-        let proj = (**df)
-            .clone()
-            .select(select_exprs)
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Projection failed: {}",
-                    e
-                ))
-            })?;
-
-        if !sort_keys.is_empty() {
-            let sort_exprs = build_sort_exprs(sort_keys);
-            proj.sort(sort_exprs).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Sort failed: {}",
-                    e
-                ))
-            })?
-        } else {
-            proj
-        }
-    };
-
-    // 4. Collect into a single RecordBatch
-    let batches = RUNTIME
-        .block_on(async { projected_df.collect().await })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Collect failed: {}",
-                e
-            ))
-        })?;
+    let batches = collect_projected_sorted(df, &referenced_cols, schema, sort_keys)?;
 
     if batches.is_empty() {
         return Ok(0);
@@ -1053,4 +1004,60 @@ pub fn search_pattern_count_impl(
     }
 
     Ok(count)
+}
+
+/// Helper: project, sort, and collect a DataFrame using the general (multi-partition) path.
+fn collect_projected_sorted(
+    df: &Arc<datafusion::dataframe::DataFrame>,
+    referenced_cols: &HashSet<String>,
+    schema: &Arc<datafusion::arrow::datatypes::Schema>,
+    sort_keys: &[String],
+) -> PyResult<Vec<RecordBatch>> {
+    let select_exprs: Vec<Expr> = referenced_cols
+        .iter()
+        .filter(|col_name| {
+            schema
+                .fields()
+                .iter()
+                .any(|f| f.name() == col_name.as_str())
+        })
+        .map(|col_name| col(col_name.as_str()))
+        .collect();
+
+    if select_exprs.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No valid columns found in step predicates",
+        ));
+    }
+
+    let proj = (**df)
+        .clone()
+        .select(select_exprs)
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Projection failed: {}",
+                e
+            ))
+        })?;
+
+    let projected_df = if !sort_keys.is_empty() {
+        let sort_exprs = build_sort_exprs(sort_keys);
+        proj.sort(sort_exprs).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Sort failed: {}",
+                e
+            ))
+        })?
+    } else {
+        proj
+    };
+
+    RUNTIME
+        .block_on(async { projected_df.collect().await })
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Collect failed: {}",
+                e
+            ))
+        })
 }
