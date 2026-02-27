@@ -35,19 +35,19 @@ fn get_df_and_schema_or_empty(
     table: &LTSeqTable,
 ) -> Result<(&Arc<datafusion::dataframe::DataFrame>, &Arc<ArrowSchema>), LTSeqTable> {
     if table.dataframe.is_none() {
-        return Err(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(Arc::clone),
-            sort_exprs: Vec::new(),
-        });
+        return Err(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            Vec::new(),
+        ));
     }
     let df = table.dataframe.as_ref().unwrap();
-    let schema = table.schema.as_ref().ok_or_else(|| LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: None,
-        schema: None,
-        sort_exprs: Vec::new(),
+    let schema = table.schema.as_ref().ok_or_else(|| {
+        LTSeqTable::empty(
+            Arc::clone(&table.session),
+            None,
+            Vec::new(),
+        )
     })?;
     Ok((df, schema))
 }
@@ -129,55 +129,21 @@ fn create_result_from_batches(
     session: &Arc<SessionContext>,
     result_batches: Vec<RecordBatch>,
     fallback_schema: Option<&Arc<ArrowSchema>>,
-    prefix: &str,
+    _prefix: &str,
 ) -> PyResult<LTSeqTable> {
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(session),
-            dataframe: None,
-            schema: fallback_schema.map(Arc::clone),
-            sort_exprs: Vec::new(),
-        });
+    match fallback_schema {
+        Some(schema) => LTSeqTable::from_batches_with_schema(
+            Arc::clone(session),
+            result_batches,
+            Arc::clone(schema),
+            Vec::new(),
+        ),
+        None => LTSeqTable::from_batches(
+            Arc::clone(session),
+            result_batches,
+            Vec::new(),
+        ),
     }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem_table =
-        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result memory table: {}",
-                e
-            ))
-        })?;
-
-    let result_table_name = format!("__ltseq_{}_result_{}", prefix, std::process::id());
-    let _ = session.deregister_table(&result_table_name);
-
-    session
-        .register_table(&result_table_name, Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = RUNTIME
-        .block_on(async {
-            session
-                .table(&result_table_name)
-                .await
-                .map_err(|e| format!("Failed to get result table: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    let _ = session.deregister_table(&result_table_name);
-
-    Ok(LTSeqTable {
-        session: Arc::clone(session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
 }
 
 /// Build column list string from schema, optionally filtering internal columns

@@ -22,20 +22,14 @@ pub fn sort_impl(
 ) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: Vec::new(),
-        });
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            Vec::new(),
+        ));
     }
 
-    // Get schema (required for transpilation)
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Schema not available. Call read_csv() first.",
-        )
-    })?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     // Capture sort column names for Phase 6 window functions
     let mut captured_sort_keys = Vec::new();
@@ -66,11 +60,6 @@ pub fn sort_impl(
         });
     }
 
-    // Get DataFrame
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
     // Apply sort (async operation)
     let sorted_df = RUNTIME
         .block_on(async {
@@ -81,11 +70,11 @@ pub fn sort_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Return new LTSeqTable with sorted data and captured sort keys
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(sorted_df)),
-        schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-        sort_exprs: captured_sort_keys,
-    })
+    // Return new LTSeqTable with sorted data and captured sort keys (schema unchanged)
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        sorted_df,
+        Arc::clone(table.schema.as_ref().unwrap()),
+        captured_sort_keys,
+    ))
 }

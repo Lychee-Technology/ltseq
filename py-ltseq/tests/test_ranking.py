@@ -102,8 +102,8 @@ class TestRowNumber:
 
         df = result.to_pandas()
         # Earliest date should get highest row number
-        earliest = df[df["date"] == "2024-01-01"]["rn"].values[0]
-        latest = df[df["date"] == "2024-01-05"]["rn"].values[0]
+        earliest = df[df["date"].astype(str) == "2024-01-01"]["rn"].values[0]
+        latest = df[df["date"].astype(str) == "2024-01-05"]["rn"].values[0]
         assert earliest > latest
 
     def test_row_number_returns_expr(self):

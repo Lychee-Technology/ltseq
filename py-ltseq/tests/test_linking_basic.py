@@ -193,3 +193,66 @@ class TestLinkLenOperation:
         count = len(filtered)
         assert isinstance(count, int)
         assert count >= 0
+
+
+class TestLinkedTableSortSliceDistinct:
+    """Tests for LinkedTable.sort(), .slice(), .distinct() (T33)."""
+
+    @pytest.fixture
+    def orders_table(self):
+        return LTSeq.read_csv("examples/orders.csv")
+
+    @pytest.fixture
+    def products_table(self):
+        return LTSeq.read_csv("examples/products.csv")
+
+    def _make_linked(self, orders_table, products_table):
+        return orders_table.link(
+            products_table,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+        )
+
+    def test_sort_returns_linked_table(self, orders_table, products_table):
+        """sort() on LinkedTable returns a LinkedTable."""
+        linked = self._make_linked(orders_table, products_table)
+        sorted_linked = linked.sort("quantity")
+        assert isinstance(sorted_linked, LinkedTable)
+
+    def test_sort_preserves_schema(self, orders_table, products_table):
+        """sort() preserves schema including linked columns."""
+        linked = self._make_linked(orders_table, products_table)
+        sorted_linked = linked.sort("quantity")
+        assert "prod_name" in sorted_linked._schema
+        assert "id" in sorted_linked._schema
+
+    def test_sort_preserves_row_count(self, orders_table, products_table):
+        """sort() does not change the number of rows."""
+        linked = self._make_linked(orders_table, products_table)
+        original_len = len(linked)
+        sorted_linked = linked.sort("quantity")
+        assert len(sorted_linked) == original_len
+
+    def test_slice_returns_linked_table(self, orders_table, products_table):
+        """slice() on LinkedTable returns a LinkedTable."""
+        linked = self._make_linked(orders_table, products_table)
+        sliced = linked.slice(0, 2)
+        assert isinstance(sliced, LinkedTable)
+
+    def test_slice_reduces_rows(self, orders_table, products_table):
+        """slice(0, 2) returns at most 2 rows."""
+        linked = self._make_linked(orders_table, products_table)
+        sliced = linked.slice(0, 2)
+        assert len(sliced) <= 2
+
+    def test_distinct_returns_linked_table(self, orders_table, products_table):
+        """distinct() on LinkedTable returns a LinkedTable."""
+        linked = self._make_linked(orders_table, products_table)
+        distinct_linked = linked.distinct()
+        assert isinstance(distinct_linked, LinkedTable)
+
+    def test_distinct_preserves_schema(self, orders_table, products_table):
+        """distinct() preserves schema including linked columns."""
+        linked = self._make_linked(orders_table, products_table)
+        distinct_linked = linked.distinct()
+        assert "prod_name" in distinct_linked._schema

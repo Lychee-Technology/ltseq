@@ -22,19 +22,11 @@ use std::sync::Arc;
 /// 3. ORDER BY position
 pub fn align_impl(
     table: &LTSeqTable,
-    ref_sequence: Vec<PyObject>,
+    ref_sequence: Vec<Py<PyAny>>,
     key_col: &str,
 ) -> PyResult<LTSeqTable> {
     // Validate table has data
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Table has no data. Call read_csv() first.",
-        )
-    })?;
-
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Table schema not available.")
-    })?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     // Validate key column exists
     if !schema.fields().iter().any(|f| f.name() == key_col) {
@@ -86,7 +78,7 @@ pub fn align_impl(
         })?;
 
     // Build ref_sequence table as VALUES clause
-    Python::with_gil(|py| -> PyResult<()> {
+    Python::attach(|py| -> PyResult<()> {
         let mut values: Vec<String> = Vec::with_capacity(ref_sequence.len());
 
         for (pos, obj) in ref_sequence.iter().enumerate() {
@@ -166,38 +158,10 @@ pub fn align_impl(
     let _ = table.session.deregister_table(&ref_table_name);
 
     // Create result LTSeqTable
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: Some(Arc::clone(&batch_schema)),
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem =
-        MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = table
-        .session
-        .read_table(Arc::new(result_mem))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read result table: {}",
-                e
-            ))
-        })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    LTSeqTable::from_batches_with_schema(
+        Arc::clone(&table.session),
+        result_batches,
+        Arc::clone(&batch_schema),
+        Vec::new(),
+    )
 }

@@ -338,3 +338,35 @@ class TestTemporalNullHandling:
         # This test just verifies operations don't crash
         result = t.derive(year=lambda r: r.event_date.dt.year())
         assert result is not None
+
+
+class TestDtDiffEndToEnd:
+    """End-to-end tests for .dt.diff() (T30)."""
+
+    def test_dt_diff_between_columns(self):
+        """dt.diff() computes day difference between two date columns."""
+        import csv
+        import os
+        import tempfile
+
+        # Create CSV with two date columns
+        csv_content = "id,start_date,end_date\n1,2024-01-01,2024-01-11\n2,2024-03-01,2024-03-15\n3,2024-06-10,2024-06-10\n"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False
+        ) as f:
+            f.write(csv_content)
+            path = f.name
+        try:
+            t = LTSeq.read_csv(path)
+            result = t.derive(days_diff=lambda r: r.end_date.dt.diff(r.start_date))
+            df = result.to_pandas()
+            assert "days_diff" in df.columns
+            vals = df["days_diff"].tolist()
+            # 2024-01-11 - 2024-01-01 = 10 days
+            assert vals[0] == 10
+            # 2024-03-15 - 2024-03-01 = 14 days
+            assert vals[1] == 14
+            # Same day = 0
+            assert vals[2] == 0
+        finally:
+            os.unlink(path)

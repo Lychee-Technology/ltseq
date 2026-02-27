@@ -196,7 +196,7 @@ class TestAggEdgeCases:
             t = LTSeq.read_csv(path)
             # Empty tables have Null column types, which can't be aggregated
             # This is expected DataFusion behavior
-            with pytest.raises(RuntimeError, match="Sum not supported for Null"):
+            with pytest.raises(RuntimeError, match="SUM not supported for Null"):
                 t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
 
     def test_agg_single_row(self):

@@ -23,7 +23,7 @@
 
 use crate::engine::RUNTIME;
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
@@ -34,29 +34,6 @@ use std::sync::Arc;
 // ============================================================================
 // Helper Functions for Set Operations
 // ============================================================================
-
-/// Get validated dataframe and schema from a table
-fn get_df_and_schema<'a>(
-    table: &'a LTSeqTable,
-    table_name: &str,
-) -> PyResult<(
-    &'a Arc<datafusion::dataframe::DataFrame>,
-    &'a Arc<ArrowSchema>,
-)> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "{} table has no data loaded. Call read_csv() first.",
-            table_name
-        ))
-    })?;
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "{} table schema not available",
-            table_name
-        ))
-    })?;
-    Ok((df, schema))
-}
 
 /// Determine comparison columns from optional key expression or use all columns
 fn get_compare_columns(
@@ -147,16 +124,11 @@ fn create_result_table(
     result_df: datafusion::dataframe::DataFrame,
     sort_exprs: &[String],
 ) -> LTSeqTable {
-    let df_schema = result_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_arrow_schema = ArrowSchema::new(arrow_fields);
-
-    LTSeqTable {
-        session: Arc::clone(session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: sort_exprs.to_vec(),
-    }
+    LTSeqTable::from_df(
+        Arc::clone(session),
+        result_df,
+        sort_exprs.to_vec(),
+    )
 }
 
 // ============================================================================
@@ -174,15 +146,14 @@ pub fn distinct_impl(
 ) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: table.schema.as_ref().map(Arc::clone),
-            sort_exprs: table.sort_exprs.clone(),
-        });
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            table.sort_exprs.clone(),
+        ));
     }
 
-    let (df, schema) = get_df_and_schema(table, "Source")?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     // If no key columns specified, use simple distinct on all columns
     if key_exprs.is_empty() {
@@ -210,12 +181,12 @@ fn distinct_all_columns(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(distinct_df)),
-        schema: table.schema.as_ref().map(Arc::clone),
-        sort_exprs: table.sort_exprs.clone(),
-    })
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        distinct_df,
+        Arc::clone(table.schema.as_ref().unwrap()),
+        table.sort_exprs.clone(),
+    ))
 }
 
 /// Extract column names from key expressions
@@ -296,12 +267,12 @@ fn distinct_with_keys(
         })
         .map_err(|e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(distinct_df)),
-        schema: table.schema.as_ref().map(Arc::clone),
-        sort_exprs: table.sort_exprs.clone(),
-    })
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        distinct_df,
+        Arc::clone(table.schema.as_ref().unwrap()),
+        table.sort_exprs.clone(),
+    ))
 }
 
 /// Union: Vertically concatenate two tables with compatible schemas
@@ -309,8 +280,8 @@ fn distinct_with_keys(
 /// Combines all rows from both tables (equivalent to UNION ALL).
 /// Schemas must match exactly in column names and order.
 pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTable> {
-    let (df1, schema1) = get_df_and_schema(table1, "Left")?;
-    let (df2, schema2) = get_df_and_schema(table2, "Right")?;
+    let (df1, schema1) = table1.require_df_and_schema()?;
+    let (df2, schema2) = table2.require_df_and_schema()?;
 
     // Check that column names match
     let cols1: Vec<&str> = schema1.fields().iter().map(|f| f.name().as_str()).collect();
@@ -372,8 +343,8 @@ pub fn is_subset_impl(
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
-    let (df1, schema1) = get_df_and_schema(table1, "Left")?;
-    let (df2, schema2) = get_df_and_schema(table2, "Right")?;
+    let (df1, schema1) = table1.require_df_and_schema()?;
+    let (df2, schema2) = table2.require_df_and_schema()?;
     let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
     // t1 is a subset of t2 if diff(t1, t2) is empty (count rows not in t2 = 0)
@@ -435,8 +406,8 @@ fn set_operation_impl(
     key_expr_dict: Option<Bound<'_, PyDict>>,
     op: SetOperation,
 ) -> PyResult<LTSeqTable> {
-    let (df1, schema1) = get_df_and_schema(table1, "Left")?;
-    let (df2, schema2) = get_df_and_schema(table2, "Right")?;
+    let (df1, schema1) = table1.require_df_and_schema()?;
+    let (df2, schema2) = table2.require_df_and_schema()?;
     let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
     let (t1_name, t2_name, op_name) = match op {

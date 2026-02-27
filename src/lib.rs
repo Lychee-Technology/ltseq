@@ -1,4 +1,7 @@
+use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::common::DFSchema;
+use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -15,10 +18,9 @@ pub mod ops; // Table operations grouped by category
 pub mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // Streaming cursor for lazy iteration
 
-// Re-exports for convenience
-pub use error::PyExprError;
-pub use format::{format_cell, format_table};
-pub use types::{dict_to_py_expr, PyExpr};
+// Re-exports for internal use
+pub(crate) use format::format_table;
+pub(crate) use types::{dict_to_py_expr, PyExpr};
 
 use crate::engine::{create_session_context, RUNTIME};
 
@@ -35,6 +37,169 @@ pub struct LTSeqTable {
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
     sort_exprs: Vec<String>, // Column names used for sorting, for Phase 6 window functions
+}
+
+/// Helper constructors for LTSeqTable (non-PyO3).
+///
+/// These reduce boilerplate across 36+ construction sites in src/ops/*.
+impl LTSeqTable {
+    /// Extract Arrow schema from a DataFusion DFSchema.
+    pub(crate) fn schema_from_df(df_schema: &DFSchema) -> Arc<ArrowSchema> {
+        let fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
+        Arc::new(ArrowSchema::new(fields))
+    }
+
+    /// Wrap a DataFrame, recomputing the schema from its DFSchema.
+    /// Use when the operation changes columns (select, derive, window, etc.).
+    pub(crate) fn from_df(
+        session: Arc<SessionContext>,
+        df: DataFrame,
+        sort_exprs: Vec<String>,
+    ) -> Self {
+        let schema = Self::schema_from_df(df.schema());
+        LTSeqTable {
+            session,
+            dataframe: Some(Arc::new(df)),
+            schema: Some(schema),
+            sort_exprs,
+        }
+    }
+
+    /// Wrap a DataFrame, keeping the provided schema unchanged.
+    /// Use when the operation preserves columns (filter, slice, sort, distinct).
+    pub(crate) fn from_df_with_schema(
+        session: Arc<SessionContext>,
+        df: DataFrame,
+        schema: Arc<ArrowSchema>,
+        sort_exprs: Vec<String>,
+    ) -> Self {
+        LTSeqTable {
+            session,
+            dataframe: Some(Arc::new(df)),
+            schema: Some(schema),
+            sort_exprs,
+        }
+    }
+
+    /// Create a table from record batches via MemTable.
+    /// Schema is inferred from the first batch; returns an empty table if batches are empty.
+    pub(crate) fn from_batches(
+        session: Arc<SessionContext>,
+        batches: Vec<RecordBatch>,
+        sort_exprs: Vec<String>,
+    ) -> PyResult<Self> {
+        if batches.is_empty() {
+            return Ok(LTSeqTable {
+                session,
+                dataframe: None,
+                schema: None,
+                sort_exprs,
+            });
+        }
+
+        let result_schema = batches[0].schema();
+        let mem_table =
+            MemTable::try_new(Arc::clone(&result_schema), vec![batches]).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to create table: {}",
+                    e
+                ))
+            })?;
+
+        let result_df = session.read_table(Arc::new(mem_table)).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to read table: {}",
+                e
+            ))
+        })?;
+
+        Ok(LTSeqTable {
+            session,
+            dataframe: Some(Arc::new(result_df)),
+            schema: Some(result_schema),
+            sort_exprs,
+        })
+    }
+
+    /// Like `from_batches`, but uses a fallback schema when batches are empty.
+    pub(crate) fn from_batches_with_schema(
+        session: Arc<SessionContext>,
+        batches: Vec<RecordBatch>,
+        empty_schema: Arc<ArrowSchema>,
+        sort_exprs: Vec<String>,
+    ) -> PyResult<Self> {
+        if batches.is_empty() {
+            return Ok(LTSeqTable {
+                session,
+                dataframe: None,
+                schema: Some(empty_schema),
+                sort_exprs,
+            });
+        }
+
+        let result_schema = batches[0].schema();
+        let mem_table =
+            MemTable::try_new(Arc::clone(&result_schema), vec![batches]).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to create table: {}",
+                    e
+                ))
+            })?;
+
+        let result_df = session.read_table(Arc::new(mem_table)).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to read table: {}",
+                e
+            ))
+        })?;
+
+        Ok(LTSeqTable {
+            session,
+            dataframe: Some(Arc::new(result_df)),
+            schema: Some(result_schema),
+            sort_exprs,
+        })
+    }
+
+    /// Create an empty table with a known schema (dataframe: None).
+    /// Used for early returns when no data is loaded.
+    pub(crate) fn empty(
+        session: Arc<SessionContext>,
+        schema: Option<Arc<ArrowSchema>>,
+        sort_exprs: Vec<String>,
+    ) -> Self {
+        LTSeqTable {
+            session,
+            dataframe: None,
+            schema,
+            sort_exprs,
+        }
+    }
+
+    /// Get a reference to the DataFrame, or return a PyErr if no data is loaded.
+    pub(crate) fn require_df(&self) -> PyResult<&Arc<DataFrame>> {
+        self.dataframe.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first.",
+            )
+        })
+    }
+
+    /// Get a reference to the schema, or return a PyErr if unavailable.
+    pub(crate) fn require_schema(&self) -> PyResult<&Arc<ArrowSchema>> {
+        self.schema.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first.",
+            )
+        })
+    }
+
+    /// Get references to both the DataFrame and schema.
+    pub(crate) fn require_df_and_schema(
+        &self,
+    ) -> PyResult<(&Arc<DataFrame>, &Arc<ArrowSchema>)> {
+        Ok((self.require_df()?, self.require_schema()?))
+    }
 }
 
 #[pymethods]
@@ -67,13 +232,7 @@ impl LTSeqTable {
                 ))
             })?;
 
-            // Get the DFSchema and convert to Arrow schema
-            let df_schema = df.schema();
-            let arrow_fields: Vec<arrow::datatypes::Field> =
-                df_schema.fields().iter().map(|f| (**f).clone()).collect();
-            let arrow_schema = ArrowSchema::new(arrow_fields);
-
-            self.schema = Some(Arc::new(arrow_schema));
+            self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
             Ok(())
         })
@@ -94,13 +253,7 @@ impl LTSeqTable {
                 ))
             })?;
 
-            // Get the DFSchema and convert to Arrow schema
-            let df_schema = df.schema();
-            let arrow_fields: Vec<arrow::datatypes::Field> =
-                df_schema.fields().iter().map(|f| (**f).clone()).collect();
-            let arrow_schema = ArrowSchema::new(arrow_fields);
-
-            self.schema = Some(Arc::new(arrow_schema));
+            self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
             Ok(())
         })
@@ -172,19 +325,6 @@ impl LTSeqTable {
         })
     }
 
-    /// Get basic info about the table
-    fn hello(&self) -> String {
-        match (&self.dataframe, &self.schema) {
-            (Some(_), Some(schema)) => {
-                format!(
-                    "Hello from LTSeqTable! Schema has {} columns",
-                    schema.fields().len()
-                )
-            }
-            _ => "Hello from LTSeqTable! No data loaded yet.".to_string(),
-        }
-    }
-
     /// Get column names from the table schema
     ///
     /// Returns:
@@ -213,16 +353,65 @@ impl LTSeqTable {
 
         RUNTIME.block_on(async {
             let df_clone = (**df).clone();
-            let batches = df_clone.collect().await.map_err(|e| {
+            df_clone.count().await.map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to count rows: {}",
+                    e
+                ))
+            })
+        })
+    }
+
+    /// Collect the DataFrame and return all record batches as Arrow IPC bytes.
+    ///
+    /// Returns:
+    ///     List of bytes objects, each containing one Arrow IPC-serialized RecordBatch
+    fn to_arrow_ipc(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        use datafusion::arrow::ipc::writer::StreamWriter;
+
+        let df = self.dataframe.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "No data loaded. Call read_csv() first.",
+            )
+        })?;
+
+        let batches = RUNTIME.block_on(async {
+            (**df).clone().collect().await.map_err(|e| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                     "Failed to collect data: {}",
                     e
                 ))
-            })?;
+            })
+        })?;
 
-            let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
-            Ok(total_rows)
-        })
+        let mut result = Vec::with_capacity(batches.len());
+        for batch in &batches {
+            let mut buffer = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
+                    .map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                            "Failed to create IPC writer: {}",
+                            e
+                        ))
+                    })?;
+                writer.write(batch).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to write IPC batch: {}",
+                        e
+                    ))
+                })?;
+                writer.finish().map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to finish IPC stream: {}",
+                        e
+                    ))
+                })?;
+            }
+            result.push(pyo3::types::PyBytes::new(py, &buffer).into());
+        }
+
+        Ok(result)
     }
 
     /// Filter rows based on predicate expression
@@ -239,12 +428,11 @@ impl LTSeqTable {
 
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(LTSeqTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-                sort_exprs: self.sort_exprs.clone(),
-            });
+            return Ok(LTSeqTable::empty(
+                Arc::clone(&self.session),
+                self.schema.as_ref().map(Arc::clone),
+                self.sort_exprs.clone(),
+            ));
         }
 
         // 2. Get schema (required for transpilation)
@@ -275,13 +463,13 @@ impl LTSeqTable {
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // 6. Return new LTSeqTable with filtered data
-        Ok(LTSeqTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(filtered_df)),
-            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: self.sort_exprs.clone(),
-        })
+        // 6. Return new LTSeqTable with filtered data (schema unchanged)
+        Ok(LTSeqTable::from_df_with_schema(
+            Arc::clone(&self.session),
+            filtered_df,
+            Arc::clone(schema),
+            self.sort_exprs.clone(),
+        ))
     }
 
     /// Find the first row matching a predicate
@@ -308,12 +496,11 @@ impl LTSeqTable {
     fn select(&self, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(LTSeqTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-                sort_exprs: self.sort_exprs.clone(),
-            });
+            return Ok(LTSeqTable::empty(
+                Arc::clone(&self.session),
+                self.schema.as_ref().map(Arc::clone),
+                self.sort_exprs.clone(),
+            ));
         }
 
         // 1. Get schema
@@ -355,19 +542,12 @@ impl LTSeqTable {
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // 5. Update schema to reflect selected DataFrame
-        // Get new schema from the resulting DataFrame
-        let df_schema = selected_df.schema();
-        let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-        let new_schema = ArrowSchema::new(arrow_fields);
-
-        // 6. Return new LTSeqTable with updated schema
-        Ok(LTSeqTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(selected_df)),
-            schema: Some(Arc::new(new_schema)),
-            sort_exprs: self.sort_exprs.clone(),
-        })
+        // 5. Return new LTSeqTable with recomputed schema
+        Ok(LTSeqTable::from_df(
+            Arc::clone(&self.session),
+            selected_df,
+            self.sort_exprs.clone(),
+        ))
     }
 
     /// Create derived columns based on expressions
@@ -402,7 +582,7 @@ impl LTSeqTable {
         sort_exprs: Vec<Bound<'_, PyDict>>,
         desc_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::sort_impl(self, sort_exprs, desc_flags)
+        crate::ops::sort::sort_impl(self, sort_exprs, desc_flags)
     }
 
     /// Add __group_id__ column for consecutive identical grouping values
@@ -410,7 +590,7 @@ impl LTSeqTable {
     /// Phase B2: Foundation for group_ordered() lazy evaluation.
     /// Placeholder: will compute __group_id__ via window functions.
     fn group_id(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::group_id_impl(self, grouping_expr)
+        crate::ops::grouping::group_id_impl(self, grouping_expr)
     }
 
     /// Get only the first row of each group (Phase B4)
@@ -418,7 +598,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// first row per group.
     fn first_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::first_row_impl(self)
+        crate::ops::grouping::first_row_impl(self)
     }
 
     /// Get only the last row of each group (Phase B4)
@@ -426,7 +606,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// last row per group.
     fn last_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::last_row_impl(self)
+        crate::ops::grouping::last_row_impl(self)
     }
 
     /// Remove duplicate rows based on key columns
@@ -452,12 +632,11 @@ impl LTSeqTable {
     fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
-            return Ok(LTSeqTable {
-                session: Arc::clone(&self.session),
-                dataframe: None,
-                schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-                sort_exprs: self.sort_exprs.clone(),
-            });
+            return Ok(LTSeqTable::empty(
+                Arc::clone(&self.session),
+                self.schema.as_ref().map(Arc::clone),
+                self.sort_exprs.clone(),
+            ));
         }
 
         // Get DataFrame
@@ -481,13 +660,13 @@ impl LTSeqTable {
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-        // Return new LTSeqTable with sliced data
-        Ok(LTSeqTable {
-            session: Arc::clone(&self.session),
-            dataframe: Some(Arc::new(sliced_df)),
-            schema: self.schema.as_ref().map(|s| Arc::clone(s)),
-            sort_exprs: self.sort_exprs.clone(),
-        })
+        // Return new LTSeqTable with sliced data (schema unchanged)
+        Ok(LTSeqTable::from_df_with_schema(
+            Arc::clone(&self.session),
+            sliced_df,
+            Arc::clone(self.schema.as_ref().unwrap()),
+            self.sort_exprs.clone(),
+        ))
     }
 
     /// Add cumulative sum columns for specified columns
@@ -520,7 +699,7 @@ impl LTSeqTable {
         group_expr: Option<Bound<'_, PyDict>>,
         agg_dict: &Bound<'_, PyDict>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::agg_impl(self, group_expr, agg_dict)
+        crate::ops::aggregation::agg_impl(self, group_expr, agg_dict)
     }
 
     /// Filter rows using a raw SQL WHERE clause
@@ -534,7 +713,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with rows matching the WHERE clause
     fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::filter_where_impl(self, where_clause)
+        crate::ops::aggregation::filter_where_impl(self, where_clause)
     }
 
     /// Derive columns using raw SQL window expressions
@@ -553,7 +732,7 @@ impl LTSeqTable {
         &self,
         derive_exprs: std::collections::HashMap<String, String>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::derive_window_sql_impl(self, derive_exprs)
+        crate::ops::derive_sql::derive_window_sql_impl(self, derive_exprs)
     }
 
     /// Phase 8B: Join two tables using pointer-based foreign keys
@@ -609,7 +788,7 @@ impl LTSeqTable {
         join_type: &str,
         alias: &str,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::join_impl(
+        crate::ops::join::join_impl(
             self,
             other,
             left_key_expr_dict,
@@ -656,7 +835,7 @@ impl LTSeqTable {
         direction: &str,
         alias: &str,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::asof_join_impl(
+        crate::ops::asof_join::asof_join_impl(
             self,
             other,
             left_time_col,
@@ -751,8 +930,8 @@ impl LTSeqTable {
     /// 1. Create temp table from ref_sequence with position column
     /// 2. LEFT JOIN original table ON key
     /// 3. ORDER BY position
-    fn align(&self, ref_sequence: Vec<PyObject>, key_col: &str) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::align_impl(self, ref_sequence, key_col)
+    fn align(&self, ref_sequence: Vec<Py<PyAny>>, key_col: &str) -> PyResult<LTSeqTable> {
+        crate::ops::align::align_impl(self, ref_sequence, key_col)
     }
 
     /// Pivot: Transform table from long to wide format
@@ -783,7 +962,7 @@ impl LTSeqTable {
         value_col: String,
         agg_fn: String,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::advanced::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
+        crate::ops::pivot::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
     }
 
     /// Union: Vertically concatenate two tables with compatible schemas
@@ -858,18 +1037,6 @@ impl LTSeqTable {
         crate::ops::io::write_csv_impl(self, path)
     }
 
-    fn debug_schema(&self) -> PyResult<String> {
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-        })?;
-
-        let mut output = String::new();
-        for field in schema.fields() {
-            output.push_str(&format!("{}: {}\n", field.name(), field.data_type()));
-        }
-        Ok(output)
-    }
-
     /// Is Subset: Check if this table is a subset of another table
     ///
     /// Returns true if all rows in this table also appear in the other table.
@@ -892,14 +1059,8 @@ impl LTSeqTable {
     }
 }
 
-#[pyfunction]
-fn hello() -> PyResult<String> {
-    Ok("hello from ltseq_core".to_string())
-}
-
 #[pymodule]
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(hello, m)?)?;
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
     Ok(())

@@ -418,12 +418,12 @@ class AdvancedOpsMixin:
 
     def _infer_type_from_value(self, value: Any) -> str:
         """Infer schema type from a Python value."""
-        if isinstance(value, float):
-            return "float64"
+        if isinstance(value, bool):
+            return "bool"
         elif isinstance(value, int):
             return "int64"
-        elif isinstance(value, bool):
-            return "bool"
+        elif isinstance(value, float):
+            return "float64"
         elif isinstance(value, str):
             return "string"
         else:

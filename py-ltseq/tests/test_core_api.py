@@ -280,6 +280,84 @@ class TestTailMethod:
         assert 1 not in ids
 
 
+class TestToArrow:
+    """Test to_arrow() method (T20)."""
+
+    def test_to_arrow_returns_pa_table(self, sample_csv):
+        """to_arrow() returns a pyarrow Table."""
+        import pyarrow as pa
+
+        t = LTSeq.read_csv(sample_csv)
+        arrow = t.to_arrow()
+        assert isinstance(arrow, pa.Table)
+
+    def test_to_arrow_schema_preserved(self, sample_csv):
+        """to_arrow() result has the same column names."""
+        t = LTSeq.read_csv(sample_csv)
+        arrow = t.to_arrow()
+        assert set(arrow.column_names) == set(t.columns)
+
+    def test_to_arrow_row_count(self, sample_csv):
+        """to_arrow() result has correct number of rows."""
+        t = LTSeq.read_csv(sample_csv)
+        arrow = t.to_arrow()
+        assert arrow.num_rows == 5
+
+    def test_to_arrow_empty_table(self):
+        """to_arrow() on empty LTSeq returns empty table."""
+        import pyarrow as pa
+
+        t = LTSeq()
+        arrow = t.to_arrow()
+        assert isinstance(arrow, pa.Table)
+        assert arrow.num_rows == 0
+
+    def test_to_arrow_after_filter(self, sample_csv):
+        """to_arrow() works on filtered table."""
+        t = LTSeq.read_csv(sample_csv)
+        filtered = t.filter(lambda r: r.name == "Alice")
+        arrow = filtered.to_arrow()
+        assert arrow.num_rows == 1
+
+
+class TestEmptyTableHandling:
+    """Test empty table edge cases (T34)."""
+
+    def test_empty_collect(self):
+        """collect() on empty LTSeq returns empty list."""
+        t = LTSeq()
+        result = t.collect()
+        assert result == []
+
+    def test_empty_to_pandas(self):
+        """to_pandas() on empty LTSeq returns empty DataFrame."""
+        import pandas as pd
+
+        t = LTSeq()
+        df = t.to_pandas()
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 0
+
+    def test_filter_to_empty(self, sample_csv):
+        """Filtering that eliminates all rows still returns valid LTSeq."""
+        t = LTSeq.read_csv(sample_csv)
+        empty = t.filter(lambda r: r.age > 9999)
+        assert len(empty) == 0
+        result = empty.collect()
+        assert result == []
+
+    def test_empty_count(self):
+        """count() on empty table raises RuntimeError (no data loaded)."""
+        t = LTSeq()
+        with pytest.raises(RuntimeError, match="No data loaded"):
+            t.count()
+
+    def test_empty_columns(self):
+        """columns on empty table returns empty list."""
+        t = LTSeq()
+        assert t.columns == []
+
+
 class TestHeadTailChaining:
     """Test head() and tail() work in chains."""
 

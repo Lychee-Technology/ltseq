@@ -169,21 +169,23 @@ def ltseq_session(t_sorted):
 
 
 def ltseq_session_v2(t_sorted):
-    """LTSeq alternative: derive boundary flag, then count.
+    """LTSeq: derive session boundary flag, then count.
 
-    The very first row has shift(1)=NULL, so userid != NULL is NULL (not true).
-    We add 1 for this uncounted first session.
+    Uses partition_by="userid" on shift so DataFusion can process each user
+    independently. The first row per user gets NULL from shift, and we treat
+    NULL as a new session start using is_null OR time gap > 1800.
+    This avoids a separate distinct-user count pass.
     """
     t = t_sorted.derive(
         lambda r: {
-            "is_new_session": (
-                (r.userid != r.userid.shift(1))
-                | (r.eventtime - r.eventtime.shift(1) > 1800)
-            )
+            "prev_time": r.eventtime.shift(1, partition_by="userid"),
         }
     )
-    boundary_count = t.filter(lambda r: r.is_new_session).count()
-    return boundary_count + 1  # +1 for the very first row (shift(1) is NULL)
+    # First row per user: prev_time is NULL → is_null catches it as new session.
+    # Subsequent rows: check if gap > 1800 seconds.
+    return t.filter(
+        lambda r: (r.prev_time.is_null()) | (r.eventtime - r.prev_time > 1800)
+    ).count()
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +214,15 @@ def duckdb_funnel(data_file, p1, p2, p3):
 
 
 def ltseq_funnel(t_sorted, p1, p2, p3):
-    """LTSeq: derive shifted columns, then filter for consecutive URL matching."""
+    """LTSeq: derive shifted URL columns with partition_by, then filter for consecutive URL matching.
+
+    Using partition_by="userid" means LEAD only looks at the same user's next rows,
+    eliminating the need for separate userid shift columns and cross-user filtering.
+    """
     t = t_sorted.derive(
         lambda r: {
-            "next_url_1": r.url.shift(-1),
-            "next_url_2": r.url.shift(-2),
-            "next_uid_1": r.userid.shift(-1),
-            "next_uid_2": r.userid.shift(-2),
+            "next_url_1": r.url.shift(-1, partition_by="userid"),
+            "next_url_2": r.url.shift(-2, partition_by="userid"),
         }
     )
     return t.filter(
@@ -226,8 +230,6 @@ def ltseq_funnel(t_sorted, p1, p2, p3):
             (r.url.s.starts_with(p1))
             & (r.next_url_1.s.starts_with(p2))
             & (r.next_url_2.s.starts_with(p3))
-            & (r.userid == r.next_uid_1)
-            & (r.userid == r.next_uid_2)
         )
     ).count()
 

@@ -1,44 +1,295 @@
 //! Aggregation operations for LTSeqTable
 //!
 //! Provides SQL GROUP BY aggregation and raw SQL WHERE filtering.
+//! Uses DataFusion's native df.aggregate() API for performance (no materialization).
 
 use crate::engine::RUNTIME;
 use crate::transpiler::pyexpr_to_sql;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::common::Column;
 use datafusion::datasource::MemTable;
+use datafusion::functions_aggregate::expr_fn as agg_fn;
+use datafusion::logical_expr::{case, Expr};
+use datafusion::prelude::*;
+use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-/// Result type for aggregate function extraction
+/// Convert a PyExpr aggregate call to a native DataFusion Expr.
+/// Returns Ok(Some(expr)) for supported aggregates, Ok(None) for unsupported ones
+/// that need the SQL fallback path (top_k, mode).
+fn pyexpr_to_agg_expr(
+    py_expr: &PyExpr,
+    schema: &ArrowSchema,
+) -> Result<Option<Expr>, String> {
+    let PyExpr::Call { func, on, args, .. } = py_expr else {
+        return Err("Expected aggregate function call".to_string());
+    };
+
+    match func.as_str() {
+        // Simple aggregations on a column
+        "sum" | "count" | "min" | "max" | "avg" | "median" | "variance" | "var" | "stddev"
+        | "std" => {
+            let col_expr = match on.as_ref() {
+                PyExpr::Column(col_name) => {
+                    Expr::Column(Column::new_unqualified(col_name))
+                }
+                _ if func == "count" => {
+                    // count() without a specific column → count(*)
+                    lit(1i64)
+                }
+                _ => return Err(format!("Aggregate '{}' requires a column reference", func)),
+            };
+
+            let agg_expr = match func.as_str() {
+                "sum" => agg_fn::sum(col_expr),
+                "count" => agg_fn::count(col_expr),
+                "min" => agg_fn::min(col_expr),
+                "max" => agg_fn::max(col_expr),
+                "avg" => agg_fn::avg(col_expr),
+                "median" => agg_fn::median(col_expr),
+                "variance" | "var" => agg_fn::var_sample(col_expr),
+                "stddev" | "std" => agg_fn::stddev(col_expr),
+                _ => unreachable!(),
+            };
+            Ok(Some(agg_expr))
+        }
+        "percentile" => {
+            let col_expr = match on.as_ref() {
+                PyExpr::Column(col_name) => {
+                    Expr::Column(Column::new_unqualified(col_name))
+                }
+                _ => return Err("percentile requires a column reference".to_string()),
+            };
+            let p = args.first().and_then(|arg| {
+                if let PyExpr::Literal { value, .. } = arg {
+                    value.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            }).unwrap_or(0.5);
+            let sort = datafusion::logical_expr::SortExpr::new(col_expr, true, false);
+            Ok(Some(agg_fn::approx_percentile_cont(sort, lit(p), None)))
+        }
+        // Conditional aggregations
+        "count_if" => {
+            let predicate = args.first().ok_or("count_if requires a predicate argument")?;
+            let pred_expr = crate::transpiler::pyexpr_to_datafusion(predicate.clone(), schema)?;
+            // count_if(cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+            let case_expr = case(pred_expr)
+                .when(lit(true), lit(1i64))
+                .otherwise(lit(0i64))
+                .map_err(|e| format!("Failed to create CASE: {}", e))?;
+            Ok(Some(agg_fn::sum(case_expr)))
+        }
+        "sum_if" | "avg_if" | "min_if" | "max_if" => {
+            if args.len() < 2 {
+                return Err(format!("{} requires predicate and column arguments", func));
+            }
+            let pred_expr = crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?;
+            let col_expr = crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?;
+
+            let (true_val, false_val) = match func.as_str() {
+                "sum_if" => (col_expr.clone(), lit(0i64)),
+                _ => (col_expr.clone(), lit(ScalarValue::Null)),
+            };
+
+            let case_expr = case(pred_expr)
+                .when(lit(true), true_val)
+                .otherwise(false_val)
+                .map_err(|e| format!("Failed to create CASE: {}", e))?;
+
+            let agg_expr = match func.as_str() {
+                "sum_if" => agg_fn::sum(case_expr),
+                "avg_if" => agg_fn::avg(case_expr),
+                "min_if" => agg_fn::min(case_expr),
+                "max_if" => agg_fn::max(case_expr),
+                _ => unreachable!(),
+            };
+            Ok(Some(agg_expr))
+        }
+        // Complex aggregates that need SQL path
+        "top_k" | "mode" => Ok(None),
+        _ => Err(format!("Unknown aggregate function: {}", func)),
+    }
+}
+
+/// Parse group expression into DataFusion Expr(s)
+fn parse_group_exprs(
+    group_expr: Option<Bound<'_, PyDict>>,
+    schema: &ArrowSchema,
+) -> PyResult<Vec<Expr>> {
+    let Some(group_expr_dict) = group_expr else {
+        return Ok(Vec::new());
+    };
+
+    let py_expr = dict_to_py_expr(&group_expr_dict).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse group: {}", e))
+    })?;
+
+    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Transpile failed: {}", e))
+    })?;
+
+    Ok(vec![df_expr])
+}
+
+/// Aggregate rows into a summary table with one row per group.
+/// Uses native DataFusion df.aggregate() API — no materialization needed.
+pub fn agg_impl(
+    table: &LTSeqTable,
+    group_expr: Option<Bound<'_, PyDict>>,
+    agg_dict: &Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
+    let (df, schema) = table.require_df_and_schema()?;
+
+    // Try the native DataFusion path first: build aggregate Exprs directly
+    let mut agg_exprs: Vec<Expr> = Vec::new();
+    let mut needs_sql_fallback = false;
+
+    for (key, value) in agg_dict.iter() {
+        let key_str = key.extract::<String>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
+        })?;
+
+        let val_dict = value.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
+        })?;
+
+        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse: {}", e))
+        })?;
+
+        match pyexpr_to_agg_expr(&py_expr, schema) {
+            Ok(Some(expr)) => {
+                agg_exprs.push(expr.alias(&key_str));
+            }
+            Ok(None) => {
+                // top_k or mode — need SQL fallback
+                needs_sql_fallback = true;
+                break;
+            }
+            Err(e) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
+            }
+        }
+    }
+
+    if needs_sql_fallback {
+        return agg_impl_sql_fallback(table, group_expr, agg_dict);
+    }
+
+    // Parse group expressions
+    let group_exprs = parse_group_exprs(group_expr, schema)?;
+
+    // Execute native aggregate — stays lazy until collect!
+    let result_df = RUNTIME.block_on(async {
+        let cloned_df = (**df).clone();
+        let agg_df = cloned_df
+            .aggregate(group_exprs, agg_exprs)
+            .map_err(|e| format!("Aggregate failed: {}", e))?;
+        // Collect to get result schema
+        let batches = agg_df
+            .collect()
+            .await
+            .map_err(|e| format!("Collect failed: {}", e))?;
+        Ok::<_, String>(batches)
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    create_result_table(table, result_df)
+}
+
+/// SQL-based fallback for complex aggregates (top_k, mode)
+fn agg_impl_sql_fallback(
+    table: &LTSeqTable,
+    group_expr: Option<Bound<'_, PyDict>>,
+    agg_dict: &Bound<'_, PyDict>,
+) -> PyResult<LTSeqTable> {
+    let (df, schema) = table.require_df_and_schema()?;
+
+    let mut agg_select_parts: Vec<String> = Vec::new();
+
+    for (key, value) in agg_dict.iter() {
+        let key_str = key.extract::<String>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
+        })?;
+
+        let val_dict = value.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
+        })?;
+
+        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse: {}", e))
+        })?;
+
+        let agg_result = extract_agg_function(&py_expr, schema).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Invalid aggregate expression - must be g.column.agg_func() or g.count()",
+            )
+        })?;
+
+        let sql_expr = agg_result_to_sql(agg_result)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+
+        agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
+    }
+
+    let group_cols = parse_group_expr_sql(group_expr, schema)?;
+
+    // Register temp table (must materialize for SQL path)
+    let temp_table_name = "__ltseq_agg_temp";
+    let current_batches = collect_dataframe(df)?;
+    let arrow_schema = Arc::new((**schema).clone());
+
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to create table: {}", e))
+    })?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Register failed: {}", e))
+        })?;
+
+    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
+    let result_batches = execute_sql_query(table, &sql_query)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    let _ = table.session.deregister_table(temp_table_name);
+
+    create_result_table(table, result_batches)
+}
+
+// ============================================================================
+// SQL-path helpers (kept for fallback and filter_where_impl)
+// ============================================================================
+
+/// Result type for aggregate function extraction (SQL path)
 enum AggResult {
-    /// Simple aggregate: (func_name, col_name, optional_arg)
     Simple(String, String, Option<String>),
-    /// Conditional aggregate: (func_name, predicate_sql, optional_col_name)
     Conditional(String, String, Option<String>),
 }
 
-/// Extract aggregate function info from a PyExpr
 fn extract_agg_function(py_expr: &PyExpr, schema: &ArrowSchema) -> Option<AggResult> {
     let PyExpr::Call { func, on, args, .. } = py_expr else {
         return None;
     };
 
     match func.as_str() {
-        // Simple aggregations
         "sum" | "count" | "min" | "max" | "avg" | "median" | "variance" | "var" | "stddev"
         | "std" | "mode" => extract_simple_agg(func, on, args),
         "top_k" | "percentile" => extract_agg_with_arg(func, on, args),
-        // Conditional aggregations
         "count_if" => extract_count_if(args, schema),
         "sum_if" | "avg_if" | "min_if" | "max_if" => extract_conditional_agg(func, args, schema),
         _ => None,
     }
 }
 
-/// Extract simple aggregate function (sum, count, min, max, avg, etc.)
 fn extract_simple_agg(func: &str, on: &PyExpr, _args: &[PyExpr]) -> Option<AggResult> {
     if let PyExpr::Column(col_name) = on {
         return Some(AggResult::Simple(func.to_string(), col_name.clone(), None));
@@ -49,7 +300,6 @@ fn extract_simple_agg(func: &str, on: &PyExpr, _args: &[PyExpr]) -> Option<AggRe
     None
 }
 
-/// Extract aggregate with argument (top_k, percentile)
 fn extract_agg_with_arg(func: &str, on: &PyExpr, args: &[PyExpr]) -> Option<AggResult> {
     if let PyExpr::Column(col_name) = on {
         let arg = args.first().and_then(|arg| {
@@ -64,7 +314,6 @@ fn extract_agg_with_arg(func: &str, on: &PyExpr, args: &[PyExpr]) -> Option<AggR
     None
 }
 
-/// Extract count_if aggregate
 fn extract_count_if(args: &[PyExpr], schema: &ArrowSchema) -> Option<AggResult> {
     let predicate = args.first()?;
     let pred_sql = pyexpr_to_sql(predicate, schema).ok()?;
@@ -75,7 +324,6 @@ fn extract_count_if(args: &[PyExpr], schema: &ArrowSchema) -> Option<AggResult> 
     ))
 }
 
-/// Extract conditional aggregate (sum_if, avg_if, min_if, max_if)
 fn extract_conditional_agg(func: &str, args: &[PyExpr], schema: &ArrowSchema) -> Option<AggResult> {
     if args.len() < 2 {
         return None;
@@ -89,7 +337,6 @@ fn extract_conditional_agg(func: &str, args: &[PyExpr], schema: &ArrowSchema) ->
     ))
 }
 
-/// Generate SQL expression for an aggregate result
 fn agg_result_to_sql(agg_result: AggResult) -> Result<String, String> {
     match agg_result {
         AggResult::Simple(agg_func, col_name, arg_opt) => {
@@ -101,7 +348,6 @@ fn agg_result_to_sql(agg_result: AggResult) -> Result<String, String> {
     }
 }
 
-/// Generate SQL for simple aggregates
 fn simple_agg_to_sql(func: &str, col: &str, arg: Option<String>) -> Result<String, String> {
     Ok(match func {
         "sum" => format!("SUM({})", col),
@@ -140,7 +386,6 @@ fn simple_agg_to_sql(func: &str, col: &str, arg: Option<String>) -> Result<Strin
     })
 }
 
-/// Generate SQL for conditional aggregates
 fn conditional_agg_to_sql(func: &str, pred: &str, col: Option<String>) -> Result<String, String> {
     let col_sql = col.unwrap_or_else(|| "1".to_string());
     Ok(match func {
@@ -153,7 +398,6 @@ fn conditional_agg_to_sql(func: &str, pred: &str, col: Option<String>) -> Result
     })
 }
 
-/// Execute SQL query and return result batches
 fn execute_sql_query(
     table: &LTSeqTable,
     sql_query: &str,
@@ -177,107 +421,15 @@ fn create_result_table(
     table: &LTSeqTable,
     batches: Vec<datafusion::arrow::array::RecordBatch>,
 ) -> PyResult<LTSeqTable> {
-    if batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: None,
-            sort_exprs: Vec::new(),
-        });
-    }
-
-    let result_schema = batches[0].schema();
-    let mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to create table: {}", e))
-    })?;
-
-    let result_df = table.session.read_table(Arc::new(mem_table)).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read table: {}", e))
-    })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(Arc::clone(&result_schema)),
-        sort_exprs: Vec::new(),
-    })
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        batches,
+        Vec::new(),
+    )
 }
 
-/// Aggregate rows into a summary table with one row per group
-pub fn agg_impl(
-    table: &LTSeqTable,
-    group_expr: Option<Bound<'_, PyDict>>,
-    agg_dict: &Bound<'_, PyDict>,
-) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let schema = table
-        .schema
-        .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
-
-    // Collect all agg expressions
-    let mut agg_select_parts: Vec<String> = Vec::new();
-
-    for (key, value) in agg_dict.iter() {
-        let key_str = key.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
-        })?;
-
-        let val_dict = value.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
-        })?;
-
-        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse: {}", e))
-        })?;
-
-        let agg_result = extract_agg_function(&py_expr, schema).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid aggregate expression - must be g.column.agg_func() or g.count()",
-            )
-        })?;
-
-        let sql_expr = agg_result_to_sql(agg_result)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-        agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
-    }
-
-    // Build the GROUP BY clause
-    let group_cols = parse_group_expr(group_expr, schema)?;
-
-    // Register temp table
-    let temp_table_name = "__ltseq_agg_temp";
-    let current_batches = collect_dataframe(df)?;
-    let arrow_schema = Arc::new((**schema).clone());
-
-    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to create table: {}", e))
-    })?;
-
-    table
-        .session
-        .register_table(temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Register failed: {}", e))
-        })?;
-
-    // Build and execute SQL query
-    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
-    let result_batches = execute_sql_query(table, &sql_query)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Cleanup temp table
-    let _ = table.session.deregister_table(temp_table_name);
-
-    create_result_table(table, result_batches)
-}
-
-/// Parse group expression into column names
-fn parse_group_expr(
+/// Parse group expression into column names (SQL path)
+fn parse_group_expr_sql(
     group_expr: Option<Bound<'_, PyDict>>,
     schema: &Arc<ArrowSchema>,
 ) -> PyResult<Option<Vec<String>>> {
@@ -319,7 +471,6 @@ fn collect_dataframe(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
 }
 
-/// Build SQL query for aggregation
 fn build_agg_sql(
     group_cols: &Option<Vec<String>>,
     agg_parts: &[String],
@@ -389,12 +540,11 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
     let _ = table.session.deregister_table(&temp_table_name);
 
     if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: Some(Arc::clone(schema)),
-            sort_exprs: Vec::new(),
-        });
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            Some(Arc::clone(schema)),
+            Vec::new(),
+        ));
     }
 
     create_result_table(table, result_batches)

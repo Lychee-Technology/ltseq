@@ -8,8 +8,6 @@ pub enum PyExprError {
     MissingField(String),
     InvalidType(String),
     UnknownVariant(String),
-    DeserializationFailed(String),
-    TranspilationFailed(String),
 }
 
 impl std::fmt::Display for PyExprError {
@@ -18,8 +16,6 @@ impl std::fmt::Display for PyExprError {
             PyExprError::MissingField(field) => write!(f, "Missing field: {}", field),
             PyExprError::InvalidType(msg) => write!(f, "Invalid type: {}", msg),
             PyExprError::UnknownVariant(var) => write!(f, "Unknown expression type: {}", var),
-            PyExprError::DeserializationFailed(msg) => write!(f, "Deserialization failed: {}", msg),
-            PyExprError::TranspilationFailed(msg) => write!(f, "Transpilation failed: {}", msg),
         }
     }
 }

@@ -40,8 +40,6 @@ class IOMixin:
         import os
 
         t = LTSeq()
-        t._csv_path = path
-        t._has_header = has_header
         # Set table name from file basename (without extension) for lookup support
         t._name = os.path.splitext(os.path.basename(path))[0]
         t._inner.read_csv(path, has_header)
@@ -152,7 +150,6 @@ class IOMixin:
                 temp_path = f.name
             try:
                 t._inner.read_csv(temp_path, True)
-                t._csv_path = None
             finally:
                 os.unlink(temp_path)
             return t

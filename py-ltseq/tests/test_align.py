@@ -43,8 +43,8 @@ class TestAlignBasic:
 
         df = result.to_pandas()
         assert len(df) == 2
-        assert df.iloc[0]["date"] == "2024-01-04"
-        assert df.iloc[1]["date"] == "2024-01-02"
+        assert str(df.iloc[0]["date"]) == "2024-01-04"
+        assert str(df.iloc[1]["date"]) == "2024-01-02"
 
     def test_align_inserts_null_rows(self, sample_csv):
         """Test that align inserts NULL rows for missing keys."""
@@ -106,9 +106,9 @@ class TestAlignDuplicates:
 
         df = result.to_pandas()
         assert len(df) == 3
-        assert df.iloc[0]["date"] == "2024-01-02"
-        assert df.iloc[1]["date"] == "2024-01-02"
-        assert df.iloc[2]["date"] == "2024-01-04"
+        assert str(df.iloc[0]["date"]) == "2024-01-02"
+        assert str(df.iloc[1]["date"]) == "2024-01-02"
+        assert str(df.iloc[2]["date"]) == "2024-01-04"
 
 
 class TestAlignIntKeys:

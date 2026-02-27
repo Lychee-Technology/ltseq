@@ -18,7 +18,6 @@ use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -35,25 +34,8 @@ pub fn asof_join_impl(
     alias: &str,
 ) -> PyResult<LTSeqTable> {
     // 1. Validate both tables have data
-    let df_left = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Left table has no data. Call read_csv() first.",
-        )
-    })?;
-
-    let df_right = other.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Right table has no data. Call read_csv() first.",
-        )
-    })?;
-
-    let stored_schema_left = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Left table schema not available.")
-    })?;
-
-    let stored_schema_right = other.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Right table schema not available.")
-    })?;
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
     // 2. Validate direction
     match direction {
@@ -128,28 +110,20 @@ pub fn asof_join_impl(
         })?;
 
     // 6. Flatten batches and extract time values
-    let mut left_rows: Vec<(usize, usize)> = Vec::new();
     let mut left_times: Vec<i64> = Vec::new();
 
-    for (batch_idx, batch) in left_batches.iter().enumerate() {
+    for batch in left_batches.iter() {
         let time_col = batch.column(left_time_idx);
         let times = extract_time_values(time_col)?;
-        for (row_idx, time) in times.into_iter().enumerate() {
-            left_rows.push((batch_idx, row_idx));
-            left_times.push(time);
-        }
+        left_times.extend(times);
     }
 
     let mut right_times: Vec<i64> = Vec::new();
-    let mut right_row_indices: Vec<(usize, usize)> = Vec::new();
 
-    for (batch_idx, batch) in right_batches.iter().enumerate() {
+    for batch in right_batches.iter() {
         let time_col = batch.column(right_time_idx);
         let times = extract_time_values(time_col)?;
-        for (row_idx, time) in times.into_iter().enumerate() {
-            right_row_indices.push((batch_idx, row_idx));
-            right_times.push(time);
-        }
+        right_times.extend(times);
     }
 
     // 7. For each left row, find matching right row using binary search
@@ -183,25 +157,78 @@ pub fn asof_join_impl(
     let result_schema = Arc::new(ArrowSchema::new(result_fields));
 
     // 9. Build result arrays
+    //
+    // Optimization: consolidate all batches into single RecordBatches once,
+    // then extract columns directly. This avoids per-column concat (which
+    // would redundantly concatenate the same batches N+M times).
     let num_result_rows = left_times.len();
     let mut result_columns: Vec<Arc<dyn Array>> = Vec::new();
 
-    // Copy left columns
-    for col_idx in 0..left_schema.fields().len() {
-        let result_array = copy_column_from_batches(&left_batches, col_idx, &left_rows)?;
-        result_columns.push(result_array);
+    // Consolidate left batches into a single RecordBatch
+    let consolidated_left = if left_batches.len() <= 1 {
+        left_batches.into_iter().next()
+    } else {
+        Some(
+            datafusion::arrow::compute::concat_batches(&left_schema, &left_batches).map_err(
+                |e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to concatenate left batches: {}",
+                        e
+                    ))
+                },
+            )?,
+        )
+    };
+
+    // Consolidate right batches into a single RecordBatch
+    let consolidated_right = if right_batches.len() <= 1 {
+        right_batches.into_iter().next()
+    } else {
+        Some(
+            datafusion::arrow::compute::concat_batches(&right_schema, &right_batches).map_err(
+                |e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to concatenate right batches: {}",
+                        e
+                    ))
+                },
+            )?,
+        )
+    };
+
+    // Copy left columns directly (all rows kept in order after concat)
+    if let Some(ref left_batch) = consolidated_left {
+        for col_idx in 0..left_schema.fields().len() {
+            result_columns.push(Arc::clone(left_batch.column(col_idx)));
+        }
     }
 
-    // Build right columns with matches or NULLs
-    for col_idx in 0..right_schema.fields().len() {
-        let result_array = build_matched_column(
-            &right_batches,
-            col_idx,
-            &right_row_indices,
-            &matched_right_indices,
-            num_result_rows,
-        )?;
-        result_columns.push(result_array);
+    // Build right columns with matches or NULLs via take()
+    if let Some(ref right_batch) = consolidated_right {
+        let indices: Vec<Option<u32>> = matched_right_indices
+            .iter()
+            .map(|opt| opt.map(|idx| idx as u32))
+            .collect();
+        let indices_array = array::UInt32Array::from(indices);
+
+        for col_idx in 0..right_schema.fields().len() {
+            let col = right_batch.column(col_idx);
+            let result =
+                datafusion::arrow::compute::take(col, &indices_array, None).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to take right values: {}",
+                        e
+                    ))
+                })?;
+            result_columns.push(result);
+        }
+    } else {
+        // No right data — add null columns
+        for field in right_schema.fields() {
+            let null_arr =
+                datafusion::arrow::array::new_null_array(field.data_type(), num_result_rows);
+            result_columns.push(null_arr);
+        }
     }
 
     // 10. Create result RecordBatch
@@ -217,30 +244,11 @@ pub fn asof_join_impl(
     })?;
 
     // 11. Create result LTSeqTable
-    let result_mem = MemTable::try_new(Arc::clone(&result_schema), vec![vec![result_batch]])
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = table
-        .session
-        .read_table(Arc::new(result_mem))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read result table: {}",
-                e
-            ))
-        })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        vec![result_batch],
+        Vec::new(),
+    )
 }
 
 /// Find the largest index where right_times[idx] <= target (backward match)
@@ -437,96 +445,4 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
     Ok(values)
 }
 
-/// Copy a column from source batches to result, selecting rows by index
-fn copy_column_from_batches(
-    batches: &[datafusion::arrow::record_batch::RecordBatch],
-    col_idx: usize,
-    row_indices: &[(usize, usize)],
-) -> PyResult<Arc<dyn Array>> {
-    if batches.is_empty() || row_indices.is_empty() {
-        let dtype = if let Some(batch) = batches.first() {
-            batch.column(col_idx).data_type().clone()
-        } else {
-            DataType::Null
-        };
-        return Ok(datafusion::arrow::array::new_empty_array(&dtype));
-    }
 
-    // Concatenate all batches for this column
-    let arrays: Vec<&dyn Array> = batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
-
-    let concatenated = datafusion::arrow::compute::concat(&arrays).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to concatenate arrays: {}",
-            e
-        ))
-    })?;
-
-    // Calculate batch offsets for global indices
-    let batch_offsets: Vec<usize> = batches
-        .iter()
-        .scan(0usize, |acc, b| {
-            let prev = *acc;
-            *acc += b.num_rows();
-            Some(prev)
-        })
-        .collect();
-
-    let global_indices: Vec<u32> = row_indices
-        .iter()
-        .map(|&(batch_idx, row_idx)| (batch_offsets[batch_idx] + row_idx) as u32)
-        .collect();
-
-    let indices = array::UInt32Array::from(global_indices);
-    let result = datafusion::arrow::compute::take(&concatenated, &indices, None).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to take values: {}", e))
-    })?;
-
-    Ok(result)
-}
-
-/// Build a column for matched right rows, with NULLs for unmatched
-fn build_matched_column(
-    right_batches: &[datafusion::arrow::record_batch::RecordBatch],
-    col_idx: usize,
-    _right_row_indices: &[(usize, usize)],
-    matched_indices: &[Option<usize>],
-    num_rows: usize,
-) -> PyResult<Arc<dyn Array>> {
-    if right_batches.is_empty() {
-        let dtype = DataType::Null;
-        let null_arr = datafusion::arrow::array::new_null_array(&dtype, num_rows);
-        return Ok(null_arr);
-    }
-
-    // Concatenate all right batches for this column
-    let arrays: Vec<&dyn Array> = right_batches
-        .iter()
-        .map(|b| b.column(col_idx).as_ref())
-        .collect();
-
-    let concatenated = datafusion::arrow::compute::concat(&arrays).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to concatenate right arrays: {}",
-            e
-        ))
-    })?;
-
-    // Build nullable indices for take operation
-    let indices: Vec<Option<u32>> = matched_indices
-        .iter()
-        .map(|opt| opt.map(|idx| idx as u32))
-        .collect();
-
-    let indices_array = array::UInt32Array::from(indices);
-
-    let result =
-        datafusion::arrow::compute::take(&concatenated, &indices_array, None).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to take right values: {}",
-                e
-            ))
-        })?;
-
-    Ok(result)
-}

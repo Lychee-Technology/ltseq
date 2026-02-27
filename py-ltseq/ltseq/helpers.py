@@ -6,44 +6,6 @@ import csv
 from .expr import SchemaProxy, BinOpExpr, ColumnExpr
 
 
-def _normalize_schema(schema_dict: Dict[str, str]) -> Dict[str, str]:
-    """
-    Normalize DataFusion type strings to simplified format.
-
-    Converts DataFusion's debug format (e.g., "Utf8", "Int64") to standard names.
-
-    Args:
-        schema_dict: Dict mapping column names to DataFusion type strings
-
-    Returns:
-        Dict mapping column names to normalized type strings
-    """
-    # Map common DataFusion types to normalized names
-    type_map = {
-        "Utf8": "string",
-        "String": "string",
-        "Int8": "int8",
-        "Int16": "int16",
-        "Int32": "int32",
-        "Int64": "int64",
-        "UInt8": "uint8",
-        "UInt16": "uint16",
-        "UInt32": "uint32",
-        "UInt64": "uint64",
-        "Float32": "float32",
-        "Float64": "float64",
-        "Boolean": "bool",
-        "Bool": "bool",
-    }
-
-    normalized = {}
-    for col_name, type_str in schema_dict.items():
-        # Try to find normalized type, otherwise keep original
-        normalized[col_name] = type_map.get(type_str.strip(), type_str)
-
-    return normalized
-
-
 def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]:
     """
     Infer schema from CSV file by reading the header and sampling rows.

@@ -236,7 +236,7 @@ class TransformMixin(LookupMixin):
                 has_window = resolved_table._has_window_functions(simplified_cols)
                 if has_window and resolved_table._sort_keys:
                     result_inner = resolved_table._inner.derive_with_window_functions(
-                        simplified_cols, resolved_table._sort_keys
+                        simplified_cols
                     )
                 else:
                     result_inner = resolved_table._inner.derive(simplified_cols)
@@ -257,7 +257,7 @@ class TransformMixin(LookupMixin):
 
         if has_window and self._sort_keys:
             result_inner = self._inner.derive_with_window_functions(
-                derived_cols, self._sort_keys
+                derived_cols
             )
         else:
             result_inner = self._inner.derive(derived_cols)
@@ -277,9 +277,13 @@ class TransformMixin(LookupMixin):
             if not isinstance(expr, dict):
                 return False
             expr_type = expr.get("type", "")
+            if expr_type == "Window":
+                return True
             if expr_type == "Call":
-                method = expr.get("method", "")
-                if method in ("shift", "diff", "rolling"):
+                func = expr.get("func", "")
+                if func in ("shift", "diff", "rolling", "cum_sum"):
+                    return True
+                if check_expr(expr.get("on") or {}):
                     return True
                 for arg in expr.get("args", []):
                     if check_expr(arg):
@@ -288,6 +292,9 @@ class TransformMixin(LookupMixin):
                 if check_expr(expr.get("left", {})):
                     return True
                 if check_expr(expr.get("right", {})):
+                    return True
+            elif expr_type == "UnaryOp":
+                if check_expr(expr.get("operand", {})):
                     return True
             return False
 

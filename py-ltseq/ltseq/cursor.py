@@ -4,7 +4,7 @@ This module provides a Python wrapper around LTSeqCursor for processing
 large datasets without loading everything into memory.
 """
 
-from typing import Iterator, Optional, Dict, Any
+from typing import Dict
 
 try:
     from . import ltseq_core

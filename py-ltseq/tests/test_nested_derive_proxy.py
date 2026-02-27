@@ -84,7 +84,7 @@ class TestDeriveFirstLast:
 
         # First group starts at 2024-01-01
         first_rows = df.head(3)
-        assert all(first_rows["start_date"] == "2024-01-01")
+        assert all(first_rows["start_date"].astype(str) == "2024-01-01")
 
     def test_derive_last_column(self, sample_csv):
         """g.last().date should capture last row's column value."""
@@ -98,7 +98,7 @@ class TestDeriveFirstLast:
 
         # First group ends at 2024-01-03
         first_rows = df.head(3)
-        assert all(first_rows["end_date"] == "2024-01-03")
+        assert all(first_rows["end_date"].astype(str) == "2024-01-03")
 
     def test_derive_both_first_and_last(self, sample_csv):
         """Can use both g.first() and g.last() in same derive."""

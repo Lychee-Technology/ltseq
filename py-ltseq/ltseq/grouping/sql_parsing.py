@@ -41,45 +41,6 @@ def extract_lambda_from_chain(source: str) -> str:
     return lambda_source.strip()
 
 
-def remove_comments_from_source(source: str) -> str:
-    """
-    Remove Python comments from source code while preserving string literals.
-
-    This is important for multi-line lambdas with inline comments,
-    which would otherwise break AST parsing.
-    """
-    lines = source.split("\n")
-    result_lines = []
-
-    for line in lines:
-        in_string = False
-        quote_char = None
-        result = []
-
-        i = 0
-        while i < len(line):
-            char = line[i]
-
-            if char in ('"', "'") and (i == 0 or line[i - 1] != "\\"):
-                if not in_string:
-                    in_string = True
-                    quote_char = char
-                elif char == quote_char:
-                    in_string = False
-                    quote_char = None
-
-            if char == "#" and not in_string:
-                break
-
-            result.append(char)
-            i += 1
-
-        result_lines.append("".join(result).rstrip())
-
-    final_result = [line for line in result_lines if line.strip()]
-    return "\n".join(final_result)
-
-
 def ast_op_to_sql(op) -> Optional[str]:
     """Convert AST operator to SQL operator."""
     op_map = {
@@ -108,22 +69,6 @@ def ast_binop_to_sql(op) -> Optional[str]:
     elif isinstance(op, ast.Mod):
         return "%"
     return ""
-
-
-def get_literal_value(node) -> Optional[str]:
-    """Extract a literal value from an AST node as SQL-safe string."""
-    if isinstance(node, ast.Constant):
-        value = node.value
-        if isinstance(value, str):
-            escaped = value.replace("'", "''")
-            return f"'{escaped}'"
-        elif isinstance(value, bool):
-            return "true" if value else "false"
-        elif isinstance(value, (int, float)):
-            return str(value)
-        elif value is None:
-            return "NULL"
-    return None
 
 
 class FilterSQLParser:
@@ -452,15 +397,6 @@ class DeriveSQLParser:
         return f"({left_sql} {op_str} {right_sql})"
 
 
-def get_unsupported_filter_error(source: str) -> str:
-    """Generate error message for unsupported filter patterns."""
-    return (
-        f"Unsupported filter pattern: {source.strip()}\n"
-        "Supported: g.count(), g.first().col, g.last().col, g.max/min/sum/avg('col'), "
-        "g.all/any/none(lambda r: ...), combinations with & and |"
-    )
-
-
 def get_unsupported_derive_error(source: str) -> str:
     """Generate error for unsupported derive patterns."""
     return (
@@ -468,12 +404,6 @@ def get_unsupported_derive_error(source: str) -> str:
         "Supported: g.count(), g.first().col, g.last().col, g.max/min/sum/avg('col'), "
         "arithmetic combinations like (g.last().price - g.first().price)"
     )
-
-
-def get_parse_error_message(source: str, error: str) -> str:
-    """Generate error message for syntax errors in filter predicate."""
-    src = source.strip() if source else "<unavailable>"
-    return f"Failed to parse filter: {src}\nError: {error}"
 
 
 def get_derive_parse_error_message(source: str, error: str) -> str:
