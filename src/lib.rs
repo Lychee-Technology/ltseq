@@ -670,6 +670,15 @@ impl LTSeqTable {
         crate::ops::grouping::group_id_impl(self, grouping_expr)
     }
 
+    /// Fast path: count the number of groups without building metadata arrays.
+    ///
+    /// This is used for the `group_ordered(cond).first().count()` pattern,
+    /// where we only need the total number of groups (sessions).
+    /// Avoids allocating 3 x N arrays for 100M+ rows.
+    fn group_ordered_count(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<usize> {
+        crate::ops::grouping::group_ordered_count_impl(self, grouping_expr)
+    }
+
     /// Get only the first row of each group (Phase B4)
     ///
     /// Requires __group_id__ column to exist. Returns a new table with only the

@@ -45,6 +45,7 @@ pub mod basic;
 pub mod derive;
 pub mod io;
 pub mod linear_scan;
+pub mod parallel_scan;
 pub mod pattern_match;
 pub mod set_ops;
 pub mod window;

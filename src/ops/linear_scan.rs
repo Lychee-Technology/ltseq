@@ -1312,16 +1312,16 @@ fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
 ///
 /// Enables `fuse_eval` to correctly detect boundaries at batch boundaries
 /// by remembering the last row's column values from the previous batch.
-struct StreamState {
+pub(crate) struct StreamState {
     /// Last row's column values from the previous batch (keyed by column name).
     /// `None` means the column value was NULL or no previous batch exists.
-    prev_values: HashMap<String, Option<i64>>,
+    pub(crate) prev_values: HashMap<String, Option<i64>>,
     /// Current group ID (incremented on each boundary).
-    current_gid: i64,
+    pub(crate) current_gid: i64,
 }
 
 impl StreamState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         StreamState {
             prev_values: HashMap::new(),
             current_gid: 0,
@@ -1329,7 +1329,7 @@ impl StreamState {
     }
 
     /// Save the last row's column values from the current batch.
-    fn save_last_row(&mut self, batch: &RecordBatch, name_to_idx: &HashMap<String, usize>) {
+    pub(crate) fn save_last_row(&mut self, batch: &RecordBatch, name_to_idx: &HashMap<String, usize>) {
         let last = batch.num_rows() - 1;
         for (name, idx) in name_to_idx {
             let col = batch.column(*idx);
@@ -1347,7 +1347,7 @@ impl StreamState {
 /// Like `fuse_eval`, but row 0 of each batch compares against `state.prev_values`
 /// instead of unconditionally being `true`. First batch (empty prev_values) still
 /// marks row 0 as boundary.
-fn streaming_fuse_eval(
+pub(crate) fn streaming_fuse_eval(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
@@ -1935,6 +1935,22 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     //   - Skip .sort() node: single partition + file_sort_order is sufficient
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_exprs.is_empty() {
+            // Direct Parquet streaming — bypasses DataFusion for lower overhead
+            match crate::ops::parallel_scan::direct_streaming_group_ordered(
+                table,
+                predicate,
+                parquet_path,
+            ) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("PARALLEL_FALLBACK") {
+                        return Err(e);
+                    }
+                    // Fall through to DataFusion streaming path
+                }
+            }
+
             return streaming_linear_scan_group_id(
                 table,
                 predicate,
@@ -2347,7 +2363,7 @@ fn build_group_metadata_from_boundaries(
 }
 
 /// Build the metadata LTSeqTable from group_id, count, and rn arrays.
-fn build_metadata_table(
+pub(crate) fn build_metadata_table(
     group_ids: Vec<i64>,
     count_values: Vec<i64>,
     rn_values: Vec<i64>,

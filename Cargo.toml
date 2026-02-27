@@ -16,6 +16,12 @@ datafusion = "52.1.0"
 # async executor utilities
 futures-util = "0.3"
 
+# Parallel iteration for sequence engine
+rayon = "1.10"
+
+# Direct Parquet reading (must match datafusion's arrow version)
+parquet = { version = "57.1", default-features = false, features = ["arrow"] }
+
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
 
 [profile.release]

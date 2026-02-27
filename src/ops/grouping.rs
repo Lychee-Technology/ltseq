@@ -189,6 +189,69 @@ fn build_column_list(schema: &ArrowSchema, filter_internal: bool) -> String {
 // Public API Functions
 // ============================================================================
 
+/// Fast path: count groups without building metadata arrays.
+///
+/// Used for `group_ordered(cond).first().count()` — returns just the
+/// number of groups (sessions) without allocating per-row arrays.
+pub fn group_ordered_count_impl(
+    table: &LTSeqTable,
+    grouping_expr: Bound<'_, PyDict>,
+) -> PyResult<usize> {
+    // Deserialize grouping expression
+    let py_expr = dict_to_py_expr(&grouping_expr)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+
+    // Only works for linear scan predicates (shift-based boundary detection)
+    if !can_linear_scan(&py_expr) {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "group_ordered_count only supports shift-based boundary predicates",
+        ));
+    }
+
+    // Try direct Parquet streaming (bypasses DataFusion)
+    if let Some(ref parquet_path) = table.source_parquet_path {
+        if !table.sort_exprs.is_empty() {
+            match crate::ops::parallel_scan::direct_streaming_group_count(
+                table,
+                &py_expr,
+                parquet_path,
+            ) {
+                Ok(count) => return Ok(count),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("PARALLEL_FALLBACK") {
+                        return Err(e);
+                    }
+                    // Fall through to full path
+                }
+            }
+        }
+    }
+
+    // Fallback: do the full group_id computation and count
+    let result = linear_scan_group_id(table, &py_expr)?;
+    let count = RUNTIME.block_on(async {
+        let df = result
+            .dataframe
+            .as_ref()
+            .ok_or_else(|| "No data".to_string())?;
+        // Filter __rn__ == 1 and count
+        let filtered = (**df)
+            .clone()
+            .filter(
+                Expr::Column(datafusion::common::Column::new_unqualified("__rn__"))
+                    .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
+            )
+            .map_err(|e| e.to_string())?;
+        filtered.count().await.map_err(|e| e.to_string())
+    });
+
+    match count {
+        Ok(c) => Ok(c),
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)),
+    }
+}
+
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.
 ///
 /// Supports both simple column references and complex expressions containing
