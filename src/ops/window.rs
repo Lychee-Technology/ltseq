@@ -162,7 +162,7 @@ fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff:
 /// Build SELECT parts for derived window function columns
 async fn build_derived_select_parts(
     schema: &ArrowSchema,
-    derived_cols: &Bound<'_, PyDict>,
+    parsed_cols: &[(String, PyExpr)],
     table: &LTSeqTable,
 ) -> PyResult<Vec<String>> {
     let mut select_parts = Vec::new();
@@ -173,20 +173,9 @@ async fn build_derived_select_parts(
     }
 
     // Add derived columns
-    for (col_name, expr_item) in derived_cols.iter() {
-        let col_name_str = col_name.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
-        })?;
-
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-        })?;
-
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
+    for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert expression to SQL
-        let expr_sql = pyexpr_to_sql(&py_expr, schema)
+        let expr_sql = pyexpr_to_sql(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
         // Check what type of window function this is
@@ -232,22 +221,58 @@ pub fn derive_with_window_functions_impl(
         .as_ref()
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded"))?;
 
+    // Deserialize all expressions once
+    let parsed_cols = parse_derived_cols(derived_cols)?;
+
+    derive_with_window_functions_from_parsed(table, schema, df, &parsed_cols)
+}
+
+/// Internal entry point when expressions are already parsed (avoids double deserialization).
+pub(crate) fn derive_with_window_functions_from_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    df: &Arc<DataFrame>,
+    parsed_cols: &[(String, PyExpr)],
+) -> PyResult<LTSeqTable> {
+    // NOTE: Arrow shift fast path disabled.
+    // The native DataFusion window path (below) stays lazy and benefits from column
+    // pruning and predicate pushdown, making it ~150x faster for Parquet sources
+    // with many columns (e.g., 105-column ClickBench hits table: 0.28s native vs
+    // 42s arrow shift due to eager collect of all columns).
+
     // Try native path first
-    match try_native_window_derive(table, schema, df, derived_cols) {
+    match try_native_window_derive(table, schema, df, parsed_cols) {
         Ok(result) => Ok(result),
         Err(_native_err) => {
-            // Fall back to SQL path
-            derive_with_window_functions_sql_fallback(table, schema, df, derived_cols)
+            derive_with_window_functions_sql_fallback(table, schema, df, parsed_cols)
         }
     }
 }
+
+/// Deserialize derived column expressions from a Python dict into Vec<(String, PyExpr)>.
+pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<Vec<(String, PyExpr)>> {
+    let mut parsed = Vec::with_capacity(derived_cols.len());
+    for (col_name, expr_item) in derived_cols.iter() {
+        let col_name_str = col_name.extract::<String>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
+        })?;
+        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+        })?;
+        let py_expr = dict_to_py_expr(&expr_dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        parsed.push((col_name_str, py_expr));
+    }
+    Ok(parsed)
+}
+
 
 /// Native window derive: convert PyExpr window calls to DataFusion Expr and use df.select()
 fn try_native_window_derive(
     table: &LTSeqTable,
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
-    derived_cols: &Bound<'_, PyDict>,
+    parsed_cols: &[(String, PyExpr)],
 ) -> PyResult<LTSeqTable> {
     // Build the list of select expressions: all existing columns + derived window columns
     let mut all_exprs: Vec<Expr> = Vec::new();
@@ -258,23 +283,12 @@ fn try_native_window_derive(
     }
 
     // Convert each derived column's PyExpr to a native DataFusion window Expr
-    for (col_name, expr_item) in derived_cols.iter() {
-        let col_name_str = col_name.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
-        })?;
-
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-        })?;
-
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
+    for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert to native DataFusion window expression
-        let window_expr = pyexpr_to_window_expr(py_expr, schema, &table.sort_exprs)
+        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_exprs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
 
-        all_exprs.push(window_expr.alias(&col_name_str));
+        all_exprs.push(window_expr.alias(col_name_str));
     }
 
     // Apply via df.select() — stays lazy, no materialization!
@@ -292,6 +306,7 @@ fn try_native_window_derive(
         Arc::clone(&table.session),
         result_df,
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }
 
@@ -300,7 +315,7 @@ fn derive_with_window_functions_sql_fallback(
     table: &LTSeqTable,
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
-    derived_cols: &Bound<'_, PyDict>,
+    parsed_cols: &[(String, PyExpr)],
 ) -> PyResult<LTSeqTable> {
     RUNTIME.block_on(async {
         // Get the data from the current DataFrame as record batches
@@ -340,7 +355,7 @@ fn derive_with_window_functions_sql_fallback(
                 ))
             })?;
 
-        let select_parts = build_derived_select_parts(&batch_schema, derived_cols, table).await?;
+        let select_parts = build_derived_select_parts(&batch_schema, parsed_cols, table).await?;
 
         let sql = format!(
             "SELECT {} FROM \"{}\"",
@@ -362,6 +377,7 @@ fn derive_with_window_functions_sql_fallback(
             Arc::clone(&table.session),
             new_df,
             table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
         ))
     })
 }
@@ -455,6 +471,7 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
         ));
     }
 
@@ -584,6 +601,7 @@ fn try_native_cum_sum(
         Arc::clone(&table.session),
         result_df,
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }
 
@@ -656,6 +674,7 @@ fn cum_sum_sql_fallback(
             Arc::clone(&table.session),
             new_df,
             table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
         ))
     })
 }
@@ -699,5 +718,6 @@ async fn handle_empty_cum_sum(
         dataframe: table.dataframe.as_ref().map(|d| Arc::clone(d)),
         schema: Some(Arc::new(new_arrow_schema)),
         sort_exprs: table.sort_exprs.clone(),
+        source_parquet_path: table.source_parquet_path.clone(),
     })
 }

@@ -425,6 +425,7 @@ fn create_result_table(
         Arc::clone(&table.session),
         batches,
         Vec::new(),
+        None,
     )
 }
 
@@ -544,6 +545,7 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
             Vec::new(),
+            None,
         ));
     }
 

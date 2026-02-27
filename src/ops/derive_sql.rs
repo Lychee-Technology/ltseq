@@ -127,6 +127,7 @@ pub fn derive_window_sql_impl(
             Arc::clone(&table.session),
             Some(empty_schema),
             Vec::new(),
+            table.source_parquet_path.clone(),
         ));
     }
 
@@ -134,5 +135,6 @@ pub fn derive_window_sql_impl(
         Arc::clone(&table.session),
         result_batches,
         Vec::new(),
+        table.source_parquet_path.clone(),
     )
 }

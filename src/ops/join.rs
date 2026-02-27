@@ -142,6 +142,7 @@ fn build_result_table(
         result_batches,
         empty_schema,
         sort_exprs.to_vec(),
+        None,
     )
 }
 

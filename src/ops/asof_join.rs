@@ -248,6 +248,7 @@ pub fn asof_join_impl(
         Arc::clone(&table.session),
         vec![result_batch],
         Vec::new(),
+        table.source_parquet_path.clone(),
     )
 }
 

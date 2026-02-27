@@ -149,7 +149,7 @@ def duckdb_session(data_file):
         WITH Diff AS (
             SELECT userid,
                 CASE WHEN eventtime - LAG(eventtime)
-                    OVER (PARTITION BY userid ORDER BY eventtime) > 1800
+                    OVER (PARTITION BY userid ORDER BY eventtime, watchid) > 1800
                 THEN 1 ELSE 0 END AS is_new
             FROM '{data_file}'
         )
@@ -200,38 +200,28 @@ def duckdb_funnel(data_file, p1, p2, p3):
         FROM (
             SELECT
                 url,
-                LEAD(url) OVER (PARTITION BY userid ORDER BY eventtime) as next1,
-                LEAD(url, 2) OVER (PARTITION BY userid ORDER BY eventtime) as next2,
-                userid,
-                LEAD(userid) OVER (PARTITION BY userid ORDER BY eventtime) as nextuid1,
-                LEAD(userid, 2) OVER (PARTITION BY userid ORDER BY eventtime) as nextuid2
+                LEAD(url) OVER (PARTITION BY userid ORDER BY eventtime, watchid) as next1,
+                LEAD(url, 2) OVER (PARTITION BY userid ORDER BY eventtime, watchid) as next2
             FROM '{data_file}'
         )
-        WHERE url LIKE '{p1}%'
-          AND next1 LIKE '{p2}%'
-          AND next2 LIKE '{p3}%'
+        WHERE starts_with(url, '{p1}')
+          AND starts_with(next1, '{p2}')
+          AND starts_with(next2, '{p3}')
     """).fetchone()[0]
 
 
 def ltseq_funnel(t_sorted, p1, p2, p3):
-    """LTSeq: derive shifted URL columns with partition_by, then filter for consecutive URL matching.
+    """LTSeq: streaming pattern matcher for consecutive URL matching.
 
-    Using partition_by="userid" means LEAD only looks at the same user's next rows,
-    eliminating the need for separate userid shift columns and cross-user filtering.
+    Uses search_pattern_count for single-pass evaluation — only collects
+    the columns needed for predicate evaluation, never computes LEAD/shift.
     """
-    t = t_sorted.derive(
-        lambda r: {
-            "next_url_1": r.url.shift(-1, partition_by="userid"),
-            "next_url_2": r.url.shift(-2, partition_by="userid"),
-        }
+    return t_sorted.search_pattern_count(
+        lambda r: r.url.s.starts_with(p1),
+        lambda r: r.url.s.starts_with(p2),
+        lambda r: r.url.s.starts_with(p3),
+        partition_by="userid",
     )
-    return t.filter(
-        lambda r: (
-            (r.url.s.starts_with(p1))
-            & (r.next_url_1.s.starts_with(p2))
-            & (r.next_url_2.s.starts_with(p3))
-        )
-    ).count()
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +242,7 @@ def print_results_table(results):
     loc_data = {
         "R1: Top URLs": (6, 5),
         "R2: Sessionization": (10, 4),
-        "R3: Funnel": (10, 7),
+        "R3: Funnel": (10, 5),
     }
 
     for r in results:
@@ -372,9 +362,9 @@ def main():
 
     print("Sorting for LTSeq (declaring sort order)...")
     t0 = time.perf_counter()
-    t_ltseq_sorted = t_ltseq.sort("userid", "eventtime")
+    t_ltseq_sorted = t_ltseq.assume_sorted("userid", "eventtime", "watchid")
     sort_time = time.perf_counter() - t0
-    print(f"  LTSeq sort time: {sort_time:.3f}s")
+    print(f"  LTSeq assume_sorted time: {sort_time:.3f}s")
 
     results = []
 

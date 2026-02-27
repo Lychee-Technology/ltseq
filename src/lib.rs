@@ -37,6 +37,7 @@ pub struct LTSeqTable {
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
     sort_exprs: Vec<String>, // Column names used for sorting, for Phase 6 window functions
+    source_parquet_path: Option<String>, // Parquet file path for assume_sorted optimization
 }
 
 /// Helper constructors for LTSeqTable (non-PyO3).
@@ -55,6 +56,7 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         df: DataFrame,
         sort_exprs: Vec<String>,
+        source_parquet_path: Option<String>,
     ) -> Self {
         let schema = Self::schema_from_df(df.schema());
         LTSeqTable {
@@ -62,6 +64,7 @@ impl LTSeqTable {
             dataframe: Some(Arc::new(df)),
             schema: Some(schema),
             sort_exprs,
+            source_parquet_path,
         }
     }
 
@@ -72,12 +75,14 @@ impl LTSeqTable {
         df: DataFrame,
         schema: Arc<ArrowSchema>,
         sort_exprs: Vec<String>,
+        source_parquet_path: Option<String>,
     ) -> Self {
         LTSeqTable {
             session,
             dataframe: Some(Arc::new(df)),
             schema: Some(schema),
             sort_exprs,
+            source_parquet_path,
         }
     }
 
@@ -87,6 +92,7 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
         sort_exprs: Vec<String>,
+        source_parquet_path: Option<String>,
     ) -> PyResult<Self> {
         if batches.is_empty() {
             return Ok(LTSeqTable {
@@ -94,6 +100,7 @@ impl LTSeqTable {
                 dataframe: None,
                 schema: None,
                 sort_exprs,
+                source_parquet_path,
             });
         }
 
@@ -118,6 +125,7 @@ impl LTSeqTable {
             dataframe: Some(Arc::new(result_df)),
             schema: Some(result_schema),
             sort_exprs,
+            source_parquet_path,
         })
     }
 
@@ -127,6 +135,7 @@ impl LTSeqTable {
         batches: Vec<RecordBatch>,
         empty_schema: Arc<ArrowSchema>,
         sort_exprs: Vec<String>,
+        source_parquet_path: Option<String>,
     ) -> PyResult<Self> {
         if batches.is_empty() {
             return Ok(LTSeqTable {
@@ -134,6 +143,7 @@ impl LTSeqTable {
                 dataframe: None,
                 schema: Some(empty_schema),
                 sort_exprs,
+                source_parquet_path,
             });
         }
 
@@ -158,6 +168,7 @@ impl LTSeqTable {
             dataframe: Some(Arc::new(result_df)),
             schema: Some(result_schema),
             sort_exprs,
+            source_parquet_path,
         })
     }
 
@@ -167,12 +178,14 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         schema: Option<Arc<ArrowSchema>>,
         sort_exprs: Vec<String>,
+        source_parquet_path: Option<String>,
     ) -> Self {
         LTSeqTable {
             session,
             dataframe: None,
             schema,
             sort_exprs,
+            source_parquet_path,
         }
     }
 
@@ -212,6 +225,7 @@ impl LTSeqTable {
             dataframe: None,
             schema: None,
             sort_exprs: Vec::new(),
+            source_parquet_path: None,
         }
     }
 
@@ -234,6 +248,7 @@ impl LTSeqTable {
 
             self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
+            self.source_parquet_path = None;
             Ok(())
         })
     }
@@ -255,6 +270,7 @@ impl LTSeqTable {
 
             self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
+            self.source_parquet_path = Some(path);
             Ok(())
         })
     }
@@ -344,20 +360,22 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     The number of rows
-    fn count(&self) -> PyResult<usize> {
+    fn count(&self, py: Python<'_>) -> PyResult<usize> {
         let df = self.dataframe.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "No data loaded. Call read_csv() first.",
             )
         })?;
 
-        RUNTIME.block_on(async {
-            let df_clone = (**df).clone();
-            df_clone.count().await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to count rows: {}",
-                    e
-                ))
+        let df_clone = (**df).clone();
+        py.detach(|| {
+            RUNTIME.block_on(async {
+                df_clone.count().await.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to count rows: {}",
+                        e
+                    ))
+                })
             })
         })
     }
@@ -375,12 +393,15 @@ impl LTSeqTable {
             )
         })?;
 
-        let batches = RUNTIME.block_on(async {
-            (**df).clone().collect().await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to collect data: {}",
-                    e
-                ))
+        let df_clone = (**df).clone();
+        let batches = py.detach(|| {
+            RUNTIME.block_on(async {
+                df_clone.collect().await.map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to collect data: {}",
+                        e
+                    ))
+                })
             })
         })?;
 
@@ -432,6 +453,7 @@ impl LTSeqTable {
                 Arc::clone(&self.session),
                 self.schema.as_ref().map(Arc::clone),
                 self.sort_exprs.clone(),
+                self.source_parquet_path.clone(),
             ));
         }
 
@@ -469,6 +491,7 @@ impl LTSeqTable {
             filtered_df,
             Arc::clone(schema),
             self.sort_exprs.clone(),
+            self.source_parquet_path.clone(),
         ))
     }
 
@@ -486,6 +509,40 @@ impl LTSeqTable {
         crate::ops::basic::search_first_impl(self, expr_dict)
     }
 
+    /// Sequential pattern matching — find rows where consecutive rows match a sequence of predicates
+    ///
+    /// Args:
+    ///     step_predicates: List of serialized predicate expression dicts
+    ///     partition_by: Optional column name for partitioning (pattern cannot cross partition boundaries)
+    ///
+    /// Returns:
+    ///     New LTSeqTable with matching rows (the row where step 1 matched)
+    #[pyo3(signature = (step_predicates, partition_by=None))]
+    fn search_pattern(
+        &self,
+        step_predicates: Vec<Bound<'_, PyDict>>,
+        partition_by: Option<String>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::pattern_match::search_pattern_impl(self, step_predicates, partition_by)
+    }
+
+    /// Sequential pattern matching — count only (no full table collection)
+    ///
+    /// Args:
+    ///     step_predicates: List of serialized predicate expression dicts
+    ///     partition_by: Optional column name for partitioning
+    ///
+    /// Returns:
+    ///     Number of matching pattern instances
+    #[pyo3(signature = (step_predicates, partition_by=None))]
+    fn search_pattern_count(
+        &self,
+        step_predicates: Vec<Bound<'_, PyDict>>,
+        partition_by: Option<String>,
+    ) -> PyResult<usize> {
+        crate::ops::pattern_match::search_pattern_count_impl(self, step_predicates, partition_by)
+    }
+
     /// Select columns or derived expressions
     ///
     /// Args:
@@ -500,6 +557,7 @@ impl LTSeqTable {
                 Arc::clone(&self.session),
                 self.schema.as_ref().map(Arc::clone),
                 self.sort_exprs.clone(),
+                self.source_parquet_path.clone(),
             ));
         }
 
@@ -547,6 +605,7 @@ impl LTSeqTable {
             Arc::clone(&self.session),
             selected_df,
             self.sort_exprs.clone(),
+            self.source_parquet_path.clone(),
         ))
     }
 
@@ -583,6 +642,24 @@ impl LTSeqTable {
         desc_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
         crate::ops::sort::sort_impl(self, sort_exprs, desc_flags)
+    }
+
+    /// Declare sort order without physically sorting the data.
+    ///
+    /// Use when reading pre-sorted data (e.g., pre-sorted Parquet files).
+    /// Sets sort metadata so downstream operations (Arrow shift fast path,
+    /// window functions) recognize the sort order without re-sorting.
+    ///
+    /// Args:
+    ///     sort_exprs: List of serialized column expression dicts
+    ///
+    /// Returns:
+    ///     New LTSeqTable with sort metadata set (same underlying data)
+    fn assume_sorted(
+        &self,
+        sort_exprs: Vec<Bound<'_, PyDict>>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::sort::assume_sorted_impl(self, sort_exprs)
     }
 
     /// Add __group_id__ column for consecutive identical grouping values
@@ -636,6 +713,7 @@ impl LTSeqTable {
                 Arc::clone(&self.session),
                 self.schema.as_ref().map(Arc::clone),
                 self.sort_exprs.clone(),
+                self.source_parquet_path.clone(),
             ));
         }
 
@@ -666,6 +744,7 @@ impl LTSeqTable {
             sliced_df,
             Arc::clone(self.schema.as_ref().unwrap()),
             self.sort_exprs.clone(),
+            self.source_parquet_path.clone(),
         ))
     }
 

@@ -128,6 +128,7 @@ fn create_result_table(
         Arc::clone(session),
         result_df,
         sort_exprs.to_vec(),
+        None,
     )
 }
 
@@ -150,6 +151,7 @@ pub fn distinct_impl(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
         ));
     }
 
@@ -186,6 +188,7 @@ fn distinct_all_columns(
         distinct_df,
         Arc::clone(table.schema.as_ref().unwrap()),
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }
 
@@ -272,6 +275,7 @@ fn distinct_with_keys(
         distinct_df,
         Arc::clone(table.schema.as_ref().unwrap()),
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }
 

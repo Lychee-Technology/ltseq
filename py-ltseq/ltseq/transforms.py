@@ -365,6 +365,67 @@ class TransformMixin(LookupMixin):
 
         return result
 
+    def assume_sorted(
+        self,
+        *keys: str,
+        desc: Union[bool, List[bool]] = False,
+    ) -> "LTSeq":
+        """
+        Declare that data is already sorted by the given keys.
+
+        Sets sort metadata without physically sorting. Use when reading
+        pre-sorted data (e.g., pre-sorted Parquet files) to skip the
+        sort overhead while enabling window functions and the Arrow
+        shift fast path.
+
+        The caller is responsible for ensuring the data is actually
+        sorted in the declared order. Incorrect metadata will produce
+        wrong results.
+
+        Args:
+            *keys: Column names declaring the sort order
+            desc: Descending flag(s) - single bool or list per key
+
+        Returns:
+            LTSeq with sort metadata set (same underlying data)
+
+        Example:
+            >>> t = LTSeq.read_parquet("presorted.parquet")
+            >>> t = t.assume_sorted("userid", "eventtime")
+            >>> t.is_sorted_by("userid")  # True
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() or read_parquet() first."
+            )
+
+        if isinstance(desc, bool):
+            desc_list = [desc] * len(keys)
+        elif isinstance(desc, list):
+            desc_list = desc
+            if len(desc_list) != len(keys):
+                raise ValueError(
+                    f"desc list length ({len(desc_list)}) must match "
+                    f"number of keys ({len(keys)})"
+                )
+        else:
+            raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+
+        key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
+        result_inner = self._inner.assume_sorted(key_exprs)
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+
+        # Track sort keys
+        sort_keys = [(key, desc_list[i]) for i, key in enumerate(keys)]
+        result._sort_keys = sort_keys if sort_keys else None
+
+        return result
+
     def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
         """
         Deduplicate rows by key columns.
@@ -470,3 +531,85 @@ class TransformMixin(LookupMixin):
         total = len(self)
         offset = max(0, total - n)
         return self.slice(offset=offset, length=n)
+
+    def search_pattern(self, *step_predicates: Callable, partition_by: Optional[str] = None) -> "LTSeq":
+        """
+        Find rows where consecutive rows match a sequence of predicates.
+
+        Each step predicate is a lambda evaluated against successive rows.
+        With partition_by, the pattern cannot cross partition boundaries.
+
+        Returns the rows where step 1 matched (i.e., row i where
+        step1(i), step2(i+1), ..., stepN(i+N-1) all match).
+
+        Args:
+            *step_predicates: Lambda predicates for each step in the pattern.
+                             E.g., lambda r: r.url.s.starts_with("http://example.com")
+            partition_by: Optional column name for partitioning. Pattern
+                         matching does not cross partition boundaries.
+
+        Returns:
+            New LTSeq with matching rows
+
+        Example:
+            >>> # Find 3-step URL funnel
+            >>> matches = t.search_pattern(
+            ...     lambda r: r.url.s.starts_with("http://example.com/landing"),
+            ...     lambda r: r.url.s.starts_with("http://example.com/product"),
+            ...     lambda r: r.url.s.starts_with("http://example.com/checkout"),
+            ...     partition_by="userid"
+            ... )
+            >>> print(matches.count())
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() or read_parquet() first."
+            )
+
+        if not step_predicates:
+            raise ValueError("search_pattern requires at least one step predicate")
+
+        step_dicts = [self._capture_expr(p) for p in step_predicates]
+        result_inner = self._inner.search_pattern(step_dicts, partition_by)
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+        result._sort_keys = self._sort_keys
+        return result
+
+    def search_pattern_count(self, *step_predicates: Callable, partition_by: Optional[str] = None) -> int:
+        """
+        Count rows where consecutive rows match a sequence of predicates.
+
+        Optimized version of search_pattern(...).count() that avoids
+        collecting the full table — only collects the columns needed
+        for predicate evaluation.
+
+        Args:
+            *step_predicates: Lambda predicates for each step in the pattern.
+            partition_by: Optional column name for partitioning.
+
+        Returns:
+            Number of matching pattern instances
+
+        Example:
+            >>> count = t.search_pattern_count(
+            ...     lambda r: r.url.s.starts_with("http://example.com/landing"),
+            ...     lambda r: r.url.s.starts_with("http://example.com/product"),
+            ...     lambda r: r.url.s.starts_with("http://example.com/checkout"),
+            ...     partition_by="userid"
+            ... )
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() or read_parquet() first."
+            )
+
+        if not step_predicates:
+            raise ValueError("search_pattern_count requires at least one step predicate")
+
+        step_dicts = [self._capture_expr(p) for p in step_predicates]
+        return self._inner.search_pattern_count(step_dicts, partition_by)

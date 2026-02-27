@@ -62,5 +62,6 @@ pub fn search_first_impl(
         Arc::clone(&table.session),
         result_df,
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }

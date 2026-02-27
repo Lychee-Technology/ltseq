@@ -80,16 +80,11 @@ fn extract_partition_by(
     };
     match pb {
         // partition_by="col_name" — string literal used as column name
-        PyExpr::Literal {
-            value,
-            dtype,
-        } if dtype == "String" || dtype == "Utf8" => {
+        PyExpr::Literal { value, dtype } if dtype == "String" || dtype == "Utf8" => {
             Ok(vec![col(value)])
         }
         // partition_by=r.col — column expression
-        PyExpr::Column(name) => {
-            Ok(vec![col(name)])
-        }
+        PyExpr::Column(name) => Ok(vec![col(name)]),
         // Any other expression — try converting through the standard path
         other => {
             let expr = pyexpr_to_datafusion(other.clone(), schema)?;
@@ -104,7 +99,7 @@ fn extract_partition_by(
 /// functions — calling `.window_frame()` or `.partition_by()` on `Expr::AggregateFunction`
 /// returns an empty builder that produces errors on `.build()`. Instead, we manually
 /// extract the aggregate UDF and args, then construct `Expr::WindowFunction` directly.
-fn aggregate_to_window(
+pub(crate) fn aggregate_to_window(
     agg_expr: Expr,
     partition_by: Vec<Expr>,
     order_by: Vec<Sort>,
@@ -138,7 +133,7 @@ fn aggregate_to_window(
 /// functions like lag/lead). For aggregate-as-window functions (cum_sum, rolling),
 /// use `aggregate_to_window()` instead.
 /// When order_by is empty (unsorted table), we skip the order_by clause but still build.
-fn finalize_window_expr(
+pub(crate) fn finalize_window_expr(
     window_expr: Expr,
     partition_by_exprs: Vec<Expr>,
     order_by: &[Sort],
@@ -291,11 +286,7 @@ fn convert_shift(
 /// Convert diff(n) to col - lag(col, n) with ORDER BY
 ///
 /// Supports `partition_by` kwarg: `diff(n, partition_by="col")`
-fn convert_diff(
-    py_expr: &PyExpr,
-    schema: &ArrowSchema,
-    order_by: &[Sort],
-) -> Result<Expr, String> {
+fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Result<Expr, String> {
     if let PyExpr::Call {
         on, args, kwargs, ..
     } = py_expr
@@ -318,8 +309,7 @@ fn convert_diff(
 
         // Build: col - lag(col, periods) with ORDER BY and optional PARTITION BY
         let lag_expr = lag(col_expr.clone(), Some(periods), None);
-        let lag_with_order =
-            finalize_window_expr(lag_expr, partition_by_exprs, order_by, "diff")?;
+        let lag_with_order = finalize_window_expr(lag_expr, partition_by_exprs, order_by, "diff")?;
 
         Ok(col_expr - lag_with_order)
     } else {
@@ -405,7 +395,7 @@ fn convert_rolling_agg(
             let frame = WindowFrame::new_bounds(
                 WindowFrameUnits::Rows,
                 WindowFrameBound::Preceding(ScalarValue::UInt64(Some(
-                    (window_size - 1).max(0) as u64,
+                    (window_size - 1).max(0) as u64
                 ))),
                 WindowFrameBound::CurrentRow,
             );

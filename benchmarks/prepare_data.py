@@ -85,7 +85,7 @@ def sort_data():
         COPY (
             SELECT {select_str}
             FROM '{HITS_RAW}'
-            ORDER BY userid, eventtime
+            ORDER BY userid, eventtime, watchid
         ) TO '{HITS_SORTED}' (FORMAT 'parquet')
     """)
     elapsed = time.perf_counter() - t0

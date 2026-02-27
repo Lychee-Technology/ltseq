@@ -163,5 +163,6 @@ pub fn align_impl(
         result_batches,
         Arc::clone(&batch_schema),
         Vec::new(),
+        table.source_parquet_path.clone(),
     )
 }

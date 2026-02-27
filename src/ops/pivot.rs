@@ -194,6 +194,7 @@ pub fn pivot_impl(
         result_batches,
         result_schema,
         Vec::new(),
+        None,
     )
 }
 

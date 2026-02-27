@@ -40,9 +40,12 @@
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
 
 // Core modules
+pub mod arrow_shift;
 pub mod basic;
 pub mod derive;
 pub mod io;
+pub mod linear_scan;
+pub mod pattern_match;
 pub mod set_ops;
 pub mod window;
 

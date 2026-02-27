@@ -19,7 +19,7 @@
 
 use crate::engine::RUNTIME;
 use crate::transpiler::pyexpr_to_datafusion;
-use crate::types::dict_to_py_expr;
+use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
@@ -38,29 +38,9 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     // 1. Get schema and DataFrame
     let (df, schema) = table.require_df_and_schema()?;
 
-    // 2. Check if any derived column contains window functions
+    // 2. Deserialize all expressions once (avoids double deserialization)
+    let mut parsed_cols: Vec<(String, PyExpr)> = Vec::with_capacity(derived_cols.len());
     let mut has_window_functions = false;
-    for (_, expr_item) in derived_cols.iter() {
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-        })?;
-
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-        if crate::transpiler::contains_window_function(&py_expr) {
-            has_window_functions = true;
-            break;
-        }
-    }
-
-    // 3. Handle window functions using SQL
-    if has_window_functions {
-        return crate::ops::window::derive_with_window_functions_impl(table, derived_cols);
-    }
-
-    // 4. Standard (non-window) derivation using DataFusion expressions
-    let mut df_exprs = Vec::new();
 
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
@@ -74,6 +54,24 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         let py_expr = dict_to_py_expr(&expr_dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
+        if crate::transpiler::contains_window_function(&py_expr) {
+            has_window_functions = true;
+        }
+
+        parsed_cols.push((col_name_str, py_expr));
+    }
+
+    // 3. Handle window functions — pass pre-parsed expressions to avoid re-deserialization
+    if has_window_functions {
+        return crate::ops::window::derive_with_window_functions_from_parsed(
+            table, schema, &df, &parsed_cols,
+        );
+    }
+
+    // 4. Standard (non-window) derivation using already-parsed expressions
+    let mut df_exprs = Vec::new();
+
+    for (col_name_str, py_expr) in parsed_cols {
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
             .alias(&col_name_str);
@@ -109,6 +107,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         Arc::clone(&table.session),
         result_df,
         table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
     ))
 }
 
