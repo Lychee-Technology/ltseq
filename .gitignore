@@ -8,3 +8,4 @@ __pycache__/
 # Benchmark data files (large parquet datasets)
 benchmarks/data/*.parquet
 .opencode/
+.claude/
