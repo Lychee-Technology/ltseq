@@ -14,6 +14,7 @@
 //! * `nearest`: Find closest right.time (backward bias on ties)
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
@@ -41,10 +42,11 @@ pub fn asof_join_impl(
     match direction {
         "backward" | "forward" | "nearest" => {}
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Invalid direction '{}'. Must be 'backward', 'forward', or 'nearest'",
                 direction
-            )))
+            ))
+            .into())
         }
     }
 
@@ -56,14 +58,14 @@ pub fn asof_join_impl(
 
             let left_result = left_future
                 .await
-                .map_err(|e| format!("Failed to collect left table: {}", e))?;
+                .map_err(|e| LtseqError::collect(e))?;
             let right_result = right_future
                 .await
-                .map_err(|e| format!("Failed to collect right table: {}", e))?;
+                .map_err(|e| LtseqError::collect(e))?;
 
-            Ok::<_, String>((left_result, right_result))
+            Ok::<_, LtseqError>((left_result, right_result))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| PyErr::from(e))?;
 
     // 4. Get actual schemas from batches
     let left_schema = left_batches
@@ -82,7 +84,7 @@ pub fn asof_join_impl(
         .iter()
         .position(|f| f.name() == left_time_col)
         .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            LtseqError::Validation(format!(
                 "Time column '{}' not found in left table. Available: {:?}",
                 left_time_col,
                 left_schema
@@ -98,7 +100,7 @@ pub fn asof_join_impl(
         .iter()
         .position(|f| f.name() == right_time_col)
         .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            LtseqError::Validation(format!(
                 "Time column '{}' not found in right table. Available: {:?}",
                 right_time_col,
                 right_schema
@@ -171,7 +173,7 @@ pub fn asof_join_impl(
         Some(
             datafusion::arrow::compute::concat_batches(&left_schema, &left_batches).map_err(
                 |e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    LtseqError::Runtime(format!(
                         "Failed to concatenate left batches: {}",
                         e
                     ))
@@ -187,7 +189,7 @@ pub fn asof_join_impl(
         Some(
             datafusion::arrow::compute::concat_batches(&right_schema, &right_batches).map_err(
                 |e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    LtseqError::Runtime(format!(
                         "Failed to concatenate right batches: {}",
                         e
                     ))
@@ -215,7 +217,7 @@ pub fn asof_join_impl(
             let col = right_batch.column(col_idx);
             let result =
                 datafusion::arrow::compute::take(col, &indices_array, None).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    LtseqError::Runtime(format!(
                         "Failed to take right values: {}",
                         e
                     ))
@@ -237,7 +239,7 @@ pub fn asof_join_impl(
         result_columns,
     )
     .map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+        LtseqError::Runtime(format!(
             "Failed to create result batch: {}",
             e
         ))
@@ -314,7 +316,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                 .as_any()
                 .downcast_ref::<array::Int64Array>()
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Int64Array")
+                    LtseqError::Validation("Failed to cast to Int64Array".into())
                 })?;
             for i in 0..len {
                 values.push(if arr.is_null(i) {
@@ -329,7 +331,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                 .as_any()
                 .downcast_ref::<array::Int32Array>()
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Int32Array")
+                    LtseqError::Validation("Failed to cast to Int32Array".into())
                 })?;
             for i in 0..len {
                 values.push(if arr.is_null(i) {
@@ -344,8 +346,8 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                 .as_any()
                 .downcast_ref::<array::Float64Array>()
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "Failed to cast to Float64Array",
+                    LtseqError::Validation(
+                        "Failed to cast to Float64Array".into(),
                     )
                 })?;
             for i in 0..len {
@@ -400,9 +402,10 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                     });
                 }
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Unsupported timestamp type for asof join time column",
-                ));
+                return Err(LtseqError::Validation(
+                    "Unsupported timestamp type for asof join time column".into(),
+                )
+                .into());
             }
         }
         DataType::Date32 => {
@@ -410,7 +413,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                 .as_any()
                 .downcast_ref::<array::Date32Array>()
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Date32Array")
+                    LtseqError::Validation("Failed to cast to Date32Array".into())
                 })?;
             for i in 0..len {
                 values.push(if arr.is_null(i) {
@@ -425,7 +428,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
                 .as_any()
                 .downcast_ref::<array::Date64Array>()
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to cast to Date64Array")
+                    LtseqError::Validation("Failed to cast to Date64Array".into())
                 })?;
             for i in 0..len {
                 values.push(if arr.is_null(i) {
@@ -436,10 +439,11 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
             }
         }
         other => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Unsupported data type '{}' for asof join time column",
                 other
-            )));
+            ))
+            .into());
         }
     }
 

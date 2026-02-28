@@ -43,19 +43,84 @@ class LTSeq(
         )
         self._name: Optional[str] = None  # Table name for lookup operations
 
-    def show(self, n: int = 10) -> None:
+    def show(self, n: int = 10) -> "LTSeq":
         """
         Display the data as a pretty-printed ASCII table.
+
+        Returns self for method chaining.
 
         Args:
             n: Maximum number of rows to display (default 10)
 
+        Returns:
+            self (for chaining)
+
         Example:
             >>> t = LTSeq.read_csv("data.csv")
             >>> t.show()
+            >>> t.filter(lambda r: r.active).show().derive(upper=lambda r: r.name.s.upper())
         """
         out = self._inner.show(n)
         print(out)
+        return self
+
+    def __repr__(self) -> str:
+        """
+        Return a string representation for REPL / notebook display.
+
+        Shows table dimensions, column names with types, and a preview.
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> t  # Shows schema + preview
+        """
+        if not self._schema:
+            return "LTSeq(empty, no schema)"
+
+        try:
+            n_rows = self._inner.count()
+        except Exception:
+            n_rows = "?"
+
+        n_cols = len(self._schema)
+        header = f"LTSeq(rows={n_rows}, cols={n_cols})"
+
+        # Show column info
+        col_info = ", ".join(
+            f"{name}: {dtype}" for name, dtype in self._schema.items()
+        )
+        if len(col_info) > 120:
+            col_info = col_info[:117] + "..."
+
+        # Try to get a preview
+        try:
+            preview = self._inner.show(5)
+        except Exception:
+            preview = "(no data loaded)"
+
+        return f"{header}\nColumns: [{col_info}]\n{preview}"
+
+    def pipe(self, func, *args, **kwargs) -> "LTSeq":
+        """
+        Apply a function to this table, enabling functional composition in chains.
+
+        Useful for inserting custom transformation steps into method chains.
+
+        Args:
+            func: A callable that takes an LTSeq as its first argument
+                  and returns an LTSeq.
+            *args: Additional positional arguments passed to func.
+            **kwargs: Additional keyword arguments passed to func.
+
+        Returns:
+            The result of func(self, *args, **kwargs)
+
+        Example:
+            >>> def add_age_bucket(t):
+            ...     return t.derive(bucket=lambda r: if_else(r.age > 30, "senior", "junior"))
+            >>> t.filter(lambda r: r.active).pipe(add_age_bucket).show()
+        """
+        return func(self, *args, **kwargs)
 
     def to_pandas(self):
         """
@@ -192,6 +257,20 @@ class LTSeq(
             >>> print(t.columns)  # ["id", "name", "age"]
         """
         return list(self._schema.keys())
+
+    @property
+    def dtypes(self) -> List[Tuple[str, str]]:
+        """
+        Return list of (column_name, data_type) tuples.
+
+        Returns:
+            List of (name, type) tuples
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.dtypes)  # [("id", "Int64"), ("name", "Utf8"), ...]
+        """
+        return list(self._schema.items())
 
     @property
     def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:

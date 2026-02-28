@@ -538,10 +538,13 @@ class TestAbsEndToEnd:
         assert serialized["type"] == "Call"
         assert serialized["func"] == "abs"
 
-    def test_abs_in_plain_derive_errors(self, numbers_table):
-        """abs() in plain derive raises ValueError (requires window context)."""
-        with pytest.raises(ValueError, match="window context"):
-            numbers_table.derive(ax=lambda r: abs(r.x))
+    def test_abs_in_plain_derive_works(self, numbers_table):
+        """abs() in plain derive works as a scalar function."""
+        result = numbers_table.derive(ax=lambda r: abs(r.x))
+        df = result.to_pandas()
+        assert "ax" in df.columns
+        # All absolute values should be non-negative
+        assert (df["ax"] >= 0).all()
 
 
 class TestFillNullEndToEnd:

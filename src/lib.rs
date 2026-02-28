@@ -10,15 +10,16 @@ use std::sync::Arc;
 // Global Tokio runtime for async operations
 
 // Module declarations - Organized for better maintainability
-pub mod cursor;
-pub mod engine; // DataFusion session and LTSeqTable struct
+pub(crate) mod cursor;
+pub(crate) mod engine; // DataFusion session and LTSeqTable struct
 mod error;
-pub mod format; // Formatting and display functions
-pub mod ops; // Table operations grouped by category
-pub mod transpiler; // PyExpr to DataFusion transpilation
+pub(crate) mod format; // Formatting and display functions
+pub(crate) mod ops; // Table operations grouped by category
+pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // Streaming cursor for lazy iteration
 
 // Re-exports for internal use
+pub(crate) use error::LtseqError;
 pub(crate) use format::format_table;
 pub(crate) use types::{dict_to_py_expr, PyExpr};
 
@@ -106,19 +107,12 @@ impl LTSeqTable {
 
         let result_schema = batches[0].schema();
         let mem_table =
-            MemTable::try_new(Arc::clone(&result_schema), vec![batches]).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create table: {}",
-                    e
-                ))
-            })?;
+            MemTable::try_new(Arc::clone(&result_schema), vec![batches])
+                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
 
-        let result_df = session.read_table(Arc::new(mem_table)).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read table: {}",
-                e
-            ))
-        })?;
+        let result_df = session
+            .read_table(Arc::new(mem_table))
+            .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
 
         Ok(LTSeqTable {
             session,
@@ -149,19 +143,12 @@ impl LTSeqTable {
 
         let result_schema = batches[0].schema();
         let mem_table =
-            MemTable::try_new(Arc::clone(&result_schema), vec![batches]).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create table: {}",
-                    e
-                ))
-            })?;
+            MemTable::try_new(Arc::clone(&result_schema), vec![batches])
+                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
 
-        let result_df = session.read_table(Arc::new(mem_table)).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read table: {}",
-                e
-            ))
-        })?;
+        let result_df = session
+            .read_table(Arc::new(mem_table))
+            .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
 
         Ok(LTSeqTable {
             session,
@@ -191,20 +178,16 @@ impl LTSeqTable {
 
     /// Get a reference to the DataFrame, or return a PyErr if no data is loaded.
     pub(crate) fn require_df(&self) -> PyResult<&Arc<DataFrame>> {
-        self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })
+        self.dataframe
+            .as_ref()
+            .ok_or_else(|| LtseqError::NoData.into())
     }
 
     /// Get a reference to the schema, or return a PyErr if unavailable.
     pub(crate) fn require_schema(&self) -> PyResult<&Arc<ArrowSchema>> {
-        self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })
+        self.schema
+            .as_ref()
+            .ok_or_else(|| LtseqError::NoSchema.into())
     }
 
     /// Get references to both the DataFrame and schema.
@@ -239,12 +222,11 @@ impl LTSeqTable {
         RUNTIME.block_on(async {
             // Use DataFusion's built-in CSV reader with has_header option
             let options = CsvReadOptions::new().has_header(has_header);
-            let df = self.session.read_csv(&path, options).await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to read CSV: {}",
-                    e
-                ))
-            })?;
+            let df = self
+                .session
+                .read_csv(&path, options)
+                .await
+                .map_err(|e| LtseqError::io("Failed to read CSV", e))?;
 
             self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
@@ -261,12 +243,11 @@ impl LTSeqTable {
     fn read_parquet(&mut self, path: String) -> PyResult<()> {
         RUNTIME.block_on(async {
             let options = ParquetReadOptions::default();
-            let df = self.session.read_parquet(&path, options).await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to read Parquet: {}",
-                    e
-                ))
-            })?;
+            let df = self
+                .session
+                .read_parquet(&path, options)
+                .await
+                .map_err(|e| LtseqError::io("Failed to read Parquet", e))?;
 
             self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
             self.dataframe = Some(Arc::new(df));
@@ -291,7 +272,7 @@ impl LTSeqTable {
     fn scan_csv(path: String, has_header: bool) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
         crate::cursor::create_cursor_from_csv(session, &path, has_header)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+            .map_err(|e| LtseqError::Runtime(e).into())
     }
 
     /// Scan Parquet file and return a streaming cursor
@@ -305,7 +286,7 @@ impl LTSeqTable {
     fn scan_parquet(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
         crate::cursor::create_cursor_from_parquet(session, &path)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+            .map_err(|e| LtseqError::Runtime(e).into())
     }
 
     /// Display the data as a pretty-printed ASCII table
@@ -316,25 +297,23 @@ impl LTSeqTable {
     /// Returns:
     ///     Formatted table as string
     fn show(&self, n: usize) -> PyResult<String> {
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self
+            .dataframe
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
 
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-        })?;
+        let schema = self
+            .schema
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoSchema))?;
 
         RUNTIME.block_on(async {
             // Clone the DataFrame to collect data
             let df_clone = (**df).clone();
-            let batches = df_clone.collect().await.map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to collect data: {}",
-                    e
-                ))
-            })?;
+            let batches = df_clone
+                .collect()
+                .await
+                .map_err(|e| LtseqError::collect(e))?;
 
             let output = format_table(&batches, schema, n)?;
             Ok(output)
@@ -346,9 +325,10 @@ impl LTSeqTable {
     /// Returns:
     ///     List of column names as strings
     fn get_column_names(&self) -> PyResult<Vec<String>> {
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-        })?;
+        let schema = self
+            .schema
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoSchema))?;
         Ok(schema
             .fields()
             .iter()
@@ -361,21 +341,18 @@ impl LTSeqTable {
     /// Returns:
     ///     The number of rows
     fn count(&self, py: Python<'_>) -> PyResult<usize> {
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self
+            .dataframe
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
 
         let df_clone = (**df).clone();
         py.detach(|| {
             RUNTIME.block_on(async {
-                df_clone.count().await.map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to count rows: {}",
-                        e
-                    ))
-                })
+                df_clone
+                    .count()
+                    .await
+                    .map_err(|e| LtseqError::with_context("Failed to count rows", e).into())
             })
         })
     }
@@ -387,21 +364,18 @@ impl LTSeqTable {
     fn to_arrow_ipc(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         use datafusion::arrow::ipc::writer::StreamWriter;
 
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self
+            .dataframe
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
 
         let df_clone = (**df).clone();
         let batches = py.detach(|| {
             RUNTIME.block_on(async {
-                df_clone.collect().await.map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to collect data: {}",
-                        e
-                    ))
-                })
+                df_clone
+                    .collect()
+                    .await
+                    .map_err(|e| LtseqError::collect(e))
             })
         })?;
 
@@ -410,24 +384,13 @@ impl LTSeqTable {
             let mut buffer = Vec::new();
             {
                 let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
-                    .map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Failed to create IPC writer: {}",
-                            e
-                        ))
-                    })?;
-                writer.write(batch).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to write IPC batch: {}",
-                        e
-                    ))
-                })?;
-                writer.finish().map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to finish IPC stream: {}",
-                        e
-                    ))
-                })?;
+                    .map_err(|e| LtseqError::with_context("Failed to create IPC writer", e))?;
+                writer
+                    .write(batch)
+                    .map_err(|e| LtseqError::with_context("Failed to write IPC batch", e))?;
+                writer
+                    .finish()
+                    .map_err(|e| LtseqError::with_context("Failed to finish IPC stream", e))?;
             }
             result.push(pyo3::types::PyBytes::new(py, &buffer).into());
         }
@@ -444,8 +407,7 @@ impl LTSeqTable {
     ///     New LTSeqTable with filtered data
     fn filter(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         // 1. Deserialize expression
-        let py_expr = dict_to_py_expr(expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         // If no dataframe, return empty result (for unit tests)
         if self.dataframe.is_none() {
@@ -458,22 +420,14 @@ impl LTSeqTable {
         }
 
         // 2. Get schema (required for transpilation)
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available. Call read_csv() first.",
-            )
-        })?;
+        let schema = self.require_schema()?;
 
         // 3. Transpile to DataFusion expr
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Transpile(e))?;
 
         // 4. Get DataFrame
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self.require_df()?;
 
         // 5. Apply filter (async operation)
         let filtered_df = RUNTIME
@@ -483,7 +437,7 @@ impl LTSeqTable {
                     .filter(df_expr)
                     .map_err(|e| format!("Filter execution failed: {}", e))
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
 
         // 6. Return new LTSeqTable with filtered data (schema unchanged)
         Ok(LTSeqTable::from_df_with_schema(
@@ -562,33 +516,24 @@ impl LTSeqTable {
         }
 
         // 1. Get schema
-        let schema = self.schema.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Schema not available. Call read_csv() first.",
-            )
-        })?;
+        let schema = self.require_schema()?;
 
         // 2. Deserialize and transpile all expressions
         let mut df_exprs = Vec::new();
 
         for expr_dict in exprs {
             // Deserialize
-            let py_expr = dict_to_py_expr(&expr_dict)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let py_expr = dict_to_py_expr(&expr_dict)?;
 
             // Transpile
             let df_expr = pyexpr_to_datafusion(py_expr, schema)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+                .map_err(|e| LtseqError::Transpile(e))?;
 
             df_exprs.push(df_expr);
         }
 
         // 3. Get DataFrame
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self.require_df()?;
 
         // 4. Apply select (async operation)
         let selected_df = RUNTIME
@@ -598,7 +543,7 @@ impl LTSeqTable {
                     .select(df_exprs)
                     .map_err(|e| format!("Select execution failed: {}", e))
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
 
         // 5. Return new LTSeqTable with recomputed schema
         Ok(LTSeqTable::from_df(
@@ -727,11 +672,7 @@ impl LTSeqTable {
         }
 
         // Get DataFrame
-        let df = self.dataframe.as_ref().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "No data loaded. Call read_csv() first.",
-            )
-        })?;
+        let df = self.require_df()?;
 
         // Apply slice: use limit() with offset and fetch parameters
         let sliced_df = RUNTIME
@@ -745,13 +686,14 @@ impl LTSeqTable {
                     .limit(skip, fetch)
                     .map_err(|e| format!("Slice execution failed: {}", e))
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
 
         // Return new LTSeqTable with sliced data (schema unchanged)
+        let schema = self.require_schema()?;
         Ok(LTSeqTable::from_df_with_schema(
             Arc::clone(&self.session),
             sliced_df,
-            Arc::clone(self.schema.as_ref().unwrap()),
+            Arc::clone(schema),
             self.sort_exprs.clone(),
             self.source_parquet_path.clone(),
         ))
@@ -1123,6 +1065,28 @@ impl LTSeqTable {
     ///     path: Path to the output CSV file
     fn write_csv(&self, path: String) -> PyResult<()> {
         crate::ops::io::write_csv_impl(self, path)
+    }
+
+    /// Write table data to a Parquet file
+    ///
+    /// Args:
+    ///     path: Path to the output Parquet file
+    ///     compression: Optional compression algorithm ("snappy", "zstd", "gzip", "lz4", "none")
+    #[pyo3(signature = (path, compression=None))]
+    fn write_parquet(&self, path: String, compression: Option<String>) -> PyResult<()> {
+        crate::ops::io::write_parquet_impl(self, path, compression)
+    }
+
+    /// Load Arrow IPC bytes into a new LTSeqTable.
+    ///
+    /// This is the reverse of to_arrow_ipc() — accepts IPC-serialized RecordBatch
+    /// bytes from Python's pyarrow and creates a DataFusion-backed table.
+    ///
+    /// Args:
+    ///     ipc_buffers: List of bytes objects, each an Arrow IPC-serialized RecordBatch
+    #[staticmethod]
+    fn load_arrow_ipc(ipc_buffers: Vec<Vec<u8>>) -> PyResult<LTSeqTable> {
+        crate::ops::io::load_arrow_ipc_impl(ipc_buffers)
     }
 
     /// Is Subset: Check if this table is a subset of another table

@@ -132,67 +132,52 @@ class JoinMixin:
         result_schema = _build_join_result_schema(self._schema, other._schema, "_other")
         return LTSeq._from_rows(rows, result_schema)
 
-    def join(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+    def join(
+        self,
+        other: "LTSeq",
+        on: Callable,
+        how: str = "inner",
+        strategy: Optional[str] = None,
+    ) -> "LTSeq":
         """
-        Standard SQL-style hash join between two tables.
+        Join two tables with configurable strategy.
 
         Args:
             other: Another LTSeq table to join with
             on: Lambda specifying join condition.
                 E.g., lambda a, b: a.user_id == b.user_id
             how: Join type: "inner", "left", "right", "full"
+            strategy: Join strategy (optional):
+                - None: default hash join
+                - "hash": explicit hash join (same as None)
+                - "merge": merge join for pre-sorted tables (validates sort order)
 
         Returns:
             Joined LTSeq with columns from both tables
 
+        Raises:
+            ValueError: If strategy="merge" and tables are not sorted by join keys
+
         Example:
             >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id)
+            >>> result = t1.sort("id").join(t2.sort("id"),
+            ...     on=lambda a, b: a.id == b.id, strategy="merge")
         """
+        valid_strategies = {None, "hash", "merge"}
+        if strategy not in valid_strategies:
+            raise ValueError(
+                f"Invalid strategy '{strategy}'. Must be one of: None, 'hash', 'merge'"
+            )
+
+        if strategy == "merge":
+            return self._join_with_sort_validation(other, on, how)
+
         return self._execute_join(other, on, how, "join")
 
-    def join_merge(
-        self, other: "LTSeq", on: Callable, join_type: str = "inner"
+    def _join_with_sort_validation(
+        self, other: "LTSeq", on: Callable, how: str
     ) -> "LTSeq":
-        """
-        Merge join for pre-sorted tables.
-
-        Both tables should be sorted by the join key for optimal O(N+M) performance.
-
-        Args:
-            other: Another LTSeq table
-            on: Lambda specifying join condition
-            join_type: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-
-        Example:
-            >>> result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
-        """
-        return self._execute_join(other, on, join_type, "join_merge")
-
-    def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
-        """
-        Merge join with sort order validation.
-
-        Validates both tables are sorted by join keys before executing.
-
-        Args:
-            other: Another LTSeq table (must be sorted by join key)
-            on: Lambda specifying join condition
-            how: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-
-        Raises:
-            ValueError: If tables not sorted by join keys
-
-        Example:
-            >>> t1_sorted = t1.sort("id")
-            >>> t2_sorted = t2.sort("id")
-            >>> result = t1_sorted.join_sorted(t2_sorted, on=lambda a, b: a.id == b.id)
-        """
+        """Merge join with sort order validation (used by strategy='merge')."""
         from .core import LTSeq
 
         _validate_join_inputs(self, other, how)
@@ -224,7 +209,7 @@ class JoinMixin:
             if not self.is_sorted_by(left_key_col, desc=expected_desc):
                 raise ValueError(
                     f"Left table is not sorted by '{left_key_col}'. "
-                    f"Use .sort('{left_key_col}') first or use join_merge() instead."
+                    f"Use .sort('{left_key_col}') first or use join() without strategy instead."
                 )
 
         if right_key_col:
@@ -232,7 +217,7 @@ class JoinMixin:
             if not other.is_sorted_by(right_key_col, desc=expected_desc):
                 raise ValueError(
                     f"Right table is not sorted by '{right_key_col}'. "
-                    f"Use .sort('{right_key_col}') first or use join_merge() instead."
+                    f"Use .sort('{right_key_col}') first or use join() without strategy instead."
                 )
 
         # Check sort directions match
@@ -255,7 +240,7 @@ class JoinMixin:
             import warnings
 
             warnings.warn(
-                f"Rust join_sorted failed: {e}. Falling back to pandas.",
+                f"Rust merge join failed: {e}. Falling back to pandas.",
                 RuntimeWarning,
             )
             return self._join_pandas_fallback(other, on, how, left_key_expr)
@@ -266,6 +251,58 @@ class JoinMixin:
             self._schema, other._schema, "_other"
         )
         return result
+
+    def join_merge(
+        self, other: "LTSeq", on: Callable, join_type: str = "inner"
+    ) -> "LTSeq":
+        """
+        Merge join for pre-sorted tables.
+
+        .. deprecated::
+            Use ``join(..., strategy="merge")`` instead.
+
+        Args:
+            other: Another LTSeq table
+            on: Lambda specifying join condition
+            join_type: Join type: "inner", "left", "right", "full"
+
+        Returns:
+            Joined LTSeq
+        """
+        import warnings
+
+        warnings.warn(
+            "join_merge() is deprecated. Use join(..., strategy='merge') instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Preserve original behavior: no sort validation (unlike strategy="merge")
+        return self._execute_join(other, on, join_type, "join_merge")
+
+    def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
+        """
+        Merge join with sort order validation.
+
+        .. deprecated::
+            Use ``join(..., strategy="merge")`` instead.
+
+        Args:
+            other: Another LTSeq table (must be sorted by join key)
+            on: Lambda specifying join condition
+            how: Join type: "inner", "left", "right", "full"
+
+        Returns:
+            Joined LTSeq
+        """
+        import warnings
+
+        warnings.warn(
+            "join_sorted() is deprecated. Use join(..., strategy='merge') instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Preserve original behavior: sort validation (same as strategy="merge")
+        return self._join_with_sort_validation(other, on, how)
 
     def _get_sort_direction(self, col_name: str) -> Optional[bool]:
         """Get sort direction for a column, or None if not sorted by it."""

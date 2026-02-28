@@ -81,6 +81,9 @@ class AggregationMixin:
 
         return NestedTable(self, grouping_fn, is_sorted=False)
 
+    # Alias: group_consecutive is a more descriptive name for group_ordered
+    group_consecutive = group_ordered
+
     def group_sorted(self, key: Callable) -> "NestedTable":
         """
         Group by key assuming data is globally sorted.

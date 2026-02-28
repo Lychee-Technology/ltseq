@@ -3,6 +3,7 @@
 //! Provides derive operations using raw SQL window expressions.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::datasource::MemTable;
@@ -36,7 +37,7 @@ pub fn derive_window_sql_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     let batch_schema = if let Some(first_batch) = current_batches.first() {
         first_batch.schema()
@@ -47,7 +48,7 @@ pub fn derive_window_sql_impl(
     let temp_table_name = format!("__ltseq_derive_temp_{}", std::process::id());
     let temp_table =
         MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to create memory table: {}",
                 e
             ))
@@ -59,7 +60,7 @@ pub fn derive_window_sql_impl(
         .session
         .register_table(&temp_table_name, Arc::new(temp_table))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to register temp table: {}",
                 e
             ))
@@ -101,7 +102,7 @@ pub fn derive_window_sql_impl(
                 .await
                 .map_err(|e| format!("Failed to collect derive results: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     let _ = table.session.deregister_table(&temp_table_name);
 

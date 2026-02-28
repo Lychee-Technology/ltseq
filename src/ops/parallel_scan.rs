@@ -9,6 +9,7 @@
 //! 2. **Parallel partitioned** (R3 pattern matching): Read row groups in parallel,
 //!    split by partition key, run pattern matching per-partition in parallel.
 
+use crate::error::LtseqError;
 use crate::ops::linear_scan::{
     build_metadata_table, extract_referenced_columns, streaming_fuse_eval, StreamState,
 };
@@ -49,16 +50,11 @@ pub fn direct_streaming_group_ordered(
     extract_referenced_columns(predicate, &mut needed_cols);
 
     // Step 2: Open Parquet and build projection
-    let file = File::open(parquet_path).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to open Parquet: {}", e))
-    })?;
+    let file = File::open(parquet_path)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to read Parquet metadata: {}",
-            e
-        ))
-    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
 
     let parquet_schema = builder.schema().clone();
     let total_rows_estimate = builder.metadata().file_metadata().num_rows() as usize;
@@ -83,12 +79,7 @@ pub fn direct_streaming_group_ordered(
         .with_projection(projection_mask)
         .with_batch_size(65536)
         .build()
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to build Parquet reader: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to build Parquet reader: {}", e)))?;
 
     let mut state = StreamState::new();
     let mut group_ids: Vec<i64> = Vec::with_capacity(total_rows_estimate);
@@ -96,12 +87,8 @@ pub fn direct_streaming_group_ordered(
     let mut idx_built = false;
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read Parquet batch: {}",
-                e
-            ))
-        })?;
+        let batch = batch_result
+            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet batch: {}", e)))?;
 
         let n = batch.num_rows();
         if n == 0 {
@@ -119,9 +106,7 @@ pub fn direct_streaming_group_ordered(
         // Compute boundaries within this batch
         let mut result = vec![false; n];
         if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "PARALLEL_FALLBACK",
-            ));
+            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()).into());
         }
 
         // Accumulate group IDs from boundaries
@@ -181,16 +166,11 @@ pub fn direct_streaming_group_count(
     extract_referenced_columns(predicate, &mut needed_cols);
 
     // Step 2: Open Parquet and build projection
-    let file = File::open(parquet_path).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to open Parquet: {}", e))
-    })?;
+    let file = File::open(parquet_path)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to read Parquet metadata: {}",
-            e
-        ))
-    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
 
     let parquet_schema = builder.schema().clone();
     let parquet_metadata = builder.metadata().clone();
@@ -214,24 +194,15 @@ pub fn direct_streaming_group_count(
         .with_projection(projection_mask)
         .with_batch_size(65536)
         .build()
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to build Parquet reader: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to build Parquet reader: {}", e)))?;
 
     let mut state = StreamState::new();
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
     let mut idx_built = false;
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to read Parquet batch: {}",
-                e
-            ))
-        })?;
+        let batch = batch_result
+            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet batch: {}", e)))?;
 
         let n = batch.num_rows();
         if n == 0 {
@@ -249,9 +220,7 @@ pub fn direct_streaming_group_count(
         // Compute boundaries within this batch
         let mut result = vec![false; n];
         if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "PARALLEL_FALLBACK",
-            ));
+            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()).into());
         }
 
         // Just count boundaries — no group_ids array needed
@@ -314,16 +283,11 @@ pub fn parallel_pattern_match_count(
     needed_cols.insert(partition_col.to_string());
 
     // Step 2: Open file and get metadata
-    let file = File::open(parquet_path).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to open Parquet: {}", e))
-    })?;
+    let file = File::open(parquet_path)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to read Parquet metadata: {}",
-            e
-        ))
-    })?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
 
     let parquet_schema = builder.schema().clone();
     let num_row_groups = builder.metadata().num_row_groups();
@@ -341,12 +305,11 @@ pub fn parallel_pattern_match_count(
         .map(|(i, _)| i)
         .collect();
 
-    let projected_schema = Arc::new(parquet_schema.project(&proj_indices).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to project schema: {}",
-            e
-        ))
-    })?);
+    let projected_schema = Arc::new(
+        parquet_schema
+            .project(&proj_indices)
+            .map_err(|e| LtseqError::Runtime(format!("Failed to project schema: {}", e)))?,
+    );
 
     let projection_mask = ProjectionMask::roots(
         parquet_metadata.file_metadata().schema_descr(),
@@ -357,12 +320,7 @@ pub fn parallel_pattern_match_count(
         .fields()
         .iter()
         .position(|f| f.name() == partition_col)
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Partition column '{}' not found",
-                partition_col
-            ))
-        })?;
+        .ok_or_else(|| LtseqError::ColumnNotFound(partition_col.to_string()))?;
 
     // Build name_to_idx from projected schema
     let name_to_idx: HashMap<String, usize> = projected_schema
@@ -391,12 +349,7 @@ pub fn parallel_pattern_match_count(
             )
         })
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Parallel fused read+match failed: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Parallel fused read+match failed: {}", e)))?;
 
     // Step 5: Sum intra-RG counts
     let intra_rg_count: usize = rg_results.iter().map(|r| r.count).sum();
@@ -496,7 +449,8 @@ fn read_match_and_extract_boundary(
     let first_head_rows = first_batch.num_rows().min(num_steps - 1);
     let first_head = first_batch.slice(0, first_head_rows);
 
-    let (last_key, last_batch) = slices.last().unwrap();
+    // SAFETY: slices.is_empty() returned early at line 437
+    let (last_key, last_batch) = slices.last().expect("slices is non-empty");
     let last_rows = last_batch.num_rows();
     let last_tail_start = last_rows.saturating_sub(num_steps - 1);
     let last_tail = last_batch.slice(last_tail_start, last_rows - last_tail_start);
@@ -613,10 +567,11 @@ fn count_cross_rg_boundary_patterns_from_info(
         let max_start = n.saturating_sub(num_steps - 1);
 
         if all_simple {
-            let url_col = combined.column(*url_idx.unwrap());
+            // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
+            let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
             let prefixes: Vec<&str> = step_prefixes
                 .iter()
-                .map(|p| p.as_ref().unwrap().as_str())
+                .map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str())
                 .collect();
 
             if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
@@ -879,10 +834,11 @@ fn count_patterns_in_rg_slices(
     let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
 
     if all_simple {
-        let url_col = combined.column(*url_idx.unwrap());
+        // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
+        let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
         let prefixes: Vec<&str> = step_prefixes
             .iter()
-            .map(|p| p.as_ref().unwrap().as_str())
+            .map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str())
             .collect();
 
         if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {

@@ -4,6 +4,7 @@
 //! Uses DataFusion's native df.aggregate() API for performance (no materialization).
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_sql;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
@@ -126,13 +127,11 @@ fn parse_group_exprs(
         return Ok(Vec::new());
     };
 
-    let py_expr = dict_to_py_expr(&group_expr_dict).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse group: {}", e))
-    })?;
+    let py_expr = dict_to_py_expr(&group_expr_dict)
+        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
-    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Transpile failed: {}", e))
-    })?;
+    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+        .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
 
     Ok(vec![df_expr])
 }
@@ -151,17 +150,16 @@ pub fn agg_impl(
     let mut needs_sql_fallback = false;
 
     for (key, value) in agg_dict.iter() {
-        let key_str = key.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
-        })?;
+        let key_str = key
+            .extract::<String>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg key must be string".into()))?;
 
-        let val_dict = value.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
-        })?;
+        let val_dict = value
+            .cast::<PyDict>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse: {}", e))
-        })?;
+        let py_expr = dict_to_py_expr(&val_dict)
+            .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         match pyexpr_to_agg_expr(&py_expr, schema) {
             Ok(Some(expr)) => {
@@ -173,7 +171,7 @@ pub fn agg_impl(
                 break;
             }
             Err(e) => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
+                return Err(LtseqError::Validation(e).into());
             }
         }
     }
@@ -198,7 +196,7 @@ pub fn agg_impl(
             .map_err(|e| format!("Collect failed: {}", e))?;
         Ok::<_, String>(batches)
     })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    .map_err(|e| LtseqError::Runtime(e))?;
 
     create_result_table(table, result_df)
 }
@@ -214,26 +212,26 @@ fn agg_impl_sql_fallback(
     let mut agg_select_parts: Vec<String> = Vec::new();
 
     for (key, value) in agg_dict.iter() {
-        let key_str = key.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg key must be string")
-        })?;
+        let key_str = key
+            .extract::<String>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg key must be string".into()))?;
 
-        let val_dict = value.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Agg value must be dict")
-        })?;
+        let val_dict = value
+            .cast::<PyDict>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse: {}", e))
-        })?;
+        let py_expr = dict_to_py_expr(&val_dict)
+            .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         let agg_result = extract_agg_function(&py_expr, schema).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Invalid aggregate expression - must be g.column.agg_func() or g.count()",
+            LtseqError::Validation(
+                "Invalid aggregate expression - must be g.column.agg_func() or g.count()"
+                    .into(),
             )
         })?;
 
-        let sql_expr = agg_result_to_sql(agg_result)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        let sql_expr =
+            agg_result_to_sql(agg_result).map_err(|e| LtseqError::Validation(e))?;
 
         agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
     }
@@ -245,20 +243,17 @@ fn agg_impl_sql_fallback(
     let current_batches = collect_dataframe(df)?;
     let arrow_schema = Arc::new((**schema).clone());
 
-    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to create table: {}", e))
-    })?;
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches])
+        .map_err(|e| LtseqError::Runtime(format!("Failed to create table: {}", e)))?;
 
     table
         .session
         .register_table(temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Register failed: {}", e))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Register failed: {}", e)))?;
 
     let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
-    let result_batches = execute_sql_query(table, &sql_query)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let result_batches =
+        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
 
     let _ = table.session.deregister_table(temp_table_name);
 
@@ -438,19 +433,15 @@ fn parse_group_expr_sql(
         return Ok(None);
     };
 
-    let py_expr = dict_to_py_expr(&group_expr_dict).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Failed to parse group: {}", e))
-    })?;
+    let py_expr = dict_to_py_expr(&group_expr_dict)
+        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
     match py_expr {
         PyExpr::Column(col_name) => Ok(Some(vec![col_name])),
         _ => {
             let sql_expr =
                 crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Transpile failed: {}",
-                        e
-                    ))
+                    LtseqError::Validation(format!("Transpile failed: {}", e))
                 })?;
             Ok(Some(vec![format!("{}", sql_expr)]))
         }
@@ -461,7 +452,7 @@ fn parse_group_expr_sql(
 fn collect_dataframe(
     df: &Arc<datafusion::dataframe::DataFrame>,
 ) -> PyResult<Vec<datafusion::arrow::array::RecordBatch>> {
-    RUNTIME
+    Ok(RUNTIME
         .block_on(async {
             (**df)
                 .clone()
@@ -469,7 +460,7 @@ fn collect_dataframe(
                 .await
                 .map_err(|e| format!("Failed to collect: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+        .map_err(|e| LtseqError::Runtime(e))?)
 }
 
 fn build_agg_sql(
@@ -492,14 +483,15 @@ fn build_agg_sql(
 
 /// Filter rows using a raw SQL WHERE clause
 pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
+    let df = table
+        .dataframe
+        .as_ref()
+        .ok_or(LtseqError::NoData)?;
 
     let schema = table
         .schema
         .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
+        .ok_or(LtseqError::NoSchema)?;
 
     let current_batches = collect_dataframe(df)?;
 
@@ -511,16 +503,14 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
     let temp_table_name = format!("__ltseq_filter_temp_{}", std::process::id());
     let temp_table =
         MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Create table: {}", e))
+            LtseqError::Runtime(format!("Create table: {}", e))
         })?;
 
     let _ = table.session.deregister_table(&temp_table_name);
     table
         .session
         .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Register: {}", e))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Register: {}", e)))?;
 
     let column_list: Vec<String> = batch_schema
         .fields()
@@ -535,8 +525,8 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
         where_clause
     );
 
-    let result_batches = execute_sql_query(table, &sql_query)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+    let result_batches =
+        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
 
     let _ = table.session.deregister_table(&temp_table_name);
 

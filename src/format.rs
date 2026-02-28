@@ -39,38 +39,93 @@ impl<'a> TypedColumn<'a> {
     /// Create a TypedColumn by matching on the column's DataType once.
     fn new(column: &'a dyn Array) -> Self {
         match column.data_type() {
-            DataType::Utf8 => TypedColumn::Utf8(column.as_any().downcast_ref().unwrap()),
-            DataType::LargeUtf8 => {
-                TypedColumn::LargeUtf8(column.as_any().downcast_ref().unwrap())
+            DataType::Utf8 => {
+                TypedColumn::Utf8(column.as_any().downcast_ref().expect("type matched Utf8"))
             }
-            DataType::Utf8View => {
-                TypedColumn::Utf8View(column.as_any().downcast_ref().unwrap())
+            DataType::LargeUtf8 => TypedColumn::LargeUtf8(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched LargeUtf8"),
+            ),
+            DataType::Utf8View => TypedColumn::Utf8View(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched Utf8View"),
+            ),
+            DataType::Date32 => {
+                TypedColumn::Date32(column.as_any().downcast_ref().expect("type matched Date32"))
             }
-            DataType::Date32 => TypedColumn::Date32(column.as_any().downcast_ref().unwrap()),
-            DataType::Date64 => TypedColumn::Date64(column.as_any().downcast_ref().unwrap()),
-            DataType::Timestamp(TimeUnit::Second, _) => {
-                TypedColumn::TimestampSec(column.as_any().downcast_ref().unwrap())
+            DataType::Date64 => {
+                TypedColumn::Date64(column.as_any().downcast_ref().expect("type matched Date64"))
             }
-            DataType::Timestamp(TimeUnit::Millisecond, _) => {
-                TypedColumn::TimestampMs(column.as_any().downcast_ref().unwrap())
+            DataType::Timestamp(TimeUnit::Second, _) => TypedColumn::TimestampSec(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched TimestampSec"),
+            ),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => TypedColumn::TimestampMs(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched TimestampMs"),
+            ),
+            DataType::Timestamp(TimeUnit::Microsecond, _) => TypedColumn::TimestampUs(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched TimestampUs"),
+            ),
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => TypedColumn::TimestampNs(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched TimestampNs"),
+            ),
+            DataType::Int8 => {
+                TypedColumn::Int8(column.as_any().downcast_ref().expect("type matched Int8"))
             }
-            DataType::Timestamp(TimeUnit::Microsecond, _) => {
-                TypedColumn::TimestampUs(column.as_any().downcast_ref().unwrap())
+            DataType::Int16 => {
+                TypedColumn::Int16(column.as_any().downcast_ref().expect("type matched Int16"))
             }
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                TypedColumn::TimestampNs(column.as_any().downcast_ref().unwrap())
+            DataType::Int32 => {
+                TypedColumn::Int32(column.as_any().downcast_ref().expect("type matched Int32"))
             }
-            DataType::Int8 => TypedColumn::Int8(column.as_any().downcast_ref().unwrap()),
-            DataType::Int16 => TypedColumn::Int16(column.as_any().downcast_ref().unwrap()),
-            DataType::Int32 => TypedColumn::Int32(column.as_any().downcast_ref().unwrap()),
-            DataType::Int64 => TypedColumn::Int64(column.as_any().downcast_ref().unwrap()),
-            DataType::UInt8 => TypedColumn::UInt8(column.as_any().downcast_ref().unwrap()),
-            DataType::UInt16 => TypedColumn::UInt16(column.as_any().downcast_ref().unwrap()),
-            DataType::UInt32 => TypedColumn::UInt32(column.as_any().downcast_ref().unwrap()),
-            DataType::UInt64 => TypedColumn::UInt64(column.as_any().downcast_ref().unwrap()),
-            DataType::Float32 => TypedColumn::Float32(column.as_any().downcast_ref().unwrap()),
-            DataType::Float64 => TypedColumn::Float64(column.as_any().downcast_ref().unwrap()),
-            DataType::Boolean => TypedColumn::Boolean(column.as_any().downcast_ref().unwrap()),
+            DataType::Int64 => {
+                TypedColumn::Int64(column.as_any().downcast_ref().expect("type matched Int64"))
+            }
+            DataType::UInt8 => {
+                TypedColumn::UInt8(column.as_any().downcast_ref().expect("type matched UInt8"))
+            }
+            DataType::UInt16 => {
+                TypedColumn::UInt16(column.as_any().downcast_ref().expect("type matched UInt16"))
+            }
+            DataType::UInt32 => {
+                TypedColumn::UInt32(column.as_any().downcast_ref().expect("type matched UInt32"))
+            }
+            DataType::UInt64 => {
+                TypedColumn::UInt64(column.as_any().downcast_ref().expect("type matched UInt64"))
+            }
+            DataType::Float32 => TypedColumn::Float32(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched Float32"),
+            ),
+            DataType::Float64 => TypedColumn::Float64(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched Float64"),
+            ),
+            DataType::Boolean => TypedColumn::Boolean(
+                column
+                    .as_any()
+                    .downcast_ref()
+                    .expect("type matched Boolean"),
+            ),
             _ => TypedColumn::Unsupported,
         }
     }
@@ -210,11 +265,7 @@ fn draw_header(schema: &ArrowSchema, col_widths: &[usize]) -> String {
 }
 
 /// Draw data rows from batches (up to limit)
-fn draw_rows(
-    batches: &[RecordBatch],
-    col_widths: &[usize],
-    limit: usize,
-) -> String {
+fn draw_rows(batches: &[RecordBatch], col_widths: &[usize], limit: usize) -> String {
     let mut rows = String::new();
     let mut row_count = 0;
 
@@ -287,14 +338,4 @@ pub fn format_table(
     output.push_str(&draw_border(&col_widths));
 
     Ok(output)
-}
-
-/// Format a single cell value from an Arrow column.
-///
-/// This is a convenience wrapper for external callers that performs
-/// type dispatch per call. For batch formatting, prefer `TypedColumn`
-/// which resolves the type once per column.
-pub fn format_cell(column: &dyn Array, row_idx: usize) -> String {
-    let typed = TypedColumn::new(column);
-    typed.format(row_idx, column)
 }

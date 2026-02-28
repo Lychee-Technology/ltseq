@@ -40,22 +40,21 @@
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
 
 // Core modules
-pub mod arrow_shift;
-pub mod basic;
-pub mod derive;
-pub mod io;
-pub mod linear_scan;
-pub mod parallel_scan;
-pub mod pattern_match;
-pub mod set_ops;
-pub mod window;
+pub(crate) mod basic;
+pub(crate) mod derive;
+pub(crate) mod io;
+pub(crate) mod linear_scan;
+pub(crate) mod parallel_scan;
+pub(crate) mod pattern_match;
+pub(crate) mod set_ops;
+pub(crate) mod window;
 
 // Split from advanced.rs (Phase 3 refactoring)
-pub mod aggregation;
-pub mod align;
-pub mod asof_join;
-pub mod derive_sql;
-pub mod grouping;
-pub mod join;
-pub mod pivot;
-pub mod sort;
+pub(crate) mod aggregation;
+pub(crate) mod align;
+pub(crate) mod asof_join;
+pub(crate) mod derive_sql;
+pub(crate) mod grouping;
+pub(crate) mod join;
+pub(crate) mod pivot;
+pub(crate) mod sort;

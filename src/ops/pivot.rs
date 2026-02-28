@@ -3,6 +3,7 @@
 //! Transforms table from long to wide format using SQL CASE WHEN aggregation.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
@@ -29,13 +30,15 @@ pub fn pivot_impl(
 ) -> PyResult<LTSeqTable> {
     // Validate inputs
     if table.dataframe.is_none() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Cannot pivot empty table",
-        ));
+        return Err(LtseqError::Validation("Cannot pivot empty table".into()).into());
     }
 
-    let df = table.dataframe.as_ref().unwrap();
-    let schema = table.schema.as_ref().unwrap();
+    // SAFETY: dataframe.is_none() is checked above
+    let df = table.dataframe.as_ref().expect("dataframe checked above");
+    let schema = table
+        .schema
+        .as_ref()
+        .expect("schema present when dataframe is");
 
     // Validate that all required columns exist
     let col_names: Vec<String> = schema
@@ -46,25 +49,28 @@ pub fn pivot_impl(
 
     for col in &index_cols {
         if !col_names.contains(col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Index column '{}' not found in table",
                 col
-            )));
+            ))
+            .into());
         }
     }
 
     if !col_names.contains(&pivot_col) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        return Err(LtseqError::Validation(format!(
             "Pivot column '{}' not found in table",
             pivot_col
-        )));
+        ))
+        .into());
     }
 
     if !col_names.contains(&value_col) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        return Err(LtseqError::Validation(format!(
             "Value column '{}' not found in table",
             value_col
-        )));
+        ))
+        .into());
     }
 
     // Validate aggregation function
@@ -72,10 +78,11 @@ pub fn pivot_impl(
     match agg_fn_upper.as_str() {
         "SUM" | "MEAN" | "COUNT" | "MIN" | "MAX" => {}
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Invalid aggregation function '{}'. Must be one of: sum, mean, count, min, max",
                 agg_fn
-            )));
+            ))
+            .into());
         }
     }
 
@@ -84,20 +91,12 @@ pub fn pivot_impl(
         .fields()
         .iter()
         .position(|f| f.name() == &pivot_col)
-        .ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Pivot column '{}' not found",
-                pivot_col
-            ))
-        })?;
+        .ok_or_else(|| LtseqError::Validation(format!("Pivot column '{}' not found", pivot_col)))?;
 
     // Collect all batches from the dataframe
-    let all_batches = RUNTIME.block_on((**df).clone().collect()).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to collect data from table: {}",
-            e
-        ))
-    })?;
+    let all_batches = RUNTIME
+        .block_on((**df).clone().collect())
+        .map_err(|e| LtseqError::collect(e))?;
 
     // Extract distinct pivot values
     let mut pivot_values_set = std::collections::HashSet::new();
@@ -112,22 +111,13 @@ pub fn pivot_impl(
 
     // Register the source data as a temporary table
     let source_table_name = "__pivot_source";
-    let source_mem_table = MemTable::try_new(schema.clone(), vec![all_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create source table: {}",
-            e
-        ))
-    })?;
+    let source_mem_table = MemTable::try_new(schema.clone(), vec![all_batches])
+        .map_err(|e| LtseqError::Runtime(format!("Failed to create source table: {}", e)))?;
 
     table
         .session
         .register_table(source_table_name, Arc::new(source_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register source table: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to register source table: {}", e)))?;
 
     // Build CASE WHEN expressions
     let mut case_exprs = Vec::new();
@@ -163,19 +153,13 @@ pub fn pivot_impl(
         .block_on(table.session.sql(&pivot_sql))
         .map_err(|e| {
             let _ = table.session.deregister_table(source_table_name);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to execute pivot query: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to execute pivot query: {}", e))
         })?;
 
     // Collect result
     let result_batches = RUNTIME.block_on(result_df.collect()).map_err(|e| {
         let _ = table.session.deregister_table(source_table_name);
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to collect pivot results: {}",
-            e
-        ))
+        LtseqError::collect(e)
     })?;
 
     // Deregister source table
@@ -250,9 +234,10 @@ fn extract_pivot_values(
             }
         }
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Pivot column must be string, int, or float type",
-            ));
+            return Err(LtseqError::Validation(
+                "Pivot column must be string, int, or float type".into(),
+            )
+            .into());
         }
     }
     Ok(())

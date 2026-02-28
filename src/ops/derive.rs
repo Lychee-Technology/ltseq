@@ -18,6 +18,7 @@
 //! - This module detects window functions and delegates
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
@@ -44,15 +45,14 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
 
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
+            LtseqError::Validation("Column name must be string".into())
         })?;
 
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+            LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(&expr_dict)?;
 
         if crate::transpiler::contains_window_function(&py_expr) {
             has_window_functions = true;
@@ -73,7 +73,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
 
     for (col_name_str, py_expr) in parsed_cols {
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+            .map_err(|e| LtseqError::Validation(e))?
             .alias(&col_name_str);
 
         df_exprs.push(df_expr);
@@ -100,7 +100,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
                 .select(all_exprs)
                 .map_err(|e| format!("Derive execution failed: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // 6. Return new LTSeqTable with derived columns added (schema recomputed)
     Ok(LTSeqTable::from_df(

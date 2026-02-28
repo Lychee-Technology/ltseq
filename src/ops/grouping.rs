@@ -23,6 +23,7 @@
 //! from prior flatten() call. Uses ROW_NUMBER() OVER (PARTITION BY __group_id__).
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
 use crate::transpiler::pyexpr_to_datafusion;
@@ -56,7 +57,8 @@ fn get_df_and_schema_or_empty(
             table.source_parquet_path.clone(),
         ));
     }
-    let df = table.dataframe.as_ref().unwrap();
+    // SAFETY: dataframe.is_none() is checked above
+    let df = table.dataframe.as_ref().expect("dataframe checked above");
     let schema = table.schema.as_ref().ok_or_else(|| {
         LTSeqTable::empty(
             Arc::clone(&table.session),
@@ -78,9 +80,8 @@ fn collect_and_get_schema(
             df.clone()
                 .collect()
                 .await
-                .map_err(|e| format!("Failed to collect data: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+                .map_err(|e| LtseqError::collect(e))
+        })?;
 
     let batch_schema = batches
         .first()
@@ -101,19 +102,13 @@ fn register_temp_table(
     let _ = session.deregister_table(&table_name);
 
     let temp_table = MemTable::try_new(Arc::clone(schema), vec![batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create memory table: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("Failed to create memory table: {}", e))
     })?;
 
     session
         .register_table(&table_name, Arc::new(temp_table))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register temp table: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to register temp table: {}", e))
         })?;
 
     Ok(table_name)
@@ -125,7 +120,7 @@ fn execute_sql_query(
     sql: &str,
     op_name: &str,
 ) -> PyResult<Vec<RecordBatch>> {
-    RUNTIME
+    Ok(RUNTIME
         .block_on(async {
             let result_df = session
                 .sql(sql)
@@ -137,7 +132,7 @@ fn execute_sql_query(
                 .await
                 .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+        .map_err(|e| LtseqError::Runtime(e))?)
 }
 
 /// Create result LTSeqTable from batches
@@ -198,14 +193,14 @@ pub fn group_ordered_count_impl(
     grouping_expr: Bound<'_, PyDict>,
 ) -> PyResult<usize> {
     // Deserialize grouping expression
-    let py_expr = dict_to_py_expr(&grouping_expr)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let py_expr = dict_to_py_expr(&grouping_expr)?;
 
     // Only works for linear scan predicates (shift-based boundary detection)
     if !can_linear_scan(&py_expr) {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "group_ordered_count only supports shift-based boundary predicates",
-        ));
+        return Err(LtseqError::Validation(
+            "group_ordered_count only supports shift-based boundary predicates".into(),
+        )
+        .into());
     }
 
     // Try direct Parquet streaming (bypasses DataFusion)
@@ -248,7 +243,7 @@ pub fn group_ordered_count_impl(
 
     match count {
         Ok(c) => Ok(c),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e)),
+        Err(e) => Err(LtseqError::Runtime(e).into()),
     }
 }
 
@@ -269,8 +264,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
     };
 
     // Deserialize grouping expression
-    let py_expr = dict_to_py_expr(&grouping_expr)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let py_expr = dict_to_py_expr(&grouping_expr)?;
 
     // ── Fast path: linear scan engine ─────────────────────────────────────
     // For predicates containing shift(1) + comparisons + arithmetic + logic,
@@ -299,15 +293,15 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
         pyexpr_to_window_expr(py_expr, schema, &table.sort_exprs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
+            .map_err(|e| LtseqError::Validation(e))?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
         let expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Validation(e))?;
         let lag_expr = lag(expr.clone(), Some(1), None);
         let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Validation(e))?;
         // IS DISTINCT FROM handles NULLs correctly (unlike !=)
         Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
             Box::new(expr),
@@ -329,10 +323,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         .clone()
         .select(select_exprs)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to add __boundary__ column: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to add __boundary__ column: {}", e))
         })?;
 
     // ── Step 3: Materialize + compute group_id, count, rn via SQL ─────
@@ -346,9 +337,8 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
             df_with_boundary
                 .collect()
                 .await
-                .map_err(|e| format!("Failed to collect boundary data: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+                .map_err(|e| LtseqError::collect(e))
+        })?;
 
     if batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -417,9 +407,10 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
 
     // Verify __group_id__ column exists
     if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "__group_id__ column not found. Call flatten() first.",
-        ));
+        return Err(LtseqError::Validation(
+            "__group_id__ column not found. Call flatten() first.".into(),
+        )
+        .into());
     }
 
     let has_rn = schema.fields().iter().any(|f| f.name() == "__rn__");
@@ -437,10 +428,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             .clone()
             .filter(col("__rn__").eq(lit(1i64)))
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to filter first rows: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to filter first rows: {}", e))
             })?;
 
         // Remove internal columns (__rn__, __group_id__, __group_count__)
@@ -472,10 +460,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         }
 
         let projected = filtered.select(keep_cols).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to project first_row result: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to project first_row result: {}", e))
         })?;
 
         return Ok(LTSeqTable::from_df(
@@ -492,10 +477,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             .clone()
             .filter(col("__rn__").eq(col("__group_count__")))
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to filter last rows: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to filter last rows: {}", e))
             })?;
 
         // Remove internal columns
@@ -525,10 +507,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         }
 
         let projected = filtered.select(keep_cols).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to project last_row result: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to project last_row result: {}", e))
         })?;
 
         return Ok(LTSeqTable::from_df(

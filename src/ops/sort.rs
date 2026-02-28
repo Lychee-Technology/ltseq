@@ -3,6 +3,7 @@
 //! Sorts table rows by one or more key expressions with optional descending order.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
@@ -41,8 +42,7 @@ pub fn sort_impl(
     // Deserialize and transpile each sort expression
     let mut df_sort_exprs = Vec::new();
     for (i, expr_dict) in sort_exprs.iter().enumerate() {
-        let py_expr = dict_to_py_expr(expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         // Capture column name if this is a simple column reference
         if let PyExpr::Column(ref col_name) = py_expr {
@@ -50,7 +50,7 @@ pub fn sort_impl(
         }
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Validation(e))?;
 
         // Get desc flag for this sort key
         let is_desc = desc_flags.get(i).copied().unwrap_or(false);
@@ -72,13 +72,14 @@ pub fn sort_impl(
                 .sort(df_sort_exprs)
                 .map_err(|e| format!("Sort execution failed: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Return new LTSeqTable with sorted data and captured sort keys (schema unchanged)
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
         sorted_df,
-        Arc::clone(table.schema.as_ref().unwrap()),
+        // SAFETY: require_df_and_schema() validated schema on line 37
+        Arc::clone(table.schema.as_ref().expect("schema validated by require_df_and_schema")),
         captured_sort_keys,
         table.source_parquet_path.clone(),
     ))
@@ -138,8 +139,7 @@ pub fn assume_sorted_impl(
     // Capture sort column names (same logic as sort_impl, but skip the actual sort)
     let mut captured_sort_keys = Vec::new();
     for expr_dict in sort_exprs.iter() {
-        let py_expr = dict_to_py_expr(expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         if let PyExpr::Column(ref col_name) = py_expr {
             captured_sort_keys.push(col_name.clone());
@@ -162,17 +162,17 @@ pub fn assume_sorted_impl(
                     .await
                     .map_err(|e| format!("Failed to re-read Parquet with sort order: {}", e))
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
 
         let result_schema = LTSeqTable::schema_from_df(result_df.schema());
 
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: Some(Arc::new(result_df)),
-            schema: Some(result_schema),
-            sort_exprs: captured_sort_keys,
-            source_parquet_path: table.source_parquet_path.clone(),
-        });
+        return Ok(LTSeqTable::from_df_with_schema(
+            Arc::clone(&table.session),
+            result_df,
+            result_schema,
+            captured_sort_keys,
+            table.source_parquet_path.clone(),
+        ));
     }
 
     // Non-Parquet fallback: collect batches and create MemTable with sort order
@@ -184,7 +184,7 @@ pub fn assume_sorted_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data for assume_sorted: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     if batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -199,7 +199,7 @@ pub fn assume_sorted_impl(
     let mem_table =
         MemTable::try_new(Arc::clone(&batch_schema), vec![batches])
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                LtseqError::Runtime(format!(
                     "Failed to create MemTable: {}",
                     e
                 ))
@@ -210,17 +210,17 @@ pub fn assume_sorted_impl(
         .session
         .read_table(Arc::new(mem_table))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to read sorted MemTable: {}",
                 e
             ))
         })?;
 
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(batch_schema),
-        sort_exprs: captured_sort_keys,
-        source_parquet_path: None,
-    })
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        result_df,
+        batch_schema,
+        captured_sort_keys,
+        None,
+    ))
 }

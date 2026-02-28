@@ -270,6 +270,164 @@ class TransformMixin(LookupMixin):
         result._sort_keys = self._sort_keys
         return result
 
+    # Alias for discoverability (Polars users expect with_columns)
+    with_columns = derive
+
+    def rename(self, mapping: Dict[str, str] = None, **kwargs: str) -> "LTSeq":
+        """
+        Rename columns.
+
+        Accepts either a dict mapping old names to new names, or keyword
+        arguments where each key is the old name and the value is the new name.
+
+        Args:
+            mapping: Dictionary of {old_name: new_name}
+            **kwargs: old_name=new_name keyword arguments
+
+        Returns:
+            New LTSeq with renamed columns
+
+        Raises:
+            ValueError: If schema not initialized
+            KeyError: If any old column name not found in schema
+
+        Example:
+            >>> t.rename({"user_id": "uid", "event_time": "ts"})
+            >>> t.rename(user_id="uid", event_time="ts")
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        renames = {}
+        if mapping is not None:
+            if not isinstance(mapping, dict):
+                raise TypeError(
+                    f"mapping must be a dict, got {type(mapping).__name__}"
+                )
+            renames.update(mapping)
+        renames.update(kwargs)
+
+        if not renames:
+            raise ValueError("rename() requires at least one column mapping")
+
+        # Validate all old names exist
+        for old_name in renames:
+            if old_name not in self._schema:
+                raise KeyError(
+                    f"Column '{old_name}' not found in schema. "
+                    f"Available columns: {list(self._schema.keys())}"
+                )
+
+        # Build select expressions with aliases
+        select_exprs = []
+        for col_name in self._schema:
+            if col_name in renames:
+                new_name = renames[col_name]
+                select_exprs.append({
+                    "type": "Alias",
+                    "expr": {"type": "Column", "name": col_name},
+                    "alias": new_name,
+                })
+            else:
+                select_exprs.append({"type": "Column", "name": col_name})
+
+        result_inner = self._inner.select(select_exprs)
+
+        result = LTSeq()
+        result._inner = result_inner
+
+        # Build new schema with renamed columns (preserving order)
+        new_schema = {}
+        for col_name, col_type in self._schema.items():
+            new_name = renames.get(col_name, col_name)
+            new_schema[new_name] = col_type
+        result._schema = new_schema
+
+        # Update sort keys if any were renamed
+        if self._sort_keys:
+            result._sort_keys = [
+                (renames.get(col, col), is_desc)
+                for col, is_desc in self._sort_keys
+            ]
+        else:
+            result._sort_keys = None
+
+        return result
+
+    def drop(self, *cols: str) -> "LTSeq":
+        """
+        Remove specified columns from the table.
+
+        Args:
+            *cols: Column names to drop
+
+        Returns:
+            New LTSeq without the specified columns
+
+        Raises:
+            ValueError: If schema not initialized or no columns specified
+            KeyError: If any column not found in schema
+
+        Example:
+            >>> t.drop("temp_col", "debug_col")
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not cols:
+            raise ValueError("drop() requires at least one column name")
+
+        cols_to_drop = set(cols)
+
+        # Validate all columns exist
+        for col in cols_to_drop:
+            if col not in self._schema:
+                raise KeyError(
+                    f"Column '{col}' not found in schema. "
+                    f"Available columns: {list(self._schema.keys())}"
+                )
+
+        # Build select expressions for remaining columns
+        remaining_cols = [
+            col for col in self._schema if col not in cols_to_drop
+        ]
+
+        if not remaining_cols:
+            raise ValueError("Cannot drop all columns")
+
+        select_exprs = [
+            {"type": "Column", "name": col} for col in remaining_cols
+        ]
+
+        result_inner = self._inner.select(select_exprs)
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = {
+            col: self._schema[col] for col in remaining_cols
+        }
+
+        # Update sort keys — remove any that were dropped
+        if self._sort_keys:
+            new_sort_keys = [
+                (col, is_desc)
+                for col, is_desc in self._sort_keys
+                if col not in cols_to_drop
+            ]
+            result._sort_keys = new_sort_keys if new_sort_keys else None
+        else:
+            result._sort_keys = None
+
+        return result
+
     def _has_window_functions(self, derived_cols: Dict[str, Any]) -> bool:
         """Check if derived columns contain window functions."""
 

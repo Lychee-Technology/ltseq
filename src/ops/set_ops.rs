@@ -22,6 +22,7 @@
 //! and performance.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -51,9 +52,10 @@ fn get_compare_columns(
     };
 
     if compare_cols.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "No columns specified for comparison",
-        ));
+        return Err(LtseqError::Validation(
+            "No columns specified for comparison".into(),
+        )
+        .into());
     }
     Ok(compare_cols)
 }
@@ -181,12 +183,13 @@ fn distinct_all_columns(
                 .distinct()
                 .map_err(|e| format!("Distinct execution failed: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
         distinct_df,
-        Arc::clone(table.schema.as_ref().unwrap()),
+        // SAFETY: schema validated by require_df_and_schema() before this function
+        Arc::clone(table.schema.as_ref().expect("schema validated by caller")),
         table.sort_exprs.clone(),
         table.source_parquet_path.clone(),
     ))
@@ -199,23 +202,24 @@ fn extract_key_cols_from_exprs(
 ) -> PyResult<Vec<String>> {
     let mut key_cols = Vec::new();
     for expr_dict in key_exprs.iter() {
-        let py_expr = crate::types::dict_to_py_expr(expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = crate::types::dict_to_py_expr(expr_dict)?;
 
         let col_name = match &py_expr {
             crate::types::PyExpr::Column(name) => name.clone(),
             _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "distinct() key expressions must be simple column references",
-                ))
+                return Err(LtseqError::Validation(
+                    "distinct() key expressions must be simple column references".into(),
+                )
+                .into())
             }
         };
 
         if !schema.fields().iter().any(|f| f.name() == &col_name) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in schema",
                 col_name
-            )));
+            ))
+            .into());
         }
         key_cols.push(col_name);
     }
@@ -268,12 +272,13 @@ fn distinct_with_keys(
             let _ = table.session.deregister_table("__distinct_source");
             Ok(result)
         })
-        .map_err(|e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e: String| LtseqError::Runtime(e))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
         distinct_df,
-        Arc::clone(table.schema.as_ref().unwrap()),
+        // SAFETY: schema validated by require_df_and_schema() before this function
+        Arc::clone(table.schema.as_ref().expect("schema validated by caller")),
         table.sort_exprs.clone(),
         table.source_parquet_path.clone(),
     ))
@@ -292,10 +297,11 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
     let cols2: Vec<&str> = schema2.fields().iter().map(|f| f.name().as_str()).collect();
 
     if cols1 != cols2 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        return Err(LtseqError::Validation(format!(
             "Schema mismatch: {:?} vs {:?}",
             cols1, cols2
-        )));
+        ))
+        .into());
     }
 
     let union_df = RUNTIME
@@ -305,7 +311,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
                 .union((**df2).clone())
                 .map_err(|e| format!("Union failed: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     Ok(create_result_table(
         &table1.session,
@@ -388,7 +394,7 @@ pub fn is_subset_impl(
 
             Ok(cnt_array.value(0) == 0)
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     Ok(is_subset)
 }
@@ -446,7 +452,7 @@ fn set_operation_impl(
             deregister_temp_tables(&table1.session, t1_name, t2_name);
             Ok::<_, String>(result)
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     Ok(create_result_table(
         &table1.session,
@@ -466,8 +472,7 @@ fn extract_key_columns(
     use crate::types::dict_to_py_expr;
     use crate::types::PyExpr;
 
-    let py_expr = dict_to_py_expr(expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let py_expr = dict_to_py_expr(expr_dict)?;
 
     let mut columns = Vec::new();
 
@@ -475,21 +480,23 @@ fn extract_key_columns(
     match &py_expr {
         PyExpr::Column(name) => columns.push(name.clone()),
         _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            return Err(LtseqError::Validation(
                 "on= argument must be a single column reference (e.g., lambda r: r.id). \
-                 For multiple columns, leave on=None to use all columns.",
-            ));
+                 For multiple columns, leave on=None to use all columns.".into(),
+            )
+            .into());
         }
     }
 
     // Validate columns exist in schema
     for col in &columns {
         if schema.field_with_name(col).is_err() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in schema. Available columns: {:?}",
                 col,
                 schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-            )));
+            ))
+            .into());
         }
     }
 

@@ -14,6 +14,7 @@
 //!
 //! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
 
+use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
@@ -38,12 +39,11 @@ pub fn search_first_impl(
     let (df, schema) = table.require_df_and_schema()?;
 
     // Deserialize the expression
-    let py_expr = dict_to_py_expr(expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let py_expr = dict_to_py_expr(expr_dict)?;
 
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+        .map_err(|e| LtseqError::Validation(e))?;
 
     // Apply filter and limit to first result
     let result_df = RUNTIME
@@ -55,7 +55,7 @@ pub fn search_first_impl(
                 .limit(0, Some(1))
                 .map_err(|e| format!("Limit failed: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(

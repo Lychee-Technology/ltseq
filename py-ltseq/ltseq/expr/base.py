@@ -125,6 +125,28 @@ def max_if(predicate: "Expr", column: "Expr") -> "CallExpr":
     return CallExpr("max_if", (predicate, column), {}, on=None)
 
 
+def coalesce(*args: "Expr") -> "CallExpr":
+    """
+    Return the first non-null value from the arguments.
+
+    Equivalent to SQL COALESCE(a, b, c, ...).
+
+    Args:
+        *args: Two or more expressions or values. Returns the first non-null.
+
+    Returns:
+        Expression that evaluates to the first non-null argument
+
+    Example:
+        >>> from ltseq import coalesce
+        >>> t.derive(name=lambda r: coalesce(r.preferred_name, r.full_name, "Unknown"))
+    """
+    from .types import CallExpr
+
+    coerced = tuple(Expr._coerce(a) for a in args)
+    return CallExpr("coalesce", coerced, {}, on=None)
+
+
 # =============================================================================
 # Ranking / Window Functions
 # =============================================================================
@@ -415,6 +437,145 @@ class Expr(ABC):
         from .types import CallExpr
 
         return CallExpr("is_not_null", (), {}, on=self)
+
+    def is_in(self, values: list) -> "CallExpr":
+        """
+        Check if the value is contained in a list of values.
+
+        Equivalent to SQL: column IN (val1, val2, val3)
+
+        Args:
+            values: A list of values to check membership against
+
+        Returns:
+            Boolean expression that is True when value is in the list
+
+        Example:
+            >>> t.filter(lambda r: r.status.is_in(["active", "pending", "review"]))
+            >>> t.filter(lambda r: r.age.is_in([18, 21, 65]))
+        """
+        from .types import CallExpr
+
+        coerced_values = [self._coerce(v) for v in values]
+        return CallExpr("is_in", tuple(coerced_values), {}, on=self)
+
+    def between(self, low: Any, high: Any) -> "BinOpExpr":
+        """
+        Check if the value is between low and high (inclusive).
+
+        Equivalent to: (expr >= low) & (expr <= high)
+
+        Args:
+            low: Lower bound (inclusive)
+            high: Upper bound (inclusive)
+
+        Returns:
+            Boolean expression that is True when value is in range
+
+        Example:
+            >>> t.filter(lambda r: r.price.between(10, 100))
+            >>> t.filter(lambda r: r.age.between(18, 65))
+        """
+        return (self >= self._coerce(low)) & (self <= self._coerce(high))
+
+    def cast(self, dtype: str) -> "CallExpr":
+        """
+        Cast the expression to a different data type.
+
+        Supported types: "int32", "int64", "float32", "float64",
+        "utf8", "string", "bool", "date32", "timestamp"
+
+        Args:
+            dtype: Target data type name
+
+        Returns:
+            Expression cast to the target type
+
+        Example:
+            >>> t.derive(price_str=lambda r: r.price.cast("utf8"))
+            >>> t.derive(amount=lambda r: r.amount_str.cast("float64"))
+        """
+        from .types import CallExpr, LiteralExpr
+
+        return CallExpr("cast", (LiteralExpr(dtype),), {}, on=self)
+
+    def abs(self) -> "CallExpr":
+        """
+        Compute the absolute value.
+
+        Returns:
+            Expression with absolute value applied
+
+        Example:
+            >>> t.derive(abs_change=lambda r: (r.price - r.prev_price).abs())
+        """
+        from .types import CallExpr
+
+        return CallExpr("abs", (), {}, on=self)
+
+    def round(self, decimals: int = 0) -> "CallExpr":
+        """
+        Round to the specified number of decimal places.
+
+        Args:
+            decimals: Number of decimal places (default 0)
+
+        Returns:
+            Expression with rounding applied
+
+        Example:
+            >>> t.derive(rounded=lambda r: r.score.round(2))
+        """
+        from .types import CallExpr, LiteralExpr
+
+        return CallExpr("round", (LiteralExpr(decimals),), {}, on=self)
+
+    def floor(self) -> "CallExpr":
+        """
+        Round down to the nearest integer.
+
+        Returns:
+            Expression with floor applied
+
+        Example:
+            >>> t.derive(bucket=lambda r: r.value.floor())
+        """
+        from .types import CallExpr
+
+        return CallExpr("floor", (), {}, on=self)
+
+    def ceil(self) -> "CallExpr":
+        """
+        Round up to the nearest integer.
+
+        Returns:
+            Expression with ceiling applied
+
+        Example:
+            >>> t.derive(bucket=lambda r: r.value.ceil())
+        """
+        from .types import CallExpr
+
+        return CallExpr("ceil", (), {}, on=self)
+
+    def pct_change(self) -> "BinOpExpr":
+        """
+        Compute the percentage change from the previous row.
+
+        Equivalent to: (value - value.shift(1)) / value.shift(1)
+
+        Requires the table to be sorted. Common in financial analysis.
+
+        Returns:
+            Expression representing percentage change from previous row
+
+        Example:
+            >>> t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
+        """
+        from .types import CallExpr
+
+        shifted = CallExpr("shift", (self._coerce(1),), {}, on=self)
+        return (self - shifted) / shifted
 
     @staticmethod
     def _coerce(value: Any) -> "Expr":

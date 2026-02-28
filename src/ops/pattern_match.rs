@@ -28,6 +28,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::ops::linear_scan::{build_sort_exprs, extract_referenced_columns};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
@@ -144,6 +145,7 @@ fn eval_expr(
         PyExpr::Window { .. } => {
             Err("Window expressions not supported in search_pattern predicates".to_string())
         }
+        PyExpr::Alias { expr, .. } => eval_expr(expr, batch, name_to_idx),
     }
 }
 
@@ -508,19 +510,17 @@ pub fn search_pattern_impl(
     let num_steps = step_predicates.len();
 
     if num_steps == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "search_pattern requires at least one step predicate",
-        ));
+        return Err(LtseqError::Validation(
+            "search_pattern requires at least one step predicate".into(),
+        )
+        .into());
     }
 
     // 1. Deserialize all step predicates
     let py_exprs: Vec<PyExpr> = step_predicates
         .iter()
-        .map(|d| {
-            dict_to_py_expr(d)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+        .map(|d| dict_to_py_expr(d))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // 2. Extract referenced columns for projection pruning
     let mut referenced_cols = HashSet::new();
@@ -551,29 +551,24 @@ pub fn search_pattern_impl(
             .collect();
 
         if select_exprs.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No valid columns found in step predicates",
-            ));
+            return Err(LtseqError::Validation(
+                "No valid columns found in step predicates".into(),
+            )
+            .into());
         }
 
         let proj = (**df)
             .clone()
             .select(select_exprs)
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Projection failed: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Projection failed: {}", e))
             })?;
 
         // Add sort to ensure correct order from multi-row-group Parquet
         if !sort_keys.is_empty() {
             let sort_exprs = build_sort_exprs(sort_keys);
             proj.sort(sort_exprs).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Sort failed: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Sort failed: {}", e))
             })?
         } else {
             proj
@@ -583,12 +578,7 @@ pub fn search_pattern_impl(
     // 4. Collect into a single RecordBatch
     let batches = RUNTIME
         .block_on(async { projected_df.collect().await })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Collect failed: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::collect(e))?;
 
     if batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -601,10 +591,7 @@ pub fn search_pattern_impl(
 
     let batch_schema = batches[0].schema();
     let combined = concat_batches(&batch_schema, &batches).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "concat_batches failed: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("concat_batches failed: {}", e))
     })?;
 
     let n = combined.num_rows();
@@ -626,13 +613,13 @@ pub fn search_pattern_impl(
     // 6. Compute partition boundaries if needed
     let partition_ids = if let Some(ref part_col) = partition_by {
         let idx = name_to_idx.get(part_col).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            LtseqError::Validation(format!(
                 "partition_by column '{}' not found",
                 part_col
             ))
         })?;
         let boundaries = compute_partition_boundaries(combined.column(*idx))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
         Some(build_partition_ids(&boundaries))
     } else {
         None
@@ -640,7 +627,7 @@ pub fn search_pattern_impl(
 
     // 7. Evaluate step 1 predicate vectorized (this is the fast rejection filter)
     let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // 8. Single-pass scan
     let max_start = n.saturating_sub(num_steps - 1);
@@ -661,9 +648,9 @@ pub fn search_pattern_impl(
             .iter()
             .map(|expr| {
                 eval_predicate(expr, &combined, &name_to_idx)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                    .map_err(|e| LtseqError::Runtime(e))
             })
-            .collect::<PyResult<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
         for i in 0..max_start {
             // Fast rejection: check step 1
@@ -722,10 +709,7 @@ pub fn search_pattern_impl(
     let full_df = if !sort_keys.is_empty() {
         let sort_exprs = build_sort_exprs(sort_keys);
         (**df).clone().sort(sort_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Full table sort failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Full table sort failed: {}", e))
         })?
     } else {
         (**df).clone()
@@ -733,12 +717,7 @@ pub fn search_pattern_impl(
 
     let full_batches = RUNTIME
         .block_on(async { full_df.collect().await })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Full table collect failed: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| LtseqError::collect(e))?;
 
     if full_batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -751,10 +730,7 @@ pub fn search_pattern_impl(
 
     let full_schema = full_batches[0].schema();
     let full_combined = concat_batches(&full_schema, &full_batches).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Full concat_batches failed: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("Full concat_batches failed: {}", e))
     })?;
 
     // Take matching rows
@@ -764,19 +740,13 @@ pub fn search_pattern_impl(
         .iter()
         .map(|col_arr| {
             take(col_arr, &indices, None).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "take failed: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("take failed: {}", e))
             })
         })
-        .collect::<PyResult<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     let result_batch = RecordBatch::try_new(full_schema.clone(), result_columns).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "RecordBatch creation failed: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("RecordBatch creation failed: {}", e))
     })?;
 
     LTSeqTable::from_batches(
@@ -797,19 +767,17 @@ pub fn search_pattern_count_impl(
     let num_steps = step_predicates.len();
 
     if num_steps == 0 {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "search_pattern requires at least one step predicate",
-        ));
+        return Err(LtseqError::Validation(
+            "search_pattern requires at least one step predicate".into(),
+        )
+        .into());
     }
 
     // 1. Deserialize all step predicates (lightweight, no DataFusion needed)
     let py_exprs: Vec<PyExpr> = step_predicates
         .iter()
-        .map(|d| {
-            dict_to_py_expr(d)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+        .map(|d| dict_to_py_expr(d))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Try parallel fast path BEFORE creating DataFusion session.
     // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
@@ -860,10 +828,7 @@ pub fn search_pattern_count_impl(
 
     let batch_schema = batches[0].schema();
     let combined = concat_batches(&batch_schema, &batches).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "concat_batches failed: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("concat_batches failed: {}", e))
     })?;
 
     let n = combined.num_rows();
@@ -880,13 +845,13 @@ pub fn search_pattern_count_impl(
     // 6. Compute partition boundaries if needed
     let partition_ids = if let Some(ref part_col) = partition_by {
         let idx = name_to_idx.get(part_col).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            LtseqError::Validation(format!(
                 "partition_by column '{}' not found",
                 part_col
             ))
         })?;
         let boundaries = compute_partition_boundaries(combined.column(*idx))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+            .map_err(|e| LtseqError::Runtime(e))?;
         Some(build_partition_ids(&boundaries))
     } else {
         None
@@ -894,7 +859,7 @@ pub fn search_pattern_count_impl(
 
     // 7. Evaluate step 1 predicate vectorized (fast rejection filter)
     let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // 8. Single-pass scan — count only, with lazy per-row evaluation for steps 2..N
     let max_start = n.saturating_sub(num_steps - 1);
@@ -926,8 +891,9 @@ pub fn search_pattern_count_impl(
 
         if all_simple {
             // Fast path: all remaining predicates are starts_with on the same column
-            let url_col = combined.column(*url_idx.unwrap());
-            let prefixes: Vec<&str> = step_prefixes.iter().map(|p| p.as_ref().unwrap().as_str()).collect();
+            // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
+            let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
+            let prefixes: Vec<&str> = step_prefixes.iter().map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str()).collect();
 
             // Try StringViewArray first (common for Parquet), then StringArray, then LargeStringArray
             if let Some(str_arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::StringViewArray>() {
@@ -1003,9 +969,9 @@ pub fn search_pattern_count_impl(
                 .iter()
                 .map(|expr| {
                     eval_predicate(expr, &combined, &name_to_idx)
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
+                        .map_err(|e| LtseqError::Runtime(e))
                 })
-                .collect::<PyResult<Vec<_>>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
 
             for i in 0..max_start {
                 if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
@@ -1053,28 +1019,23 @@ fn collect_projected_sorted(
         .collect();
 
     if select_exprs.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "No valid columns found in step predicates",
-        ));
+        return Err(LtseqError::Validation(
+            "No valid columns found in step predicates".into(),
+        )
+        .into());
     }
 
     let proj = (**df)
         .clone()
         .select(select_exprs)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Projection failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Projection failed: {}", e))
         })?;
 
     let projected_df = if !sort_keys.is_empty() {
         let sort_exprs = build_sort_exprs(sort_keys);
         proj.sort(sort_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Sort failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Sort failed: {}", e))
         })?
     } else {
         proj
@@ -1082,10 +1043,5 @@ fn collect_projected_sorted(
 
     RUNTIME
         .block_on(async { projected_df.collect().await })
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Collect failed: {}",
-                e
-            ))
-        })
+        .map_err(|e| LtseqError::collect(e).into())
 }

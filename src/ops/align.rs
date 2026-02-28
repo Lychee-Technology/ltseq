@@ -3,6 +3,7 @@
 //! Aligns table rows to a reference sequence using SQL LEFT JOIN.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
@@ -30,11 +31,11 @@ pub fn align_impl(
 
     // Validate key column exists
     if !schema.fields().iter().any(|f| f.name() == key_col) {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        return Err(LtseqError::Validation(format!(
             "Key column '{}' not found in schema. Available: {:?}",
             key_col,
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
-        )));
+        )).into());
     }
 
     // Collect dataframe to batches
@@ -46,7 +47,7 @@ pub fn align_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Get actual schema from batches
     let batch_schema = batches
@@ -60,7 +61,7 @@ pub fn align_impl(
 
     // Register original table
     let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+        LtseqError::Runtime(format!(
             "Failed to create memory table: {}",
             e
         ))
@@ -71,7 +72,7 @@ pub fn align_impl(
         .session
         .register_table(&temp_table_name, Arc::new(temp_table))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to register temp table: {}",
                 e
             ))
@@ -113,7 +114,7 @@ pub fn align_impl(
                     .await
                     .map_err(|e| format!("Failed to execute ref table creation: {}", e))
             })
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
         Ok(())
     })?;
@@ -151,7 +152,7 @@ pub fn align_impl(
                 .await
                 .map_err(|e| format!("Failed to collect align results: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Cleanup temp tables
     let _ = table.session.deregister_table(&temp_table_name);

@@ -39,6 +39,9 @@ pub enum PyExpr {
         order_by: Option<Box<PyExpr>>,
         descending: bool,
     },
+
+    /// Alias expression: {"type": "Alias", "expr": {...}, "alias": "new_name"}
+    Alias { expr: Box<PyExpr>, alias: String },
 }
 
 /// Deserialize a Column expression
@@ -276,6 +279,27 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     })
 }
 
+/// Deserialize an Alias expression
+fn parse_alias_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
+    let alias = dict
+        .get_item("alias")
+        .map_err(|_| PyExprError::MissingField("alias".to_string()))?
+        .ok_or_else(|| PyExprError::MissingField("alias".to_string()))?
+        .extract::<String>()
+        .map_err(|_| PyExprError::InvalidType("alias must be string".to_string()))?;
+
+    let expr_obj = dict
+        .get_item("expr")
+        .map_err(|_| PyExprError::MissingField("expr".to_string()))?
+        .ok_or_else(|| PyExprError::MissingField("expr".to_string()))?;
+    let expr_dict = expr_obj
+        .cast::<PyDict>()
+        .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
+    let expr = Box::new(dict_to_py_expr(&expr_dict)?);
+
+    Ok(PyExpr::Alias { expr, alias })
+}
+
 /// Recursively deserialize a Python dict to PyExpr
 pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     // Get "type" field
@@ -294,6 +318,7 @@ pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> 
         "UnaryOp" => parse_unaryop_expr(dict),
         "Call" => parse_call_expr(dict),
         "Window" => parse_window_expr(dict),
+        "Alias" => parse_alias_expr(dict),
         _ => Err(PyExprError::UnknownVariant(expr_type)),
     }
 }

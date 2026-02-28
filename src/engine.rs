@@ -12,9 +12,6 @@ use tokio::runtime::Runtime;
 /// Default batch size for DataFusion operations.
 /// 16384 rows reduces per-batch overhead for large scans while
 /// maintaining reasonable memory usage per batch.
-/// Default batch size for DataFusion operations.
-/// 16384 rows reduces per-batch overhead for large scans while
-/// maintaining reasonable memory usage per batch.
 pub(crate) const DEFAULT_BATCH_SIZE: usize = 16384;
 
 // Global Tokio runtime for async operations
@@ -41,7 +38,7 @@ pub static NUM_CPUS: LazyLock<usize> = LazyLock::new(|| {
 ///
 /// Configuration choices:
 /// - `target_partitions`: Set to number of CPUs for parallel execution
-/// - `batch_size`: 8192 rows (DataFusion default, cache-optimized)
+/// - `batch_size`: 16384 rows (reduces per-batch overhead for large scans)
 /// - `information_schema`: Disabled (not needed, saves memory)
 /// - `repartition_joins`: Enabled for parallel join execution
 /// - `repartition_aggregations`: Enabled for parallel aggregations

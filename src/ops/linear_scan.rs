@@ -25,6 +25,7 @@
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 
 use crate::engine::{create_sequential_session, RUNTIME};
+use crate::error::LtseqError;
 use crate::types::PyExpr;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
@@ -71,6 +72,7 @@ fn contains_shift(expr: &PyExpr) -> bool {
             }
         }
         PyExpr::Window { .. } => false,
+        PyExpr::Alias { expr, .. } => contains_shift(expr),
     }
 }
 
@@ -138,6 +140,7 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
             }
         }
         PyExpr::Window { .. } => false,
+        PyExpr::Alias { expr, .. } => is_supported_expr(expr),
     }
 }
 
@@ -153,676 +156,6 @@ enum Value {
     Int64(i64),
     Float64(f64),
     Str(String),
-}
-
-impl Value {
-    fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
-    }
-
-    /// Coerce to f64 for arithmetic operations
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            Value::Int64(v) => Some(*v as f64),
-            Value::Float64(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Try to get as i64
-    fn as_i64(&self) -> Option<i64> {
-        match self {
-            Value::Int64(v) => Some(*v),
-            _ => None,
-        }
-    }
-}
-
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Value::Null, Value::Null) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int64(a), Value::Int64(b)) => a == b,
-            (Value::Float64(a), Value::Float64(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            // Cross-type numeric comparison
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64) == *b,
-            (Value::Float64(a), Value::Int64(b)) => *a == (*b as f64),
-            _ => false,
-        }
-    }
-}
-
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Value::Int64(a), Value::Int64(b)) => a.partial_cmp(b),
-            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-            (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
-            (Value::Str(a), Value::Str(b)) => a.partial_cmp(b),
-            (Value::Bool(a), Value::Bool(b)) => a.partial_cmp(b),
-            _ => None,
-        }
-    }
-}
-
-// ============================================================================
-// Column accessor — typed reader for Arrow arrays
-// ============================================================================
-
-/// Read a value from an Arrow array at a given index.
-fn read_array_value(array: &ArrayRef, row: usize) -> Value {
-    if array.is_null(row) {
-        return Value::Null;
-    }
-    match array.data_type() {
-        DataType::Int64 => {
-            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            Value::Int64(arr.value(row))
-        }
-        DataType::Int32 => {
-            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            Value::Int64(arr.value(row) as i64)
-        }
-        DataType::UInt64 => {
-            let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-            Value::Int64(arr.value(row) as i64)
-        }
-        DataType::UInt32 => {
-            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            Value::Int64(arr.value(row) as i64)
-        }
-        DataType::Float64 => {
-            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            Value::Float64(arr.value(row))
-        }
-        DataType::Utf8 => {
-            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-            Value::Str(arr.value(row).to_string())
-        }
-        DataType::LargeUtf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
-                .unwrap();
-            Value::Str(arr.value(row).to_string())
-        }
-        DataType::Utf8View => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<datafusion::arrow::array::StringViewArray>()
-                .unwrap();
-            Value::Str(arr.value(row).to_string())
-        }
-        DataType::Boolean => {
-            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            Value::Bool(arr.value(row))
-        }
-        DataType::Timestamp(_, _) => {
-            // Timestamps are stored as i64 internally (microseconds, nanoseconds, etc.)
-            // For comparison and arithmetic, treat as i64
-            use datafusion::arrow::array::TimestampMicrosecondArray;
-            use datafusion::arrow::array::TimestampMillisecondArray;
-            use datafusion::arrow::array::TimestampNanosecondArray;
-            use datafusion::arrow::array::TimestampSecondArray;
-            if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-                Value::Int64(arr.value(row))
-            } else if let Some(arr) =
-                array.as_any().downcast_ref::<TimestampMillisecondArray>()
-            {
-                Value::Int64(arr.value(row))
-            } else if let Some(arr) =
-                array.as_any().downcast_ref::<TimestampMicrosecondArray>()
-            {
-                Value::Int64(arr.value(row))
-            } else if let Some(arr) =
-                array.as_any().downcast_ref::<TimestampNanosecondArray>()
-            {
-                Value::Int64(arr.value(row))
-            } else {
-                Value::Null
-            }
-        }
-        _ => Value::Null,
-    }
-}
-
-// ============================================================================
-// Expression evaluator
-// ============================================================================
-
-// ============================================================================
-// Compiled evaluator — pre-resolves columns for fast per-row evaluation
-// ============================================================================
-
-/// Pre-downcasted column accessor for zero-overhead typed reads.
-#[derive(Clone)]
-enum TypedColumn {
-    Int64(Arc<Int64Array>),
-    UInt64(Arc<UInt64Array>),
-    Int32(Arc<Int32Array>),
-    UInt32(Arc<UInt32Array>),
-    Float64(Arc<Float64Array>),
-    Bool(Arc<BooleanArray>),
-    /// Fallback: use dynamic dispatch via read_array_value
-    Generic(ArrayRef),
-}
-
-impl TypedColumn {
-    fn from_array(array: &ArrayRef) -> Self {
-        match array.data_type() {
-            DataType::Int64 => {
-                TypedColumn::Int64(Arc::new(array.as_any().downcast_ref::<Int64Array>().unwrap().clone()))
-            }
-            DataType::UInt64 => {
-                TypedColumn::UInt64(Arc::new(array.as_any().downcast_ref::<UInt64Array>().unwrap().clone()))
-            }
-            DataType::Int32 => {
-                TypedColumn::Int32(Arc::new(array.as_any().downcast_ref::<Int32Array>().unwrap().clone()))
-            }
-            DataType::UInt32 => {
-                TypedColumn::UInt32(Arc::new(array.as_any().downcast_ref::<UInt32Array>().unwrap().clone()))
-            }
-            DataType::Float64 => {
-                TypedColumn::Float64(Arc::new(array.as_any().downcast_ref::<Float64Array>().unwrap().clone()))
-            }
-            DataType::Boolean => {
-                TypedColumn::Bool(Arc::new(array.as_any().downcast_ref::<BooleanArray>().unwrap().clone()))
-            }
-            DataType::Timestamp(_, _) => {
-                // Timestamps are i64 internally — reinterpret the underlying data as Int64
-                let data = array.to_data();
-                match Int64Array::try_new(
-                    data.buffers()[0].clone().into(),
-                    data.nulls().cloned(),
-                ) {
-                    Ok(i64_arr) => TypedColumn::Int64(Arc::new(i64_arr)),
-                    Err(_) => TypedColumn::Generic(Arc::clone(array)),
-                }
-            }
-            _ => TypedColumn::Generic(Arc::clone(array)),
-        }
-    }
-
-    #[inline(always)]
-    fn read(&self, row: usize) -> Value {
-        match self {
-            TypedColumn::Int64(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Int64(arr.value(row)) }
-            }
-            TypedColumn::UInt64(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Int64(arr.value(row) as i64) }
-            }
-            TypedColumn::Int32(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Int64(arr.value(row) as i64) }
-            }
-            TypedColumn::UInt32(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Int64(arr.value(row) as i64) }
-            }
-            TypedColumn::Float64(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Float64(arr.value(row)) }
-            }
-            TypedColumn::Bool(arr) => {
-                if arr.is_null(row) { Value::Null } else { Value::Bool(arr.value(row)) }
-            }
-            TypedColumn::Generic(arr) => read_array_value(arr, row),
-        }
-    }
-}
-
-/// A compiled instruction for the stack-based evaluator.
-/// Pre-resolves column indices and types to avoid per-row lookups.
-#[derive(Debug, Clone)]
-enum Instruction {
-    /// Push column value at current row
-    PushColumn(usize), // column index in batch
-    /// Push column value at previous row (shift(1))
-    PushShiftedColumn(usize), // column index in batch
-    /// Push literal value
-    PushLiteral(Value),
-    /// Binary operation on top two stack values
-    BinOp(BinOpKind),
-    /// Unary NOT on top stack value
-    Not,
-    /// is_null check on top stack value
-    IsNull,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BinOpKind {
-    Ne,
-    Eq,
-    Gt,
-    Lt,
-    Ge,
-    Le,
-    Or,
-    And,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    FloorDiv,
-    Mod,
-}
-
-/// Compiled evaluator with pre-resolved column references
-#[allow(dead_code)]
-struct CompiledEvaluator {
-    instructions: Vec<Instruction>,
-    /// Pre-downcasted column arrays for typed access
-    columns: Vec<TypedColumn>,
-}
-
-#[allow(dead_code)]
-impl CompiledEvaluator {
-    /// Compile a PyExpr into instructions
-    fn compile(expr: &PyExpr, batch: &RecordBatch) -> Self {
-        let mut name_to_idx = std::collections::HashMap::new();
-        for (i, field) in batch.schema().fields().iter().enumerate() {
-            name_to_idx.insert(field.name().clone(), i);
-        }
-
-        let columns: Vec<TypedColumn> = batch
-            .columns()
-            .iter()
-            .map(|arr| TypedColumn::from_array(arr))
-            .collect();
-        let mut instructions = Vec::new();
-        Self::compile_expr(expr, &name_to_idx, &mut instructions);
-
-        CompiledEvaluator {
-            instructions,
-            columns,
-        }
-    }
-
-    fn compile_expr(
-        expr: &PyExpr,
-        name_to_idx: &std::collections::HashMap<String, usize>,
-        out: &mut Vec<Instruction>,
-    ) {
-        match expr {
-            PyExpr::Column(name) => {
-                let idx = name_to_idx.get(name).copied().unwrap_or(usize::MAX);
-                out.push(Instruction::PushColumn(idx));
-            }
-            PyExpr::Literal { value, dtype } => {
-                out.push(Instruction::PushLiteral(literal_to_value(value, dtype)));
-            }
-            PyExpr::Call {
-                func, on, args: _, ..
-            } => match func.as_str() {
-                "shift" => {
-                    if let PyExpr::Column(col_name) = on.as_ref() {
-                        let idx = name_to_idx.get(col_name).copied().unwrap_or(usize::MAX);
-                        out.push(Instruction::PushShiftedColumn(idx));
-                    } else {
-                        out.push(Instruction::PushLiteral(Value::Null));
-                    }
-                }
-                "is_null" => {
-                    Self::compile_expr(on, name_to_idx, out);
-                    out.push(Instruction::IsNull);
-                }
-                _ => {
-                    out.push(Instruction::PushLiteral(Value::Null));
-                }
-            },
-            PyExpr::BinOp { op, left, right } => {
-                // For short-circuit ops (Or/And), we still evaluate both sides
-                // on the stack. True short-circuiting would require jumps.
-                Self::compile_expr(left, name_to_idx, out);
-                Self::compile_expr(right, name_to_idx, out);
-                let kind = match op.as_str() {
-                    "Ne" => BinOpKind::Ne,
-                    "Eq" => BinOpKind::Eq,
-                    "Gt" => BinOpKind::Gt,
-                    "Lt" => BinOpKind::Lt,
-                    "Ge" => BinOpKind::Ge,
-                    "Le" => BinOpKind::Le,
-                    "Or" => BinOpKind::Or,
-                    "And" => BinOpKind::And,
-                    "Add" => BinOpKind::Add,
-                    "Sub" => BinOpKind::Sub,
-                    "Mul" => BinOpKind::Mul,
-                    "Div" => BinOpKind::Div,
-                    "FloorDiv" => BinOpKind::FloorDiv,
-                    "Mod" => BinOpKind::Mod,
-                    _ => BinOpKind::Eq, // fallback
-                };
-                out.push(Instruction::BinOp(kind));
-            }
-            PyExpr::UnaryOp { op, operand } => {
-                Self::compile_expr(operand, name_to_idx, out);
-                if op == "Not" {
-                    out.push(Instruction::Not);
-                }
-            }
-            PyExpr::Window { .. } => {
-                out.push(Instruction::PushLiteral(Value::Null));
-            }
-        }
-    }
-
-    /// Evaluate the compiled expression for a given row
-    #[inline]
-    fn evaluate(&self, row: usize, prev_row: Option<usize>) -> bool {
-        let mut stack: Vec<Value> = Vec::with_capacity(16);
-
-        for instr in &self.instructions {
-            match instr {
-                Instruction::PushColumn(idx) => {
-                    if *idx < self.columns.len() {
-                        stack.push(self.columns[*idx].read(row));
-                    } else {
-                        stack.push(Value::Null);
-                    }
-                }
-                Instruction::PushShiftedColumn(idx) => {
-                    match prev_row {
-                        Some(prev) if *idx < self.columns.len() => {
-                            stack.push(self.columns[*idx].read(prev));
-                        }
-                        _ => stack.push(Value::Null),
-                    }
-                }
-                Instruction::PushLiteral(val) => {
-                    stack.push(val.clone());
-                }
-                Instruction::BinOp(kind) => {
-                    let rv = stack.pop().unwrap_or(Value::Null);
-                    let lv = stack.pop().unwrap_or(Value::Null);
-                    stack.push(eval_binop(*kind, &lv, &rv));
-                }
-                Instruction::Not => {
-                    let val = stack.pop().unwrap_or(Value::Null);
-                    stack.push(match val {
-                        Value::Bool(b) => Value::Bool(!b),
-                        _ => Value::Null,
-                    });
-                }
-                Instruction::IsNull => {
-                    let val = stack.pop().unwrap_or(Value::Null);
-                    stack.push(Value::Bool(val.is_null()));
-                }
-            }
-        }
-
-        // Convert final result to boolean
-        match stack.pop() {
-            Some(Value::Bool(b)) => b,
-            Some(Value::Null) => true, // NULL → boundary (new group)
-            _ => false,
-        }
-    }
-
-    /// Create a cross-boundary evaluator from the last row of the previous batch
-    /// and the first row of the current batch. Used for detecting boundaries at
-    /// batch transitions.
-    #[allow(dead_code)]
-    fn compile_cross_boundary(
-        expr: &PyExpr,
-        prev_last_row: &RecordBatch,
-        curr_batch: &RecordBatch,
-    ) -> CrossBoundaryEvaluator {
-        // Build name->idx mapping (same schema for both)
-        let mut name_to_idx = std::collections::HashMap::new();
-        for (i, field) in prev_last_row.schema().fields().iter().enumerate() {
-            name_to_idx.insert(field.name().clone(), i);
-        }
-
-        let prev_columns: Vec<TypedColumn> = prev_last_row
-            .columns()
-            .iter()
-            .map(|arr| TypedColumn::from_array(arr))
-            .collect();
-
-        let curr_columns: Vec<TypedColumn> = curr_batch
-            .columns()
-            .iter()
-            .map(|arr| TypedColumn::from_array(arr))
-            .collect();
-
-        let mut instructions = Vec::new();
-        Self::compile_expr(expr, &name_to_idx, &mut instructions);
-
-        CrossBoundaryEvaluator {
-            instructions,
-            prev_columns,
-            curr_columns,
-        }
-    }
-}
-
-/// Evaluator for cross-batch boundary detection.
-/// Uses the previous batch's last row for shift(1) and the current batch's first row
-/// for the current row value.
-#[allow(dead_code)]
-struct CrossBoundaryEvaluator {
-    instructions: Vec<Instruction>,
-    /// Columns from the previous batch's last row (row index 0 in a 1-row batch)
-    prev_columns: Vec<TypedColumn>,
-    /// Columns from the current batch (row index 0)
-    curr_columns: Vec<TypedColumn>,
-}
-
-#[allow(dead_code)]
-impl CrossBoundaryEvaluator {
-    /// Evaluate the boundary predicate: current row = curr_batch[0], prev row = prev_batch[0]
-    #[inline]
-    fn evaluate_boundary(&self) -> bool {
-        let mut stack: Vec<Value> = Vec::with_capacity(16);
-
-        for instr in &self.instructions {
-            match instr {
-                Instruction::PushColumn(idx) => {
-                    // Current row → curr_columns, row 0
-                    if *idx < self.curr_columns.len() {
-                        stack.push(self.curr_columns[*idx].read(0));
-                    } else {
-                        stack.push(Value::Null);
-                    }
-                }
-                Instruction::PushShiftedColumn(idx) => {
-                    // Previous row → prev_columns, row 0
-                    if *idx < self.prev_columns.len() {
-                        stack.push(self.prev_columns[*idx].read(0));
-                    } else {
-                        stack.push(Value::Null);
-                    }
-                }
-                Instruction::PushLiteral(val) => {
-                    stack.push(val.clone());
-                }
-                Instruction::BinOp(kind) => {
-                    let rv = stack.pop().unwrap_or(Value::Null);
-                    let lv = stack.pop().unwrap_or(Value::Null);
-                    stack.push(eval_binop(*kind, &lv, &rv));
-                }
-                Instruction::Not => {
-                    let val = stack.pop().unwrap_or(Value::Null);
-                    stack.push(match val {
-                        Value::Bool(b) => Value::Bool(!b),
-                        _ => Value::Null,
-                    });
-                }
-                Instruction::IsNull => {
-                    let val = stack.pop().unwrap_or(Value::Null);
-                    stack.push(Value::Bool(val.is_null()));
-                }
-            }
-        }
-
-        match stack.pop() {
-            Some(Value::Bool(b)) => b,
-            Some(Value::Null) => true,
-            _ => false,
-        }
-    }
-}
-
-/// Evaluate a binary operation
-#[inline]
-fn eval_binop(kind: BinOpKind, lv: &Value, rv: &Value) -> Value {
-    match kind {
-        BinOpKind::Or => {
-            let lb = matches!(lv, Value::Bool(true));
-            if lb {
-                return Value::Bool(true);
-            }
-            Value::Bool(matches!(rv, Value::Bool(true)))
-        }
-        BinOpKind::And => {
-            let lb = matches!(lv, Value::Bool(true));
-            if !lb {
-                return Value::Bool(false);
-            }
-            Value::Bool(matches!(rv, Value::Bool(true)))
-        }
-        BinOpKind::Ne => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(true)
-            } else {
-                Value::Bool(lv != rv)
-            }
-        }
-        BinOpKind::Eq => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(false)
-            } else {
-                Value::Bool(lv == rv)
-            }
-        }
-        BinOpKind::Gt => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(false)
-            } else {
-                Value::Bool(lv > rv)
-            }
-        }
-        BinOpKind::Lt => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(false)
-            } else {
-                Value::Bool(lv < rv)
-            }
-        }
-        BinOpKind::Ge => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(false)
-            } else {
-                Value::Bool(lv >= rv)
-            }
-        }
-        BinOpKind::Le => {
-            if lv.is_null() || rv.is_null() {
-                Value::Bool(false)
-            } else {
-                Value::Bool(lv <= rv)
-            }
-        }
-        BinOpKind::Sub => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_i64(), rv.as_i64()) {
-                    (Some(a), Some(b)) => Value::Int64(a - b),
-                    _ => match (lv.as_f64(), rv.as_f64()) {
-                        (Some(a), Some(b)) => Value::Float64(a - b),
-                        _ => Value::Null,
-                    },
-                }
-            }
-        }
-        BinOpKind::Add => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_i64(), rv.as_i64()) {
-                    (Some(a), Some(b)) => Value::Int64(a + b),
-                    _ => match (lv.as_f64(), rv.as_f64()) {
-                        (Some(a), Some(b)) => Value::Float64(a + b),
-                        _ => Value::Null,
-                    },
-                }
-            }
-        }
-        BinOpKind::Mul => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_i64(), rv.as_i64()) {
-                    (Some(a), Some(b)) => Value::Int64(a * b),
-                    _ => match (lv.as_f64(), rv.as_f64()) {
-                        (Some(a), Some(b)) => Value::Float64(a * b),
-                        _ => Value::Null,
-                    },
-                }
-            }
-        }
-        BinOpKind::Div => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_f64(), rv.as_f64()) {
-                    (Some(a), Some(b)) if b != 0.0 => Value::Float64(a / b),
-                    _ => Value::Null,
-                }
-            }
-        }
-        BinOpKind::FloorDiv => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_f64(), rv.as_f64()) {
-                    (Some(a), Some(b)) if b != 0.0 => Value::Int64((a / b).floor() as i64),
-                    _ => Value::Null,
-                }
-            }
-        }
-        BinOpKind::Mod => {
-            if lv.is_null() || rv.is_null() {
-                Value::Null
-            } else {
-                match (lv.as_i64(), rv.as_i64()) {
-                    (Some(a), Some(b)) if b != 0 => Value::Int64(a % b),
-                    _ => Value::Null,
-                }
-            }
-        }
-    }
-}
-
-/// Column lookup table: maps column name → index in the concatenated batch.
-/// Kept for potential fallback use but no longer used in the hot path.
-#[allow(dead_code)]
-struct ColumnLookup {
-    /// The single concatenated RecordBatch containing all rows
-    batch: RecordBatch,
-    /// Map from column name to column index in the batch
-    name_to_idx: std::collections::HashMap<String, usize>,
-}
-
-#[allow(dead_code)]
-impl ColumnLookup {
-    fn new(batch: RecordBatch) -> Self {
-        let mut name_to_idx = std::collections::HashMap::new();
-        for (i, field) in batch.schema().fields().iter().enumerate() {
-            name_to_idx.insert(field.name().clone(), i);
-        }
-        ColumnLookup { batch, name_to_idx }
-    }
-
-    /// Read a column value at a given row
-    fn read(&self, col_name: &str, row: usize) -> Value {
-        match self.name_to_idx.get(col_name) {
-            Some(&idx) => read_array_value(self.batch.column(idx), row),
-            None => Value::Null,
-        }
-    }
 }
 
 /// Parse a literal PyExpr into a Value
@@ -855,225 +188,6 @@ fn literal_to_value(value: &str, dtype: &str) -> Value {
     }
 }
 
-/// Evaluate a PyExpr for a given row, using `prev_row` for shift(1) lookups.
-/// Kept for potential fallback use but no longer used in the hot path.
-///
-/// - `row`: current row index
-/// - `prev_row`: previous row index (None for row 0)
-#[allow(dead_code)]
-fn evaluate(
-    expr: &PyExpr,
-    lookup: &ColumnLookup,
-    row: usize,
-    prev_row: Option<usize>,
-) -> Value {
-    match expr {
-        PyExpr::Column(name) => lookup.read(name, row),
-
-        PyExpr::Literal { value, dtype } => literal_to_value(value, dtype),
-
-        PyExpr::Call {
-            func, on, args: _, ..
-        } => match func.as_str() {
-            "shift" => {
-                // shift(1) on a column: read the previous row's value
-                if let PyExpr::Column(col_name) = on.as_ref() {
-                    match prev_row {
-                        Some(prev) => lookup.read(col_name, prev),
-                        None => Value::Null, // First row: shift(1) is NULL
-                    }
-                } else {
-                    Value::Null
-                }
-            }
-            "is_null" => {
-                let val = evaluate(on, lookup, row, prev_row);
-                Value::Bool(val.is_null())
-            }
-            _ => Value::Null,
-        },
-
-        PyExpr::BinOp { op, left, right } => {
-            let lv = evaluate(left, lookup, row, prev_row);
-            let rv = evaluate(right, lookup, row, prev_row);
-
-            match op.as_str() {
-                // Short-circuit logical ops
-                "Or" => {
-                    let lb = match &lv {
-                        Value::Bool(b) => *b,
-                        _ => false,
-                    };
-                    if lb {
-                        return Value::Bool(true);
-                    }
-                    let rb = match &rv {
-                        Value::Bool(b) => *b,
-                        _ => false,
-                    };
-                    Value::Bool(rb)
-                }
-                "And" => {
-                    let lb = match &lv {
-                        Value::Bool(b) => *b,
-                        _ => false,
-                    };
-                    if !lb {
-                        return Value::Bool(false);
-                    }
-                    let rb = match &rv {
-                        Value::Bool(b) => *b,
-                        _ => false,
-                    };
-                    Value::Bool(rb)
-                }
-
-                // Comparison ops — handle NULL propagation (NULL != X → NULL → false for boundary)
-                "Ne" => {
-                    if lv.is_null() || rv.is_null() {
-                        // NULL != anything is NULL, but for boundary detection
-                        // we want NULL to mean "different" (new group)
-                        Value::Bool(true)
-                    } else {
-                        Value::Bool(lv != rv)
-                    }
-                }
-                "Eq" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Bool(false)
-                    } else {
-                        Value::Bool(lv == rv)
-                    }
-                }
-                "Gt" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Bool(false)
-                    } else {
-                        Value::Bool(lv > rv)
-                    }
-                }
-                "Lt" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Bool(false)
-                    } else {
-                        Value::Bool(lv < rv)
-                    }
-                }
-                "Ge" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Bool(false)
-                    } else {
-                        Value::Bool(lv >= rv)
-                    }
-                }
-                "Le" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Bool(false)
-                    } else {
-                        Value::Bool(lv <= rv)
-                    }
-                }
-
-                // Arithmetic ops
-                "Sub" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Null
-                    } else {
-                        // Try integer arithmetic first (preserves precision)
-                        match (lv.as_i64(), rv.as_i64()) {
-                            (Some(a), Some(b)) => Value::Int64(a - b),
-                            _ => match (lv.as_f64(), rv.as_f64()) {
-                                (Some(a), Some(b)) => Value::Float64(a - b),
-                                _ => Value::Null,
-                            },
-                        }
-                    }
-                }
-                "Add" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Null
-                    } else {
-                        match (lv.as_i64(), rv.as_i64()) {
-                            (Some(a), Some(b)) => Value::Int64(a + b),
-                            _ => match (lv.as_f64(), rv.as_f64()) {
-                                (Some(a), Some(b)) => Value::Float64(a + b),
-                                _ => Value::Null,
-                            },
-                        }
-                    }
-                }
-                "Mul" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Null
-                    } else {
-                        match (lv.as_i64(), rv.as_i64()) {
-                            (Some(a), Some(b)) => Value::Int64(a * b),
-                            _ => match (lv.as_f64(), rv.as_f64()) {
-                                (Some(a), Some(b)) => Value::Float64(a * b),
-                                _ => Value::Null,
-                            },
-                        }
-                    }
-                }
-                "Div" | "FloorDiv" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Null
-                    } else {
-                        match (lv.as_f64(), rv.as_f64()) {
-                            (Some(a), Some(b)) if b != 0.0 => {
-                                if op == "FloorDiv" {
-                                    Value::Int64((a / b).floor() as i64)
-                                } else {
-                                    Value::Float64(a / b)
-                                }
-                            }
-                            _ => Value::Null,
-                        }
-                    }
-                }
-                "Mod" => {
-                    if lv.is_null() || rv.is_null() {
-                        Value::Null
-                    } else {
-                        match (lv.as_i64(), rv.as_i64()) {
-                            (Some(a), Some(b)) if b != 0 => Value::Int64(a % b),
-                            _ => Value::Null,
-                        }
-                    }
-                }
-
-                _ => Value::Null,
-            }
-        }
-
-        PyExpr::UnaryOp { op, operand } => {
-            if op == "Not" {
-                let val = evaluate(operand, lookup, row, prev_row);
-                match val {
-                    Value::Bool(b) => Value::Bool(!b),
-                    Value::Null => Value::Null,
-                    _ => Value::Null,
-                }
-            } else {
-                Value::Null
-            }
-        }
-
-        PyExpr::Window { .. } => Value::Null,
-    }
-}
-
-/// Convert a Value to boolean for boundary detection.
-/// NULL → true (treat as boundary / new group for first row)
-#[allow(dead_code)]
-fn value_to_bool(val: &Value) -> bool {
-    match val {
-        Value::Bool(b) => *b,
-        Value::Null => true,
-        _ => false,
-    }
-}
-
 // ============================================================================
 // Column extraction from expression tree
 // ============================================================================
@@ -1099,6 +213,9 @@ pub(crate) fn extract_referenced_columns(expr: &PyExpr, cols: &mut HashSet<Strin
             }
         }
         PyExpr::Window { expr, .. } => {
+            extract_referenced_columns(expr, cols);
+        }
+        PyExpr::Alias { expr, .. } => {
             extract_referenced_columns(expr, cols);
         }
     }
@@ -1621,6 +738,7 @@ fn vectorized_eval_expr(
         }
         
         PyExpr::Window { .. } => Err("Window expressions not supported in vectorized eval".to_string()),
+        PyExpr::Alias { expr, .. } => vectorized_eval_expr(expr, batch, name_to_idx),
     }
 }
 
@@ -1963,7 +1081,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     let df = table
         .dataframe
         .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded"))?;
+        .ok_or(LtseqError::NoData)?;
 
     // ── Phase A: Lightweight boundary detection ──────────────────────────
 
@@ -1995,7 +1113,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         (**df).clone()
     } else {
         (**df).clone().select(col_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to project columns for linear scan: {}",
                 e
             ))
@@ -2006,7 +1124,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         projected_df
     } else {
         projected_df.sort(relevant_sort_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to sort projected data: {}",
                 e
             ))
@@ -2021,7 +1139,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
                 .await
                 .map_err(|e| format!("Failed to collect projected data: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     if proj_batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -2045,10 +1163,10 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
 
     // Step 4: Boundary detection — concat batches then use vectorized SIMD evaluation.
     // concat_batches is cheap for small projections (2-3 columns) and the vectorized
-    // path using Arrow compute kernels is ~2x faster than per-row CompiledEvaluator.
+    // path using Arrow compute kernels is ~2x faster than per-row evaluation.
     let schema = proj_batches[0].schema();
     let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+        LtseqError::Runtime(format!(
             "Failed to concatenate projected batches: {}",
             e
         ))
@@ -2063,7 +1181,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     // Vectorized boundary detection using Arrow compute kernels (SIMD-accelerated)
     let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Vectorized boundary evaluation failed: {}",
                 e
             ))
@@ -2187,7 +1305,7 @@ fn streaming_linear_scan_group_id(
             return general_linear_scan_group_id(table, predicate);
         }
         Err(e) => {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e));
+            return Err(LtseqError::Runtime(e).into());
         }
     };
 
@@ -2202,7 +1320,8 @@ fn streaming_linear_scan_group_id(
     }
 
     // Step 5: Build metadata from accumulated group IDs
-    let current_gid = *group_ids.last().unwrap();
+    // SAFETY: total_rows == 0 returned early above
+    let current_gid = *group_ids.last().expect("group_ids is non-empty");
     let num_groups = current_gid as usize;
     let mut group_counts: Vec<i64> = vec![0; num_groups + 1];
     for &gid in &group_ids {
@@ -2231,7 +1350,7 @@ fn general_linear_scan_group_id(
     let df = table
         .dataframe
         .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded"))?;
+        .ok_or(LtseqError::NoData)?;
 
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
@@ -2256,7 +1375,7 @@ fn general_linear_scan_group_id(
         (**df).clone()
     } else {
         (**df).clone().select(col_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to project columns for linear scan: {}",
                 e
             ))
@@ -2267,7 +1386,7 @@ fn general_linear_scan_group_id(
         projected_df
     } else {
         projected_df.sort(relevant_sort_exprs).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Failed to sort projected data: {}",
                 e
             ))
@@ -2281,7 +1400,7 @@ fn general_linear_scan_group_id(
                 .await
                 .map_err(|e| format!("Failed to collect projected data: {}", e))
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     if proj_batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -2305,7 +1424,7 @@ fn general_linear_scan_group_id(
 
     let schema = proj_batches[0].schema();
     let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+        LtseqError::Runtime(format!(
             "Failed to concatenate projected batches: {}",
             e
         ))
@@ -2318,7 +1437,7 @@ fn general_linear_scan_group_id(
 
     let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            LtseqError::Runtime(format!(
                 "Vectorized boundary evaluation failed: {}",
                 e
             ))
@@ -2393,7 +1512,7 @@ pub(crate) fn build_metadata_table(
         vec![group_id_array, group_count_array, rn_array],
     )
     .map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+        LtseqError::Runtime(format!(
             "Failed to create group metadata batch: {}",
             e
         ))

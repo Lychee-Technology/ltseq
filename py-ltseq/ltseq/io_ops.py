@@ -181,3 +181,134 @@ class IOMixin:
             >>> t.write_csv("output.csv")
         """
         self._inner.write_csv(path)
+
+    def write_parquet(self, path: str, compression: str | None = None) -> None:
+        """
+        Write the table to a Parquet file.
+
+        Args:
+            path: Path where the Parquet file will be written
+            compression: Optional compression algorithm.
+                         One of "snappy", "zstd", "gzip", "lz4", "none".
+                         Defaults to uncompressed if not specified.
+
+        Raises:
+            RuntimeError: If write fails
+            ValueError: If compression is not recognized
+
+        Example:
+            >>> t.write_parquet("output.parquet")
+            >>> t.write_parquet("output.parquet", compression="zstd")
+        """
+        self._inner.write_parquet(path, compression)
+
+    @classmethod
+    def from_arrow(cls, arrow_table) -> "LTSeq":
+        """
+        Create an LTSeq table from a PyArrow Table.
+
+        Args:
+            arrow_table: A pyarrow.Table instance
+
+        Returns:
+            New LTSeq instance backed by the Arrow data
+
+        Example:
+            >>> import pyarrow as pa
+            >>> arrow_table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+            >>> t = LTSeq.from_arrow(arrow_table)
+        """
+        import pyarrow as pa
+
+        from .core import LTSeq
+
+        if not isinstance(arrow_table, pa.Table):
+            raise TypeError(
+                f"Expected pyarrow.Table, got {type(arrow_table).__name__}"
+            )
+
+        # Serialize Arrow Table to IPC bytes
+        batches = arrow_table.to_batches()
+        if not batches and arrow_table.num_rows == 0:
+            # Create an empty batch with the schema so Rust receives schema info
+            empty_batch = pa.RecordBatch.from_pydict(
+                {field.name: pa.array([], type=field.type) for field in arrow_table.schema},
+                schema=arrow_table.schema,
+            )
+            batches = [empty_batch]
+        ipc_buffers = []
+        for batch in batches:
+            sink = pa.BufferOutputStream()
+            writer = pa.ipc.new_stream(sink, batch.schema)
+            writer.write_batch(batch)
+            writer.close()
+            ipc_buffers.append(sink.getvalue().to_pybytes())
+
+        # Load into Rust via the IPC pathway
+        t = LTSeq()
+        t._inner = ltseq_core.LTSeqTable.load_arrow_ipc(ipc_buffers)
+
+        # Infer schema from Arrow schema
+        _arrow_to_ltseq_type = {
+            "int8": "int64",
+            "int16": "int64",
+            "int32": "int64",
+            "int64": "int64",
+            "uint8": "int64",
+            "uint16": "int64",
+            "uint32": "int64",
+            "uint64": "int64",
+            "float16": "float64",
+            "float32": "float64",
+            "float64": "float64",
+            "double": "float64",
+            "bool": "bool",
+            "string": "string",
+            "large_string": "string",
+            "utf8": "string",
+            "large_utf8": "string",
+            "date32": "date32",
+            "date64": "date32",
+        }
+        schema = {}
+        for field in arrow_table.schema:
+            type_str = str(field.type)
+            schema[field.name] = _arrow_to_ltseq_type.get(type_str, type_str)
+        t._schema = schema
+
+        return t
+
+    @classmethod
+    def from_pandas(cls, df) -> "LTSeq":
+        """
+        Create an LTSeq table from a pandas DataFrame.
+
+        Converts the DataFrame to a PyArrow Table first, then loads it.
+
+        Args:
+            df: A pandas DataFrame
+
+        Returns:
+            New LTSeq instance backed by the DataFrame data
+
+        Example:
+            >>> import pandas as pd
+            >>> df = pd.DataFrame({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+            >>> t = LTSeq.from_pandas(df)
+        """
+        import pyarrow as pa
+
+        try:
+            import pandas as pd
+        except ImportError:
+            raise RuntimeError(
+                "from_pandas() requires pandas. Install it with: pip install pandas"
+            )
+
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(
+                f"Expected pandas.DataFrame, got {type(df).__name__}"
+            )
+
+        arrow_table = pa.Table.from_pandas(df)
+        return cls.from_arrow(arrow_table)

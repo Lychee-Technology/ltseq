@@ -160,31 +160,16 @@ fn sql_rolling_agg(func: &str, on: &PyExpr, schema: &ArrowSchema) -> Result<Stri
     }
 }
 
-/// Handle SQL for function calls (shift, diff, abs, ceil, floor, round, etc.)
-fn sql_call(
+// ========== Category-based SQL call handlers ==========
+
+/// Handle SQL for conditional and null operations
+fn sql_call_conditional_null(
     func: &str,
     on: &PyExpr,
     args: &[PyExpr],
-    kwargs: &std::collections::HashMap<String, PyExpr>,
     schema: &ArrowSchema,
 ) -> Result<String, String> {
     match func {
-        "shift" => sql_shift(on, args, kwargs, schema),
-        "rolling" => {
-            Err("rolling() should not reach pyexpr_to_sql - it's handled separately".to_string())
-        }
-        "diff" => sql_diff(on, args, schema),
-        "cum_sum" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("SUM({}) OVER ()", on_sql))
-        }
-        // Aggregation functions that can be applied to rolling windows
-        "mean" | "sum" | "min" | "max" | "count" | "std" => sql_rolling_agg(func, on, schema),
-        "abs" => sql_abs(args, schema),
-        "ceil" => sql_ceil(args, schema),
-        "floor" => sql_floor(args, schema),
-        "round" => sql_round(args, schema),
-        // Conditional expressions
         "if_else" => {
             if args.len() != 3 {
                 return Err(
@@ -199,7 +184,6 @@ fn sql_call(
                 cond_sql, true_sql, false_sql
             ))
         }
-        // Null handling
         "fill_null" => {
             if args.is_empty() {
                 return Err("fill_null requires a default value argument".to_string());
@@ -216,9 +200,20 @@ fn sql_call(
             let on_sql = pyexpr_to_sql(on, schema)?;
             Ok(format!("{} IS NOT NULL", on_sql))
         }
-        // String operations
+        _ => Err(format!("Not a conditional/null function: {}", func)),
+    }
+}
+
+/// Handle SQL for string operations
+fn sql_call_string(
+    func: &str,
+    on: &PyExpr,
+    args: &[PyExpr],
+    schema: &ArrowSchema,
+) -> Result<String, String> {
+    let on_sql = pyexpr_to_sql(on, schema)?;
+    match func {
         "str_contains" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_contains requires a pattern argument".to_string());
             }
@@ -226,7 +221,6 @@ fn sql_call(
             Ok(format!("POSITION({} IN {}) > 0", pattern, on_sql))
         }
         "str_starts_with" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_starts_with requires a prefix argument".to_string());
             }
@@ -234,7 +228,6 @@ fn sql_call(
             Ok(format!("LEFT({}, LENGTH({})) = {}", on_sql, prefix, prefix))
         }
         "str_ends_with" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_ends_with requires a suffix argument".to_string());
             }
@@ -244,43 +237,26 @@ fn sql_call(
                 on_sql, suffix, suffix
             ))
         }
-        "str_lower" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("LOWER({})", on_sql))
-        }
-        "str_upper" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("UPPER({})", on_sql))
-        }
-        "str_strip" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("TRIM({})", on_sql))
-        }
-        "str_len" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("LENGTH({})", on_sql))
-        }
+        "str_lower" => Ok(format!("LOWER({})", on_sql)),
+        "str_upper" => Ok(format!("UPPER({})", on_sql)),
+        "str_strip" => Ok(format!("TRIM({})", on_sql)),
+        "str_len" => Ok(format!("LENGTH({})", on_sql)),
         "str_slice" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.len() < 2 {
                 return Err("str_slice requires start and length arguments".to_string());
             }
             let start = pyexpr_to_sql(&args[0], schema)?;
             let length = pyexpr_to_sql(&args[1], schema)?;
-            // SQL uses 1-based indexing, Python uses 0-based
             Ok(format!("SUBSTRING({}, {} + 1, {})", on_sql, start, length))
         }
         "str_regex_match" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_regex_match requires a pattern argument".to_string());
             }
             let pattern = pyexpr_to_sql(&args[0], schema)?;
             Ok(format!("REGEXP_LIKE({}, {})", on_sql, pattern))
         }
-        // New string operations
         "str_replace" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.len() < 2 {
                 return Err("str_replace requires 'old' and 'new' arguments".to_string());
             }
@@ -289,7 +265,6 @@ fn sql_call(
             Ok(format!("REPLACE({}, {}, {})", on_sql, old_sql, new_sql))
         }
         "str_concat" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             let mut all_parts = vec![on_sql];
             for arg in args {
                 all_parts.push(pyexpr_to_sql(arg, schema)?);
@@ -297,7 +272,6 @@ fn sql_call(
             Ok(format!("CONCAT({})", all_parts.join(", ")))
         }
         "str_pad_left" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_pad_left requires a width argument".to_string());
             }
@@ -310,7 +284,6 @@ fn sql_call(
             Ok(format!("LPAD({}, {}, {})", on_sql, width_sql, char_sql))
         }
         "str_pad_right" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("str_pad_right requires a width argument".to_string());
             }
@@ -323,7 +296,6 @@ fn sql_call(
             Ok(format!("RPAD({}, {}, {})", on_sql, width_sql, char_sql))
         }
         "str_split" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.len() < 2 {
                 return Err("str_split requires delimiter and index arguments".to_string());
             }
@@ -334,53 +306,84 @@ fn sql_call(
                 on_sql, delimiter_sql, index_sql
             ))
         }
-        // Temporal operations
-        "dt_year" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(YEAR FROM {})", on_sql))
-        }
-        "dt_month" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(MONTH FROM {})", on_sql))
-        }
-        "dt_day" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(DAY FROM {})", on_sql))
-        }
-        "dt_hour" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(HOUR FROM {})", on_sql))
-        }
-        "dt_minute" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(MINUTE FROM {})", on_sql))
-        }
-        "dt_second" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
-            Ok(format!("EXTRACT(SECOND FROM {})", on_sql))
-        }
+        _ => Err(format!("Not a string function: {}", func)),
+    }
+}
+
+/// Handle SQL for temporal operations
+fn sql_call_temporal(
+    func: &str,
+    on: &PyExpr,
+    args: &[PyExpr],
+    schema: &ArrowSchema,
+) -> Result<String, String> {
+    let on_sql = pyexpr_to_sql(on, schema)?;
+    match func {
+        "dt_year" => Ok(format!("EXTRACT(YEAR FROM {})", on_sql)),
+        "dt_month" => Ok(format!("EXTRACT(MONTH FROM {})", on_sql)),
+        "dt_day" => Ok(format!("EXTRACT(DAY FROM {})", on_sql)),
+        "dt_hour" => Ok(format!("EXTRACT(HOUR FROM {})", on_sql)),
+        "dt_minute" => Ok(format!("EXTRACT(MINUTE FROM {})", on_sql)),
+        "dt_second" => Ok(format!("EXTRACT(SECOND FROM {})", on_sql)),
         "dt_add" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.len() < 3 {
                 return Err("dt_add requires days, months, and years arguments".to_string());
             }
             let days = pyexpr_to_sql(&args[0], schema)?;
             let months = pyexpr_to_sql(&args[1], schema)?;
             let years = pyexpr_to_sql(&args[2], schema)?;
-            // Build interval string dynamically
             Ok(format!(
                 "({} + INTERVAL '{}' DAY + INTERVAL '{}' MONTH + INTERVAL '{}' YEAR)",
                 on_sql, days, months, years
             ))
         }
         "dt_diff" => {
-            let on_sql = pyexpr_to_sql(on, schema)?;
             if args.is_empty() {
                 return Err("dt_diff requires another date argument".to_string());
             }
             let other = pyexpr_to_sql(&args[0], schema)?;
             Ok(format!("DATEDIFF('day', {}, {})", other, on_sql))
         }
+        _ => Err(format!("Not a temporal function: {}", func)),
+    }
+}
+
+/// Handle SQL for function calls.
+///
+/// Dispatches to category-specific handlers: window, math, conditional/null,
+/// string, and temporal operations.
+fn sql_call(
+    func: &str,
+    on: &PyExpr,
+    args: &[PyExpr],
+    kwargs: &std::collections::HashMap<String, PyExpr>,
+    schema: &ArrowSchema,
+) -> Result<String, String> {
+    match func {
+        // Window functions
+        "shift" => sql_shift(on, args, kwargs, schema),
+        "rolling" => {
+            Err("rolling() should not reach pyexpr_to_sql - it's handled separately".to_string())
+        }
+        "diff" => sql_diff(on, args, schema),
+        "cum_sum" => {
+            let on_sql = pyexpr_to_sql(on, schema)?;
+            Ok(format!("SUM({}) OVER ()", on_sql))
+        }
+        "mean" | "sum" | "min" | "max" | "count" | "std" => sql_rolling_agg(func, on, schema),
+        // Math functions
+        "abs" => sql_abs(args, schema),
+        "ceil" => sql_ceil(args, schema),
+        "floor" => sql_floor(args, schema),
+        "round" => sql_round(args, schema),
+        // Conditional and null handling
+        "if_else" | "fill_null" | "is_null" | "is_not_null" => {
+            sql_call_conditional_null(func, on, args, schema)
+        }
+        // String operations
+        f if f.starts_with("str_") => sql_call_string(func, on, args, schema),
+        // Temporal operations
+        f if f.starts_with("dt_") => sql_call_temporal(func, on, args, schema),
         _ => Err(format!("Unsupported function in window context: {}", func)),
     }
 }
@@ -449,6 +452,11 @@ pub fn pyexpr_to_sql(py_expr: &PyExpr, schema: &ArrowSchema) -> Result<String, S
             *descending,
             schema,
         ),
+
+        PyExpr::Alias { expr, alias } => {
+            let inner_sql = pyexpr_to_sql(expr, schema)?;
+            Ok(format!("{} AS \"{}\"", inner_sql, alias))
+        }
     }
 }
 

@@ -11,6 +11,7 @@
 //! eliminating the previous collect→MemTable→SQL string round-trip.
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_sql;
 use crate::transpiler::pyexpr_to_window_expr;
 use crate::types::{dict_to_py_expr, PyExpr};
@@ -176,7 +177,7 @@ async fn build_derived_select_parts(
     for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert expression to SQL
         let expr_sql = pyexpr_to_sql(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Transpile(e))?;
 
         // Check what type of window function this is
         let is_rolling_agg = expr_sql.contains("__ROLLING_");
@@ -214,12 +215,12 @@ pub fn derive_with_window_functions_impl(
     let schema = table
         .schema
         .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available"))?;
+        .ok_or(LtseqError::NoSchema)?;
 
     let df = table
         .dataframe
         .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded"))?;
+        .ok_or(LtseqError::NoData)?;
 
     // Deserialize all expressions once
     let parsed_cols = parse_derived_cols(derived_cols)?;
@@ -254,13 +255,12 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
     let mut parsed = Vec::with_capacity(derived_cols.len());
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Column name must be string")
+            LtseqError::Validation("Column name must be string".into())
         })?;
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+            LtseqError::Validation("Expression must be dict".into())
         })?;
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(&expr_dict)?;
         parsed.push((col_name_str, py_expr));
     }
     Ok(parsed)
@@ -286,7 +286,7 @@ fn try_native_window_derive(
     for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert to native DataFusion window expression
         let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_exprs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Transpile(e))?;
 
         all_exprs.push(window_expr.alias(col_name_str));
     }
@@ -296,10 +296,7 @@ fn try_native_window_derive(
         .clone()
         .select(all_exprs)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Native window derive failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Native window derive failed: {}", e))
         })?;
 
     Ok(LTSeqTable::from_df(
@@ -320,10 +317,7 @@ fn derive_with_window_functions_sql_fallback(
     RUNTIME.block_on(async {
         // Get the data from the current DataFrame as record batches
         let current_batches = (**df).clone().collect().await.map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to collect current DataFrame: {}",
-                e
-            ))
+            LtseqError::collect(e)
         })?;
 
         // Get schema from the actual batches
@@ -337,10 +331,7 @@ fn derive_with_window_functions_sql_fallback(
         let temp_table_name = format!("__ltseq_temp_{}", std::process::id());
         let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create memory table: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
             })?;
 
         let _ = table.session.deregister_table(&temp_table_name);
@@ -349,10 +340,7 @@ fn derive_with_window_functions_sql_fallback(
             .session
             .register_table(&temp_table_name, Arc::new(temp_table))
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to register temporary table: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
             })?;
 
         let select_parts = build_derived_select_parts(&batch_schema, parsed_cols, table).await?;
@@ -365,10 +353,7 @@ fn derive_with_window_functions_sql_fallback(
 
         let new_df = table.session.sql(&sql).await.map_err(|e| {
             let _ = table.session.deregister_table(&temp_table_name);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Window function query failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Window function query failed: {}", e))
         })?;
 
         let _ = table.session.deregister_table(&temp_table_name);
@@ -398,15 +383,14 @@ async fn build_cumsum_select_parts(
     // Add cumulative sum columns for each input column
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+            LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(&expr_dict)?;
 
         // Convert expression to SQL
         let expr_sql = pyexpr_to_sql(&py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Transpile(e))?;
 
         // Extract column name from expression
         let col_name = if let PyExpr::Column(name) = &py_expr {
@@ -420,10 +404,10 @@ async fn build_cumsum_select_parts(
             if let Ok(field) = schema.field_with_name(col_name_ref) {
                 let field_type = field.data_type();
                 if !crate::transpiler::is_numeric_type(field_type) {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    return Err(PyErr::from(LtseqError::TypeMismatch(format!(
                         "cum_sum() requires numeric columns. Column '{}' has type {:?}",
                         col_name_ref, field_type
-                    )));
+                    ))));
                 }
             }
         }
@@ -521,11 +505,10 @@ fn try_native_cum_sum(
     // Add cumulative sum columns for each input column
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+            LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(&expr_dict)?;
 
         // Extract column name
         let col_name = if let PyExpr::Column(name) = &py_expr {
@@ -539,17 +522,17 @@ fn try_native_cum_sum(
             if let Ok(field) = schema.field_with_name(col_name_ref) {
                 let field_type = field.data_type();
                 if !crate::transpiler::is_numeric_type(field_type) {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    return Err(PyErr::from(LtseqError::TypeMismatch(format!(
                         "cum_sum() requires numeric columns. Column '{}' has type {:?}",
                         col_name_ref, field_type
-                    )));
+                    ))));
                 }
             }
         }
 
         // Build native cum_sum expression: SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
         let col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+            .map_err(|e| LtseqError::Transpile(e))?;
 
         let sum_agg = datafusion::functions_aggregate::expr_fn::sum(col_expr);
         let frame = WindowFrame::new_bounds(
@@ -576,9 +559,9 @@ fn try_native_cum_sum(
                 }))
             }
             _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Expected AggregateFunction from sum()",
-                ));
+                return Err(PyErr::from(LtseqError::Runtime(
+                    "Expected AggregateFunction from sum()".into(),
+                )));
             }
         };
 
@@ -591,10 +574,7 @@ fn try_native_cum_sum(
         .clone()
         .select(all_exprs)
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Native cum_sum derive failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Native cum_sum derive failed: {}", e))
         })?;
 
     Ok(LTSeqTable::from_df(
@@ -614,10 +594,7 @@ fn cum_sum_sql_fallback(
 ) -> PyResult<LTSeqTable> {
     RUNTIME.block_on(async {
         let current_batches = (**df).clone().collect().await.map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to collect current DataFrame: {}",
-                e
-            ))
+            LtseqError::collect(e)
         })?;
 
         let is_empty = current_batches.iter().all(|batch| batch.num_rows() == 0);
@@ -634,10 +611,7 @@ fn cum_sum_sql_fallback(
         let temp_table_name = format!("__ltseq_cumsum_{}", std::process::id());
         let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create memory table: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
             })?;
 
         let _ = table.session.deregister_table(&temp_table_name);
@@ -646,10 +620,7 @@ fn cum_sum_sql_fallback(
             .session
             .register_table(&temp_table_name, Arc::new(temp_table))
             .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to register temporary table: {}",
-                    e
-                ))
+                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
             })?;
 
         let select_parts = build_cumsum_select_parts(&batch_schema, &cum_exprs, table).await?;
@@ -662,10 +633,7 @@ fn cum_sum_sql_fallback(
 
         let new_df = table.session.sql(&sql).await.map_err(|e| {
             let _ = table.session.deregister_table(&temp_table_name);
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "cum_sum query failed: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("cum_sum query failed: {}", e))
         })?;
 
         let _ = table.session.deregister_table(&temp_table_name);
@@ -689,11 +657,10 @@ async fn handle_empty_cum_sum(
     let mut new_fields = schema.fields().to_vec();
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
+            LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let py_expr = dict_to_py_expr(&expr_dict)?;
 
         let col_name = if let PyExpr::Column(name) = &py_expr {
             name.clone()
@@ -713,11 +680,10 @@ async fn handle_empty_cum_sum(
     let new_arrow_schema = ArrowSchema::new(new_fields);
 
     // Return table with expanded schema but no data
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: table.dataframe.as_ref().map(|d| Arc::clone(d)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-        source_parquet_path: table.source_parquet_path.clone(),
-    })
+    Ok(LTSeqTable::empty(
+        Arc::clone(&table.session),
+        Some(Arc::new(new_arrow_schema)),
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
 }

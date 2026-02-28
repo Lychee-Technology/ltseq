@@ -17,6 +17,7 @@
 //! - Full: All rows from both tables
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
@@ -78,36 +79,24 @@ fn register_join_tables(
     let _ = session.deregister_table(&right_name);
 
     let left_mem = MemTable::try_new(Arc::clone(left_schema), vec![left_batches]).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to create left temp table: {}",
-            e
-        ))
+        LtseqError::Runtime(format!("Failed to create left temp table: {}", e))
     })?;
 
     let right_mem =
         MemTable::try_new(Arc::clone(right_schema), vec![right_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create right temp table: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to create right temp table: {}", e))
         })?;
 
     session
         .register_table(&left_name, Arc::new(left_mem))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register left temp table: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to register left temp table: {}", e))
         })?;
 
     session
         .register_table(&right_name, Arc::new(right_mem))
         .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to register right temp table: {}",
-                e
-            ))
+            LtseqError::Runtime(format!("Failed to register right temp table: {}", e))
         })?;
 
     Ok((left_name, right_name))
@@ -173,9 +162,10 @@ fn extract_join_key_columns(
         }
     }
 
-    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-        "Join keys must be either simple columns or matching And-expressions",
-    ))
+    Err(LtseqError::Validation(
+        "Join keys must be either simple columns or matching And-expressions".into(),
+    )
+    .into())
 }
 
 /// Recursively extract column names from And-expressions containing Eq operations
@@ -198,29 +188,33 @@ fn extract_cols_from_and(
                     if let PyExpr::Column(left_name) = left.as_ref() {
                         left_cols.push(left_name.clone());
                     } else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "Left side of join equality must be a column reference",
-                        ));
+                        return Err(LtseqError::Validation(
+                            "Left side of join equality must be a column reference".into(),
+                        )
+                        .into());
                     }
 
                     if let PyExpr::Column(right_name) = right.as_ref() {
                         right_cols.push(right_name.clone());
                     } else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "Right side of join equality must be a column reference",
-                        ));
+                        return Err(LtseqError::Validation(
+                            "Right side of join equality must be a column reference".into(),
+                        )
+                        .into());
                     }
                     Ok(())
                 }
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                other => Err(LtseqError::Validation(format!(
                     "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
                     other
-                ))),
+                ))
+                .into()),
             }
         }
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Expected And or Eq expression in composite join",
-        )),
+        _ => Err(LtseqError::Validation(
+            "Expected And or Eq expression in composite join".into(),
+        )
+        .into()),
     }
 }
 
@@ -231,38 +225,39 @@ fn extract_and_validate_join_keys(
     schema_left: &ArrowSchema,
     schema_right: &ArrowSchema,
 ) -> PyResult<(Vec<String>, Vec<String>)> {
-    let left_key_expr = dict_to_py_expr(left_key_expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let left_key_expr = dict_to_py_expr(left_key_expr_dict)?;
 
-    let right_key_expr = dict_to_py_expr(right_key_expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
 
     let (left_col_names, right_col_names) =
         extract_join_key_columns(&left_key_expr, &right_key_expr)?;
 
     if left_col_names.is_empty() || right_col_names.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "No join keys found in expressions",
-        ));
+        return Err(LtseqError::Validation(
+            "No join keys found in expressions".into(),
+        )
+        .into());
     }
 
     // Validate left columns exist
     for left_col in &left_col_names {
         if !schema_left.fields().iter().any(|f| f.name() == left_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in left table",
                 left_col
-            )));
+            ))
+            .into());
         }
     }
 
     // Validate right columns exist
     for right_col in &right_col_names {
         if !schema_right.fields().iter().any(|f| f.name() == right_col) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in right table",
                 right_col
-            )));
+            ))
+            .into());
         }
     }
 
@@ -342,16 +337,17 @@ pub fn join_impl(
 
     // Validate join type
     if !matches!(join_type, "inner" | "left" | "right" | "full") {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        return Err(LtseqError::Validation(format!(
             "Unknown join type: {}",
             join_type
-        )));
+        ))
+        .into());
     }
 
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
@@ -387,7 +383,7 @@ pub fn join_impl(
 
     let result_batches = RUNTIME
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Cleanup
     let _ = table.session.deregister_table(&left_name);
@@ -492,7 +488,7 @@ fn semi_anti_join_impl(
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
@@ -532,7 +528,7 @@ fn semi_anti_join_impl(
             &sql_query,
             join_type_name,
         ))
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+        .map_err(|e| LtseqError::Runtime(e))?;
 
     // Cleanup
     let _ = table.session.deregister_table(&left_name);

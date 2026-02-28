@@ -82,9 +82,9 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def except_(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
         """
-        Set difference: rows in left but not in right.
+        Set difference: rows in left but not in right (SQL EXCEPT).
 
         Args:
             other: Another table
@@ -94,7 +94,7 @@ class SetOpsMixin:
             Difference LTSeq
 
         Example:
-            >>> only_left = t1.diff(t2, on=lambda r: r.id)
+            >>> only_left = t1.except_(t2, on=lambda r: r.id)
         """
         from .core import LTSeq
 
@@ -105,7 +105,7 @@ class SetOpsMixin:
 
         if not isinstance(other, LTSeq):
             raise TypeError(
-                f"diff() argument must be LTSeq, got {type(other).__name__}"
+                f"except_() argument must be LTSeq, got {type(other).__name__}"
             )
 
         on_expr = None
@@ -121,6 +121,22 @@ class SetOpsMixin:
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
+
+    def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+        """
+        Deprecated: Use except_() instead.
+
+        Set difference: rows in left but not in right.
+        """
+        import warnings
+
+        warnings.warn(
+            "diff() is deprecated for set difference. Use except_() instead. "
+            "diff() will become a row-level difference operation in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.except_(other, on=on)
 
     def is_subset(self, other: "LTSeq", on: Optional[Callable] = None) -> bool:
         """
