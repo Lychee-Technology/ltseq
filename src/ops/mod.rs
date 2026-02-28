@@ -1,7 +1,7 @@
 //! Table operations module
 //!
 //! This module organizes all table operations into logical submodules:
-//! - **basic**: Core read/write/filter/select operations
+//! - **basic**: search_first operation
 //! - **derive**: Column derivation coordination
 //! - **window**: Window functions for derived columns
 //! - **io**: File I/O operations (CSV writing, etc.)
@@ -13,7 +13,6 @@
 //! - **pivot**: Long-to-wide table transformation
 //! - **align**: Row alignment to reference sequence
 //! - **derive_sql**: SQL-based derive operations
-//! - **display**: Formatting and display operations
 //! - **advanced**: Re-exports for backward compatibility
 //!
 //! # Architecture: Helper Function Delegation Pattern
@@ -41,10 +40,13 @@
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
 
 // Core modules
+pub mod arrow_shift;
 pub mod basic;
 pub mod derive;
-pub mod display;
 pub mod io;
+pub mod linear_scan;
+pub mod parallel_scan;
+pub mod pattern_match;
 pub mod set_ops;
 pub mod window;
 
@@ -57,6 +59,3 @@ pub mod grouping;
 pub mod join;
 pub mod pivot;
 pub mod sort;
-
-// Re-export module for backward compatibility with lib.rs imports
-pub mod advanced;

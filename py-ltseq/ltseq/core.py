@@ -38,8 +38,6 @@ class LTSeq(
             )
         self._inner = ltseq_core.LTSeqTable()
         self._schema: Dict[str, str] = {}
-        self._csv_path: Optional[str] = None  # Track original CSV file for to_pandas()
-        self._has_header: bool = True  # Track header setting for to_pandas()
         self._sort_keys: Optional[List[Tuple[str, bool]]] = (
             None  # [(col, is_desc), ...]
         )
@@ -66,7 +64,7 @@ class LTSeq(
         Returns:
             A pandas DataFrame containing the table data
 
-        Requires pandas to be installed.
+        Requires pandas and pyarrow to be installed.
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
@@ -79,37 +77,47 @@ class LTSeq(
                 "to_pandas() requires pandas. Install it with: pip install pandas"
             )
 
-        # If we have the original CSV path and it still exists, read it directly
-        if self._csv_path:
-            import os
+        pa_table = self.to_arrow()
+        return pa_table.to_pandas()
 
-            if os.path.exists(self._csv_path):
-                has_header = getattr(self, "_has_header", True)
-                if has_header:
-                    return pd.read_csv(self._csv_path)
-                else:
-                    df = pd.read_csv(self._csv_path, header=None)
-                    df.columns = [f"column_{i + 1}" for i in range(len(df.columns))]
-                    return df
+    def to_arrow(self):
+        """
+        Convert the table to a PyArrow Table.
 
-        # Otherwise, try to use CSV round-trip via write_csv
-        import tempfile
-        import os
+        Returns:
+            A pyarrow.Table containing the table data
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
-            temp_path = f.name
+        Requires pyarrow to be installed.
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> arrow_table = t.to_arrow()
+        """
+        try:
+            import pyarrow as pa
+        except ImportError:
+            raise RuntimeError(
+                "to_arrow() requires pyarrow. Install it with: pip install pyarrow"
+            )
 
         try:
-            try:
-                self.write_csv(temp_path)
-                df = pd.read_csv(temp_path)
-                return df
-            except (AttributeError, RuntimeError):
-                # Empty table or no data loaded - return empty DataFrame with schema
-                return pd.DataFrame(columns=self._schema.keys())
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            ipc_buffers = self._inner.to_arrow_ipc()
+        except RuntimeError as e:
+            if "No data loaded" in str(e):
+                # Empty table or no data loaded - return empty table with schema
+                return pa.table({col: [] for col in self._schema.keys()})
+            raise
+
+        if not ipc_buffers:
+            # No batches returned - empty result
+            return pa.table({col: [] for col in self._schema.keys()})
+
+        batches = []
+        for buf in ipc_buffers:
+            reader = pa.ipc.open_stream(buf)
+            batches.extend(reader.read_all().to_batches())
+
+        return pa.Table.from_batches(batches)
 
     def __len__(self) -> int:
         """
@@ -123,6 +131,67 @@ class LTSeq(
             >>> print(len(t))  # Number of rows
         """
         return self._inner.count()
+
+    def count(self) -> int:
+        """
+        Return the number of rows in the table.
+
+        Returns:
+            Integer row count
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> n = t.filter(lambda r: r.status == "active").count()
+        """
+        return len(self)
+
+    def collect(self) -> List[Dict[str, Any]]:
+        """
+        Materialize all rows as a list of dictionaries.
+
+        Returns:
+            List of row dictionaries, where each dict maps column names to values
+
+        Raises:
+            MemoryError: If the dataset is too large to fit in memory
+            RuntimeError: If execution fails
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> rows = t.filter(lambda r: r.age > 18).collect()
+            >>> for row in rows:
+            ...     print(row["name"])
+        """
+        df = self.to_pandas()
+        return df.to_dict("records")
+
+    @property
+    def schema(self) -> Dict[str, str]:
+        """
+        Return the table schema with column names and types.
+
+        Returns:
+            Dictionary mapping column names to their data types
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.schema)  # {"id": "Int64", "name": "Utf8", ...}
+        """
+        return self._schema.copy()
+
+    @property
+    def columns(self) -> List[str]:
+        """
+        Return list of column names.
+
+        Returns:
+            List of column name strings
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.columns)  # ["id", "name", "age"]
+        """
+        return list(self._schema.keys())
 
     @property
     def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:

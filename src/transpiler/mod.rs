@@ -7,7 +7,8 @@
 //! ## Module Structure
 //!
 //! - `optimization`: Constant folding and boolean simplification
-//! - `sql_gen`: SQL string generation for window functions
+//! - `sql_gen`: SQL string generation for window functions (fallback path)
+//! - `window_native`: Native DataFusion window expression builder (primary path)
 //!
 //! ## Expression Optimization
 //!
@@ -19,9 +20,11 @@
 
 mod optimization;
 mod sql_gen;
+pub mod window_native;
 
 pub use optimization::optimize_expr;
 pub use sql_gen::pyexpr_to_sql;
+pub use window_native::pyexpr_to_window_expr;
 
 use crate::types::PyExpr;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -492,7 +495,10 @@ pub fn is_numeric_type(data_type: &DataType) -> bool {
 
 /// Check if a DataType is a string type
 fn is_string_type(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Utf8 | DataType::LargeUtf8)
+    matches!(
+        data_type,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    )
 }
 
 /// Check if a DataType is a temporal type (date/datetime)

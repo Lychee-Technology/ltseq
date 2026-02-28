@@ -7,25 +7,7 @@ use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use std::sync::Arc;
-
-/// Add derived columns based on group properties (placeholder)
-///
-/// Takes a table with __group_id__ column and computes derived columns
-/// like group size, first/last values, etc.
-pub fn derive_impl(
-    table: &LTSeqTable,
-    _derived_cols_spec: Bound<'_, PyDict>,
-) -> PyResult<LTSeqTable> {
-    // Placeholder: Just return the input table unchanged
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: table.dataframe.as_ref().map(|df| Arc::clone(df)),
-        schema: table.schema.as_ref().map(|s| Arc::clone(s)),
-        sort_exprs: Vec::new(),
-    })
-}
 
 /// Derive columns using raw SQL window expressions
 ///
@@ -44,14 +26,7 @@ pub fn derive_window_sql_impl(
     table: &LTSeqTable,
     derive_exprs: std::collections::HashMap<String, String>,
 ) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let schema = table
-        .schema
-        .as_ref()
-        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No schema available."))?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     let current_batches = RUNTIME
         .block_on(async {
@@ -148,37 +123,18 @@ pub fn derive_window_sql_impl(
             ));
         }
         let empty_schema = Arc::new(ArrowSchema::new(result_fields));
-        return Ok(LTSeqTable {
-            session: Arc::clone(&table.session),
-            dataframe: None,
-            schema: Some(empty_schema),
-            sort_exprs: Vec::new(),
-        });
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            Some(empty_schema),
+            Vec::new(),
+            table.source_parquet_path.clone(),
+        ));
     }
 
-    let result_schema = result_batches[0].schema();
-    let result_mem_table = MemTable::try_new(Arc::clone(&result_schema), vec![result_batches])
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = table
-        .session
-        .read_table(Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(Arc::clone(&result_schema)),
-        sort_exprs: Vec::new(),
-    })
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        result_batches,
+        Vec::new(),
+        table.source_parquet_path.clone(),
+    )
 }

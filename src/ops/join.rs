@@ -31,29 +31,6 @@ use std::sync::Arc;
 // Helper Functions
 // ============================================================================
 
-/// Get validated dataframe and schema from a table
-fn get_df_and_schema<'a>(
-    table: &'a LTSeqTable,
-    table_name: &str,
-) -> PyResult<(
-    &'a Arc<datafusion::dataframe::DataFrame>,
-    &'a Arc<ArrowSchema>,
-)> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "{} table has no data. Call read_csv() first.",
-            table_name
-        ))
-    })?;
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "{} table schema not available.",
-            table_name
-        ))
-    })?;
-    Ok((df, schema))
-}
-
 /// Collect both left and right DataFrames to batches
 async fn collect_both_tables(
     df_left: &datafusion::dataframe::DataFrame,
@@ -160,37 +137,13 @@ fn build_result_table(
     empty_schema: Arc<ArrowSchema>,
     sort_exprs: &[String],
 ) -> PyResult<LTSeqTable> {
-    if result_batches.is_empty() {
-        return Ok(LTSeqTable {
-            session: Arc::clone(session),
-            dataframe: None,
-            schema: Some(empty_schema),
-            sort_exprs: sort_exprs.to_vec(),
-        });
-    }
-
-    let result_schema = result_batches[0].schema();
-    let result_mem =
-        MemTable::try_new(Arc::clone(&result_schema), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    let result_df = session.read_table(Arc::new(result_mem)).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to read result table: {}",
-            e
-        ))
-    })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(result_schema),
-        sort_exprs: sort_exprs.to_vec(),
-    })
+    LTSeqTable::from_batches_with_schema(
+        Arc::clone(session),
+        result_batches,
+        empty_schema,
+        sort_exprs.to_vec(),
+        None,
+    )
 }
 
 /// Extract join key column names from either a Column or And-expression
@@ -384,8 +337,8 @@ pub fn join_impl(
     join_type: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
-    let (df_left, stored_schema_left) = get_df_and_schema(table, "Left")?;
-    let (df_right, stored_schema_right) = get_df_and_schema(other, "Right")?;
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
     // Validate join type
     if !matches!(join_type, "inner" | "left" | "right" | "full") {
@@ -533,8 +486,8 @@ fn semi_anti_join_impl(
     right_key_expr_dict: &Bound<'_, PyDict>,
     is_anti: bool,
 ) -> PyResult<LTSeqTable> {
-    let (df_left, stored_schema_left) = get_df_and_schema(table, "Left")?;
-    let (df_right, stored_schema_right) = get_df_and_schema(other, "Right")?;
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME

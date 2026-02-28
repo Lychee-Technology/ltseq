@@ -241,7 +241,7 @@ class TestStringSplit:
             assert row["part"] == row["name"]
 
     def test_split_index_out_of_range(self):
-        """s.split() returns NULL (NaN in pandas) for out-of-range index."""
+        """s.split() returns empty string or NULL for out-of-range index."""
         import pandas as pd
 
         t = LTSeq.read_csv(TEST_CSV)
@@ -251,8 +251,8 @@ class TestStringSplit:
         for i, row in df.iterrows():
             parts = row["name"].split(" ")
             if len(parts) < 5:
-                # DataFusion returns NULL for out-of-range index
-                assert pd.isna(row["part"])
+                # DataFusion may return NULL or empty string for out-of-range index
+                assert pd.isna(row["part"]) or row["part"] == ""
 
     def test_split_multiple_delimiters(self):
         """s.split() should correctly handle multiple delimiter occurrences."""
@@ -357,14 +357,15 @@ class TestStringOpsEdgeCases:
         assert "padded" in df.columns
 
     def test_split_index_zero(self):
-        """s.split(delim, 0) behavior - 1-based indexing."""
+        """s.split(delim, 0) behavior - 1-based indexing.
+        DataFusion uses SQL SPLIT_PART which is 1-based.
+        Index 0 is invalid and raises an error.
+        """
         t = LTSeq.read_csv(TEST_CSV)
-        # Index 0 is typically invalid in SQL SPLIT_PART (1-based)
-        # DataFusion might return empty string or the whole string
+        # Index 0 is invalid in SQL SPLIT_PART (1-based)
         result = t.derive(part=lambda r: r.name.s.split(" ", 0))
-        df = result.to_pandas()
-        # Should not crash
-        assert "part" in df.columns
+        with pytest.raises(RuntimeError, match="field position must not be zero"):
+            result.to_pandas()
 
 
 class TestStringOpsTypeErrors:

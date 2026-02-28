@@ -19,9 +19,8 @@
 
 use crate::engine::RUNTIME;
 use crate::transpiler::pyexpr_to_datafusion;
-use crate::types::dict_to_py_expr;
+use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -37,40 +36,11 @@ use std::sync::Arc;
 ///     derived_cols: Dictionary mapping column names to expression dicts
 pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // 1. Get schema and DataFrame
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Schema not available. Call read_csv() first.",
-        )
-    })?;
+    let (df, schema) = table.require_df_and_schema()?;
 
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    // 2. Check if any derived column contains window functions
+    // 2. Deserialize all expressions once (avoids double deserialization)
+    let mut parsed_cols: Vec<(String, PyExpr)> = Vec::with_capacity(derived_cols.len());
     let mut has_window_functions = false;
-    for (_, expr_item) in derived_cols.iter() {
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Expression must be dict")
-        })?;
-
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-        if crate::transpiler::contains_window_function(&py_expr) {
-            has_window_functions = true;
-            break;
-        }
-    }
-
-    // 3. Handle window functions using SQL
-    if has_window_functions {
-        return crate::ops::window::derive_with_window_functions_impl(table, derived_cols);
-    }
-
-    // 4. Standard (non-window) derivation using DataFusion expressions
-    let mut df_exprs = Vec::new();
-    let mut col_names = Vec::new();
 
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
@@ -84,12 +54,29 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         let py_expr = dict_to_py_expr(&expr_dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
+        if crate::transpiler::contains_window_function(&py_expr) {
+            has_window_functions = true;
+        }
+
+        parsed_cols.push((col_name_str, py_expr));
+    }
+
+    // 3. Handle window functions — pass pre-parsed expressions to avoid re-deserialization
+    if has_window_functions {
+        return crate::ops::window::derive_with_window_functions_from_parsed(
+            table, schema, &df, &parsed_cols,
+        );
+    }
+
+    // 4. Standard (non-window) derivation using already-parsed expressions
+    let mut df_exprs = Vec::new();
+
+    for (col_name_str, py_expr) in parsed_cols {
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?
             .alias(&col_name_str);
 
         df_exprs.push(df_expr);
-        col_names.push(col_name_str);
     }
 
     // 5. Apply derivation via select (adds columns to existing data)
@@ -115,18 +102,13 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // 6. Get schema from the resulting DataFrame
-    let df_schema = result_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_schema = ArrowSchema::new(arrow_fields);
-
-    // 7. Return new LTSeqTable with derived columns added
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(Arc::new(new_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-    })
+    // 6. Return new LTSeqTable with derived columns added (schema recomputed)
+    Ok(LTSeqTable::from_df(
+        Arc::clone(&table.session),
+        result_df,
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
 }
 
 /// Helper function to add cumulative sum columns

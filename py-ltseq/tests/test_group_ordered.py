@@ -160,3 +160,32 @@ class TestGroupOrderedChaining:
         assert "start" in result._schema
         assert "end" in result._schema
         assert "gain" in result._schema
+
+
+class TestNestedTableLenAndToPandas:
+    """Tests for NestedTable.__len__() and .to_pandas() (T24)."""
+
+    def test_nested_len_returns_total_row_count(self, sample_csv):
+        """len(grouped) returns total row count (not group count)."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        grouped = t.group_ordered(lambda r: r.is_up)
+        assert len(grouped) == 10
+
+    def test_nested_to_pandas_returns_dataframe(self, sample_csv):
+        """to_pandas() returns a pandas DataFrame."""
+        import pandas as pd
+
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        grouped = t.group_ordered(lambda r: r.is_up)
+        df = grouped.to_pandas()
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 10
+
+    def test_nested_to_pandas_has_original_columns(self, sample_csv):
+        """to_pandas() result includes the original table columns."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        grouped = t.group_ordered(lambda r: r.is_up)
+        df = grouped.to_pandas()
+        assert "date" in df.columns
+        assert "price" in df.columns
+        assert "is_up" in df.columns

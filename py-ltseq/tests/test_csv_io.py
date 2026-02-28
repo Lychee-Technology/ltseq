@@ -131,5 +131,56 @@ class TestPhase2ChainOperations:
         t.show(n=3)  # Second call should also work
 
 
+class TestWriteCSV:
+    """Test write_csv() functionality (T19)."""
+
+    def test_write_csv_basic(self, tmp_path):
+        """write_csv() produces a readable CSV file."""
+        t = LTSeq.read_csv(SAMPLE_CSV)
+        out = str(tmp_path / "out.csv")
+        t.write_csv(out)
+        assert os.path.exists(out)
+        assert os.path.getsize(out) > 0
+
+    def test_write_csv_roundtrip(self, tmp_path):
+        """Data survives a write → read round-trip."""
+        t = LTSeq.read_csv(SAMPLE_CSV)
+        original = t.collect()
+        out = str(tmp_path / "roundtrip.csv")
+        t.write_csv(out)
+        t2 = LTSeq.read_csv(out)
+        reloaded = t2.collect()
+        assert len(reloaded) == len(original)
+        # Column names should match
+        assert set(reloaded[0].keys()) == set(original[0].keys())
+
+    def test_write_csv_after_filter(self, tmp_path):
+        """write_csv() works on a filtered table."""
+        t = LTSeq.read_csv(SAMPLE_CSV)
+        filtered = t.filter(lambda r: r.price > 11)
+        out = str(tmp_path / "filtered.csv")
+        filtered.write_csv(out)
+        t2 = LTSeq.read_csv(out)
+        assert len(t2) <= len(t)
+        assert len(t2) > 0
+
+
+class TestIOErrorHandling:
+    """Test I/O error handling (T32)."""
+
+    def test_read_csv_nonexistent_returns_empty(self):
+        """Reading a non-existent CSV returns empty table (lazy error)."""
+        t = LTSeq.read_csv("/nonexistent/path/to/file.csv")
+        # The current behavior: no exception, empty schema, empty data
+        assert t._schema == {}
+        assert t.collect() == []
+
+    def test_read_parquet_nonexistent_returns_empty(self):
+        """Reading a non-existent parquet file returns empty table (lazy error)."""
+        t = LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
+        # The current behavior: no exception, empty data
+        assert t.collect() == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

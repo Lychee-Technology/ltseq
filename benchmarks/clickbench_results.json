@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-02-27T15:44:40.600152",
+  "system": {
+    "platform": "Linux-6.18.13-2-cachyos-lts-x86_64-with-glibc2.43",
+    "processor": "",
+    "cpu_count": 32,
+    "ram_gb": 125.1,
+    "python_version": "3.14.3"
+  },
+  "data_file": "/home/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
+  "warmup": 1,
+  "iterations": 3,
+  "rounds": [
+    {
+      "round_name": "R1: Top URLs",
+      "duckdb": {
+        "name": "DuckDB",
+        "median_s": 1.0389,
+        "times": [
+          1.0607,
+          1.0389,
+          1.0369
+        ],
+        "mem_delta_mb": 305.4,
+        "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 3288173), ('http://kinopoisk.ru', 1625250), ('http://bdsm_po_yers=0&with_video', 791465), ('http://video.yandex', 582400), ('http://smeshariki.r"
+      },
+      "ltseq": {
+        "name": "LTSeq",
+        "median_s": 1.754,
+        "times": [
+          1.7379,
+          1.754,
+          1.7556
+        ],
+        "mem_delta_mb": 531.8,
+        "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 3288173}, {'url': 'http://kinopoisk.ru', 'cnt': 1625250}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 791465}, {'url': 'htt"
+      }
+    },
+    {
+      "round_name": "R2: Sessionization",
+      "duckdb": {
+        "name": "DuckDB",
+        "median_s": 1.3663,
+        "times": [
+          1.3216,
+          1.3663,
+          1.3714
+        ],
+        "mem_delta_mb": 571.2,
+        "result": "26181387"
+      },
+      "ltseq": {
+        "name": "LTSeq",
+        "median_s": 0.9713,
+        "times": [
+          0.9788,
+          0.9713,
+          0.9713
+        ],
+        "mem_delta_mb": 8.5,
+        "result": "26181387"
+      }
+    },
+    {
+      "round_name": "R3: Funnel",
+      "duckdb": {
+        "name": "DuckDB",
+        "median_s": 3.5335,
+        "times": [
+          3.5335,
+          3.4533,
+          3.5374
+        ],
+        "mem_delta_mb": 1160.8,
+        "result": "155373"
+      },
+      "ltseq": {
+        "name": "LTSeq",
+        "median_s": 2.3625,
+        "times": [
+          2.362,
+          2.3625,
+          2.3674
+        ],
+        "mem_delta_mb": 10.4,
+        "result": "155373"
+      }
+    }
+  ]
+}

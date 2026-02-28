@@ -85,14 +85,14 @@ class NestedTable:
         Get the first row of each group.
 
         Returns an LTSeq containing only the first row within each group.
+        The returned LTSeq has a fast path for .count() that avoids
+        materializing per-row metadata arrays.
 
         Example:
             >>> grouped.first()  # Returns LTSeq with first row per group
+            >>> grouped.first().count()  # Fast path: just counts groups
         """
-        flattened = self.flatten()
-        result = flattened.__class__()
-        result._schema = flattened._schema.copy()
-        result._inner = flattened._inner.first_row()
+        result = _LazyFirstLTSeq(self)
         return result
 
     def last(self) -> "LTSeq":
@@ -532,3 +532,62 @@ Supported group methods:
                     return df.groupby("__group_id__")[col_name].transform(agg_pandas)
 
         return df.eval(sql_expr)
+
+
+class _LazyFirstLTSeq:
+    """
+    Lazy wrapper returned by NestedTable.first().
+
+    Defers materialization until needed. Intercepts count()/len() to use the
+    fast group_ordered_count() Rust path that avoids building per-row metadata
+    arrays (saves ~0.71s on 100M rows).
+
+    For all other operations, materializes eagerly via flatten().first_row()
+    and delegates to the resulting LTSeq.
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+    def __init__(self, nested: "NestedTable"):
+        # Intentionally do NOT call LTSeq.__init__ — we are lazy.
+        self._nested = nested
+        self._materialized = None
+        # Set LTSeq-expected attributes to avoid AttributeError before
+        # __getattr__ kicks in (these are checked by some LTSeq methods).
+        self._schema = nested._ltseq._schema.copy()
+        self._sort_keys = nested._ltseq._sort_keys
+        self._name = None
+
+    def _materialize(self):
+        """Eagerly materialize the first-row-per-group LTSeq."""
+        if self._materialized is None:
+            flattened = self._nested.flatten()
+            from ..core import LTSeq
+            result = LTSeq()
+            result._schema = flattened._schema.copy()
+            result._inner = flattened._inner.first_row()
+            self._materialized = result
+        return self._materialized
+
+    # -- Fast path: count / len --
+
+    def count(self) -> int:
+        """Fast path: count groups without materializing per-row arrays."""
+        nested = self._nested
+        ltseq = nested._ltseq
+        expr_dict = ltseq._capture_expr(nested._grouping_lambda)
+        try:
+            return ltseq._inner.group_ordered_count(expr_dict)
+        except Exception:
+            # Fallback: materialize and count
+            return self._materialize().count()
+
+    def __len__(self) -> int:
+        return self.count()
+
+    # -- Delegate everything else to materialized LTSeq --
+
+    def __getattr__(self, name):
+        """Delegate attribute access to the materialized LTSeq."""
+        return getattr(self._materialize(), name)

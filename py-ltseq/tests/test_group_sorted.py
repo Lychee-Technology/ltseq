@@ -45,11 +45,13 @@ class TestGroupSortedBasic(unittest.TestCase):
         self.assertIsInstance(groups, NestedTable)
 
     def test_group_sorted_first_returns_ltseq(self):
-        """group_sorted().first() should return an LTSeq instance."""
+        """group_sorted().first() should return an LTSeq-compatible object."""
         t = LTSeq.read_csv(self.events_csv.name)
         groups = t.group_sorted(lambda r: r.user_id)
         first_rows = groups.first()
-        self.assertIsInstance(first_rows, LTSeq)
+        # _LazyFirstLTSeq duck-types as LTSeq: has count(), to_pandas(), etc.
+        self.assertTrue(hasattr(first_rows, "count"))
+        self.assertTrue(hasattr(first_rows, "to_pandas"))
 
     def test_group_sorted_last_returns_ltseq(self):
         """group_sorted().last() should return an LTSeq instance."""

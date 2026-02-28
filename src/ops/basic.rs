@@ -1,4 +1,4 @@
-//! Basic table operations: read, filter, select, slice, count, distinct
+//! Basic table operations: search_first
 //!
 //! This module contains helper functions for basic table operations.
 //! The actual methods are implemented in the #[pymethods] impl block in lib.rs
@@ -8,156 +8,20 @@
 //!
 //! Due to PyO3 constraints, all actual operation implementations are extracted as helper
 //! functions here. The #[pymethods] impl block in lib.rs simply delegates to these
-//! helpers via one-line stubs like:
-//!
-//! ```rust,ignore
-//! fn read_csv(&mut self, path: &str) -> PyResult<()> {
-//!     RUNTIME.block_on(read_csv_impl(self, path.to_string()))
-//! }
-//! ```
+//! helpers via one-line stubs.
 //!
 //! # Operations Provided
 //!
-//! ## I/O Operations
-//! - **read_csv_impl**: Load CSV files into DataFusion
-//!   - Parses CSV with DataFusion's native reader
-//!   - Extracts schema from loaded data
-//!   - Stores both schema and dataframe in LTSeqTable
-//!
-//! ## Query Operations
-//! - **filter_impl**: Apply WHERE conditions (predicates)
-//! - **select_impl**: Project columns or expressions
-//! - **slice_impl**: Get row ranges (limit/offset)
-//! - **count_impl**: Count total rows
-//! - **distinct_impl**: Remove duplicate rows
-//!
-//! # Implementation Pattern
-//!
-//! All query operations follow this pattern:
-//! 1. Validate schema and dataframe exist (return error if not)
-//! 2. For expression-based ops: deserialize Python dict → PyExpr
-//! 3. Transpile PyExpr → DataFusion Expr via pyexpr_to_datafusion()
-//! 4. Build DataFusion logical plan (filter, project, etc.)
-//! 5. Collect results via RUNTIME.block_on(df.collect())
-//! 6. Build RecordBatches and return new LTSeqTable
-//!
-//! # Error Handling
-//!
-//! All operations return PyResult<T> for seamless Python exception handling:
-//! - Schema/dataframe missing → PyRuntimeError
-//! - Expression deserialization fails → PyValueError
-//! - DataFusion execution errors → PyRuntimeError with descriptive message
-//!
-//! # Performance Considerations
-//!
-//! - **Streaming**: Uses RecordBatches for streaming I/O (not all in-memory)
-//! - **Async**: CSV reads are async via DataFusion's session context
-//! - **Runtime**: All async operations executed via RUNTIME.block_on() in helpers
+//! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
 
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
-use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
 use crate::engine::RUNTIME;
-
-/// Helper function to read CSV file into DataFusion DataFrame
-///
-/// Args:
-///     table: Mutable reference to LTSeqTable
-///     path: Path to CSV file
-///     has_header: Whether the CSV file has a header row
-pub async fn read_csv_impl(table: &mut LTSeqTable, path: String, has_header: bool) -> PyResult<()> {
-    let options = CsvReadOptions::new().has_header(has_header);
-    let df = table.session.read_csv(&path, options).await.map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read CSV: {}", e))
-    })?;
-
-    // Get the DFSchema and convert to Arrow schema
-    let df_schema = df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let arrow_schema = ArrowSchema::new(arrow_fields);
-
-    table.schema = Some(Arc::new(arrow_schema));
-    table.dataframe = Some(Arc::new(df));
-    Ok(())
-}
-
-/// Helper function to get the number of rows in the table
-///
-/// Returns:
-///     The number of rows
-pub fn count_impl(table: &LTSeqTable) -> PyResult<usize> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let mut row_count = 0;
-    RUNTIME.block_on(async {
-        let batches = (**df).clone().collect().await.map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to collect data: {}",
-                e
-            ))
-        })?;
-        for batch in batches {
-            row_count += batch.num_rows();
-        }
-        Ok::<(), PyErr>(())
-    })?;
-
-    Ok(row_count)
-}
-
-/// Helper function to filter rows based on an expression
-///
-/// Args:
-///     table: Reference to LTSeqTable
-///     expr_dict: Serialized expression dict
-pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-    })?;
-
-    // Deserialize the expression
-    let py_expr = dict_to_py_expr(expr_dict)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    // Transpile to DataFusion Expr
-    let df_expr = pyexpr_to_datafusion(py_expr, schema)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-    // Apply filter
-    let filtered_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .filter(df_expr)
-                .map_err(|e| format!("Filter failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema from the new DataFrame
-    let df_schema = filtered_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_arrow_schema = ArrowSchema::new(arrow_fields);
-
-    // Return new LTSeqTable
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(filtered_df)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-    })
-}
 
 /// Helper function to find the first row matching a predicate
 ///
@@ -171,13 +35,7 @@ pub fn search_first_impl(
     table: &LTSeqTable,
     expr_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-    })?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     // Deserialize the expression
     let py_expr = dict_to_py_expr(expr_dict)
@@ -199,104 +57,11 @@ pub fn search_first_impl(
         })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
 
-    // Get schema from the result DataFrame
-    let df_schema = result_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_arrow_schema = ArrowSchema::new(arrow_fields);
-
-    // Return new LTSeqTable
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(result_df)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-    })
-}
-
-/// Helper function to select specific columns
-///
-/// Args:
-///     table: Reference to LTSeqTable
-///     exprs: List of serialized expression dicts
-pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Schema not available.")
-    })?;
-
-    // Transpile all expressions
-    let mut df_exprs = Vec::new();
-    for expr_dict in exprs {
-        let py_expr = dict_to_py_expr(&expr_dict)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-        let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
-
-        df_exprs.push(df_expr);
-    }
-
-    // Apply select
-    let selected_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .select(df_exprs)
-                .map_err(|e| format!("Select failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema
-    let df_schema = selected_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_arrow_schema = ArrowSchema::new(arrow_fields);
-
-    // Return new LTSeqTable
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(selected_df)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-    })
-}
-
-/// Helper function to slice the table (offset and limit)
-///
-/// Args:
-///     table: Reference to LTSeqTable
-///     offset: Starting row index
-///     length: Maximum number of rows to return
-pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
-    let df = table.dataframe.as_ref().ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No data loaded. Call read_csv() first.")
-    })?;
-
-    let sliced_df = RUNTIME
-        .block_on(async {
-            // DataFusion's limit(skip: usize, fetch: Option<usize>)
-            let skip = offset as usize;
-            let fetch = length.map(|len| len as usize);
-
-            (**df)
-                .clone()
-                .limit(skip, fetch)
-                .map_err(|e| format!("Slice execution failed: {}", e))
-        })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
-
-    // Get schema from the new DataFrame (or reuse existing)
-    let df_schema = sliced_df.schema();
-    let arrow_fields: Vec<Field> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
-    let new_arrow_schema = ArrowSchema::new(arrow_fields);
-
-    // Return new LTSeqTable
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(sliced_df)),
-        schema: Some(Arc::new(new_arrow_schema)),
-        sort_exprs: table.sort_exprs.clone(),
-    })
+    // Return new LTSeqTable with recomputed schema
+    Ok(LTSeqTable::from_df(
+        Arc::clone(&table.session),
+        result_df,
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
 }

@@ -188,31 +188,14 @@ pub fn pivot_impl(
         Arc::new(ArrowSchema::empty())
     };
 
-    // Create result table and dataframe
-    let result_mem_table =
-        MemTable::try_new(result_schema.clone(), vec![result_batches]).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result table: {}",
-                e
-            ))
-        })?;
-
-    let final_df = table
-        .session
-        .read_table(Arc::new(result_mem_table))
-        .map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                "Failed to create result dataframe: {}",
-                e
-            ))
-        })?;
-
-    Ok(LTSeqTable {
-        session: Arc::clone(&table.session),
-        dataframe: Some(Arc::new(final_df)),
-        schema: Some(result_schema),
-        sort_exprs: Vec::new(),
-    })
+    // Create result table via helper
+    LTSeqTable::from_batches_with_schema(
+        Arc::clone(&table.session),
+        result_batches,
+        result_schema,
+        Vec::new(),
+        None,
+    )
 }
 
 /// Extract pivot values from a column into a HashSet

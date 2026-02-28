@@ -11,6 +11,79 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 - Window/ordered operations require a prior `sort`; otherwise runtime errors or incorrect results may occur
 - Expressions are captured into AST on the Python side and executed in Rust/DataFusion
 
+## Common Errors and Solutions
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` before window operations |
+| `AttributeError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
+| `ValueError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
+| `ValueError: tables not sorted by join keys` | `join_sorted` called on unsorted tables | Call `.sort(join_key)` on both tables first |
+| `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
+| `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
+
+## Quick Reference
+
+### Data Loading & Output
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Load CSV | `LTSeq.read_csv()` | `t = LTSeq.read_csv("data.csv")` |
+| View schema | `.columns` | `print(t.columns)` |
+| Stream results | `.to_cursor()` | `for batch in t.to_cursor(): ...` |
+| Collect all | `.collect()` | `rows = t.collect()` |
+| To pandas | `.to_pandas()` | `df = t.to_pandas()` |
+| Row count | `.count()` | `n = t.count()` |
+
+### Basic Operations
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Filter rows | `.filter()` | `t.filter(lambda r: r.age > 18)` |
+| Select columns | `.select()` | `t.select("id", "name")` |
+| Add columns | `.derive()` | `t.derive(total=lambda r: r.a + r.b)` |
+| Sort | `.sort()` | `t.sort("date", desc=True)` |
+| Deduplicate | `.distinct()` | `t.distinct("id")` |
+| Slice rows | `.slice()` | `t.slice(offset=10, length=5)` |
+| First N rows | `.head()` | `t.head(10)` |
+| Last N rows | `.tail()` | `t.tail(10)` |
+
+### Window Operations (require `.sort()` first)
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Previous row | `.shift(n)` | `r.price.shift(1)` |
+| Rolling agg | `.rolling(n).agg()` | `r.price.rolling(5).mean()` |
+| Row difference | `.diff(n)` | `r.price.diff(1)` |
+| Cumulative sum | `.cum_sum()` | `t.cum_sum("volume")` |
+
+### Ranking (use `.over()`)
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Row number | `row_number()` | `row_number().over(order_by=r.date)` |
+| Rank with gaps | `rank()` | `rank().over(order_by=r.score)` |
+| Dense rank | `dense_rank()` | `dense_rank().over(order_by=r.score)` |
+| Buckets | `ntile(n)` | `ntile(4).over(order_by=r.value)` |
+
+### Aggregation
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Group aggregate | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())` |
+| Partition | `.partition()` | `parts = t.partition("region")` |
+| Pivot | `.pivot()` | `t.pivot(index="date", columns="region", values="amount")` |
+
+### Joins
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Hash join | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
+| Merge join | `.join_sorted()` | `a.sort("id").join_sorted(b.sort("id"), on="id")` |
+| Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
+| Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
+
+### Set Operations
+| Operation | Method | Example |
+|-----------|--------|---------|
+| Union | `.union()` | `t1.union(t2)` |
+| Intersect | `.intersect()` | `t1.intersect(t2)` |
+| Diff | `.diff()` | `t1.diff(t2)` |
+
 ## 1. Input / Output
 
 ### `LTSeq.read_csv`
@@ -26,6 +99,34 @@ from ltseq import LTSeq
 t = LTSeq.read_csv("data.csv")
 ```
 
+### `LTSeq.schema` (property)
+- **Signature**: `LTSeq.schema -> Schema`
+- **Behavior**: Return the table schema with column names and types
+- **Parameters**: none (property)
+- **Returns**: `Schema` object with `.names` and `.types` attributes
+- **Exceptions**: none
+- **Example**:
+```python
+t = LTSeq.read_csv("data.csv")
+print(t.schema.names)   # ["id", "name", "age", "created_at"]
+print(t.schema.types)   # [Int64, Utf8, Int64, Timestamp]
+
+# Iterate columns
+for name, dtype in zip(t.schema.names, t.schema.types):
+    print(f"{name}: {dtype}")
+```
+
+### `LTSeq.columns` (property)
+- **Signature**: `LTSeq.columns -> List[str]`
+- **Behavior**: Return list of column names (shortcut for `schema.names`)
+- **Parameters**: none (property)
+- **Returns**: list of column name strings
+- **Exceptions**: none
+- **Example**:
+```python
+print(t.columns)  # ["id", "name", "age"]
+```
+
 ### `LTSeq.to_cursor`
 - **Signature**: `LTSeq.to_cursor(chunk_size: int = 10000) -> Iterator[Record]`
 - **Behavior**: Stream results via cursor to avoid full materialization
@@ -38,6 +139,64 @@ for batch in t.to_cursor(chunk_size=5000):
     print(batch)
 ```
 
+### `LTSeq.collect`
+- **Signature**: `LTSeq.collect() -> List[Dict[str, Any]]`
+- **Behavior**: Materialize all rows as a list of dictionaries
+- **Parameters**: none
+- **Returns**: list of row dictionaries
+- **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
+- **Example**:
+```python
+rows = t.filter(lambda r: r.age > 18).collect()
+for row in rows:
+    print(row["name"])
+```
+
+### `LTSeq.to_pandas`
+- **Signature**: `LTSeq.to_pandas() -> pandas.DataFrame`
+- **Behavior**: Convert to pandas DataFrame for interoperability
+- **Parameters**: none
+- **Returns**: `pandas.DataFrame`
+- **Exceptions**: `ImportError` (pandas not installed), `MemoryError` (dataset too large)
+- **Example**:
+```python
+df = t.to_pandas()
+df.plot(x="date", y="price")
+```
+
+### `LTSeq.count`
+- **Signature**: `LTSeq.count() -> int`
+- **Behavior**: Return the number of rows
+- **Parameters**: none
+- **Returns**: integer row count
+- **Exceptions**: `RuntimeError` (execution failure)
+- **Example**:
+```python
+n = t.filter(lambda r: r.status == "active").count()
+```
+
+### `LTSeq.head`
+- **Signature**: `LTSeq.head(n: int = 10) -> LTSeq`
+- **Behavior**: Return the first n rows
+- **Parameters**: `n` number of rows (default 10)
+- **Returns**: `LTSeq` with first n rows
+- **Exceptions**: `ValueError` (n < 0)
+- **Example**:
+```python
+top_10 = t.sort("score", desc=True).head(10)
+```
+
+### `LTSeq.tail`
+- **Signature**: `LTSeq.tail(n: int = 10) -> LTSeq`
+- **Behavior**: Return the last n rows
+- **Parameters**: `n` number of rows (default 10)
+- **Returns**: `LTSeq` with last n rows
+- **Exceptions**: `ValueError` (n < 0)
+- **Example**:
+```python
+recent = t.sort("date").tail(5)
+```
+
 ## 2. Basic Relational Operations
 
 ### `LTSeq.filter`
@@ -45,7 +204,6 @@ for batch in t.to_cursor(chunk_size=5000):
 - **Behavior**: Filter rows matching the predicate; pushed down to the Rust engine when possible
 - **Parameters**: `predicate` row predicate expression (returns boolean Expr)
 - **Returns**: filtered `LTSeq`
-- **SPL Equivalent**: `select()`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (predicate not boolean Expr), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -57,7 +215,6 @@ filtered = t.filter(lambda r: r.amount > 100)
 - **Behavior**: Project specified columns or expressions; supports column pruning
 - **Parameters**: `cols` column names or lambdas (single expr or list)
 - **Returns**: projected `LTSeq`
-- **SPL Equivalent**: `new()`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid return type), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -71,7 +228,6 @@ t.select(lambda r: [r.id, r.name])
 - **Behavior**: Add or overwrite columns; keeps existing columns
 - **Parameters**: `new_cols` mapping of column name to lambda; or a lambda that returns a dict
 - **Returns**: new `LTSeq` with derived columns
-- **SPL Equivalent**: `derive()`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid return type), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -86,7 +242,6 @@ with_tax = t.derive(lambda r: {"tax": r.price * 0.1})
 - **Behavior**: Sort by one or more keys; required for window/ordered computing. Also populates `sort_keys` for sort order tracking.
 - **Parameters**: `keys` column names or expressions; `desc` (or `descending`) global or per-key descending flags
 - **Returns**: sorted `LTSeq` with tracked sort keys
-- **SPL Equivalent**: `sort()`
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid key type), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -133,7 +288,6 @@ t_sorted.is_sorted_by("a", desc=True)  # False (direction mismatch)
 - **Behavior**: Deduplicate; if no keys are provided, deduplicate by all columns
 - **Parameters**: `keys` key columns or expressions
 - **Returns**: deduplicated `LTSeq`
-- **SPL Equivalent**: `id()`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid key type), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -145,7 +299,6 @@ unique = t.distinct("customer_id")
 - **Behavior**: Select a contiguous row range with logical zero-copy semantics
 - **Parameters**: `offset` starting row (0-based); `length` number of rows (None means to the end)
 - **Returns**: sliced `LTSeq`
-- **SPL Equivalent**: `T([start,end])`
 - **Exceptions**: `ValueError` (negative offset/length), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -154,69 +307,59 @@ t.slice(offset=10, length=5)
 
 ## 3. Ordered and Window Functions
 
-> Window functions (shift/rolling/diff/cum_sum) require a prior `sort` to establish order.
+### 3.1 Row-Level Window Operations
 
-### `Expr.shift`
+> These operations require a prior `.sort()` to establish order.
+
+#### `r.col.shift`
 - **Signature**: `r.col.shift(offset: int) -> Expr`
-- **Behavior**: Access relative rows; `offset > 0` looks backward, `offset < 0` looks forward
-- **Parameters**: `offset` row offset
-- **Returns**: expression (NULL at boundaries)
-- **SPL Equivalent**: `col[-1]`
+- **Behavior**: Access relative rows. Positive offset looks backward (previous rows), negative offset looks forward (future rows). Consistent with pandas `Series.shift()`.
+- **Parameters**: `offset` row offset (positive = backward, negative = forward)
+- **Returns**: expression (NULL at boundaries where offset exceeds available rows)
 - **Exceptions**: `TypeError` (offset not int), `RuntimeError` (used without sort)
 - **Example**:
 ```python
 with_prev = t.sort("date").derive(prev=lambda r: r.close.shift(1))
 ```
 
-### `Expr.rolling`
+#### `r.col.rolling`
 - **Signature**: `r.col.rolling(window_size: int).agg_func() -> Expr`
 - **Behavior**: Sliding window aggregation; common aggs: `mean/sum/min/max/std`
 - **Parameters**: `window_size` window size
 - **Returns**: window aggregation expression
-- **SPL Equivalent**: `col{-1,1}`
 - **Exceptions**: `ValueError` (window_size <= 0), `RuntimeError` (used without sort)
 - **Example**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
 ```
 
-### `Expr.diff`
+#### `r.col.diff`
 - **Signature**: `r.col.diff(offset: int = 1) -> Expr`
-- **Behavior**: Difference, equivalent to `r.col - r.col.shift(offset)`
+- **Behavior**: Row difference, equivalent to `r.col - r.col.shift(offset)`
 - **Parameters**: `offset` row offset
 - **Returns**: difference expression
-- **SPL Equivalent**: `col - col[-1]`
 - **Exceptions**: `TypeError` (non-numeric or offset not int), `RuntimeError` (used without sort)
 - **Example**:
 ```python
 changes = t.sort("date").derive(daily=lambda r: r.close.diff())
 ```
 
-### `LTSeq.cum_sum`
+### 3.2 Table-Level Cumulative Operations
+
+#### `LTSeq.cum_sum`
 - **Signature**: `LTSeq.cum_sum(*cols: Union[str, Callable]) -> LTSeq`
 - **Behavior**: Add cumulative sum columns with `*_cumsum` suffix
 - **Parameters**: `cols` column names or expressions
 - **Returns**: new `LTSeq` with cumulative columns
-- **SPL Equivalent**: `cum(col)`
 - **Exceptions**: `ValueError` (no columns or schema not initialized), `TypeError` (non-numeric)
 - **Example**:
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
 ```
 
-### `LTSeq.search_first`
-- **Signature**: `LTSeq.search_first(predicate: Callable[[Row], Expr]) -> LTSeq`
-- **Behavior**: Return the first matching row (single-row LTSeq); can do binary search on sorted data
-- **Parameters**: `predicate` row predicate
-- **Returns**: single-row `LTSeq` (empty if not found)
-- **SPL Equivalent**: `pselect`
-- **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid predicate), `RuntimeError` (execution failure)
-- **Example**:
-```python
-first_big = t.sort("price").search_first(lambda r: r.price > 100)
-```
+### 3.3 Ranking Functions
 
-### Ranking Functions
+> Ranking functions use `.over()` to specify ordering; they do NOT require a prior `.sort()`.
 
 Ranking functions assign positions or ranks to rows within partitions. They must be used with `.over()` to specify ordering.
 
@@ -289,27 +432,49 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over` (Window Specification)
-- **Signature**: `expr.over(partition_by: Optional[Expr] = None, order_by: Optional[Expr] = None, descending: bool = False) -> WindowExpr`
+- **Signature**: `expr.over(partition_by: Optional[Union[Expr, List[Expr]]] = None, order_by: Optional[Union[Expr, List[Expr]]] = None, descending: Union[bool, List[bool]] = False) -> WindowExpr`
 - **Behavior**: Apply window specification to a ranking function
-- **Parameters**: `partition_by` column(s) to partition by; `order_by` column(s) to order by; `descending` sort direction
+- **Parameters**:
+  - `partition_by` column(s) to partition by (single Expr or list of Exprs)
+  - `order_by` column(s) to order by (single Expr or list of Exprs)
+  - `descending` sort direction (single bool or per-column list of bools)
 - **Returns**: `WindowExpr` ready for use in derive()
 - **Exceptions**: `TypeError` (invalid partition_by/order_by types)
 - **Example**:
 ```python
-# Partition by region, order by date descending
+# Single column partition and order
 t.derive(rn=lambda r: row_number().over(
     partition_by=r.region,
     order_by=r.date,
     descending=True
 ))
+
+# Multiple columns partition and order
+t.derive(rn=lambda r: row_number().over(
+    partition_by=[r.region, r.category],
+    order_by=[r.date, r.id],
+    descending=[True, False]
+))
 ```
 
-### `LTSeq.align`
-- **Signature**: `LTSeq.align(ref_sequence: list, key: Callable) -> LTSeq`
+### 3.4 Ordered Search
+
+#### `LTSeq.search_first`
+- **Signature**: `LTSeq.search_first(predicate: Callable[[Row], Expr]) -> LTSeq`
+- **Behavior**: Return the first matching row (single-row LTSeq); can do binary search on sorted data
+- **Parameters**: `predicate` row predicate
+- **Returns**: single-row `LTSeq` (empty if not found)
+- **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid predicate), `RuntimeError` (execution failure)
+- **Example**:
+```python
+first_big = t.sort("price").search_first(lambda r: r.price > 100)
+```
+
+#### `LTSeq.align`
+- **Signature**: `LTSeq.align(ref_sequence: List[Any], key: Callable[[Row], Expr]) -> LTSeq`
 - **Behavior**: Align to `ref_sequence` order and insert NULLs for missing keys
 - **Parameters**: `ref_sequence` reference key sequence; `key` key extractor
 - **Returns**: aligned `LTSeq`
-- **SPL Equivalent**: `align`
 - **Exceptions**: `TypeError` (invalid key), `ValueError` (empty ref_sequence)
 - **Example**:
 ```python
@@ -323,7 +488,6 @@ aligned = t.align(["2024-01-01", "2024-01-02"], key=lambda r: r.date)
 - **Behavior**: Group only consecutive equal values; does not reorder
 - **Parameters**: `key` grouping key expression
 - **Returns**: `NestedTable` (group-level operations)
-- **SPL Equivalent**: `group@o`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid key), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -335,7 +499,6 @@ groups = t.sort("date").group_ordered(lambda r: r.is_up)
 - **Behavior**: Assumes global sort by key; one-pass grouping without hashing
 - **Parameters**: `key` grouping key expression
 - **Returns**: `NestedTable`
-- **SPL Equivalent**: `groups@o`
 - **Exceptions**: `ValueError` (unsorted or schema not initialized), `TypeError` (invalid key)
 - **Example**:
 ```python
@@ -347,7 +510,6 @@ groups = t.sort("user_id").group_sorted(lambda r: r.user_id)
 - **Behavior**: Stateful scan over current order; outputs per-row accumulated state
 - **Parameters**: `func` state transition; `init` initial state
 - **Returns**: `LTSeq` (usually a state sequence or appended state column)
-- **SPL Equivalent**: `iterate`
 - **Exceptions**: `TypeError` (invalid func), `RuntimeError` (execution failure)
 - **Example**:
 ```python
@@ -505,7 +667,6 @@ groups.derive(lambda g: {"top_3_prices": g.top_k("price", 3)})
 - **Behavior**: Returns True if predicate holds for ALL rows in the group
 - **Parameters**: `predicate` row-level predicate function
 - **Returns**: boolean expression
-- **SPL Equivalent**: Universal quantifier
 - **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
 - **Example**:
 ```python
@@ -521,7 +682,6 @@ groups.derive(lambda g: {"all_in_stock": g.all(lambda r: r.quantity > 0)})
 - **Behavior**: Returns True if predicate holds for AT LEAST ONE row in the group
 - **Parameters**: `predicate` row-level predicate function
 - **Returns**: boolean expression
-- **SPL Equivalent**: Existential quantifier
 - **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
 - **Example**:
 ```python
@@ -537,7 +697,6 @@ groups.derive(lambda g: {"has_vip": g.any(lambda r: r.is_vip == True)})
 - **Behavior**: Returns True if predicate holds for NO rows in the group (equivalent to `not any`)
 - **Parameters**: `predicate` row-level predicate function
 - **Returns**: boolean expression
-- **SPL Equivalent**: Negated existential quantifier
 - **Exceptions**: `TypeError` (invalid predicate), `RuntimeError` (execution failure)
 - **Example**:
 ```python
@@ -610,7 +769,6 @@ groups.derive(lambda g: {"max_valid_price": g.max_if(lambda r: r.is_valid, "pric
 - **Behavior**: Vertical concatenation (similar to SQL UNION ALL)
 - **Parameters**: `other` another LTSeq with same schema
 - **Returns**: combined `LTSeq`
-- **SPL Equivalent**: `A & B`
 - **Exceptions**: `TypeError` (other is not LTSeq), `ValueError` (schema mismatch)
 - **Example**:
 ```python
@@ -622,7 +780,6 @@ combined = t1.union(t2)
 - **Behavior**: Intersection of two tables
 - **Parameters**: `other` another table; `on` key selector (None means all columns)
 - **Returns**: intersection `LTSeq`
-- **SPL Equivalent**: `A ^ B`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -634,7 +791,7 @@ common = t1.intersect(t2, on=lambda r: r.id)
 - **Behavior**: Rows in left table but not in right table
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
-- **SPL Equivalent**: `A \\ B`
+- **SQL Equivalent**: `EXCEPT` / `MINUS`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -659,7 +816,6 @@ flag = t_small.is_subset(t_big, on=lambda r: r.id)
 - **Behavior**: Standard hash join; no sorting required
 - **Parameters**: `other` other table; `on` join condition; `how` in {inner,left,right,full}
 - **Returns**: joined `LTSeq` (conflicting columns get a suffix)
-- **SPL Equivalent**: `join`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how or schema not initialized)
 - **Example**:
 ```python
@@ -671,7 +827,6 @@ joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 - **Behavior**: Merge join; requires both sides sorted by join key; O(N+M)
 - **Parameters**: `other` other table; `on` join condition; `join_type` in {inner,left,right,full}
 - **Returns**: joined `LTSeq`
-- **SPL Equivalent**: `join@m`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid join_type or unsorted)
 - **Example**:
 ```python
@@ -683,7 +838,6 @@ result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
 - **Behavior**: Merge join with strict validation that both tables are sorted by join keys. Validates sort order using `is_sorted_by()` before executing.
 - **Parameters**: `other` other table (must be sorted by join key); `on` join column name(s); `how` in {inner,left,right,full}
 - **Returns**: joined `LTSeq`
-- **SPL Equivalent**: `joinx`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (tables not sorted by join keys, or sort directions don't match)
 - **Example**:
 ```python
@@ -712,7 +866,6 @@ t_unsorted.join_sorted(t2_sorted, on="id")  # ValueError!
 - **Behavior**: As-of join for nearest time match
 - **Parameters**: `other` other table; `on` join condition; `direction` in {"backward","forward","nearest"}
 - **Returns**: as-of joined `LTSeq`
-- **SPL Equivalent**: `joinx` (range/nearest)
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid direction or unsorted)
 - **Example**:
 ```python
@@ -724,7 +877,6 @@ quotes = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="b
 - **Behavior**: Return rows from left table where keys exist in right table. Returns only left table columns with no duplicates from multiple matches.
 - **Parameters**: `other` right table to match against; `on` join condition lambda
 - **Returns**: `LTSeq` with matching rows from left table
-- **SPL Equivalent**: Semi-join / EXISTS subquery
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -737,7 +889,6 @@ active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
 - **Behavior**: Return rows from left table where keys do NOT exist in right table. Returns only left table columns.
 - **Parameters**: `other` right table to match against; `on` join condition lambda
 - **Returns**: `LTSeq` with non-matching rows from left table
-- **SPL Equivalent**: Anti-join / NOT EXISTS subquery
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -750,7 +901,6 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 - **Behavior**: Pointer-style association; not materialized; access via alias
 - **Parameters**: `target_table` target table; `on` join condition; `as_` alias; `join_type` join type
 - **Returns**: `LinkedTable` (can be used like LTSeq)
-- **SPL Equivalent**: `switch` (pointer link)
 - **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type or schema not initialized)
 - **Example**:
 ```python
@@ -763,7 +913,6 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **Behavior**: Load dim table into memory and build a direct index for fast lookups
 - **Parameters**: `dim_table` dimension table; `on` join condition; `as_` alias
 - **Returns**: `LTSeq` with internal pointers/indexes
-- **SPL Equivalent**: `switch` (addressization)
 - **Exceptions**: `MemoryError`/`RuntimeError` (dim table too large or build failure), `TypeError` (invalid params)
 - **Example**:
 ```python
@@ -772,15 +921,15 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 
 ### Join Strategy Summary
 
-| Method | Best Use Case | Algorithm | SPL Equivalent |
+| Method | Best Use Case | Algorithm | SQL Equivalent |
 | --- | --- | --- | --- |
-| `join` | Unsorted general data | Hash Join | SQL Join |
-| `join_sorted` / `join_merge` | Pre-sorted large tables | Merge Join | `joinx` / `join@m` |
-| `semi_join` | Filter by key existence | Hash Semi-Join | EXISTS |
-| `anti_join` | Filter by key non-existence | Hash Anti-Join | NOT EXISTS |
-| `link` | Fact-to-dimension pointer access | Pointer | `switch` |
-| `lookup` | Fact + small dimension in memory | Direct Address | `switch` (addressization) |
-| `asof_join` | Financial time series | Ordered Search | `joinx` (range) |
+| `join` | Unsorted general data | Hash Join | `JOIN` |
+| `join_sorted` / `join_merge` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
+| `semi_join` | Filter by key existence | Hash Semi-Join | `WHERE EXISTS` |
+| `anti_join` | Filter by key non-existence | Hash Anti-Join | `WHERE NOT EXISTS` |
+| `link` | Fact-to-dimension pointer access | Pointer | `LEFT JOIN` (lazy) |
+| `lookup` | Fact + small dimension in memory | Direct Address | `LEFT JOIN` (indexed) |
+| `asof_join` | Financial time series | Ordered Search | `LATERAL JOIN` |
 
 ## 7. Aggregation, Partitioning, Pivot
 
@@ -789,7 +938,6 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 - **Behavior**: Grouped aggregation (or full-table aggregation); one row per group
 - **Parameters**: `by` grouping key (single column or list); `aggs` aggregation expressions
 - **Returns**: aggregated `LTSeq`
-- **SPL Equivalent**: `groups`
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid expressions)
 - **Example**:
 ```python
@@ -801,7 +949,6 @@ summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
 - **Behavior**: Return Top-K of a column (aggregate semantics)
 - **Parameters**: `col` target column (expression or callable); `k` Top count
 - **Returns**: Top-K list
-- **SPL Equivalent**: `top`
 - **Exceptions**: `ValueError` (k <= 0), `TypeError` (invalid col)
 - **Example**:
 ```python
@@ -814,7 +961,6 @@ result = t.agg(top_prices=lambda g: top_k(g.price, 5))
 - **Behavior**: Split into sub-tables by key (no aggregation)
 - **Parameters**: column names or lambda
 - **Returns**: `PartitionedTable` (key -> LTSeq)
-- **SPL Equivalent**: `group`
 - **Exceptions**: `TypeError` (invalid params), `AttributeError` (column not found), `ValueError` (schema not initialized)
 - **Example**:
 ```python
@@ -823,11 +969,14 @@ west = parts["West"]
 ```
 
 ### `LTSeq.pivot`
-- **Signature**: `LTSeq.pivot(index: Union[str, list], columns: str, values: str, agg_fn: str = "sum") -> LTSeq`
+- **Signature**: `LTSeq.pivot(index: Union[str, List[str]], columns: str, values: str, agg_fn: str = "sum") -> LTSeq`
 - **Behavior**: Pivot from long to wide
-- **Parameters**: `index` row index columns; `columns` column dimension; `values` value field; `agg_fn` aggregation
+- **Parameters**:
+  - `index` row index column(s)
+  - `columns` column to pivot on (values become column names)
+  - `values` column containing values to aggregate
+  - `agg_fn` aggregation function: `"sum"` | `"mean"` | `"min"` | `"max"` | `"count"` | `"first"` | `"last"` (default: `"sum"`)
 - **Returns**: pivoted `LTSeq`
-- **SPL Equivalent**: `pivot`
 - **Exceptions**: `ValueError` (invalid agg_fn or schema not initialized), `AttributeError` (column not found)
 - **Example**:
 ```python
@@ -859,7 +1008,7 @@ from ltseq.expr import if_else
 status = if_else(r.amount > 100, "VIP", "Normal")
 ```
 
-### `Expr.fill_null`
+### `r.col.fill_null`
 - **Signature**: `r.col.fill_null(default: Any) -> Expr`
 - **Behavior**: NULL fill (SQL COALESCE)
 - **Parameters**: `default` fallback value
@@ -870,7 +1019,7 @@ status = if_else(r.amount > 100, "VIP", "Normal")
 safe_price = r.price.fill_null(0)
 ```
 
-### `Expr.is_null`
+### `r.col.is_null`
 - **Signature**: `r.col.is_null() -> Expr`
 - **Behavior**: NULL check
 - **Parameters**: none
@@ -881,7 +1030,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 ```
 
-### `Expr.is_not_null`
+### `r.col.is_not_null`
 - **Signature**: `r.col.is_not_null() -> Expr`
 - **Behavior**: NOT NULL check
 - **Parameters**: none
@@ -1104,8 +1253,8 @@ delivery = t.derive(delivery=lambda r: r.order_date.dt.add(days=5))
 age_days = t.derive(age=lambda r: r.end_date.dt.diff(r.start_date))
 ```
 
-### `Expr.lookup` (expression-level lookup)
-- **Signature**: `r.key.lookup(target_table: LTSeq, column: str, join_key: Optional[str] = None) -> Expr`
+### `r.col.lookup` (expression-level lookup)
+- **Signature**: `r.col.lookup(target_table: LTSeq, column: str, join_key: Optional[str] = None) -> Expr`
 - **Behavior**: Lightweight lookup inside expressions, returning a single column value
 - **Parameters**: `target_table` target table; `column` output column; `join_key` join key in target table
 - **Returns**: lookup expression
@@ -1226,3 +1375,28 @@ result = orders.derive(
 - All expressions are serialized and pushed down to Rust/DataFusion, not evaluated row-by-row in Python
 - String/temporal/NULL extensions map to SQL/DataFusion functions
 - `to_cursor` enables streaming for very large datasets
+
+## Appendix A: Migrating from Pandas
+
+| Pandas | LTSeq | Notes |
+|--------|-------|-------|
+| `df[df.age > 18]` | `t.filter(lambda r: r.age > 18)` | Lambda captures expression |
+| `df[['id', 'name']]` | `t.select("id", "name")` | |
+| `df.assign(total=df.a + df.b)` | `t.derive(total=lambda r: r.a + r.b)` | |
+| `df.sort_values('date')` | `t.sort("date")` | |
+| `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | |
+| `df.drop_duplicates('id')` | `t.distinct("id")` | |
+| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda g: g.sales.sum())` | |
+| `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
+| `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
+| `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | Requires sort |
+| `df['col'].rolling(5).mean()` | `t.sort(...).derive(ma=lambda r: r.col.rolling(5).mean())` | Requires sort |
+| `df['col'].diff()` | `t.sort(...).derive(d=lambda r: r.col.diff())` | Requires sort |
+| `df['col'].cumsum()` | `t.sort(...).cum_sum("col")` | Requires sort |
+| `df.head(10)` | `t.head(10)` | |
+| `df.tail(10)` | `t.tail(10)` | |
+| `df.to_dict('records')` | `t.collect()` | |
+| `len(df)` | `t.count()` | |
+| `df.columns.tolist()` | `t.columns` | |
+| `df.isna()` | `t.filter(lambda r: r.col.is_null())` | Per-column |
+| `df.fillna(0)` | `t.derive(col=lambda r: r.col.fill_null(0))` | Per-column |

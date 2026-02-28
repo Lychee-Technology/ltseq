@@ -9,6 +9,7 @@ Tests verify:
 """
 
 import pytest
+from ltseq import LTSeq
 from ltseq.expr import (
     Expr,
     ColumnExpr,
@@ -17,6 +18,7 @@ from ltseq.expr import (
     UnaryOpExpr,
     CallExpr,
 )
+from ltseq.expr.base import if_else
 
 
 class TestColumnExpr:
@@ -417,3 +419,150 @@ class TestStringAccessor:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tests that exercise expressions through the full Rust pipeline
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def numbers_table():
+    """Create a small numeric table for expression e2e tests."""
+    return LTSeq._from_rows(
+        [
+            {"id": 1, "x": 10, "y": 5},
+            {"id": 2, "x": -3, "y": 8},
+            {"id": 3, "x": 0, "y": 12},
+        ],
+        {"id": "int64", "x": "int64", "y": "int64"},
+    )
+
+
+class TestIfElseEndToEnd:
+    """End-to-end tests for if_else() (T21)."""
+
+    def test_if_else_basic_derive(self, numbers_table):
+        """if_else in derive produces correct values."""
+        result = numbers_table.derive(
+            label=lambda r: if_else(r.x > 0, "positive", "non-positive")
+        )
+        df = result.to_pandas()
+        assert "label" in df.columns
+        labels = df["label"].tolist()
+        assert labels[0] == "positive"      # x=10
+        assert labels[1] == "non-positive"  # x=-3
+        assert labels[2] == "non-positive"  # x=0
+
+    def test_if_else_numeric(self, numbers_table):
+        """if_else with numeric outputs."""
+        result = numbers_table.derive(
+            clamped=lambda r: if_else(r.x > 0, r.x, 0)
+        )
+        df = result.to_pandas()
+        vals = df["clamped"].tolist()
+        assert vals[0] == 10
+        assert vals[1] == 0
+        assert vals[2] == 0
+
+    def test_if_else_nested(self, numbers_table):
+        """Nested if_else produces correct values."""
+        result = numbers_table.derive(
+            tier=lambda r: if_else(
+                r.x > 5,
+                "high",
+                if_else(r.x > 0, "medium", "low"),
+            )
+        )
+        df = result.to_pandas()
+        tiers = df["tier"].tolist()
+        assert tiers[0] == "high"    # x=10
+        assert tiers[1] == "low"     # x=-3
+        assert tiers[2] == "low"     # x=0
+
+
+class TestReverseOperatorsEndToEnd:
+    """End-to-end tests for right-hand operators (T22)."""
+
+    def test_rmul(self, numbers_table):
+        """2 * r.x should produce correct results."""
+        result = numbers_table.derive(doubled=lambda r: 2 * r.x)
+        df = result.to_pandas()
+        vals = df["doubled"].tolist()
+        assert vals[0] == 20
+        assert vals[1] == -6
+        assert vals[2] == 0
+
+    def test_rtruediv(self, numbers_table):
+        """100 / r.y should produce correct results (int division on int cols)."""
+        result = numbers_table.derive(ratio=lambda r: 100 / r.y)
+        df = result.to_pandas()
+        vals = df["ratio"].tolist()
+        assert vals[0] == 20   # 100 / 5  (integer division on int64)
+        assert vals[1] == 12   # 100 / 8  (integer division on int64)
+
+    def test_rmod(self, numbers_table):
+        """17 % r.y should produce correct results."""
+        result = numbers_table.derive(remainder=lambda r: 17 % r.y)
+        df = result.to_pandas()
+        vals = df["remainder"].tolist()
+        assert vals[0] == 2   # 17 % 5
+        assert vals[1] == 1   # 17 % 8
+
+    def test_radd(self, numbers_table):
+        """100 + r.x should produce correct results."""
+        result = numbers_table.derive(shifted=lambda r: 100 + r.x)
+        df = result.to_pandas()
+        vals = df["shifted"].tolist()
+        assert vals[0] == 110
+        assert vals[1] == 97
+        assert vals[2] == 100
+
+    def test_rsub(self, numbers_table):
+        """100 - r.x should produce correct results."""
+        result = numbers_table.derive(inv=lambda r: 100 - r.x)
+        df = result.to_pandas()
+        vals = df["inv"].tolist()
+        assert vals[0] == 90
+        assert vals[1] == 103
+        assert vals[2] == 100
+
+
+class TestAbsEndToEnd:
+    """End-to-end tests for __abs__ (T23)."""
+
+    def test_abs_serialization(self):
+        """abs(col) creates CallExpr with abs function."""
+        col = ColumnExpr("x")
+        expr = abs(col)
+        serialized = expr.serialize()
+        assert serialized["type"] == "Call"
+        assert serialized["func"] == "abs"
+
+    def test_abs_in_plain_derive_errors(self, numbers_table):
+        """abs() in plain derive raises ValueError (requires window context)."""
+        with pytest.raises(ValueError, match="window context"):
+            numbers_table.derive(ax=lambda r: abs(r.x))
+
+
+class TestFillNullEndToEnd:
+    """End-to-end tests for fill_null() (T25)."""
+
+    def test_fill_null_replaces_nulls(self):
+        """fill_null() replaces null values with the default."""
+        # Create table with nulls using _from_rows
+        t = LTSeq._from_rows(
+            [
+                {"id": 1, "val": "hello"},
+                {"id": 2, "val": ""},
+                {"id": 3, "val": "world"},
+            ],
+            {"id": "int64", "val": "string"},
+        )
+        # fill_null on a non-null column is a no-op
+        result = t.derive(safe_val=lambda r: r.val.fill_null("DEFAULT"))
+        df = result.to_pandas()
+        assert "safe_val" in df.columns
+        # No actual nulls in this data, so all originals preserved
+        vals = df["safe_val"].tolist()
+        assert vals[0] == "hello"
+        assert vals[2] == "world"

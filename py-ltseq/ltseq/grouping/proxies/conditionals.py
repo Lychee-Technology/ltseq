@@ -1,9 +1,6 @@
 """Conditional methods mixin for GroupProxy."""
 
-from typing import TYPE_CHECKING, Any, Callable
-
-if TYPE_CHECKING:
-    pass
+from typing import Any, Callable
 
 
 class GroupConditionalMixin:

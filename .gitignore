@@ -4,3 +4,8 @@
 *.log
 __pycache__/
 *.bak
+
+# Benchmark data files (large parquet datasets)
+benchmarks/data/*.parquet
+.opencode/
+.claude/
