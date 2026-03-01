@@ -182,6 +182,10 @@ class LTSeq(
             reader = pa.ipc.open_stream(buf)
             batches.extend(reader.read_all().to_batches())
 
+        if not batches:
+            # All batches were empty (e.g. filter eliminated all rows)
+            return pa.table({col: [] for col in self._schema.keys()})
+
         return pa.Table.from_batches(batches)
 
     def __len__(self) -> int:

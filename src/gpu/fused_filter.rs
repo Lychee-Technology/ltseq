@@ -1,0 +1,501 @@
+//! Fused compound-filter WGSL code generation.
+//!
+//! Generates a single WGSL compute shader that evaluates an entire
+//! `GpuFilterTree` (AND/OR/NOT of column-vs-literal comparisons) in one pass.
+//!
+//! # Why fused?
+//! The original implementation dispatches one GPU kernel per leaf predicate and
+//! combines the resulting bitmasks on CPU (bitwise AND/OR/NOT).  For a predicate
+//! like `a > 5 AND b < 10 AND c != 0` that means 3 GPU round-trips.
+//!
+//! The fused path generates a single shader that evaluates all leaves and
+//! logical operators inline, writes **one** bitmask, and requires **one**
+//! round-trip regardless of tree depth.
+//!
+//! # Shader layout
+//! ```text
+//! @binding(0) — FusedFilterParams uniform  (num_rows, literal_lo/hi for each leaf)
+//! @binding(1) — col buffer for column A    (array<i32>)
+//! @binding(2) — col buffer for column B    (array<i32>)
+//! ...
+//! @binding(N+1) — output bitmask           (array<atomic<u32>>)
+//! ```
+//!
+//! # Pipeline caching
+//! The pipeline is keyed on the *structural* hash of the predicate tree
+//! (column indices, column types, ops, literal *types* — but NOT literal
+//! *values*).  Literal values are passed at runtime via the uniform buffer, so
+//! the same compiled pipeline can be reused across different literal values with
+//! the same tree shape.
+
+use std::collections::hash_map::DefaultHasher;
+use std::fmt::Write;
+use std::hash::{Hash, Hasher};
+
+use super::filter_exec::{GpuFilterOp, GpuFilterTree, GpuLiteral};
+
+// ── Column type tags — must match the generated WGSL ─────────────────────────
+
+/// Maximum number of leaf predicates supported in a single fused shader.
+/// Limits the uniform buffer size; 32 leaves = 32*8 = 256 bytes of literals.
+pub const MAX_FUSED_LEAVES: usize = 32;
+
+// ── Structural hash (cache key) ───────────────────────────────────────────────
+
+/// Compute a structural hash for the tree (column indices, types, ops, tree
+/// topology) — identical for trees that share shader source.
+pub fn structural_hash(tree: &GpuFilterTree) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_tree(tree, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_tree<H: Hasher>(tree: &GpuFilterTree, h: &mut H) {
+    std::mem::discriminant(tree).hash(h);
+    match tree {
+        GpuFilterTree::Leaf(op) => {
+            op.column_index.hash(h);
+            literal_type_tag(&op.literal).hash(h);
+            op.op.to_wgsl_op().hash(h);
+        }
+        GpuFilterTree::And(l, r) | GpuFilterTree::Or(l, r) => {
+            hash_tree(l, h);
+            hash_tree(r, h);
+        }
+        GpuFilterTree::Not(inner) => hash_tree(inner, h),
+    }
+}
+
+fn literal_type_tag(lit: &GpuLiteral) -> u8 {
+    match lit {
+        GpuLiteral::Int32(_) => 0,
+        GpuLiteral::Int64(_) => 1,
+        GpuLiteral::Float32(_) => 2,
+    }
+}
+
+// ── Leaf collection ───────────────────────────────────────────────────────────
+
+/// Collect all leaf ops in DFS order (left-first).  The order determines the
+/// uniform-buffer slot indices, so it must be stable and match the emission order.
+pub fn collect_leaves(tree: &GpuFilterTree) -> Vec<&GpuFilterOp> {
+    let mut leaves = Vec::new();
+    gather_leaves(tree, &mut leaves);
+    leaves
+}
+
+fn gather_leaves<'a>(tree: &'a GpuFilterTree, out: &mut Vec<&'a GpuFilterOp>) {
+    match tree {
+        GpuFilterTree::Leaf(op) => out.push(op),
+        GpuFilterTree::And(l, r) | GpuFilterTree::Or(l, r) => {
+            gather_leaves(l, out);
+            gather_leaves(r, out);
+        }
+        GpuFilterTree::Not(inner) => gather_leaves(inner, out),
+    }
+}
+
+/// Collect the unique column indices referenced by the tree (sorted, deduped).
+pub fn collect_unique_columns(tree: &GpuFilterTree) -> Vec<(usize, u8)> {
+    let mut cols: Vec<(usize, u8)> = collect_leaves(tree)
+        .iter()
+        .map(|op| (op.column_index, literal_type_tag(&op.literal)))
+        .collect();
+    cols.sort();
+    cols.dedup();
+    cols
+}
+
+// ── WGSL generation ───────────────────────────────────────────────────────────
+
+/// Generate a complete fused WGSL shader for `tree`.
+///
+/// Returns `(source, unique_columns)` where `unique_columns` is the ordered list
+/// of `(column_index, col_type_tag)` pairs that correspond to bindings 1…N.
+pub fn generate_fused_filter_wgsl(tree: &GpuFilterTree) -> (String, Vec<(usize, u8)>) {
+    let leaves = collect_leaves(tree);
+    let n_leaves = leaves.len();
+    assert!(
+        n_leaves <= MAX_FUSED_LEAVES,
+        "Too many leaves in fused filter ({n_leaves} > {MAX_FUSED_LEAVES})"
+    );
+
+    let unique_cols = collect_unique_columns(tree);
+    let n_cols = unique_cols.len();
+
+    let mut s = String::with_capacity(2048);
+
+    // ── Uniform struct ────────────────────────────────────────────────────────
+    // We always emit MAX_FUSED_LEAVES literal slots for a stable layout.
+    // Each slot is two i32 words (lo, hi); unused slots are zero.
+    writeln!(s, "// Fused filter shader — generated by ltseq").unwrap();
+    writeln!(s, "struct FusedFilterParams {{").unwrap();
+    writeln!(s, "    num_rows: u32,").unwrap();
+    writeln!(s, "    n_leaves: u32,").unwrap();
+    writeln!(s, "    _pad0: u32,").unwrap();
+    writeln!(s, "    _pad1: u32,").unwrap();
+    // literal_lo[0..MAX], literal_hi[0..MAX] as flat arrays
+    // WGSL doesn't have runtime-sized arrays in uniforms; emit as fixed-size
+    // Using individual fields (WGSL uniform arrays require stride annotations)
+    for i in 0..MAX_FUSED_LEAVES {
+        writeln!(s, "    lit_lo_{i}: i32,").unwrap();
+        writeln!(s, "    lit_hi_{i}: i32,").unwrap();
+    }
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+
+    // ── Bindings ──────────────────────────────────────────────────────────────
+    writeln!(
+        s,
+        "@group(0) @binding(0) var<uniform> params: FusedFilterParams;"
+    )
+    .unwrap();
+    for (bind_offset, &(col_idx, _col_type)) in unique_cols.iter().enumerate() {
+        let binding = bind_offset + 1;
+        writeln!(
+            s,
+            "@group(0) @binding({binding}) var<storage, read> col_{col_idx}: array<i32>;"
+        )
+        .unwrap();
+    }
+    let out_binding = n_cols + 1;
+    writeln!(
+        s,
+        "@group(0) @binding({out_binding}) var<storage, read_write> out_mask: array<atomic<u32>>;"
+    )
+    .unwrap();
+    writeln!(s).unwrap();
+
+    // ── i64 compare helper ────────────────────────────────────────────────────
+    // Only emitted when needed, but always emitting is simpler and the dead code
+    // is trivially optimized by the WGSL compiler.
+    writeln!(
+        s,
+        "fn cmp_i64(vh: i32, vl: i32, lh: i32, ll: i32, op: u32) -> bool {{"
+    )
+    .unwrap();
+    writeln!(s, "    let vu = bitcast<u32>(vl);").unwrap();
+    writeln!(s, "    let lu = bitcast<u32>(ll);").unwrap();
+    writeln!(s, "    switch op {{").unwrap();
+    writeln!(s, "        case 0u: {{ return vh == lh && vu == lu; }}").unwrap();
+    writeln!(s, "        case 1u: {{ return vh != lh || vu != lu; }}").unwrap();
+    writeln!(
+        s,
+        "        case 2u: {{ if vh != lh {{ return vh < lh; }} return vu < lu; }}"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "        case 3u: {{ if vh != lh {{ return vh < lh; }} return vu <= lu; }}"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "        case 4u: {{ if vh != lh {{ return vh > lh; }} return vu > lu; }}"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "        case 5u: {{ if vh != lh {{ return vh > lh; }} return vu >= lu; }}"
+    )
+    .unwrap();
+    writeln!(s, "        default: {{ return false; }}").unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s, "}}").unwrap();
+    writeln!(s).unwrap();
+
+    // ── Main entry point ──────────────────────────────────────────────────────
+    writeln!(s, "@compute @workgroup_size(256)").unwrap();
+    writeln!(
+        s,
+        "fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{"
+    )
+    .unwrap();
+    writeln!(s, "    let idx = gid.x;").unwrap();
+    writeln!(s, "    if idx >= params.num_rows {{ return; }}").unwrap();
+    writeln!(s).unwrap();
+
+    // Emit predicate tree expression
+    let mut leaf_counter = 0usize;
+    let pred = emit_tree(
+        &mut s,
+        tree,
+        &unique_cols,
+        &leaves,
+        &mut leaf_counter,
+        "    ",
+    );
+
+    writeln!(s).unwrap();
+    writeln!(s, "    if ({pred}) {{").unwrap();
+    writeln!(s, "        let word_idx = idx / 32u;").unwrap();
+    writeln!(s, "        let bit_idx  = idx % 32u;").unwrap();
+    writeln!(s, "        atomicOr(&out_mask[word_idx], 1u << bit_idx);").unwrap();
+    writeln!(s, "    }}").unwrap();
+    writeln!(s, "}}").unwrap();
+
+    (s, unique_cols)
+}
+
+/// Emit WGSL boolean expression for a `GpuFilterTree` node.
+///
+/// Leaf nodes emit a comparison of a column value against a uniform literal.
+/// Interior nodes emit `&&`, `||`, `!` combinations.
+///
+/// Returns the name of the boolean variable holding the result.
+fn emit_tree(
+    s: &mut String,
+    tree: &GpuFilterTree,
+    unique_cols: &[(usize, u8)],
+    leaves: &[&GpuFilterOp],
+    leaf_counter: &mut usize,
+    indent: &str,
+) -> String {
+    match tree {
+        GpuFilterTree::Leaf(op) => {
+            let leaf_idx = *leaf_counter;
+            *leaf_counter += 1;
+
+            let var = format!("pred_{leaf_idx}");
+            let col_idx = op.column_index;
+            let op_code = op.op.to_wgsl_op();
+
+            match &op.literal {
+                GpuLiteral::Int32(_) => {
+                    // i32: single word comparison
+                    writeln!(s, "{indent}let {var}_col = col_{col_idx}[idx];").unwrap();
+                    writeln!(s, "{indent}let {var}_lit = params.lit_lo_{leaf_idx};").unwrap();
+                    // Inline comparison using op code switch
+                    writeln!(s, "{indent}var {var}: bool;").unwrap();
+                    writeln!(s, "{indent}switch {op_code}u {{").unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 0u: {{ {var} = {var}_col == {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 1u: {{ {var} = {var}_col != {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 2u: {{ {var} = {var}_col < {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 3u: {{ {var} = {var}_col <= {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 4u: {{ {var} = {var}_col > {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 5u: {{ {var} = {var}_col >= {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(s, "{indent}    default: {{ {var} = false; }}").unwrap();
+                    writeln!(s, "{indent}}}").unwrap();
+                }
+                GpuLiteral::Float32(_) => {
+                    // f32: bitcast from stored i32
+                    writeln!(
+                        s,
+                        "{indent}let {var}_col = bitcast<f32>(col_{col_idx}[idx]);"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}let {var}_lit = bitcast<f32>(params.lit_lo_{leaf_idx});"
+                    )
+                    .unwrap();
+                    writeln!(s, "{indent}var {var}: bool;").unwrap();
+                    writeln!(s, "{indent}switch {op_code}u {{").unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 0u: {{ {var} = {var}_col == {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 1u: {{ {var} = {var}_col != {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 2u: {{ {var} = {var}_col < {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 3u: {{ {var} = {var}_col <= {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 4u: {{ {var} = {var}_col > {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        s,
+                        "{indent}    case 5u: {{ {var} = {var}_col >= {var}_lit; }}"
+                    )
+                    .unwrap();
+                    writeln!(s, "{indent}    default: {{ {var} = false; }}").unwrap();
+                    writeln!(s, "{indent}}}").unwrap();
+                }
+                GpuLiteral::Int64(_) => {
+                    // i64: two-word comparison via helper
+                    writeln!(s, "{indent}let {var}_vlo = col_{col_idx}[idx * 2u];").unwrap();
+                    writeln!(s, "{indent}let {var}_vhi = col_{col_idx}[idx * 2u + 1u];").unwrap();
+                    writeln!(
+                        s,
+                        "{indent}let {var} = cmp_i64({var}_vhi, {var}_vlo, params.lit_hi_{leaf_idx}, params.lit_lo_{leaf_idx}, {op_code}u);"
+                    )
+                    .unwrap();
+                }
+            }
+
+            var
+        }
+
+        GpuFilterTree::And(left, right) => {
+            let lv = emit_tree(s, left, unique_cols, leaves, leaf_counter, indent);
+            let rv = emit_tree(s, right, unique_cols, leaves, leaf_counter, indent);
+            let var = format!("and_{lv}_{rv}");
+            writeln!(s, "{indent}let {var} = {lv} && {rv};").unwrap();
+            var
+        }
+
+        GpuFilterTree::Or(left, right) => {
+            let lv = emit_tree(s, left, unique_cols, leaves, leaf_counter, indent);
+            let rv = emit_tree(s, right, unique_cols, leaves, leaf_counter, indent);
+            let var = format!("or_{lv}_{rv}");
+            writeln!(s, "{indent}let {var} = {lv} || {rv};").unwrap();
+            var
+        }
+
+        GpuFilterTree::Not(inner) => {
+            let iv = emit_tree(s, inner, unique_cols, leaves, leaf_counter, indent);
+            let var = format!("not_{iv}");
+            writeln!(s, "{indent}let {var} = !{iv};").unwrap();
+            var
+        }
+    }
+}
+
+// ── Uniform params builder ────────────────────────────────────────────────────
+
+/// Build the uniform buffer bytes for a fused filter dispatch.
+///
+/// Layout matches the WGSL `FusedFilterParams` struct:
+/// - u32  num_rows
+/// - u32  n_leaves
+/// - u32  _pad0
+/// - u32  _pad1
+/// - (i32 lit_lo_N, i32 lit_hi_N) × MAX_FUSED_LEAVES
+pub fn build_fused_params(num_rows: u32, leaves: &[&GpuFilterOp]) -> Vec<u8> {
+    // Header: 4 × u32 = 16 bytes
+    // Then MAX_FUSED_LEAVES × (lo: i32, hi: i32) = MAX_FUSED_LEAVES × 8 bytes
+    let total = 16 + MAX_FUSED_LEAVES * 8;
+    let mut buf = vec![0u8; total];
+
+    // Header
+    buf[0..4].copy_from_slice(&num_rows.to_le_bytes());
+    buf[4..8].copy_from_slice(&(leaves.len() as u32).to_le_bytes());
+    // _pad0, _pad1 = 0
+
+    // Literals
+    for (i, leaf) in leaves.iter().enumerate() {
+        let offset = 16 + i * 8;
+        let (lo, hi): (i32, i32) = match leaf.literal {
+            GpuLiteral::Int32(v) => (v, 0),
+            GpuLiteral::Float32(v) => (v.to_bits() as i32, 0),
+            GpuLiteral::Int64(v) => {
+                let bytes = v.to_le_bytes();
+                let lo = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let hi = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                (lo, hi)
+            }
+        };
+        buf[offset..offset + 4].copy_from_slice(&lo.to_le_bytes());
+        buf[offset + 4..offset + 8].copy_from_slice(&hi.to_le_bytes());
+    }
+
+    buf
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::filter_exec::{CompareOp, GpuFilterOp, GpuFilterTree, GpuLiteral};
+
+    fn leaf_i32(col: usize, op: CompareOp, val: i32) -> GpuFilterTree {
+        GpuFilterTree::Leaf(GpuFilterOp {
+            column_index: col,
+            op,
+            literal: GpuLiteral::Int32(val),
+        })
+    }
+
+    #[test]
+    fn test_generate_simple_leaf() {
+        let tree = leaf_i32(0, CompareOp::Gt, 42);
+        let (src, cols) = generate_fused_filter_wgsl(&tree);
+        assert!(src.contains("col_0"), "should reference col_0");
+        assert!(src.contains("out_mask"), "should have output mask");
+        assert_eq!(cols, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn test_generate_and_two_columns() {
+        let tree = GpuFilterTree::And(
+            Box::new(leaf_i32(0, CompareOp::Gt, 5)),
+            Box::new(leaf_i32(1, CompareOp::Lt, 100)),
+        );
+        let (src, cols) = generate_fused_filter_wgsl(&tree);
+        assert!(src.contains("col_0"), "col 0 binding");
+        assert!(src.contains("col_1"), "col 1 binding");
+        assert!(src.contains("&&"), "AND operator");
+        assert_eq!(cols, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn test_structural_hash_invariant_to_literal_values() {
+        let tree_a = leaf_i32(0, CompareOp::Gt, 42);
+        let tree_b = leaf_i32(0, CompareOp::Gt, 99); // different value
+        assert_eq!(structural_hash(&tree_a), structural_hash(&tree_b));
+    }
+
+    #[test]
+    fn test_structural_hash_differs_for_different_ops() {
+        let tree_a = leaf_i32(0, CompareOp::Gt, 42);
+        let tree_b = leaf_i32(0, CompareOp::Lt, 42);
+        assert_ne!(structural_hash(&tree_a), structural_hash(&tree_b));
+    }
+
+    #[test]
+    fn test_build_fused_params_i32() {
+        let op = GpuFilterOp {
+            column_index: 0,
+            op: CompareOp::Gt,
+            literal: GpuLiteral::Int32(42),
+        };
+        let leaves = vec![&op];
+        let params = build_fused_params(1000, &leaves);
+        // num_rows at offset 0
+        assert_eq!(&params[0..4], &1000u32.to_le_bytes());
+        // n_leaves at offset 4
+        assert_eq!(&params[4..8], &1u32.to_le_bytes());
+        // lit_lo_0 at offset 16
+        assert_eq!(&params[16..20], &42i32.to_le_bytes());
+        // lit_hi_0 at offset 20 = 0
+        assert_eq!(&params[20..24], &0i32.to_le_bytes());
+    }
+}

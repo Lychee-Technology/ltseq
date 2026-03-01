@@ -14,6 +14,8 @@ pub(crate) mod cursor;
 pub(crate) mod engine; // DataFusion session and LTSeqTable struct
 mod error;
 pub(crate) mod format; // Formatting and display functions
+#[cfg(feature = "gpu")]
+pub(crate) mod gpu; // GPU acceleration via wgpu
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // Streaming cursor for lazy iteration
@@ -1111,9 +1113,89 @@ impl LTSeqTable {
     }
 }
 
+/// Check whether GPU acceleration is available.
+///
+/// Returns `True` if the `gpu` feature was compiled in, `LTSEQ_DISABLE_GPU` is not set,
+/// and a wgpu adapter was successfully initialized. Returns `False` otherwise.
+#[pyfunction]
+fn gpu_available() -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        crate::gpu::is_gpu_available()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        false
+    }
+}
+
+/// Enumerate all available GPU adapters visible to wgpu.
+///
+/// Returns a list of dicts, one per adapter, with keys:
+///   - `index`       (int)  — zero-based position in the enumerated list
+///   - `name`        (str)  — adapter name, e.g. "NVIDIA GeForce RTX 3070"
+///   - `backend`     (str)  — wgpu backend, e.g. "Vulkan", "Metal", "Dx12"
+///   - `device_type` (str)  — e.g. "DiscreteGpu", "IntegratedGpu", "Cpu"
+///
+/// This function creates a temporary wgpu Instance and does **not** trigger the
+/// global `GPU_CONTEXT` singleton, so it is safe to call before GPU init or when
+/// `LTSEQ_DISABLE_GPU` is set.
+#[pyfunction]
+fn gpu_list(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+    #[cfg(feature = "gpu")]
+    {
+        let adapters = crate::gpu::enumerate_gpus();
+        adapters
+            .into_iter()
+            .map(|a| {
+                let dict = pyo3::types::PyDict::new(py);
+                dict.set_item("index", a.index)?;
+                dict.set_item("name", &a.name)?;
+                dict.set_item("backend", &a.backend)?;
+                dict.set_item("device_type", &a.device_type)?;
+                Ok(dict.into())
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = py;
+        Ok(vec![])
+    }
+}
+
+/// Return information about the currently selected GPU adapter.
+///
+/// Returns a dict with keys `name`, `backend`, `device_type`, `is_uma`, or `None`
+/// if the GPU context is not available (disabled, no adapter, or not compiled in).
+#[pyfunction]
+fn gpu_info(py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    #[cfg(feature = "gpu")]
+    {
+        if let Some((info, is_uma)) = crate::gpu::selected_gpu_info() {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("name", &info.name)?;
+            dict.set_item("backend", &info.backend)?;
+            dict.set_item("device_type", &info.device_type)?;
+            dict.set_item("is_uma", is_uma)?;
+            Ok(Some(dict.into()))
+        } else {
+            Ok(None)
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = py;
+        Ok(None)
+    }
+}
+
 #[pymodule]
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
+    m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_list, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_info, m)?)?;
     Ok(())
 }

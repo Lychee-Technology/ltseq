@@ -6,6 +6,13 @@ from .grouping import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable
 
+# GPU availability check (returns False if compiled without gpu feature)
+from . import ltseq_core as _core
+
+gpu_available = _core.gpu_available
+gpu_list = _core.gpu_list
+gpu_info = _core.gpu_info
+
 # Re-export public expression types
 from .expr import (
     SchemaProxy,
@@ -32,6 +39,9 @@ __all__ = [
     "NestedTable",
     "LinkedTable",
     "PartitionedTable",
+    "gpu_available",
+    "gpu_list",
+    "gpu_info",
     "SchemaProxy",
     "BinOpExpr",
     "ColumnExpr",

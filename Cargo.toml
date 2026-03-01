@@ -24,6 +24,14 @@ parquet = { version = "57.1", default-features = false, features = ["arrow"] }
 
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
 
+# GPU acceleration (optional, behind "gpu" feature)
+wgpu = { version = "24", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+pollster = { version = "0.4", optional = true }
+
+[features]
+gpu = ["wgpu", "bytemuck", "pollster"]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
