@@ -1,143 +1,143 @@
 {
-  "timestamp": "2026-01-09 16:04:56",
+  "timestamp": "2026-02-28 09:21:54",
   "results": [
     {
       "name": "filter_10000",
       "rows": 10000,
-      "time_ms": 41.6,
-      "rows_per_sec": 240378.0
+      "time_ms": 20.71,
+      "rows_per_sec": 482955.0
     },
     {
       "name": "filter_100000",
       "rows": 100000,
-      "time_ms": 318.43,
-      "rows_per_sec": 314043.0
+      "time_ms": 104.49,
+      "rows_per_sec": 957025.0
     },
     {
       "name": "filter_1000000",
       "rows": 1000000,
-      "time_ms": 486.34,
-      "rows_per_sec": 2056162.0
+      "time_ms": 87.42,
+      "rows_per_sec": 11438797.0
     },
     {
       "name": "filter_complex_100000",
       "rows": 100000,
-      "time_ms": 317.99,
-      "rows_per_sec": 314477.0
+      "time_ms": 103.05,
+      "rows_per_sec": 970389.0
     },
     {
       "name": "derive_10000",
       "rows": 10000,
-      "time_ms": 39.79,
-      "rows_per_sec": 251304.0
+      "time_ms": 18.52,
+      "rows_per_sec": 539964.0
     },
     {
       "name": "derive_100000",
       "rows": 100000,
-      "time_ms": 316.31,
-      "rows_per_sec": 316141.0
+      "time_ms": 40.84,
+      "rows_per_sec": 2448654.0
     },
     {
       "name": "derive_1000000",
       "rows": 1000000,
-      "time_ms": 468.22,
-      "rows_per_sec": 2135739.0
+      "time_ms": 48.53,
+      "rows_per_sec": 20606192.0
     },
     {
       "name": "derive_multi_100000",
       "rows": 100000,
-      "time_ms": 318.1,
-      "rows_per_sec": 314368.0
+      "time_ms": 42.59,
+      "rows_per_sec": 2348084.0
     },
     {
       "name": "join_10000x10000",
       "rows": 20000,
-      "time_ms": 81.57,
-      "rows_per_sec": 245173.0
+      "time_ms": 68.2,
+      "rows_per_sec": 293255.0
     },
     {
       "name": "join_100000x10000",
       "rows": 110000,
-      "time_ms": 358.67,
-      "rows_per_sec": 306689.0
+      "time_ms": 258.89,
+      "rows_per_sec": 424898.0
     },
     {
       "name": "join_100000x100000",
       "rows": 200000,
-      "time_ms": 643.21,
-      "rows_per_sec": 310941.0
+      "time_ms": 511.06,
+      "rows_per_sec": 391343.0
     },
     {
       "name": "window_lag_10000",
       "rows": 10000,
-      "time_ms": 138.36,
-      "rows_per_sec": 72274.0
+      "time_ms": 18.78,
+      "rows_per_sec": 532412.0
     },
     {
       "name": "window_lag_100000",
       "rows": 100000,
-      "time_ms": 1322.2,
-      "rows_per_sec": 75631.0
+      "time_ms": 43.66,
+      "rows_per_sec": 2290165.0
     },
     {
       "name": "window_cumsum_10000",
       "rows": 10000,
-      "time_ms": 130.48,
-      "rows_per_sec": 76638.0
+      "time_ms": 20.14,
+      "rows_per_sec": 496592.0
     },
     {
       "name": "window_cumsum_100000",
       "rows": 100000,
-      "time_ms": 1254.46,
-      "rows_per_sec": 79715.0
+      "time_ms": 42.43,
+      "rows_per_sec": 2356960.0
     },
     {
       "name": "group_agg_10000",
       "rows": 10000,
-      "time_ms": 48.75,
-      "rows_per_sec": 205126.0
+      "time_ms": 45.47,
+      "rows_per_sec": 219907.0
     },
     {
       "name": "group_agg_100000",
       "rows": 100000,
-      "time_ms": 332.6,
-      "rows_per_sec": 300657.0
+      "time_ms": 234.7,
+      "rows_per_sec": 426083.0
     },
     {
       "name": "chain_10000",
       "rows": 10000,
-      "time_ms": 35.44,
-      "rows_per_sec": 282175.0
+      "time_ms": 28.81,
+      "rows_per_sec": 347134.0
     },
     {
       "name": "chain_100000",
       "rows": 100000,
-      "time_ms": 243.73,
-      "rows_per_sec": 410296.0
+      "time_ms": 109.36,
+      "rows_per_sec": 914381.0
     },
     {
       "name": "chain_1000000",
       "rows": 1000000,
-      "time_ms": 358.51,
-      "rows_per_sec": 2789304.0
+      "time_ms": 98.76,
+      "rows_per_sec": 10125799.0
     },
     {
       "name": "read_csv_10000",
       "rows": 10000,
-      "time_ms": 38.03,
-      "rows_per_sec": 262935.0
+      "time_ms": 13.65,
+      "rows_per_sec": 732810.0
     },
     {
       "name": "read_csv_100000",
       "rows": 100000,
-      "time_ms": 314.5,
-      "rows_per_sec": 317968.0
+      "time_ms": 39.16,
+      "rows_per_sec": 2553728.0
     },
     {
       "name": "read_csv_1000000",
       "rows": 1000000,
-      "time_ms": 462.68,
-      "rows_per_sec": 2161336.0
+      "time_ms": 41.27,
+      "rows_per_sec": 24228712.0
     }
   ]
 }

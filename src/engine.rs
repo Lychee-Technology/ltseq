@@ -5,6 +5,7 @@
 //! - Configured SessionContext factory for optimal performance
 
 use datafusion::execution::config::SessionConfig;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use std::sync::{Arc, LazyLock};
 use tokio::runtime::Runtime;
@@ -42,6 +43,9 @@ pub static NUM_CPUS: LazyLock<usize> = LazyLock::new(|| {
 /// - `information_schema`: Disabled (not needed, saves memory)
 /// - `repartition_joins`: Enabled for parallel join execution
 /// - `repartition_aggregations`: Enabled for parallel aggregations
+///
+/// When the `gpu` feature is enabled and a CUDA GPU is available, the
+/// `HostToGpuRule` physical optimizer rule is appended to the pipeline.
 pub fn create_session_context() -> Arc<SessionContext> {
     let mut config = SessionConfig::new()
         .with_target_partitions(*NUM_CPUS)
@@ -55,7 +59,8 @@ pub fn create_session_context() -> Arc<SessionContext> {
     config.options_mut().execution.parquet.pushdown_filters = true;
     config.options_mut().execution.parquet.reorder_filters = true;
 
-    Arc::new(SessionContext::new_with_config(config))
+    let state = build_session_state(config);
+    Arc::new(SessionContext::new_with_state(state))
 }
 
 /// Create a SessionContext optimized for sequential/streaming operations.
@@ -80,5 +85,31 @@ pub fn create_sequential_session() -> Arc<SessionContext> {
     config.options_mut().execution.parquet.pushdown_filters = true;
     config.options_mut().execution.parquet.reorder_filters = true;
 
-    Arc::new(SessionContext::new_with_config(config))
+    let state = build_session_state(config);
+    Arc::new(SessionContext::new_with_state(state))
+}
+
+/// Build a `SessionState` from a `SessionConfig`, optionally appending
+/// the GPU physical optimizer rule when the `gpu` feature is enabled
+/// and a CUDA device is available.
+fn build_session_state(config: SessionConfig) -> datafusion::execution::SessionState {
+    #[allow(unused_mut)]
+    let mut builder = SessionStateBuilder::new()
+        .with_config(config)
+        .with_default_features();
+
+    #[cfg(feature = "gpu")]
+    {
+        // Allow disabling GPU at runtime via LTSEQ_DISABLE_GPU=1 for benchmarking
+        let gpu_disabled = std::env::var("LTSEQ_DISABLE_GPU").is_ok();
+        if !gpu_disabled && crate::gpu::is_gpu_available() {
+            // Append HostToGpuRule at the end of the optimizer pipeline.
+            // Running last means all standard rewrites (predicate pushdown,
+            // coalesce batches, etc.) have already been applied.
+            builder = builder
+                .with_physical_optimizer_rule(Arc::new(crate::gpu::optimizer::HostToGpuRule));
+        }
+    }
+
+    builder.build()
 }

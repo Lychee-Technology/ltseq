@@ -24,6 +24,13 @@ parquet = { version = "57.1", default-features = false, features = ["arrow"] }
 
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
 
+# GPU acceleration via CUDA (optional)
+cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-13010"], optional = true }
+
+[features]
+default = []
+gpu = ["cudarc"]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

@@ -9,6 +9,7 @@ the ClickBench hits.parquet dataset (~100M rows):
   Round 1: Basic aggregation (Top URLs by count)
   Round 2: User sessionization (30-min gap detection)
   Round 3: Sequential pattern matching (URL funnel)
+  Round 4: GPU-accelerated filter (counterid > threshold)
 
 Usage:
     # Full benchmark (requires hits_sorted.parquet)
@@ -225,6 +226,26 @@ def ltseq_funnel(t_sorted, p1, p2, p3):
 
 
 # ---------------------------------------------------------------------------
+# Round 4: GPU Filter — counterid > threshold (~50% selectivity)
+# ---------------------------------------------------------------------------
+
+# Threshold computed at runtime from data (50th percentile of counterid)
+R4_THRESHOLD = None  # Set in main()
+
+
+def duckdb_filter_count(data_file, threshold):
+    """DuckDB: Simple filter + count."""
+    return duckdb.sql(
+        f"SELECT count(*) FROM '{data_file}' WHERE counterid > {threshold}"
+    ).fetchone()[0]
+
+
+def ltseq_filter_count(t, threshold):
+    """LTSeq: Filter counterid > threshold, count rows."""
+    return t.filter(lambda r, th=threshold: r.counterid > th).count()
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -243,6 +264,7 @@ def print_results_table(results):
         "R1: Top URLs": (6, 5),
         "R2: Sessionization": (10, 4),
         "R3: Funnel": (10, 5),
+        "R4: GPU Filter": (1, 1),
     }
 
     for r in results:
@@ -307,7 +329,7 @@ def main():
         help="Use 1M-row sample instead of full dataset",
     )
     parser.add_argument(
-        "--round", type=int, choices=[1, 2, 3], help="Run specific round only"
+        "--round", type=int, choices=[1, 2, 3, 4], help="Run specific round only"
     )
     parser.add_argument(
         "--iterations", type=int, default=ITERATIONS, help="Number of timed iterations"
@@ -464,6 +486,39 @@ def main():
 
         results.append(
             {"round_name": "R3: Funnel", "duckdb": duck_r3, "ltseq": ltseq_r3}
+        )
+
+    # -----------------------------------------------------------------------
+    # Round 4: GPU Filter
+    # -----------------------------------------------------------------------
+    if args.round is None or args.round == 4:
+        print("\n--- Round 4: GPU Filter (counterid > threshold) ---")
+        # Compute 50th percentile threshold for ~50% selectivity
+        threshold = duckdb.sql(
+            f"SELECT approx_quantile(counterid, 0.5) FROM '{data_file}'"
+        ).fetchone()[0]
+        threshold = int(threshold)
+        print(f"  Threshold: counterid > {threshold} (~50% selectivity)")
+
+        duck_r4 = bench(
+            "DuckDB", lambda: duckdb_filter_count(data_file, threshold)
+        )
+        ltseq_r4 = bench(
+            "LTSeq", lambda: ltseq_filter_count(t_ltseq, threshold)
+        )
+
+        # Validate
+        duck_count = duckdb_filter_count(data_file, threshold)
+        ltseq_count = ltseq_filter_count(t_ltseq, threshold)
+        if duck_count == ltseq_count:
+            print(f"  Validation: PASS (both = {duck_count:,} rows)")
+        else:
+            print(
+                f"  Validation: WARN (DuckDB={duck_count:,}, LTSeq={ltseq_count:,})"
+            )
+
+        results.append(
+            {"round_name": "R4: GPU Filter", "duckdb": duck_r4, "ltseq": ltseq_r4}
         )
 
     # -----------------------------------------------------------------------

@@ -14,6 +14,8 @@ pub(crate) mod cursor;
 pub(crate) mod engine; // DataFusion session and LTSeqTable struct
 mod error;
 pub(crate) mod format; // Formatting and display functions
+#[cfg(feature = "gpu")]
+pub(crate) mod gpu; // GPU-accelerated execution plans via CUDA
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // Streaming cursor for lazy iteration
@@ -1111,9 +1113,26 @@ impl LTSeqTable {
     }
 }
 
+/// Check if GPU acceleration is available.
+///
+/// Returns `True` when the binary was compiled with `--features gpu`
+/// and a compatible CUDA device was detected at runtime.
+#[pyfunction]
+fn gpu_available() -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        crate::gpu::is_gpu_available()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        false
+    }
+}
+
 #[pymodule]
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
+    m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
     Ok(())
 }

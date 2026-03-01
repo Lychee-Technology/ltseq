@@ -27,6 +27,9 @@ from .expr import (
     ntile,
 )
 
+# GPU utilities
+from .ltseq_core import gpu_available
+
 __all__ = [
     "LTSeq",
     "NestedTable",
@@ -49,4 +52,5 @@ __all__ = [
     "rank",
     "dense_rank",
     "ntile",
+    "gpu_available",
 ]
