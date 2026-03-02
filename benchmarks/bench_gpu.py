@@ -182,7 +182,8 @@ def get_gpu_info():
             info["backend"] = adapter["backend"]
             info["device_type"] = adapter["device_type"]
             info["is_uma"] = adapter["is_uma"]
-    except ImportError:
+    except (ImportError, AttributeError):
+        # gpu_available/gpu_info not present: compiled without --features gpu
         pass
 
     # Try nvidia-smi if available (supplementary VRAM / driver info)
@@ -228,7 +229,11 @@ def get_gpu_info():
 
 def get_system_info():
     """Collect system + GPU information."""
-    from ltseq import gpu_available
+    try:
+        from ltseq import gpu_available
+        ltseq_gpu = gpu_available()
+    except (ImportError, AttributeError):
+        ltseq_gpu = False
 
     info = {
         "platform": platform.platform(),
@@ -237,7 +242,7 @@ def get_system_info():
         "ram_gb": round(psutil.virtual_memory().total / (1024**3), 1),
         "python_version": platform.python_version(),
         "gpu": get_gpu_info(),
-        "ltseq_gpu_available": gpu_available(),
+        "ltseq_gpu_available": ltseq_gpu,
     }
     return info
 
@@ -1055,7 +1060,10 @@ def main():
     # Check GPU availability
     import ltseq
 
-    gpu_avail = ltseq.gpu_available()
+    try:
+        gpu_avail = ltseq.gpu_available()
+    except AttributeError:
+        gpu_avail = False
     if not gpu_avail:
         print("WARNING: GPU acceleration not available.")
         print("  Build with: maturin develop --release --features gpu")
