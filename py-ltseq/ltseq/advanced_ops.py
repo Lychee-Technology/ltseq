@@ -122,6 +122,110 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
+    def xunion(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+        """
+        Symmetric difference: rows in either table but not in both.
+
+        Equivalent to (self except other) union (other except self).
+
+        Args:
+            other: Another table
+            on: Key selector (None means all columns)
+
+        Returns:
+            Symmetric difference LTSeq
+
+        Example:
+            >>> unique_to_either = t1.xunion(t2, on=lambda r: r.id)
+        """
+        left = self.except_(other, on=on)
+        right = other.except_(self, on=on)
+        return left.union(right)
+
+    def rvs(self) -> "LTSeq":
+        """
+        Reverse the row order of the table.
+
+        Returns:
+            New LTSeq with rows in reversed order
+
+        Example:
+            >>> reversed_t = t.sort("date").rvs()
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        result_inner = self._inner.rvs()
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+        result._sort_keys = None
+        return result
+
+    def step(self, n: int) -> "LTSeq":
+        """
+        Take every nth row (0-based: rows 0, n, 2n, ...).
+
+        Args:
+            n: Step size (must be >= 1)
+
+        Returns:
+            New LTSeq with every nth row
+
+        Example:
+            >>> every_other = t.step(2)  # rows 0, 2, 4, ...
+            >>> every_tenth = t.step(10)
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if n < 1:
+            raise ValueError(f"step() n must be >= 1, got {n}")
+
+        result_inner = self._inner.step(n)
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+        result._sort_keys = None
+        return result
+
+    def contain(self, key_col: str, *values) -> bool:
+        """
+        Check if all given values are present in key_col.
+
+        Args:
+            key_col: Column name to search in
+            *values: Values to look for
+
+        Returns:
+            True if all values are found in the column
+
+        Example:
+            >>> t.contain("status", "active", "pending")
+            >>> t.contain("id", 1, 2, 3)
+        """
+        if key_col not in self._schema:
+            raise AttributeError(
+                f"Column '{key_col}' not found in schema. "
+                f"Available columns: {list(self._schema.keys())}"
+            )
+        if not values:
+            return True
+
+        df = self.to_pandas()
+        col_values = set(df[key_col].tolist())
+        return all(v in col_values for v in values)
+
     def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
         """
         Deprecated: Use except_() instead.

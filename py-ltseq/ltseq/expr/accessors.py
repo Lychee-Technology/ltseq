@@ -155,6 +155,46 @@ class StringAccessor:
         """
         return self._make_call("str_split", (delimiter, index))
 
+    def like(self, pattern: str) -> "CallExpr":
+        """SQL LIKE pattern matching (% matches any sequence, _ matches one char).
+
+        Example:
+            >>> t.filter(lambda r: r.name.s.like("J%"))
+        """
+        return self._make_call("str_like", (pattern,))
+
+    def isalpha(self) -> "CallExpr":
+        """Return True if all characters in the string are alphabetic.
+
+        Example:
+            >>> t.filter(lambda r: r.code.s.isalpha())
+        """
+        return self._make_call("str_isalpha")
+
+    def isdigit(self) -> "CallExpr":
+        """Return True if all characters in the string are digits.
+
+        Example:
+            >>> t.filter(lambda r: r.zip_code.s.isdigit())
+        """
+        return self._make_call("str_isdigit")
+
+    def islower(self) -> "CallExpr":
+        """Return True if all cased characters are lowercase.
+
+        Example:
+            >>> t.filter(lambda r: r.tag.s.islower())
+        """
+        return self._make_call("str_islower")
+
+    def isupper(self) -> "CallExpr":
+        """Return True if all cased characters are uppercase.
+
+        Example:
+            >>> t.filter(lambda r: r.code.s.isupper())
+        """
+        return self._make_call("str_isupper")
+
 
 class TemporalAccessor:
     """
@@ -210,3 +250,19 @@ class TemporalAccessor:
 
         other_coerced = Expr._coerce(other)
         return CallExpr("dt_diff", (other_coerced,), {}, on=self._expr)
+
+    def millisecond(self) -> "CallExpr":
+        """Extract millisecond component (0–999) from a timestamp.
+
+        Example:
+            >>> t.derive(ms=lambda r: r.ts.dt.millisecond())
+        """
+        return self._make_call("dt_millisecond")
+
+    def weekday(self) -> "CallExpr":
+        """Extract weekday as 0-based integer (Monday=0 … Sunday=6).
+
+        Example:
+            >>> t.derive(wd=lambda r: r.date.dt.weekday())
+        """
+        return self._make_call("dt_weekday")

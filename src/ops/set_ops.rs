@@ -461,6 +461,115 @@ fn set_operation_impl(
     ))
 }
 
+/// Reverse: Return rows in reversed order
+///
+/// Uses ROW_NUMBER() OVER () to assign a stable position, then ORDER BY DESC.
+pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+    let (df, schema) = table.require_df_and_schema()?;
+
+    let all_cols = schema
+        .fields()
+        .iter()
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let result_df = RUNTIME
+        .block_on(async {
+            let batches = collect_batches(df, "rvs").await?;
+            let schema_clone = Arc::clone(schema);
+
+            let temp = MemTable::try_new(schema_clone, vec![batches])
+                .map_err(|e| format!("Failed to create temp table for rvs: {}", e))?;
+
+            let t_name = "__rvs_temp__";
+            table
+                .session
+                .register_table(t_name, Arc::new(temp))
+                .map_err(|e| format!("Failed to register rvs table: {}", e))?;
+
+            let sql = format!(
+                "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER () as __rn FROM \"{}\") ORDER BY __rn DESC",
+                all_cols, t_name
+            );
+
+            let result = table
+                .session
+                .sql(&sql)
+                .await
+                .map_err(|e| format!("rvs SQL failed: {}", e))?;
+
+            let _ = table.session.deregister_table(t_name);
+            Ok::<_, String>(result)
+        })
+        .map_err(|e| LtseqError::Runtime(e))?;
+
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        result_df,
+        Arc::clone(schema),
+        Vec::new(), // sort order is no longer valid
+        None,
+    ))
+}
+
+/// Step: Take every nth row (0-based, rows 0, n, 2n, …)
+///
+/// Uses ROW_NUMBER() OVER () - 1 to get a 0-based row index, then filters
+/// rows where that index is divisible by n.
+pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
+    if n == 0 {
+        return Err(LtseqError::Validation("step() n must be >= 1".into()).into());
+    }
+
+    let (df, schema) = table.require_df_and_schema()?;
+
+    let all_cols = schema
+        .fields()
+        .iter()
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let result_df = RUNTIME
+        .block_on(async {
+            let batches = collect_batches(df, "step").await?;
+            let schema_clone = Arc::clone(schema);
+
+            let temp = MemTable::try_new(schema_clone, vec![batches])
+                .map_err(|e| format!("Failed to create temp table for step: {}", e))?;
+
+            let t_name = "__step_temp__";
+            table
+                .session
+                .register_table(t_name, Arc::new(temp))
+                .map_err(|e| format!("Failed to register step table: {}", e))?;
+
+            let sql = format!(
+                "SELECT {} FROM (SELECT *, (ROW_NUMBER() OVER () - 1) as __rn FROM \"{}\") WHERE __rn % {} = 0",
+                all_cols, t_name, n
+            );
+
+            let result = table
+                .session
+                .sql(&sql)
+                .await
+                .map_err(|e| format!("step SQL failed: {}", e))?;
+
+            let _ = table.session.deregister_table(t_name);
+            Ok::<_, String>(result)
+        })
+        .map_err(|e| LtseqError::Runtime(e))?;
+
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        result_df,
+        Arc::clone(schema),
+        Vec::new(),
+        None,
+    ))
+}
+
 /// Helper function to extract column names from a key expression dict
 ///
 /// Currently handles single column keys: lambda r: r.id

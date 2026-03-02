@@ -1,5 +1,6 @@
 """Aggregation methods mixin for GroupProxy."""
 
+import math
 import statistics
 from collections import Counter
 from typing import TYPE_CHECKING, Any, List
@@ -236,6 +237,103 @@ class GroupAggregationMixin:
                 counter = Counter(valid_values)
                 return counter.most_common(1)[0][0]
         return None
+
+    def skew(self, column_name: str = None) -> Any:
+        """
+        Get the skewness of values in a column for this group.
+
+        Args:
+            column_name: Name of the column to compute skewness for.
+
+        Returns:
+            Skewness (Fisher's moment coefficient) or None if insufficient data.
+
+        Example:
+            >>> g.skew('price')  # Skewness of prices in group
+        """
+        if column_name is None:
+            return self
+
+        valid_values = self._get_valid_values(column_name)
+        n = len(valid_values)
+        if n < 3:
+            return None
+        mean = sum(valid_values) / n
+        std = statistics.stdev(valid_values)
+        if std == 0:
+            return 0.0
+        return (sum((v - mean) ** 3 for v in valid_values) / n) / (std ** 3)
+
+    def corr(self, col_a: str, col_b: str) -> Any:
+        """
+        Get Pearson correlation coefficient between two columns in this group.
+
+        Args:
+            col_a: Name of the first column.
+            col_b: Name of the second column.
+
+        Returns:
+            Pearson correlation in [-1, 1], or None if insufficient data.
+
+        Example:
+            >>> g.corr('price', 'quantity')
+        """
+        vals_a = self._get_valid_values(col_a)
+        vals_b = self._get_valid_values(col_b)
+        n = len(vals_a)
+        if n < 2 or n != len(vals_b):
+            return None
+        mean_a = sum(vals_a) / n
+        mean_b = sum(vals_b) / n
+        numerator = sum((a - mean_a) * (b - mean_b) for a, b in zip(vals_a, vals_b))
+        denom_a = math.sqrt(sum((a - mean_a) ** 2 for a in vals_a))
+        denom_b = math.sqrt(sum((b - mean_b) ** 2 for b in vals_b))
+        if denom_a == 0 or denom_b == 0:
+            return None
+        return numerator / (denom_a * denom_b)
+
+    def covar(self, col_a: str, col_b: str) -> Any:
+        """
+        Get sample covariance between two columns in this group.
+
+        Args:
+            col_a: Name of the first column.
+            col_b: Name of the second column.
+
+        Returns:
+            Sample covariance, or None if insufficient data.
+
+        Example:
+            >>> g.covar('price', 'quantity')
+        """
+        vals_a = self._get_valid_values(col_a)
+        vals_b = self._get_valid_values(col_b)
+        n = len(vals_a)
+        if n < 2 or n != len(vals_b):
+            return None
+        mean_a = sum(vals_a) / n
+        mean_b = sum(vals_b) / n
+        return sum((a - mean_a) * (b - mean_b) for a, b in zip(vals_a, vals_b)) / (n - 1)
+
+    def concat_agg(self, column_name: str, delimiter: str = ",") -> Any:
+        """
+        Concatenate all non-null string values in a column for this group.
+
+        Args:
+            column_name: Name of the column to concatenate.
+            delimiter: Separator between values (default: ",").
+
+        Returns:
+            String with all values joined by delimiter, or "" if empty.
+
+        Example:
+            >>> g.concat_agg('tag', ' | ')
+        """
+        if column_name is None:
+            return self
+
+        valid_values = [str(v) for v in self._get_valid_values(column_name)]
+        return delimiter.join(valid_values)
 
     def top_k(self, column_name: str, k: int) -> List[Any]:
         """
