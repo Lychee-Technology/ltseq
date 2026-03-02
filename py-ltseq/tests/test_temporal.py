@@ -85,16 +85,19 @@ class TestTemporalExpressionSerialization:
         assert serialized["args"][2]["value"] == 0  # years (default)
 
     def test_dt_diff_serialization(self):
-        """dt.diff() should serialize with other date column."""
+        """dt.diff() should serialize with other date column and unit."""
         col1 = ColumnExpr("start_date")
         col2 = ColumnExpr("end_date")
         result = col1.dt.diff(col2)
         serialized = result.serialize()
         assert serialized["type"] == "Call"
         assert serialized["func"] == "dt_diff"
-        assert len(serialized["args"]) == 1
+        # args[0] = other date, args[1] = unit literal (default "day")
+        assert len(serialized["args"]) == 2
         assert serialized["args"][0]["type"] == "Column"
         assert serialized["args"][0]["name"] == "end_date"
+        assert serialized["args"][1]["type"] == "Literal"
+        assert serialized["args"][1]["value"] == "day"
 
 
 class TestTemporalDateExtraction:

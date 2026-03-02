@@ -82,7 +82,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 |-----------|--------|---------|
 | Union | `.union()` | `t1.union(t2)` |
 | Intersect | `.intersect()` | `t1.intersect(t2)` |
-| Diff | `.diff()` | `t1.diff(t2)` |
+| Diff | `.except_()` | `t1.except_(t2)` |
 
 ## 1. Input / Output
 
@@ -786,17 +786,19 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.diff` (set difference)
-- **Signature**: `LTSeq.diff(other: LTSeq, on: Optional[Callable] = None) -> LTSeq`
-- **Behavior**: Rows in left table but not in right table
+### `LTSeq.except_` (set difference)
+- **Signature**: `LTSeq.except_(other: LTSeq, on: Optional[Callable] = None) -> LTSeq`
+- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics)
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
 - **SQL Equivalent**: `EXCEPT` / `MINUS`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
-only_left = t1.diff(t2, on=lambda r: r.id)
+only_left = t1.except_(t2, on=lambda r: r.id)
 ```
+
+> ⚠️ `LTSeq.diff()` is a deprecated alias for `except_()`. Note: `Expr.diff()` (row-level differences, Section 3) is an unrelated operation.
 
 ### `LTSeq.is_subset`
 - **Signature**: `LTSeq.is_subset(other: LTSeq, on: Optional[Callable] = None) -> bool`
@@ -1207,6 +1209,116 @@ domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
 first = t.derive(first_name=lambda r: r.username.s.split(".", 1))
 ```
 
+#### `pos`
+- **Signature**: `r.col.s.pos(sub: str) -> Expr`
+- **Behavior**: Returns the 1-based position of the first occurrence of `sub`; returns 0 if not found
+- **Parameters**: `sub` substring to search for
+- **Returns**: integer expression
+- **SQL Equivalent**: `STRPOS(col, sub)`
+- **SPL Equivalent**: `pos(s, sub)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+at_pos = t.derive(pos=lambda r: r.email.s.pos("@"))  # "user@example" → 5
+```
+
+#### `left`
+- **Signature**: `r.col.s.left(n: int) -> Expr`
+- **Behavior**: Returns the leftmost `n` characters; returns the full string if `n` exceeds its length
+- **Parameters**: `n` character count
+- **Returns**: string expression
+- **SQL Equivalent**: `LEFT(col, n)`
+- **SPL Equivalent**: `left(s, n)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+prefix = t.derive(pfx=lambda r: r.code.s.left(3))  # "ABC123" → "ABC"
+```
+
+#### `right`
+- **Signature**: `r.col.s.right(n: int) -> Expr`
+- **Behavior**: Returns the rightmost `n` characters; returns the full string if `n` exceeds its length
+- **Parameters**: `n` character count
+- **Returns**: string expression
+- **SQL Equivalent**: `RIGHT(col, n)`
+- **SPL Equivalent**: `right(s, n)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+suffix = t.derive(sfx=lambda r: r.code.s.right(3))  # "ABC123" → "123"
+```
+
+#### `lstrip`
+- **Signature**: `r.col.s.lstrip() -> Expr`
+- **Behavior**: Removes leading whitespace only (left-trim)
+- **Parameters**: none
+- **Returns**: string expression
+- **SQL Equivalent**: `LTRIM(col)`
+- **SPL Equivalent**: `ltrim(s)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+clean = t.derive(name=lambda r: r.name.s.lstrip())  # "  hello" → "hello"
+```
+
+#### `rstrip`
+- **Signature**: `r.col.s.rstrip() -> Expr`
+- **Behavior**: Removes trailing whitespace only (right-trim)
+- **Parameters**: none
+- **Returns**: string expression
+- **SQL Equivalent**: `RTRIM(col)`
+- **SPL Equivalent**: `rtrim(s)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+clean = t.derive(name=lambda r: r.name.s.rstrip())  # "hello  " → "hello"
+```
+
+#### `asc`
+- **Signature**: `r.col.s.asc() -> Expr`
+- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string
+- **Parameters**: none
+- **Returns**: integer expression
+- **SQL Equivalent**: `ASCII(col)`
+- **SPL Equivalent**: `asc(s)`
+- **Exceptions**: `TypeError` (non-string column)
+- **Example**:
+```python
+code = t.derive(code=lambda r: r.ch.s.asc())  # "A" → 65, "a" → 97
+```
+
+### String Global Functions
+
+#### `str_char`
+- **Signature**: `str_char(n: Expr) -> Expr`
+- **Behavior**: Converts a Unicode code point integer to its single-character string representation
+- **Parameters**: `n` integer expression (Unicode code point)
+- **Returns**: string expression
+- **SQL Equivalent**: `CHR(n)`
+- **SPL Equivalent**: `char(n)`
+- **Import**: `from ltseq.expr import str_char`
+- **Exceptions**: `ValueError` (invalid code point)
+- **Example**:
+```python
+from ltseq.expr import str_char
+ch = t.derive(ch=lambda r: str_char(r.code))  # 65 → "A", 97 → "a"
+```
+
+#### `concat_ws`
+- **Signature**: `concat_ws(delimiter: str, *cols: Expr) -> Expr`
+- **Behavior**: Concatenate two or more column expressions with a separator between each
+- **Parameters**: `delimiter` separator string; `cols` two or more string column expressions
+- **Returns**: string expression
+- **SQL Equivalent**: `CONCAT_WS(delimiter, col1, col2, ...)`
+- **Import**: `from ltseq.expr import concat_ws`
+- **Exceptions**: `TypeError` (non-string columns)
+- **Example**:
+```python
+from ltseq.expr import concat_ws
+full = t.derive(full_name=lambda r: concat_ws(" ", r.first, r.last))
+csv_row = t.derive(row=lambda r: concat_ws(",", r.a, r.b, r.c))
+```
+
 ### Temporal Operations (`r.col.dt.*`)
 
 #### `year` / `month` / `day`
@@ -1232,25 +1344,90 @@ with_time = t.derive(hour=lambda r: r.ts.dt.hour())
 ```
 
 #### `add`
-- **Signature**: `r.col.dt.add(days: int = 0, months: int = 0, years: int = 0) -> Expr`
-- **Behavior**: date arithmetic
-- **Parameters**: `days/months/years` offsets
-- **Returns**: date expression
+- **Signature**: `r.col.dt.add(days: int = 0, months: int = 0, years: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0, weeks: int = 0) -> Expr`
+- **Behavior**: Date/time arithmetic. `weeks` is converted to `days × 7`; `hours/minutes/seconds` use nanosecond precision internally.
+- **Parameters**: `days/months/years/hours/minutes/seconds/weeks` integer offsets (all default to 0)
+- **Returns**: date/timestamp expression
+- **SPL Equivalent**: `elapse(t, k, unit)`
 - **Exceptions**: `TypeError` (non-date column)
 - **Example**:
 ```python
-delivery = t.derive(delivery=lambda r: r.order_date.dt.add(days=5))
+delivery   = t.derive(delivery=lambda r: r.order_date.dt.add(days=5))
+after_2h   = t.derive(ts2=lambda r: r.ts.dt.add(hours=2, minutes=30))
+next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
+next_month = t.derive(d3=lambda r: r.date.dt.add(days=10, months=1))
 ```
 
 #### `diff`
-- **Signature**: `r.col.dt.diff(other: Expr) -> Expr`
-- **Behavior**: date difference (days)
-- **Parameters**: `other` other date expression
+- **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
+- **Behavior**: Returns the integer difference between `self` and `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`.
+- **Parameters**: `other` other date/timestamp expression; `unit` time unit (default: `"day"`)
 - **Returns**: integer expression
+- **SPL Equivalent**: `interval(t1, t2, unit)`
+- **Exceptions**: `TypeError` (non-date column), `ValueError` (invalid unit)
+- **Example**:
+```python
+days   = t.derive(d=lambda r: r.end.dt.diff(r.start))                    # days (default)
+months = t.derive(m=lambda r: r.end.dt.diff(r.start, unit="month"))
+years  = t.derive(y=lambda r: r.end.dt.diff(r.start, unit="year"))
+hours  = t.derive(h=lambda r: r.end.dt.diff(r.start, unit="hour"))
+```
+
+#### `age`
+- **Signature**: `r.col.dt.age() -> Expr`
+- **Behavior**: Returns the number of complete years between the column's date and today (today - col, in full years). Result is negative for future dates.
+- **Parameters**: none
+- **Returns**: integer expression
+- **SQL Equivalent**: `EXTRACT(YEAR FROM CURRENT_DATE) - EXTRACT(YEAR FROM col)` with day-of-year correction
+- **SPL Equivalent**: `age(dt)`
 - **Exceptions**: `TypeError` (non-date column)
 - **Example**:
 ```python
-age_days = t.derive(age=lambda r: r.end_date.dt.diff(r.start_date))
+age = t.derive(age=lambda r: r.birth_date.dt.age())
+```
+
+### Math Global Functions
+
+#### `gcd`
+- **Signature**: `gcd(a: Expr, b: Expr) -> Expr`
+- **Behavior**: Greatest common divisor of two integer expressions
+- **Parameters**: `a`, `b` integer expressions
+- **Returns**: integer expression
+- **SQL Equivalent**: `GCD(a, b)` (DataFusion)
+- **SPL Equivalent**: `gcd(a, b)`
+- **Import**: `from ltseq.expr import gcd`
+- **Example**:
+```python
+from ltseq.expr import gcd
+t.derive(g=lambda r: gcd(r.a, r.b))  # gcd(12, 8) → 4
+```
+
+#### `lcm`
+- **Signature**: `lcm(a: Expr, b: Expr) -> Expr`
+- **Behavior**: Least common multiple of two integer expressions
+- **Parameters**: `a`, `b` integer expressions
+- **Returns**: integer expression
+- **SQL Equivalent**: `LCM(a, b)` (DataFusion)
+- **SPL Equivalent**: `lcm(a, b)`
+- **Import**: `from ltseq.expr import lcm`
+- **Example**:
+```python
+from ltseq.expr import lcm
+t.derive(l=lambda r: lcm(r.a, r.b))  # lcm(4, 6) → 12
+```
+
+#### `factorial`
+- **Signature**: `factorial(n: Expr) -> Expr`
+- **Behavior**: Factorial of a non-negative integer expression; `n! = 1 × 2 × ... × n`, `0! = 1`
+- **Parameters**: `n` non-negative integer expression
+- **Returns**: integer expression
+- **SQL Equivalent**: `FACTORIAL(n)` (DataFusion)
+- **SPL Equivalent**: `fact(n)`
+- **Import**: `from ltseq.expr import factorial`
+- **Example**:
+```python
+from ltseq.expr import factorial
+t.derive(f=lambda r: factorial(r.n))  # factorial(5) → 120
 ```
 
 ### `r.col.lookup` (expression-level lookup)
@@ -1375,6 +1552,54 @@ result = orders.derive(
 - All expressions are serialized and pushed down to Rust/DataFusion, not evaluated row-by-row in Python
 - String/temporal/NULL extensions map to SQL/DataFusion functions
 - `to_cursor` enables streaming for very large datasets
+
+### Expression SQL Translation Reference
+
+All expressions are transpiled to the Rust/DataFusion layer before execution. No Python-level evaluation happens inside lambdas.
+
+| Expression | SQL / DataFusion Equivalent |
+|-----------|----------------------------|
+| `if_else(cond, a, b)` | `CASE WHEN cond THEN a ELSE b END` |
+| `r.col.fill_null(v)` | `COALESCE(col, v)` |
+| `r.col.is_null()` | `col IS NULL` |
+| `r.col.is_not_null()` | `col IS NOT NULL` |
+| `r.col.s.contains(p)` | `POSITION(p IN col) > 0` |
+| `r.col.s.starts_with(p)` | `STARTS_WITH(col, p)` |
+| `r.col.s.ends_with(p)` | `ENDS_WITH(col, p)` |
+| `r.col.s.lower()` | `LOWER(col)` |
+| `r.col.s.upper()` | `UPPER(col)` |
+| `r.col.s.strip()` | `TRIM(col)` |
+| `r.col.s.lstrip()` | `LTRIM(col)` |
+| `r.col.s.rstrip()` | `RTRIM(col)` |
+| `r.col.s.len()` | `CHARACTER_LENGTH(col)` |
+| `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
+| `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
+| `r.col.s.left(n)` | `LEFT(col, n)` |
+| `r.col.s.right(n)` | `RIGHT(col, n)` |
+| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
+| `r.col.s.pad_left(n, c)` | `LPAD(col, n, c)` |
+| `r.col.s.pad_right(n, c)` | `RPAD(col, n, c)` |
+| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
+| `str_char(n)` | `CHR(n)` |
+| `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
+| `r.col.dt.year()` | `EXTRACT(YEAR FROM col)` |
+| `r.col.dt.month()` | `EXTRACT(MONTH FROM col)` |
+| `r.col.dt.day()` | `EXTRACT(DAY FROM col)` |
+| `r.col.dt.hour()` | `EXTRACT(HOUR FROM col)` |
+| `r.col.dt.minute()` | `EXTRACT(MINUTE FROM col)` |
+| `r.col.dt.second()` | `EXTRACT(SECOND FROM col)` |
+| `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
+| `r.col.dt.add(hours=n)` | `col + INTERVAL 'n' HOUR` |
+| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other, unit="month")` | `(year(col)-year(other))*12 + month(col)-month(other)` |
+| `r.col.dt.diff(other, unit="year")` | `EXTRACT(YEAR FROM col) - EXTRACT(YEAR FROM other)` |
+| `r.col.dt.age()` | year diff from `CURRENT_DATE` with day-of-year correction |
+| `gcd(a, b)` | `GCD(a, b)` |
+| `lcm(a, b)` | `LCM(a, b)` |
+| `factorial(n)` | `FACTORIAL(n)` |
+| `count_if(cond)` | `COUNT(CASE WHEN cond THEN 1 END)` |
+| `sum_if(cond, col)` | `SUM(CASE WHEN cond THEN col END)` |
 
 ## Appendix A: Migrating from Pandas
 

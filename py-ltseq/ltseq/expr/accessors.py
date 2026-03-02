@@ -195,6 +195,81 @@ class StringAccessor:
         """
         return self._make_call("str_isupper")
 
+    def pos(self, sub: str) -> "CallExpr":
+        """Find 1-based position of substring (0 if not found). Equivalent to SQL STRPOS.
+
+        Args:
+            sub: Substring to search for
+
+        Returns:
+            Integer expression: 1-based position, or 0 if not found
+
+        Example:
+            >>> t.derive(at_pos=lambda r: r.email.s.pos("@"))
+        """
+        return self._make_call("str_pos", (sub,))
+
+    def left(self, n: int) -> "CallExpr":
+        """Return the leftmost n characters of the string.
+
+        Args:
+            n: Number of characters to extract from the left
+
+        Returns:
+            String expression with the first n characters
+
+        Example:
+            >>> t.derive(prefix=lambda r: r.code.s.left(3))
+        """
+        return self._make_call("str_left", (n,))
+
+    def right(self, n: int) -> "CallExpr":
+        """Return the rightmost n characters of the string.
+
+        Args:
+            n: Number of characters to extract from the right
+
+        Returns:
+            String expression with the last n characters
+
+        Example:
+            >>> t.derive(suffix=lambda r: r.code.s.right(4))
+        """
+        return self._make_call("str_right", (n,))
+
+    def lstrip(self) -> "CallExpr":
+        """Remove leading (left) whitespace from the string.
+
+        Returns:
+            String expression with leading whitespace removed
+
+        Example:
+            >>> t.derive(clean=lambda r: r.name.s.lstrip())
+        """
+        return self._make_call("str_ltrim")
+
+    def rstrip(self) -> "CallExpr":
+        """Remove trailing (right) whitespace from the string.
+
+        Returns:
+            String expression with trailing whitespace removed
+
+        Example:
+            >>> t.derive(clean=lambda r: r.name.s.rstrip())
+        """
+        return self._make_call("str_rtrim")
+
+    def asc(self) -> "CallExpr":
+        """Return the Unicode code point of the first character. Equivalent to ord(s[0]).
+
+        Returns:
+            Integer expression with the ASCII/Unicode code of the first character
+
+        Example:
+            >>> t.derive(code=lambda r: r.initial.s.asc())
+        """
+        return self._make_call("str_asc")
+
 
 class TemporalAccessor:
     """
@@ -240,16 +315,65 @@ class TemporalAccessor:
         """Extract second from datetime."""
         return self._make_call("dt_second")
 
-    def add(self, days: int = 0, months: int = 0, years: int = 0) -> "CallExpr":
-        """Add days, months, and/or years to a date/datetime."""
-        return self._make_call("dt_add", (days, months, years))
+    def add(
+        self,
+        days: int = 0,
+        months: int = 0,
+        years: int = 0,
+        hours: int = 0,
+        minutes: int = 0,
+        seconds: int = 0,
+        weeks: int = 0,
+    ) -> "CallExpr":
+        """Add a duration to a date/datetime.
 
-    def diff(self, other: "Expr") -> "CallExpr":
-        """Calculate difference between two dates in days."""
-        from .types import CallExpr
+        Args:
+            days: Number of days to add (negative to subtract)
+            months: Number of months to add
+            years: Number of years to add
+            hours: Number of hours to add
+            minutes: Number of minutes to add
+            seconds: Number of seconds to add
+            weeks: Number of weeks to add (converted to days × 7)
+
+        Example:
+            >>> t.derive(next_month=lambda r: r.date.dt.add(months=1))
+            >>> t.derive(in_2h=lambda r: r.ts.dt.add(hours=2))
+        """
+        return self._make_call("dt_add", (days, months, years, hours, minutes, seconds, weeks))
+
+    def diff(self, other: "Expr", unit: str = "day") -> "CallExpr":
+        """Calculate the difference between two dates/datetimes.
+
+        Args:
+            other: The other date/datetime to subtract
+            unit: Unit of the result — one of "day", "month", "year",
+                  "hour", "minute", "second" (default: "day")
+
+        Returns:
+            Integer expression representing the difference in the specified unit
+
+        Example:
+            >>> t.derive(days_open=lambda r: r.close_date.dt.diff(r.open_date))
+            >>> t.derive(months_old=lambda r: r.today.dt.diff(r.birth_date, unit="month"))
+        """
+        from .types import CallExpr, LiteralExpr
 
         other_coerced = Expr._coerce(other)
-        return CallExpr("dt_diff", (other_coerced,), {}, on=self._expr)
+        return CallExpr("dt_diff", (other_coerced, LiteralExpr(unit)), {}, on=self._expr)
+
+    def age(self) -> "CallExpr":
+        """Return the number of complete years between this date and today.
+
+        Equivalent to SPL's age(dt): the number of full years elapsed since the date.
+
+        Returns:
+            Integer expression with the age in complete years
+
+        Example:
+            >>> t.derive(age_years=lambda r: r.birth_date.dt.age())
+        """
+        return self._make_call("dt_age")
 
     def millisecond(self) -> "CallExpr":
         """Extract millisecond component (0–999) from a timestamp.

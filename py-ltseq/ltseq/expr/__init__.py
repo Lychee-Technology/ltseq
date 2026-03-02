@@ -52,6 +52,12 @@ from .base import (
     atan,
     atan2,
     rand,
+    gcd,
+    lcm,
+    factorial,
+    # String global functions
+    str_char,
+    concat_ws,
     # Datetime global functions
     now,
     today,
@@ -95,6 +101,7 @@ __all__ = [
     "rank",
     "dense_rank",
     "ntile",
+    # Math
     "sqrt",
     "power",
     "sign",
@@ -109,10 +116,19 @@ __all__ = [
     "atan",
     "atan2",
     "rand",
+    "gcd",
+    "lcm",
+    "factorial",
+    # String global
+    "str_char",
+    "concat_ws",
+    # Datetime
     "now",
     "today",
+    # Null / conditional
     "nvl",
     "ifa",
+    # Aggregate
     "skew",
     "corr",
     "covar",
