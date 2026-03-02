@@ -1,21 +1,21 @@
 {
-  "timestamp": "2026-02-28T14:36:58.039892",
+  "timestamp": "2026-03-02T14:46:57.897899",
   "system": {
-    "platform": "Linux-6.18.13-2-cachyos-lts-x86_64-with-glibc2.43",
-    "processor": "",
-    "cpu_count": 32,
-    "ram_gb": 125.1,
+    "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "cpu_count": 10,
+    "ram_gb": 32.0,
     "python_version": "3.14.3",
     "gpu": {
       "available": true,
-      "model": "NVIDIA GeForce RTX 3070",
-      "vram_mb": 8192,
-      "driver_version": "590.48.01",
-      "cuda_version": "13.1"
+      "backend": "Metal",
+      "name": "Apple M1 Pro",
+      "device_type": "IntegratedGpu",
+      "is_uma": true
     },
     "ltseq_gpu_available": true
   },
-  "data_file": "/home/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
+  "data_file": "/Users/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
   "warmup": 1,
   "iterations": 3,
   "results": {
@@ -24,108 +24,565 @@
         "n_rows": 100000,
         "gpu": {
           "name": "GPU     100,000",
-          "median_s": 0.0031,
+          "median_s": 0.0092,
           "times": [
-            0.0031,
-            0.0027,
-            0.0036
+            0.0054,
+            0.0092,
+            0.0109
           ],
-          "mem_delta_mb": 3.0,
-          "result": "50458"
+          "mem_delta_mb": 1.1,
+          "result": "48148"
         },
         "cpu": {
           "name": "CPU     100,000",
-          "median_s": 0.003,
+          "median_s": 0.0102,
           "times": [
-            0.003,
-            0.003,
-            0.0026
+            0.0087,
+            0.0102,
+            0.0103
           ],
-          "mem_delta_mb": 1.3,
-          "result": "50085"
+          "mem_delta_mb": 0.1,
+          "result": "50234"
         },
-        "speedup": 0.968,
+        "speedup": 1.109,
         "correct": null
       },
       {
         "n_rows": 1000000,
         "gpu": {
           "name": "GPU   1,000,000",
-          "median_s": 0.0072,
+          "median_s": 0.0902,
           "times": [
-            0.0075,
-            0.0072,
-            0.0072
+            0.0902,
+            0.0909,
+            0.0883
           ],
-          "mem_delta_mb": 4.9,
-          "result": "497462"
+          "mem_delta_mb": 0.5,
+          "result": "496766"
         },
         "cpu": {
           "name": "CPU   1,000,000",
-          "median_s": 0.0051,
+          "median_s": 0.0922,
           "times": [
-            0.0051,
-            0.005,
-            0.0051
+            0.0922,
+            0.0929,
+            0.0917
           ],
-          "mem_delta_mb": 3.0,
-          "result": "494785"
+          "mem_delta_mb": 0.2,
+          "result": "493284"
         },
-        "speedup": 0.708,
+        "speedup": 1.022,
         "correct": null
       },
       {
         "n_rows": 10000000,
         "gpu": {
           "name": "GPU  10,000,000",
-          "median_s": 0.0365,
+          "median_s": 0.9242,
           "times": [
-            0.0382,
-            0.0365,
-            0.0353
+            0.8788,
+            0.9299,
+            0.9242
           ],
-          "mem_delta_mb": 15.9,
-          "result": "4940247"
+          "mem_delta_mb": 3.6,
+          "result": "4927114"
         },
         "cpu": {
           "name": "CPU  10,000,000",
-          "median_s": 0.0107,
+          "median_s": 0.8922,
           "times": [
-            0.0138,
-            0.0096,
-            0.0107
+            0.8922,
+            0.9561,
+            0.8643
           ],
-          "mem_delta_mb": 4.6,
-          "result": "4929926"
+          "mem_delta_mb": 0.6,
+          "result": "4927466"
         },
-        "speedup": 0.293,
+        "speedup": 0.965,
         "correct": null
       },
       {
         "n_rows": 99997497,
         "gpu": {
           "name": "GPU  99,997,497",
-          "median_s": 0.0752,
+          "median_s": 10.9459,
           "times": [
-            0.0715,
-            0.0807,
-            0.0752
+            10.1842,
+            10.9459,
+            11.2667
           ],
-          "mem_delta_mb": 180.0,
-          "result": "49498259"
+          "mem_delta_mb": 64.3,
+          "result": "49500392"
         },
         "cpu": {
           "name": "CPU  99,997,497",
-          "median_s": 0.0654,
+          "median_s": 8.9055,
           "times": [
-            0.0691,
-            0.0637,
-            0.0654
+            9.3975,
+            8.9055,
+            8.8693
           ],
-          "mem_delta_mb": 50.7,
-          "result": "49498259"
+          "mem_delta_mb": 18.1,
+          "result": "49500392"
         },
-        "speedup": 0.87,
+        "speedup": 0.814,
+        "correct": true
+      }
+    ],
+    "selectivity": [
+      {
+        "selectivity": "~1%",
+        "percentile": 0.99,
+        "threshold": 1375276822,
+        "gpu": {
+          "name": "GPU sel=~1%",
+          "median_s": 9.8272,
+          "times": [
+            11.0009,
+            9.8272,
+            9.0588
+          ],
+          "mem_delta_mb": 14.8,
+          "result": "1024666"
+        },
+        "cpu": {
+          "name": "CPU sel=~1%",
+          "median_s": 9.0344,
+          "times": [
+            9.0344,
+            9.0745,
+            8.9816
+          ],
+          "mem_delta_mb": 4.6,
+          "result": "1024666"
+        },
+        "speedup": 0.919,
+        "correct": true
+      },
+      {
+        "selectivity": "~10%",
+        "percentile": 0.9,
+        "threshold": 1375049271,
+        "gpu": {
+          "name": "GPU sel=~10%",
+          "median_s": 8.9539,
+          "times": [
+            9.1612,
+            8.9539,
+            8.9226
+          ],
+          "mem_delta_mb": 24.1,
+          "result": "9997007"
+        },
+        "cpu": {
+          "name": "CPU sel=~10%",
+          "median_s": 8.656,
+          "times": [
+            8.6348,
+            8.656,
+            8.6791
+          ],
+          "mem_delta_mb": 4.3,
+          "result": "9997007"
+        },
+        "speedup": 0.967,
+        "correct": true
+      },
+      {
+        "selectivity": "~50%",
+        "percentile": 0.5,
+        "threshold": 1373848046,
+        "gpu": {
+          "name": "GPU sel=~50%",
+          "median_s": 8.8427,
+          "times": [
+            8.6887,
+            9.3076,
+            8.8427
+          ],
+          "mem_delta_mb": 19.8,
+          "result": "50068895"
+        },
+        "cpu": {
+          "name": "CPU sel=~50%",
+          "median_s": 8.6539,
+          "times": [
+            8.6539,
+            8.6215,
+            8.7292
+          ],
+          "mem_delta_mb": 5.8,
+          "result": "50068895"
+        },
+        "speedup": 0.979,
+        "correct": true
+      },
+      {
+        "selectivity": "~90%",
+        "percentile": 0.1,
+        "threshold": 1372850862,
+        "gpu": {
+          "name": "GPU sel=~90%",
+          "median_s": 8.6557,
+          "times": [
+            8.6557,
+            8.5821,
+            8.7138
+          ],
+          "mem_delta_mb": 21.1,
+          "result": "89969384"
+        },
+        "cpu": {
+          "name": "CPU sel=~90%",
+          "median_s": 8.6561,
+          "times": [
+            8.6561,
+            8.6374,
+            8.6894
+          ],
+          "mem_delta_mb": 9.1,
+          "result": "89969384"
+        },
+        "speedup": 1.0,
+        "correct": true
+      }
+    ],
+    "dtype": [
+      {
+        "column": "counterid",
+        "dtype": "int32",
+        "threshold": 125580,
+        "gpu": {
+          "name": "GPU int32",
+          "median_s": 8.6687,
+          "times": [
+            8.6687,
+            8.6659,
+            8.7311
+          ],
+          "mem_delta_mb": 5.2,
+          "result": "49500334"
+        },
+        "cpu": {
+          "name": "CPU int32",
+          "median_s": 8.7813,
+          "times": [
+            8.7598,
+            8.797,
+            8.7813
+          ],
+          "mem_delta_mb": 17.0,
+          "result": "49500334"
+        },
+        "speedup": 1.013,
+        "correct": true
+      },
+      {
+        "column": "eventtime",
+        "dtype": "int64",
+        "threshold": 1373847799,
+        "gpu": {
+          "name": "GPU int64",
+          "median_s": 8.6961,
+          "times": [
+            8.8124,
+            8.6961,
+            8.5565
+          ],
+          "mem_delta_mb": 18.3,
+          "result": "50105406"
+        },
+        "cpu": {
+          "name": "CPU int64",
+          "median_s": 9.1562,
+          "times": [
+            9.1782,
+            9.1562,
+            8.9522
+          ],
+          "mem_delta_mb": 1.1,
+          "result": "50105406"
+        },
+        "speedup": 1.053,
+        "correct": true
+      }
+    ],
+    "compound": [
+      {
+        "predicate": "simple",
+        "description": "counterid > threshold",
+        "gpu": {
+          "name": "GPU simple",
+          "median_s": 8.9378,
+          "times": [
+            9.166,
+            8.9378,
+            8.6719
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "49499035"
+        },
+        "cpu": {
+          "name": "CPU simple",
+          "median_s": 8.605,
+          "times": [
+            8.605,
+            8.7026,
+            8.5443
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "49499035"
+        },
+        "speedup": 0.963
+      },
+      {
+        "predicate": "AND",
+        "description": "counterid > t1 AND regionid > t2",
+        "gpu": {
+          "name": "GPU AND(i32,i32)",
+          "median_s": 8.5649,
+          "times": [
+            8.5629,
+            8.5649,
+            8.5988
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "24191222"
+        },
+        "cpu": {
+          "name": "CPU AND(i32,i32)",
+          "median_s": 8.5899,
+          "times": [
+            8.5899,
+            8.5822,
+            8.6229
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "24191222"
+        },
+        "speedup": 1.003,
+        "correct": true
+      },
+      {
+        "predicate": "OR",
+        "description": "counterid > t1 OR eventtime > t2",
+        "gpu": {
+          "name": "GPU OR(i32,i64)",
+          "median_s": 8.5792,
+          "times": [
+            8.6764,
+            8.5792,
+            8.5673
+          ],
+          "mem_delta_mb": 0.0,
+          "result": "80160065"
+        },
+        "cpu": {
+          "name": "CPU OR(i32,i64)",
+          "median_s": 8.5544,
+          "times": [
+            8.5439,
+            8.5544,
+            8.5802
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "80160065"
+        },
+        "speedup": 0.997,
+        "correct": true
+      },
+      {
+        "predicate": "AND3",
+        "description": "counterid > t1 AND regionid > t2 AND eventtime > t3",
+        "gpu": {
+          "name": "GPU AND3(i32,i32,i64)",
+          "median_s": 8.6186,
+          "times": [
+            8.6212,
+            8.6059,
+            8.6186
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "9443425"
+        },
+        "cpu": {
+          "name": "CPU AND3(i32,i32,i64)",
+          "median_s": 8.6303,
+          "times": [
+            8.6296,
+            8.6429,
+            8.6303
+          ],
+          "mem_delta_mb": 4.5,
+          "result": "9443425"
+        },
+        "speedup": 1.001,
+        "correct": true
+      }
+    ],
+    "duckdb": [
+      {
+        "query": "simple_i32",
+        "description": "counterid > 125619",
+        "gpu": {
+          "name": "LTSeq GPU simple_i32",
+          "median_s": 8.6317,
+          "times": [
+            8.5838,
+            8.6317,
+            8.6333
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "49499035"
+        },
+        "cpu": {
+          "name": "LTSeq CPU simple_i32",
+          "median_s": 8.6578,
+          "times": [
+            8.6507,
+            8.6578,
+            8.675
+          ],
+          "mem_delta_mb": 0.1,
+          "result": "49499035"
+        },
+        "duckdb": {
+          "name": "DuckDB     simple_i32",
+          "median_s": 0.1926,
+          "times": [
+            0.1893,
+            0.2035,
+            0.1926
+          ],
+          "mem_delta_mb": 0.4,
+          "result": "49499035"
+        },
+        "gpu_vs_cpu": 1.003,
+        "gpu_vs_duckdb": 0.022,
+        "cpu_vs_duckdb": 0.022,
+        "correct": true
+      },
+      {
+        "query": "simple_i64",
+        "description": "eventtime > 1373848078",
+        "gpu": {
+          "name": "LTSeq GPU simple_i64",
+          "median_s": 8.5547,
+          "times": [
+            8.5547,
+            8.5526,
+            8.5812
+          ],
+          "mem_delta_mb": 0.4,
+          "result": "50064295"
+        },
+        "cpu": {
+          "name": "LTSeq CPU simple_i64",
+          "median_s": 8.5617,
+          "times": [
+            8.5711,
+            8.5617,
+            8.5575
+          ],
+          "mem_delta_mb": 8.5,
+          "result": "50064295"
+        },
+        "duckdb": {
+          "name": "DuckDB     simple_i64",
+          "median_s": 0.2849,
+          "times": [
+            0.2924,
+            0.2849,
+            0.2768
+          ],
+          "mem_delta_mb": 5.7,
+          "result": "50064295"
+        },
+        "gpu_vs_cpu": 1.001,
+        "gpu_vs_duckdb": 0.033,
+        "cpu_vs_duckdb": 0.033,
+        "correct": true
+      },
+      {
+        "query": "and_i32_i32",
+        "description": "counterid > 125619 AND regionid > 170",
+        "gpu": {
+          "name": "LTSeq GPU and_i32_i32",
+          "median_s": 8.5886,
+          "times": [
+            8.5886,
+            8.6407,
+            8.5833
+          ],
+          "mem_delta_mb": 3.2,
+          "result": "24188712"
+        },
+        "cpu": {
+          "name": "LTSeq CPU and_i32_i32",
+          "median_s": 8.5982,
+          "times": [
+            8.5982,
+            9.0182,
+            8.5941
+          ],
+          "mem_delta_mb": 0.6,
+          "result": "24188712"
+        },
+        "duckdb": {
+          "name": "DuckDB     and_i32_i32",
+          "median_s": 0.2244,
+          "times": [
+            0.2241,
+            0.2244,
+            0.2404
+          ],
+          "mem_delta_mb": 0.7,
+          "result": "24188712"
+        },
+        "gpu_vs_cpu": 1.001,
+        "gpu_vs_duckdb": 0.026,
+        "cpu_vs_duckdb": 0.026,
+        "correct": true
+      },
+      {
+        "query": "or_i32_i64",
+        "description": "counterid > 125619 OR eventtime > 1373848078",
+        "gpu": {
+          "name": "LTSeq GPU or_i32_i64",
+          "median_s": 8.5419,
+          "times": [
+            8.5392,
+            8.5419,
+            8.548
+          ],
+          "mem_delta_mb": 0.0,
+          "result": "80106054"
+        },
+        "cpu": {
+          "name": "LTSeq CPU or_i32_i64",
+          "median_s": 8.6088,
+          "times": [
+            8.5472,
+            8.6088,
+            8.641
+          ],
+          "mem_delta_mb": 0.0,
+          "result": "80106054"
+        },
+        "duckdb": {
+          "name": "DuckDB     or_i32_i64",
+          "median_s": 0.4295,
+          "times": [
+            0.4292,
+            0.4295,
+            0.4447
+          ],
+          "mem_delta_mb": 10.6,
+          "result": "80106054"
+        },
+        "gpu_vs_cpu": 1.008,
+        "gpu_vs_duckdb": 0.05,
+        "cpu_vs_duckdb": 0.05,
         "correct": true
       }
     ]
