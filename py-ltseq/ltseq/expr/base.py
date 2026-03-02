@@ -216,6 +216,67 @@ def rand() -> "CallExpr":
     return CallExpr("math_rand", (), {}, on=None)
 
 
+def gcd(a: "Expr", b: "Expr") -> "CallExpr":
+    """Greatest common divisor of two integers. Equivalent to math.gcd(a, b).
+
+    Example:
+        >>> t.derive(g=lambda r: gcd(r.a, r.b))
+    """
+    from .types import CallExpr
+    return CallExpr("math_gcd", (Expr._coerce(a), Expr._coerce(b)), {}, on=None)
+
+
+def lcm(a: "Expr", b: "Expr") -> "CallExpr":
+    """Least common multiple of two integers. Equivalent to math.lcm(a, b).
+
+    Example:
+        >>> t.derive(l=lambda r: lcm(r.a, r.b))
+    """
+    from .types import CallExpr
+    return CallExpr("math_lcm", (Expr._coerce(a), Expr._coerce(b)), {}, on=None)
+
+
+def factorial(n: "Expr") -> "CallExpr":
+    """Factorial of n. Equivalent to math.factorial(n).
+
+    Example:
+        >>> t.derive(f=lambda r: factorial(r.n))
+    """
+    from .types import CallExpr
+    return CallExpr("math_factorial", (Expr._coerce(n),), {}, on=None)
+
+
+# =============================================================================
+# String Global Functions
+# =============================================================================
+
+
+def str_char(n: "Expr") -> "CallExpr":
+    """Convert a Unicode code point to a single-character string. Equivalent to chr(n).
+
+    Example:
+        >>> t.derive(ch=lambda r: str_char(r.code_point))
+    """
+    from .types import CallExpr
+    return CallExpr("str_char", (Expr._coerce(n),), {}, on=None)
+
+
+def concat_ws(delimiter: str, *cols: "Expr") -> "CallExpr":
+    """Concatenate strings with a separator, ignoring NULLs. Equivalent to SQL CONCAT_WS.
+
+    Args:
+        delimiter: Separator string inserted between values
+        *cols: Column expressions or literal strings to concatenate
+
+    Example:
+        >>> t.derive(full=lambda r: concat_ws(" ", r.first_name, r.last_name))
+        >>> t.derive(csv=lambda r: concat_ws(",", r.a, r.b, r.c))
+    """
+    from .types import CallExpr, LiteralExpr
+    coerced = tuple(Expr._coerce(c) for c in cols)
+    return CallExpr("str_concat_ws", (LiteralExpr(delimiter),) + coerced, {}, on=None)
+
+
 # =============================================================================
 # Datetime Global Functions
 # =============================================================================
