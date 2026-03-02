@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-01T21:11:03.554926",
+  "timestamp": "2026-03-02T14:02:11.623247",
   "system": {
     "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
     "processor": "arm",
@@ -15,24 +15,24 @@
       "round_name": "R1: Top URLs",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 2.6153,
+        "median_s": 2.9106,
         "times": [
-          2.5574,
-          2.6153,
-          2.6562
+          2.9106,
+          3.2998,
+          2.7
         ],
-        "mem_delta_mb": 269.0,
+        "mem_delta_mb": 184.1,
         "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 3288173), ('http://kinopoisk.ru', 1625250), ('http://bdsm_po_yers=0&with_video', 791465), ('http://video.yandex', 582400), ('http://smeshariki.r"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 3.86,
+        "median_s": 4.118,
         "times": [
-          3.7845,
-          3.86,
-          3.9472
+          3.8503,
+          4.3853,
+          4.118
         ],
-        "mem_delta_mb": 880.0,
+        "mem_delta_mb": 1462.7,
         "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 3288173}, {'url': 'http://kinopoisk.ru', 'cnt': 1625250}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 791465}, {'url': 'htt"
       }
     },
@@ -40,24 +40,24 @@
       "round_name": "R2: Sessionization",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 1.6167,
+        "median_s": 1.5513,
         "times": [
-          1.6147,
-          1.6167,
-          1.6524
+          1.5654,
+          1.521,
+          1.5513
         ],
-        "mem_delta_mb": 207.2,
+        "mem_delta_mb": 0,
         "result": "26181387"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.2221,
+        "median_s": 0.2101,
         "times": [
-          0.2391,
-          0.2065,
-          0.2221
+          0.2144,
+          0.2101,
+          0.2098
         ],
-        "mem_delta_mb": 2.1,
+        "mem_delta_mb": 2.0,
         "result": "26181387"
       }
     },
@@ -65,22 +65,22 @@
       "round_name": "R3: Funnel",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 16.0551,
+        "median_s": 15.2827,
         "times": [
-          16.0551,
-          16.1067,
-          15.9492
+          15.6671,
+          15.2827,
+          14.7512
         ],
-        "mem_delta_mb": 296.9,
+        "mem_delta_mb": 0,
         "result": "155336"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 4.5492,
+        "median_s": 4.2206,
         "times": [
-          4.6081,
-          4.5492,
-          4.3538
+          4.2206,
+          4.0761,
+          4.8154
         ],
         "mem_delta_mb": 0,
         "result": "155336"
