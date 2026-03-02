@@ -1109,6 +1109,21 @@ impl LTSeqTable {
     ) -> PyResult<bool> {
         crate::ops::set_ops::is_subset_impl(self, other, key_expr_dict)
     }
+
+    /// Reverse: return rows in reversed order
+    ///
+    /// Uses ROW_NUMBER() OVER () to assign stable positions, then reverses.
+    fn rvs(&self) -> PyResult<LTSeqTable> {
+        crate::ops::set_ops::rvs_impl(self)
+    }
+
+    /// Step: take every nth row (0-based — rows 0, n, 2n, …)
+    ///
+    /// Args:
+    ///     n: Step size (must be >= 1)
+    fn step(&self, n: usize) -> PyResult<LTSeqTable> {
+        crate::ops::set_ops::step_impl(self, n)
+    }
 }
 
 #[pymodule]

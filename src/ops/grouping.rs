@@ -203,9 +203,26 @@ pub fn group_ordered_count_impl(
         .into());
     }
 
-    // Try direct Parquet streaming (bypasses DataFusion)
+    // Try Parquet fast paths (bypass DataFusion entirely).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_exprs.is_empty() {
+            // Preferred: parallel per-RG counting with seam stitching.
+            match crate::ops::parallel_scan::parallel_streaming_group_count(
+                table,
+                &py_expr,
+                parquet_path,
+            ) {
+                Ok(count) => return Ok(count),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("PARALLEL_FALLBACK") {
+                        return Err(e);
+                    }
+                    // Fall through to sequential streaming.
+                }
+            }
+
+            // Fallback: single-threaded sequential streaming.
             match crate::ops::parallel_scan::direct_streaming_group_count(
                 table,
                 &py_expr,
@@ -217,7 +234,7 @@ pub fn group_ordered_count_impl(
                     if !msg.contains("PARALLEL_FALLBACK") {
                         return Err(e);
                     }
-                    // Fall through to full path
+                    // Fall through to DataFusion full path.
                 }
             }
         }

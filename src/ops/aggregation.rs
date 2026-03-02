@@ -112,8 +112,76 @@ fn pyexpr_to_agg_expr(
             };
             Ok(Some(agg_expr))
         }
+        // Statistical aggregates — native DataFusion path
+        "corr" => {
+            // corr(col_a, col_b) — both come from args when on is empty
+            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+                if args.len() < 2 {
+                    return Err("corr requires two column arguments".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
+                )
+            } else {
+                if args.is_empty() {
+                    return Err("corr requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            };
+            Ok(Some(agg_fn::corr(col_a, col_b)))
+        }
+        "covar" => {
+            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+                if args.len() < 2 {
+                    return Err("covar requires two column arguments".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
+                )
+            } else {
+                if args.is_empty() {
+                    return Err("covar requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            };
+            Ok(Some(agg_fn::covar_samp(col_a, col_b)))
+        }
+        "concat_agg" => {
+            // concat_agg(col, delimiter) — uses native string_agg UDAF
+            let (col_expr, delim_expr) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+                if args.is_empty() {
+                    return Err("concat_agg requires a column argument".to_string());
+                }
+                let col = crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?;
+                let delim = if args.len() > 1 {
+                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?
+                } else {
+                    lit(",")
+                };
+                (col, delim)
+            } else {
+                let col = crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?;
+                let delim = if !args.is_empty() {
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?
+                } else {
+                    lit(",")
+                };
+                (col, delim)
+            };
+            use datafusion::functions_aggregate::string_agg::string_agg;
+            Ok(Some(string_agg(col_expr, delim_expr)))
+        }
         // Complex aggregates that need SQL path
-        "top_k" | "mode" => Ok(None),
+        // skew → SQL fallback using moment formula
+        "top_k" | "mode" | "skew" => Ok(None),
         _ => Err(format!("Unknown aggregate function: {}", func)),
     }
 }
@@ -277,12 +345,48 @@ fn extract_agg_function(py_expr: &PyExpr, schema: &ArrowSchema) -> Option<AggRes
 
     match func.as_str() {
         "sum" | "count" | "min" | "max" | "avg" | "median" | "variance" | "var" | "stddev"
-        | "std" | "mode" => extract_simple_agg(func, on, args),
+        | "std" | "mode" | "skew" => extract_simple_agg(func, on, args),
         "top_k" | "percentile" => extract_agg_with_arg(func, on, args),
+        "concat_agg" => extract_concat_agg(on, args),
         "count_if" => extract_count_if(args, schema),
         "sum_if" | "avg_if" | "min_if" | "max_if" => extract_conditional_agg(func, args, schema),
         _ => None,
     }
+}
+
+fn extract_concat_agg(on: &PyExpr, args: &[PyExpr]) -> Option<AggResult> {
+    let col_name = if let PyExpr::Column(name) = on {
+        if !name.is_empty() {
+            name.clone()
+        } else if let Some(PyExpr::Column(arg_name)) = args.first() {
+            arg_name.clone()
+        } else {
+            return None;
+        }
+    } else if let Some(PyExpr::Column(name)) = args.first() {
+        name.clone()
+    } else {
+        return None;
+    };
+
+    // Extract optional delimiter from args
+    let delim = if let PyExpr::Column(name) = on {
+        if name.is_empty() {
+            // standalone: args[0]=col, args[1]=delim
+            args.get(1).and_then(|a| {
+                if let PyExpr::Literal { value, .. } = a { Some(value.clone()) } else { None }
+            }).unwrap_or_else(|| ",".to_string())
+        } else {
+            // method: on=col, args[0]=delim
+            args.first().and_then(|a| {
+                if let PyExpr::Literal { value, .. } = a { Some(value.clone()) } else { None }
+            }).unwrap_or_else(|| ",".to_string())
+        }
+    } else {
+        ",".to_string()
+    };
+
+    Some(AggResult::Simple("concat_agg".to_string(), col_name, Some(delim)))
 }
 
 fn extract_simple_agg(func: &str, on: &PyExpr, _args: &[PyExpr]) -> Option<AggResult> {
@@ -376,6 +480,15 @@ fn simple_agg_to_sql(func: &str, col: &str, arg: Option<String>) -> Result<Strin
                 "ARRAY_TO_STRING(ARRAY_SLICE(ARRAY_AGG(CAST({} AS DOUBLE) ORDER BY CAST({} AS DOUBLE) DESC), 1, {}), ';')",
                 col, col, k
             )
+        }
+        "skew" => format!(
+            "(AVG({col}*{col}*{col}) - 3*AVG({col}*{col})*AVG({col}) + 2*POWER(AVG({col}),3)) \
+             / NULLIF(POWER(STDDEV_POP({col}),3), 0)"
+        ),
+        "concat_agg" => {
+            let delim = arg.as_deref().unwrap_or(",");
+            let delim_escaped = delim.replace('\'', "''");
+            format!("STRING_AGG({}, '{}')", col, delim_escaped)
         }
         _ => return Err(format!("Unknown aggregate function: {}", func)),
     })

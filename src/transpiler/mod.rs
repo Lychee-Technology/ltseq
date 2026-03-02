@@ -39,7 +39,7 @@ use datafusion::functions::string::expr_fn::{
 // Unicode functions (for length, substr, padding)
 use datafusion::functions::unicode::expr_fn::{character_length, lpad, rpad, substring};
 // Datetime functions
-use datafusion::functions::datetime::expr_fn::date_part;
+use datafusion::functions::datetime::expr_fn::{date_part, now};
 // Regex functions
 use datafusion::functions::regex::expr_fn::regexp_like;
 
@@ -228,7 +228,7 @@ fn parse_call_null_ops(
     }
 }
 
-/// Handle math operations (abs, ceil, floor, round)
+/// Handle math operations (abs, ceil, floor, round, sqrt, power, sign, log, etc.)
 fn parse_call_math(
     func: &str,
     on: &PyExpr,
@@ -270,6 +270,132 @@ fn parse_call_math(
                 }
             };
             Ok(round(vec![input, decimals_expr]))
+        }
+        "math_sqrt" => {
+            use datafusion::functions::math::expr_fn::sqrt;
+            let input = resolve_on_or_args(on, args, schema, "sqrt")?;
+            Ok(sqrt(input))
+        }
+        "math_power" => {
+            use datafusion::functions::math::expr_fn::power;
+            // base is first arg (or on), exponent is second arg
+            let base = resolve_on_or_args(on, args, schema, "power")?;
+            let exp_expr = if is_on_empty(on) {
+                if args.len() < 2 {
+                    return Err("power() requires two arguments: base and exponent".to_string());
+                }
+                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+            } else {
+                if args.is_empty() {
+                    return Err("power() requires an exponent argument".to_string());
+                }
+                pyexpr_to_datafusion_inner(args[0].clone(), schema)?
+            };
+            Ok(power(base, exp_expr))
+        }
+        "math_sign" => {
+            use datafusion::functions::math::expr_fn::signum;
+            let input = resolve_on_or_args(on, args, schema, "sign")?;
+            Ok(signum(input))
+        }
+        "math_ln" => {
+            use datafusion::functions::math::expr_fn::ln;
+            let input = resolve_on_or_args(on, args, schema, "ln")?;
+            Ok(ln(input))
+        }
+        "math_log" => {
+            // log(x) → ln(x), log(x, 10) → log10(x), log(x, 2) → log2(x), else log(base, x)
+            let input = resolve_on_or_args(on, args, schema, "log")?;
+            // Look for optional base argument
+            let base_arg = if is_on_empty(on) {
+                args.get(1)
+            } else {
+                args.first()
+            };
+            match base_arg {
+                None => {
+                    use datafusion::functions::math::expr_fn::ln;
+                    Ok(ln(input))
+                }
+                Some(PyExpr::Literal { value, .. }) => {
+                    let base_val = value
+                        .parse::<f64>()
+                        .map_err(|_| format!("log() base must be a number, got '{}'", value))?;
+                    if (base_val - 10.0_f64).abs() < 1e-9 {
+                        use datafusion::functions::math::expr_fn::log10;
+                        Ok(log10(input))
+                    } else if (base_val - 2.0_f64).abs() < 1e-9 {
+                        use datafusion::functions::math::expr_fn::log2;
+                        Ok(log2(input))
+                    } else {
+                        use datafusion::functions::math::expr_fn::log;
+                        Ok(log(lit(base_val), input))
+                    }
+                }
+                Some(other) => {
+                    let base_expr = pyexpr_to_datafusion_inner(other.clone(), schema)?;
+                    use datafusion::functions::math::expr_fn::log;
+                    Ok(log(base_expr, input))
+                }
+            }
+        }
+        "math_exp" => {
+            use datafusion::functions::math::expr_fn::exp;
+            let input = resolve_on_or_args(on, args, schema, "exp")?;
+            Ok(exp(input))
+        }
+        "math_sin" => {
+            use datafusion::functions::math::expr_fn::sin;
+            let input = resolve_on_or_args(on, args, schema, "sin")?;
+            Ok(sin(input))
+        }
+        "math_cos" => {
+            use datafusion::functions::math::expr_fn::cos;
+            let input = resolve_on_or_args(on, args, schema, "cos")?;
+            Ok(cos(input))
+        }
+        "math_tan" => {
+            use datafusion::functions::math::expr_fn::tan;
+            let input = resolve_on_or_args(on, args, schema, "tan")?;
+            Ok(tan(input))
+        }
+        "math_asin" => {
+            use datafusion::functions::math::expr_fn::asin;
+            let input = resolve_on_or_args(on, args, schema, "asin")?;
+            Ok(asin(input))
+        }
+        "math_acos" => {
+            use datafusion::functions::math::expr_fn::acos;
+            let input = resolve_on_or_args(on, args, schema, "acos")?;
+            Ok(acos(input))
+        }
+        "math_atan" => {
+            use datafusion::functions::math::expr_fn::atan;
+            let input = resolve_on_or_args(on, args, schema, "atan")?;
+            Ok(atan(input))
+        }
+        "math_atan2" => {
+            use datafusion::functions::math::expr_fn::atan2;
+            // atan2(y, x) — y is first arg, x is second
+            if is_on_empty(on) {
+                if args.len() < 2 {
+                    return Err("atan2() requires two arguments: y and x".to_string());
+                }
+                let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+                Ok(atan2(y_expr, x_expr))
+            } else {
+                let y_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
+                if args.is_empty() {
+                    return Err("atan2() requires x argument".to_string());
+                }
+                let x_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                Ok(atan2(y_expr, x_expr))
+            }
+        }
+        "math_rand" => {
+            use datafusion::functions::math::expr_fn::random;
+            Ok(random())
         }
         _ => Err(format!("Not a math function: {}", func)),
     }
@@ -452,6 +578,44 @@ fn parse_call_string(
             let index_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
             Ok(split_part(on_expr, delimiter_expr, index_expr))
         }
+        "str_like" => {
+            validate_string_column(&on, schema, "str_like")?;
+            if args.is_empty() {
+                return Err("str_like requires a pattern argument".to_string());
+            }
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            use datafusion::logical_expr::Like;
+            Ok(Expr::Like(Like {
+                negated: false,
+                expr: Box::new(on_expr),
+                pattern: Box::new(pattern_expr),
+                escape_char: None,
+                case_insensitive: false,
+            }))
+        }
+        "str_isalpha" => {
+            validate_string_column(&on, schema, "str_isalpha")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok(regexp_like(on_expr, lit("^[a-zA-Z]+$"), None))
+        }
+        "str_isdigit" => {
+            validate_string_column(&on, schema, "str_isdigit")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok(regexp_like(on_expr, lit("^[0-9]+$"), None))
+        }
+        "str_islower" => {
+            validate_string_column(&on, schema, "str_islower")?;
+            let on_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
+            let on_expr2 = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok(on_expr.eq(lower(on_expr2)))
+        }
+        "str_isupper" => {
+            validate_string_column(&on, schema, "str_isupper")?;
+            let on_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
+            let on_expr2 = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok(on_expr.eq(upper(on_expr2)))
+        }
         _ => Err(format!("Not a string function: {}", func)),
     }
 }
@@ -516,6 +680,29 @@ fn parse_call_temporal(
             let diff_expr = on_expr - other_expr;
             Ok(date_part(lit("day"), diff_expr))
         }
+        "dt_millisecond" => {
+            // date_part("millisecond", col) gives total milliseconds within the second
+            // (returns the millisecond sub-second component 0–999)
+            validate_temporal_column(&on, schema, "dt_millisecond")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok(date_part(lit("millisecond"), on_expr) % lit(1000_f64))
+        }
+        "dt_weekday" => {
+            // DataFusion dow: 0=Sunday, 1=Monday, …, 6=Saturday
+            // Target: Monday=0 … Sunday=6 → (dow + 6) % 7
+            validate_temporal_column(&on, schema, "dt_weekday")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            Ok((date_part(lit("dow"), on_expr) + lit(6_f64)) % lit(7_f64))
+        }
+        "dt_now" => {
+            // now() returns current timestamp; no column required
+            Ok(now())
+        }
+        "dt_today" => {
+            // current_date() returns today's date
+            use datafusion::functions::datetime::expr_fn::current_date;
+            Ok(current_date())
+        }
         _ => Err(format!("Not a temporal function: {}", func)),
     }
 }
@@ -537,8 +724,10 @@ fn parse_call_expr(
         "fill_null" | "is_null" | "is_not_null" | "coalesce" => {
             parse_call_null_ops(func, on, args, schema)
         }
-        // Math
+        // Math (built-in method-style: abs, ceil, floor, round)
         "abs" | "ceil" | "floor" | "round" => parse_call_math(func, &on, &args, schema),
+        // Extended math functions (math_* prefix from global functions)
+        f if f.starts_with("math_") => parse_call_math(func, &on, &args, schema),
         // Type / membership
         "cast" | "is_in" => parse_call_type_ops(func, on, args, schema),
         // Window functions (must be handled elsewhere)

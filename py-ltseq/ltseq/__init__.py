@@ -25,7 +25,36 @@ from .expr import (
     rank,
     dense_rank,
     ntile,
+    # Math functions
+    sqrt,
+    power,
+    sign,
+    log,
+    ln,
+    exp,
+    sin,
+    cos,
+    tan,
+    asin,
+    acos,
+    atan,
+    atan2,
+    rand,
+    # Datetime functions
+    now,
+    today,
+    # Null / conditional utilities
+    nvl,
+    ifa,
+    # Aggregate expression functions
+    skew,
+    corr,
+    covar,
+    concat_agg,
 )
+
+# Re-export utility functions
+from .utils import seq
 
 __all__ = [
     "LTSeq",
@@ -49,4 +78,27 @@ __all__ = [
     "rank",
     "dense_rank",
     "ntile",
+    "sqrt",
+    "power",
+    "sign",
+    "log",
+    "ln",
+    "exp",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "rand",
+    "now",
+    "today",
+    "nvl",
+    "ifa",
+    "skew",
+    "corr",
+    "covar",
+    "concat_agg",
+    "seq",
 ]

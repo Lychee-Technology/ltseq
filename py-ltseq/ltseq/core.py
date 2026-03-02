@@ -11,6 +11,7 @@ from .transforms import TransformMixin
 from .joins import JoinMixin
 from .aggregation import AggregationMixin
 from .advanced_ops import SetOpsMixin, AdvancedOpsMixin
+from .mutation_mixin import MutationMixin
 
 try:
     from . import ltseq_core
@@ -27,6 +28,7 @@ class LTSeq(
     AggregationMixin,
     SetOpsMixin,
     AdvancedOpsMixin,
+    MutationMixin,
 ):
     """Python-visible LTSeq wrapper backed by the native Rust kernel."""
 

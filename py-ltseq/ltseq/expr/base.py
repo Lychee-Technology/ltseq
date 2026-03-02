@@ -125,6 +125,158 @@ def max_if(predicate: "Expr", column: "Expr") -> "CallExpr":
     return CallExpr("max_if", (predicate, column), {}, on=None)
 
 
+# =============================================================================
+# Math Functions
+# =============================================================================
+
+
+def sqrt(x: "Expr") -> "CallExpr":
+    """Square root of x."""
+    from .types import CallExpr
+    return CallExpr("math_sqrt", (Expr._coerce(x),), {}, on=None)
+
+
+def power(x: "Expr", n: "Expr") -> "CallExpr":
+    """Raise x to the power n."""
+    from .types import CallExpr
+    return CallExpr("math_power", (Expr._coerce(x), Expr._coerce(n)), {}, on=None)
+
+
+def sign(x: "Expr") -> "CallExpr":
+    """Return sign of x: -1, 0, or 1."""
+    from .types import CallExpr
+    return CallExpr("math_sign", (Expr._coerce(x),), {}, on=None)
+
+
+def log(x: "Expr", base=None) -> "CallExpr":
+    """Logarithm. If base=None → natural log; base=10 → log10; base=2 → log2; else log(base, x)."""
+    from .types import CallExpr, LiteralExpr
+    if base is None:
+        return CallExpr("math_log", (Expr._coerce(x),), {}, on=None)
+    return CallExpr("math_log", (Expr._coerce(x), LiteralExpr(base)), {}, on=None)
+
+
+def ln(x: "Expr") -> "CallExpr":
+    """Natural logarithm of x."""
+    from .types import CallExpr
+    return CallExpr("math_ln", (Expr._coerce(x),), {}, on=None)
+
+
+def exp(x: "Expr") -> "CallExpr":
+    """Euler's number raised to the power x."""
+    from .types import CallExpr
+    return CallExpr("math_exp", (Expr._coerce(x),), {}, on=None)
+
+
+def sin(x: "Expr") -> "CallExpr":
+    """Sine of x (radians)."""
+    from .types import CallExpr
+    return CallExpr("math_sin", (Expr._coerce(x),), {}, on=None)
+
+
+def cos(x: "Expr") -> "CallExpr":
+    """Cosine of x (radians)."""
+    from .types import CallExpr
+    return CallExpr("math_cos", (Expr._coerce(x),), {}, on=None)
+
+
+def tan(x: "Expr") -> "CallExpr":
+    """Tangent of x (radians)."""
+    from .types import CallExpr
+    return CallExpr("math_tan", (Expr._coerce(x),), {}, on=None)
+
+
+def asin(x: "Expr") -> "CallExpr":
+    """Arc sine of x, result in radians."""
+    from .types import CallExpr
+    return CallExpr("math_asin", (Expr._coerce(x),), {}, on=None)
+
+
+def acos(x: "Expr") -> "CallExpr":
+    """Arc cosine of x, result in radians."""
+    from .types import CallExpr
+    return CallExpr("math_acos", (Expr._coerce(x),), {}, on=None)
+
+
+def atan(x: "Expr") -> "CallExpr":
+    """Arc tangent of x, result in radians."""
+    from .types import CallExpr
+    return CallExpr("math_atan", (Expr._coerce(x),), {}, on=None)
+
+
+def atan2(y: "Expr", x: "Expr") -> "CallExpr":
+    """Arc tangent of y/x, using signs to determine the quadrant."""
+    from .types import CallExpr
+    return CallExpr("math_atan2", (Expr._coerce(y), Expr._coerce(x)), {}, on=None)
+
+
+def rand() -> "CallExpr":
+    """Generate a random float in [0, 1)."""
+    from .types import CallExpr
+    return CallExpr("math_rand", (), {}, on=None)
+
+
+# =============================================================================
+# Datetime Global Functions
+# =============================================================================
+
+
+def now() -> "CallExpr":
+    """Return the current timestamp as an expression."""
+    from .types import CallExpr
+    return CallExpr("dt_now", (), {}, on=None)
+
+
+def today() -> "CallExpr":
+    """Return the current date as an expression."""
+    from .types import CallExpr
+    return CallExpr("dt_today", (), {}, on=None)
+
+
+# =============================================================================
+# Null / Conditional Utilities
+# =============================================================================
+
+
+def nvl(x: "Expr", default: "Expr") -> "CallExpr":
+    """Return x if non-null, otherwise default. Equivalent to COALESCE(x, default)."""
+    return coalesce(x, default)
+
+
+def ifa(cond: "Expr", value: "Expr") -> "CallExpr":
+    """Return value if cond is True, otherwise NULL. Equivalent to if_else(cond, value, None)."""
+    return if_else(cond, value, None)
+
+
+# =============================================================================
+# Aggregate Expression Functions (for use in agg() lambdas)
+# =============================================================================
+
+
+def skew(col: "Expr") -> "CallExpr":
+    """Skewness of a column (for use in agg() lambdas)."""
+    from .types import CallExpr
+    return CallExpr("skew", (Expr._coerce(col),), {}, on=None)
+
+
+def corr(col_a: "Expr", col_b: "Expr") -> "CallExpr":
+    """Pearson correlation coefficient between two columns."""
+    from .types import CallExpr
+    return CallExpr("corr", (Expr._coerce(col_a), Expr._coerce(col_b)), {}, on=None)
+
+
+def covar(col_a: "Expr", col_b: "Expr") -> "CallExpr":
+    """Sample covariance between two columns."""
+    from .types import CallExpr
+    return CallExpr("covar", (Expr._coerce(col_a), Expr._coerce(col_b)), {}, on=None)
+
+
+def concat_agg(col: "Expr", delimiter: str = ",") -> "CallExpr":
+    """Concatenate all non-null values of col with the given delimiter (STRING_AGG)."""
+    from .types import CallExpr, LiteralExpr
+    return CallExpr("concat_agg", (Expr._coerce(col), LiteralExpr(delimiter)), {}, on=None)
+
+
 def coalesce(*args: "Expr") -> "CallExpr":
     """
     Return the first non-null value from the arguments.
