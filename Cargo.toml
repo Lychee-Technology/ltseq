@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 # Python co-op
 pyo3 = { version = "0.27.2", features = ["extension-module", "macros"] }
 
-datafusion = "52.1.0"
+datafusion = "52.2.0"
 
 # async executor utilities
 futures-util = "0.3"
