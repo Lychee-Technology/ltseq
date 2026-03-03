@@ -1144,10 +1144,56 @@ fn gpu_available() -> bool {
     }
 }
 
+/// Run a CUDA filter kernel directly on a raw GPU device pointer from cuDF.
+///
+/// This is the core of the B-extended GPU path: cuDF's device pointer is passed
+/// directly to the CUDA kernel without any H2D transfer. Returns the device pointer
+/// of the resulting `u8` mask (1=keep, 0=drop) allocated in GPU memory.
+///
+/// The caller (Python) must free the mask via `gpu_free_ptr()` after use.
+///
+/// Args:
+///     col_ptr:   Raw CUDA device pointer from `cudf_series.data.ptr`
+///     n:         Number of elements
+///     dtype:     "i32", "i64", "f32", or "f64"
+///     op:        "gt", "lt", "gte", "lte", "eq", "neq"
+///     threshold: Comparison value (converted to column dtype internally)
+///
+/// Returns: Raw device pointer (int) to the u8 mask in GPU memory.
+#[pyfunction]
+#[cfg(feature = "gpu")]
+fn gpu_filter_raw(
+    col_ptr: u64,
+    n: usize,
+    dtype: &str,
+    op: &str,
+    threshold: f64,
+) -> PyResult<u64> {
+    crate::gpu::raw_exec::gpu_filter_raw_impl(col_ptr, n, dtype, op, threshold)
+}
+
+/// Free a GPU mask buffer allocated by `gpu_filter_raw()`.
+///
+/// Must be called after the mask has been consumed by cupy/cuDF on the Python side.
+///
+/// Args:
+///     ptr: Device pointer returned by `gpu_filter_raw()`
+///     n:   Element count (same `n` passed to `gpu_filter_raw()`)
+#[pyfunction]
+#[cfg(feature = "gpu")]
+fn gpu_free_ptr(ptr: u64, n: usize) -> PyResult<()> {
+    crate::gpu::raw_exec::gpu_free_ptr_impl(ptr, n)
+}
+
 #[pymodule]
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
+    #[cfg(feature = "gpu")]
+    {
+        m.add_function(wrap_pyfunction!(gpu_filter_raw, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_free_ptr, m)?)?;
+    }
     Ok(())
 }

@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-03-02T15:41:23.163600",
+  "timestamp": "2026-03-02T19:55:01.438450",
   "system": {
-    "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
-    "processor": "arm",
-    "cpu_count": 10,
-    "ram_gb": 32.0,
+    "platform": "Linux-6.18.15-3-cachyos-lts-x86_64-with-glibc2.43",
+    "processor": "",
+    "cpu_count": 32,
+    "ram_gb": 125.1,
     "python_version": "3.14.3"
   },
-  "data_file": "/Users/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
+  "data_file": "/home/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
   "warmup": 1,
   "iterations": 3,
   "rounds": [
@@ -15,24 +15,24 @@
       "round_name": "R1: Top URLs",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 2.4902,
+        "median_s": 1.0527,
         "times": [
-          2.6411,
-          2.4902,
-          2.4888
+          1.0888,
+          1.0527,
+          1.0362
         ],
-        "mem_delta_mb": 172.3,
+        "mem_delta_mb": 796.8,
         "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 3288173), ('http://kinopoisk.ru', 1625250), ('http://bdsm_po_yers=0&with_video', 791465), ('http://video.yandex', 582400), ('http://smeshariki.r"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 3.9862,
+        "median_s": 1.7003,
         "times": [
-          4.0401,
-          3.9862,
-          3.8047
+          1.6973,
+          1.7656,
+          1.7003
         ],
-        "mem_delta_mb": 1348.8,
+        "mem_delta_mb": 849.9,
         "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 3288173}, {'url': 'http://kinopoisk.ru', 'cnt': 1625250}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 791465}, {'url': 'htt"
       }
     },
@@ -40,24 +40,24 @@
       "round_name": "R2: Sessionization",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 1.5684,
+        "median_s": 1.3798,
         "times": [
-          1.5625,
-          1.5814,
-          1.5684
+          1.4158,
+          1.3717,
+          1.3798
         ],
-        "mem_delta_mb": 58.1,
+        "mem_delta_mb": 81.4,
         "result": "26181387"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.2055,
+        "median_s": 0.1218,
         "times": [
-          0.227,
-          0.1994,
-          0.2055
+          0.1123,
+          0.1218,
+          0.1288
         ],
-        "mem_delta_mb": 2.0,
+        "mem_delta_mb": 479.5,
         "result": "26181387"
       }
     },
@@ -65,50 +65,50 @@
       "round_name": "R3: Funnel",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 15.0271,
+        "median_s": 3.5357,
         "times": [
-          15.0271,
-          15.5124,
-          14.5375
+          3.5219,
+          3.5707,
+          3.5357
         ],
-        "mem_delta_mb": 675.2,
-        "result": "155336"
+        "mem_delta_mb": 319.7,
+        "result": "155373"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 4.0031,
+        "median_s": 2.3543,
         "times": [
-          4.2022,
-          3.9852,
-          4.0031
+          2.3503,
+          2.3569,
+          2.3543
         ],
-        "mem_delta_mb": 16.6,
-        "result": "155336"
+        "mem_delta_mb": 23.2,
+        "result": "155373"
       }
     },
     {
       "round_name": "R4: GPU Filter",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.1325,
+        "median_s": 0.1162,
         "times": [
-          0.1343,
-          0.1221,
-          0.1325
+          0.1197,
+          0.1116,
+          0.1162
         ],
         "mem_delta_mb": 0,
-        "result": "49498259"
+        "result": "49500334"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.0602,
+        "median_s": 0.0559,
         "times": [
-          0.0629,
-          0.0553,
-          0.0602
+          0.0608,
+          0.0548,
+          0.0559
         ],
-        "mem_delta_mb": 349.4,
-        "result": "49498259"
+        "mem_delta_mb": 318.1,
+        "result": "49500334"
       }
     }
   ]

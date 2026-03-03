@@ -147,14 +147,14 @@ def ltseq_top_url(t):
 def duckdb_session(data_file):
     """DuckDB: LAG window function + SUM to count session boundaries.
 
-    Uses ORDER BY eventtime (no watchid) to match the physical parquet order,
-    which is sorted by (userid, eventtime) only.
+    Uses ORDER BY eventtime, watchid to match the physical parquet sort order
+    (userid, eventtime, watchid), ensuring deterministic tie-breaking.
     """
     return duckdb.sql(f"""
         WITH Diff AS (
             SELECT userid,
                 CASE WHEN eventtime - LAG(eventtime)
-                    OVER (PARTITION BY userid ORDER BY eventtime) > 1800
+                    OVER (PARTITION BY userid ORDER BY eventtime, watchid) > 1800
                 THEN 1 ELSE 0 END AS is_new
             FROM '{data_file}'
         )
@@ -201,16 +201,16 @@ def ltseq_session_v2(t_sorted):
 def duckdb_funnel(data_file, p1, p2, p3):
     """DuckDB: LEAD window function for consecutive URL matching.
 
-    Uses ORDER BY eventtime (no watchid) to match the physical parquet order,
-    which is sorted by (userid, eventtime) only.
+    Uses ORDER BY eventtime, watchid to match the physical parquet sort order
+    (userid, eventtime, watchid), ensuring deterministic tie-breaking.
     """
     return duckdb.sql(f"""
         SELECT count(*)
         FROM (
             SELECT
                 url,
-                LEAD(url) OVER (PARTITION BY userid ORDER BY eventtime) as next1,
-                LEAD(url, 2) OVER (PARTITION BY userid ORDER BY eventtime) as next2
+                LEAD(url) OVER (PARTITION BY userid ORDER BY eventtime, watchid) as next1,
+                LEAD(url, 2) OVER (PARTITION BY userid ORDER BY eventtime, watchid) as next2
             FROM '{data_file}'
         )
         WHERE starts_with(url, '{p1}')
@@ -392,8 +392,9 @@ def main():
 
     print("Sorting for LTSeq (declaring sort order)...")
     t0 = time.perf_counter()
-    # hits_sorted.parquet is sorted by (userid, eventtime) only — no watchid tiebreak.
-    t_ltseq_sorted = t_ltseq.assume_sorted("userid", "eventtime")
+    # hits_sorted.parquet is sorted by (userid, eventtime, watchid).
+    # watchid is the tiebreaker for rows sharing the same (userid, eventtime).
+    t_ltseq_sorted = t_ltseq.assume_sorted("userid", "eventtime", "watchid")
     sort_time = time.perf_counter() - t0
     print(f"  LTSeq assume_sorted time: {sort_time:.3f}s")
 

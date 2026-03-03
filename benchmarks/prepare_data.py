@@ -66,13 +66,14 @@ def download_data():
 
 
 def sort_data():
-    """Pre-sort the dataset by (userid, eventtime) using DuckDB.
+    """Pre-sort the dataset by (userid, eventtime, watchid) using DuckDB.
 
-    Sort key is (userid, eventtime) only.  watchid is NOT used as a tiebreaker
-    because the benchmark's DuckDB queries and LTSeq both rely on the physical
-    parquet row order for rows that share the same (userid, eventtime), and
-    adding watchid here would produce a different ordering than what
-    assume_sorted("userid", "eventtime") declares.
+    watchid is used as a tiebreaker so that rows with identical (userid, eventtime)
+    have a deterministic order.  This ensures DuckDB window functions (ORDER BY
+    eventtime, watchid) and LTSeq (assume_sorted("userid", "eventtime", "watchid"))
+    process rows in exactly the same sequence, giving matching results for R2/R3.
+
+    watchid has only 4 duplicates across 100M rows, making it an effective tiebreaker.
     """
     if os.path.exists(HITS_SORTED):
         size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
@@ -81,7 +82,7 @@ def sort_data():
 
     import duckdb
 
-    print("  Sorting hits.parquet by (userid, eventtime) with lowercase columns...")
+    print("  Sorting hits.parquet by (userid, eventtime, watchid) with lowercase columns...")
     t0 = time.perf_counter()
     con = duckdb.connect()
     # Get all column names and build rename expressions
@@ -92,7 +93,7 @@ def sort_data():
         COPY (
             SELECT {select_str}
             FROM '{HITS_RAW}'
-            ORDER BY userid, eventtime
+            ORDER BY userid, eventtime, watchid
         ) TO '{HITS_SORTED}' (FORMAT 'parquet')
     """)
     elapsed = time.perf_counter() - t0

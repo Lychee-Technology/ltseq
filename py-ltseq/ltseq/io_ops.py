@@ -279,6 +279,31 @@ class IOMixin:
         return t
 
     @classmethod
+    def read_parquet_gpu(cls, path: str, columns=None) -> "GpuTable":
+        """Read a Parquet file directly to GPU VRAM using cuDF's GPU Parquet decoder.
+
+        This is the entry point for the B-extended GPU-native IO path:
+
+        Standard path:  Parquet → CPU decode (arrow-rs) → H2D per batch → CUDA kernel → D2H
+        GPU path:       Parquet → GPU decode (libcudf)  → VRAM → GPU ops → single D2H
+
+        Requires `cudf` to be installed (`pip install cudf-cu12`).
+
+        Args:
+            path:    Path to the Parquet file.
+            columns: Optional column name list for column pruning.
+
+        Returns:
+            GpuTable — data lives in GPU VRAM. Call `.to_ltseq()` to materialize.
+
+        Example::
+            t = LTSeq.read_parquet_gpu("hits_sorted.parquet")
+            result = t.filter(lambda r: r.counterid > 5000).to_ltseq()
+        """
+        from .gpu_table import GpuTable
+        return GpuTable.read_parquet(path, columns=columns)
+
+    @classmethod
     def from_pandas(cls, df) -> "LTSeq":
         """
         Create an LTSeq table from a pandas DataFrame.

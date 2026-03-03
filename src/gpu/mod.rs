@@ -16,6 +16,7 @@
 
 pub mod filter_exec;
 pub mod optimizer;
+pub mod raw_exec;
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use cudarc::nvrtc::compile_ptx;

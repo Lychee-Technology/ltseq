@@ -56,6 +56,13 @@ from .expr import (
 # GPU utilities
 from .ltseq_core import gpu_available
 
+# GPU table — conditional import (requires cudf)
+try:
+    from .gpu_table import GpuTable
+    _GPUTABLE_AVAILABLE = True
+except ImportError:
+    _GPUTABLE_AVAILABLE = False
+
 # Re-export utility functions
 from .utils import seq
 
@@ -82,6 +89,7 @@ __all__ = [
     "dense_rank",
     "ntile",
     "gpu_available",
+    "GpuTable",
     "sqrt",
     "power",
     "sign",
