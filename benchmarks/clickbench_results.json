@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-02T19:55:01.438450",
+  "timestamp": "2026-03-02T20:25:50.153909",
   "system": {
     "platform": "Linux-6.18.15-3-cachyos-lts-x86_64-with-glibc2.43",
     "processor": "",
@@ -7,7 +7,7 @@
     "ram_gb": 125.1,
     "python_version": "3.14.3"
   },
-  "data_file": "/home/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
+  "data_file": "benchmarks/data/hits_20m.parquet",
   "warmup": 1,
   "iterations": 3,
   "rounds": [
@@ -15,100 +15,100 @@
       "round_name": "R1: Top URLs",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 1.0527,
+        "median_s": 0.2442,
         "times": [
-          1.0888,
-          1.0527,
-          1.0362
+          0.2442,
+          0.2449,
+          0.2391
         ],
-        "mem_delta_mb": 796.8,
-        "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 3288173), ('http://kinopoisk.ru', 1625250), ('http://bdsm_po_yers=0&with_video', 791465), ('http://video.yandex', 582400), ('http://smeshariki.r"
+        "mem_delta_mb": 1431.5,
+        "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 647217), ('http://kinopoisk.ru', 299730), ('http://bdsm_po_yers=0&with_video', 161023), ('http://video.yandex', 117298), ('http://auto_fiat_dlya"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 1.7003,
+        "median_s": 0.3477,
         "times": [
-          1.6973,
-          1.7656,
-          1.7003
+          0.3559,
+          0.3477,
+          0.3284
         ],
-        "mem_delta_mb": 849.9,
-        "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 3288173}, {'url': 'http://kinopoisk.ru', 'cnt': 1625250}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 791465}, {'url': 'htt"
+        "mem_delta_mb": 1229.6,
+        "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 647217}, {'url': 'http://kinopoisk.ru', 'cnt': 299730}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 161023}, {'url': 'http:"
       }
     },
     {
       "round_name": "R2: Sessionization",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 1.3798,
+        "median_s": 0.469,
         "times": [
-          1.4158,
-          1.3717,
-          1.3798
+          0.4632,
+          0.4742,
+          0.469
         ],
-        "mem_delta_mb": 81.4,
-        "result": "26181387"
+        "mem_delta_mb": 53.1,
+        "result": "5211971"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.1218,
+        "median_s": 0.0256,
         "times": [
-          0.1123,
-          0.1218,
-          0.1288
+          0.0274,
+          0.0256,
+          0.0253
         ],
-        "mem_delta_mb": 479.5,
-        "result": "26181387"
+        "mem_delta_mb": 48.9,
+        "result": "5211971"
       }
     },
     {
       "round_name": "R3: Funnel",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 3.5357,
+        "median_s": 0.8688,
         "times": [
-          3.5219,
-          3.5707,
-          3.5357
+          0.8302,
+          0.8712,
+          0.8688
         ],
-        "mem_delta_mb": 319.7,
-        "result": "155373"
+        "mem_delta_mb": 479.7,
+        "result": "30804"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 2.3543,
+        "median_s": 0.3078,
         "times": [
-          2.3503,
-          2.3569,
-          2.3543
+          0.3078,
+          0.2964,
+          0.3082
         ],
-        "mem_delta_mb": 23.2,
-        "result": "155373"
+        "mem_delta_mb": 19.3,
+        "result": "30804"
       }
     },
     {
       "round_name": "R4: GPU Filter",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.1162,
+        "median_s": 0.0335,
         "times": [
-          0.1197,
-          0.1116,
-          0.1162
+          0.0335,
+          0.0351,
+          0.0324
         ],
-        "mem_delta_mb": 0,
-        "result": "49500334"
+        "mem_delta_mb": 0.0,
+        "result": "9910158"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.0559,
+        "median_s": 0.0162,
         "times": [
-          0.0608,
-          0.0548,
-          0.0559
+          0.0162,
+          0.0173,
+          0.016
         ],
-        "mem_delta_mb": 318.1,
-        "result": "49500334"
+        "mem_delta_mb": 69.0,
+        "result": "9910158"
       }
     }
   ]
