@@ -1,6 +1,9 @@
 """Advanced operations for LTSeq: align, stateful_scan, search_first, pivot, set operations."""
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 
 class SetOpsMixin:
@@ -42,7 +45,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def intersect(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def intersect(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Intersection of two tables.
 
@@ -82,7 +85,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def except_(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def except_(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Set difference: rows in left but not in right (SQL EXCEPT).
 
@@ -122,7 +125,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def xunion(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def xunion(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Symmetric difference: rows in either table but not in both.
 
@@ -226,7 +229,7 @@ class SetOpsMixin:
         col_values = set(df[key_col].tolist())
         return all(v in col_values for v in values)
 
-    def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def diff(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Deprecated: Use except_() instead.
 
@@ -242,7 +245,7 @@ class SetOpsMixin:
         )
         return self.except_(other, on=on)
 
-    def is_subset(self, other: "LTSeq", on: Optional[Callable] = None) -> bool:
+    def is_subset(self, other: "LTSeq", on: Callable | None = None) -> bool:
         """
         Check if this table is a subset of another.
 
@@ -280,7 +283,7 @@ class SetOpsMixin:
 class AdvancedOpsMixin:
     """Mixin class providing advanced operations for LTSeq."""
 
-    def align(self, ref_sequence: list, key: Callable) -> "LTSeq":
+    def align(self, ref_sequence: list[Any], key: Callable) -> "LTSeq":
         """
         Align table rows to a reference sequence.
 
@@ -338,7 +341,7 @@ class AdvancedOpsMixin:
 
         return result
 
-    def search_first(self, predicate: Callable) -> Optional["LTSeq"]:
+    def search_first(self, predicate: Callable) -> "LTSeq | None":
         """
         Return the first matching row.
 
@@ -389,7 +392,7 @@ class AdvancedOpsMixin:
 
     def pivot(
         self,
-        index: str | list,
+        index: str | list[str],
         columns: str,
         values: str,
         agg_fn: str = "sum",

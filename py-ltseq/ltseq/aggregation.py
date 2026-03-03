@@ -1,15 +1,18 @@
 """Aggregation operations for LTSeq: agg, cum_sum, group_ordered, group_sorted."""
 
-from typing import Callable, Optional, Union
+from typing import Callable, TYPE_CHECKING
 
-from .expr import SchemaProxy
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .grouping import NestedTable
+
 from .transforms import _collect_key_exprs
 
 
 class AggregationMixin:
     """Mixin class providing aggregation operations for LTSeq."""
 
-    def cum_sum(self, *cols: Union[str, Callable]) -> "LTSeq":
+    def cum_sum(self, *cols: str | Callable) -> "LTSeq":
         """
         Add cumulative sum columns for specified columns.
 
@@ -113,7 +116,7 @@ class AggregationMixin:
 
         return NestedTable(self, key, is_sorted=True)
 
-    def agg(self, by: Optional[Callable] = None, **aggregations) -> "LTSeq":
+    def agg(self, by: Callable | None = None, **aggregations: Callable) -> "LTSeq":
         """
         Grouped aggregation with one row per group.
 

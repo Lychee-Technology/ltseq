@@ -1,13 +1,16 @@
 """Join operations for LTSeq: join, join_merge, join_sorted, asof_join."""
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 from .expr import SchemaProxy
 
 
 def _pandas_join_fallback(
-    df1, df2, left_key: str, right_key: str, how: str, suffix: str
-):
+    df1: Any, df2: Any, left_key: str, right_key: str, how: str, suffix: str
+) -> Any:
     """Execute join using pandas as fallback."""
     import pandas as pd
 
@@ -29,7 +32,7 @@ def _pandas_join_fallback(
     return merged
 
 
-def _validate_join_inputs(self_table, other, how: str):
+def _validate_join_inputs(self_table: Any, other: Any, how: str) -> None:
     """Validate join inputs and return error if invalid."""
     if not self_table._schema:
         raise ValueError(
@@ -49,7 +52,11 @@ def _validate_join_inputs(self_table, other, how: str):
         )
 
 
-def _build_join_result_schema(left_schema, right_schema, suffix="_other"):
+def _build_join_result_schema(
+    left_schema: dict[str, str],
+    right_schema: dict[str, str],
+    suffix: str = "_other",
+) -> dict[str, str]:
     """Build result schema for join operations.
 
     Rust joins always prefix ALL right columns with {suffix}_{col},
@@ -108,7 +115,7 @@ class JoinMixin:
         return result
 
     def _join_pandas_fallback(
-        self, other, on: Callable, how: str, left_key_expr: dict
+        self, other: "LTSeq", on: Callable, how: str, left_key_expr: dict[str, Any]
     ) -> "LTSeq":
         """Fallback join implementation using pandas."""
         from .core import LTSeq
@@ -137,7 +144,7 @@ class JoinMixin:
         other: "LTSeq",
         on: Callable,
         how: str = "inner",
-        strategy: Optional[str] = None,
+        strategy: str | None = None,
     ) -> "LTSeq":
         """
         Join two tables with configurable strategy.
@@ -304,7 +311,7 @@ class JoinMixin:
         # Preserve original behavior: sort validation (same as strategy="merge")
         return self._join_with_sort_validation(other, on, how)
 
-    def _get_sort_direction(self, col_name: str) -> Optional[bool]:
+    def _get_sort_direction(self, col_name: str) -> bool | None:
         """Get sort direction for a column, or None if not sorted by it."""
         if not self._sort_keys:
             return None

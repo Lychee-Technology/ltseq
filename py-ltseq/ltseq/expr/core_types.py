@@ -1,6 +1,6 @@
 """Core expression types: Literal, BinOp, UnaryOp."""
 
-from typing import Any, Dict
+from typing import Any
 
 from .base import Expr
 
@@ -17,7 +17,7 @@ class LiteralExpr(Expr):
         """Initialize a LiteralExpr with a constant value."""
         self.value = value
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """Serialize to dict with inferred dtype."""
         return {"type": "Literal", "value": self.value, "dtype": self._infer_dtype()}
 
@@ -53,7 +53,7 @@ class BinOpExpr(Expr):
         self.left = left
         self.right = right
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """Serialize to dict with recursive serialization of operands."""
         return {
             "type": "BinOp",
@@ -77,6 +77,6 @@ class UnaryOpExpr(Expr):
         self.op = op
         self.operand = operand
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """Serialize to dict with recursive serialization of operand."""
         return {"type": "UnaryOp", "op": self.op, "operand": self.operand.serialize()}

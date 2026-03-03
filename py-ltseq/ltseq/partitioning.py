@@ -5,7 +5,7 @@ Unlike group_ordered() which handles consecutive groups, partition() groups
 all rows with the same key value regardless of position.
 """
 
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterator
 
 
 class SQLPartitionedTable:
@@ -28,7 +28,7 @@ class SQLPartitionedTable:
         >>> 2023_west = partitions[(2023, "West")]  # Multiple columns: key is tuple
     """
 
-    def __init__(self, ltseq_instance: "LTSeq", columns: Tuple[str, ...]):
+    def __init__(self, ltseq_instance: "LTSeq", columns: tuple[str, ...]):
         """
         Initialize SQLPartitionedTable.
 
@@ -38,8 +38,8 @@ class SQLPartitionedTable:
         """
         self._ltseq = ltseq_instance
         self._columns = columns
-        self._keys_cache: Optional[List[Any]] = None
-        self._partitions_cache: Optional[Dict[Any, "LTSeq"]] = None
+        self._keys_cache: list[Any] | None = None
+        self._partitions_cache: dict[Any, "LTSeq"] | None = None
 
     def __getitem__(self, key: Any) -> "LTSeq":
         """
@@ -93,7 +93,7 @@ class SQLPartitionedTable:
         except Exception as e:
             raise KeyError(f"Failed to access partition for key {key}: {e}")
 
-    def keys(self) -> List[Any]:
+    def keys(self) -> list[Any]:
         """
         Return all partition keys.
 
@@ -102,7 +102,7 @@ class SQLPartitionedTable:
         """
         if self._keys_cache is None:
             self._compute_keys()
-        return self._keys_cache
+        return self._keys_cache  # type: ignore[return-value]
 
     def _compute_keys(self) -> None:
         """Compute distinct keys using SQL."""
@@ -120,7 +120,7 @@ class SQLPartitionedTable:
 
         self._keys_cache = keys
 
-    def values(self) -> List["LTSeq"]:
+    def values(self) -> list["LTSeq"]:
         """
         Return all partition tables.
 
@@ -130,9 +130,9 @@ class SQLPartitionedTable:
         if self._keys_cache is None:
             self._compute_keys()
 
-        return [self[key] for key in self._keys_cache]
+        return [self[key] for key in self._keys_cache]  # type: ignore[union-attr]
 
-    def items(self) -> Iterator[Tuple[Any, "LTSeq"]]:
+    def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
         """
         Iterate through (key, table) pairs.
 
@@ -178,8 +178,8 @@ class SQLPartitionedTable:
         if self._keys_cache is None:
             self._compute_keys()
 
-        transformed_partitions = {}
-        for key in self._keys_cache:
+        transformed_partitions: dict[Any, "LTSeq"] = {}
+        for key in self._keys_cache:  # type: ignore[union-attr]
             try:
                 result = fn(self[key])
                 transformed_partitions[key] = result
@@ -188,7 +188,7 @@ class SQLPartitionedTable:
 
         return _PrecomputedPartitionedTable(transformed_partitions)
 
-    def to_list(self) -> List["LTSeq"]:
+    def to_list(self) -> list["LTSeq"]:
         """
         Convert to list of LTSeq objects.
 
@@ -230,7 +230,7 @@ class PartitionedTable:
         """
         self._ltseq = ltseq_instance
         self._partition_fn = partition_fn
-        self._partitions_cache: Optional[Dict[Any, "LTSeq"]] = None
+        self._partitions_cache: dict[Any, "LTSeq"] | None = None
 
     def __getitem__(self, key: Any) -> "LTSeq":
         """
@@ -256,7 +256,7 @@ class PartitionedTable:
 
         return self._partitions_cache[key]
 
-    def keys(self) -> List[Any]:
+    def keys(self) -> list[Any]:
         """
         Return all partition keys.
 
@@ -269,9 +269,9 @@ class PartitionedTable:
         """
         if self._partitions_cache is None:
             self._materialize_partitions()
-        return list(self._partitions_cache.keys())
+        return list(self._partitions_cache.keys())  # type: ignore[union-attr]
 
-    def values(self) -> List["LTSeq"]:
+    def values(self) -> list["LTSeq"]:
         """
         Return all partition tables.
 
@@ -280,9 +280,9 @@ class PartitionedTable:
         """
         if self._partitions_cache is None:
             self._materialize_partitions()
-        return list(self._partitions_cache.values())
+        return list(self._partitions_cache.values())  # type: ignore[union-attr]
 
-    def items(self) -> Iterator[Tuple[Any, "LTSeq"]]:
+    def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
         """
         Iterate through (key, table) pairs.
 
@@ -295,7 +295,7 @@ class PartitionedTable:
         """
         if self._partitions_cache is None:
             self._materialize_partitions()
-        return iter(self._partitions_cache.items())
+        return iter(self._partitions_cache.items())  # type: ignore[union-attr]
 
     def __iter__(self) -> Iterator["LTSeq"]:
         """
@@ -315,7 +315,7 @@ class PartitionedTable:
         """
         if self._partitions_cache is None:
             self._materialize_partitions()
-        return len(self._partitions_cache)
+        return len(self._partitions_cache)  # type: ignore[arg-type]
 
     def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
         """
@@ -339,8 +339,8 @@ class PartitionedTable:
             self._materialize_partitions()
 
         # Apply function to each partition
-        transformed_partitions = {}
-        for key, partition_table in self._partitions_cache.items():
+        transformed_partitions: dict[Any, "LTSeq"] = {}
+        for key, partition_table in self._partitions_cache.items():  # type: ignore[union-attr]
             try:
                 result = fn(partition_table)
                 transformed_partitions[key] = result
@@ -350,7 +350,7 @@ class PartitionedTable:
         # Return a new PartitionedTable wrapper with transformed data
         return _PrecomputedPartitionedTable(transformed_partitions)
 
-    def to_list(self) -> List["LTSeq"]:
+    def to_list(self) -> list["LTSeq"]:
         """
         Convert to list of LTSeq objects.
 
@@ -384,7 +384,7 @@ class PartitionedTable:
         rows = df.to_dict("records")
 
         # Evaluate partition function on each row and group
-        partitions_dict: Dict[Any, List[Dict]] = {}
+        partitions_dict: dict[Any, list[dict]] = {}
 
         for row_idx, row_data in enumerate(rows):
             try:
@@ -419,7 +419,7 @@ class _PrecomputedPartitionedTable(PartitionedTable):
     Used internally by map() to return results without recomputing partitions.
     """
 
-    def __init__(self, precomputed_partitions: Dict[Any, "LTSeq"]):
+    def __init__(self, precomputed_partitions: dict[Any, "LTSeq"]):
         """
         Initialize with pre-computed partition dictionary.
 

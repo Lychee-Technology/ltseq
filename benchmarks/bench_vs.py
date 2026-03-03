@@ -164,9 +164,10 @@ def duckdb_session(data_file):
 
 def ltseq_session(t_sorted):
     """LTSeq: group_ordered on user/time boundary, count groups via first()."""
-    cond = lambda r: (
-        (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
-    )
+    def cond(r):
+        return (
+            (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
+        )
     grouped = t_sorted.group_ordered(cond)
     # Each group = one session. first() collapses to 1 row per group, count() gives total.
     return grouped.first().count()

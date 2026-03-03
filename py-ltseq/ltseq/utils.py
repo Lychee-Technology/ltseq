@@ -1,7 +1,12 @@
 """Utility functions for LTSeq."""
 
+from typing import TYPE_CHECKING
 
-def seq(start_or_stop, stop=None, step=1):
+if TYPE_CHECKING:
+    from .core import LTSeq
+
+
+def seq(start_or_stop: int, stop: int | None = None, step: int = 1) -> "LTSeq":
     """
     Generate an integer sequence as a single-column LTSeq.
 

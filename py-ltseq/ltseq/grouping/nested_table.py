@@ -2,7 +2,7 @@
 
 import re
 import textwrap
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 from .proxies import GroupProxy, RowProxy
 from .sql_parsing import (
@@ -76,7 +76,7 @@ class NestedTable:
         """Return the number of rows in the grouped table."""
         return len(self._ltseq.to_pandas())
 
-    def to_pandas(self):
+    def to_pandas(self) -> Any:
         """Convert the grouped table to a pandas DataFrame."""
         return self._ltseq.to_pandas()
 
@@ -350,7 +350,7 @@ Supported group methods:
             source_str = source if source else "<unavailable>"
             raise ValueError(get_derive_parse_error_message(source_str, str(e)))
 
-    def _capture_derive_via_proxy(self, group_mapper: Callable) -> Dict[str, str]:
+    def _capture_derive_via_proxy(self, group_mapper: Callable) -> dict[str, str]:
         """
         Capture derive expressions using proxy pattern.
 
@@ -391,7 +391,7 @@ Supported group methods:
         return derive_exprs
 
     def _derive_via_sql(
-        self, flattened: "LTSeq", derive_exprs: Dict[str, str]
+        self, flattened: "LTSeq", derive_exprs: dict[str, str]
     ) -> "LTSeq":
         """Apply derived column expressions via SQL SELECT with window functions."""
         result = flattened.__class__()

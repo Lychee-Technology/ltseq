@@ -1,9 +1,13 @@
 """Core LTSeq table class with data operations."""
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .linking import LinkedTable
+    from .partitioning import PartitionedTable 
 
 from .expr import SchemaProxy, _lambda_to_expr
-from .helpers import _infer_schema_from_csv
 
 # Import mixin classes
 from .io_ops import IOMixin
@@ -39,11 +43,11 @@ class LTSeq(
                 "Please rebuild with `maturin develop`."
             )
         self._inner = ltseq_core.LTSeqTable()
-        self._schema: Dict[str, str] = {}
-        self._sort_keys: Optional[List[Tuple[str, bool]]] = (
+        self._schema: dict[str, str] = {}
+        self._sort_keys: list[tuple[str, bool]] | None = (
             None  # [(col, is_desc), ...]
         )
-        self._name: Optional[str] = None  # Table name for lookup operations
+        self._name: str | None = None  # Table name for lookup operations
 
     def show(self, n: int = 10) -> "LTSeq":
         """
@@ -102,7 +106,7 @@ class LTSeq(
 
         return f"{header}\nColumns: [{col_info}]\n{preview}"
 
-    def pipe(self, func, *args, **kwargs) -> "LTSeq":
+    def pipe(self, func: Callable[..., "LTSeq"], *args: Any, **kwargs: Any) -> "LTSeq":
         """
         Apply a function to this table, enabling functional composition in chains.
 
@@ -212,7 +216,7 @@ class LTSeq(
         """
         return len(self)
 
-    def collect(self) -> List[Dict[str, Any]]:
+    def collect(self) -> list[dict[str, Any]]:
         """
         Materialize all rows as a list of dictionaries.
 
@@ -233,7 +237,7 @@ class LTSeq(
         return df.to_dict("records")
 
     @property
-    def schema(self) -> Dict[str, str]:
+    def schema(self) -> dict[str, str]:
         """
         Return the table schema with column names and types.
 
@@ -247,7 +251,7 @@ class LTSeq(
         return self._schema.copy()
 
     @property
-    def columns(self) -> List[str]:
+    def columns(self) -> list[str]:
         """
         Return list of column names.
 
@@ -261,7 +265,7 @@ class LTSeq(
         return list(self._schema.keys())
 
     @property
-    def dtypes(self) -> List[Tuple[str, str]]:
+    def dtypes(self) -> list[tuple[str, str]]:
         """
         Return list of (column_name, data_type) tuples.
 
@@ -275,7 +279,7 @@ class LTSeq(
         return list(self._schema.items())
 
     @property
-    def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
+    def sort_keys(self) -> list[tuple[str, bool]] | None:
         """
         Get the current sort keys for this table.
 
@@ -292,7 +296,7 @@ class LTSeq(
         """
         return self._sort_keys
 
-    def is_sorted_by(self, *keys: str, desc: Union[bool, List[bool]] = False) -> bool:
+    def is_sorted_by(self, *keys: str, desc: bool | list[bool] = False) -> bool:
         """
         Check if this table is sorted by the specified keys.
 
@@ -343,7 +347,7 @@ class LTSeq(
 
         return True
 
-    def _capture_expr(self, fn: Callable) -> Dict[str, Any]:
+    def _capture_expr(self, fn: Callable) -> dict[str, Any]:
         """
         Capture and serialize an expression tree from a lambda.
 
@@ -434,7 +438,7 @@ class LTSeq(
 
         return LinkedTable(self, target_table, on, as_, join_type)
 
-    def partition(self, *args, by: Callable | None = None) -> "PartitionedTable":
+    def partition(self, *args: Any, by: Callable | None = None) -> "PartitionedTable":
         """
         Partition the table into groups based on columns or a key function.
 

@@ -1,6 +1,10 @@
 """I/O operations for LTSeq: read_csv, write_csv, scan, _from_rows."""
 
-from typing import Any, Dict
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .cursor import Cursor
 
 from .helpers import _infer_schema_from_csv, _infer_schema_from_parquet
 
@@ -119,7 +123,7 @@ class IOMixin:
         return Cursor(rust_cursor)
 
     @classmethod
-    def _from_rows(cls, rows: list[Dict[str, Any]], schema: Dict[str, str]) -> "LTSeq":
+    def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq":
         """
         Create an LTSeq instance from a list of row dictionaries.
 
@@ -203,7 +207,7 @@ class IOMixin:
         self._inner.write_parquet(path, compression)
 
     @classmethod
-    def from_arrow(cls, arrow_table) -> "LTSeq":
+    def from_arrow(cls, arrow_table: Any) -> "LTSeq":
         """
         Create an LTSeq table from a PyArrow Table.
 
@@ -279,7 +283,7 @@ class IOMixin:
         return t
 
     @classmethod
-    def from_pandas(cls, df) -> "LTSeq":
+    def from_pandas(cls, df: Any) -> "LTSeq":
         """
         Create an LTSeq table from a pandas DataFrame.
 

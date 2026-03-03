@@ -1,6 +1,6 @@
 """LinkedTable class for pointer-based join operations."""
 
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable
 
 from .expr import _lambda_to_expr
 from .helpers import _extract_join_keys
@@ -42,7 +42,7 @@ class LinkedTable:
         self._alias = alias
         self._join_type = join_type
         self._schema = source_table._schema.copy()
-        self._materialized: Optional["LTSeq"] = None  # Lazy materialization
+        self._materialized: "LTSeq | None" = None  # Lazy materialization
 
         # Add linked column metadata to schema with prefix
         for col_name, col_type in target_table._schema.items():
@@ -115,7 +115,7 @@ class LinkedTable:
         materialized = self._materialize()
         return len(materialized)
 
-    def filter(self, predicate: Callable) -> Union["LinkedTable", "LTSeq"]:
+    def filter(self, predicate: Callable) -> "LinkedTable | LTSeq":
         """
         Filter rows with support for both source and linked columns.
 
@@ -208,7 +208,7 @@ class LinkedTable:
         sliced_source = self._source.slice(start, end)
         return LinkedTable(sliced_source, self._target, self._join_fn, self._alias)
 
-    def distinct(self, key_fn: Callable = None) -> "LinkedTable":
+    def distinct(self, key_fn: Callable | None = None) -> "LinkedTable":
         """Get distinct rows."""
         if key_fn is None:
             distinct_source = self._source.distinct()

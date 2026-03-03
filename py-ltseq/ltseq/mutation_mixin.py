@@ -1,12 +1,15 @@
 """Copy-on-write row-level mutation operations for LTSeq."""
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 
 class MutationMixin:
     """Mixin providing copy-on-write row mutation operations for LTSeq."""
 
-    def insert(self, pos: int, row_dict: Dict[str, Any]) -> "LTSeq":
+    def insert(self, pos: int, row_dict: dict[str, Any]) -> "LTSeq":
         """
         Insert a row at the given 0-based position (copy-on-write).
 
@@ -49,7 +52,7 @@ class MutationMixin:
         result._sort_keys = None
         return result
 
-    def delete(self, predicate_or_pos) -> "LTSeq":
+    def delete(self, predicate_or_pos: Callable | int) -> "LTSeq":
         """
         Delete rows matching a predicate or the single row at a 0-based index.
 

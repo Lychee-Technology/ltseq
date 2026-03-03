@@ -11,7 +11,7 @@ Other types are imported from:
 - lookup_expr: LookupExpr
 """
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .base import Expr
 from .accessors import StringAccessor, TemporalAccessor
@@ -34,7 +34,7 @@ class ColumnExpr(Expr):
         """Initialize a ColumnExpr with a column name."""
         self.name = name
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """Serialize to dict: {"type": "Column", "name": self.name}"""
         return {"type": "Column", "name": self.name}
 
@@ -80,9 +80,9 @@ class CallExpr(Expr):
     def __init__(
         self,
         func: str,
-        args: tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-        on: Optional[Expr] = None,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+        on: "Expr | None" = None,
     ):
         """Initialize a CallExpr with function name, args, kwargs, and target."""
         self.func = func
@@ -90,7 +90,7 @@ class CallExpr(Expr):
         self.kwargs = kwargs if kwargs is not None else {}
         self.on = on
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """
         Serialize to dict with recursive serialization of args/kwargs/on.
 
@@ -136,8 +136,8 @@ class CallExpr(Expr):
 
     def over(
         self,
-        partition_by: Optional[Expr] = None,
-        order_by: Optional[Expr] = None,
+        partition_by: "Expr | None" = None,
+        order_by: "Expr | None" = None,
         descending: bool = False,
     ) -> "WindowExpr":
         """
@@ -180,9 +180,9 @@ class WindowExpr(Expr):
 
     def __init__(
         self,
-        expr: CallExpr,
-        partition_by: Optional[Expr] = None,
-        order_by: Optional[Expr] = None,
+        expr: "CallExpr",
+        partition_by: "Expr | None" = None,
+        order_by: "Expr | None" = None,
         descending: bool = False,
     ):
         """Initialize a WindowExpr with expression and window specification."""
@@ -191,7 +191,7 @@ class WindowExpr(Expr):
         self.order_by = order_by
         self.descending = descending
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """
         Serialize to dict with window specification.
 

@@ -1,7 +1,7 @@
 """SQL parsing utilities for converting Python lambdas to SQL expressions."""
 
 import ast
-from typing import Dict, Optional
+from typing import Any
 
 
 def extract_lambda_from_chain(source: str) -> str:
@@ -41,7 +41,7 @@ def extract_lambda_from_chain(source: str) -> str:
     return lambda_source.strip()
 
 
-def ast_op_to_sql(op) -> Optional[str]:
+def ast_op_to_sql(op) -> str | None:
     """Convert AST operator to SQL operator."""
     op_map = {
         ast.Gt: ">",
@@ -54,7 +54,7 @@ def ast_op_to_sql(op) -> Optional[str]:
     return op_map.get(type(op))
 
 
-def ast_binop_to_sql(op) -> Optional[str]:
+def ast_binop_to_sql(op) -> str | None:
     """Convert AST BinOp to SQL operator."""
     if isinstance(op, ast.Add):
         return "+"
@@ -74,7 +74,7 @@ def ast_binop_to_sql(op) -> Optional[str]:
 class FilterSQLParser:
     """Parser for converting filter predicates to SQL WHERE clauses."""
 
-    def try_parse_filter_to_sql(self, group_predicate) -> Optional[str]:
+    def try_parse_filter_to_sql(self, group_predicate) -> str | None:
         """
         Attempt to parse a group filter predicate to SQL with window functions.
 
@@ -93,7 +93,7 @@ class FilterSQLParser:
         except Exception:
             return None
 
-    def _ast_to_sql(self, node) -> Optional[str]:
+    def _ast_to_sql(self, node) -> str | None:
         """Convert an AST node to SQL WHERE clause."""
         if isinstance(node, ast.Compare):
             left_sql = self._ast_to_sql(node.left)
@@ -142,7 +142,7 @@ class FilterSQLParser:
 
         return None
 
-    def _ast_call_to_sql(self, node) -> Optional[str]:
+    def _ast_call_to_sql(self, node) -> str | None:
         """Convert AST function call to SQL window function."""
         if not (
             isinstance(node.func, ast.Attribute)
@@ -195,7 +195,7 @@ class FilterSQLParser:
 
         return None
 
-    def _ast_inner_predicate_to_sql(self, node) -> Optional[str]:
+    def _ast_inner_predicate_to_sql(self, node) -> str | None:
         """Convert an inner predicate (r.col op val) to SQL condition."""
         if isinstance(node, ast.Compare):
             left_sql = self._ast_row_expr_to_sql(node.left)
@@ -248,14 +248,14 @@ class FilterSQLParser:
 
         return None
 
-    def _ast_row_expr_to_sql(self, node) -> Optional[str]:
+    def _ast_row_expr_to_sql(self, node) -> str | None:
         """Convert r.col to column name."""
         if isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id == "r":
                 return node.attr
         return None
 
-    def _ast_row_method_to_sql(self, node) -> Optional[str]:
+    def _ast_row_method_to_sql(self, node) -> str | None:
         """Convert r.col.is_null() or similar method calls to SQL."""
         if not isinstance(node.func, ast.Attribute):
             return None
@@ -274,7 +274,7 @@ class FilterSQLParser:
 
         return None
 
-    def _ast_attribute_to_sql(self, node) -> Optional[str]:
+    def _ast_attribute_to_sql(self, node) -> str | None:
         """Convert AST attribute access to SQL."""
         if isinstance(node.value, ast.Call):
             call_node = node.value
@@ -297,7 +297,7 @@ class FilterSQLParser:
 class DeriveSQLParser:
     """Parser for converting derive expressions to SQL window functions."""
 
-    def extract_derive_expressions(self, ast_tree, schema: Dict) -> Dict[str, str]:
+    def extract_derive_expressions(self, ast_tree, schema: dict[str, str]) -> dict[str, str]:
         """
         Extract derive expressions from lambda g: {dict} AST.
 
@@ -330,7 +330,7 @@ class DeriveSQLParser:
 
         return result
 
-    def _process_derive_expr(self, expr, schema: Dict) -> str:
+    def _process_derive_expr(self, expr, schema: dict[str, str]) -> str:
         """Process a derive expression and return SQL window function."""
         if isinstance(expr, ast.Call):
             return self._process_derive_call(expr, schema)
@@ -340,7 +340,7 @@ class DeriveSQLParser:
             return self._process_derive_attribute(expr, schema)
         return ""
 
-    def _process_derive_call(self, call_node, schema: Dict) -> str:
+    def _process_derive_call(self, call_node, schema: dict[str, str]) -> str:
         """Process function calls like g.count(), g.max('col'), etc."""
         if not isinstance(call_node.func, ast.Attribute):
             return ""
@@ -362,7 +362,7 @@ class DeriveSQLParser:
 
         return ""
 
-    def _process_derive_attribute(self, attr_node, schema: Dict) -> str:
+    def _process_derive_attribute(self, attr_node, schema: dict[str, str]) -> str:
         """Process attribute access chains like g.first().col or g.last().col."""
         if not isinstance(attr_node.value, ast.Call):
             return ""
@@ -382,7 +382,7 @@ class DeriveSQLParser:
 
         return ""
 
-    def _process_derive_binop(self, binop_node, schema: Dict) -> str:
+    def _process_derive_binop(self, binop_node, schema: dict[str, str]) -> str:
         """Process binary operations like (expr1) - (expr2), (expr1) / (expr2)."""
         op_str = ast_binop_to_sql(binop_node.op)
         if not op_str:
@@ -412,7 +412,7 @@ def get_derive_parse_error_message(source: str, error: str) -> str:
     return f"Failed to parse derive: {src}\nError: {error}"
 
 
-def group_expr_to_sql(expr: Dict) -> str:
+def group_expr_to_sql(expr: dict[str, Any]) -> str:
     """
     Convert a serialized GroupExpr to SQL window function.
 
