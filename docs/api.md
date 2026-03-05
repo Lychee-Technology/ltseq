@@ -18,7 +18,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` before window operations |
 | `AttributeError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
 | `ValueError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
-| `ValueError: tables not sorted by join keys` | `join_sorted` called on unsorted tables | Call `.sort(join_key)` on both tables first |
+| `ValueError: tables not sorted by join keys` | `join(strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 
@@ -41,6 +41,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | Select columns | `.select()` | `t.select("id", "name")` |
 | Add columns | `.derive()` | `t.derive(total=lambda r: r.a + r.b)` |
 | Sort | `.sort()` | `t.sort("date", desc=True)` |
+| Declare sorted | `.assume_sorted()` | `t.assume_sorted("date")` |
 | Deduplicate | `.distinct()` | `t.distinct("id")` |
 | Slice rows | `.slice()` | `t.slice(offset=10, length=5)` |
 | First N rows | `.head()` | `t.head(10)` |
@@ -73,7 +74,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | Operation | Method | Example |
 |-----------|--------|---------|
 | Hash join | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
-| Merge join | `.join_sorted()` | `a.sort("id").join_sorted(b.sort("id"), on="id")` |
+| Merge join | `.join(strategy="merge")` | `a.sort("id").join(b.sort("id"), on=..., strategy="merge")` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
 
@@ -247,6 +248,24 @@ with_tax = t.derive(lambda r: {"tax": r.price * 0.1})
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
 print(t_sorted.sort_keys)  # [("date", False), ("id", True)]
+```
+
+### `LTSeq.assume_sorted`
+- **Signature**: `LTSeq.assume_sorted(*keys: str, desc: Union[bool, List[bool]] = False) -> LTSeq`
+- **Behavior**: Declare that data is already sorted by the given keys **without physically sorting**. Sets sort metadata so downstream operations (window functions, `shift`, `join_sorted`, GPU optimizer) can use order-aware algorithms. For Parquet sources, re-registers the file with `file_sort_order`, enabling DataFusion's `enforce_sorting` pass to elide redundant sorts. For non-Parquet sources, materializes into a `MemTable` with `with_sort_order()`.
+- **Parameters**: `keys` column names declaring the sort order; `desc` descending flag(s) — single bool or per-key list
+- **Returns**: `LTSeq` with sort metadata set (same data, no physical reordering)
+- **Safety**: The caller is responsible for ensuring the data is actually sorted in the declared order. Incorrect metadata will produce wrong results in window functions, shift operations, and sorted joins.
+- **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid desc type)
+- **Example**:
+```python
+# Pre-sorted Parquet file — skip the sort, just declare the order
+t = LTSeq.read_parquet("presorted.parquet")
+t = t.assume_sorted("userid", "eventtime")
+t.is_sorted_by("userid")  # True
+
+# Now window functions and sort-aware joins work without a physical sort
+with_prev = t.derive(prev=lambda r: r.eventtime.shift(1))
 ```
 
 ### `LTSeq.sort_keys` (property)
@@ -814,54 +833,36 @@ flag = t_small.is_subset(t_big, on=lambda r: r.id)
 ## 6. Association and Joins
 
 ### `LTSeq.join`
-- **Signature**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner") -> LTSeq`
-- **Behavior**: Standard hash join; no sorting required
-- **Parameters**: `other` other table; `on` join condition; `how` in {inner,left,right,full}
+- **Signature**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: Optional[str] = None) -> LTSeq`
+- **Behavior**: Join two tables. The `strategy` parameter selects the join algorithm:
+  - `None` or `"hash"` — standard hash join (no sorting required)
+  - `"merge"` — merge join for pre-sorted tables; validates sort order using `is_sorted_by()` before executing (O(N+M) sequential scan)
+- **Parameters**: `other` other table; `on` join condition; `how` in {inner,left,right,full}; `strategy` in {None, "hash", "merge"}
 - **Returns**: joined `LTSeq` (conflicting columns get a suffix)
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how or schema not initialized)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, or strategy="merge" with unsorted tables)
 - **Example**:
 ```python
+# Hash join (default)
 joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+
+# Merge join (both sides must be sorted by join key)
+result = t1.sort("id").join(t2.sort("id"),
+    on=lambda a, b: a.id == b.id, strategy="merge")
 ```
 
-### `LTSeq.join_merge`
+### `LTSeq.join_merge` (deprecated)
 - **Signature**: `LTSeq.join_merge(other: LTSeq, on: Callable, join_type: str = "inner") -> LTSeq`
-- **Behavior**: Merge join; requires both sides sorted by join key; O(N+M)
+- **Behavior**: Merge join; **deprecated** in favor of `join(..., strategy="merge")`. Unlike `strategy="merge"`, this method does **not** validate sort order.
 - **Parameters**: `other` other table; `on` join condition; `join_type` in {inner,left,right,full}
 - **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid join_type or unsorted)
-- **Example**:
-```python
-result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
-```
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid join_type)
 
-### `LTSeq.join_sorted`
-- **Signature**: `LTSeq.join_sorted(other: LTSeq, on: Union[str, List[str]], how: str = "inner") -> LTSeq`
-- **Behavior**: Merge join with strict validation that both tables are sorted by join keys. Validates sort order using `is_sorted_by()` before executing.
-- **Parameters**: `other` other table (must be sorted by join key); `on` join column name(s); `how` in {inner,left,right,full}
+### `LTSeq.join_sorted` (deprecated)
+- **Signature**: `LTSeq.join_sorted(other: LTSeq, on: Callable, how: str = "inner") -> LTSeq`
+- **Behavior**: Merge join with sort order validation; **deprecated** in favor of `join(..., strategy="merge")`. Functionally identical to `join(..., strategy="merge")`.
+- **Parameters**: `other` other table (must be sorted by join key); `on` join condition; `how` in {inner,left,right,full}
 - **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (tables not sorted by join keys, or sort directions don't match)
-- **Example**:
-```python
-# Both tables must be sorted by their join keys
-t1_sorted = t1.sort("id")
-t2_sorted = t2.sort("id")
-result = t1_sorted.join_sorted(t2_sorted, on="id")
-
-# Composite keys: both tables must be sorted by all join keys
-t1_sorted = t1.sort("region", "date")
-t2_sorted = t2.sort("region", "date")
-result = t1_sorted.join_sorted(t2_sorted, on=["region", "date"])
-
-# Descending sort also supported (must match)
-t1_desc = t1.sort("id", desc=True)
-t2_desc = t2.sort("id", desc=True)
-result = t1_desc.join_sorted(t2_desc, on="id")
-
-# Raises ValueError if not sorted correctly
-t_unsorted = LTSeq.read_csv("data.csv")
-t_unsorted.join_sorted(t2_sorted, on="id")  # ValueError!
-```
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (tables not sorted by join keys)
 
 ### `LTSeq.asof_join`
 - **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward") -> LTSeq`
@@ -925,13 +926,15 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 
 | Method | Best Use Case | Algorithm | SQL Equivalent |
 | --- | --- | --- | --- |
-| `join` | Unsorted general data | Hash Join | `JOIN` |
-| `join_sorted` / `join_merge` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
-| `semi_join` | Filter by key existence | Hash Semi-Join | `WHERE EXISTS` |
-| `anti_join` | Filter by key non-existence | Hash Anti-Join | `WHERE NOT EXISTS` |
-| `link` | Fact-to-dimension pointer access | Pointer | `LEFT JOIN` (lazy) |
-| `lookup` | Fact + small dimension in memory | Direct Address | `LEFT JOIN` (indexed) |
-| `asof_join` | Financial time series | Ordered Search | `LATERAL JOIN` |
+| `join()` | Unsorted general data | Hash Join | `JOIN` |
+| `join(strategy="merge")` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
+| `join_merge()` | *(deprecated, use `strategy="merge"`)* | Merge Join | `JOIN` (optimized) |
+| `join_sorted()` | *(deprecated, use `strategy="merge"`)* | Merge Join | `JOIN` (optimized) |
+| `semi_join()` | Filter by key existence | Hash Semi-Join | `WHERE EXISTS` |
+| `anti_join()` | Filter by key non-existence | Hash Anti-Join | `WHERE NOT EXISTS` |
+| `link()` | Fact-to-dimension pointer access | Pointer | `LEFT JOIN` (lazy) |
+| `lookup()` | Fact + small dimension in memory | Direct Address | `LEFT JOIN` (indexed) |
+| `asof_join()` | Financial time series | Ordered Search | `LATERAL JOIN` |
 
 ## 7. Aggregation, Partitioning, Pivot
 
@@ -1549,9 +1552,64 @@ result = orders.derive(
 
 ## 10. Execution and Performance Notes
 
+### Sort-Order-Aware Performance Model
+
+LTSeq's core performance advantage comes from **sort-order-aware algorithm selection**. When data is known to be sorted (via `.sort()` or `.assume_sorted()`), the engine selects fundamentally different — and faster — algorithms:
+
+| Operation | Unsorted Algorithm | Sorted Algorithm | Typical Speedup |
+|-----------|-------------------|------------------|-----------------|
+| `.agg(by=...)` | Hash table build + probe | Segmented scan (sequential) | 2-5x |
+| `.join(on=...)` / `.join_sorted(on=...)` | Hash build + probe | Merge join (sequential scan) | 3-10x (large data) |
+| `.distinct(...)` | Hash set construction | Adjacent-duplicate removal | 2-4x |
+| `.search_first(...)` | Linear scan O(n) | Binary search O(log n) | 100-1000x (large data) |
+| `.group_ordered(...)` | N/A (requires order) | Single-pass consecutive grouping | Unique to LTSeq |
+| `.rolling(n).agg()` | Random access | Sequential scan | 2-5x |
+
+**How it works:** The `sort_keys` metadata propagates through the operation chain. Order-preserving operations (`filter`, `derive`, `select`, `slice`) preserve sort metadata. Order-destroying operations (`join`, `agg`, `distinct`) clear it. The engine reads this metadata at plan construction time to select the optimal algorithm — there is no runtime overhead.
+
+```python
+t = LTSeq.read_csv("data.csv")      # sort_keys = None
+t = t.sort("date", "id")            # sort_keys = [("date", False), ("id", False)]
+t = t.filter(lambda r: r.x > 0)     # sort_keys preserved
+t = t.derive(y=lambda r: r.x + 1)   # sort_keys preserved
+t = t.join(other, ...)               # sort_keys = None (join may reorder)
+
+# For pre-sorted data, skip the sort overhead:
+t = LTSeq.read_parquet("presorted.parquet")
+t = t.assume_sorted("date", "id")   # sort_keys set without physical sort
+```
+
+**Performance targets:**
+- **5x+ on ordered data** vs general-purpose engines (DuckDB, Polars) for ordered-sequence workloads (consecutive grouping, sorted joins, windowing on pre-sorted data)
+- **0.95x+ on arbitrary data** — LTSeq matches general-purpose engines via DataFusion's standard hash-based operators
+
+### GPU Acceleration (Transparent)
+
+When a CUDA-capable GPU is available and the `gpu` feature is enabled, LTSeq automatically accelerates operations on the GPU. **No API changes are required** — the same Python code runs on CPU or GPU:
+
+```python
+# This code runs identically on CPU and GPU.
+# GPU acceleration is automatic when hardware is available.
+result = (
+    LTSeq.read_csv("stock.csv")
+    .sort("date")
+    .derive(is_up=lambda r: r.price > r.price.shift(1))
+    .group_ordered(lambda r: r.is_up)
+    .filter(lambda g: (g.first().is_up == True) & (g.count() > 3))
+    .derive(lambda g: {"start": g.first().date, "end": g.last().date})
+)
+```
+
+The GPU optimizer uses the same sort-order metadata to select between ordered and hash-based GPU operator variants. Operations not yet supported on GPU automatically fall back to CPU execution with no user intervention.
+
+> **Limitation:** `scan()` with arbitrary state functions is always CPU-only (see below).
+
+### General Execution Notes
+
 - All expressions are serialized and pushed down to Rust/DataFusion, not evaluated row-by-row in Python
 - String/temporal/NULL extensions map to SQL/DataFusion functions
 - `to_cursor` enables streaming for very large datasets
+- `scan()` with arbitrary state-transition functions (`lambda s, r: ...`) is **inherently sequential** and always executes on CPU. Each state depends on the previous, making GPU parallelization impossible for opaque functions. For parallelizable cumulative operations, use `cum_sum()` (which maps to GPU prefix sum when available) or express the operation as a window function
 
 ### Expression SQL Translation Reference
 
