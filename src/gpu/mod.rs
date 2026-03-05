@@ -38,12 +38,15 @@
 pub mod exec_node;
 pub mod ffi;
 pub mod filter_exec;
+pub mod hash_join;
+pub mod hash_ops;
 pub mod merge_join;
 pub mod optimizer;
 pub mod ordered_ops;
 pub mod planner;
 pub mod raw_exec;
 pub mod sort_aware;
+pub mod sort_exec;
 pub mod substrait;
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream};
@@ -412,6 +415,43 @@ extern "C" __global__ void filter_neq_f32(
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         mask[idx] = (data[idx] != threshold) ? 1 : 0;
+    }
+}
+
+// --- Mask combination kernels for compound predicates (AND/OR/NOT) ---
+
+extern "C" __global__ void mask_and(
+    const unsigned char* __restrict__ a,
+    const unsigned char* __restrict__ b,
+    unsigned char* __restrict__ out,
+    const unsigned int n
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = a[idx] & b[idx];
+    }
+}
+
+extern "C" __global__ void mask_or(
+    const unsigned char* __restrict__ a,
+    const unsigned char* __restrict__ b,
+    unsigned char* __restrict__ out,
+    const unsigned int n
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = a[idx] | b[idx];
+    }
+}
+
+extern "C" __global__ void mask_not(
+    const unsigned char* __restrict__ input,
+    unsigned char* __restrict__ out,
+    const unsigned int n
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = 1 - input[idx];
     }
 }
 "#;

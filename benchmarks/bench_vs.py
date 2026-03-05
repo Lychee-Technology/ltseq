@@ -10,6 +10,7 @@ the ClickBench hits.parquet dataset (~100M rows):
   Round 2: User sessionization (30-min gap detection)
   Round 3: Sequential pattern matching (URL funnel)
   Round 4: GPU-accelerated filter (counterid > threshold)
+  Round 5: GPU hash aggregate (GROUP BY regionid, 5 agg funcs)
 
 Usage:
     # Full benchmark (requires hits_sorted.parquet)
@@ -254,6 +255,44 @@ def ltseq_filter_count(t, threshold):
 
 
 # ---------------------------------------------------------------------------
+# Round 5: GPU Hash Aggregate — numeric group key (regionid)
+# ---------------------------------------------------------------------------
+
+
+def duckdb_numeric_agg(data_file):
+    """DuckDB: GROUP BY regionid with 5 aggregate functions."""
+    return duckdb.sql(f"""
+        SELECT regionid,
+               count(*) as cnt,
+               sum(counterid) as total_counter,
+               min(watchid) as min_watch,
+               max(watchid) as max_watch,
+               avg(counterid) as avg_counter
+        FROM '{data_file}'
+        GROUP BY regionid
+        ORDER BY cnt DESC
+        LIMIT 20
+    """).fetchall()
+
+
+def ltseq_numeric_agg(t):
+    """LTSeq: agg by regionid with 5 aggregate functions."""
+    return (
+        t.agg(
+            by=lambda r: r.regionid,
+            cnt=lambda g: g.regionid.count(),
+            total_counter=lambda g: g.counterid.sum(),
+            min_watch=lambda g: g.watchid.min(),
+            max_watch=lambda g: g.watchid.max(),
+            avg_counter=lambda g: g.counterid.avg(),
+        )
+        .sort("cnt", desc=True)
+        .slice(0, 20)
+        .collect()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -273,6 +312,7 @@ def print_results_table(results):
         "R2: Sessionization": (10, 4),
         "R3: Funnel": (10, 5),
         "R4: GPU Filter": (1, 1),
+        "R5: Numeric Agg": (7, 8),
     }
 
     for r in results:
@@ -337,7 +377,7 @@ def main():
         help="Use 1M-row sample instead of full dataset",
     )
     parser.add_argument(
-        "--round", type=int, choices=[1, 2, 3, 4], help="Run specific round only"
+        "--round", type=int, choices=[1, 2, 3, 4, 5], help="Run specific round only"
     )
     parser.add_argument(
         "--iterations", type=int, default=ITERATIONS, help="Number of timed iterations"
@@ -529,6 +569,31 @@ def main():
 
         results.append(
             {"round_name": "R4: GPU Filter", "duckdb": duck_r4, "ltseq": ltseq_r4}
+        )
+
+    # -----------------------------------------------------------------------
+    # Round 5: GPU Hash Aggregate (numeric group key)
+    # -----------------------------------------------------------------------
+    if args.round is None or args.round == 5:
+        print("\n--- Round 5: GPU Hash Aggregate (GROUP BY regionid, 5 agg funcs) ---")
+
+        duck_r5 = bench("DuckDB", lambda: duckdb_numeric_agg(data_file))
+        ltseq_r5 = bench("LTSeq", lambda: ltseq_numeric_agg(t_ltseq))
+
+        # Validate: compare top-5 region counts
+        duck_top5 = duckdb_numeric_agg(data_file)[:5]
+        ltseq_top5 = ltseq_numeric_agg(t_ltseq)[:5]
+        duck_regions = {row[0] for row in duck_top5}
+        ltseq_regions = {row["regionid"] for row in ltseq_top5}
+        if duck_regions == ltseq_regions:
+            print(f"  Validation: PASS (same top 5 regions, {len(duckdb_numeric_agg(data_file))} total groups)")
+        else:
+            print(f"  Validation: WARN (different top-5 regions)")
+            print(f"    DuckDB:  {sorted(duck_regions)}")
+            print(f"    LTSeq:   {sorted(ltseq_regions)}")
+
+        results.append(
+            {"round_name": "R5: Numeric Agg", "duckdb": duck_r5, "ltseq": ltseq_r5}
         )
 
     # -----------------------------------------------------------------------

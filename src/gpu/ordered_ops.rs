@@ -629,6 +629,11 @@ fn get_ordered_ops_function(name: &str) -> Option<cudarc::driver::safe::CudaFunc
     get_ordered_ops_module()?.load_function(name).ok()
 }
 
+/// Public accessor for ordered ops kernel functions (used by hash_ops).
+pub fn get_ordered_ops_function_pub(name: &str) -> Option<cudarc::driver::safe::CudaFunction> {
+    get_ordered_ops_function(name)
+}
+
 // ============================================================================
 // Boundary Detection Mode
 // ============================================================================

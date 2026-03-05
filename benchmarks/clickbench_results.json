@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-02T20:25:50.153909",
+  "timestamp": "2026-03-05T09:44:29.475613",
   "system": {
     "platform": "Linux-6.18.15-3-cachyos-lts-x86_64-with-glibc2.43",
     "processor": "",
@@ -15,24 +15,24 @@
       "round_name": "R1: Top URLs",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.2442,
+        "median_s": 0.2431,
         "times": [
-          0.2442,
-          0.2449,
-          0.2391
+          0.2455,
+          0.2406,
+          0.2431
         ],
-        "mem_delta_mb": 1431.5,
+        "mem_delta_mb": 1458.3,
         "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 647217), ('http://kinopoisk.ru', 299730), ('http://bdsm_po_yers=0&with_video', 161023), ('http://video.yandex', 117298), ('http://auto_fiat_dlya"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.3477,
+        "median_s": 0.3257,
         "times": [
-          0.3559,
-          0.3477,
-          0.3284
+          0.335,
+          0.3247,
+          0.3257
         ],
-        "mem_delta_mb": 1229.6,
+        "mem_delta_mb": 1407.5,
         "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 647217}, {'url': 'http://kinopoisk.ru', 'cnt': 299730}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 161023}, {'url': 'http:"
       }
     },
@@ -40,24 +40,24 @@
       "round_name": "R2: Sessionization",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.469,
+        "median_s": 0.4421,
         "times": [
-          0.4632,
-          0.4742,
-          0.469
+          0.4297,
+          0.4831,
+          0.4421
         ],
-        "mem_delta_mb": 53.1,
+        "mem_delta_mb": 66.0,
         "result": "5211971"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.0256,
+        "median_s": 0.028,
         "times": [
+          0.0349,
           0.0274,
-          0.0256,
-          0.0253
+          0.028
         ],
-        "mem_delta_mb": 48.9,
+        "mem_delta_mb": 50.1,
         "result": "5211971"
       }
     },
@@ -65,24 +65,24 @@
       "round_name": "R3: Funnel",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.8688,
+        "median_s": 0.8308,
         "times": [
-          0.8302,
-          0.8712,
-          0.8688
+          0.8308,
+          0.82,
+          0.8324
         ],
-        "mem_delta_mb": 479.7,
+        "mem_delta_mb": 466.6,
         "result": "30804"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.3078,
+        "median_s": 0.2987,
         "times": [
-          0.3078,
-          0.2964,
-          0.3082
+          0.3043,
+          0.2943,
+          0.2987
         ],
-        "mem_delta_mb": 19.3,
+        "mem_delta_mb": 11.0,
         "result": "30804"
       }
     },
@@ -90,25 +90,50 @@
       "round_name": "R4: GPU Filter",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 0.0335,
+        "median_s": 0.0303,
         "times": [
-          0.0335,
-          0.0351,
-          0.0324
+          0.0371,
+          0.0284,
+          0.0303
         ],
         "mem_delta_mb": 0.0,
-        "result": "9910158"
+        "result": "9909866"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 0.0162,
+        "median_s": 0.0174,
         "times": [
-          0.0162,
-          0.0173,
-          0.016
+          0.0184,
+          0.0165,
+          0.0174
         ],
-        "mem_delta_mb": 69.0,
-        "result": "9910158"
+        "mem_delta_mb": 132.6,
+        "result": "9909866"
+      }
+    },
+    {
+      "round_name": "R5: Numeric Agg",
+      "duckdb": {
+        "name": "DuckDB",
+        "median_s": 0.0527,
+        "times": [
+          0.0519,
+          0.0527,
+          0.0564
+        ],
+        "mem_delta_mb": 0,
+        "result": "[(229, 3543532, 438007747614, 4611686211212249819, 9223371435436683060, 123607.67381640691), (2, 1358102, 167060636767, 4611690140343398251, 9223369400740834472, 123010.37533778758), (208, 943318, 117"
+      },
+      "ltseq": {
+        "name": "LTSeq",
+        "median_s": 0.0301,
+        "times": [
+          0.0282,
+          0.0301,
+          0.0327
+        ],
+        "mem_delta_mb": 8.1,
+        "result": "[{'regionid': 229, 'cnt': 3543532, 'total_counter': 438007747614, 'min_watch': 4611686211212249819, 'max_watch': 9223371435436683060, 'avg_counter': 123607.67381640691}, {'regionid': 2, 'cnt': 1358102"
       }
     }
   ]
