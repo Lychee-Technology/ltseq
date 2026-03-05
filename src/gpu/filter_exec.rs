@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    Array, AsArray, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array,
     Date32Array, Date64Array,
     TimestampSecondArray, TimestampMillisecondArray,
     TimestampMicrosecondArray, TimestampNanosecondArray,
@@ -251,6 +251,9 @@ impl GpuCompoundPredicate {
 }
 
 /// Check if a data type is supported for GPU filter operations.
+/// Numeric, date/timestamp, boolean, and string types are all supported.
+/// String and boolean types use CPU-side comparison with GPU mask upload,
+/// so they benefit from compound predicate combination on GPU.
 fn is_gpu_supported_type(dt: &DataType) -> bool {
     matches!(
         dt,
@@ -261,6 +264,9 @@ fn is_gpu_supported_type(dt: &DataType) -> bool {
             | DataType::Date32
             | DataType::Date64
             | DataType::Timestamp(_, _)
+            | DataType::Boolean
+            | DataType::Utf8
+            | DataType::LargeUtf8
     )
 }
 
@@ -599,6 +605,65 @@ fn gpu_filter_leaf(
     launch_cfg: LaunchConfig,
 ) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
     let column = batch.column(pred.column_index);
+
+    // --- Special-case types that don't use CUDA comparison kernels ---
+
+    // Dictionary columns: cast to the underlying value type, then filter as that type.
+    if let DataType::Dictionary(_, value_type) = &pred.data_type {
+        let cast_column = cast(column, value_type).map_err(|e| {
+            datafusion::common::DataFusionError::Execution(
+                format!("Failed to cast dictionary column to {:?}: {}", value_type, e),
+            )
+        })?;
+        let mut new_batch_columns: Vec<datafusion::arrow::array::ArrayRef> = Vec::new();
+        for i in 0..batch.num_columns() {
+            if i == pred.column_index {
+                new_batch_columns.push(cast_column.clone());
+            } else {
+                new_batch_columns.push(batch.column(i).clone());
+            }
+        }
+        // Build a new schema with the cast column type
+        let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
+        for (i, field) in batch.schema().fields().iter().enumerate() {
+            if i == pred.column_index {
+                fields.push(datafusion::arrow::datatypes::Field::new(
+                    field.name(),
+                    value_type.as_ref().clone(),
+                    field.is_nullable(),
+                ));
+            } else {
+                fields.push(field.as_ref().clone());
+            }
+        }
+        let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(fields));
+        let new_batch = RecordBatch::try_new(new_schema, new_batch_columns).map_err(|e| {
+            datafusion::common::DataFusionError::Execution(
+                format!("Failed to create batch with cast dictionary column: {}", e),
+            )
+        })?;
+        let cast_pred = GpuFilterPredicate {
+            column_index: pred.column_index,
+            column_name: pred.column_name.clone(),
+            op: pred.op,
+            literal: pred.literal.clone(),
+            data_type: value_type.as_ref().clone(),
+        };
+        return gpu_filter_leaf(&new_batch, &cast_pred, stream, n, launch_cfg);
+    }
+
+    // Boolean columns: evaluate comparison on CPU, upload mask to GPU.
+    if pred.data_type == DataType::Boolean {
+        return gpu_filter_leaf_boolean(column, pred, stream, n);
+    }
+
+    // String columns (Utf8/LargeUtf8): evaluate comparison on CPU, upload mask to GPU.
+    if matches!(pred.data_type, DataType::Utf8 | DataType::LargeUtf8) {
+        return gpu_filter_leaf_string(column, pred, stream, n);
+    }
+
+    // --- Numeric / Date / Timestamp types: use CUDA comparison kernels ---
+
     let kernel_name = pred.kernel_name();
 
     let func = get_filter_function(&kernel_name).ok_or_else(|| {
@@ -781,6 +846,129 @@ fn gpu_filter_leaf(
             format!("Unsupported GPU filter type: {:?}", pred.data_type),
         )),
     }
+}
+
+/// Boolean columns: compare on CPU, upload resulting mask to GPU.
+///
+/// Boolean columns only support `Eq` and `NotEq` against a boolean literal.
+/// The mask is uploaded to GPU so compound predicates can combine it with
+/// other GPU-evaluated masks.
+fn gpu_filter_leaf_boolean(
+    column: &datafusion::arrow::array::ArrayRef,
+    pred: &GpuFilterPredicate,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    n: usize,
+) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
+    let array = column
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| {
+            datafusion::common::DataFusionError::Execution(
+                "Column is not BooleanArray".to_string(),
+            )
+        })?;
+
+    let threshold = match &pred.literal {
+        ScalarValue::Boolean(Some(v)) => *v,
+        _ => {
+            return Err(datafusion::common::DataFusionError::Execution(
+                format!("Cannot convert {:?} to Boolean", pred.literal),
+            ))
+        }
+    };
+
+    let mask: Vec<u8> = (0..n)
+        .map(|i| {
+            // NULL values always produce false for any comparison (SQL semantics)
+            if array.is_null(i) {
+                return 0u8;
+            }
+            let val = array.value(i);
+            let result = match pred.op {
+                Operator::Eq => val == threshold,
+                Operator::NotEq => val != threshold,
+                // Boolean comparisons with ordering operators treat false < true
+                Operator::Gt => val & !threshold,    // true > false
+                Operator::Lt => !val & threshold,    // false < true
+                Operator::GtEq => val >= threshold,
+                Operator::LtEq => val <= threshold,
+                _ => false,
+            };
+            if result { 1u8 } else { 0u8 }
+        })
+        .collect();
+
+    stream.clone_htod(&mask).map_err(cuda_err)
+}
+
+/// String columns (Utf8/LargeUtf8): compare on CPU, upload resulting mask to GPU.
+///
+/// All 6 comparison operators are supported. String ordering uses lexicographic
+/// comparison. The mask is uploaded to GPU so compound predicates can combine
+/// it with GPU-evaluated numeric masks.
+fn gpu_filter_leaf_string(
+    column: &datafusion::arrow::array::ArrayRef,
+    pred: &GpuFilterPredicate,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    n: usize,
+) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
+    let threshold = match &pred.literal {
+        ScalarValue::Utf8(Some(v)) | ScalarValue::LargeUtf8(Some(v)) => v.as_str(),
+        _ => {
+            return Err(datafusion::common::DataFusionError::Execution(
+                format!("Cannot convert {:?} to string for comparison", pred.literal),
+            ))
+        }
+    };
+
+    // Extract string values based on the column type (Utf8 or LargeUtf8).
+    // Both types support .value(i) -> &str, so we use a closure for the comparison.
+    let mask: Vec<u8> = if pred.data_type == DataType::Utf8 {
+        let array = column.as_string::<i32>();
+        (0..n)
+            .map(|i| {
+                // NULL values always produce false for any comparison (SQL semantics)
+                if array.is_null(i) {
+                    return 0u8;
+                }
+                let val = array.value(i);
+                let result = match pred.op {
+                    Operator::Eq => val == threshold,
+                    Operator::NotEq => val != threshold,
+                    Operator::Gt => val > threshold,
+                    Operator::Lt => val < threshold,
+                    Operator::GtEq => val >= threshold,
+                    Operator::LtEq => val <= threshold,
+                    _ => false,
+                };
+                if result { 1u8 } else { 0u8 }
+            })
+            .collect()
+    } else {
+        // LargeUtf8
+        let array = column.as_string::<i64>();
+        (0..n)
+            .map(|i| {
+                // NULL values always produce false for any comparison (SQL semantics)
+                if array.is_null(i) {
+                    return 0u8;
+                }
+                let val = array.value(i);
+                let result = match pred.op {
+                    Operator::Eq => val == threshold,
+                    Operator::NotEq => val != threshold,
+                    Operator::Gt => val > threshold,
+                    Operator::Lt => val < threshold,
+                    Operator::GtEq => val >= threshold,
+                    Operator::LtEq => val <= threshold,
+                    _ => false,
+                };
+                if result { 1u8 } else { 0u8 }
+            })
+            .collect()
+    };
+
+    stream.clone_htod(&mask).map_err(cuda_err)
 }
 
 /// Upload i64 data to GPU, run comparison kernel, return device-side mask.
