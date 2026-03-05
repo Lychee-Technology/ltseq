@@ -64,17 +64,60 @@ _DTYPE_MAP: dict[str, str] = {
 _KERNEL_OPS: frozenset[str] = frozenset({"gt", "lt", "gte", "lte", "eq", "neq"})
 
 
+class GpuGroupBy:
+    """Intermediate object returned by :meth:`GpuTable.groupby`.
+
+    Call :meth:`agg` to produce the aggregated :class:`GpuTable`.
+    Data stays in GPU VRAM throughout.
+    """
+
+    def __init__(self, gdf: "cudf.DataFrame", keys: list[str]) -> None:
+        self._gdf = gdf
+        self._keys = keys
+
+    def agg(self, spec: dict) -> "GpuTable":
+        """Aggregate columns.
+
+        Args:
+            spec: Mapping of ``{col_name: agg_func}`` or
+                  ``{col_name: [agg_func, ...]}``.
+                  Supported functions: ``"sum"``, ``"count"``, ``"mean"``,
+                  ``"min"``, ``"max"``.
+
+        Returns:
+            New GpuTable with group keys + aggregated columns.
+
+        Example::
+            result = t.groupby("region").agg({"revenue": "sum", "qty": "mean"})
+        """
+        gb = self._gdf.groupby(self._keys, as_index=False)
+        result = gb.agg(spec)
+        # Flatten multi-level column names produced by multi-agg (e.g. ["sum", "mean"])
+        if hasattr(result.columns, "to_flat_index"):
+            result.columns = [
+                "_".join(str(c) for c in col).strip("_")
+                for col in result.columns.to_flat_index()
+            ]
+        return GpuTable(result)
+
+
 class GpuTable:
     """A GPU-resident table backed by cuDF.
 
-    Operations (filter, select, derive) stay in GPU VRAM.
-    Call `.to_ltseq()` for a single D2H transfer and DataFusion integration.
+    Operations (filter, select, derive, sort, limit, rename, groupby, join)
+    stay in GPU VRAM. Call `.to_ltseq()` for a single D2H transfer and
+    DataFusion integration.
 
     Typical usage::
 
         t = LTSeq.read_parquet_gpu("hits_sorted.parquet")
-        filtered = t.filter(lambda r: r.counterid > 5000)
-        result = filtered.select("counterid", "eventtime").to_ltseq()
+        result = (
+            t.filter(lambda r: r.counterid > 5000)
+             .groupby("region").agg({"revenue": "sum"})
+             .sort("revenue", ascending=False)
+             .limit(10)
+             .to_ltseq()
+        )
         result.show()
     """
 
@@ -224,6 +267,88 @@ class GpuTable:
             expr_dict = fn(proxy).serialize()
             gdf[col_name] = eval_expr_as_series(gdf, expr_dict)
         return GpuTable(gdf)
+
+    def sort(self, by, ascending=True) -> "GpuTable":
+        """Sort rows by one or more columns. Data stays in GPU VRAM.
+
+        Args:
+            by:        Column name or list of column names to sort by.
+            ascending: True (default) for ascending, False for descending.
+                       Can be a single bool (applied to all keys) or a list
+                       matching the length of ``by``.
+
+        Returns:
+            New GpuTable sorted in the requested order.
+
+        Example::
+            t.sort("revenue", ascending=False)
+            t.sort(["region", "revenue"], ascending=[True, False])
+        """
+        if isinstance(by, str):
+            by = [by]
+        if isinstance(ascending, bool):
+            ascending = [ascending] * len(by)
+        return GpuTable(self._gdf.sort_values(by=by, ascending=ascending))
+
+    def limit(self, n: int) -> "GpuTable":
+        """Keep only the first ``n`` rows. Data stays in GPU VRAM.
+
+        Args:
+            n: Number of rows to keep.
+
+        Returns:
+            New GpuTable with at most ``n`` rows.
+        """
+        return GpuTable(self._gdf.head(n))
+
+    def rename(self, **kwargs: str) -> "GpuTable":
+        """Rename columns. Data stays in GPU VRAM.
+
+        Args:
+            kwargs: ``old_name=new_name`` keyword pairs.
+
+        Returns:
+            New GpuTable with renamed columns.
+
+        Example::
+            t.rename(l_extendedprice="price", l_quantity="qty")
+        """
+        return GpuTable(self._gdf.rename(columns=kwargs))
+
+    def groupby(self, keys) -> "GpuGroupBy":
+        """Start a groupby aggregation.
+
+        Args:
+            keys: Column name or list of column names to group by.
+
+        Returns:
+            :class:`GpuGroupBy` — call ``.agg()`` on it to get results.
+
+        Example::
+            t.groupby("region").agg({"revenue": "sum"})
+            t.groupby(["region", "year"]).agg({"qty": ["sum", "mean"]})
+        """
+        if isinstance(keys, str):
+            keys = [keys]
+        return GpuGroupBy(self._gdf, keys)
+
+    def join(self, other: "GpuTable", on, how: str = "inner") -> "GpuTable":
+        """Hash join with another GpuTable. Both tables stay in GPU VRAM.
+
+        Args:
+            other: Right-hand GpuTable.
+            on:    Column name or list of column names to join on.
+            how:   Join type: ``"inner"`` (default), ``"left"``, ``"right"``,
+                   or ``"outer"``.
+
+        Returns:
+            New GpuTable with joined rows, data stays in GPU VRAM.
+
+        Example::
+            orders.join(customers, on="custkey")
+            lineitem.join(orders, on=["orderkey"], how="left")
+        """
+        return GpuTable(self._gdf.merge(other._gdf, on=on, how=how))
 
     # ── Materialization ─────────────────────────────────────────────────────
 

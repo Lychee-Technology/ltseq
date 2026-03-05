@@ -103,10 +103,14 @@ fn build_session_state(config: SessionConfig) -> datafusion::execution::SessionS
         // Allow disabling GPU at runtime via LTSEQ_DISABLE_GPU=1 for benchmarking
         let gpu_disabled = std::env::var("LTSEQ_DISABLE_GPU").is_ok();
         if !gpu_disabled && crate::gpu::is_gpu_available() {
-            // Append HostToGpuRule at the end of the optimizer pipeline.
-            // Running last means all standard rewrites (predicate pushdown,
-            // coalesce batches, etc.) have already been applied.
+            // GpuQueryPlanner: intercepts logical planning to detect GPU-compatible
+            // plans and log them.  In Phase 2/3 it falls back to DefaultPhysicalPlanner,
+            // preserving HostToGpuRule's filter optimisation.
             builder = builder
+                .with_query_planner(Arc::new(crate::gpu::planner::GpuQueryPlanner))
+                // Append HostToGpuRule at the end of the optimizer pipeline.
+                // Running last means all standard rewrites (predicate pushdown,
+                // coalesce batches, etc.) have already been applied.
                 .with_physical_optimizer_rule(Arc::new(crate::gpu::optimizer::HostToGpuRule));
         }
     }

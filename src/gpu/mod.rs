@@ -1,22 +1,37 @@
 //! GPU acceleration for LTSeq via CUDA.
 //!
-//! This module provides GPU-accelerated physical execution plan nodes for DataFusion.
-//! The architecture follows the PhysicalOptimizerRule pattern:
+//! # Architecture
 //!
-//! 1. `HostToGpuRule` (PhysicalOptimizerRule) walks the physical plan tree and replaces
-//!    CPU-based `FilterExec` nodes with `GpuFilterExec` when beneficial.
-//! 2. `GpuFilterExec` is a self-contained ExecutionPlan that:
-//!    - Pulls Arrow RecordBatches from its child
-//!    - Transfers filter-column data to GPU
-//!    - Runs a CUDA kernel to produce a boolean mask
-//!    - Applies the mask on CPU via Arrow's `filter_record_batch`
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │  GpuQueryPlanner  (QueryPlanner trait)   │  ← Phase 2
+//! │  Detects GPU-compatible logical plans    │
+//! │  Falls back to DefaultPhysicalPlanner    │
+//! │  (Phase 4: routes to GpuExecNode)        │
+//! └──────────────────┬──────────────────────┘
+//!                    │ physical plan
+//! ┌──────────────────▼──────────────────────┐
+//! │  HostToGpuRule  (PhysicalOptimizerRule)  │  ← Phase 1 (existing)
+//! │  Replaces FilterExec → GpuFilterExec     │
+//! └──────────────────┬──────────────────────┘
+//!                    │
+//! ┌──────────────────▼──────────────────────┐
+//! │  GpuFilterExec  (ExecutionPlan)          │
+//! │  H2D → CUDA kernel → D2H mask → Arrow   │
+//! └─────────────────────────────────────────┘
+//! ```
 //!
-//! Phase 2 will add separate HostToGpuExec/GpuToHostExec nodes so consecutive
-//! GPU operators can share GPU memory without H2D/D2H round-trips.
+//! `GpuExecNode` (Phase 2/3) is a leaf node that wraps a CPU fallback plan
+//! and optionally stores Substrait bytes for the future C++ libcudf engine.
+//! `GpuQueryPlanner` is registered via `SessionStateBuilder::with_query_planner`.
 
+pub mod exec_node;
+pub mod ffi;
 pub mod filter_exec;
 pub mod optimizer;
+pub mod planner;
 pub mod raw_exec;
+pub mod substrait;
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use cudarc::nvrtc::compile_ptx;
@@ -42,6 +57,11 @@ fn init_gpu_resources() -> Option<GpuResources> {
     let stream = ctx.default_stream();
     let ptx = compile_ptx(FILTER_KERNEL_SRC).ok()?;
     let filter_module = ctx.load_module(ptx).ok()?;
+
+    // Also initialise the C++ libcuDF engine (idempotent; uses the same GPU).
+    // 512 MiB pool covers typical workloads; grow on demand.
+    ffi::cudf_engine_startup(512 * 1024 * 1024, 256 * 1024 * 1024);
+
     Some(GpuResources {
         ctx,
         stream,
