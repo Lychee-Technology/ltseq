@@ -2,7 +2,7 @@
  * substrait_planner.cpp — Substrait decoder for the cuDF engine.
  *
  * Decodes the subset of Substrait plans that datafusion-substrait generates
- * for simple filter queries (ReadRel + FilterRel + optional ProjectRel).
+ * for queries involving filter, aggregate, sort, join, and distinct.
  *
  * The Substrait comparison functions are identified by their URI:
  *   https://github.com/substrait-io/substrait/blob/main/extensions/
@@ -11,6 +11,10 @@
  * Function names used by datafusion-substrait (v52.x):
  *   lt:any_any  lte:any_any  gt:any_any  gte:any_any  equal:any_any
  *   not_equal:any_any
+ *
+ * Aggregate function names:
+ *   sum:opt_i32  sum:opt_i64  sum:opt_f32  sum:opt_f64
+ *   min:opt_*  max:opt_*  count:opt_*  count:*  avg:opt_*
  */
 
 #include "substrait_planner.hpp"
@@ -38,6 +42,23 @@ static CompareOp parse_function_name(const std::string& name) {
     if (base == "equal")     return CompareOp::EQ;
     if (base == "not_equal") return CompareOp::NEQ;
     throw std::runtime_error("Unsupported function: " + name);
+}
+
+// ── Aggregate function name parser ───────────────────────────────────────────
+
+/// Parse a Substrait aggregate function name to our AggFunc enum.
+/// DataFusion-Substrait generates names like "sum:opt_i32", "count:opt_i64",
+/// "avg:opt_f64", "min:opt_i32", etc.
+static AggFunc parse_agg_function_name(const std::string& name) {
+    auto colon = name.find(':');
+    std::string base = (colon != std::string::npos) ? name.substr(0, colon) : name;
+    if (base == "sum")         return AggFunc::SUM;
+    if (base == "min")         return AggFunc::MIN;
+    if (base == "max")         return AggFunc::MAX;
+    if (base == "count")       return AggFunc::COUNT;
+    if (base == "avg")         return AggFunc::AVG;
+    if (base == "mean")        return AggFunc::MEAN;
+    throw std::runtime_error("Unsupported aggregate function: " + name);
 }
 
 // ── Internal decoder ─────────────────────────────────────────────────────────
@@ -146,6 +167,83 @@ struct PlanDecoder {
         out_pred.op          = op;
         out_pred.threshold   = threshold;
         return true;
+    }
+
+    // Decode join key expressions from a JoinRel's expression field.
+    // Handles single equality (equal(left_ref, right_ref)) and
+    // multi-key AND(equal(...), equal(...), ...) patterns.
+    bool decode_join_keys(
+        const substrait::Expression& expr,
+        const std::vector<std::string>& left_col_names,
+        const std::vector<std::string>& right_col_names,
+        JoinOp& join_op)
+    {
+        if (!expr.has_scalar_function()) return false;
+
+        const auto& sf = expr.scalar_function();
+        auto it = func_map.find(sf.function_reference());
+        if (it == func_map.end()) return false;
+
+        auto colon = it->second.find(':');
+        std::string base = (colon != std::string::npos)
+            ? it->second.substr(0, colon) : it->second;
+
+        if (base == "and" || base == "and_") {
+            // AND of multiple equalities — recurse on each argument
+            for (int i = 0; i < sf.arguments_size(); ++i) {
+                if (sf.arguments(i).has_value()) {
+                    if (!decode_join_keys(sf.arguments(i).value(),
+                                          left_col_names, right_col_names,
+                                          join_op))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        if (base == "equal") {
+            // Single equality: equal(left_field_ref, right_field_ref)
+            if (sf.arguments_size() != 2) return false;
+
+            const auto& arg0 = sf.arguments(0).value();
+            const auto& arg1 = sf.arguments(1).value();
+
+            if (!arg0.has_selection() || !arg1.has_selection()) return false;
+
+            auto extract_idx = [](const substrait::Expression& e) -> int {
+                if (e.has_selection() &&
+                    e.selection().has_direct_reference() &&
+                    e.selection().direct_reference().has_struct_field()) {
+                    return e.selection().direct_reference().struct_field().field();
+                }
+                return -1;
+            };
+
+            int idx0 = extract_idx(arg0);
+            int idx1 = extract_idx(arg1);
+            if (idx0 < 0 || idx1 < 0) return false;
+
+            // In Substrait JoinRel, field references are relative to
+            // the concatenated schema [left_cols | right_cols].
+            // Left indices are [0, left_count), right are [left_count, ...).
+            int left_count = static_cast<int>(left_col_names.size());
+
+            if (idx0 < left_count && idx1 >= left_count) {
+                // Normal: arg0=left, arg1=right
+                join_op.left_key_indices.push_back(idx0);
+                join_op.right_key_indices.push_back(idx1 - left_count);
+            } else if (idx1 < left_count && idx0 >= left_count) {
+                // Swapped: arg0=right, arg1=left
+                join_op.left_key_indices.push_back(idx1);
+                join_op.right_key_indices.push_back(idx0 - left_count);
+            } else {
+                // Both from same side — unsupported
+                return false;
+            }
+            return true;
+        }
+
+        return false;  // Not an equality or AND
     }
 
     // Walk the Rel tree and fill in the DecodedPlan.
@@ -272,6 +370,364 @@ struct PlanDecoder {
                     }
                 }
             }
+            return true;
+        }
+
+        // ── AggregateRel ─────────────────────────────────────────────────
+        if (rel.has_aggregate()) {
+            const auto& agg = rel.aggregate();
+            if (!agg.has_input()) return false;
+            if (!decode_rel(agg.input(), plan, col_names)) return false;
+
+            AggregateOp agg_op;
+
+            // Decode grouping keys.
+            // DataFusion-Substrait v52+ uses the top-level grouping_expressions
+            // list with expression_references in each Grouping. Older plans use
+            // the deprecated grouping_expressions inside each Grouping message.
+            if (agg.grouping_expressions_size() > 0 && agg.groupings_size() > 0) {
+                // New style: top-level grouping_expressions + references
+                const auto& grp = agg.groupings(0);
+                for (int i = 0; i < grp.expression_references_size(); ++i) {
+                    uint32_t ref = grp.expression_references(i);
+                    if (ref < static_cast<uint32_t>(agg.grouping_expressions_size())) {
+                        const auto& gexpr = agg.grouping_expressions(ref);
+                        if (gexpr.has_selection() &&
+                            gexpr.selection().has_direct_reference() &&
+                            gexpr.selection().direct_reference().has_struct_field())
+                        {
+                            int idx = gexpr.selection().direct_reference().struct_field().field();
+                            if (idx >= 0 && static_cast<size_t>(idx) < col_names.size()) {
+                                agg_op.group_col_indices.push_back(idx);
+                                agg_op.group_col_names.push_back(col_names[idx]);
+                            }
+                        }
+                    }
+                }
+            } else if (agg.groupings_size() > 0) {
+                // Deprecated style: grouping_expressions inside Grouping
+                const auto& grp = agg.groupings(0);
+                for (int i = 0; i < grp.grouping_expressions_size(); ++i) {
+                    const auto& gexpr = grp.grouping_expressions(i);
+                    if (gexpr.has_selection() &&
+                        gexpr.selection().has_direct_reference() &&
+                        gexpr.selection().direct_reference().has_struct_field())
+                    {
+                        int idx = gexpr.selection().direct_reference().struct_field().field();
+                        if (idx >= 0 && static_cast<size_t>(idx) < col_names.size()) {
+                            agg_op.group_col_indices.push_back(idx);
+                            agg_op.group_col_names.push_back(col_names[idx]);
+                        }
+                    }
+                }
+            }
+
+            // Decode measures
+            for (int i = 0; i < agg.measures_size(); ++i) {
+                const auto& measure = agg.measures(i);
+                if (!measure.has_measure()) continue;
+
+                const auto& af = measure.measure();
+                auto it = func_map.find(af.function_reference());
+                if (it == func_map.end()) {
+                    if (std::getenv("LTSEQ_GPU_DEBUG"))
+                        fprintf(stderr, "[cudf] aggregate: unknown func_ref=%u\n",
+                                af.function_reference());
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported aggregate function reference";
+                    return false;
+                }
+
+                AggFunc func;
+                try { func = parse_agg_function_name(it->second); }
+                catch (...) {
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported aggregate function: " + it->second;
+                    return false;
+                }
+
+                AggMeasure m;
+                m.func = func;
+                m.value_col_idx = -1;  // default for COUNT(*)
+
+                // Extract the value column from the first argument
+                if (af.arguments_size() > 0) {
+                    const auto& arg = af.arguments(0);
+                    if (arg.has_value() && arg.value().has_selection()) {
+                        const auto& sel = arg.value().selection();
+                        if (sel.has_direct_reference() &&
+                            sel.direct_reference().has_struct_field()) {
+                            int idx = sel.direct_reference().struct_field().field();
+                            m.value_col_idx = idx;
+                            if (idx >= 0 && static_cast<size_t>(idx) < col_names.size()) {
+                                m.value_col_name = col_names[idx];
+                            }
+                        }
+                    }
+                }
+
+                // COUNT(*) with no arguments or COUNT_ALL
+                if (func == AggFunc::COUNT && m.value_col_idx < 0) {
+                    m.func = AggFunc::COUNT_ALL;
+                }
+
+                agg_op.measures.push_back(std::move(m));
+            }
+
+            plan.aggregate = std::move(agg_op);
+
+            // After aggregation, the output column names change:
+            // group keys first, then measure results
+            std::vector<std::string> new_col_names;
+            for (const auto& name : plan.aggregate->group_col_names) {
+                new_col_names.push_back(name);
+            }
+            for (size_t i = 0; i < plan.aggregate->measures.size(); ++i) {
+                // Generate synthetic names for measure output columns
+                const auto& m = plan.aggregate->measures[i];
+                std::string func_str;
+                switch (m.func) {
+                    case AggFunc::SUM:       func_str = "SUM"; break;
+                    case AggFunc::MIN:       func_str = "MIN"; break;
+                    case AggFunc::MAX:       func_str = "MAX"; break;
+                    case AggFunc::COUNT:     func_str = "COUNT"; break;
+                    case AggFunc::COUNT_ALL: func_str = "COUNT"; break;
+                    case AggFunc::MEAN:
+                    case AggFunc::AVG:       func_str = "AVG"; break;
+                }
+                std::string col_name = func_str + "(" +
+                    (m.value_col_name.empty() ? "*" : m.value_col_name) + ")";
+                new_col_names.push_back(col_name);
+            }
+            col_names = std::move(new_col_names);
+            return true;
+        }
+
+        // ── SortRel ──────────────────────────────────────────────────────
+        if (rel.has_sort()) {
+            const auto& sort_rel = rel.sort();
+            if (!sort_rel.has_input()) return false;
+            if (!decode_rel(sort_rel.input(), plan, col_names)) return false;
+
+            SortOp sort_op;
+            for (int i = 0; i < sort_rel.sorts_size(); ++i) {
+                const auto& sf = sort_rel.sorts(i);
+                SortKey key;
+                key.col_idx = -1;
+
+                // Extract column index from the sort expression
+                if (sf.has_expr() && sf.expr().has_selection()) {
+                    const auto& sel = sf.expr().selection();
+                    if (sel.has_direct_reference() &&
+                        sel.direct_reference().has_struct_field()) {
+                        key.col_idx = sel.direct_reference().struct_field().field();
+                        if (key.col_idx >= 0 &&
+                            static_cast<size_t>(key.col_idx) < col_names.size()) {
+                            key.col_name = col_names[key.col_idx];
+                        }
+                    }
+                }
+
+                if (key.col_idx < 0) {
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported sort expression (not a column reference)";
+                    return false;
+                }
+
+                // Decode sort direction
+                if (sf.has_direction()) {
+                    switch (sf.direction()) {
+                        case substrait::SortField::SORT_DIRECTION_ASC_NULLS_FIRST:
+                            key.ascending = true;
+                            key.nulls_first = true;
+                            break;
+                        case substrait::SortField::SORT_DIRECTION_ASC_NULLS_LAST:
+                            key.ascending = true;
+                            key.nulls_first = false;
+                            break;
+                        case substrait::SortField::SORT_DIRECTION_DESC_NULLS_FIRST:
+                            key.ascending = false;
+                            key.nulls_first = true;
+                            break;
+                        case substrait::SortField::SORT_DIRECTION_DESC_NULLS_LAST:
+                            key.ascending = false;
+                            key.nulls_first = false;
+                            break;
+                        default:
+                            key.ascending = true;
+                            key.nulls_first = true;
+                            break;
+                    }
+                } else {
+                    key.ascending = true;
+                    key.nulls_first = true;
+                }
+
+                sort_op.keys.push_back(std::move(key));
+            }
+
+            plan.sort = std::move(sort_op);
+            return true;
+        }
+
+        // ── JoinRel ──────────────────────────────────────────────────────
+        if (rel.has_join()) {
+            const auto& join_rel = rel.join();
+            if (!join_rel.has_left() || !join_rel.has_right()) return false;
+
+            // Decode left input
+            std::vector<std::string> left_col_names;
+            if (!decode_rel(join_rel.left(), plan, left_col_names)) return false;
+
+            // Decode right input — we need a separate plan for table info
+            DecodedPlan right_plan;
+            std::vector<std::string> right_col_names;
+            if (!decode_rel(join_rel.right(), right_plan, right_col_names)) {
+                plan.ok = false;
+                plan.error_msg = "Failed to decode right side of JoinRel";
+                return false;
+            }
+            plan.join_right_table_name = right_plan.table_name;
+            plan.join_right_file_path = right_plan.local_file_path;
+
+            JoinOp join_op;
+            join_op.left_col_names = left_col_names;
+            join_op.right_col_names = right_col_names;
+
+            // Decode join type
+            switch (join_rel.type()) {
+                case substrait::JoinRel::JOIN_TYPE_INNER:
+                    join_op.type = JoinType::INNER; break;
+                case substrait::JoinRel::JOIN_TYPE_OUTER:
+                    join_op.type = JoinType::OUTER; break;
+                case substrait::JoinRel::JOIN_TYPE_LEFT:
+                    join_op.type = JoinType::LEFT; break;
+                case substrait::JoinRel::JOIN_TYPE_RIGHT:
+                    join_op.type = JoinType::RIGHT; break;
+                case substrait::JoinRel::JOIN_TYPE_LEFT_SEMI:
+                    join_op.type = JoinType::LEFT_SEMI; break;
+                case substrait::JoinRel::JOIN_TYPE_LEFT_ANTI:
+                    join_op.type = JoinType::LEFT_ANTI; break;
+                case substrait::JoinRel::JOIN_TYPE_RIGHT_SEMI:
+                    join_op.type = JoinType::RIGHT_SEMI; break;
+                case substrait::JoinRel::JOIN_TYPE_RIGHT_ANTI:
+                    join_op.type = JoinType::RIGHT_ANTI; break;
+                default:
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported join type";
+                    return false;
+            }
+
+            // Extract join keys from the join expression.
+            // DataFusion-Substrait generates an equality expression like:
+            //   equal(left_field_ref, right_field_ref)
+            // For multi-key joins, it's AND(equal(...), equal(...), ...)
+            if (join_rel.has_expression()) {
+                if (!decode_join_keys(join_rel.expression(),
+                                      left_col_names, right_col_names,
+                                      join_op)) {
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported join expression (not equality key refs)";
+                    return false;
+                }
+            }
+
+            plan.join = std::move(join_op);
+
+            // Output columns: left columns then right columns
+            col_names = left_col_names;
+            col_names.insert(col_names.end(),
+                             right_col_names.begin(), right_col_names.end());
+            return true;
+        }
+
+        // ── HashJoinRel (physical hint, same semantics as JoinRel) ────────
+        if (rel.has_hash_join()) {
+            const auto& hj = rel.hash_join();
+            if (!hj.has_left() || !hj.has_right()) return false;
+
+            // Decode left input
+            std::vector<std::string> left_col_names;
+            if (!decode_rel(hj.left(), plan, left_col_names)) return false;
+
+            // Decode right input
+            DecodedPlan right_plan;
+            std::vector<std::string> right_col_names;
+            if (!decode_rel(hj.right(), right_plan, right_col_names)) {
+                plan.ok = false;
+                plan.error_msg = "Failed to decode right side of HashJoinRel";
+                return false;
+            }
+            plan.join_right_table_name = right_plan.table_name;
+            plan.join_right_file_path = right_plan.local_file_path;
+
+            JoinOp join_op;
+            join_op.left_col_names = left_col_names;
+            join_op.right_col_names = right_col_names;
+
+            // Decode join type
+            switch (hj.type()) {
+                case substrait::HashJoinRel::JOIN_TYPE_INNER:
+                    join_op.type = JoinType::INNER; break;
+                case substrait::HashJoinRel::JOIN_TYPE_OUTER:
+                    join_op.type = JoinType::OUTER; break;
+                case substrait::HashJoinRel::JOIN_TYPE_LEFT:
+                    join_op.type = JoinType::LEFT; break;
+                case substrait::HashJoinRel::JOIN_TYPE_RIGHT:
+                    join_op.type = JoinType::RIGHT; break;
+                case substrait::HashJoinRel::JOIN_TYPE_LEFT_SEMI:
+                    join_op.type = JoinType::LEFT_SEMI; break;
+                case substrait::HashJoinRel::JOIN_TYPE_LEFT_ANTI:
+                    join_op.type = JoinType::LEFT_ANTI; break;
+                case substrait::HashJoinRel::JOIN_TYPE_RIGHT_SEMI:
+                    join_op.type = JoinType::RIGHT_SEMI; break;
+                case substrait::HashJoinRel::JOIN_TYPE_RIGHT_ANTI:
+                    join_op.type = JoinType::RIGHT_ANTI; break;
+                default:
+                    plan.ok = false;
+                    plan.error_msg = "Unsupported hash join type";
+                    return false;
+            }
+
+            // Extract keys from deprecated left_keys/right_keys fields
+            for (int i = 0; i < hj.left_keys_size(); ++i) {
+                const auto& lk = hj.left_keys(i);
+                if (lk.has_direct_reference() &&
+                    lk.direct_reference().has_struct_field()) {
+                    join_op.left_key_indices.push_back(
+                        lk.direct_reference().struct_field().field());
+                }
+            }
+            for (int i = 0; i < hj.right_keys_size(); ++i) {
+                const auto& rk = hj.right_keys(i);
+                if (rk.has_direct_reference() &&
+                    rk.direct_reference().has_struct_field()) {
+                    join_op.right_key_indices.push_back(
+                        rk.direct_reference().struct_field().field());
+                }
+            }
+
+            // Also check the new-style `keys` field
+            for (int i = 0; i < hj.keys_size(); ++i) {
+                const auto& key = hj.keys(i);
+                if (key.has_left() && key.left().has_direct_reference() &&
+                    key.left().direct_reference().has_struct_field()) {
+                    join_op.left_key_indices.push_back(
+                        key.left().direct_reference().struct_field().field());
+                }
+                if (key.has_right() && key.right().has_direct_reference() &&
+                    key.right().direct_reference().has_struct_field()) {
+                    join_op.right_key_indices.push_back(
+                        key.right().direct_reference().struct_field().field());
+                }
+            }
+
+            plan.join = std::move(join_op);
+
+            // Output columns: left columns then right columns
+            col_names = left_col_names;
+            col_names.insert(col_names.end(),
+                             right_col_names.begin(), right_col_names.end());
             return true;
         }
 
