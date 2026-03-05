@@ -49,6 +49,7 @@ use super::sort_aware::{extract_sort_columns, is_sorted_by};
 use super::sort_exec::{is_sort_key_type_supported, GpuSortConfig, GpuSortExec, GpuSortKey};
 use super::window_ops::{
     is_window_gpu_supported_type, GpuWindowOp, GpuWindowShiftConfig, GpuWindowShiftExec,
+    RollingAggFunc,
 };
 use super::GPU_MIN_ROWS_THRESHOLD;
 
@@ -860,9 +861,11 @@ fn try_replace_window_inner(
             return Ok(None);
         }
 
-        // Parse the window expression name to detect lag/lead
+        // Parse the window expression name to detect lag/lead or rolling aggregate
         let name = w_expr.name();
         if let Some(op) = parse_lag_lead_expr(name, w_expr, &input_schema)? {
+            ops.push(op);
+        } else if let Some(op) = parse_rolling_agg_expr(name, w_expr, &input_schema)? {
             ops.push(op);
         } else {
             // Not a supported window function → bail out
@@ -910,6 +913,18 @@ fn try_replace_window_inner(
                     ..
                 } => {
                     format!("{}=diff({}, {})", output_name, column_name, period)
+                }
+                GpuWindowOp::Rolling {
+                    column_name,
+                    window_size,
+                    agg_func,
+                    output_name,
+                    ..
+                } => {
+                    format!(
+                        "{}=rolling_{}({}, {})",
+                        output_name, agg_func, column_name, window_size
+                    )
                 }
             })
             .collect();
@@ -990,6 +1005,124 @@ fn parse_lag_lead_expr(
         column_index: col_idx,
         column_name: col_name.to_string(),
         offset,
+        output_name,
+        data_type,
+    }))
+}
+
+/// Parse a window expression name like `"avg(price)"`, `"sum(volume)"`, etc.
+/// and check that it has a bounded ROWS frame suitable for rolling aggregation.
+///
+/// Returns `None` if the expression is not a supported rolling aggregate.
+///
+/// Recognized functions: sum, avg, min, max, count.
+/// Required frame: `ROWS BETWEEN <n> PRECEDING AND CURRENT ROW`.
+fn parse_rolling_agg_expr(
+    name: &str,
+    w_expr: &Arc<dyn WindowExpr>,
+    input_schema: &SchemaRef,
+) -> Result<Option<GpuWindowOp>> {
+    use datafusion::arrow::datatypes::SchemaRef;
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
+
+    let name_lower = name.to_lowercase();
+
+    // Match function_name(column_name) pattern
+    // Supported: sum(...), avg(...), min(...), max(...), count(...)
+    let (agg_func, args_str) = if let Some(rest) = name_lower.strip_prefix("sum(") {
+        (RollingAggFunc::Sum, rest.trim_end_matches(')'))
+    } else if let Some(rest) = name_lower.strip_prefix("avg(") {
+        (RollingAggFunc::Avg, rest.trim_end_matches(')'))
+    } else if let Some(rest) = name_lower.strip_prefix("min(") {
+        (RollingAggFunc::Min, rest.trim_end_matches(')'))
+    } else if let Some(rest) = name_lower.strip_prefix("max(") {
+        (RollingAggFunc::Max, rest.trim_end_matches(')'))
+    } else if let Some(rest) = name_lower.strip_prefix("count(") {
+        (RollingAggFunc::Count, rest.trim_end_matches(')'))
+    } else {
+        return Ok(None);
+    };
+
+    // Check the window frame — must be ROWS BETWEEN <n> PRECEDING AND CURRENT ROW
+    let frame = w_expr.get_window_frame();
+    if frame.units != WindowFrameUnits::Rows {
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] parse_rolling_agg_expr: SKIP — frame units {:?} (need ROWS)",
+                frame.units
+            );
+        }
+        return Ok(None);
+    }
+
+    // End bound must be CURRENT ROW
+    if frame.end_bound != WindowFrameBound::CurrentRow {
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] parse_rolling_agg_expr: SKIP — end bound {:?} (need CURRENT ROW)",
+                frame.end_bound
+            );
+        }
+        return Ok(None);
+    }
+
+    // Start bound must be <n> PRECEDING (not UNBOUNDED)
+    let preceding_n = match &frame.start_bound {
+        WindowFrameBound::Preceding(sv) => {
+            if sv.is_null() {
+                // UNBOUNDED PRECEDING — not a rolling window, it's a cumulative op
+                return Ok(None);
+            }
+            match sv {
+                ScalarValue::UInt64(Some(v)) => *v as usize,
+                ScalarValue::Int64(Some(v)) => *v as usize,
+                ScalarValue::UInt32(Some(v)) => *v as usize,
+                ScalarValue::Int32(Some(v)) => *v as usize,
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    // window_size = preceding_n + 1 (frame includes current row)
+    let window_size = preceding_n + 1;
+
+    // Parse the column name from the function arguments
+    let col_ref = args_str.trim();
+    // Extract just the column name (last part after any dots)
+    let col_name = col_ref.rsplit('.').next().unwrap_or(col_ref);
+
+    // Find the column index in the input schema
+    let col_idx = input_schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == col_name);
+    let col_idx = match col_idx {
+        Some(idx) => idx,
+        None => return Ok(None),
+    };
+
+    let data_type = input_schema.field(col_idx).data_type().clone();
+    if !is_window_gpu_supported_type(&data_type) {
+        return Ok(None);
+    }
+
+    // Output column name — use the full expression name from DataFusion
+    let output_name = w_expr.field()?.name().to_string();
+
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] parse_rolling_agg_expr: MATCHED — {}({}) window_size={} → {}",
+            agg_func, col_name, window_size, output_name
+        );
+    }
+
+    Ok(Some(GpuWindowOp::Rolling {
+        column_index: col_idx,
+        column_name: col_name.to_string(),
+        window_size,
+        agg_func,
         output_name,
         data_type,
     }))

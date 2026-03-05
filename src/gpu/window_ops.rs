@@ -81,6 +81,14 @@ use super::sort_aware::{SortOrderEffect, SortOrderPropagation};
 /// - `valid`: output null mask
 /// - `n`: number of elements
 /// - `period`: diff period (positive integer)
+///
+/// Rolling aggregate kernels (`rolling_{sum,min,max}_{i64,f64}`, `rolling_avg_f64`,
+/// `rolling_count`):
+/// - Each thread computes the aggregate over a sliding window of `window_size`
+///   elements ending at the current row: `[max(0, i - window_size + 1), i]`
+/// - For rows where `i < window_size - 1`, the window is smaller (partial window)
+/// - `rolling_count` always produces a valid (non-null) result
+/// - Others produce valid results for all rows (partial windows are supported)
 const WINDOW_OPS_KERNEL_SRC: &str = r#"
 // ── Shift (lag/lead) kernels ─────────────────────────────────────────
 // out[i] = data[i - offset] if in bounds, else null
@@ -236,6 +244,164 @@ extern "C" __global__ void window_diff_f32(
         valid[idx] = 0;
     }
 }
+
+// ── Rolling aggregate kernels ────────────────────────────────────────
+// Each thread computes an aggregate over [max(0, i-window_size+1), i].
+// For partial windows (i < window_size-1), the aggregate is over fewer elements.
+
+// --- Rolling SUM ---
+extern "C" __global__ void rolling_sum_i64(
+    const long long* __restrict__ data,
+    long long* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    long long acc = 0;
+    for (int j = start; j <= (int)idx; j++) {
+        acc += data[j];
+    }
+    out[idx] = acc;
+    valid[idx] = 1;
+}
+
+extern "C" __global__ void rolling_sum_f64(
+    const double* __restrict__ data,
+    double* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    double acc = 0.0;
+    for (int j = start; j <= (int)idx; j++) {
+        acc += data[j];
+    }
+    out[idx] = acc;
+    valid[idx] = 1;
+}
+
+// --- Rolling AVG (always f64 output) ---
+extern "C" __global__ void rolling_avg_f64(
+    const double* __restrict__ data,
+    double* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    double acc = 0.0;
+    int count = (int)idx - start + 1;
+    for (int j = start; j <= (int)idx; j++) {
+        acc += data[j];
+    }
+    out[idx] = acc / (double)count;
+    valid[idx] = 1;
+}
+
+// --- Rolling MIN ---
+extern "C" __global__ void rolling_min_i64(
+    const long long* __restrict__ data,
+    long long* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    long long val = data[start];
+    for (int j = start + 1; j <= (int)idx; j++) {
+        if (data[j] < val) val = data[j];
+    }
+    out[idx] = val;
+    valid[idx] = 1;
+}
+
+extern "C" __global__ void rolling_min_f64(
+    const double* __restrict__ data,
+    double* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    double val = data[start];
+    for (int j = start + 1; j <= (int)idx; j++) {
+        if (data[j] < val) val = data[j];
+    }
+    out[idx] = val;
+    valid[idx] = 1;
+}
+
+// --- Rolling MAX ---
+extern "C" __global__ void rolling_max_i64(
+    const long long* __restrict__ data,
+    long long* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    long long val = data[start];
+    for (int j = start + 1; j <= (int)idx; j++) {
+        if (data[j] > val) val = data[j];
+    }
+    out[idx] = val;
+    valid[idx] = 1;
+}
+
+extern "C" __global__ void rolling_max_f64(
+    const double* __restrict__ data,
+    double* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const unsigned int n,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    double val = data[start];
+    for (int j = start + 1; j <= (int)idx; j++) {
+        if (data[j] > val) val = data[j];
+    }
+    out[idx] = val;
+    valid[idx] = 1;
+}
+
+// --- Rolling COUNT (always u32 output, stored in int array) ---
+// Counts elements in the window; for non-null-aware version, just window size
+extern "C" __global__ void rolling_count(
+    const unsigned int n,
+    int* __restrict__ out,
+    unsigned char* __restrict__ valid,
+    const int window_size
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    int start = (int)idx - window_size + 1;
+    if (start < 0) start = 0;
+    out[idx] = (int)idx - start + 1;
+    valid[idx] = 1;
+}
 "#;
 
 // ============================================================================
@@ -265,7 +431,29 @@ fn get_window_module() -> Option<Arc<CudaModule>> {
 // Window Operation Types
 // ============================================================================
 
-/// Describes a single window shift/diff operation to execute on GPU.
+/// Aggregation function for rolling window operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollingAggFunc {
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Count,
+}
+
+impl fmt::Display for RollingAggFunc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            RollingAggFunc::Sum => write!(f, "sum"),
+            RollingAggFunc::Avg => write!(f, "avg"),
+            RollingAggFunc::Min => write!(f, "min"),
+            RollingAggFunc::Max => write!(f, "max"),
+            RollingAggFunc::Count => write!(f, "count"),
+        }
+    }
+}
+
+/// Describes a single window shift/diff/rolling operation to execute on GPU.
 #[derive(Debug, Clone)]
 pub enum GpuWindowOp {
     /// Shift (lag/lead) operation: copy with offset.
@@ -295,6 +483,22 @@ pub enum GpuWindowOp {
         /// Data type of the column
         data_type: DataType,
     },
+    /// Rolling aggregate operation: compute an aggregate over a sliding window.
+    /// Window is `ROWS BETWEEN (window_size-1) PRECEDING AND CURRENT ROW`.
+    Rolling {
+        /// Column index in the input schema
+        column_index: usize,
+        /// Column name (for display)
+        column_name: String,
+        /// Window size (number of rows in the window)
+        window_size: usize,
+        /// Aggregation function to apply
+        agg_func: RollingAggFunc,
+        /// Output column name
+        output_name: String,
+        /// Data type of the input column
+        data_type: DataType,
+    },
 }
 
 impl GpuWindowOp {
@@ -303,14 +507,25 @@ impl GpuWindowOp {
         match self {
             GpuWindowOp::Shift { output_name, .. } => output_name,
             GpuWindowOp::Diff { output_name, .. } => output_name,
+            GpuWindowOp::Rolling { output_name, .. } => output_name,
         }
     }
 
     /// Get the data type of the output.
-    pub fn data_type(&self) -> &DataType {
+    pub fn data_type(&self) -> DataType {
         match self {
-            GpuWindowOp::Shift { data_type, .. } => data_type,
-            GpuWindowOp::Diff { data_type, .. } => data_type,
+            GpuWindowOp::Shift { data_type, .. } => data_type.clone(),
+            GpuWindowOp::Diff { data_type, .. } => data_type.clone(),
+            GpuWindowOp::Rolling { agg_func, data_type, .. } => {
+                match agg_func {
+                    // Avg always produces Float64
+                    RollingAggFunc::Avg => DataType::Float64,
+                    // Count always produces Int64
+                    RollingAggFunc::Count => DataType::Int64,
+                    // Sum/Min/Max preserve the input type
+                    _ => data_type.clone(),
+                }
+            }
         }
     }
 }
@@ -373,7 +588,7 @@ impl GpuWindowShiftExec {
             // Window columns are nullable (nulls for out-of-bounds shifts)
             let field = Arc::new(Field::new(
                 op.output_name(),
-                op.data_type().clone(),
+                op.data_type(),
                 true, // always nullable
             ));
             fields.push(field);
@@ -415,6 +630,9 @@ impl DisplayAs for GpuWindowShiftExec {
                         }
                         GpuWindowOp::Diff { column_name, period, output_name, .. } => {
                             format!("{}=diff({}, {})", output_name, column_name, period)
+                        }
+                        GpuWindowOp::Rolling { column_name, window_size, agg_func, output_name, .. } => {
+                            format!("{}=rolling_{}({}, {})", output_name, agg_func, column_name, window_size)
                         }
                     }
                 }).collect();
@@ -530,7 +748,7 @@ impl ExecutionPlan for GpuWindowShiftExec {
 // GPU Kernel Execution
 // ============================================================================
 
-/// Execute a single window operation (shift or diff) on the GPU.
+/// Execute a single window operation (shift, diff, or rolling) on the GPU.
 fn execute_window_op(
     batch: &RecordBatch,
     op: &GpuWindowOp,
@@ -557,6 +775,17 @@ fn execute_window_op(
             let column = batch.column(*column_index);
             execute_diff_gpu(column, *period, data_type, num_rows)
                 .or_else(|_| execute_diff_cpu(column, *period, data_type, num_rows))
+        }
+        GpuWindowOp::Rolling {
+            column_index,
+            window_size,
+            agg_func,
+            data_type,
+            ..
+        } => {
+            let column = batch.column(*column_index);
+            execute_rolling_gpu(column, *window_size, *agg_func, data_type, num_rows)
+                .or_else(|_| execute_rolling_cpu(column, *window_size, *agg_func, data_type, num_rows))
         }
     }
 }
@@ -800,6 +1029,366 @@ fn gpu_diff_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
 }
 
 // ============================================================================
+// GPU Rolling Aggregate Execution
+// ============================================================================
+
+/// Execute a rolling aggregate on GPU using CUDA kernel.
+fn execute_rolling_gpu(
+    column: &ArrayRef,
+    window_size: usize,
+    agg_func: RollingAggFunc,
+    data_type: &DataType,
+    num_rows: usize,
+) -> Result<ArrayRef> {
+    let module = get_window_module().ok_or_else(|| {
+        DataFusionError::Internal("GPU not available for rolling window".to_string())
+    })?;
+    let stream = get_stream().ok_or_else(|| {
+        DataFusionError::Internal("CUDA stream not available".to_string())
+    })?;
+
+    let n = num_rows as u32;
+    let grid = grid_size(n);
+    let launch_cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (CUDA_BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let ws = window_size as i32;
+
+    match agg_func {
+        RollingAggFunc::Count => {
+            // Count doesn't need input data — just produces window sizes
+            execute_rolling_count_gpu(&module, &stream, launch_cfg, n, ws)
+        }
+        RollingAggFunc::Avg => {
+            // Avg always works on f64
+            let f64_values = column_to_f64(column, data_type)?;
+            gpu_rolling_typed::<f64>(
+                &f64_values, &module, &stream, launch_cfg, n, ws,
+                "rolling_avg_f64",
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        RollingAggFunc::Sum => {
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<i64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_sum_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<f64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_sum_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Int32 => {
+                    // Promote i32 sum to i64 to avoid overflow
+                    let i64_values: Vec<i64> = column
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .ok_or_else(|| DataFusionError::Internal("Expected Int32Array".to_string()))?
+                        .values()
+                        .iter()
+                        .map(|&v| v as i64)
+                        .collect();
+                    gpu_rolling_typed::<i64>(
+                        &i64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_sum_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        // Sum of i32 promoted to i64
+                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float32 => {
+                    // Promote f32 sum to f64 for precision
+                    let f64_values: Vec<f64> = column
+                        .as_any()
+                        .downcast_ref::<Float32Array>()
+                        .ok_or_else(|| DataFusionError::Internal("Expected Float32Array".to_string()))?
+                        .values()
+                        .iter()
+                        .map(|&v| v as f64)
+                        .collect();
+                    gpu_rolling_typed::<f64>(
+                        &f64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_sum_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported data type for GPU rolling sum: {:?}", data_type
+                ))),
+            }
+        }
+        RollingAggFunc::Min => {
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<i64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_min_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<f64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_min_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Int32 => {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int32Array".to_string())
+                    })?;
+                    let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+                    gpu_rolling_typed::<i64>(
+                        &i64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_min_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        // Min of i32 values fits in i32, but we keep i64 for consistency
+                        let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                        Arc::new(Int32Array::new(i32_values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float32Array".to_string())
+                    })?;
+                    let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+                    gpu_rolling_typed::<f64>(
+                        &f64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_min_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                        Arc::new(Float32Array::new(f32_values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported data type for GPU rolling min: {:?}", data_type
+                ))),
+            }
+        }
+        RollingAggFunc::Max => {
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<i64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_max_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    gpu_rolling_typed::<f64>(
+                        arr.values(), &module, &stream, launch_cfg, n, ws,
+                        "rolling_max_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Int32 => {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int32Array".to_string())
+                    })?;
+                    let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+                    gpu_rolling_typed::<i64>(
+                        &i64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_max_i64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                        Arc::new(Int32Array::new(i32_values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float32Array".to_string())
+                    })?;
+                    let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+                    gpu_rolling_typed::<f64>(
+                        &f64_values, &module, &stream, launch_cfg, n, ws,
+                        "rolling_max_f64",
+                    ).map(|(values, valid_mask)| {
+                        let null_buffer = build_null_buffer(&valid_mask);
+                        let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                        Arc::new(Float32Array::new(f32_values.into(), Some(null_buffer))) as ArrayRef
+                    })
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported data type for GPU rolling max: {:?}", data_type
+                ))),
+            }
+        }
+    }
+}
+
+/// Generic GPU rolling aggregate kernel execution for a typed column.
+fn gpu_rolling_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
+    input_values: &[T],
+    module: &Arc<CudaModule>,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    launch_cfg: LaunchConfig,
+    n: u32,
+    window_size: i32,
+    kernel_name: &str,
+) -> Result<(Vec<T>, Vec<u8>)> {
+    let func = module.load_function(kernel_name).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to load kernel {}: {}", kernel_name, e))
+    })?;
+
+    // Allocate device memory
+    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+        DataFusionError::Internal(format!("H2D copy failed: {}", e))
+    })?;
+    let d_out = stream.alloc_zeros::<T>(n as usize).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+    let d_valid = stream.alloc_zeros::<u8>(n as usize).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+
+    // Launch kernel: (data, out, valid, n, window_size)
+    unsafe {
+        let mut builder = stream.launch_builder(&func);
+        builder.arg(&d_data);
+        builder.arg(&d_out);
+        builder.arg(&d_valid);
+        builder.arg(&n);
+        builder.arg(&window_size);
+        builder.launch(launch_cfg).map_err(|e| {
+            DataFusionError::Internal(format!("Kernel launch failed: {}", e))
+        })?;
+    }
+
+    // Copy results back
+    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+        DataFusionError::Internal(format!("D2H copy failed: {}", e))
+    })?;
+    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+        DataFusionError::Internal(format!("D2H copy failed: {}", e))
+    })?;
+
+    Ok((out_values, valid_mask))
+}
+
+/// Execute rolling count on GPU — no input data column needed.
+fn execute_rolling_count_gpu(
+    module: &Arc<CudaModule>,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    launch_cfg: LaunchConfig,
+    n: u32,
+    window_size: i32,
+) -> Result<ArrayRef> {
+    let func = module.load_function("rolling_count").map_err(|e| {
+        DataFusionError::Internal(format!("Failed to load rolling_count kernel: {}", e))
+    })?;
+
+    let d_out = stream.alloc_zeros::<i32>(n as usize).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+    let d_valid = stream.alloc_zeros::<u8>(n as usize).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+
+    // Kernel signature: rolling_count(n, out, valid, window_size)
+    unsafe {
+        let mut builder = stream.launch_builder(&func);
+        builder.arg(&n);
+        builder.arg(&d_out);
+        builder.arg(&d_valid);
+        builder.arg(&window_size);
+        builder.launch(launch_cfg).map_err(|e| {
+            DataFusionError::Internal(format!("Kernel launch failed: {}", e))
+        })?;
+    }
+
+    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+        DataFusionError::Internal(format!("D2H copy failed: {}", e))
+    })?;
+    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+        DataFusionError::Internal(format!("D2H copy failed: {}", e))
+    })?;
+
+    // Convert i32 → i64 for the Arrow Int64 output
+    let i64_values: Vec<i64> = out_values.iter().map(|&v| v as i64).collect();
+    let null_buffer = build_null_buffer(&valid_mask);
+    Ok(Arc::new(Int64Array::new(i64_values.into(), Some(null_buffer))) as ArrayRef)
+}
+
+/// Convert any numeric column to f64 values for avg computation.
+fn column_to_f64(column: &ArrayRef, data_type: &DataType) -> Result<Vec<f64>> {
+    match data_type {
+        DataType::Float64 => {
+            let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float64Array".to_string())
+            })?;
+            Ok(arr.values().to_vec())
+        }
+        DataType::Float32 => {
+            let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float32Array".to_string())
+            })?;
+            Ok(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::Int64 => {
+            let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int64Array".to_string())
+            })?;
+            Ok(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        DataType::Int32 => {
+            let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int32Array".to_string())
+            })?;
+            Ok(arr.values().iter().map(|&v| v as f64).collect())
+        }
+        _ => Err(DataFusionError::Internal(format!(
+            "Cannot convert {:?} to f64 for rolling avg", data_type
+        ))),
+    }
+}
+
+// ============================================================================
 // CPU Fallback Implementations
 // ============================================================================
 
@@ -964,6 +1553,257 @@ fn cpu_diff_typed_f32(input: &[f32], period: i32, num_rows: usize) -> ArrayRef {
     Arc::new(Float32Array::new(out.into(), Some(null_buffer)))
 }
 
+/// CPU fallback for rolling aggregate operations.
+///
+/// Implements rolling sum/avg/min/max/count over a sliding window of `window_size`
+/// rows. The window is `ROWS BETWEEN (window_size-1) PRECEDING AND CURRENT ROW`.
+///
+/// Semantics:
+/// - All rows get a valid output (no nulls) because partial windows are allowed.
+///   For row i, the window covers rows `max(0, i - window_size + 1)..=i`.
+/// - Count always returns Int64, Avg always returns Float64.
+/// - Sum/Min/Max preserve the input type (with i32→i64 promotion for sum).
+fn execute_rolling_cpu(
+    column: &ArrayRef,
+    window_size: usize,
+    agg_func: RollingAggFunc,
+    data_type: &DataType,
+    num_rows: usize,
+) -> Result<ArrayRef> {
+    match agg_func {
+        RollingAggFunc::Count => {
+            // Count: for row i, count = min(i + 1, window_size)
+            let mut out = vec![0i64; num_rows];
+            for i in 0..num_rows {
+                out[i] = std::cmp::min(i + 1, window_size) as i64;
+            }
+            Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+        }
+        RollingAggFunc::Avg => {
+            // Avg always returns Float64
+            let f64_values = column_to_f64(column, data_type)?;
+            let out = cpu_rolling_avg(&f64_values, window_size, num_rows);
+            Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+        }
+        RollingAggFunc::Sum => {
+            // Sum preserves type (i32→i64 promotion)
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_sum_i64(arr.values(), window_size, num_rows);
+                    Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+                }
+                DataType::Int32 => {
+                    // i32→i64 promotion for sum
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int32Array".to_string())
+                    })?;
+                    let vals: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+                    let out = cpu_rolling_sum_i64(&vals, window_size, num_rows);
+                    Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_sum_f64(arr.values(), window_size, num_rows);
+                    Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float32Array".to_string())
+                    })?;
+                    let vals: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+                    let out = cpu_rolling_sum_f64(&vals, window_size, num_rows);
+                    // Return as Float64 (Float32 sum promotes to Float64 for precision)
+                    Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported type for CPU rolling sum: {:?}", data_type
+                ))),
+            }
+        }
+        RollingAggFunc::Min => {
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax(arr.values(), window_size, num_rows, true);
+                    Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+                }
+                DataType::Int32 => {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int32Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax(arr.values(), window_size, num_rows, true);
+                    Ok(Arc::new(Int32Array::from(out)) as ArrayRef)
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax_f64(arr.values(), window_size, num_rows, true);
+                    Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float32Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax_f32(arr.values(), window_size, num_rows, true);
+                    Ok(Arc::new(Float32Array::from(out)) as ArrayRef)
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported type for CPU rolling min: {:?}", data_type
+                ))),
+            }
+        }
+        RollingAggFunc::Max => {
+            match data_type {
+                DataType::Int64 => {
+                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax(arr.values(), window_size, num_rows, false);
+                    Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+                }
+                DataType::Int32 => {
+                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Int32Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax(arr.values(), window_size, num_rows, false);
+                    Ok(Arc::new(Int32Array::from(out)) as ArrayRef)
+                }
+                DataType::Float64 => {
+                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float64Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax_f64(arr.values(), window_size, num_rows, false);
+                    Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+                }
+                DataType::Float32 => {
+                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                        DataFusionError::Internal("Expected Float32Array".to_string())
+                    })?;
+                    let out = cpu_rolling_minmax_f32(arr.values(), window_size, num_rows, false);
+                    Ok(Arc::new(Float32Array::from(out)) as ArrayRef)
+                }
+                _ => Err(DataFusionError::Internal(format!(
+                    "Unsupported type for CPU rolling max: {:?}", data_type
+                ))),
+            }
+        }
+    }
+}
+
+/// CPU rolling sum for i64 values.
+fn cpu_rolling_sum_i64(input: &[i64], window_size: usize, num_rows: usize) -> Vec<i64> {
+    let mut out = vec![0i64; num_rows];
+    let mut sum: i64 = 0;
+    for i in 0..num_rows {
+        sum += input[i];
+        if i >= window_size {
+            sum -= input[i - window_size];
+        }
+        out[i] = sum;
+    }
+    out
+}
+
+/// CPU rolling sum for f64 values.
+fn cpu_rolling_sum_f64(input: &[f64], window_size: usize, num_rows: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; num_rows];
+    let mut sum: f64 = 0.0;
+    for i in 0..num_rows {
+        sum += input[i];
+        if i >= window_size {
+            sum -= input[i - window_size];
+        }
+        out[i] = sum;
+    }
+    out
+}
+
+/// CPU rolling average for f64 values.
+fn cpu_rolling_avg(input: &[f64], window_size: usize, num_rows: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; num_rows];
+    let mut sum: f64 = 0.0;
+    for i in 0..num_rows {
+        sum += input[i];
+        if i >= window_size {
+            sum -= input[i - window_size];
+        }
+        let count = std::cmp::min(i + 1, window_size) as f64;
+        out[i] = sum / count;
+    }
+    out
+}
+
+/// CPU rolling min/max for i64/i32 (types implementing Ord).
+fn cpu_rolling_minmax<T: Copy + Ord>(
+    input: &[T],
+    window_size: usize,
+    num_rows: usize,
+    is_min: bool,
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        let start = if i >= window_size { i - window_size + 1 } else { 0 };
+        let window = &input[start..=i];
+        let val = if is_min {
+            *window.iter().min().unwrap()
+        } else {
+            *window.iter().max().unwrap()
+        };
+        out.push(val);
+    }
+    out
+}
+
+/// CPU rolling min/max for f64 (uses partial_cmp for floats).
+fn cpu_rolling_minmax_f64(
+    input: &[f64],
+    window_size: usize,
+    num_rows: usize,
+    is_min: bool,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        let start = if i >= window_size { i - window_size + 1 } else { 0 };
+        let window = &input[start..=i];
+        let val = if is_min {
+            window.iter().copied().reduce(f64::min).unwrap()
+        } else {
+            window.iter().copied().reduce(f64::max).unwrap()
+        };
+        out.push(val);
+    }
+    out
+}
+
+/// CPU rolling min/max for f32 (uses partial_cmp for floats).
+fn cpu_rolling_minmax_f32(
+    input: &[f32],
+    window_size: usize,
+    num_rows: usize,
+    is_min: bool,
+) -> Vec<f32> {
+    let mut out = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        let start = if i >= window_size { i - window_size + 1 } else { 0 };
+        let window = &input[start..=i];
+        let val = if is_min {
+            window.iter().copied().reduce(f32::min).unwrap()
+        } else {
+            window.iter().copied().reduce(f32::max).unwrap()
+        };
+        out.push(val);
+    }
+    out
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -1118,5 +1958,156 @@ mod tests {
         assert!(arr.is_null(0));
         assert!(arr.is_null(1));
         assert!(arr.is_null(2));
+    }
+
+    // ========================================================================
+    // Rolling CPU tests
+    // ========================================================================
+
+    #[test]
+    fn test_cpu_rolling_sum_i64() {
+        // Window size 3: [10], [10,20], [10,20,30], [20,30,40], [30,40,50]
+        let input = vec![10i64, 20, 30, 40, 50];
+        let out = cpu_rolling_sum_i64(&input, 3, 5);
+        assert_eq!(out, vec![10, 30, 60, 90, 120]);
+    }
+
+    #[test]
+    fn test_cpu_rolling_sum_f64() {
+        let input = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let out = cpu_rolling_sum_f64(&input, 2, 5);
+        // Window 2: [1.0], [1.0,2.0], [2.0,3.0], [3.0,4.0], [4.0,5.0]
+        assert!((out[0] - 1.0).abs() < 1e-10);
+        assert!((out[1] - 3.0).abs() < 1e-10);
+        assert!((out[2] - 5.0).abs() < 1e-10);
+        assert!((out[3] - 7.0).abs() < 1e-10);
+        assert!((out[4] - 9.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cpu_rolling_avg() {
+        let input = vec![10.0f64, 20.0, 30.0, 40.0, 50.0];
+        let out = cpu_rolling_avg(&input, 3, 5);
+        // Window 3 avg: [10/1=10], [30/2=15], [60/3=20], [90/3=30], [120/3=40]
+        assert!((out[0] - 10.0).abs() < 1e-10);
+        assert!((out[1] - 15.0).abs() < 1e-10);
+        assert!((out[2] - 20.0).abs() < 1e-10);
+        assert!((out[3] - 30.0).abs() < 1e-10);
+        assert!((out[4] - 40.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cpu_rolling_min_i64() {
+        let input = vec![30i64, 10, 50, 20, 40];
+        let out = cpu_rolling_minmax(&input, 3, 5, true);
+        // Window 3 min: [30], [10,30], [10,30,50], [10,20,50], [20,40,50]
+        assert_eq!(out, vec![30, 10, 10, 10, 20]);
+    }
+
+    #[test]
+    fn test_cpu_rolling_max_i64() {
+        let input = vec![30i64, 10, 50, 20, 40];
+        let out = cpu_rolling_minmax(&input, 3, 5, false);
+        // Window 3 max: [30], [10,30], [10,30,50], [10,20,50], [20,40,50]
+        assert_eq!(out, vec![30, 30, 50, 50, 50]);
+    }
+
+    #[test]
+    fn test_cpu_rolling_min_f64() {
+        let input = vec![3.0f64, 1.0, 5.0, 2.0, 4.0];
+        let out = cpu_rolling_minmax_f64(&input, 2, 5, true);
+        // Window 2 min: [3], [1,3], [1,5], [2,5], [2,4]
+        assert!((out[0] - 3.0).abs() < 1e-10);
+        assert!((out[1] - 1.0).abs() < 1e-10);
+        assert!((out[2] - 1.0).abs() < 1e-10);
+        assert!((out[3] - 2.0).abs() < 1e-10);
+        assert!((out[4] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cpu_rolling_max_f64() {
+        let input = vec![3.0f64, 1.0, 5.0, 2.0, 4.0];
+        let out = cpu_rolling_minmax_f64(&input, 2, 5, false);
+        // Window 2 max: [3], [1,3], [1,5], [2,5], [2,4]
+        assert!((out[0] - 3.0).abs() < 1e-10);
+        assert!((out[1] - 3.0).abs() < 1e-10);
+        assert!((out[2] - 5.0).abs() < 1e-10);
+        assert!((out[3] - 5.0).abs() < 1e-10);
+        assert!((out[4] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cpu_rolling_count() {
+        // Count via execute_rolling_cpu
+        let input = Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])) as ArrayRef;
+        let result = execute_rolling_cpu(&input, 3, RollingAggFunc::Count, &DataType::Int64, 5).unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 1);
+        assert_eq!(arr.value(1), 2);
+        assert_eq!(arr.value(2), 3);
+        assert_eq!(arr.value(3), 3);
+        assert_eq!(arr.value(4), 3);
+    }
+
+    #[test]
+    fn test_cpu_rolling_sum_via_execute() {
+        // Sum via execute_rolling_cpu
+        let input = Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])) as ArrayRef;
+        let result = execute_rolling_cpu(&input, 3, RollingAggFunc::Sum, &DataType::Int64, 5).unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 10);
+        assert_eq!(arr.value(1), 30);
+        assert_eq!(arr.value(2), 60);
+        assert_eq!(arr.value(3), 90);
+        assert_eq!(arr.value(4), 120);
+    }
+
+    #[test]
+    fn test_cpu_rolling_avg_via_execute() {
+        // Avg via execute_rolling_cpu always returns Float64
+        let input = Arc::new(Int64Array::from(vec![10, 20, 30])) as ArrayRef;
+        let result = execute_rolling_cpu(&input, 2, RollingAggFunc::Avg, &DataType::Int64, 3).unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 10.0).abs() < 1e-10);   // [10] / 1
+        assert!((arr.value(1) - 15.0).abs() < 1e-10);   // [10,20] / 2
+        assert!((arr.value(2) - 25.0).abs() < 1e-10);   // [20,30] / 2
+    }
+
+    #[test]
+    fn test_cpu_rolling_window_size_1() {
+        // Window size 1: each output equals the input
+        let input = vec![10i64, 20, 30];
+        let out = cpu_rolling_sum_i64(&input, 1, 3);
+        assert_eq!(out, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_cpu_rolling_window_larger_than_data() {
+        // Window size larger than data: includes all preceding rows
+        let input = vec![10i64, 20, 30];
+        let out = cpu_rolling_sum_i64(&input, 10, 3);
+        assert_eq!(out, vec![10, 30, 60]);
+    }
+
+    #[test]
+    fn test_rolling_op_output_name() {
+        let op = GpuWindowOp::Rolling {
+            column_index: 0,
+            column_name: "price".to_string(),
+            window_size: 3,
+            agg_func: RollingAggFunc::Avg,
+            output_name: "avg_price".to_string(),
+            data_type: DataType::Float64,
+        };
+        assert_eq!(op.output_name(), "avg_price");
+    }
+
+    #[test]
+    fn test_rolling_agg_func_display() {
+        assert_eq!(format!("{}", RollingAggFunc::Sum), "sum");
+        assert_eq!(format!("{}", RollingAggFunc::Avg), "avg");
+        assert_eq!(format!("{}", RollingAggFunc::Min), "min");
+        assert_eq!(format!("{}", RollingAggFunc::Max), "max");
+        assert_eq!(format!("{}", RollingAggFunc::Count), "count");
     }
 }
