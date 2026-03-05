@@ -9,6 +9,72 @@ if TYPE_CHECKING:
     from .row_proxy import RowProxy
 
 
+class GroupColumnProxy:
+    """
+    Enables property-style aggregation access on GroupProxy.
+
+    Instead of ``g.avg('price')``, this allows ``g.price.avg()``.
+    Both styles are supported; property-style delegates back to the
+    GroupProxy's string-style methods.
+
+    Single-column aggregations are available as methods on this proxy.
+    Multi-column operations (corr, covar) and operations requiring extra
+    parameters (percentile, top_k) remain string-style only.
+
+    Example:
+        >>> g.price.avg()   # property-style
+        >>> g.avg('price')  # string-style (equivalent)
+    """
+
+    def __init__(self, group_proxy: "GroupAggregationMixin", column_name: str):
+        self._group_proxy = group_proxy
+        self._column_name = column_name
+
+    def max(self) -> Any:
+        """Maximum value in this column for the group."""
+        return self._group_proxy.max(self._column_name)
+
+    def min(self) -> Any:
+        """Minimum value in this column for the group."""
+        return self._group_proxy.min(self._column_name)
+
+    def sum(self) -> Any:
+        """Sum of values in this column for the group."""
+        return self._group_proxy.sum(self._column_name)
+
+    def avg(self) -> Any:
+        """Average value in this column for the group."""
+        return self._group_proxy.avg(self._column_name)
+
+    def median(self) -> Any:
+        """Median value in this column for the group."""
+        return self._group_proxy.median(self._column_name)
+
+    def variance(self) -> Any:
+        """Sample variance of values in this column for the group."""
+        return self._group_proxy.variance(self._column_name)
+
+    var = variance
+
+    def std(self) -> Any:
+        """Sample standard deviation of values in this column for the group."""
+        return self._group_proxy.std(self._column_name)
+
+    stddev = std
+
+    def mode(self) -> Any:
+        """Most frequent value in this column for the group."""
+        return self._group_proxy.mode(self._column_name)
+
+    def skew(self) -> Any:
+        """Skewness of values in this column for the group."""
+        return self._group_proxy.skew(self._column_name)
+
+    def concat_agg(self, delimiter: str = ",") -> Any:
+        """Concatenate string values in this column with a delimiter."""
+        return self._group_proxy.concat_agg(self._column_name, delimiter)
+
+
 class GroupAggregationMixin:
     """Mixin providing aggregation methods for GroupProxy."""
 

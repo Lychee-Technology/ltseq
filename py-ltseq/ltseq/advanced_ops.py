@@ -1,4 +1,4 @@
-"""Advanced operations for LTSeq: align, stateful_scan, search_first, pivot, set operations."""
+"""Advanced operations for LTSeq: align, scan, search_first, pivot, set operations."""
 
 from typing import Any, Callable, Optional
 
@@ -448,7 +448,7 @@ class AdvancedOpsMixin:
 
         return result
 
-    def stateful_scan(
+    def scan(
         self,
         func: Callable,
         init: Any,
@@ -469,7 +469,7 @@ class AdvancedOpsMixin:
             New LTSeq with state column added
 
         Example:
-            >>> result = t.sort("date").stateful_scan(
+            >>> result = t.sort("date").scan(
             ...     func=lambda s, r: s * (1 + r["rate"]),
             ...     init=1.0,
             ...     output_col="cumulative_return"
@@ -495,7 +495,7 @@ class AdvancedOpsMixin:
             import pandas as pd
         except ImportError:
             raise RuntimeError(
-                "stateful_scan() requires pandas. Install with: pip install pandas"
+                "scan() requires pandas. Install with: pip install pandas"
             )
 
         df = self.to_pandas()
@@ -529,7 +529,7 @@ class AdvancedOpsMixin:
         return result
 
     def _handle_empty_scan(self, init: Any, output_col: str) -> "LTSeq":
-        """Handle stateful_scan on empty table."""
+        """Handle scan on empty table."""
         from .core import LTSeq
 
         result_schema = self._schema.copy()

@@ -93,10 +93,25 @@ impl QueryPlanner for GpuQueryPlanner {
             // Parquet files into GPU HBM when the engine is available.
             let parquet_paths = extract_parquet_paths(logical_plan);
 
+            // Extract sort column names from the CPU plan's EquivalenceProperties.
+            // This propagates LTSeqTable.sort_exprs (set via assume_sorted or sort())
+            // into the GPU plan layer, enabling sort-aware GPU operator selection.
+            let sort_column_names =
+                crate::gpu::sort_aware::extract_sort_columns(&cpu_plan);
+
+            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                if sort_column_names.is_empty() {
+                    eprintln!("[GPU] sort metadata: unsorted");
+                } else {
+                    eprintln!("[GPU] sort metadata: sorted by [{}]", sort_column_names.join(", "));
+                }
+            }
+
             return Ok(Arc::new(crate::gpu::exec_node::GpuExecNode::new(
                 cpu_plan,
                 substrait_bytes,
                 parquet_paths,
+                sort_column_names,
             )));
         }
 

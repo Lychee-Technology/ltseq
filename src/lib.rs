@@ -830,6 +830,38 @@ impl LTSeqTable {
         )
     }
 
+    /// Merge join for pre-sorted tables with GPU acceleration.
+    ///
+    /// Uses GPU binary search when available and eligible, otherwise falls back
+    /// to a CPU two-pointer merge join. Both tables must be sorted by their
+    /// respective join key columns (ascending). Only inner and left joins are
+    /// supported; right/full fall back to SQL join.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The right table to join with (sorted by right key)
+    /// * `left_key_expr_dict` - Serialized expression for left join key
+    /// * `right_key_expr_dict` - Serialized expression for right join key
+    /// * `join_type` - "inner" or "left" (right/full fall back to SQL)
+    /// * `alias` - Prefix for right table columns (e.g., "_other")
+    fn merge_join(
+        &self,
+        other: &LTSeqTable,
+        left_key_expr_dict: &Bound<'_, PyDict>,
+        right_key_expr_dict: &Bound<'_, PyDict>,
+        join_type: &str,
+        alias: &str,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::join::merge_join_impl(
+            self,
+            other,
+            left_key_expr_dict,
+            right_key_expr_dict,
+            join_type,
+            alias,
+        )
+    }
+
     /// As-of Join: Time-series join matching each left row with nearest right row
     ///
     /// This operation finds, for each row in the left table, the "nearest" matching

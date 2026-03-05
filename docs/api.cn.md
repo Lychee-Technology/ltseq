@@ -20,7 +20,8 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 |------|------|------|
 | 加载 CSV | `LTSeq.read_csv()` | `t = LTSeq.read_csv("data.csv")` |
 | 查看列名 | `.columns` | `print(t.columns)` |
-| 流式输出 | `.to_cursor()` | `for batch in t.to_cursor(): ...` |
+| 流式读取 CSV | `LTSeq.scan_csv()` | `for batch in LTSeq.scan_csv("file.csv"): ...` |
+| 流式读取 Parquet | `LTSeq.scan_parquet()` | `for batch in LTSeq.scan_parquet("file.parquet"): ...` |
 | 物化所有行 | `.collect()` | `rows = t.collect()` |
 | 转 pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | 行数统计 | `.count()` | `n = t.count()` |
@@ -80,7 +81,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 - t: 当前 LTSeq 实例（不可变，所有操作返回新实例）
 - r: 行代理（lambda 内部用于构造表达式，不在 Python 侧执行）
 - g: 组代理（NestedTable 的 filter/derive 中使用）
-- 绝大多数操作返回新的 LTSeq；`to_cursor` 返回迭代器；`is_subset` 返回布尔值
+- 绝大多数操作返回新的 LTSeq；`scan_csv`/`scan_parquet` 返回流式 `Cursor`；`is_subset` 返回布尔值
 - 窗口/有序相关能力依赖已有排序（`sort`），未排序使用会导致运行期错误或不正确结果
 - 表达式在 Python 侧被捕获为 AST 并在 Rust/DataFusion 层执行
 
@@ -126,16 +127,28 @@ for name, dtype in zip(t.schema.names, t.schema.types):
 print(t.columns)  # ["id", "name", "age"]
 ```
 
-### `LTSeq.to_cursor`
-- **签名**: `LTSeq.to_cursor(chunk_size: int = 10000) -> Iterator[Record]`
-- **行为**: 将结果以游标方式流式输出，避免一次性物化
-- **参数**: `chunk_size` 每批次行数
-- **返回**: 记录迭代器
-- **异常**: `ValueError`（chunk_size 非法），`RuntimeError`（底层不支持流式或执行失败）
+### `LTSeq.scan_csv`
+- **签名**: `LTSeq.scan_csv(path: str, has_header: bool = True) -> Cursor`
+- **行为**: 为 CSV 文件创建流式游标，无需将数据全部加载到内存
+- **参数**: `path` 文件路径；`has_header` 首行是否为表头（默认 `True`）
+- **返回**: 流式迭代 `Cursor`
+- **异常**: `FileNotFoundError`（路径不存在），`ValueError`（CSV 解析失败）
 - **示例**:
 ```python
-for batch in t.to_cursor(chunk_size=5000):
-    print(batch)
+for batch in LTSeq.scan_csv("large.csv"):
+    process(batch)
+```
+
+### `LTSeq.scan_parquet`
+- **签名**: `LTSeq.scan_parquet(path: str) -> Cursor`
+- **行为**: 为 Parquet 文件创建流式游标，无需将数据全部加载到内存
+- **参数**: `path` 文件路径
+- **返回**: 流式迭代 `Cursor`
+- **异常**: `FileNotFoundError`（路径不存在），`RuntimeError`（Parquet 读取失败）
+- **示例**:
+```python
+for batch in LTSeq.scan_parquet("large.parquet"):
+    process(batch)
 ```
 
 ### `LTSeq.collect`
@@ -546,28 +559,38 @@ spans = groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
 
 ### `GroupProxy` 聚合方法
 
-#### 基础聚合（列访问风格）
-- **签名**: `g.col.sum()`, `g.col.avg()`, `g.col.min()`, `g.col.max()`
-- **行为**: 在组范围内对指定列做基础聚合
+#### 基础聚合（两种风格均可）
+- **签名**: `g.sum("col")` / `g.col.sum()`, `g.avg("col")` / `g.col.avg()`, `g.min("col")` / `g.col.min()`, `g.max("col")` / `g.col.max()`
+- **行为**: 在组范围内对指定列做基础聚合。支持**字符串风格**（`g.avg("price")`）和**属性风格**（`g.price.avg()`），二者等价
 - **示例**:
 ```python
+# 属性风格
 groups.derive(lambda g: {"avg": g.price.avg(), "hi": g.price.max()})
+
+# 字符串风格（等价）
+groups.derive(lambda g: {"avg": g.avg("price"), "hi": g.max("price")})
+
+# filter() 同样支持两种风格
+groups.filter(lambda g: g.price.avg() > 100)
+groups.filter(lambda g: g.avg("price") > 100)
 ```
 
 #### `GroupProxy.variance` / `GroupProxy.std`
-- **签名**: `g.variance(column: str) -> Expr` / `g.std(column: str) -> Expr`
+- **签名**: `g.variance(column: str) -> Expr` / `g.col.variance() -> Expr` / `g.std(column: str) -> Expr` / `g.col.std() -> Expr`
 - **行为**: 组内方差 / 标准差
 - **示例**:
 ```python
 groups.derive(lambda g: {"vol": g.variance("price")})
+groups.derive(lambda g: {"vol": g.price.variance()})  # 属性风格
 ```
 
 #### `GroupProxy.median`
-- **签名**: `g.median(column: str) -> Expr`
+- **签名**: `g.median(column: str) -> Expr` / `g.col.median() -> Expr`
 - **行为**: 组内中位数
 - **示例**:
 ```python
 groups.derive(lambda g: {"mid": g.median("price")})
+groups.derive(lambda g: {"mid": g.price.median()})  # 属性风格
 ```
 
 #### `GroupProxy.percentile`
@@ -579,11 +602,12 @@ groups.derive(lambda g: {"p95": g.percentile("response_ms", 0.95)})
 ```
 
 #### `GroupProxy.mode`
-- **签名**: `g.mode(column: str) -> Expr`
+- **签名**: `g.mode(column: str) -> Expr` / `g.col.mode() -> Expr`
 - **行为**: 组内众数（出现频率最高的值）
 - **示例**:
 ```python
 groups.derive(lambda g: {"common_category": g.mode("category")})
+groups.derive(lambda g: {"common_category": g.category.mode()})  # 属性风格
 ```
 
 #### `GroupProxy.top_k`
@@ -1338,7 +1362,7 @@ summary = orders.agg(
 
 - 所有表达式会被序列化并下推到 Rust/DataFusion 层执行，不在 Python 侧逐行计算
 - 字符串/时间/NULL 等扩展操作会映射为底层 SQL/DataFusion 函数
-- `to_cursor` 提供流式处理能力，适合超大数据集
+- `scan_csv`/`scan_parquet` 提供流式处理能力，适合超大数据集
 
 ### 表达式 SQL 转译速查表
 

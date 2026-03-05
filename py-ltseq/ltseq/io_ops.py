@@ -1,4 +1,4 @@
-"""I/O operations for LTSeq: read_csv, write_csv, scan, _from_rows."""
+"""I/O operations for LTSeq: read_csv, write_csv, scan_csv, _from_rows."""
 
 from typing import Any, Dict
 
@@ -74,7 +74,7 @@ class IOMixin:
         return t
 
     @classmethod
-    def scan(cls, path: str, has_header: bool = True) -> "Cursor":
+    def scan_csv(cls, path: str, has_header: bool = True) -> "Cursor":
         """
         Create a streaming cursor for a CSV file.
 
@@ -88,7 +88,7 @@ class IOMixin:
             Cursor for streaming iteration
 
         Example:
-            >>> cursor = LTSeq.scan("large.csv")
+            >>> cursor = LTSeq.scan_csv("large.csv")
             >>> for batch in cursor:
             ...     process(batch)
         """

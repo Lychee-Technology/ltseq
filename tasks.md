@@ -6,7 +6,7 @@
 
 | Feature | API Method | Status |
 |---------|-----------|--------|
-| **I/O** | `read_csv`, `write_csv`, `scan`, `scan_parquet`, `to_cursor` | Complete |
+| **I/O** | `read_csv`, `write_csv`, `scan_csv`, `scan_parquet` | Complete |
 | **Basic Ops** | `filter`, `select`, `derive`, `sort`, `distinct`, `slice` | Complete |
 | **Window Funcs** | `shift`, `rolling().mean/sum/min/max/count/std`, `diff`, `cum_sum` | Complete |
 | **Ordered Grouping** | `group_ordered` -> `NestedTable` | Complete |
@@ -30,7 +30,7 @@
 |---------|-----------|-----|----------|
 | **read_csv has_header** | `read_csv(path, has_header=True)` | **IMPLEMENTED** - `has_header` parameter added | Medium |
 | **group_sorted** | `group_sorted(key)` | **IMPLEMENTED** - one-pass grouping on pre-sorted data | High |
-| **scan (stateful)** | `scan(func, init)` | **IMPLEMENTED** as `stateful_scan()` - Python-based stateful iteration | High |
+| **scan (stateful)** | `scan(func, init)` | **IMPLEMENTED** - Python-based stateful iteration | High |
 | **align** | `align(ref_sequence, key)` | **IMPLEMENTED** - align to reference sequence | Medium |
 | **asof_join** | `asof_join(other, on, direction)` | **IMPLEMENTED** - time-series as-of joins | High |
 | **join_sorted** | `join_sorted(other, on, how)` | **IMPLEMENTED** - merge join with sort validation | Low |
@@ -54,20 +54,20 @@
 **Status**: COMPLETED
 
 #### 1.2 `scan(func, init)` - Stateful Scan/Iterate
-- [x] Add `stateful_scan(func, init, output_col)` method to `LTSeq`
+- [x] Add `scan(func, init, output_col)` method to `LTSeq`
 - [x] Implement Python-based row-by-row state iteration
 - [x] Handle empty tables and single-row tables
 - [x] Preserve sort keys after scan
-- [x] Add comprehensive tests in `tests/test_stateful_scan.py`
+- [x] Add comprehensive tests in `tests/test_scan.py`
 
 **Implementation Notes:**
 - Implemented as Python-side iteration (not Rust transpiled) for maximum flexibility
 - Uses pandas DataFrame for row iteration
 - State can be any Python type (int, float, bool, string)
 - CSV round-trip may convert types to strings; subsequent derives should account for this
-- Named `stateful_scan()` to avoid conflict with existing `scan()` (file streaming)
+- File-streaming class method renamed to `scan_csv()` to free the `scan` name
 
-**Files**: `py-ltseq/ltseq/core.py`, `py-ltseq/tests/test_stateful_scan.py`
+**Files**: `py-ltseq/ltseq/advanced_ops.py`, `py-ltseq/tests/test_scan.py`
 **Status**: COMPLETED
 
 #### 1.3 `asof_join(other, on, direction)` - Time-Series As-Of Join
@@ -95,7 +95,7 @@
 
 #### 2.2 `read_csv(path, has_header=True)` - Header Parameter
 - [x] Add `has_header` parameter to `read_csv()`
-- [x] Add `has_header` parameter to `scan()`
+- [x] Add `has_header` parameter to `scan_csv()`
 - [x] Pass to Rust `read_csv` and `scan_csv` implementations
 - [x] Update schema inference logic for headerless CSVs
 - [x] Add tests in `tests/test_has_header.py`
@@ -354,7 +354,7 @@
 
 ### Phase 1-3 (Core Features)
 - [x] Phase 1.1: `group_sorted` - **COMPLETED**
-- [x] Phase 1.2: `scan` (stateful) - **COMPLETED** (as `stateful_scan()`)
+- [x] Phase 1.2: `scan` (stateful) - **COMPLETED**
 - [x] Phase 1.3: `asof_join` - **COMPLETED**
 - [x] Phase 2.1: `align` - **COMPLETED**
 - [x] Phase 2.2: `read_csv has_header` - **COMPLETED**

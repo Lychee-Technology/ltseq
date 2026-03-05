@@ -40,6 +40,13 @@ from .expr import (
     atan,
     atan2,
     rand,
+    # Number-theory functions
+    gcd,
+    lcm,
+    factorial,
+    # String functions
+    str_char,
+    concat_ws,
     # Datetime functions
     now,
     today,
@@ -104,6 +111,11 @@ __all__ = [
     "atan",
     "atan2",
     "rand",
+    "gcd",
+    "lcm",
+    "factorial",
+    "str_char",
+    "concat_ws",
     "now",
     "today",
     "nvl",

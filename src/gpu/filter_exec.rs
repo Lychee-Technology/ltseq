@@ -569,3 +569,12 @@ fn run_kernel_f32(
 fn cuda_err(e: cudarc::driver::safe::DriverError) -> datafusion::common::DataFusionError {
     datafusion::common::DataFusionError::Execution(format!("CUDA error: {:?}", e))
 }
+
+// --- SortOrderPropagation ---
+
+impl super::sort_aware::SortOrderPropagation for GpuFilterExec {
+    /// Filtering preserves the input's sort order (rows are removed, not reordered).
+    fn sort_order_effect(&self) -> super::sort_aware::SortOrderEffect {
+        super::sort_aware::SortOrderEffect::Preserve
+    }
+}

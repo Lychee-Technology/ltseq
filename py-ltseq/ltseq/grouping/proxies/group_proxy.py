@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from .row_proxy import RowProxy
-from .aggregations import GroupAggregationMixin
+from .aggregations import GroupAggregationMixin, GroupColumnProxy
 from .conditionals import GroupConditionalMixin
 
 if TYPE_CHECKING:
@@ -16,6 +16,10 @@ class GroupProxy(GroupAggregationMixin, GroupConditionalMixin):
 
     Provides access to group properties like count(), first(), last()
     so that predicates can be evaluated.
+
+    Supports both string-style and property-style aggregation access:
+        g.avg('price')   # string-style
+        g.price.avg()    # property-style
 
     This class combines mixins for aggregation and conditional operations.
     """
@@ -30,6 +34,36 @@ class GroupProxy(GroupAggregationMixin, GroupConditionalMixin):
         """
         self._group_data = group_data
         self._nested_table = nested_table
+
+    def __getattr__(self, name: str) -> GroupColumnProxy:
+        """Enable property-style column access for aggregations.
+
+        Attribute access for names that aren't methods returns a
+        GroupColumnProxy, which provides aggregation methods like
+        .avg(), .max(), etc.
+
+        Args:
+            name: Column name to access
+
+        Returns:
+            GroupColumnProxy for the requested column
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        # Check if column exists in group data
+        if isinstance(self._group_data, list):
+            if self._group_data and isinstance(self._group_data[0], dict):
+                if name not in self._group_data[0]:
+                    raise AttributeError(
+                        f"No column '{name}' in group data"
+                    )
+            return GroupColumnProxy(self, name)
+        else:
+            # pandas DataFrame
+            if hasattr(self._group_data, 'columns') and name in self._group_data.columns:
+                return GroupColumnProxy(self, name)
+            raise AttributeError(f"No column '{name}' in group data")
 
     def count(self) -> int:
         """Get the number of rows in this group."""

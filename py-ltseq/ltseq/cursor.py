@@ -20,12 +20,12 @@ class Cursor:
     in batches, enabling processing of datasets larger than RAM.
 
     Example:
-        >>> for batch in LTSeq.scan("large_file.csv"):
+        >>> for batch in LTSeq.scan_csv("large_file.csv"):
         ...     df = batch.to_pandas()
         ...     process(df)
 
         >>> # Or collect all at once (materializes to memory)
-        >>> df = LTSeq.scan("file.csv").to_pandas()
+        >>> df = LTSeq.scan_csv("file.csv").to_pandas()
     """
 
     def __init__(self, rust_cursor):

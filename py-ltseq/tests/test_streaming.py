@@ -1,6 +1,6 @@
 """Tests for streaming cursor functionality.
 
-These tests verify that the LTSeq.scan() API works correctly for
+These tests verify that the LTSeq.scan_csv() API works correctly for
 streaming batch-by-batch data processing.
 """
 
@@ -10,7 +10,7 @@ import pytest
 
 
 class TestStreamingCursor:
-    """Tests for LTSeq.scan() streaming functionality."""
+    """Tests for LTSeq.scan_csv() streaming functionality."""
 
     def test_scan_csv_basic(self):
         """Test basic CSV scanning returns a Cursor."""
@@ -26,7 +26,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             assert hasattr(cursor, '__iter__')
             assert hasattr(cursor, '__next__')
             assert cursor.columns == ['id', 'name', 'value']
@@ -46,7 +46,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             total_rows = 0
             batch_count = 0
 
@@ -75,7 +75,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             df = cursor.to_pandas()
 
             assert len(df) == 3
@@ -99,7 +99,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             table = cursor.to_arrow()
 
             assert isinstance(table, pa.Table)
@@ -149,7 +149,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             schema = cursor.schema
 
             assert 'int_col' in schema
@@ -169,7 +169,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             assert cursor.source == temp_path
         finally:
             os.unlink(temp_path)
@@ -186,7 +186,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             assert not cursor.exhausted
 
             list(cursor)  # Consume all
@@ -208,7 +208,7 @@ class TestStreamingCursor:
             temp_path = f.name
 
         try:
-            cursor = LTSeq.scan(temp_path)
+            cursor = LTSeq.scan_csv(temp_path)
             count = cursor.count()
 
             assert count == 75

@@ -233,7 +233,7 @@ class JoinMixin:
 
         # Execute merge join
         try:
-            joined_inner = self._inner.join(
+            joined_inner = self._inner.merge_join(
                 other._inner, left_key_expr, right_key_expr, jtype, "_other"
             )
         except RuntimeError as e:

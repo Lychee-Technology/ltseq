@@ -2,6 +2,13 @@
 
 from .row_proxy import RowProxy
 from .group_proxy import GroupProxy
-from .derive_proxy import DeriveGroupProxy
+from .aggregations import GroupColumnProxy
+from .derive_proxy import DeriveGroupProxy, DeriveColumnProxy
 
-__all__ = ["RowProxy", "GroupProxy", "DeriveGroupProxy"]
+__all__ = [
+    "RowProxy",
+    "GroupProxy",
+    "GroupColumnProxy",
+    "DeriveGroupProxy",
+    "DeriveColumnProxy",
+]

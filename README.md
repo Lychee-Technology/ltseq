@@ -384,7 +384,7 @@ For datasets too large to fit in memory, use cursor-based streaming:
 from ltseq import LTSeq
 
 # Create streaming cursor (doesn't load entire file)
-cursor = LTSeq.scan("huge_file.csv")
+cursor = LTSeq.scan_csv("huge_file.csv")
 
 # Process in batches
 for batch in cursor:
@@ -448,7 +448,7 @@ See [docs/api.md](docs/api.md) for the complete API specification including:
 - Conditional expressions (if_else, fill_null, is_null, is_not_null)
 - Conditional aggregations (count_if, sum_if, avg_if, min_if, max_if)
 - GroupProxy methods (median, percentile, variance, std, mode, top_k, all, any, none)
-- Streaming (scan, scan_parquet, Cursor)
+- Streaming (scan_csv, scan_parquet, Cursor)
 
 ## Testing
 

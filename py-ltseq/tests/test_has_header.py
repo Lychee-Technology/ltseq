@@ -1,4 +1,4 @@
-"""Tests for read_csv and scan with has_header parameter."""
+"""Tests for read_csv and scan_csv with has_header parameter."""
 
 import os
 import tempfile
@@ -157,7 +157,7 @@ Bob,25
             with open(path, "w") as f:
                 f.write(data)
 
-            cursor = LTSeq.scan(path)
+            cursor = LTSeq.scan_csv(path)
             df = cursor.to_pandas()
 
             assert list(df.columns) == ["name", "age"]
@@ -174,7 +174,7 @@ Charlie,35
             with open(path, "w") as f:
                 f.write(data)
 
-            cursor = LTSeq.scan(path, has_header=False)
+            cursor = LTSeq.scan_csv(path, has_header=False)
             df = cursor.to_pandas()
 
             # Column names should be auto-generated (1-based)
@@ -194,7 +194,7 @@ Diana,40
             with open(path, "w") as f:
                 f.write(data)
 
-            cursor = LTSeq.scan(path, has_header=False)
+            cursor = LTSeq.scan_csv(path, has_header=False)
 
             # Iterate through batches
             all_rows = []

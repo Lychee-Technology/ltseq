@@ -1,4 +1,4 @@
-"""Tests for LTSeq.stateful_scan() - stateful row-by-row scan operation."""
+"""Tests for LTSeq.scan() - stateful row-by-row scan operation."""
 
 import pytest
 import tempfile
@@ -45,7 +45,7 @@ class TestStatefulScanBasic:
     def test_compound_growth(self, sample_csv):
         """Test compound growth calculation (main use case from API spec)."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s * (1 + r["rate"]),
             init=1.0,
             output_col="cumulative_return",
@@ -68,7 +68,7 @@ class TestStatefulScanBasic:
     def test_running_sum(self, sample_csv):
         """Test running sum of values."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + r["value"], init=0, output_col="running_total"
         )
 
@@ -78,7 +78,7 @@ class TestStatefulScanBasic:
     def test_running_max(self, prices_csv):
         """Test running maximum value."""
         t = LTSeq.read_csv(prices_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: max(s, r["price"]),
             init=float("-inf"),
             output_col="running_max",
@@ -90,7 +90,7 @@ class TestStatefulScanBasic:
     def test_running_min(self, prices_csv):
         """Test running minimum value."""
         t = LTSeq.read_csv(prices_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: min(s, r["price"]),
             init=float("inf"),
             output_col="running_min",
@@ -102,7 +102,7 @@ class TestStatefulScanBasic:
     def test_count_positive(self, sample_csv):
         """Test counting positive rates."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + (1 if r["rate"] > 0 else 0),
             init=0,
             output_col="positive_count",
@@ -119,7 +119,7 @@ class TestStatefulScanEdgeCases:
     def test_empty_table(self, sample_csv):
         """Test scan on empty table."""
         t = LTSeq.read_csv(sample_csv).filter(lambda r: r.value < 0)  # No matches
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + r["value"], init=0, output_col="running_total"
         )
 
@@ -136,7 +136,7 @@ class TestStatefulScanEdgeCases:
 
         try:
             t = LTSeq.read_csv(f.name)
-            result = t.stateful_scan(
+            result = t.scan(
                 func=lambda s, r: s + r["value"], init=0, output_col="running_total"
             )
 
@@ -149,7 +149,7 @@ class TestStatefulScanEdgeCases:
     def test_preserves_original_columns(self, sample_csv):
         """Test that original columns are preserved."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + 1, init=0, output_col="row_count"
         )
 
@@ -166,7 +166,7 @@ class TestStatefulScanEdgeCases:
         t = LTSeq.read_csv(sample_csv).sort("date")
         assert t.sort_keys == [("date", False)]
 
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + 1, init=0, output_col="row_count"
         )
 
@@ -179,7 +179,7 @@ class TestStatefulScanStateTypes:
     def test_integer_state(self, sample_csv):
         """Test with integer state."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(func=lambda s, r: s + 1, init=0, output_col="counter")
+        result = t.scan(func=lambda s, r: s + 1, init=0, output_col="counter")
 
         df = result.to_pandas()
         assert df["counter"].tolist() == [1, 2, 3, 4, 5]
@@ -187,7 +187,7 @@ class TestStatefulScanStateTypes:
     def test_float_state(self, sample_csv):
         """Test with float state."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + 0.5, init=0.0, output_col="half_counter"
         )
 
@@ -197,7 +197,7 @@ class TestStatefulScanStateTypes:
     def test_boolean_state(self, sample_csv):
         """Test with boolean state (tracking if ever saw positive)."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s or r["rate"] > 0.05,
             init=False,
             output_col="ever_high",
@@ -215,19 +215,19 @@ class TestStatefulScanErrors:
         """Test error when schema not initialized."""
         t = LTSeq()
         with pytest.raises(ValueError, match="Schema not initialized"):
-            t.stateful_scan(func=lambda s, r: s, init=0)
+            t.scan(func=lambda s, r: s, init=0)
 
     def test_non_callable_func_error(self, sample_csv):
         """Test error when func is not callable."""
         t = LTSeq.read_csv(sample_csv)
         with pytest.raises(TypeError, match="func must be callable"):
-            t.stateful_scan(func="not_a_function", init=0)
+            t.scan(func="not_a_function", init=0)
 
     def test_duplicate_output_col_error(self, sample_csv):
         """Test error when output column already exists."""
         t = LTSeq.read_csv(sample_csv)
         with pytest.raises(ValueError, match="already exists"):
-            t.stateful_scan(func=lambda s, r: s, init=0, output_col="value")
+            t.scan(func=lambda s, r: s, init=0, output_col="value")
 
     def test_func_runtime_error(self, sample_csv):
         """Test error handling when func raises exception."""
@@ -239,7 +239,7 @@ class TestStatefulScanErrors:
             return s + r["value"]
 
         with pytest.raises(RuntimeError, match="State transition function failed"):
-            t.stateful_scan(func=bad_func, init=0)
+            t.scan(func=bad_func, init=0)
 
 
 class TestStatefulScanChaining:
@@ -250,7 +250,7 @@ class TestStatefulScanChaining:
         t = LTSeq.read_csv(sample_csv).sort("date")
         result = t.filter(
             lambda r: r.rate > 0
-        ).stateful_scan(  # Keep only positive rates
+        ).scan(  # Keep only positive rates
             func=lambda s, r: s * (1 + r["rate"]),
             init=1.0,
             output_col="growth",
@@ -267,7 +267,7 @@ class TestStatefulScanChaining:
     def test_scan_then_filter(self, sample_csv):
         """Test filtering after scan."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + r["value"], init=0, output_col="running_total"
         ).filter(lambda r: r.running_total > 300)
 
@@ -284,7 +284,7 @@ class TestStatefulScanChaining:
         This test verifies the chaining works, even if types need conversion.
         """
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + r["value"], init=0, output_col="running_total"
         )
 
@@ -304,9 +304,9 @@ class TestStatefulScanChaining:
     def test_multiple_scans(self, sample_csv):
         """Test multiple consecutive scans."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + r["value"], init=0, output_col="running_sum"
-        ).stateful_scan(func=lambda s, r: s + 1, init=0, output_col="row_number")
+        ).scan(func=lambda s, r: s + 1, init=0, output_col="row_number")
 
         df = result.to_pandas()
         assert "running_sum" in df.columns
@@ -323,7 +323,7 @@ class TestStatefulScanUseCases:
         t = LTSeq.read_csv(prices_csv).sort("date")
         alpha = 0.3  # Smoothing factor
 
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: alpha * r["price"] + (1 - alpha) * s,
             init=50,  # Start with first price
             output_col="ema",
@@ -348,7 +348,7 @@ class TestStatefulScanUseCases:
         t = LTSeq.read_csv(prices_csv).sort("date")
 
         # First calculate running max
-        with_max = t.stateful_scan(
+        with_max = t.scan(
             func=lambda s, r: max(s, r["price"]),
             init=float("-inf"),
             output_col="peak",
@@ -372,7 +372,7 @@ class TestStatefulScanUseCases:
         """Test counting consecutive positive returns streak."""
         t = LTSeq.read_csv(sample_csv).sort("date")
 
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: (s + 1) if r["rate"] > 0 else 0,
             init=0,
             output_col="pos_streak",
@@ -392,14 +392,14 @@ class TestStatefulScanUseCases:
         t = LTSeq.read_csv(prices_csv).sort("date")
 
         # Track cumulative price*volume sum
-        result_pv = t.stateful_scan(
+        result_pv = t.scan(
             func=lambda s, r: s + r["price"] * r["volume"],
             init=0.0,
             output_col="cumulative_pv",
         )
 
         # Track cumulative volume in a second scan
-        result = result_pv.stateful_scan(
+        result = result_pv.scan(
             func=lambda s, r: s + r["volume"],
             init=0,
             output_col="cumulative_vol",
@@ -426,7 +426,7 @@ class TestStatefulScanCustomOutputCol:
     def test_custom_output_col_name(self, sample_csv):
         """Test using custom output column name."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(
+        result = t.scan(
             func=lambda s, r: s + 1,
             init=0,
             output_col="my_custom_column_name",
@@ -439,7 +439,7 @@ class TestStatefulScanCustomOutputCol:
     def test_default_output_col_name(self, sample_csv):
         """Test default output column name."""
         t = LTSeq.read_csv(sample_csv).sort("date")
-        result = t.stateful_scan(func=lambda s, r: s + 1, init=0)
+        result = t.scan(func=lambda s, r: s + 1, init=0)
 
         df = result.to_pandas()
         assert "scan_result" in df.columns

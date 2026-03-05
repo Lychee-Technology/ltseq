@@ -7,7 +7,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 - t: current LTSeq instance (immutable; all operations return a new instance)
 - r: row proxy used inside lambdas to build expressions (not executed in Python)
 - g: group proxy used in NestedTable filter/derive
-- Most operations return a new LTSeq; `to_cursor` returns an iterator; `is_subset` returns a bool
+- Most operations return a new LTSeq; `scan_csv`/`scan_parquet` return a streaming `Cursor`; `is_subset` returns a bool
 - Window/ordered operations require a prior `sort`; otherwise runtime errors or incorrect results may occur
 - Expressions are captured into AST on the Python side and executed in Rust/DataFusion
 
@@ -29,7 +29,8 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 |-----------|--------|---------|
 | Load CSV | `LTSeq.read_csv()` | `t = LTSeq.read_csv("data.csv")` |
 | View schema | `.columns` | `print(t.columns)` |
-| Stream results | `.to_cursor()` | `for batch in t.to_cursor(): ...` |
+| Stream CSV | `LTSeq.scan_csv()` | `for batch in LTSeq.scan_csv("file.csv"): ...` |
+| Stream Parquet | `LTSeq.scan_parquet()` | `for batch in LTSeq.scan_parquet("file.parquet"): ...` |
 | Collect all | `.collect()` | `rows = t.collect()` |
 | To pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | Row count | `.count()` | `n = t.count()` |
@@ -128,16 +129,28 @@ for name, dtype in zip(t.schema.names, t.schema.types):
 print(t.columns)  # ["id", "name", "age"]
 ```
 
-### `LTSeq.to_cursor`
-- **Signature**: `LTSeq.to_cursor(chunk_size: int = 10000) -> Iterator[Record]`
-- **Behavior**: Stream results via cursor to avoid full materialization
-- **Parameters**: `chunk_size` rows per batch
-- **Returns**: record iterator (e.g., Record/RecordBatch)
-- **Exceptions**: `ValueError` (invalid chunk_size), `RuntimeError` (streaming not supported or execution failure)
+### `LTSeq.scan_csv`
+- **Signature**: `LTSeq.scan_csv(path: str, has_header: bool = True) -> Cursor`
+- **Behavior**: Create a streaming cursor for a CSV file without loading it into memory
+- **Parameters**: `path` file path; `has_header` whether first row is a header (default `True`)
+- **Returns**: `Cursor` for streaming iteration
+- **Exceptions**: `FileNotFoundError` (path does not exist), `ValueError` (CSV parsing fails)
 - **Example**:
 ```python
-for batch in t.to_cursor(chunk_size=5000):
-    print(batch)
+for batch in LTSeq.scan_csv("large.csv"):
+    process(batch)
+```
+
+### `LTSeq.scan_parquet`
+- **Signature**: `LTSeq.scan_parquet(path: str) -> Cursor`
+- **Behavior**: Create a streaming cursor for a Parquet file without loading it into memory
+- **Parameters**: `path` file path
+- **Returns**: `Cursor` for streaming iteration
+- **Exceptions**: `FileNotFoundError` (path does not exist), `RuntimeError` (Parquet read failure)
+- **Example**:
+```python
+for batch in LTSeq.scan_parquet("large.parquet"):
+    process(batch)
 ```
 
 ### `LTSeq.collect`
@@ -605,25 +618,34 @@ spans = groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
 ```
 
 #### `GroupProxy` Common Aggregations
-- **Signature**: `g.count()`, `g.first()`, `g.last()`, `g.col.sum()`, `g.col.avg()`, `g.col.min()`, `g.col.max()`
-- **Behavior**: Aggregations or first/last within each group
-- **Parameters**: none (or column selection)
+- **Signature**: `g.count()`, `g.first()`, `g.last()`, `g.sum("col")` / `g.col.sum()`, `g.avg("col")` / `g.col.avg()`, `g.min("col")` / `g.col.min()`, `g.max("col")` / `g.col.max()`
+- **Behavior**: Aggregations or first/last within each group. Two styles are supported: **string-style** (`g.avg("price")`) and **property-style** (`g.price.avg()`). Both are equivalent.
+- **Parameters**: none (or column selection via string or property access)
 - **Returns**: group-level expressions
 - **Exceptions**: `TypeError` (unsupported column type), `RuntimeError` (execution failure)
 - **Example**:
 ```python
+# Property-style
 groups.derive(lambda g: {"avg": g.price.avg(), "hi": g.price.max()})
+
+# String-style (equivalent)
+groups.derive(lambda g: {"avg": g.avg("price"), "hi": g.max("price")})
+
+# filter() also supports both styles
+groups.filter(lambda g: g.price.avg() > 100)
+groups.filter(lambda g: g.avg("price") > 100)
 ```
 
 #### `GroupProxy.median`
-- **Signature**: `g.median(column: str) -> Any`
+- **Signature**: `g.median(column: str) -> Any` or `g.col.median() -> Any`
 - **Behavior**: Get the median value of a column in the group
-- **Parameters**: `column` column name
+- **Parameters**: `column` column name (string-style) or via property access
 - **Returns**: median value (or None if empty)
 - **Exceptions**: `TypeError` (non-numeric column)
 - **Example**:
 ```python
 groups.derive(lambda g: {"med_price": g.median("price")})
+groups.derive(lambda g: {"med_price": g.price.median()})  # property-style
 ```
 
 #### `GroupProxy.percentile`
@@ -638,36 +660,39 @@ groups.derive(lambda g: {"p95": g.percentile("latency", 0.95)})
 ```
 
 #### `GroupProxy.variance` / `GroupProxy.var`
-- **Signature**: `g.variance(column: str) -> Any` or `g.var(column: str) -> Any`
+- **Signature**: `g.variance(column: str) -> Any` or `g.col.variance() -> Any` (aliases: `var`)
 - **Behavior**: Get the sample variance of a column in the group
-- **Parameters**: `column` column name
+- **Parameters**: `column` column name (string-style) or via property access
 - **Returns**: sample variance (None if fewer than 2 values)
 - **Exceptions**: `TypeError` (non-numeric column)
 - **Example**:
 ```python
 groups.derive(lambda g: {"price_var": g.variance("price")})
+groups.derive(lambda g: {"price_var": g.price.var()})  # property-style
 ```
 
 #### `GroupProxy.std` / `GroupProxy.stddev`
-- **Signature**: `g.std(column: str) -> Any` or `g.stddev(column: str) -> Any`
+- **Signature**: `g.std(column: str) -> Any` or `g.col.std() -> Any` (aliases: `stddev`)
 - **Behavior**: Get the sample standard deviation of a column in the group
-- **Parameters**: `column` column name
+- **Parameters**: `column` column name (string-style) or via property access
 - **Returns**: sample standard deviation (None if fewer than 2 values)
 - **Exceptions**: `TypeError` (non-numeric column)
 - **Example**:
 ```python
 groups.derive(lambda g: {"price_std": g.std("price")})
+groups.derive(lambda g: {"price_std": g.price.std()})  # property-style
 ```
 
 #### `GroupProxy.mode`
-- **Signature**: `g.mode(column: str) -> Any`
+- **Signature**: `g.mode(column: str) -> Any` or `g.col.mode() -> Any`
 - **Behavior**: Get the most frequent value (mode) of a column in the group
-- **Parameters**: `column` column name
+- **Parameters**: `column` column name (string-style) or via property access
 - **Returns**: most frequent value (one of the modes if multiple)
 - **Exceptions**: none
 - **Example**:
 ```python
 groups.derive(lambda g: {"common_category": g.mode("category")})
+groups.derive(lambda g: {"common_category": g.category.mode()})  # property-style
 ```
 
 #### `GroupProxy.top_k`
@@ -1608,7 +1633,7 @@ The GPU optimizer uses the same sort-order metadata to select between ordered an
 
 - All expressions are serialized and pushed down to Rust/DataFusion, not evaluated row-by-row in Python
 - String/temporal/NULL extensions map to SQL/DataFusion functions
-- `to_cursor` enables streaming for very large datasets
+- `scan_csv`/`scan_parquet` enable streaming for very large datasets
 - `scan()` with arbitrary state-transition functions (`lambda s, r: ...`) is **inherently sequential** and always executes on CPU. Each state depends on the previous, making GPU parallelization impossible for opaque functions. For parallelizable cumulative operations, use `cum_sum()` (which maps to GPU prefix sum when available) or express the operation as a window function
 
 ### Expression SQL Translation Reference

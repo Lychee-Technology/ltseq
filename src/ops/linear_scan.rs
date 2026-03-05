@@ -1172,6 +1172,39 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         ))
     })?;
 
+    // ── GPU fast path ────────────────────────────────────────────────────
+    // For simple boundary predicates (adjacent_ne, adjacent_diff_gt) on
+    // large datasets, offload boundary detection + prefix sum to GPU.
+    #[cfg(feature = "gpu")]
+    {
+        if crate::gpu::ordered_ops::is_gpu_group_eligible(total_rows) {
+            if let Some(mode) = crate::gpu::ordered_ops::try_match_gpu_boundary_mode(
+                predicate,
+                &concat_batch.schema(),
+            ) {
+                if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                    eprintln!(
+                        "[GPU] linear_scan_group_id: using GPU path for {} rows, mode={:?}",
+                        total_rows,
+                        mode.kernel_name(),
+                    );
+                }
+
+                match crate::gpu::ordered_ops::gpu_group_id_from_batch(&concat_batch, &mode) {
+                    Ok((group_ids, count_values, rn_values)) => {
+                        return build_metadata_table(group_ids, count_values, rn_values, table);
+                    }
+                    Err(e) => {
+                        // GPU failed — fall through to CPU path
+                        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                            eprintln!("[GPU] GPU group_id failed, falling back to CPU: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Build column name → index mapping
     let mut name_to_idx: HashMap<String, usize> = HashMap::new();
     for (i, field) in concat_batch.schema().fields().iter().enumerate() {

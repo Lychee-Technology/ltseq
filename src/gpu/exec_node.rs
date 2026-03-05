@@ -55,20 +55,29 @@ pub struct GpuExecNode {
     /// Used to load tables into GPU HBM when the Substrait ReadRel uses
     /// a named_table reference (like "?table?") rather than local_files.
     pub parquet_paths: Vec<(String, String)>,
+    /// Sort column names propagated from `LTSeqTable.sort_exprs`.
+    /// Used by `HostToGpuRule` and downstream GPU operators to choose
+    /// ordered vs unordered algorithms.
+    pub sort_column_names: Vec<String>,
     /// Cached plan properties (always 1 output partition).
     cache: PlanProperties,
 }
 
 impl GpuExecNode {
     /// Create a new `GpuExecNode` wrapping `cpu_fallback`.
+    ///
+    /// `sort_column_names` carries the sort metadata from `LTSeqTable.sort_exprs`
+    /// through the planner into the physical plan layer, enabling the GPU
+    /// optimizer to choose between ordered and unordered algorithms.
     pub fn new(
         cpu_fallback: Arc<dyn ExecutionPlan>,
         substrait_bytes: Option<Vec<u8>>,
         parquet_paths: Vec<(String, String)>,
+        sort_column_names: Vec<String>,
     ) -> Self {
         let schema = cpu_fallback.schema();
         let cache = Self::compute_properties(&cpu_fallback);
-        Self { schema, cpu_fallback, substrait_bytes, parquet_paths, cache }
+        Self { schema, cpu_fallback, substrait_bytes, parquet_paths, sort_column_names, cache }
     }
 
     fn compute_properties(input: &Arc<dyn ExecutionPlan>) -> PlanProperties {
@@ -90,7 +99,12 @@ impl DisplayAs for GpuExecNode {
             Some(b) => format!("substrait={} bytes", b.len()),
             None => "substrait=none".to_string(),
         };
-        write!(f, "GpuExecNode [{substrait_info}]")
+        let sort_info = if self.sort_column_names.is_empty() {
+            "unsorted".to_string()
+        } else {
+            format!("sorted=[{}]", self.sort_column_names.join(", "))
+        };
+        write!(f, "GpuExecNode [{substrait_info}, {sort_info}]")
     }
 }
 
@@ -239,4 +253,25 @@ fn project_batch(
     }
 
     batch.project(&indices).ok()
+}
+
+// --- SortOrderPropagation ---
+
+impl super::sort_aware::SortOrderPropagation for GpuExecNode {
+    /// `GpuExecNode` preserves the sort order of the wrapped CPU fallback plan.
+    /// The actual sort metadata is stored in `sort_column_names` for the optimizer,
+    /// and is also available via DataFusion's `EquivalenceProperties`.
+    fn sort_order_effect(&self) -> super::sort_aware::SortOrderEffect {
+        if self.sort_column_names.is_empty() {
+            // No explicit sort metadata; check EquivalenceProperties from the CPU plan
+            let eq_cols = super::sort_aware::extract_sort_columns(&self.cpu_fallback);
+            if eq_cols.is_empty() {
+                super::sort_aware::SortOrderEffect::Destroy
+            } else {
+                super::sort_aware::SortOrderEffect::Produce(eq_cols)
+            }
+        } else {
+            super::sort_aware::SortOrderEffect::Produce(self.sort_column_names.clone())
+        }
+    }
 }

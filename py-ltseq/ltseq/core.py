@@ -434,6 +434,99 @@ class LTSeq(
 
         return LinkedTable(self, target_table, on, as_, join_type)
 
+    def lookup(
+        self, dim_table: "LTSeq", on: Callable, as_: str
+    ) -> "LTSeq":
+        """
+        Eager lookup join with a dimension table.
+
+        Performs a LEFT JOIN immediately and returns a new LTSeq with the
+        dimension columns prefixed by ``as_``. Best for small dimension
+        tables that fit in memory.
+
+        Unlike ``link()`` (which is lazy and returns a LinkedTable),
+        ``lookup()`` materializes the join eagerly and returns a plain LTSeq.
+
+        Args:
+            dim_table: The dimension table to look up against.
+            on: Join condition lambda with two parameters.
+                E.g., ``lambda o, p: o.product_id == p.id``
+            as_: Alias prefix for dimension columns. Dimension columns
+                will appear as ``{as_}_{column}`` in the result.
+
+        Returns:
+            New LTSeq with all original columns plus dimension columns.
+            Unmatched rows have NULL values for dimension columns.
+
+        Raises:
+            TypeError: If dim_table is not LTSeq, on is not callable,
+                      or as_ is not a non-empty string
+            ValueError: If schemas are not initialized or join condition
+                       references invalid columns
+
+        Example:
+            >>> orders = LTSeq.read_csv("orders.csv")
+            >>> products = LTSeq.read_csv("products.csv")
+            >>> fact = orders.lookup(products,
+            ...     on=lambda o, p: o.product_id == p.id,
+            ...     as_="prod")
+            >>> fact.show()  # has prod_name, prod_price, etc.
+        """
+        if not isinstance(dim_table, LTSeq):
+            raise TypeError(
+                f"dim_table must be LTSeq, got {type(dim_table).__name__}"
+            )
+        if not callable(on):
+            raise TypeError("on must be a callable (lambda)")
+        if not isinstance(as_, str) or not as_:
+            raise TypeError("as_ must be a non-empty string")
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+        if not dim_table._schema:
+            raise ValueError(
+                "Dimension table schema not initialized. Call read_csv() first."
+            )
+
+        # Validate join condition
+        try:
+            self_proxy = SchemaProxy(self._schema)
+            dim_proxy = SchemaProxy(dim_table._schema)
+            _ = on(self_proxy, dim_proxy)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
+        from .helpers import _extract_join_keys
+
+        left_key_expr, right_key_expr, join_type = _extract_join_keys(
+            on, self._schema, dim_table._schema, "left"
+        )
+
+        # Perform LEFT JOIN eagerly via Rust
+        try:
+            result_inner = self._inner.join(
+                dim_table._inner,
+                left_key_expr,
+                right_key_expr,
+                join_type,
+                as_,
+            )
+        except RuntimeError as e:
+            raise RuntimeError(f"Lookup join failed: {e}")
+
+        # Build result
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = dict(self._schema)
+        for col_name, col_type in dim_table._schema.items():
+            result._schema[f"{as_}_{col_name}"] = col_type
+        result._sort_keys = (
+            list(self._sort_keys) if self._sort_keys else None
+        )
+        return result
+
     def partition(self, *args, by: Callable | None = None) -> "PartitionedTable":
         """
         Partition the table into groups based on columns or a key function.

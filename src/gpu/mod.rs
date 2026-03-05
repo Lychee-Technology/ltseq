@@ -6,31 +6,44 @@
 //! ┌─────────────────────────────────────────┐
 //! │  GpuQueryPlanner  (QueryPlanner trait)   │  ← Phase 2
 //! │  Detects GPU-compatible logical plans    │
-//! │  Falls back to DefaultPhysicalPlanner    │
+//! │  Propagates sort metadata from CPU plan  │
 //! │  (Phase 4: routes to GpuExecNode)        │
 //! └──────────────────┬──────────────────────┘
-//!                    │ physical plan
+//!                    │ physical plan + sort metadata
 //! ┌──────────────────▼──────────────────────┐
-//! │  HostToGpuRule  (PhysicalOptimizerRule)  │  ← Phase 1 (existing)
-//! │  Replaces FilterExec → GpuFilterExec     │
+//! │  HostToGpuRule  (PhysicalOptimizerRule)  │  ← Phase 1 (sort-aware)
+//! │  Reads output_ordering() from inputs     │
+//! │  Chooses ordered vs unordered GPU ops:   │
+//! │    FilterExec → GpuFilterExec            │
+//! │    (Phase 1.2+: AggExec → GpuSegmented/  │
+//! │     GpuMergeJoin / GpuBinarySearch)      │
 //! └──────────────────┬──────────────────────┘
 //!                    │
 //! ┌──────────────────▼──────────────────────┐
-//! │  GpuFilterExec  (ExecutionPlan)          │
-//! │  H2D → CUDA kernel → D2H mask → Arrow   │
+//! │  GPU Exec Nodes (SortOrderPropagation)   │
+//! │  GpuFilterExec     → Preserve            │
+//! │  GpuExecNode       → Preserve/Produce    │
+//! │  (Phase 1.2+: GpuConsecutiveGroupExec,   │
+//! │   GpuSegmentedAggregateExec, etc.)       │
 //! └─────────────────────────────────────────┘
 //! ```
 //!
 //! `GpuExecNode` (Phase 2/3) is a leaf node that wraps a CPU fallback plan
 //! and optionally stores Substrait bytes for the future C++ libcudf engine.
 //! `GpuQueryPlanner` is registered via `SessionStateBuilder::with_query_planner`.
+//!
+//! `sort_aware` module provides the `SortOrderPropagation` trait and utilities
+//! for extracting sort metadata from DataFusion's `EquivalenceProperties`.
 
 pub mod exec_node;
 pub mod ffi;
 pub mod filter_exec;
+pub mod merge_join;
 pub mod optimizer;
+pub mod ordered_ops;
 pub mod planner;
 pub mod raw_exec;
+pub mod sort_aware;
 pub mod substrait;
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream};
