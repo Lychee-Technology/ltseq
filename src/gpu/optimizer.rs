@@ -861,11 +861,14 @@ fn try_replace_window_inner(
             return Ok(None);
         }
 
-        // Parse the window expression name to detect lag/lead or rolling aggregate
+        // Parse the window expression name to detect lag/lead, rolling aggregate,
+        // or cumulative sum
         let name = w_expr.name();
         if let Some(op) = parse_lag_lead_expr(name, w_expr, &input_schema)? {
             ops.push(op);
         } else if let Some(op) = parse_rolling_agg_expr(name, w_expr, &input_schema)? {
+            ops.push(op);
+        } else if let Some(op) = parse_cumulative_sum_expr(name, w_expr, &input_schema)? {
             ops.push(op);
         } else {
             // Not a supported window function → bail out
@@ -925,6 +928,13 @@ fn try_replace_window_inner(
                         "{}=rolling_{}({}, {})",
                         output_name, agg_func, column_name, window_size
                     )
+                }
+                GpuWindowOp::CumulativeSum {
+                    column_name,
+                    output_name,
+                    ..
+                } => {
+                    format!("{}=cum_sum({})", output_name, column_name)
                 }
             })
             .collect();
@@ -1123,6 +1133,92 @@ fn parse_rolling_agg_expr(
         column_name: col_name.to_string(),
         window_size,
         agg_func,
+        output_name,
+        data_type,
+    }))
+}
+
+/// Parse a window expression like `"sum(col)"` with an UNBOUNDED PRECEDING frame
+/// as a cumulative sum operation.
+///
+/// This is distinguished from rolling sum by the start bound:
+/// - Rolling sum: `ROWS BETWEEN <n> PRECEDING AND CURRENT ROW` (bounded)
+/// - Cumulative sum: `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (unbounded)
+///
+/// Only `sum(col)` is supported (not avg/min/max/count — those with unbounded
+/// frames are different operations not yet GPU-accelerated).
+///
+/// Returns `None` if the expression is not a cumulative sum.
+fn parse_cumulative_sum_expr(
+    name: &str,
+    w_expr: &Arc<dyn WindowExpr>,
+    input_schema: &SchemaRef,
+) -> Result<Option<GpuWindowOp>> {
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
+
+    let name_lower = name.to_lowercase();
+
+    // Only match sum(col) — cumulative sum
+    let args_str = if let Some(rest) = name_lower.strip_prefix("sum(") {
+        rest.trim_end_matches(')')
+    } else {
+        return Ok(None);
+    };
+
+    // Check the window frame — must be ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    let frame = w_expr.get_window_frame();
+    if frame.units != WindowFrameUnits::Rows {
+        return Ok(None);
+    }
+
+    // End bound must be CURRENT ROW
+    if frame.end_bound != WindowFrameBound::CurrentRow {
+        return Ok(None);
+    }
+
+    // Start bound must be UNBOUNDED PRECEDING (Preceding(ScalarValue::Null))
+    match &frame.start_bound {
+        WindowFrameBound::Preceding(sv) => {
+            if !sv.is_null() {
+                // Bounded preceding — that's a rolling sum, not cumulative
+                return Ok(None);
+            }
+        }
+        _ => return Ok(None),
+    }
+
+    // Parse the column name
+    let col_ref = args_str.trim();
+    let col_name = col_ref.rsplit('.').next().unwrap_or(col_ref);
+
+    // Find the column index in the input schema
+    let col_idx = input_schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == col_name);
+    let col_idx = match col_idx {
+        Some(idx) => idx,
+        None => return Ok(None),
+    };
+
+    let data_type = input_schema.field(col_idx).data_type().clone();
+    if !is_window_gpu_supported_type(&data_type) {
+        return Ok(None);
+    }
+
+    let output_name = w_expr.field()?.name().to_string();
+
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] parse_cumulative_sum_expr: MATCHED — sum({}) UNBOUNDED → {}",
+            col_name, output_name
+        );
+    }
+
+    Ok(Some(GpuWindowOp::CumulativeSum {
+        column_index: col_idx,
+        column_name: col_name.to_string(),
         output_name,
         data_type,
     }))

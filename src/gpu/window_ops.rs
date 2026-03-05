@@ -402,6 +402,138 @@ extern "C" __global__ void rolling_count(
     out[idx] = (int)idx - start + 1;
     valid[idx] = 1;
 }
+
+// ── Prefix Sum (cumulative sum) kernels ──────────────────────────────
+// Blelloch-style work-efficient prefix sum within a single thread block
+// using shared memory. For arrays larger than block_size, we use a
+// multi-pass approach with block-level sums.
+//
+// Phase 1 (prefix_sum_block_*): Each block computes an inclusive prefix
+// sum of its chunk using shared memory up-sweep / down-sweep.
+//
+// Phase 2 (prefix_sum_propagate_*): Add the cumulative block sum from
+// block (b-1) to all elements of block b (for b >= 1).
+
+// -- Block-level inclusive prefix sum for i64 --
+// Each block processes up to blockDim.x elements.
+// block_sums[blockIdx.x] receives the total sum for this block.
+extern "C" __global__ void prefix_sum_block_i64(
+    const long long* __restrict__ data,
+    long long* __restrict__ out,
+    long long* __restrict__ block_sums,
+    const unsigned int n
+) {
+    extern __shared__ long long sdata_i64[];
+    unsigned int tid = threadIdx.x;
+    unsigned int gid = blockIdx.x * blockDim.x + tid;
+
+    // Load into shared memory
+    sdata_i64[tid] = (gid < n) ? data[gid] : 0;
+    __syncthreads();
+
+    // Up-sweep (reduce) phase
+    unsigned int limit = blockDim.x;
+    for (unsigned int stride = 1; stride < limit; stride <<= 1) {
+        unsigned int idx = (tid + 1) * (stride << 1) - 1;
+        if (idx < limit) {
+            sdata_i64[idx] += sdata_i64[idx - stride];
+        }
+        __syncthreads();
+    }
+
+    // Save block total and clear last element for down-sweep
+    if (tid == 0) {
+        block_sums[blockIdx.x] = sdata_i64[limit - 1];
+        sdata_i64[limit - 1] = 0;
+    }
+    __syncthreads();
+
+    // Down-sweep phase
+    for (unsigned int stride = limit >> 1; stride >= 1; stride >>= 1) {
+        unsigned int idx = (tid + 1) * (stride << 1) - 1;
+        if (idx < limit) {
+            long long tmp = sdata_i64[idx - stride];
+            sdata_i64[idx - stride] = sdata_i64[idx];
+            sdata_i64[idx] += tmp;
+        }
+        __syncthreads();
+    }
+
+    // Write exclusive prefix sum + original value = inclusive prefix sum
+    if (gid < n) {
+        out[gid] = sdata_i64[tid] + data[gid];
+    }
+}
+
+// -- Propagate block sums for i64 --
+// After block-level prefix sums, propagate cumulative block sums.
+// block_prefix[b] = sum of all blocks 0..b-1 (exclusive prefix sum of block_sums).
+extern "C" __global__ void prefix_sum_propagate_i64(
+    long long* __restrict__ out,
+    const long long* __restrict__ block_prefix,
+    const unsigned int n
+) {
+    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n && blockIdx.x > 0) {
+        out[gid] += block_prefix[blockIdx.x];
+    }
+}
+
+// -- Block-level inclusive prefix sum for f64 --
+extern "C" __global__ void prefix_sum_block_f64(
+    const double* __restrict__ data,
+    double* __restrict__ out,
+    double* __restrict__ block_sums,
+    const unsigned int n
+) {
+    extern __shared__ double sdata_f64[];
+    unsigned int tid = threadIdx.x;
+    unsigned int gid = blockIdx.x * blockDim.x + tid;
+
+    sdata_f64[tid] = (gid < n) ? data[gid] : 0.0;
+    __syncthreads();
+
+    unsigned int limit = blockDim.x;
+    for (unsigned int stride = 1; stride < limit; stride <<= 1) {
+        unsigned int idx = (tid + 1) * (stride << 1) - 1;
+        if (idx < limit) {
+            sdata_f64[idx] += sdata_f64[idx - stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        block_sums[blockIdx.x] = sdata_f64[limit - 1];
+        sdata_f64[limit - 1] = 0.0;
+    }
+    __syncthreads();
+
+    for (unsigned int stride = limit >> 1; stride >= 1; stride >>= 1) {
+        unsigned int idx = (tid + 1) * (stride << 1) - 1;
+        if (idx < limit) {
+            double tmp = sdata_f64[idx - stride];
+            sdata_f64[idx - stride] = sdata_f64[idx];
+            sdata_f64[idx] += tmp;
+        }
+        __syncthreads();
+    }
+
+    if (gid < n) {
+        out[gid] = sdata_f64[tid] + data[gid];
+    }
+}
+
+// -- Propagate block sums for f64 --
+extern "C" __global__ void prefix_sum_propagate_f64(
+    double* __restrict__ out,
+    const double* __restrict__ block_prefix,
+    const unsigned int n
+) {
+    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n && blockIdx.x > 0) {
+        out[gid] += block_prefix[blockIdx.x];
+    }
+}
 "#;
 
 // ============================================================================
@@ -499,6 +631,19 @@ pub enum GpuWindowOp {
         /// Data type of the input column
         data_type: DataType,
     },
+    /// Cumulative sum (prefix sum) operation.
+    /// Frame is `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+    /// Uses Blelloch work-efficient parallel prefix sum on GPU.
+    CumulativeSum {
+        /// Column index in the input schema
+        column_index: usize,
+        /// Column name (for display)
+        column_name: String,
+        /// Output column name
+        output_name: String,
+        /// Data type of the input column
+        data_type: DataType,
+    },
 }
 
 impl GpuWindowOp {
@@ -508,6 +653,7 @@ impl GpuWindowOp {
             GpuWindowOp::Shift { output_name, .. } => output_name,
             GpuWindowOp::Diff { output_name, .. } => output_name,
             GpuWindowOp::Rolling { output_name, .. } => output_name,
+            GpuWindowOp::CumulativeSum { output_name, .. } => output_name,
         }
     }
 
@@ -523,6 +669,13 @@ impl GpuWindowOp {
                     // Count always produces Int64
                     RollingAggFunc::Count => DataType::Int64,
                     // Sum/Min/Max preserve the input type
+                    _ => data_type.clone(),
+                }
+            }
+            // Cumulative sum preserves the input type (with i32→i64 promotion)
+            GpuWindowOp::CumulativeSum { data_type, .. } => {
+                match data_type {
+                    DataType::Int32 => DataType::Int64, // promote to avoid overflow
                     _ => data_type.clone(),
                 }
             }
@@ -633,6 +786,9 @@ impl DisplayAs for GpuWindowShiftExec {
                         }
                         GpuWindowOp::Rolling { column_name, window_size, agg_func, output_name, .. } => {
                             format!("{}=rolling_{}({}, {})", output_name, agg_func, column_name, window_size)
+                        }
+                        GpuWindowOp::CumulativeSum { column_name, output_name, .. } => {
+                            format!("{}=cum_sum({})", output_name, column_name)
                         }
                     }
                 }).collect();
@@ -786,6 +942,15 @@ fn execute_window_op(
             let column = batch.column(*column_index);
             execute_rolling_gpu(column, *window_size, *agg_func, data_type, num_rows)
                 .or_else(|_| execute_rolling_cpu(column, *window_size, *agg_func, data_type, num_rows))
+        }
+        GpuWindowOp::CumulativeSum {
+            column_index,
+            data_type,
+            ..
+        } => {
+            let column = batch.column(*column_index);
+            execute_cumsum_gpu(column, data_type, num_rows)
+                .or_else(|_| execute_cumsum_cpu(column, data_type, num_rows))
         }
     }
 }
@@ -1804,6 +1969,262 @@ fn cpu_rolling_minmax_f32(
     out
 }
 
+    out
+}
+
+// ============================================================================
+// GPU Cumulative Sum (Prefix Sum) Execution
+// ============================================================================
+
+/// Execute cumulative sum on GPU using Blelloch prefix sum kernels.
+///
+/// Algorithm (multi-block):
+/// 1. Each thread block computes a local inclusive prefix sum in shared memory.
+/// 2. Block totals are extracted into a `block_sums` array.
+/// 3. A sequential prefix sum is computed over `block_sums` on CPU (cheap, few blocks).
+/// 4. Each block's elements are offset by the cumulative sum of all prior blocks.
+///
+/// For single-block arrays (≤ CUDA_BLOCK_SIZE elements), steps 2-4 are skipped.
+fn execute_cumsum_gpu(
+    column: &ArrayRef,
+    data_type: &DataType,
+    num_rows: usize,
+) -> Result<ArrayRef> {
+    let module = get_window_module().ok_or_else(|| {
+        DataFusionError::Internal("GPU not available for cumulative sum".to_string())
+    })?;
+    let stream = get_stream().ok_or_else(|| {
+        DataFusionError::Internal("CUDA stream not available".to_string())
+    })?;
+
+    match data_type {
+        DataType::Int64 => {
+            let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int64Array".to_string())
+            })?;
+            let values = gpu_prefix_sum_typed::<i64>(
+                arr.values(), &module, &stream, num_rows,
+                "prefix_sum_block_i64", "prefix_sum_propagate_i64",
+            )?;
+            Ok(Arc::new(Int64Array::from(values)) as ArrayRef)
+        }
+        DataType::Float64 => {
+            let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float64Array".to_string())
+            })?;
+            let values = gpu_prefix_sum_typed::<f64>(
+                arr.values(), &module, &stream, num_rows,
+                "prefix_sum_block_f64", "prefix_sum_propagate_f64",
+            )?;
+            Ok(Arc::new(Float64Array::from(values)) as ArrayRef)
+        }
+        DataType::Int32 => {
+            // Promote i32 → i64 for cumulative sum to avoid overflow
+            let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int32Array".to_string())
+            })?;
+            let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+            let values = gpu_prefix_sum_typed::<i64>(
+                &i64_values, &module, &stream, num_rows,
+                "prefix_sum_block_i64", "prefix_sum_propagate_i64",
+            )?;
+            Ok(Arc::new(Int64Array::from(values)) as ArrayRef)
+        }
+        DataType::Float32 => {
+            // Promote f32 → f64 for precision
+            let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float32Array".to_string())
+            })?;
+            let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+            let values = gpu_prefix_sum_typed::<f64>(
+                &f64_values, &module, &stream, num_rows,
+                "prefix_sum_block_f64", "prefix_sum_propagate_f64",
+            )?;
+            Ok(Arc::new(Float64Array::from(values)) as ArrayRef)
+        }
+        _ => Err(DataFusionError::Internal(format!(
+            "Unsupported data type for GPU cumulative sum: {:?}", data_type
+        ))),
+    }
+}
+
+/// Generic GPU prefix sum for a typed column.
+///
+/// Implements a multi-block Blelloch-style inclusive prefix sum:
+/// 1. Launch `prefix_sum_block_*` with shared memory for each block.
+/// 2. Read back block_sums, compute exclusive prefix sum on CPU.
+/// 3. Launch `prefix_sum_propagate_*` to add block offsets.
+fn gpu_prefix_sum_typed<T>(
+    input_values: &[T],
+    module: &Arc<CudaModule>,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    num_rows: usize,
+    block_kernel_name: &str,
+    propagate_kernel_name: &str,
+) -> Result<Vec<T>>
+where
+    T: cudarc::driver::DeviceRepr + Default + Clone + Copy + std::ops::AddAssign,
+{
+    let n = num_rows as u32;
+    let block_size = CUDA_BLOCK_SIZE;
+    let num_blocks = grid_size(n);
+
+    let shared_mem = block_size as u32 * std::mem::size_of::<T>() as u32;
+    let launch_cfg = LaunchConfig {
+        grid_dim: (num_blocks, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: shared_mem,
+    };
+
+    let block_func = module.load_function(block_kernel_name).map_err(|e| {
+        DataFusionError::Internal(format!("Failed to load kernel {}: {}", block_kernel_name, e))
+    })?;
+
+    // Allocate device memory
+    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+        DataFusionError::Internal(format!("H2D copy failed: {}", e))
+    })?;
+    let d_out = stream.alloc_zeros::<T>(num_rows).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+    let d_block_sums = stream.alloc_zeros::<T>(num_blocks as usize).map_err(|e| {
+        DataFusionError::Internal(format!("GPU alloc failed: {}", e))
+    })?;
+
+    // Phase 1: Block-level prefix sums
+    unsafe {
+        let mut builder = stream.launch_builder(&block_func);
+        builder.arg(&d_data);
+        builder.arg(&d_out);
+        builder.arg(&d_block_sums);
+        builder.arg(&n);
+        builder.launch(launch_cfg).map_err(|e| {
+            DataFusionError::Internal(format!("Block prefix sum kernel launch failed: {}", e))
+        })?;
+    }
+
+    // For multi-block: compute exclusive prefix sum of block_sums on CPU, then propagate
+    if num_blocks > 1 {
+        let block_sums: Vec<T> = stream.memcpy_dtoh(&d_block_sums).map_err(|e| {
+            DataFusionError::Internal(format!("D2H copy of block_sums failed: {}", e))
+        })?;
+
+        // Compute exclusive prefix sum of block_sums on CPU
+        let mut block_prefix = vec![T::default(); num_blocks as usize];
+        for i in 1..num_blocks as usize {
+            block_prefix[i] = block_prefix[i - 1];
+            block_prefix[i] += block_sums[i - 1];
+        }
+
+        // Upload block_prefix to GPU
+        let d_block_prefix = stream.memcpy_htod(&block_prefix).map_err(|e| {
+            DataFusionError::Internal(format!("H2D copy of block_prefix failed: {}", e))
+        })?;
+
+        // Phase 2: Propagate block sums
+        let propagate_func = module.load_function(propagate_kernel_name).map_err(|e| {
+            DataFusionError::Internal(format!("Failed to load kernel {}: {}", propagate_kernel_name, e))
+        })?;
+
+        let propagate_cfg = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            let mut builder = stream.launch_builder(&propagate_func);
+            builder.arg(&d_out);
+            builder.arg(&d_block_prefix);
+            builder.arg(&n);
+            builder.launch(propagate_cfg).map_err(|e| {
+                DataFusionError::Internal(format!("Propagate kernel launch failed: {}", e))
+            })?;
+        }
+    }
+
+    // Copy results back
+    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+        DataFusionError::Internal(format!("D2H copy failed: {}", e))
+    })?;
+
+    Ok(out_values)
+}
+
+// ============================================================================
+// CPU Cumulative Sum Fallback
+// ============================================================================
+
+/// CPU fallback for cumulative sum (prefix sum).
+///
+/// Simple sequential scan: `out[0] = in[0]; out[i] = out[i-1] + in[i]`.
+/// All outputs are valid (no nulls).
+fn execute_cumsum_cpu(
+    column: &ArrayRef,
+    data_type: &DataType,
+    num_rows: usize,
+) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Int64 => {
+            let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int64Array".to_string())
+            })?;
+            let out = cpu_prefix_sum_i64(arr.values(), num_rows);
+            Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+        }
+        DataType::Float64 => {
+            let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float64Array".to_string())
+            })?;
+            let out = cpu_prefix_sum_f64(arr.values(), num_rows);
+            Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+        }
+        DataType::Int32 => {
+            // Promote i32→i64
+            let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int32Array".to_string())
+            })?;
+            let vals: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+            let out = cpu_prefix_sum_i64(&vals, num_rows);
+            Ok(Arc::new(Int64Array::from(out)) as ArrayRef)
+        }
+        DataType::Float32 => {
+            // Promote f32→f64
+            let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float32Array".to_string())
+            })?;
+            let vals: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+            let out = cpu_prefix_sum_f64(&vals, num_rows);
+            Ok(Arc::new(Float64Array::from(out)) as ArrayRef)
+        }
+        _ => Err(DataFusionError::Internal(format!(
+            "Unsupported type for CPU cumulative sum: {:?}", data_type
+        ))),
+    }
+}
+
+/// CPU prefix sum for i64 values.
+fn cpu_prefix_sum_i64(input: &[i64], num_rows: usize) -> Vec<i64> {
+    let mut out = Vec::with_capacity(num_rows);
+    let mut acc: i64 = 0;
+    for i in 0..num_rows {
+        acc += input[i];
+        out.push(acc);
+    }
+    out
+}
+
+/// CPU prefix sum for f64 values.
+fn cpu_prefix_sum_f64(input: &[f64], num_rows: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(num_rows);
+    let mut acc: f64 = 0.0;
+    for i in 0..num_rows {
+        acc += input[i];
+        out.push(acc);
+    }
+    out
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -2109,5 +2530,123 @@ mod tests {
         assert_eq!(format!("{}", RollingAggFunc::Min), "min");
         assert_eq!(format!("{}", RollingAggFunc::Max), "max");
         assert_eq!(format!("{}", RollingAggFunc::Count), "count");
+    }
+
+    // ========================================================================
+    // Cumulative Sum (Prefix Sum) CPU tests
+    // ========================================================================
+
+    #[test]
+    fn test_cpu_prefix_sum_i64() {
+        let input = vec![10i64, 20, 30, 40, 50];
+        let out = cpu_prefix_sum_i64(&input, 5);
+        assert_eq!(out, vec![10, 30, 60, 100, 150]);
+    }
+
+    #[test]
+    fn test_cpu_prefix_sum_f64() {
+        let input = vec![1.0f64, 2.5, 3.5, 4.0];
+        let out = cpu_prefix_sum_f64(&input, 4);
+        assert!((out[0] - 1.0).abs() < 1e-10);
+        assert!((out[1] - 3.5).abs() < 1e-10);
+        assert!((out[2] - 7.0).abs() < 1e-10);
+        assert!((out[3] - 11.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cpu_prefix_sum_single_element() {
+        let input = vec![42i64];
+        let out = cpu_prefix_sum_i64(&input, 1);
+        assert_eq!(out, vec![42]);
+    }
+
+    #[test]
+    fn test_cpu_prefix_sum_zeros() {
+        let input = vec![0i64, 0, 0, 0];
+        let out = cpu_prefix_sum_i64(&input, 4);
+        assert_eq!(out, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_cpu_prefix_sum_negative() {
+        let input = vec![10i64, -3, 5, -2, 1];
+        let out = cpu_prefix_sum_i64(&input, 5);
+        assert_eq!(out, vec![10, 7, 12, 10, 11]);
+    }
+
+    #[test]
+    fn test_cumsum_via_execute_cpu_i64() {
+        let input = Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])) as ArrayRef;
+        let result = execute_cumsum_cpu(&input, &DataType::Int64, 5).unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 10);
+        assert_eq!(arr.value(1), 30);
+        assert_eq!(arr.value(2), 60);
+        assert_eq!(arr.value(3), 100);
+        assert_eq!(arr.value(4), 150);
+        // No nulls in cumulative sum
+        assert_eq!(arr.null_count(), 0);
+    }
+
+    #[test]
+    fn test_cumsum_via_execute_cpu_f64() {
+        let input = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
+        let result = execute_cumsum_cpu(&input, &DataType::Float64, 3).unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 1.0).abs() < 1e-10);
+        assert!((arr.value(1) - 3.0).abs() < 1e-10);
+        assert!((arr.value(2) - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cumsum_via_execute_cpu_i32_promotes_to_i64() {
+        let input = Arc::new(Int32Array::from(vec![10, 20, 30])) as ArrayRef;
+        let result = execute_cumsum_cpu(&input, &DataType::Int32, 3).unwrap();
+        // Should produce Int64 (promoted)
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 10);
+        assert_eq!(arr.value(1), 30);
+        assert_eq!(arr.value(2), 60);
+    }
+
+    #[test]
+    fn test_cumsum_op_output_name() {
+        let op = GpuWindowOp::CumulativeSum {
+            column_index: 0,
+            column_name: "volume".to_string(),
+            output_name: "volume_cumsum".to_string(),
+            data_type: DataType::Int64,
+        };
+        assert_eq!(op.output_name(), "volume_cumsum");
+    }
+
+    #[test]
+    fn test_cumsum_op_data_type() {
+        // Int64 → Int64
+        let op = GpuWindowOp::CumulativeSum {
+            column_index: 0,
+            column_name: "v".to_string(),
+            output_name: "cs".to_string(),
+            data_type: DataType::Int64,
+        };
+        assert_eq!(op.data_type(), DataType::Int64);
+
+        // Int32 → Int64 (promoted)
+        let op2 = GpuWindowOp::CumulativeSum {
+            column_index: 0,
+            column_name: "v".to_string(),
+            output_name: "cs".to_string(),
+            data_type: DataType::Int32,
+        };
+        assert_eq!(op2.data_type(), DataType::Int64);
+
+        // Float64 → Float64
+        let op3 = GpuWindowOp::CumulativeSum {
+            column_index: 0,
+            column_name: "v".to_string(),
+            output_name: "cs".to_string(),
+            data_type: DataType::Float64,
+        };
+        assert_eq!(op3.data_type(), DataType::Float64);
     }
 }
