@@ -34,6 +34,7 @@ use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::adjacent_distinct::{
@@ -46,6 +47,9 @@ use super::merge_join::GpuJoinType;
 use super::ordered_ops::SegAggFunc;
 use super::sort_aware::{extract_sort_columns, is_sorted_by};
 use super::sort_exec::{is_sort_key_type_supported, GpuSortConfig, GpuSortExec, GpuSortKey};
+use super::window_ops::{
+    is_window_gpu_supported_type, GpuWindowOp, GpuWindowShiftConfig, GpuWindowShiftExec,
+};
 use super::GPU_MIN_ROWS_THRESHOLD;
 
 /// Physical optimizer rule that offloads eligible operations to GPU.
@@ -86,6 +90,7 @@ impl PhysicalOptimizerRule for HostToGpuRule {
 /// - `AggregateExec` → `GpuHashAggregateExec` (numeric group-by + simple aggs, or DISTINCT)
 /// - `HashJoinExec` → `GpuHashJoinExec` (single numeric key equi-join)
 /// - `SortExec` → `GpuSortExec` (numeric sort keys)
+/// - `BoundedWindowAggExec` / `WindowAggExec` → `GpuWindowShiftExec` (lag/lead/diff)
 fn try_replace_node(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     // Try filter replacement first
     if let Some(result) = try_replace_filter(&plan)? {
@@ -111,6 +116,11 @@ fn try_replace_node(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn 
 
     // Try sort replacement
     if let Some(result) = try_replace_sort(&plan)? {
+        return Ok(result);
+    }
+
+    // Try window replacement (lag/lead/diff → GPU shift)
+    if let Some(result) = try_replace_window(&plan)? {
         return Ok(result);
     }
 
@@ -783,4 +793,204 @@ fn is_gpu_agg_supported_type(dt: &datafusion::arrow::datatypes::DataType) -> boo
         dt,
         DataType::Int32 | DataType::Int64 | DataType::Float32 | DataType::Float64
     )
+}
+
+// ============================================================================
+// Window replacement (lag/lead/diff → GpuWindowShiftExec)
+// ============================================================================
+
+use datafusion::physical_expr::window::WindowExpr;
+
+/// Attempt to replace a `BoundedWindowAggExec` or `WindowAggExec` with
+/// `GpuWindowShiftExec` when all window expressions are simple lag/lead
+/// operations on numeric columns without PARTITION BY.
+///
+/// Eligibility:
+/// - Node is `BoundedWindowAggExec` or `WindowAggExec`
+/// - ALL window expressions are lag or lead (identified by `name()` prefix)
+/// - Source columns are numeric (i32/i64/f32/f64)
+/// - No PARTITION BY (whole-table window)
+/// - Row count ≥ GPU_MIN_ROWS_THRESHOLD
+///
+/// Note: diff() is expressed by DataFusion as `BinaryExpr(col, Minus, lag(col))`
+/// at the physical level. Since the window function part is just a lag, the
+/// GPU optimizer replaces the lag portion; DataFusion handles the subtraction
+/// on CPU. For pure diff operations, the GpuWindowShiftExec handles both the
+/// shift and the subtraction in a single GPU kernel pass — but this is only
+/// used when the optimizer detects the diff pattern directly.
+fn try_replace_window(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    // Try BoundedWindowAggExec first (more common for lag/lead)
+    if let Some(bounded) = plan.as_any().downcast_ref::<BoundedWindowAggExec>() {
+        return try_replace_window_inner(bounded.window_expr(), bounded.input(), plan);
+    }
+
+    // Also try WindowAggExec (for unbounded window frames)
+    if let Some(window) = plan.as_any().downcast_ref::<WindowAggExec>() {
+        return try_replace_window_inner(window.window_expr(), window.input(), plan);
+    }
+
+    Ok(None)
+}
+
+/// Inner implementation for window replacement that works with either
+/// `BoundedWindowAggExec` or `WindowAggExec`.
+fn try_replace_window_inner(
+    window_exprs: &[Arc<dyn WindowExpr>],
+    input: &Arc<dyn ExecutionPlan>,
+    _plan: &Arc<dyn ExecutionPlan>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    if window_exprs.is_empty() {
+        return Ok(None);
+    }
+
+    let input_schema = input.schema();
+    let mut ops = Vec::new();
+
+    for w_expr in window_exprs {
+        // Skip if window has PARTITION BY (not yet supported on GPU)
+        if !w_expr.partition_by().is_empty() {
+            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                eprintln!(
+                    "[GPU] try_replace_window: SKIP — has PARTITION BY (name={})",
+                    w_expr.name()
+                );
+            }
+            return Ok(None);
+        }
+
+        // Parse the window expression name to detect lag/lead
+        let name = w_expr.name();
+        if let Some(op) = parse_lag_lead_expr(name, w_expr, &input_schema)? {
+            ops.push(op);
+        } else {
+            // Not a supported window function → bail out
+            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                eprintln!(
+                    "[GPU] try_replace_window: SKIP — unsupported window function: {}",
+                    name
+                );
+            }
+            return Ok(None);
+        }
+    }
+
+    // Check row count threshold
+    if let Ok(stats) = input.partition_statistics(None) {
+        if let Some(num_rows) = stats.num_rows.get_value() {
+            if *num_rows < GPU_MIN_ROWS_THRESHOLD {
+                if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                    eprintln!(
+                        "[GPU] try_replace_window: SKIP — below threshold ({})",
+                        num_rows
+                    );
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        let op_strs: Vec<String> = ops
+            .iter()
+            .map(|op| match op {
+                GpuWindowOp::Shift {
+                    column_name,
+                    offset,
+                    output_name,
+                    ..
+                } => {
+                    format!("{}=shift({}, {})", output_name, column_name, offset)
+                }
+                GpuWindowOp::Diff {
+                    column_name,
+                    period,
+                    output_name,
+                    ..
+                } => {
+                    format!("{}=diff({}, {})", output_name, column_name, period)
+                }
+            })
+            .collect();
+        eprintln!(
+            "[GPU] HostToGpuRule: WindowExec → GpuWindowShiftExec, ops=[{}]",
+            op_strs.join(", ")
+        );
+    }
+
+    let config = GpuWindowShiftConfig { ops };
+    let gpu_window = GpuWindowShiftExec::try_new(config, Arc::clone(input))?;
+    Ok(Some(Transformed::yes(Arc::new(gpu_window))))
+}
+
+/// Parse a window expression name like `"lag(price,1,NULL)"` or `"lead(vol,2)"`
+/// and extract the GPU window operation.
+///
+/// Returns `None` if the expression is not a supported lag/lead.
+fn parse_lag_lead_expr(
+    name: &str,
+    w_expr: &Arc<dyn WindowExpr>,
+    input_schema: &SchemaRef,
+) -> Result<Option<GpuWindowOp>> {
+    use datafusion::arrow::datatypes::SchemaRef;
+
+    let name_lower = name.to_lowercase();
+
+    // Match lag(...) or lead(...)
+    let (is_lag, args_str) = if let Some(rest) = name_lower.strip_prefix("lag(") {
+        (true, rest.trim_end_matches(')'))
+    } else if let Some(rest) = name_lower.strip_prefix("lead(") {
+        (false, rest.trim_end_matches(')'))
+    } else {
+        return Ok(None);
+    };
+
+    // Parse arguments: first arg is the column reference, second (optional) is offset
+    let args: Vec<&str> = args_str.split(',').collect();
+    if args.is_empty() {
+        return Ok(None);
+    }
+
+    // First argument: column name (may have table qualifier like "t1.price")
+    let col_ref = args[0].trim();
+    // Extract just the column name (last part after any dots)
+    let col_name = col_ref.rsplit('.').next().unwrap_or(col_ref);
+
+    // Find the column index in the input schema
+    let col_idx = input_schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == col_name);
+    let col_idx = match col_idx {
+        Some(idx) => idx,
+        None => return Ok(None), // Column not found
+    };
+
+    let data_type = input_schema.field(col_idx).data_type().clone();
+    if !is_window_gpu_supported_type(&data_type) {
+        return Ok(None);
+    }
+
+    // Second argument: offset (default 1 for lag, -1 for lead)
+    let raw_offset = if args.len() > 1 {
+        args[1].trim().parse::<i32>().unwrap_or(1)
+    } else {
+        1
+    };
+
+    // For lag, offset is positive (look backward).
+    // For lead, offset is negative (look forward).
+    let offset = if is_lag { raw_offset } else { -raw_offset };
+
+    // Output column name — use the full expression name from DataFusion
+    let output_name = w_expr.field()?.name().to_string();
+
+    Ok(Some(GpuWindowOp::Shift {
+        column_index: col_idx,
+        column_name: col_name.to_string(),
+        offset,
+        output_name,
+        data_type,
+    }))
 }

@@ -49,6 +49,7 @@ pub mod raw_exec;
 pub mod sort_aware;
 pub mod sort_exec;
 pub mod substrait;
+pub mod window_ops;
 
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use cudarc::nvrtc::compile_ptx;
