@@ -1,6 +1,47 @@
 """Advanced operations for LTSeq: align, scan, search_first, pivot, set operations."""
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
+
+
+class _ScanRowProxy:
+    """Row proxy that supports both attribute access (r.col) and dict access (r["col"]).
+
+    Used by scan() to wrap each row dict, so user callbacks can use either style:
+        lambda s, r: s * (1 + r.rate)      # attribute style
+        lambda s, r: s * (1 + r["rate"])    # dict style
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Dict[str, Any]):
+        object.__setattr__(self, "_data", data)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(f"Column '{name}' not found in row")
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def keys(self) -> Any:
+        return self._data.keys()
+
+    def values(self) -> Any:
+        return self._data.values()
+
+    def items(self) -> Any:
+        return self._data.items()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def __repr__(self) -> str:
+        return f"Row({self._data})"
 
 
 class SetOpsMixin:
@@ -470,10 +511,13 @@ class AdvancedOpsMixin:
 
         Example:
             >>> result = t.sort("date").scan(
-            ...     func=lambda s, r: s * (1 + r["rate"]),
+            ...     func=lambda s, r: s * (1 + r.rate),
             ...     init=1.0,
             ...     output_col="cumulative_return"
             ... )
+
+        Both attribute-style (r.rate) and dict-style (r["rate"]) access
+        are supported for row columns.
         """
         from .core import LTSeq
 
@@ -507,9 +551,9 @@ class AdvancedOpsMixin:
         results = []
 
         for idx, row in df.iterrows():
-            row_dict = row.to_dict()
+            row_proxy = _ScanRowProxy(row.to_dict())
             try:
-                state = func(state, row_dict)
+                state = func(state, row_proxy)
                 results.append(state)
             except Exception as e:
                 raise RuntimeError(

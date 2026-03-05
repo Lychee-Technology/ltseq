@@ -443,3 +443,105 @@ class TestStatefulScanCustomOutputCol:
 
         df = result.to_pandas()
         assert "scan_result" in df.columns
+
+
+class TestScanRowProxy:
+    """Tests for _ScanRowProxy — dual attribute/dict row access."""
+
+    def test_attribute_style_access(self, sample_csv):
+        """Test that r.rate attribute-style access works in scan callbacks."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        result = t.scan(
+            func=lambda s, r: s * (1 + r.rate),
+            init=1.0,
+            output_col="cumulative_return",
+        )
+
+        df = result.to_pandas()
+        assert "cumulative_return" in df.columns
+        assert len(df) == 5
+        # First row: 1.0 * (1 + 0.05) = 1.05
+        assert abs(float(df["cumulative_return"].iloc[0]) - 1.05) < 1e-10
+
+    def test_dict_style_access(self, sample_csv):
+        """Test that r['rate'] dict-style access still works (backward compat)."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        result = t.scan(
+            func=lambda s, r: s * (1 + r["rate"]),
+            init=1.0,
+            output_col="cumulative_return",
+        )
+
+        df = result.to_pandas()
+        assert "cumulative_return" in df.columns
+        assert len(df) == 5
+        assert abs(float(df["cumulative_return"].iloc[0]) - 1.05) < 1e-10
+
+    def test_both_styles_same_result(self, sample_csv):
+        """Test that attribute and dict access produce identical results."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        result_attr = t.scan(
+            func=lambda s, r: s * (1 + r.rate),
+            init=1.0,
+            output_col="cr",
+        )
+        result_dict = t.scan(
+            func=lambda s, r: s * (1 + r["rate"]),
+            init=1.0,
+            output_col="cr",
+        )
+
+        df_attr = result_attr.to_pandas()
+        df_dict = result_dict.to_pandas()
+
+        for i in range(len(df_attr)):
+            assert abs(float(df_attr["cr"].iloc[i]) - float(df_dict["cr"].iloc[i])) < 1e-10
+
+    def test_mixed_access_in_one_callback(self, prices_csv):
+        """Test using both r.price and r['volume'] in the same callback."""
+        t = LTSeq.read_csv(prices_csv).sort("date")
+        result = t.scan(
+            func=lambda s, r: s + r.price * r["volume"],
+            init=0.0,
+            output_col="cumulative_pv",
+        )
+
+        df = result.to_pandas()
+        assert "cumulative_pv" in df.columns
+        # First row: 0 + 50 * 1000 = 50000
+        assert abs(float(df["cumulative_pv"].iloc[0]) - 50000) < 1e-6
+
+    def test_attribute_error_on_missing_column(self, sample_csv):
+        """Test that accessing a non-existent column raises clear error."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        with pytest.raises(RuntimeError, match="State transition function failed"):
+            t.scan(
+                func=lambda s, r: s + r.nonexistent_column,
+                init=0,
+            )
+
+    def test_contains_check(self, sample_csv):
+        """Test 'in' operator on row proxy."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        result = t.scan(
+            func=lambda s, r: s + (1 if "rate" in r else 0),
+            init=0,
+        )
+
+        df = result.to_pandas()
+        # All 5 rows have 'rate', so result should be 5
+        assert int(df["scan_result"].iloc[-1]) == 5
+
+    def test_get_with_default(self, sample_csv):
+        """Test .get() method with default value on row proxy."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        result = t.scan(
+            func=lambda s, r: s + r.get("missing_col", 10),
+            init=0,
+        )
+
+        df = result.to_pandas()
+        # 5 rows * 10 = 50
+        assert int(df["scan_result"].iloc[-1]) == 50

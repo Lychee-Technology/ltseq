@@ -538,15 +538,26 @@ groups = t.sort("user_id").group_sorted(lambda r: r.user_id)
 ```
 
 ### `LTSeq.scan`
-- **Signature**: `LTSeq.scan(func: Callable[[State, Row], State], init: Any) -> LTSeq`
-- **Behavior**: Stateful scan over current order; outputs per-row accumulated state
-- **Parameters**: `func` state transition; `init` initial state
-- **Returns**: `LTSeq` (usually a state sequence or appended state column)
-- **Exceptions**: `TypeError` (invalid func), `RuntimeError` (execution failure)
+- **Signature**: `LTSeq.scan(func: Callable[[State, Row], State], init: Any, output_col: str = "scan_result") -> LTSeq`
+- **Behavior**: Stateful scan over current order; outputs per-row accumulated state in a new column
+- **Parameters**:
+  - `func` — state transition function `(state, row) -> new_state`
+  - `init` — initial state value
+  - `output_col` — name for the output column (default: `"scan_result"`)
+- **Row access**: Both attribute-style (`r.rate`) and dict-style (`r["rate"]`) are supported
+- **Returns**: `LTSeq` with the accumulated state column added
+- **Exceptions**: `TypeError` (invalid func), `ValueError` (output_col already exists), `RuntimeError` (execution failure)
 - **Example**:
 ```python
-# Compounding
+# Compounding — attribute style
 rates = t.sort("date").scan(lambda s, r: s * (1 + r.rate), init=1.0)
+
+# Equivalent dict style with custom output column
+rates = t.sort("date").scan(
+    lambda s, r: s * (1 + r["rate"]),
+    init=1.0,
+    output_col="cumulative_return"
+)
 ```
 
 ### `NestedTable` (from `group_ordered` / `group_sorted`)
