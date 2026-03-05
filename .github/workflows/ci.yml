@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main, cudf]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_gpu:
+        description: 'Run GPU build & tests'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ===========================================================================
+  # CPU Build & Test — runs on every push / PR
+  # ===========================================================================
+  cpu:
+    name: CPU (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+        rust-version: [stable]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust-version }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cpu-${{ matrix.os }}
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest pyarrow pandas numpy
+
+      - name: Cargo check
+        run: cargo check --all-targets
+
+      - name: Cargo test
+        run: cargo test
+
+      - name: Build wheel (maturin)
+        run: maturin build --release --out dist/
+
+      - name: Install wheel
+        run: pip install dist/*.whl
+
+      - name: Run pytest
+        run: pytest py-ltseq/tests/ -v --tb=short
+
+      - name: Upload CPU wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-cpu-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 14
+
+  # ===========================================================================
+  # GPU Build — manual trigger only (workflow_dispatch with run_gpu=true)
+  # ===========================================================================
+  gpu:
+    name: GPU Build
+    if: github.event_name == 'workflow_dispatch' && inputs.run_gpu == 'true'
+    runs-on: ubuntu-latest
+    # For GPU tests, use: runs-on: [self-hosted, gpu]
+    # and uncomment the CUDA / GPU test steps below.
+
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: gpu
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest pyarrow pandas numpy
+
+      # GPU compile check (stub mode — no CUDA toolkit needed for check)
+      - name: Cargo check (GPU feature)
+        run: cargo check --features gpu
+
+      # Build the GPU wheel (stub mode — links cudf_engine_stub.c)
+      # Note: cudarc with cuda-13010 feature will compile but NVRTC
+      # kernels are only loaded at runtime when a CUDA device is present.
+      - name: Build GPU wheel (stub mode)
+        run: maturin build --release -F gpu --out dist/
+
+      - name: Upload GPU wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-gpu-py${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 14
+
+      # -----------------------------------------------------------------------
+      # GPU tests (uncomment when using a self-hosted GPU runner)
+      # -----------------------------------------------------------------------
+      # - name: Install wheel
+      #   run: pip install dist/*.whl
+      #
+      # - name: Run GPU tests
+      #   run: pytest py-ltseq/tests/test_gpu_ops.py -v --tb=short
+
+  # ===========================================================================
+  # Docker Build — validates Dockerfiles build successfully
+  # ===========================================================================
+  docker-cpu:
+    name: Docker CPU Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CPU Docker image
+        run: docker build -f docker/Dockerfile.cpu -t ltseq:cpu-ci .
+
+      - name: Run tests in Docker
+        run: docker run --rm ltseq:cpu-ci

@@ -1,0 +1,62 @@
+# ============================================================================
+# LTSeq GPU Build Image
+#
+# Builds ltseq_core with --features gpu (CUDA filter kernels via cudarc/NVRTC).
+# Links against cudf_engine_stub by default (no RAPIDS required).
+#
+# For the full C++ libcudf engine, set CUDF_ENGINE_LIB at build time:
+#   docker build --build-arg CUDF_ENGINE_LIB=/path/to/dir \
+#       -f docker/Dockerfile.gpu -t ltseq:gpu .
+#
+# Usage:
+#   docker build -f docker/Dockerfile.gpu -t ltseq:gpu .
+#   docker run --rm --gpus all ltseq:gpu pytest py-ltseq/tests/ -v
+# ============================================================================
+
+FROM nvidia/cuda:13.1.0-devel-ubuntu24.04
+
+# Avoid interactive prompts during apt-get
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps: Python 3.13, build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.13 python3.13-dev python3.13-venv \
+        curl build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create venv with Python 3.13
+RUN python3.13 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:$PATH"
+
+# Install maturin
+RUN pip install --no-cache-dir maturin
+
+# Optional: libcudf engine library path (for full C++ engine mode)
+ARG CUDF_ENGINE_LIB=""
+ENV CUDF_ENGINE_LIB=${CUDF_ENGINE_LIB}
+
+WORKDIR /src
+COPY . .
+
+# Build the wheel with GPU feature
+RUN maturin build --release -F gpu --out /dist
+
+# Install the built wheel + test deps
+RUN pip install --no-cache-dir /dist/*.whl && rm -rf /dist
+RUN pip install --no-cache-dir pytest pyarrow pandas numpy
+
+WORKDIR /app
+COPY py-ltseq/tests/ py-ltseq/tests/
+COPY data/ data/
+COPY examples/ examples/
+COPY pyproject.toml .
+
+# Default: run tests (GPU tests will be skipped if cudf is not installed)
+CMD ["pytest", "py-ltseq/tests/", "-v"]
