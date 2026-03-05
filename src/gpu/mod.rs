@@ -35,6 +35,7 @@
 //! `sort_aware` module provides the `SortOrderPropagation` trait and utilities
 //! for extracting sort metadata from DataFusion's `EquivalenceProperties`.
 
+pub mod adjacent_distinct;
 pub mod exec_node;
 pub mod ffi;
 pub mod filter_exec;

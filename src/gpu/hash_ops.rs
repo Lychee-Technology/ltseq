@@ -718,16 +718,28 @@ fn gpu_hash_aggregate(
 
     // Step 6: Run segmented aggregation on sorted data (skip for DISTINCT / empty agg_requests)
     for agg_req in &config.agg_requests {
-        let result = run_collapsed_aggregate(
-            &stream,
-            batch,
-            agg_req,
-            &permutation,
-            &group_id_u32,
-            num_groups,
-            n,
-        )?;
-        output_columns.push(result);
+        if agg_req.func == SegAggFunc::FirstValue {
+            // FirstValue: gather the value at the first row of each group.
+            // This reuses the group_first_indices already computed in Step 4.
+            let col = if let Some(ref perm) = permutation {
+                apply_permutation_column(&stream, batch.column(agg_req.column_index), &agg_req.data_type, perm, n)?
+            } else {
+                Arc::clone(batch.column(agg_req.column_index))
+            };
+            let gathered = gather_column(&stream, &col, &agg_req.data_type, &group_first_indices, num_groups)?;
+            output_columns.push(gathered);
+        } else {
+            let result = run_collapsed_aggregate(
+                &stream,
+                batch,
+                agg_req,
+                &permutation,
+                &group_id_u32,
+                num_groups,
+                n,
+            )?;
+            output_columns.push(result);
+        }
     }
 
     RecordBatch::try_new(Arc::clone(output_schema), output_columns)
@@ -1388,6 +1400,14 @@ fn run_collapsed_aggregate(
         SegAggFunc::Avg => {
             let sorted_col = get_sorted_value_column(stream, batch, agg_req, permutation, n)?;
             run_collapsed_avg(stream, &d_group_id, &sorted_col, &agg_req.data_type, alloc_size, num_groups, n_u32, &launch_cfg)
+        }
+        SegAggFunc::FirstValue => {
+            // FirstValue in the collapsed path should be handled in gpu_hash_aggregate
+            // via gather_column + group_first_indices. This branch is a fallback that
+            // should not normally be reached.
+            Err(DataFusionError::Execution(
+                "FirstValue should be handled via gather_column in gpu_hash_aggregate".to_string(),
+            ))
         }
     }
 }

@@ -226,29 +226,42 @@ fn extract_key_cols_from_exprs(
     Ok(key_cols)
 }
 
-/// Distinct with specific key columns using ROW_NUMBER()
+/// Distinct with specific key columns using GROUP BY + FIRST_VALUE.
+///
+/// Uses `GROUP BY key_cols` with `FIRST_VALUE(non_key_col)` for each non-key column,
+/// which produces an `AggregateExec` physical plan node that the GPU optimizer can
+/// intercept (unlike the previous `ROW_NUMBER() OVER (...)` approach which produced
+/// a `WindowAggExec` that was not GPU-interceptable).
 fn distinct_with_keys(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
 ) -> PyResult<LTSeqTable> {
-    let all_cols_str = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let partition_by = key_cols
+    let group_by = key_cols
         .iter()
         .map(|c| format!("\"{}\"", c))
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Build SELECT list: key columns as-is, non-key columns wrapped in FIRST_VALUE
+    let select_cols: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let name = f.name();
+            if key_cols.contains(name) {
+                format!("\"{}\"", name)
+            } else {
+                format!("FIRST_VALUE(\"{}\") as \"{}\"", name, name)
+            }
+        })
+        .collect();
+    let select_str = select_cols.join(", ");
+
     let sql = format!(
-        "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) as __rn FROM __distinct_source) WHERE __rn = 1",
-        all_cols_str, partition_by, partition_by
+        "SELECT {} FROM __distinct_source GROUP BY {}",
+        select_str, group_by
     );
 
     let schema_clone = Arc::clone(schema);

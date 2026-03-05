@@ -36,6 +36,9 @@ use datafusion::physical_plan::joins::HashJoinExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::ExecutionPlan;
 
+use super::adjacent_distinct::{
+    AdjacentDistinctKey, GpuAdjacentDistinctConfig, GpuAdjacentDistinctExec,
+};
 use super::filter_exec::{GpuCompoundPredicate, GpuFilterExec};
 use super::hash_join::{is_hash_join_key_type_supported, GpuHashJoinConfig, GpuHashJoinExec};
 use super::hash_ops::{GpuAggRequest, GpuGroupKey, GpuHashAggConfig, GpuHashAggregateExec};
@@ -79,12 +82,20 @@ impl PhysicalOptimizerRule for HostToGpuRule {
 ///
 /// Currently handles:
 /// - `FilterExec` → `GpuFilterExec` (simple Column CMP Literal)
+/// - `AggregateExec` → `GpuAdjacentDistinctExec` (DISTINCT on sorted data)
 /// - `AggregateExec` → `GpuHashAggregateExec` (numeric group-by + simple aggs, or DISTINCT)
 /// - `HashJoinExec` → `GpuHashJoinExec` (single numeric key equi-join)
 /// - `SortExec` → `GpuSortExec` (numeric sort keys)
 fn try_replace_node(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     // Try filter replacement first
     if let Some(result) = try_replace_filter(&plan)? {
+        return Ok(result);
+    }
+
+    // Try adjacent distinct replacement (sorted DISTINCT → O(N) adjacent dedup).
+    // Must be checked BEFORE try_replace_aggregate since both match AggregateExec,
+    // but adjacent distinct is cheaper when the input is already sorted.
+    if let Some(result) = try_replace_distinct(&plan)? {
         return Ok(result);
     }
 
@@ -151,6 +162,111 @@ fn try_replace_filter(
     let gpu_filter =
         GpuFilterExec::try_new_compound(gpu_pred, Arc::clone(predicate), Arc::clone(input))?;
     Ok(Some(Transformed::yes(Arc::new(gpu_filter))))
+}
+
+/// Attempt to replace a DISTINCT `AggregateExec` with `GpuAdjacentDistinctExec`.
+///
+/// This handler specifically targets DISTINCT operations (AggregateExec with
+/// group-by keys and zero aggregate functions, or all-FIRST_VALUE aggregates)
+/// when the input is already sorted by the key columns. In that case, O(N)
+/// adjacent deduplication is much cheaper than hash-based deduplication.
+///
+/// Eligibility:
+/// - Node is `AggregateExec`
+/// - Mode is `Single` (no two-phase aggregation for sorted distinct)
+/// - No GROUPING SETS
+/// - All group-by keys are simple `Column` references
+/// - Either zero aggregate functions (all-column DISTINCT) or all aggregates
+///   are `FIRST_VALUE` (key-column DISTINCT)
+/// - Input is sorted by ALL group-by key columns
+/// - Row count ≥ GPU_MIN_ROWS_THRESHOLD
+///
+/// If the input is NOT sorted, returns `None` so `try_replace_aggregate` can
+/// handle it via the hash-based `GpuHashAggregateExec` path.
+fn try_replace_distinct(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() else {
+        return Ok(None);
+    };
+
+    // Only handle Single mode — FinalPartitioned has partial aggregates that
+    // don't guarantee sorted order between partitions.
+    let mode = agg_exec.mode();
+    if *mode != AggregateMode::Single {
+        return Ok(None);
+    }
+
+    let group_by = agg_exec.group_by();
+
+    // No GROUPING SETS
+    if !group_by.is_single() {
+        return Ok(None);
+    }
+
+    // Must have at least one group key
+    if group_by.expr().is_empty() {
+        return Ok(None);
+    }
+
+    // Check that this is a DISTINCT-shaped aggregate:
+    // Either zero aggregates (all-column distinct) or all FIRST_VALUE (key-column distinct)
+    let aggr_exprs = agg_exec.aggr_expr();
+    let is_all_first_value = !aggr_exprs.is_empty()
+        && aggr_exprs
+            .iter()
+            .all(|e| e.fun().name().to_lowercase() == "first_value");
+
+    if !aggr_exprs.is_empty() && !is_all_first_value {
+        return Ok(None); // Not a DISTINCT pattern
+    }
+
+    // Extract group key column names and indices
+    let input = agg_exec.input();
+    let input_schema = input.schema();
+    let mut key_columns = Vec::new();
+
+    for (expr, _alias) in group_by.expr() {
+        let Some(col) = expr.as_any().downcast_ref::<Column>() else {
+            return Ok(None); // Non-simple key expression
+        };
+        key_columns.push(AdjacentDistinctKey {
+            column_index: col.index(),
+            column_name: col.name().to_string(),
+        });
+    }
+
+    // Check if input is sorted by ALL key columns
+    let sort_cols = extract_sort_columns(input);
+    let all_keys_sorted = key_columns
+        .iter()
+        .all(|k| sort_cols.iter().any(|sc| sc == &k.column_name));
+    if !all_keys_sorted {
+        return Ok(None); // Not sorted → fall through to hash aggregate
+    }
+
+    // Row count threshold check
+    let stats = input.partition_statistics(None)?;
+    let estimated_rows = stats.num_rows.value().unwrap_or(0);
+    if estimated_rows > 0 && estimated_rows < GPU_MIN_ROWS_THRESHOLD {
+        return Ok(None);
+    }
+
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] HostToGpuRule: AggregateExec(DISTINCT) → GpuAdjacentDistinctExec, keys=[{}], first_value_aggs={}",
+            key_columns.iter().map(|k| k.column_name.as_str()).collect::<Vec<_>>().join(", "),
+            is_all_first_value,
+        );
+    }
+
+    let config = GpuAdjacentDistinctConfig {
+        keys: key_columns,
+        is_key_distinct: is_all_first_value,
+    };
+    let output_schema = agg_exec.schema();
+    let gpu_distinct = GpuAdjacentDistinctExec::try_new(config, Arc::clone(input), output_schema)?;
+    Ok(Some(Transformed::yes(Arc::new(gpu_distinct))))
 }
 
 /// Attempt to replace an `AggregateExec` with `GpuHashAggregateExec`.
@@ -281,6 +397,7 @@ fn try_replace_aggregate(
             "min" => SegAggFunc::Min,
             "max" => SegAggFunc::Max,
             "avg" => SegAggFunc::Avg,
+            "first_value" => SegAggFunc::FirstValue,
             _ => return Ok(None), // Unsupported aggregate function
         };
 
