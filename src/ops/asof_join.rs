@@ -129,17 +129,42 @@ pub fn asof_join_impl(
     }
 
     // 7. For each left row, find matching right row using binary search
-    let mut matched_right_indices: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
+    //
+    // Try GPU-accelerated parallel binary search first (one thread per left row).
+    // Falls back to sequential CPU binary search if GPU is unavailable or
+    // the data is below the GPU offload threshold.
+    #[cfg(feature = "gpu")]
+    let matched_right_indices: Vec<Option<usize>> = {
+        use crate::gpu::asof_join_gpu::{gpu_asof_join, should_use_gpu_asof, AsofDirection};
 
-    for &left_time in &left_times {
-        let match_idx = match direction {
-            "backward" => find_asof_backward(left_time, &right_times),
-            "forward" => find_asof_forward(left_time, &right_times),
-            "nearest" => find_asof_nearest(left_time, &right_times),
-            _ => unreachable!(),
-        };
-        matched_right_indices.push(match_idx);
-    }
+        let gpu_direction = AsofDirection::from_str(direction);
+        let use_gpu = gpu_direction.is_some()
+            && should_use_gpu_asof(left_times.len(), right_times.len());
+
+        if use_gpu {
+            let dir = gpu_direction.unwrap();
+            log::debug!(
+                "GPU asof join: {} left rows × {} right rows, direction={:?}",
+                left_times.len(),
+                right_times.len(),
+                dir,
+            );
+            match gpu_asof_join(&left_times, &right_times, dir) {
+                Some(indices) => indices,
+                None => {
+                    // GPU failed, fall back to CPU
+                    log::debug!("GPU asof join failed, falling back to CPU");
+                    cpu_asof_search(&left_times, &right_times, direction)
+                }
+            }
+        } else {
+            cpu_asof_search(&left_times, &right_times, direction)
+        }
+    };
+
+    #[cfg(not(feature = "gpu"))]
+    let matched_right_indices: Vec<Option<usize>> =
+        cpu_asof_search(&left_times, &right_times, direction);
 
     // 8. Build result schema: left columns + aliased right columns
     let mut result_fields: Vec<Field> = Vec::new();
@@ -252,6 +277,29 @@ pub fn asof_join_impl(
         Vec::new(),
         table.source_parquet_path.clone(),
     )
+}
+
+/// CPU sequential as-of search — for each left time, find matching right index.
+///
+/// This is the original O(N log M) sequential loop, extracted as a helper
+/// so both the `#[cfg(feature = "gpu")]` and `#[cfg(not(feature = "gpu"))]`
+/// code paths can share it.
+fn cpu_asof_search(
+    left_times: &[i64],
+    right_times: &[i64],
+    direction: &str,
+) -> Vec<Option<usize>> {
+    let mut matched: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
+    for &left_time in left_times {
+        let match_idx = match direction {
+            "backward" => find_asof_backward(left_time, right_times),
+            "forward" => find_asof_forward(left_time, right_times),
+            "nearest" => find_asof_nearest(left_time, right_times),
+            _ => unreachable!(),
+        };
+        matched.push(match_idx);
+    }
+    matched
 }
 
 /// Find the largest index where right_times[idx] <= target (backward match)

@@ -36,6 +36,7 @@
 //! for extracting sort metadata from DataFusion's `EquivalenceProperties`.
 
 pub mod adjacent_distinct;
+pub mod asof_join_gpu;
 pub mod exec_node;
 pub mod ffi;
 pub mod filter_exec;
