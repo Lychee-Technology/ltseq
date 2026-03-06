@@ -67,6 +67,29 @@ class SchemaProxy:
             f"Available columns: {list(self._schema.keys())}"
         )
 
+    def __getitem__(self, name: str) -> ColumnExpr:
+        """
+        Return a ColumnExpr for the given column name via dict-style access.
+
+        This allows accessing columns whose names start with '_' (e.g., '_other_xxx'
+        from join results) which cannot be accessed via attribute-style access.
+
+        Args:
+            name: Column name (e.g., "_other_o_custkey")
+
+        Returns:
+            ColumnExpr(name) if column exists
+
+        Raises:
+            KeyError: If column not in schema
+        """
+        if name in self._schema:
+            return ColumnExpr(name)
+        raise KeyError(
+            f"Column '{name}' not found in schema. "
+            f"Available columns: {list(self._schema.keys())}"
+        )
+
     def get_schema(self) -> Dict[str, str]:
         """
         Return a copy of the underlying schema.
