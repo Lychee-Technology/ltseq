@@ -426,8 +426,13 @@ impl ExecutionPlan for GpuFilterExec {
                     match futures_util::StreamExt::next(&mut stream).await {
                         Some(Ok(batch)) => {
                             if batch.num_rows() == 0 {
+                                // Yield empty batches as-is (preserving schema) rather
+                                // than skipping them. This ensures that when ALL input
+                                // batches are empty, at least one RecordBatch with the
+                                // correct schema is yielded, preventing "Must pass
+                                // schema, or at least one RecordBatch" errors downstream.
                                 timer.done();
-                                continue;
+                                return Some((Ok(batch), (stream, pred, metrics)));
                             }
                             let result = gpu_filter_batch_compound(&batch, &pred);
                             timer.done();

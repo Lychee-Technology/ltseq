@@ -33,7 +33,7 @@ use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties, SendableRecordBatchStream,
 };
 
 use super::sort_aware::{SortOrderEffect, SortOrderPropagation};
@@ -136,7 +136,8 @@ impl GpuAdjacentDistinctExec {
         let input_eq = input.equivalence_properties();
         let mut eq_props = EquivalenceProperties::new(Arc::clone(schema));
         if let Some(ordering) = input_eq.output_ordering() {
-            let _ = eq_props.reorder(ordering.iter().cloned());
+            let sort_exprs: Vec<datafusion::physical_expr::PhysicalSortExpr> = ordering.iter().cloned().collect();
+            let _ = eq_props.reorder(sort_exprs.into_iter());
         }
 
         PlanProperties::new(

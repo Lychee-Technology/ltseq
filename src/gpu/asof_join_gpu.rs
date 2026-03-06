@@ -238,12 +238,12 @@ pub fn gpu_asof_join(
     let func = module.load_function(kernel_name).ok()?;
 
     // Upload time arrays to GPU
-    let d_left = stream.memcpy_stoh(&left_times).ok()?;
-    let d_right = stream.memcpy_stoh(&right_times).ok()?;
+    let d_left = stream.clone_htod(left_times).ok()?;
+    let d_right = stream.clone_htod(right_times).ok()?;
 
     // Allocate output: i32 indices (-1 = no match)
     let init_indices = vec![-1i32; n_left];
-    let d_out = stream.memcpy_stoh(&init_indices).ok()?;
+    let d_out = stream.clone_htod(&init_indices).ok()?;
 
     // Launch kernel
     let grid = super::grid_size(n_left as u32);
@@ -267,7 +267,7 @@ pub fn gpu_asof_join(
     }
 
     // Download results
-    let result_indices = stream.memcpy_dtos(&d_out).ok()?;
+    let result_indices = stream.clone_dtoh(&d_out).ok()?;
 
     // Convert i32 indices to Option<usize>
     let matched: Vec<Option<usize>> = result_indices

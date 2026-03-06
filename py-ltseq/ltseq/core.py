@@ -180,11 +180,25 @@ class LTSeq(
             return pa.table({col: [] for col in self._schema.keys()})
 
         batches = []
+        schema = None
         for buf in ipc_buffers:
             reader = pa.ipc.open_stream(buf)
-            batches.extend(reader.read_all().to_batches())
+            table = reader.read_all()
+            if schema is None:
+                schema = table.schema
+            batches.extend(table.to_batches())
 
-        return pa.Table.from_batches(batches)
+        if not batches:
+            # All batches were empty (e.g., filter removed all rows).
+            # Return an empty table preserving the schema.
+            if schema is not None:
+                return pa.table(
+                    {field.name: pa.array([], type=field.type) for field in schema},
+                    schema=schema,
+                )
+            return pa.table({col: [] for col in self._schema.keys()})
+
+        return pa.Table.from_batches(batches, schema=schema)
 
     def __len__(self) -> int:
         """

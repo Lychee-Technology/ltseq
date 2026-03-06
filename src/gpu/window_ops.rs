@@ -43,11 +43,12 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
     SendableRecordBatchStream,
@@ -91,21 +92,27 @@ use super::sort_aware::{SortOrderEffect, SortOrderPropagation};
 /// - Others produce valid results for all rows (partial windows are supported)
 const WINDOW_OPS_KERNEL_SRC: &str = r#"
 // ── Shift (lag/lead) kernels ─────────────────────────────────────────
-// out[i] = data[i - offset] if in bounds, else null
+// out[i] = data[i - offset] if in bounds, else default_val (valid) or null
 // offset > 0 = lag (look backward), offset < 0 = lead (look forward)
+// has_default: 0 = out-of-bounds positions are null, 1 = fill with default_val
 
 extern "C" __global__ void shift_copy_i64(
     const long long* __restrict__ data,
     long long* __restrict__ out,
     unsigned char* __restrict__ valid,
     const unsigned int n,
-    const int offset
+    const int offset,
+    const long long default_val,
+    const int has_default
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     int src = (int)idx - offset;
     if (src >= 0 && src < (int)n) {
         out[idx] = data[src];
+        valid[idx] = 1;
+    } else if (has_default) {
+        out[idx] = default_val;
         valid[idx] = 1;
     } else {
         out[idx] = 0;
@@ -118,13 +125,18 @@ extern "C" __global__ void shift_copy_f64(
     double* __restrict__ out,
     unsigned char* __restrict__ valid,
     const unsigned int n,
-    const int offset
+    const int offset,
+    const double default_val,
+    const int has_default
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     int src = (int)idx - offset;
     if (src >= 0 && src < (int)n) {
         out[idx] = data[src];
+        valid[idx] = 1;
+    } else if (has_default) {
+        out[idx] = default_val;
         valid[idx] = 1;
     } else {
         out[idx] = 0.0;
@@ -137,13 +149,18 @@ extern "C" __global__ void shift_copy_i32(
     int* __restrict__ out,
     unsigned char* __restrict__ valid,
     const unsigned int n,
-    const int offset
+    const int offset,
+    const int default_val,
+    const int has_default
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     int src = (int)idx - offset;
     if (src >= 0 && src < (int)n) {
         out[idx] = data[src];
+        valid[idx] = 1;
+    } else if (has_default) {
+        out[idx] = default_val;
         valid[idx] = 1;
     } else {
         out[idx] = 0;
@@ -156,13 +173,18 @@ extern "C" __global__ void shift_copy_f32(
     float* __restrict__ out,
     unsigned char* __restrict__ valid,
     const unsigned int n,
-    const int offset
+    const int offset,
+    const float default_val,
+    const int has_default
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     int src = (int)idx - offset;
     if (src >= 0 && src < (int)n) {
         out[idx] = data[src];
+        valid[idx] = 1;
+    } else if (has_default) {
+        out[idx] = default_val;
         valid[idx] = 1;
     } else {
         out[idx] = 0.0f;
@@ -601,6 +623,8 @@ pub enum GpuWindowOp {
         output_name: String,
         /// Data type of the column
         data_type: DataType,
+        /// Default value for out-of-bounds positions (None = null)
+        default_value: Option<ScalarValue>,
     },
     /// Diff operation: subtract element at offset.
     Diff {
@@ -748,10 +772,16 @@ impl GpuWindowShiftExec {
         }
         let output_schema = Arc::new(Schema::new(fields));
 
+        // IMPORTANT: Build EquivalenceProperties from the OUTPUT schema, not the
+        // input's. The input has N columns but our output has N+M columns (input
+        // + window results). Cloning input.equivalence_properties() would embed
+        // the N-column schema, causing "column index out of range" errors in
+        // downstream nodes that call plan.properties().schema().
         let properties = PlanProperties::new(
-            input.equivalence_properties().clone(),
+            EquivalenceProperties::new(Arc::clone(&output_schema)),
             input.output_partitioning().clone(),
             EmissionType::Final,
+            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
 
         Ok(Self {
@@ -793,6 +823,9 @@ impl DisplayAs for GpuWindowShiftExec {
                     }
                 }).collect();
                 write!(f, "GpuWindowShiftExec: [{}]", ops.join(", "))
+            }
+            DisplayFormatType::TreeRender => {
+                write!(f, "GpuWindowShiftExec")
             }
         }
     }
@@ -845,11 +878,11 @@ impl ExecutionPlan for GpuWindowShiftExec {
         let input_schema = self.input.schema();
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
-        let stream = futures::stream::once(async move {
+        let stream = futures_util::stream::once(async move {
             let _timer = metrics.elapsed_compute().timer();
 
             // Step 1: Collect all batches
-            use futures::StreamExt;
+            use futures_util::StreamExt;
             let batches: Vec<RecordBatch> = input_stream
                 .collect::<Vec<_>>()
                 .await
@@ -916,11 +949,12 @@ fn execute_window_op(
             column_index,
             offset,
             data_type,
+            default_value,
             ..
         } => {
             let column = batch.column(*column_index);
-            execute_shift_gpu(column, *offset, data_type, num_rows)
-                .or_else(|_| execute_shift_cpu(column, *offset, data_type, num_rows))
+            execute_shift_gpu(column, *offset, data_type, default_value, num_rows)
+                .or_else(|_| execute_shift_cpu(column, *offset, data_type, default_value, num_rows))
         }
         GpuWindowOp::Diff {
             column_index,
@@ -960,6 +994,7 @@ fn execute_shift_gpu(
     column: &ArrayRef,
     offset: i32,
     data_type: &DataType,
+    default_value: &Option<ScalarValue>,
     num_rows: usize,
 ) -> Result<ArrayRef> {
     let module = get_window_module().ok_or_else(|| {
@@ -977,12 +1012,22 @@ fn execute_shift_gpu(
         shared_mem_bytes: 0,
     };
 
+    // Extract has_default flag (0 or 1) for the CUDA kernel
+    let has_default: i32 = if default_value.is_some() { 1 } else { 0 };
+
     match data_type {
         DataType::Int64 => {
             let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Int64Array".to_string())
             })?;
-            gpu_shift_typed::<i64>(arr.values(), &module, &stream, launch_cfg, n, offset, "shift_copy_i64")
+            let default_val: i64 = match default_value {
+                Some(ScalarValue::Int64(Some(v))) => *v,
+                Some(ScalarValue::Int32(Some(v))) => *v as i64,
+                Some(ScalarValue::Float64(Some(v))) => *v as i64,
+                Some(ScalarValue::Float32(Some(v))) => *v as i64,
+                _ => 0i64,
+            };
+            gpu_shift_typed::<i64>(arr.values(), &module, &stream, launch_cfg, n, offset, default_val, has_default, "shift_copy_i64")
                 .map(|(values, valid_mask)| {
                     let null_buffer = build_null_buffer(&valid_mask);
                     Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
@@ -992,7 +1037,14 @@ fn execute_shift_gpu(
             let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Float64Array".to_string())
             })?;
-            gpu_shift_typed::<f64>(arr.values(), &module, &stream, launch_cfg, n, offset, "shift_copy_f64")
+            let default_val: f64 = match default_value {
+                Some(ScalarValue::Float64(Some(v))) => *v,
+                Some(ScalarValue::Float32(Some(v))) => *v as f64,
+                Some(ScalarValue::Int64(Some(v))) => *v as f64,
+                Some(ScalarValue::Int32(Some(v))) => *v as f64,
+                _ => 0.0f64,
+            };
+            gpu_shift_typed::<f64>(arr.values(), &module, &stream, launch_cfg, n, offset, default_val, has_default, "shift_copy_f64")
                 .map(|(values, valid_mask)| {
                     let null_buffer = build_null_buffer(&valid_mask);
                     Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
@@ -1002,7 +1054,14 @@ fn execute_shift_gpu(
             let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Int32Array".to_string())
             })?;
-            gpu_shift_typed::<i32>(arr.values(), &module, &stream, launch_cfg, n, offset, "shift_copy_i32")
+            let default_val: i32 = match default_value {
+                Some(ScalarValue::Int32(Some(v))) => *v,
+                Some(ScalarValue::Int64(Some(v))) => *v as i32,
+                Some(ScalarValue::Float64(Some(v))) => *v as i32,
+                Some(ScalarValue::Float32(Some(v))) => *v as i32,
+                _ => 0i32,
+            };
+            gpu_shift_typed::<i32>(arr.values(), &module, &stream, launch_cfg, n, offset, default_val, has_default, "shift_copy_i32")
                 .map(|(values, valid_mask)| {
                     let null_buffer = build_null_buffer(&valid_mask);
                     Arc::new(Int32Array::new(values.into(), Some(null_buffer))) as ArrayRef
@@ -1012,7 +1071,14 @@ fn execute_shift_gpu(
             let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Float32Array".to_string())
             })?;
-            gpu_shift_typed::<f32>(arr.values(), &module, &stream, launch_cfg, n, offset, "shift_copy_f32")
+            let default_val: f32 = match default_value {
+                Some(ScalarValue::Float32(Some(v))) => *v,
+                Some(ScalarValue::Float64(Some(v))) => *v as f32,
+                Some(ScalarValue::Int64(Some(v))) => *v as f32,
+                Some(ScalarValue::Int32(Some(v))) => *v as f32,
+                _ => 0.0f32,
+            };
+            gpu_shift_typed::<f32>(arr.values(), &module, &stream, launch_cfg, n, offset, default_val, has_default, "shift_copy_f32")
                 .map(|(values, valid_mask)| {
                     let null_buffer = build_null_buffer(&valid_mask);
                     Arc::new(Float32Array::new(values.into(), Some(null_buffer))) as ArrayRef
@@ -1026,13 +1092,15 @@ fn execute_shift_gpu(
 }
 
 /// Generic GPU shift kernel execution for a typed column.
-fn gpu_shift_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
+fn gpu_shift_typed<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Default + Clone>(
     input_values: &[T],
     module: &Arc<CudaModule>,
     stream: &Arc<cudarc::driver::safe::CudaStream>,
     launch_cfg: LaunchConfig,
     n: u32,
     offset: i32,
+    default_val: T,
+    has_default: i32,
     kernel_name: &str,
 ) -> Result<(Vec<T>, Vec<u8>)> {
     let func = module.load_function(kernel_name).map_err(|e| {
@@ -1040,7 +1108,7 @@ fn gpu_shift_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
     })?;
 
     // Allocate device memory
-    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+    let d_data = stream.clone_htod(input_values).map_err(|e| {
         DataFusionError::Internal(format!("H2D copy failed: {}", e))
     })?;
     let d_out = stream.alloc_zeros::<T>(n as usize).map_err(|e| {
@@ -1050,7 +1118,7 @@ fn gpu_shift_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
         DataFusionError::Internal(format!("GPU alloc failed: {}", e))
     })?;
 
-    // Launch kernel
+    // Launch kernel with default_val and has_default parameters
     unsafe {
         let mut builder = stream.launch_builder(&func);
         builder.arg(&d_data);
@@ -1058,16 +1126,18 @@ fn gpu_shift_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
         builder.arg(&d_valid);
         builder.arg(&n);
         builder.arg(&offset);
+        builder.arg(&default_val);
+        builder.arg(&has_default);
         builder.launch(launch_cfg).map_err(|e| {
             DataFusionError::Internal(format!("Kernel launch failed: {}", e))
         })?;
     }
 
     // Copy results back
-    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+    let out_values = stream.clone_dtoh(&d_out).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
-    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+    let valid_mask = stream.clone_dtoh(&d_valid).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
 
@@ -1145,7 +1215,7 @@ fn execute_diff_gpu(
 }
 
 /// Generic GPU diff kernel execution for a typed column.
-fn gpu_diff_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
+fn gpu_diff_typed<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Default + Clone>(
     input_values: &[T],
     module: &Arc<CudaModule>,
     stream: &Arc<cudarc::driver::safe::CudaStream>,
@@ -1159,7 +1229,7 @@ fn gpu_diff_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
     })?;
 
     // Allocate device memory
-    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+    let d_data = stream.clone_htod(input_values).map_err(|e| {
         DataFusionError::Internal(format!("H2D copy failed: {}", e))
     })?;
     let d_out = stream.alloc_zeros::<T>(n as usize).map_err(|e| {
@@ -1183,10 +1253,10 @@ fn gpu_diff_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
     }
 
     // Copy results back
-    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+    let out_values = stream.clone_dtoh(&d_out).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
-    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+    let valid_mask = stream.clone_dtoh(&d_valid).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
 
@@ -1428,7 +1498,7 @@ fn execute_rolling_gpu(
 }
 
 /// Generic GPU rolling aggregate kernel execution for a typed column.
-fn gpu_rolling_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
+fn gpu_rolling_typed<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Default + Clone>(
     input_values: &[T],
     module: &Arc<CudaModule>,
     stream: &Arc<cudarc::driver::safe::CudaStream>,
@@ -1442,7 +1512,7 @@ fn gpu_rolling_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
     })?;
 
     // Allocate device memory
-    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+    let d_data = stream.clone_htod(input_values).map_err(|e| {
         DataFusionError::Internal(format!("H2D copy failed: {}", e))
     })?;
     let d_out = stream.alloc_zeros::<T>(n as usize).map_err(|e| {
@@ -1466,10 +1536,10 @@ fn gpu_rolling_typed<T: cudarc::driver::DeviceRepr + Default + Clone>(
     }
 
     // Copy results back
-    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+    let out_values = stream.clone_dtoh(&d_out).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
-    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+    let valid_mask = stream.clone_dtoh(&d_valid).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
 
@@ -1507,10 +1577,10 @@ fn execute_rolling_count_gpu(
         })?;
     }
 
-    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+    let out_values = stream.clone_dtoh(&d_out).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
-    let valid_mask = stream.memcpy_dtoh(&d_valid).map_err(|e| {
+    let valid_mask = stream.clone_dtoh(&d_valid).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
 
@@ -1562,6 +1632,7 @@ fn execute_shift_cpu(
     column: &ArrayRef,
     offset: i32,
     data_type: &DataType,
+    default_value: &Option<ScalarValue>,
     num_rows: usize,
 ) -> Result<ArrayRef> {
     match data_type {
@@ -1569,7 +1640,14 @@ fn execute_shift_cpu(
             let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Int64Array".to_string())
             })?;
-            Ok(cpu_shift_typed(arr.values(), offset, num_rows, |vals, nulls| {
+            let default_val: Option<i64> = match default_value {
+                Some(ScalarValue::Int64(Some(v))) => Some(*v),
+                Some(ScalarValue::Int32(Some(v))) => Some(*v as i64),
+                Some(ScalarValue::Float64(Some(v))) => Some(*v as i64),
+                Some(ScalarValue::Float32(Some(v))) => Some(*v as i64),
+                _ => None,
+            };
+            Ok(cpu_shift_typed(arr.values(), offset, num_rows, default_val, |vals, nulls| {
                 Arc::new(Int64Array::new(vals.into(), Some(nulls))) as ArrayRef
             }))
         }
@@ -1577,7 +1655,14 @@ fn execute_shift_cpu(
             let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Float64Array".to_string())
             })?;
-            Ok(cpu_shift_typed(arr.values(), offset, num_rows, |vals, nulls| {
+            let default_val: Option<f64> = match default_value {
+                Some(ScalarValue::Float64(Some(v))) => Some(*v),
+                Some(ScalarValue::Float32(Some(v))) => Some(*v as f64),
+                Some(ScalarValue::Int64(Some(v))) => Some(*v as f64),
+                Some(ScalarValue::Int32(Some(v))) => Some(*v as f64),
+                _ => None,
+            };
+            Ok(cpu_shift_typed(arr.values(), offset, num_rows, default_val, |vals, nulls| {
                 Arc::new(Float64Array::new(vals.into(), Some(nulls))) as ArrayRef
             }))
         }
@@ -1585,7 +1670,14 @@ fn execute_shift_cpu(
             let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Int32Array".to_string())
             })?;
-            Ok(cpu_shift_typed(arr.values(), offset, num_rows, |vals, nulls| {
+            let default_val: Option<i32> = match default_value {
+                Some(ScalarValue::Int32(Some(v))) => Some(*v),
+                Some(ScalarValue::Int64(Some(v))) => Some(*v as i32),
+                Some(ScalarValue::Float64(Some(v))) => Some(*v as i32),
+                Some(ScalarValue::Float32(Some(v))) => Some(*v as i32),
+                _ => None,
+            };
+            Ok(cpu_shift_typed(arr.values(), offset, num_rows, default_val, |vals, nulls| {
                 Arc::new(Int32Array::new(vals.into(), Some(nulls))) as ArrayRef
             }))
         }
@@ -1593,7 +1685,14 @@ fn execute_shift_cpu(
             let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
                 DataFusionError::Internal("Expected Float32Array".to_string())
             })?;
-            Ok(cpu_shift_typed(arr.values(), offset, num_rows, |vals, nulls| {
+            let default_val: Option<f32> = match default_value {
+                Some(ScalarValue::Float32(Some(v))) => Some(*v),
+                Some(ScalarValue::Float64(Some(v))) => Some(*v as f32),
+                Some(ScalarValue::Int64(Some(v))) => Some(*v as f32),
+                Some(ScalarValue::Int32(Some(v))) => Some(*v as f32),
+                _ => None,
+            };
+            Ok(cpu_shift_typed(arr.values(), offset, num_rows, default_val, |vals, nulls| {
                 Arc::new(Float32Array::new(vals.into(), Some(nulls))) as ArrayRef
             }))
         }
@@ -1608,6 +1707,7 @@ fn cpu_shift_typed<T: Default + Copy, F>(
     input: &[T],
     offset: i32,
     num_rows: usize,
+    default_val: Option<T>,
     build_array: F,
 ) -> ArrayRef
 where
@@ -1620,6 +1720,9 @@ where
         let src = i as i64 - offset as i64;
         if src >= 0 && (src as usize) < num_rows {
             out[i] = input[src as usize];
+            valid[i] = true;
+        } else if let Some(def) = default_val {
+            out[i] = def;
             valid[i] = true;
         }
     }
@@ -1969,9 +2072,6 @@ fn cpu_rolling_minmax_f32(
     out
 }
 
-    out
-}
-
 // ============================================================================
 // GPU Cumulative Sum (Prefix Sum) Execution
 // ============================================================================
@@ -2063,7 +2163,7 @@ fn gpu_prefix_sum_typed<T>(
     propagate_kernel_name: &str,
 ) -> Result<Vec<T>>
 where
-    T: cudarc::driver::DeviceRepr + Default + Clone + Copy + std::ops::AddAssign,
+    T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Default + Clone + Copy + std::ops::AddAssign,
 {
     let n = num_rows as u32;
     let block_size = CUDA_BLOCK_SIZE;
@@ -2081,7 +2181,7 @@ where
     })?;
 
     // Allocate device memory
-    let d_data = stream.memcpy_htod(input_values).map_err(|e| {
+    let d_data = stream.clone_htod(input_values).map_err(|e| {
         DataFusionError::Internal(format!("H2D copy failed: {}", e))
     })?;
     let d_out = stream.alloc_zeros::<T>(num_rows).map_err(|e| {
@@ -2105,7 +2205,7 @@ where
 
     // For multi-block: compute exclusive prefix sum of block_sums on CPU, then propagate
     if num_blocks > 1 {
-        let block_sums: Vec<T> = stream.memcpy_dtoh(&d_block_sums).map_err(|e| {
+        let block_sums: Vec<T> = stream.clone_dtoh(&d_block_sums).map_err(|e| {
             DataFusionError::Internal(format!("D2H copy of block_sums failed: {}", e))
         })?;
 
@@ -2117,7 +2217,7 @@ where
         }
 
         // Upload block_prefix to GPU
-        let d_block_prefix = stream.memcpy_htod(&block_prefix).map_err(|e| {
+        let d_block_prefix = stream.clone_htod(&block_prefix).map_err(|e| {
             DataFusionError::Internal(format!("H2D copy of block_prefix failed: {}", e))
         })?;
 
@@ -2144,7 +2244,7 @@ where
     }
 
     // Copy results back
-    let out_values = stream.memcpy_dtoh(&d_out).map_err(|e| {
+    let out_values = stream.clone_dtoh(&d_out).map_err(|e| {
         DataFusionError::Internal(format!("D2H copy failed: {}", e))
     })?;
 
@@ -2345,6 +2445,7 @@ mod tests {
             offset: 1,
             output_name: "prev_price".to_string(),
             data_type: DataType::Float64,
+            default_value: None,
         };
         assert_eq!(op.output_name(), "prev_price");
 

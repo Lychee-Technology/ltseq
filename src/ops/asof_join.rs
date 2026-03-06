@@ -143,17 +143,21 @@ pub fn asof_join_impl(
 
         if use_gpu {
             let dir = gpu_direction.unwrap();
-            log::debug!(
-                "GPU asof join: {} left rows × {} right rows, direction={:?}",
-                left_times.len(),
-                right_times.len(),
-                dir,
-            );
+            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                eprintln!(
+                    "[GPU] asof join: {} left rows x {} right rows, direction={:?}",
+                    left_times.len(),
+                    right_times.len(),
+                    dir,
+                );
+            }
             match gpu_asof_join(&left_times, &right_times, dir) {
                 Some(indices) => indices,
                 None => {
                     // GPU failed, fall back to CPU
-                    log::debug!("GPU asof join failed, falling back to CPU");
+                    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                        eprintln!("[GPU] asof join failed, falling back to CPU");
+                    }
                     cpu_asof_search(&left_times, &right_times, direction)
                 }
             }

@@ -25,8 +25,9 @@
 
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::{JoinType, Result};
+use datafusion::common::{JoinType, Result, ScalarValue};
 use datafusion::config::ConfigOptions;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -136,6 +137,15 @@ fn try_replace_filter(
         return Ok(None);
     };
 
+    // Skip if FilterExec has a projection — GpuFilterExec doesn't support
+    // column projection/reordering, so replacing would change the output schema.
+    if filter_exec.projection().is_some() {
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!("[GPU] try_replace_filter: SKIP — FilterExec has projection");
+        }
+        return Ok(None);
+    }
+
     let input = filter_exec.input();
     let schema = input.schema();
     let predicate = filter_exec.predicate();
@@ -208,7 +218,7 @@ fn try_replace_distinct(
         return Ok(None);
     }
 
-    let group_by = agg_exec.group_by();
+    let group_by = agg_exec.group_expr();
 
     // No GROUPING SETS
     if !group_by.is_single() {
@@ -258,7 +268,7 @@ fn try_replace_distinct(
 
     // Row count threshold check
     let stats = input.partition_statistics(None)?;
-    let estimated_rows = stats.num_rows.value().unwrap_or(0);
+    let estimated_rows = stats.num_rows.get_value().copied().unwrap_or(0);
     if estimated_rows > 0 && estimated_rows < GPU_MIN_ROWS_THRESHOLD {
         return Ok(None);
     }
@@ -305,35 +315,19 @@ fn try_replace_aggregate(
         );
     }
 
-    // Accept Single mode directly, or FinalPartitioned mode (the top half of
-    // DataFusion's two-phase aggregation). For FinalPartitioned, we'll dig
-    // down through the child tree to find the Partial aggregate's original
-    // input and replace the entire chain with a single GPU aggregate.
+    // Only intercept Single mode aggregates. FinalPartitioned/Final are the
+    // top half of DataFusion's two-phase aggregation pipeline where group-by
+    // column indices reference the Partial aggregate's OUTPUT schema (not its
+    // input). Replacing these causes schema mismatches because our GPU aggregate
+    // runs a single-pass aggregation on the raw input. Since Single mode
+    // already covers the case (GPU does one-pass aggregation), we simply skip
+    // the two-phase modes.
     let (effective_input, effective_agg) = match agg_exec.mode() {
         AggregateMode::Single => (Arc::clone(agg_exec.input()), agg_exec),
-        AggregateMode::FinalPartitioned | AggregateMode::Final => {
-            // Walk down through the child tree to find the Partial aggregate.
-            // The typical plan shape is:
-            //   FinalPartitioned(AggregateExec)
-            //     └─ CoalesceBatches / RepartitionExec / ...
-            //         └─ Partial(AggregateExec)
-            //             └─ actual input
-            match find_partial_aggregate_input(agg_exec.input()) {
-                Some(input) => (input, agg_exec),
-                None => {
-                    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-                        eprintln!(
-                            "[GPU] try_replace_aggregate: SKIP — could not find Partial child"
-                        );
-                    }
-                    return Ok(None);
-                }
-            }
-        }
         _ => {
             if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
                 eprintln!(
-                    "[GPU] try_replace_aggregate: SKIP — unsupported mode {:?}",
+                    "[GPU] try_replace_aggregate: SKIP — non-Single mode {:?}",
                     agg_exec.mode()
                 );
             }
@@ -784,6 +778,10 @@ fn try_replace_sort(
 /// the Partial aggregate's input. The typical chain is:
 ///   CoalesceBatches → RepartitionExec → Partial(AggregateExec)
 /// but there may be other intermediate nodes.
+///
+/// NOTE: Currently unused — we only intercept Single mode aggregates.
+/// Kept for potential future use with proper schema resolution.
+#[allow(dead_code)]
 fn find_partial_aggregate_input(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
     // Check if this node is a Partial aggregate
     if let Some(agg) = plan.as_any().downcast_ref::<AggregateExec>() {
@@ -919,9 +917,17 @@ fn try_replace_window_inner(
                     column_name,
                     offset,
                     output_name,
+                    default_value,
                     ..
                 } => {
-                    format!("{}=shift({}, {})", output_name, column_name, offset)
+                    if let Some(dv) = default_value {
+                        format!(
+                            "{}=shift({}, {}, default={})",
+                            output_name, column_name, offset, dv
+                        )
+                    } else {
+                        format!("{}=shift({}, {})", output_name, column_name, offset)
+                    }
                 }
                 GpuWindowOp::Diff {
                     column_name,
@@ -966,54 +972,104 @@ fn try_replace_window_inner(
 /// Parse a window expression name like `"lag(price,1,NULL)"` or `"lead(vol,2)"`
 /// and extract the GPU window operation.
 ///
+/// DataFusion renders window expression names in formats like:
+///   `"lag(?table?.value,Int64(1),Int64(0)) ROWS BETWEEN ..."`
+///   `"lead(?table?.col,Int64(2)) ORDER BY [...] ROWS BETWEEN ..."`
+///   `"lag(?table?.price,Int64(1),NULL) ORDER BY [...] ROWS BETWEEN ..."`
+///
+/// This parser handles:
+/// - Type-wrapped literals: `Int64(1)`, `Float64(3.14)`, `Int32(0)`
+/// - Nested parentheses from type wrappers (paren-aware comma splitting)
+/// - Trailing window frame and ORDER BY clauses
+/// - Table-qualified column refs: `?table?.col` → `col`
+///
 /// Returns `None` if the expression is not a supported lag/lead.
 fn parse_lag_lead_expr(
     name: &str,
     w_expr: &Arc<dyn WindowExpr>,
     input_schema: &SchemaRef,
 ) -> Result<Option<GpuWindowOp>> {
-    use datafusion::arrow::datatypes::SchemaRef;
-
     let name_lower = name.to_lowercase();
 
-    // Match lag(...) or lead(...)
-    let (is_lag, args_str) = if let Some(rest) = name_lower.strip_prefix("lag(") {
-        (true, rest.trim_end_matches(')'))
-    } else if let Some(rest) = name_lower.strip_prefix("lead(") {
-        (false, rest.trim_end_matches(')'))
+    // Find "lag(" or "lead(" prefix
+    let (is_lag, prefix_len) = if name_lower.starts_with("lag(") {
+        (true, 4)
+    } else if name_lower.starts_with("lead(") {
+        (false, 5)
     } else {
         return Ok(None);
     };
 
-    // Parse arguments: first arg is the column reference, second (optional) is offset
-    let args: Vec<&str> = args_str.split(',').collect();
+    // Find the matching closing paren for the outer lag/lead call.
+    // We need paren-aware matching because args may contain type wrappers
+    // like Int64(1) which have their own parens.
+    let inner_start = prefix_len;
+    let mut depth = 1i32;
+    let mut closing_paren = None;
+    for (i, ch) in name[inner_start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    closing_paren = Some(inner_start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let closing_paren = match closing_paren {
+        Some(pos) => pos,
+        None => return Ok(None), // Malformed — no matching close paren
+    };
+
+    let inner = &name[inner_start..closing_paren];
+
+    // Split the inner args by comma, respecting nested parens.
+    let args = split_respecting_parens(inner);
     if args.is_empty() {
         return Ok(None);
     }
 
-    // First argument: column name (may have table qualifier like "t1.price")
+    // First argument: column name (may have table qualifier like "?table?.price")
     let col_ref = args[0].trim();
     // Extract just the column name (last part after any dots)
     let col_name = col_ref.rsplit('.').next().unwrap_or(col_ref);
 
-    // Find the column index in the input schema
+    // Find the column index in the input schema (case-insensitive)
     let col_idx = input_schema
         .fields()
         .iter()
-        .position(|f| f.name() == col_name);
+        .position(|f| f.name().eq_ignore_ascii_case(col_name));
     let col_idx = match col_idx {
         Some(idx) => idx,
         None => return Ok(None), // Column not found
     };
 
-    let data_type = input_schema.field(col_idx).data_type().clone();
+    let input_col_type = input_schema.field(col_idx).data_type().clone();
+
+    // Use the window expression's output data type rather than the input column
+    // type. DataFusion may evaluate casts/expressions inside the lag/lead
+    // arguments (e.g., lag(CAST(price AS FLOAT64), 1)) — the output data type
+    // reflects the actual result type, not the raw input column type.
+    let output_field = w_expr.field()?;
+    let data_type = output_field.data_type().clone();
     if !is_window_gpu_supported_type(&data_type) {
+        return Ok(None);
+    }
+
+    // Also verify the input column type is GPU-compatible (we read data from it).
+    // If the input and output types differ, there's an embedded expression (e.g.,
+    // CAST) inside the lag/lead that the GPU can't evaluate — skip to CPU.
+    if input_col_type != data_type {
         return Ok(None);
     }
 
     // Second argument: offset (default 1 for lag, -1 for lead)
     let raw_offset = if args.len() > 1 {
-        args[1].trim().parse::<i32>().unwrap_or(1)
+        let offset_str = unwrap_typed_literal(args[1].trim());
+        offset_str.parse::<i32>().unwrap_or(1)
     } else {
         1
     };
@@ -1021,6 +1077,20 @@ fn parse_lag_lead_expr(
     // For lag, offset is positive (look backward).
     // For lead, offset is negative (look forward).
     let offset = if is_lag { raw_offset } else { -raw_offset };
+
+    // Third argument: default value (e.g., "Int64(0)", "NULL", "Float64(3.14)")
+    let default_value = if args.len() > 2 {
+        let default_raw = args[2].trim();
+        if default_raw.eq_ignore_ascii_case("null") {
+            None // NULL means no default → produce null for out-of-bounds
+        } else {
+            let default_str = unwrap_typed_literal(default_raw);
+            // Parse the default value into a ScalarValue matching the column data type
+            parse_default_scalar(&default_str, &data_type)
+        }
+    } else {
+        None
+    };
 
     // Output column name — use the full expression name from DataFusion
     let output_name = w_expr.field()?.name().to_string();
@@ -1031,7 +1101,77 @@ fn parse_lag_lead_expr(
         offset,
         output_name,
         data_type,
+        default_value,
     }))
+}
+
+/// Split a string by commas, respecting nested parentheses.
+/// E.g. `"?table?.value,Int64(1),Int64(0)"` → `["?table?.value", "Int64(1)", "Int64(0)"]`
+fn split_respecting_parens(s: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                result.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() {
+        result.push(&s[start..]);
+    }
+    result
+}
+
+/// Unwrap a DataFusion type-wrapped literal.
+/// E.g. `"Int64(42)"` → `"42"`, `"Float64(3.14)"` → `"3.14"`,
+///       `"Utf8(hello)"` → `"hello"`, `"42"` → `"42"` (no wrapper).
+fn unwrap_typed_literal(s: &str) -> String {
+    // Check for pattern: TypeName(value)
+    // Known type prefixes: Int64, Int32, Float64, Float32, Utf8, etc.
+    if let Some(paren_pos) = s.find('(') {
+        let prefix = &s[..paren_pos];
+        // Verify prefix looks like a type name (alphanumeric)
+        if prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && s.ends_with(')')
+        {
+            // Extract the inner value between parens
+            return s[paren_pos + 1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Parse a default value string into a ScalarValue of the appropriate type.
+fn parse_default_scalar(
+    s: &str,
+    data_type: &datafusion::arrow::datatypes::DataType,
+) -> Option<ScalarValue> {
+    use datafusion::arrow::datatypes::DataType;
+    match data_type {
+        DataType::Int64 => {
+            // Try integer parse first, then float (e.g., "0.0" → 0)
+            s.parse::<i64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().map(|v| v as i64))
+                .map(|v| ScalarValue::Int64(Some(v)))
+        }
+        DataType::Int32 => s
+            .parse::<i32>()
+            .ok()
+            .or_else(|| s.parse::<f64>().ok().map(|v| v as i32))
+            .map(|v| ScalarValue::Int32(Some(v))),
+        DataType::Float64 => s.parse::<f64>().ok().map(|v| ScalarValue::Float64(Some(v))),
+        DataType::Float32 => s.parse::<f32>().ok().map(|v| ScalarValue::Float32(Some(v))),
+        _ => None,
+    }
 }
 
 /// Parse a window expression name like `"avg(price)"`, `"sum(volume)"`, etc.
@@ -1046,7 +1186,6 @@ fn parse_rolling_agg_expr(
     w_expr: &Arc<dyn WindowExpr>,
     input_schema: &SchemaRef,
 ) -> Result<Option<GpuWindowOp>> {
-    use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::common::ScalarValue;
     use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
 
