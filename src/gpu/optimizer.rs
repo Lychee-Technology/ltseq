@@ -1379,20 +1379,51 @@ fn parse_rolling_agg_expr(
     let name_lower = name.to_lowercase();
 
     // Match function_name(column_name) pattern
-    // Supported: sum(...), avg(...), min(...), max(...), count(...)
-    let (agg_func, args_str) = if let Some(rest) = name_lower.strip_prefix("sum(") {
-        (RollingAggFunc::Sum, rest.trim_end_matches(')'))
-    } else if let Some(rest) = name_lower.strip_prefix("avg(") {
-        (RollingAggFunc::Avg, rest.trim_end_matches(')'))
-    } else if let Some(rest) = name_lower.strip_prefix("min(") {
-        (RollingAggFunc::Min, rest.trim_end_matches(')'))
-    } else if let Some(rest) = name_lower.strip_prefix("max(") {
-        (RollingAggFunc::Max, rest.trim_end_matches(')'))
-    } else if let Some(rest) = name_lower.strip_prefix("count(") {
-        (RollingAggFunc::Count, rest.trim_end_matches(')'))
+    // Supported: sum(...), avg(...), min(...), max(...)  , count(...)
+    //
+    // The window expression name from DataFusion is the full display string, e.g.:
+    //   avg(?table?.price) ORDER BY [?table?.ts ASC NULLS FIRST] ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+    //
+    // We need paren-aware matching to extract just the function arguments,
+    // since trim_end_matches(')') won't work (the string ends with "ROW", not ")").
+    let (agg_func, prefix_len) = if name_lower.starts_with("sum(") {
+        (RollingAggFunc::Sum, 4)
+    } else if name_lower.starts_with("avg(") {
+        (RollingAggFunc::Avg, 4)
+    } else if name_lower.starts_with("min(") {
+        (RollingAggFunc::Min, 4)
+    } else if name_lower.starts_with("max(") {
+        (RollingAggFunc::Max, 4)
+    } else if name_lower.starts_with("count(") {
+        (RollingAggFunc::Count, 6)
     } else {
         return Ok(None);
     };
+
+    // Find the matching closing paren using paren-depth tracking,
+    // same approach as parse_lag_lead_expr.
+    let inner_start = prefix_len;
+    let mut depth = 1i32;
+    let mut closing_paren = None;
+    for (i, ch) in name[inner_start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    closing_paren = Some(inner_start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let closing_paren = match closing_paren {
+        Some(pos) => pos,
+        None => return Ok(None), // Malformed — no matching close paren
+    };
+
+    let args_str = &name[inner_start..closing_paren];
 
     // Check the window frame — must be ROWS BETWEEN <n> PRECEDING AND CURRENT ROW
     let frame = w_expr.get_window_frame();
@@ -1499,12 +1530,35 @@ fn parse_cumulative_sum_expr(
 
     let name_lower = name.to_lowercase();
 
-    // Only match sum(col) — cumulative sum
-    let args_str = if let Some(rest) = name_lower.strip_prefix("sum(") {
-        rest.trim_end_matches(')')
-    } else {
+    // Only match sum(col) — cumulative sum.
+    // Use paren-aware extraction (same approach as parse_rolling_agg_expr)
+    // because the full name includes ORDER BY / ROWS clauses after the closing paren.
+    if !name_lower.starts_with("sum(") {
         return Ok(None);
+    }
+
+    let inner_start = 4; // "sum(".len()
+    let mut depth = 1i32;
+    let mut closing_paren = None;
+    for (i, ch) in name[inner_start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    closing_paren = Some(inner_start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let closing_paren = match closing_paren {
+        Some(pos) => pos,
+        None => return Ok(None),
     };
+
+    let args_str = &name[inner_start..closing_paren];
 
     // Check the window frame — must be ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     let frame = w_expr.get_window_frame();
