@@ -35,7 +35,7 @@ use std::sync::Arc;
 ///
 /// # Returns
 /// The expression with OVER clauses added to all LAG/LEAD functions
-pub(crate) fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
+fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
     let mut result = String::new();
     let mut i = 0;
     let bytes = expr.as_bytes();
@@ -251,7 +251,7 @@ pub(crate) fn derive_with_window_functions_from_parsed(
 }
 
 /// Deserialize derived column expressions from a Python dict into Vec<(String, PyExpr)>.
-pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<Vec<(String, PyExpr)>> {
+fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<Vec<(String, PyExpr)>> {
     let mut parsed = Vec::with_capacity(derived_cols.len());
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {

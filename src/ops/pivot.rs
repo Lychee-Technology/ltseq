@@ -35,10 +35,7 @@ pub fn pivot_impl(
 
     // SAFETY: dataframe.is_none() is checked above
     let df = table.dataframe.as_ref().expect("dataframe checked above");
-    let schema = table
-        .schema
-        .as_ref()
-        .expect("schema present when dataframe is");
+    let schema = table.schema.as_ref().ok_or(LtseqError::NoSchema)?;
 
     // Validate that all required columns exist
     let col_names: Vec<String> = schema

@@ -512,6 +512,7 @@ pub fn parallel_streaming_group_count(
 ///
 /// A vector of eligible row group indices. If statistics are unavailable
 /// for any row group, that row group is conservatively included.
+#[allow(dead_code)]
 pub fn prune_row_groups_by_stats(
     parquet_metadata: &parquet::file::metadata::ParquetMetaData,
     partition_col_name: &str,
@@ -600,6 +601,7 @@ pub fn prune_row_groups_by_stats(
 /// zone skipping strategies.
 ///
 /// Returns `(global_min, global_max)` or `None` if statistics are unavailable.
+#[allow(dead_code)]
 pub fn partition_column_range(
     parquet_metadata: &parquet::file::metadata::ParquetMetaData,
     partition_col_name: &str,

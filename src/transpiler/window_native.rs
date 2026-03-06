@@ -99,7 +99,7 @@ fn extract_partition_by(
 /// functions — calling `.window_frame()` or `.partition_by()` on `Expr::AggregateFunction`
 /// returns an empty builder that produces errors on `.build()`. Instead, we manually
 /// extract the aggregate UDF and args, then construct `Expr::WindowFunction` directly.
-pub(crate) fn aggregate_to_window(
+fn aggregate_to_window(
     agg_expr: Expr,
     partition_by: Vec<Expr>,
     order_by: Vec<Sort>,
