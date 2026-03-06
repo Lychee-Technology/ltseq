@@ -16,7 +16,7 @@ use datafusion::logical_expr::{case, Expr};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
 /// Convert a PyExpr aggregate call to a native DataFusion Expr.
@@ -186,29 +186,55 @@ fn pyexpr_to_agg_expr(
     }
 }
 
-/// Parse group expression into DataFusion Expr(s)
+/// Parse group expressions from Python (list of dicts) into DataFusion Expr(s)
 fn parse_group_exprs(
-    group_expr: Option<Bound<'_, PyDict>>,
+    group_exprs: Option<Bound<'_, PyAny>>,
     schema: &ArrowSchema,
 ) -> PyResult<Vec<Expr>> {
-    let Some(group_expr_dict) = group_expr else {
+    let Some(group_val) = group_exprs else {
         return Ok(Vec::new());
     };
 
-    let py_expr = dict_to_py_expr(&group_expr_dict)
-        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
+    // Accept either a single dict (backward compat) or a list of dicts
+    let expr_dicts: Vec<Bound<'_, PyDict>> = if let Ok(list) = group_val.cast::<PyList>() {
+        list.iter()
+            .map(|item| {
+                item.cast::<PyDict>()
+                    .map(|d| d.clone())
+                    .map_err(|_| {
+                        LtseqError::TypeMismatch(
+                            "Each group-by key must be a dict expression".into(),
+                        )
+                        .into()
+                    })
+            })
+            .collect::<PyResult<Vec<_>>>()?
+    } else if let Ok(dict) = group_val.cast::<PyDict>() {
+        vec![dict.clone()]
+    } else {
+        return Err(LtseqError::TypeMismatch(
+            "group_exprs must be a list of dicts or a single dict".into(),
+        )
+        .into());
+    };
 
-    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-        .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
-
-    Ok(vec![df_expr])
+    let mut result = Vec::with_capacity(expr_dicts.len());
+    for expr_dict in &expr_dicts {
+        let py_expr = dict_to_py_expr(expr_dict)
+            .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
+        let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+            .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
+        result.push(df_expr);
+    }
+    Ok(result)
 }
+
 
 /// Aggregate rows into a summary table with one row per group.
 /// Uses native DataFusion df.aggregate() API — no materialization needed.
 pub fn agg_impl(
     table: &LTSeqTable,
-    group_expr: Option<Bound<'_, PyDict>>,
+    group_exprs: Option<Bound<'_, PyAny>>,
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
@@ -245,11 +271,11 @@ pub fn agg_impl(
     }
 
     if needs_sql_fallback {
-        return agg_impl_sql_fallback(table, group_expr, agg_dict);
+        return agg_impl_sql_fallback(table, group_exprs, agg_dict);
     }
 
     // Parse group expressions
-    let group_exprs = parse_group_exprs(group_expr, schema)?;
+    let group_exprs = parse_group_exprs(group_exprs, schema)?;
 
     // Execute native aggregate — stays lazy until collect!
     let result_df = RUNTIME.block_on(async {
@@ -272,7 +298,7 @@ pub fn agg_impl(
 /// SQL-based fallback for complex aggregates (top_k, mode)
 fn agg_impl_sql_fallback(
     table: &LTSeqTable,
-    group_expr: Option<Bound<'_, PyDict>>,
+    group_exprs: Option<Bound<'_, PyAny>>,
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
@@ -304,7 +330,7 @@ fn agg_impl_sql_fallback(
         agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
     }
 
-    let group_cols = parse_group_expr_sql(group_expr, schema)?;
+    let group_cols = parse_group_expr_sql(group_exprs, schema)?;
 
     // Register temp table (must materialize for SQL path)
     let temp_table_name = "__ltseq_agg_temp";
@@ -537,28 +563,52 @@ fn create_result_table(
     )
 }
 
-/// Parse group expression into column names (SQL path)
+/// Parse group expressions into column names (SQL path)
 fn parse_group_expr_sql(
-    group_expr: Option<Bound<'_, PyDict>>,
+    group_exprs: Option<Bound<'_, PyAny>>,
     schema: &Arc<ArrowSchema>,
 ) -> PyResult<Option<Vec<String>>> {
-    let Some(group_expr_dict) = group_expr else {
+    let Some(group_val) = group_exprs else {
         return Ok(None);
     };
 
-    let py_expr = dict_to_py_expr(&group_expr_dict)
-        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
+    // Accept either a single dict or a list of dicts
+    let expr_dicts: Vec<Bound<'_, PyDict>> = if let Ok(list) = group_val.cast::<PyList>() {
+        list.iter()
+            .map(|item| {
+                item.cast::<PyDict>()
+                    .map(|d| d.clone())
+                    .map_err(|_| {
+                        LtseqError::TypeMismatch(
+                            "Each group-by key must be a dict expression".into(),
+                        )
+                        .into()
+                    })
+            })
+            .collect::<PyResult<Vec<_>>>()?
+    } else if let Ok(dict) = group_val.cast::<PyDict>() {
+        vec![dict.clone()]
+    } else {
+        return Err(LtseqError::TypeMismatch(
+            "group_exprs must be a list of dicts or a single dict".into(),
+        )
+        .into());
+    };
 
-    match py_expr {
-        PyExpr::Column(col_name) => Ok(Some(vec![col_name])),
-        _ => {
-            let sql_expr =
-                crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
-                    LtseqError::Validation(format!("Transpile failed: {}", e))
-                })?;
-            Ok(Some(vec![format!("{}", sql_expr)]))
+    let mut cols = Vec::with_capacity(expr_dicts.len());
+    for expr_dict in &expr_dicts {
+        let py_expr = dict_to_py_expr(expr_dict)
+            .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
+        match py_expr {
+            PyExpr::Column(col_name) => cols.push(col_name),
+            _ => {
+                let sql_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+                    .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
+                cols.push(format!("{}", sql_expr));
+            }
         }
     }
+    Ok(Some(cols))
 }
 
 /// Collect dataframe into record batches

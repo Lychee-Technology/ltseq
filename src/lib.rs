@@ -728,10 +728,10 @@ impl LTSeqTable {
     ///     New LTSeqTable with one row per group (or one row for full-table agg)
     fn agg(
         &self,
-        group_expr: Option<Bound<'_, PyDict>>,
+        group_exprs: Option<Bound<'_, PyAny>>,
         agg_dict: &Bound<'_, PyDict>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::aggregation::agg_impl(self, group_expr, agg_dict)
+        crate::ops::aggregation::agg_impl(self, group_exprs, agg_dict)
     }
 
     /// Filter rows using a raw SQL WHERE clause

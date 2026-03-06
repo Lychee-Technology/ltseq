@@ -1,8 +1,8 @@
 """Aggregation operations for LTSeq: agg, cum_sum, group_ordered, group_sorted."""
 
-from typing import Callable, Optional, Union
+from typing import Callable, List, Optional, Union
 
-from .expr import SchemaProxy
+from .expr import SchemaProxy, Expr
 from .transforms import _collect_key_exprs
 
 
@@ -113,19 +113,30 @@ class AggregationMixin:
 
         return NestedTable(self, key, is_sorted=True)
 
-    def agg(self, by: Optional[Callable] = None, **aggregations) -> "LTSeq":
+    def agg(
+        self,
+        by: Optional[Union[Callable, List[Union[str, Callable]]]] = None,
+        **aggregations,
+    ) -> "LTSeq":
         """
         Grouped aggregation with one row per group.
 
         Args:
-            by: Grouping key lambda (None for full-table aggregation)
+            by: Grouping key(s). Can be:
+                - A lambda returning a single column: ``by=lambda r: r.region``
+                - A lambda returning a tuple of columns: ``by=lambda r: (r.region, r.year)``
+                - A list of column names: ``by=["region", "year"]``
+                - A list of lambdas: ``by=[lambda r: r.region, lambda r: r.year]``
+                - None for full-table aggregation
             **aggregations: Aggregation expressions as keyword arguments
 
         Returns:
             Aggregated LTSeq
 
-        Example:
+        Examples:
             >>> t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
+            >>> t.agg(by=["region", "year"], total=lambda g: g.sales.sum())
+            >>> t.agg(by=lambda r: (r.region, r.year), total=lambda g: g.sales.sum())
         """
         from .core import LTSeq
 
@@ -137,11 +148,46 @@ class AggregationMixin:
         if not aggregations:
             raise ValueError("agg() requires at least one aggregation expression")
 
-        grouping_expr = None
+        # Parse grouping keys into a list of serialized expression dicts
+        grouping_exprs = None
         if by is not None:
-            if not callable(by):
-                raise TypeError(f"'by' must be callable, got {type(by).__name__}")
-            grouping_expr = self._capture_expr(by)
+            if callable(by):
+                # Single lambda — check if it returns a tuple (multi-key)
+                proxy = SchemaProxy(self._schema)
+                result = by(proxy)
+                if isinstance(result, tuple):
+                    # Multi-key: lambda r: (r.region, r.year)
+                    grouping_exprs = []
+                    for item in result:
+                        if isinstance(item, Expr):
+                            grouping_exprs.append(item.serialize())
+                        else:
+                            raise TypeError(
+                                f"Each tuple element must be an Expr, got {type(item).__name__}"
+                            )
+                elif isinstance(result, Expr):
+                    # Single key: lambda r: r.region
+                    grouping_exprs = [result.serialize()]
+                else:
+                    raise TypeError(
+                        f"'by' lambda must return an Expr or tuple of Exprs, got {type(result).__name__}"
+                    )
+            elif isinstance(by, (list, tuple)):
+                # List of column names or lambdas
+                grouping_exprs = []
+                for key in by:
+                    if isinstance(key, str):
+                        grouping_exprs.append({"type": "Column", "name": key})
+                    elif callable(key):
+                        grouping_exprs.append(self._capture_expr(key))
+                    else:
+                        raise TypeError(
+                            f"Each 'by' key must be str or callable, got {type(key).__name__}"
+                        )
+            else:
+                raise TypeError(
+                    f"'by' must be callable, list, or tuple, got {type(by).__name__}"
+                )
 
         agg_exprs = {}
         for name, fn in aggregations.items():
@@ -151,15 +197,17 @@ class AggregationMixin:
                 )
             agg_exprs[name] = self._capture_expr(fn)
 
-        result_inner = self._inner.agg(grouping_expr, agg_exprs)
+        result_inner = self._inner.agg(grouping_exprs, agg_exprs)
 
         result = LTSeq()
         result._inner = result_inner
 
         result._schema = {}
-        if grouping_expr and grouping_expr.get("type") == "Column":
-            col_name = grouping_expr.get("name", "group_key")
-            result._schema[col_name] = self._schema.get(col_name, "Unknown")
+        if grouping_exprs:
+            for gexpr in grouping_exprs:
+                if gexpr.get("type") == "Column":
+                    col_name = gexpr.get("name", "group_key")
+                    result._schema[col_name] = self._schema.get(col_name, "Unknown")
         for name in aggregations.keys():
             result._schema[name] = "Unknown"
 
