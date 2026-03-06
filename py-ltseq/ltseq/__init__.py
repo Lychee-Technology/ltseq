@@ -61,7 +61,11 @@ from .expr import (
 )
 
 # GPU utilities
-from .ltseq_core import gpu_available
+try:
+    from .ltseq_core import gpu_available
+except ImportError:
+    def gpu_available() -> bool:
+        return False
 
 # GPU table — conditional import (requires cudf)
 try:

@@ -67,7 +67,7 @@ jobs:
         run: pip install dist/*.whl
 
       - name: Run pytest
-        run: pytest py-ltseq/tests/ -v --tb=short
+        run: pytest --import-mode=importlib py-ltseq/tests/ -v --tb=short
 
       - name: Upload CPU wheel
         uses: actions/upload-artifact@v4
