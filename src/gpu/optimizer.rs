@@ -75,8 +75,16 @@ impl PhysicalOptimizerRule for HostToGpuRule {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        plan.transform_up(|node| try_replace_node(node))
-            .map(|t| t.data)
+        let result = plan
+            .transform_up(|node| try_replace_node(node))
+            .map(|t| t.data)?;
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] HostToGpuRule AFTER:\n{}",
+                datafusion::physical_plan::displayable(result.as_ref()).indent(true)
+            );
+        }
+        Ok(result)
     }
 
     fn name(&self) -> &str {
@@ -156,6 +164,31 @@ fn try_replace_filter(
         return Ok(None);
     }
 
+    // Capture the fetch limit (fused from GlobalLimitExec by DataFusion's
+    // optimizers) so we can propagate it to GpuFilterExec.
+    //
+    // DataFusion's FilterExec stores fetch as a private field and doesn't
+    // expose it through ExecutionPlan::fetch(). We detect it by checking
+    // the display string for "fetch=N", which is the canonical format.
+    let fetch = {
+        use std::fmt::Write;
+        let mut buf = String::new();
+        let _ = write!(
+            buf,
+            "{}",
+            datafusion::physical_plan::displayable(plan.as_ref()).one_line()
+        );
+        if let Some(pos) = buf.find("fetch=") {
+            let after = &buf[pos + 6..];
+            after
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|s| s.parse::<usize>().ok())
+        } else {
+            None
+        }
+    };
+
     let input = filter_exec.input();
     let schema = input.schema();
     let predicate = filter_exec.predicate();
@@ -191,7 +224,8 @@ fn try_replace_filter(
     }
 
     let gpu_filter =
-        GpuFilterExec::try_new_compound(gpu_pred, Arc::clone(predicate), Arc::clone(input))?;
+        GpuFilterExec::try_new_compound(gpu_pred, Arc::clone(predicate), Arc::clone(input))?
+            .with_fetch_limit(fetch);
     Ok(Some(Transformed::yes(Arc::new(gpu_filter))))
 }
 
@@ -959,31 +993,6 @@ fn try_replace_sort(
     )?;
 
     Ok(Some(Transformed::yes(Arc::new(gpu_sort))))
-}
-
-/// Walk down the plan tree from a FinalPartitioned aggregate's child to find
-/// the Partial aggregate's input. The typical chain is:
-///   CoalesceBatches → RepartitionExec → Partial(AggregateExec)
-/// but there may be other intermediate nodes.
-///
-/// NOTE: Currently unused — we only intercept Single mode aggregates.
-/// Kept for potential future use with proper schema resolution.
-#[allow(dead_code)]
-fn find_partial_aggregate_input(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
-    // Check if this node is a Partial aggregate
-    if let Some(agg) = plan.as_any().downcast_ref::<AggregateExec>() {
-        if matches!(agg.mode(), AggregateMode::Partial) {
-            return Some(Arc::clone(agg.input()));
-        }
-    }
-
-    // Recurse into single-child nodes (CoalesceBatches, Repartition, etc.)
-    let children = plan.children();
-    if children.len() == 1 {
-        return find_partial_aggregate_input(&Arc::clone(children[0]));
-    }
-
-    None
 }
 
 /// Check if a data type is supported for GPU aggregate operations.

@@ -3,6 +3,11 @@
 Verifies that all 10 GPU operators in the HostToGpuRule optimizer
 actually activate when presented with qualifying query patterns.
 
+GPU sessions use target_partitions=1, repartition_joins=false, and
+repartition_aggregations=false. This ensures DataFusion produces
+Single-mode aggregates and preserves sort metadata through joins,
+enabling all GPU operator replacements.
+
 Each test spawns a subprocess with LTSEQ_GPU_DEBUG=1 that:
   1. Creates a 200K-row synthetic dataset via LTSeq.from_arrow()
   2. Runs the operation that should trigger a specific GPU operator
@@ -177,15 +182,12 @@ class TestGpuSortExec:
 class TestGpuHashAggregateExec:
     """AggregateExec -> GpuHashAggregateExec for unsorted/multi-key GROUP BY.
 
-    NOTE: On multi-core machines DataFusion uses two-phase aggregation
-    (Partial + FinalPartitioned) rather than Single mode. The GPU optimizer
-    only intercepts Single-mode aggregates to avoid schema mismatches with
-    the two-phase output. These tests verify the optimizer pipeline is
-    reached and correctly examines the aggregate nodes, even though the
-    final substitution is skipped due to non-Single mode.
+    With target_partitions=1 for GPU sessions, DataFusion uses Single-mode
+    aggregation instead of two-phase (Partial + FinalPartitioned), so the
+    GPU optimizer can intercept and replace with GpuHashAggregateExec.
     """
 
-    def test_hash_aggregate_optimizer_reached(self):
+    def test_hash_aggregate_activation(self):
         stdout, stderr = _run_gpu_script(f"""
             import json, numpy as np, pyarrow as pa
             from ltseq import LTSeq
@@ -204,19 +206,12 @@ class TestGpuHashAggregateExec:
                 "expected_groups": len(set(group_ids)),
             }}))
         """)
-        # On multi-core, DataFusion uses Partial/FinalPartitioned mode.
-        # Verify the optimizer saw the aggregate and attempted processing.
-        has_gpu_op = "GpuHashAggregateExec" in stderr or "GpuConsecutiveGroupExec" in stderr
-        has_attempt = "try_replace_aggregate" in stderr
-        assert has_gpu_op or has_attempt, (
-            f"GPU aggregate optimizer path not reached.\n"
-            f"Stderr:\n{stderr[:3000]}"
-        )
+        _assert_gpu_operator(stderr, "GpuHashAggregateExec", "GpuConsecutiveGroupExec")
         data = json.loads(stdout)
         assert data["nrows"] == data["expected_groups"]
 
-    def test_multikey_aggregate_optimizer_reached(self):
-        """Multi-key group-by: verify optimizer examines aggregate nodes."""
+    def test_multikey_aggregate_activation(self):
+        """Multi-key group-by should activate GpuHashAggregateExec."""
         stdout, stderr = _run_gpu_script(f"""
             import json, numpy as np, pyarrow as pa
             from ltseq import LTSeq
@@ -231,12 +226,7 @@ class TestGpuHashAggregateExec:
             df = result.to_pandas()
             print(json.dumps({{"nrows": len(df)}}))
         """)
-        has_gpu_op = "GpuHashAggregateExec" in stderr
-        has_attempt = "try_replace_aggregate" in stderr
-        assert has_gpu_op or has_attempt, (
-            f"GPU aggregate optimizer path not reached for multi-key agg.\n"
-            f"Stderr:\n{stderr[:3000]}"
-        )
+        _assert_gpu_operator(stderr, "GpuHashAggregateExec")
         data = json.loads(stdout)
         assert data["nrows"] > 0
 
@@ -288,11 +278,12 @@ class TestGpuHashJoinExec:
 class TestGpuAdjacentDistinctExec:
     """AggregateExec(DISTINCT) -> GpuAdjacentDistinctExec on sorted data.
 
-    NOTE: Same Single-mode limitation as GpuHashAggregateExec. On multi-core
-    machines the optimizer sees the aggregate but skips non-Single mode.
+    With target_partitions=1 for GPU sessions, DataFusion uses Single-mode
+    aggregation, allowing the GPU optimizer to detect sorted input and
+    replace with GpuAdjacentDistinctExec (or GpuHashAggregateExec).
     """
 
-    def test_distinct_sorted_optimizer_reached(self):
+    def test_distinct_sorted_activation(self):
         stdout, stderr = _run_gpu_script(f"""
             import json, numpy as np, pyarrow as pa
             from ltseq import LTSeq
@@ -306,12 +297,7 @@ class TestGpuAdjacentDistinctExec:
             df = result.to_pandas()
             print(json.dumps({{"nrows": len(df)}}))
         """)
-        has_gpu_op = "GpuAdjacentDistinctExec" in stderr or "GpuHashAggregateExec" in stderr
-        has_attempt = "try_replace_aggregate" in stderr
-        assert has_gpu_op or has_attempt, (
-            f"GPU distinct optimizer path not reached.\n"
-            f"Stderr:\n{stderr[:3000]}"
-        )
+        _assert_gpu_operator(stderr, "GpuAdjacentDistinctExec", "GpuHashAggregateExec")
         data = json.loads(stdout)
         assert data["nrows"] == 1000
 
@@ -379,11 +365,10 @@ class TestGpuWindowShiftExec:
 class TestGpuMergeJoinExec:
     """HashJoinExec -> GpuMergeJoinExec when both inputs are sorted.
 
-    NOTE: On multi-core machines DataFusion inserts RepartitionExec between
-    sorted inputs and HashJoinExec (repartition_joins=true). RepartitionExec
-    destroys sort metadata, so the merge join branch cannot detect that both
-    inputs are sorted. The test verifies the join activates on GPU (hash or
-    merge), and that the merge join code path exists for single-partition mode.
+    With target_partitions=1 and repartition_joins=false for GPU sessions,
+    DataFusion no longer inserts RepartitionExec between sorted inputs and
+    the join node. Sort metadata is preserved, allowing the optimizer to
+    detect sorted inputs and use GpuMergeJoinExec instead of GpuHashJoinExec.
     """
 
     def test_merge_join_activation(self):
@@ -404,7 +389,6 @@ class TestGpuMergeJoinExec:
             result = left.join(right, on=lambda a, b: a.id == b.id)
             df = result.to_pandas()
             right_val_col = [c for c in df.columns if "right_val" in c][0]
-            # Check row with id=0 (order may vary with hash join)
             row0 = df[df["id"] == 0].iloc[0]
             print(json.dumps({{
                 "nrows": len(df),
@@ -413,9 +397,6 @@ class TestGpuMergeJoinExec:
                 "has_right_col": True,
             }}))
         """)
-        # On multi-core machines, RepartitionExec between sort and join destroys
-        # sort metadata, so GpuMergeJoinExec cannot activate. Accept GpuHashJoinExec
-        # as the fallback GPU path, which still validates the optimizer pipeline.
         _assert_gpu_operator(stderr, "GpuMergeJoinExec", "GpuHashJoinExec")
         data = json.loads(stdout)
         assert data["nrows"] == N
@@ -461,11 +442,13 @@ class TestGpuBinarySearchExec:
 class TestGpuConsecutiveGroupExec:
     """AggregateExec -> ConsecutiveGroup + SegmentedAggregate on sorted single-key.
 
-    NOTE: Same Single-mode limitation as GpuHashAggregateExec. On multi-core
-    machines the optimizer sees the aggregate but skips non-Single mode.
+    With target_partitions=1 for GPU sessions, DataFusion uses Single-mode
+    aggregation. When the input is sorted by the group key, the optimizer
+    can use the consecutive-group path (GpuConsecutiveGroupExec +
+    GpuSegmentedAggregateExec) or fall back to GpuHashAggregateExec.
     """
 
-    def test_consecutive_group_optimizer_reached(self):
+    def test_consecutive_group_activation(self):
         stdout, stderr = _run_gpu_script(f"""
             import json, numpy as np, pyarrow as pa
             from ltseq import LTSeq
@@ -486,12 +469,7 @@ class TestGpuConsecutiveGroupExec:
                 "all_5000": all_5000,
             }}))
         """)
-        has_gpu_op = "GpuConsecutiveGroupExec" in stderr or "GpuHashAggregateExec" in stderr
-        has_attempt = "try_replace_aggregate" in stderr
-        assert has_gpu_op or has_attempt, (
-            f"GPU consecutive group optimizer path not reached.\n"
-            f"Stderr:\n{stderr[:3000]}"
-        )
+        _assert_gpu_operator(stderr, "GpuConsecutiveGroupExec", "GpuHashAggregateExec")
         data = json.loads(stdout)
         assert data["nrows"] == 200
         assert data["all_5000"] is True

@@ -318,6 +318,8 @@ pub struct GpuFilterExec {
     metrics: ExecutionPlanMetricsSet,
     /// Cached plan properties
     cache: PlanProperties,
+    /// Optional row limit (fused from GlobalLimitExec)
+    fetch: Option<usize>,
 }
 
 impl GpuFilterExec {
@@ -347,7 +349,15 @@ impl GpuFilterExec {
             input,
             metrics: ExecutionPlanMetricsSet::new(),
             cache,
+            fetch: None,
         })
+    }
+
+    /// Set the fetch limit (propagated from FilterExec when a GlobalLimitExec
+    /// has been fused into the filter by DataFusion's optimizers).
+    pub fn with_fetch_limit(mut self, fetch: Option<usize>) -> Self {
+        self.fetch = fetch;
+        self
     }
 
     fn compute_properties(input: &Arc<dyn ExecutionPlan>) -> PlanProperties {
@@ -401,11 +411,13 @@ impl ExecutionPlan for GpuFilterExec {
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(GpuFilterExec::try_new_compound(
+        let mut new = GpuFilterExec::try_new_compound(
             self.compound_predicate.clone(),
             Arc::clone(&self.original_predicate),
             children.swap_remove(0),
-        )?))
+        )?;
+        new.fetch = self.fetch;
+        Ok(Arc::new(new))
     }
 
     fn execute(
@@ -417,10 +429,17 @@ impl ExecutionPlan for GpuFilterExec {
         let schema = input_stream.schema();
         let compound_pred = self.compound_predicate.clone();
         let metrics = BaselineMetrics::new(&self.metrics, partition);
+        let fetch = self.fetch;
 
         let output_stream = futures_util::stream::unfold(
-            (input_stream, compound_pred, metrics),
-            |(mut stream, pred, metrics)| async move {
+            (input_stream, compound_pred, metrics, 0usize),
+            move |(mut stream, pred, metrics, rows_emitted)| async move {
+                // If fetch limit is reached, stop emitting
+                if let Some(limit) = fetch {
+                    if rows_emitted >= limit {
+                        return None;
+                    }
+                }
                 loop {
                     let timer = metrics.elapsed_compute().timer();
                     match futures_util::StreamExt::next(&mut stream).await {
@@ -432,23 +451,31 @@ impl ExecutionPlan for GpuFilterExec {
                                 // correct schema is yielded, preventing "Must pass
                                 // schema, or at least one RecordBatch" errors downstream.
                                 timer.done();
-                                return Some((Ok(batch), (stream, pred, metrics)));
+                                return Some((Ok(batch), (stream, pred, metrics, rows_emitted)));
                             }
                             let result = gpu_filter_batch_compound(&batch, &pred);
                             timer.done();
                             match result {
-                                Ok(filtered) => {
-                                    metrics.record_output(filtered.num_rows());
-                                    return Some((Ok(filtered), (stream, pred, metrics)));
+                                Ok(mut filtered) => {
+                                    // Apply fetch limit: truncate batch if needed
+                                    if let Some(limit) = fetch {
+                                        let remaining = limit.saturating_sub(rows_emitted);
+                                        if filtered.num_rows() > remaining {
+                                            filtered = filtered.slice(0, remaining);
+                                        }
+                                    }
+                                    let n = filtered.num_rows();
+                                    metrics.record_output(n);
+                                    return Some((Ok(filtered), (stream, pred, metrics, rows_emitted + n)));
                                 }
                                 Err(e) => {
-                                    return Some((Err(e), (stream, pred, metrics)));
+                                    return Some((Err(e), (stream, pred, metrics, rows_emitted)));
                                 }
                             }
                         }
                         Some(Err(e)) => {
                             timer.done();
-                            return Some((Err(e), (stream, pred, metrics)));
+                            return Some((Err(e), (stream, pred, metrics, rows_emitted)));
                         }
                         None => {
                             timer.done();
@@ -475,6 +502,21 @@ impl ExecutionPlan for GpuFilterExec {
         stats.num_rows = stats.num_rows.with_estimated_selectivity(0.5);
         stats.total_byte_size = stats.total_byte_size.with_estimated_selectivity(0.5);
         Ok(stats)
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.fetch
+    }
+
+    fn with_fetch(&self, fetch: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        Some(Arc::new(Self {
+            compound_predicate: self.compound_predicate.clone(),
+            original_predicate: Arc::clone(&self.original_predicate),
+            input: Arc::clone(&self.input),
+            metrics: ExecutionPlanMetricsSet::new(),
+            cache: self.cache.clone(),
+            fetch,
+        }))
     }
 }
 

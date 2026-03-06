@@ -38,21 +38,39 @@ pub static NUM_CPUS: LazyLock<usize> = LazyLock::new(|| {
 /// Create a new SessionContext with optimized configuration.
 ///
 /// Configuration choices:
-/// - `target_partitions`: Set to number of CPUs for parallel execution
 /// - `batch_size`: 16384 rows (reduces per-batch overhead for large scans)
 /// - `information_schema`: Disabled (not needed, saves memory)
-/// - `repartition_joins`: Enabled for parallel join execution
-/// - `repartition_aggregations`: Enabled for parallel aggregations
+///
+/// **Partitioning strategy:**
+/// - When GPU is available: `target_partitions=1` with repartition disabled.
+///   All GPU operators run on a single device, so multi-partition planning only
+///   adds `Partial → RepartitionExec → FinalPartitioned` overhead that the GPU
+///   must immediately undo via `CoalescePartitionsExec`. Single-partition mode
+///   produces `AggregateMode::Single` plans that the GPU optimizer can fully
+///   intercept, and preserves sort order for merge-join and ordered operators.
+/// - When GPU is not available: `target_partitions=NUM_CPUS` with repartition
+///   enabled for CPU-parallel execution.
 ///
 /// When the `gpu` feature is enabled and a CUDA GPU is available, the
 /// `HostToGpuRule` physical optimizer rule is appended to the pipeline.
 pub fn create_session_context() -> Arc<SessionContext> {
+    // Detect GPU availability to choose partitioning strategy.
+    // GPU operations are inherently single-device, so multi-partition planning
+    // adds overhead without benefit and blocks several GPU optimizations.
+    let use_gpu_partitioning = is_gpu_session_enabled();
+
+    let (partitions, repartition) = if use_gpu_partitioning {
+        (1, false)
+    } else {
+        (*NUM_CPUS, true)
+    };
+
     let mut config = SessionConfig::new()
-        .with_target_partitions(*NUM_CPUS)
+        .with_target_partitions(partitions)
         .with_batch_size(DEFAULT_BATCH_SIZE)
         .with_information_schema(false)
-        .with_repartition_joins(true)
-        .with_repartition_aggregations(true)
+        .with_repartition_joins(repartition)
+        .with_repartition_aggregations(repartition)
         .with_coalesce_batches(true);
 
     // Enable Parquet filter pushdown for predicate skipping
@@ -87,6 +105,27 @@ pub fn create_sequential_session() -> Arc<SessionContext> {
 
     let state = build_session_state(config);
     Arc::new(SessionContext::new_with_state(state))
+}
+
+/// Check whether this session should use GPU-optimized partitioning.
+///
+/// Returns `true` when all of the following are met:
+/// - The `gpu` feature is compiled in
+/// - A CUDA device is available
+/// - `LTSEQ_DISABLE_GPU=1` is NOT set
+///
+/// When `true`, `create_session_context()` uses `target_partitions=1`
+/// so DataFusion produces single-partition plans that the GPU optimizer
+/// can fully intercept.
+fn is_gpu_session_enabled() -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        let gpu_disabled = std::env::var("LTSEQ_DISABLE_GPU").is_ok();
+        if !gpu_disabled && crate::gpu::is_gpu_available() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Build a `SessionState` from a `SessionConfig`, optionally appending
