@@ -39,6 +39,9 @@
 //! - **Extensibility**: Easy to add new operations or refactor existing ones
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
 
+// Shared helpers (temp-table RAII guards, empty-batch checks)
+pub(crate) mod helpers;
+
 // Core modules
 pub(crate) mod basic;
 pub(crate) mod derive;

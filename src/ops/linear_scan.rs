@@ -26,6 +26,7 @@
 
 use crate::engine::{create_sequential_session, RUNTIME};
 use crate::error::LtseqError;
+use crate::ops::helpers::check_empty_batches;
 use crate::types::PyExpr;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
@@ -486,7 +487,6 @@ pub(crate) fn streaming_fuse_eval(
             for i in 0..n {
                 out[i] = left_out[i] || right_out[i];
             }
-            // First batch, first row is always a boundary
             if state.prev_values.is_empty() {
                 out[0] = true;
             }
@@ -505,7 +505,6 @@ pub(crate) fn streaming_fuse_eval(
             for i in 0..n {
                 out[i] = left_out[i] && right_out[i];
             }
-            // First batch, first row is always a boundary
             if state.prev_values.is_empty() {
                 out[0] = true;
             }
@@ -513,108 +512,146 @@ pub(crate) fn streaming_fuse_eval(
         }
         // Pattern: Column != Column.shift(1)
         PyExpr::BinOp { op, left, right } if op == "Ne" => {
-            if let (Some(col_name), true) = (get_column_name(left), is_shift_of_same_column(left, right)) {
-                let idx = match name_to_idx.get(col_name) {
-                    Some(i) => *i,
-                    None => return false,
-                };
-                let col = batch.column(idx);
-                if let Some(i64_arr) = coerce_to_i64(col) {
-                    let vals = i64_arr.values();
-                    let nulls = i64_arr.nulls();
-
-                    // Row 0: compare against previous batch's last value
-                    if state.prev_values.is_empty() {
-                        out[0] = true; // First batch: always boundary
-                    } else {
-                        let cur_null = nulls.map_or(false, |nb| !nb.is_valid(0));
-                        match state.prev_values.get(col_name) {
-                            Some(Some(prev_val)) => {
-                                out[0] = cur_null || vals[0] != *prev_val;
-                            }
-                            _ => {
-                                out[0] = true; // prev was null → boundary
-                            }
-                        }
-                    }
-
-                    // Rows 1..n: same as non-streaming fuse_eval
-                    if let Some(nb) = nulls {
-                        for i in 1..n {
-                            out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1) || vals[i] != vals[i - 1];
-                        }
-                    } else {
-                        for i in 1..n {
-                            out[i] = vals[i] != vals[i - 1];
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+            streaming_ne_boundary(left, right, batch, name_to_idx, state, out)
         }
         // Pattern: (Column - Column.shift(1)) > Literal
         PyExpr::BinOp { op, left, right } if op == "Gt" => {
-            if let PyExpr::BinOp { op: sub_op, left: sub_left, right: sub_right } = left.as_ref() {
-                if sub_op == "Sub" {
-                    if let (Some(col_name), true) = (get_column_name(sub_left), is_shift_of_same_column(sub_left, sub_right)) {
-                        if let Some(threshold) = get_literal_i64(right) {
-                            let idx = match name_to_idx.get(col_name) {
-                                Some(i) => *i,
-                                None => return false,
-                            };
-                            let col = batch.column(idx);
-                            if let Some(i64_arr) = coerce_to_i64(col) {
-                                let vals = i64_arr.values();
-                                let nulls = i64_arr.nulls();
-
-                                // Row 0: compare against previous batch's last value
-                                if state.prev_values.is_empty() {
-                                    out[0] = true;
-                                } else {
-                                    let cur_null = nulls.map_or(false, |nb| !nb.is_valid(0));
-                                    match state.prev_values.get(col_name) {
-                                        Some(Some(prev_val)) => {
-                                            out[0] = cur_null || vals[0].wrapping_sub(*prev_val) > threshold;
-                                        }
-                                        _ => {
-                                            out[0] = true;
-                                        }
-                                    }
-                                }
-
-                                // Rows 1..n
-                                if let Some(nb) = nulls {
-                                    for i in 1..n {
-                                        out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1)
-                                            || vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                } else {
-                                    for i in 1..n {
-                                        out[i] = vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+            streaming_gt_sub_boundary(left, right, batch, name_to_idx, state, out)
         }
         _ => false,
+    }
+}
+
+/// Streaming boundary: `Column != Column.shift(1)`.
+fn streaming_ne_boundary(
+    left: &PyExpr,
+    right: &PyExpr,
+    batch: &RecordBatch,
+    name_to_idx: &HashMap<String, usize>,
+    state: &StreamState,
+    out: &mut [bool],
+) -> bool {
+    let (Some(col_name), true) = (get_column_name(left), is_shift_of_same_column(left, right))
+    else {
+        return false;
+    };
+    let idx = match name_to_idx.get(col_name) {
+        Some(i) => *i,
+        None => return false,
+    };
+    let col = batch.column(idx);
+    let Some(i64_arr) = coerce_to_i64(col) else {
+        return false;
+    };
+
+    let vals = i64_arr.values();
+    let nulls = i64_arr.nulls();
+    let n = out.len();
+
+    // Row 0: compare against previous batch's last value
+    streaming_row0_boundary(col_name, vals[0], nulls, state, &mut out[0], |cur, prev| {
+        cur != prev
+    });
+
+    // Rows 1..n
+    if let Some(nb) = nulls {
+        for i in 1..n {
+            out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1) || vals[i] != vals[i - 1];
+        }
+    } else {
+        for i in 1..n {
+            out[i] = vals[i] != vals[i - 1];
+        }
+    }
+    true
+}
+
+/// Streaming boundary: `(Column - Column.shift(1)) > Literal`.
+fn streaming_gt_sub_boundary(
+    left: &PyExpr,
+    right: &PyExpr,
+    batch: &RecordBatch,
+    name_to_idx: &HashMap<String, usize>,
+    state: &StreamState,
+    out: &mut [bool],
+) -> bool {
+    let PyExpr::BinOp {
+        op: sub_op,
+        left: sub_left,
+        right: sub_right,
+    } = left
+    else {
+        return false;
+    };
+    if sub_op != "Sub" {
+        return false;
+    }
+    let (Some(col_name), true) = (
+        get_column_name(sub_left),
+        is_shift_of_same_column(sub_left, sub_right),
+    ) else {
+        return false;
+    };
+    let Some(threshold) = get_literal_i64(right) else {
+        return false;
+    };
+    let idx = match name_to_idx.get(col_name) {
+        Some(i) => *i,
+        None => return false,
+    };
+    let col = batch.column(idx);
+    let Some(i64_arr) = coerce_to_i64(col) else {
+        return false;
+    };
+
+    let vals = i64_arr.values();
+    let nulls = i64_arr.nulls();
+    let n = out.len();
+
+    // Row 0: compare against previous batch's last value
+    streaming_row0_boundary(col_name, vals[0], nulls, state, &mut out[0], |cur, prev| {
+        cur.wrapping_sub(prev) > threshold
+    });
+
+    // Rows 1..n
+    if let Some(nb) = nulls {
+        for i in 1..n {
+            out[i] = !nb.is_valid(i)
+                || !nb.is_valid(i - 1)
+                || vals[i].wrapping_sub(vals[i - 1]) > threshold;
+        }
+    } else {
+        for i in 1..n {
+            out[i] = vals[i].wrapping_sub(vals[i - 1]) > threshold;
+        }
+    }
+    true
+}
+
+/// Handle row-0 cross-batch boundary comparison.
+///
+/// If this is the first batch (`prev_values` is empty), row 0 is always a boundary.
+/// Otherwise, compare the current value against the previous batch's last value using `cmp_fn`.
+fn streaming_row0_boundary(
+    col_name: &str,
+    cur_val: i64,
+    nulls: Option<&datafusion::arrow::buffer::NullBuffer>,
+    state: &StreamState,
+    out: &mut bool,
+    cmp_fn: impl Fn(i64, i64) -> bool,
+) {
+    if state.prev_values.is_empty() {
+        *out = true;
+    } else {
+        let cur_null = nulls.map_or(false, |nb| !nb.is_valid(0));
+        match state.prev_values.get(col_name) {
+            Some(Some(prev_val)) => {
+                *out = cur_null || cmp_fn(cur_val, *prev_val);
+            }
+            _ => {
+                *out = true; // prev was null → boundary
+            }
+        }
     }
 }
 
@@ -813,6 +850,152 @@ fn coerce_to_i64(arr: &ArrayRef) -> Option<Int64Array> {
 }
 
 /// Perform a vectorized binary operation on two Arrow arrays.
+/// Ne comparison with null-as-true semantics: NULL != X → true (boundary).
+fn vectorized_ne(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
+    use datafusion::arrow::compute::kernels::cmp;
+
+    // Try i64 first (covers Int64, UInt64, Timestamp)
+    if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
+        let n = l.len();
+        let l_values = l.values();
+        let r_values = r.values();
+        let l_nulls = l.nulls();
+        let r_nulls = r.nulls();
+        let has_any_nulls = l_nulls.is_some() || r_nulls.is_some();
+
+        let mut out = Vec::with_capacity(n);
+        if has_any_nulls {
+            for i in 0..n {
+                let l_null = l_nulls.map_or(false, |nb| !nb.is_valid(i));
+                let r_null = r_nulls.map_or(false, |nb| !nb.is_valid(i));
+                out.push(if l_null || r_null { true } else { l_values[i] != r_values[i] });
+            }
+        } else {
+            for i in 0..n {
+                out.push(l_values[i] != r_values[i]);
+            }
+        }
+        return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
+    }
+    // Float64
+    if let (Some(l), Some(r)) = (
+        left.as_any().downcast_ref::<Float64Array>(),
+        right.as_any().downcast_ref::<Float64Array>(),
+    ) {
+        let result = cmp::neq(l, r).map_err(|e| e.to_string())?;
+        return Ok(Arc::new(result) as ArrayRef);
+    }
+    // String types
+    if let (Some(l), Some(r)) = (
+        left.as_any().downcast_ref::<StringArray>(),
+        right.as_any().downcast_ref::<StringArray>(),
+    ) {
+        let result = cmp::neq(l, r).map_err(|e| e.to_string())?;
+        return Ok(Arc::new(result) as ArrayRef);
+    }
+    Err(format!("Ne: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
+}
+
+/// Gt comparison with scalar-constant optimization for i64.
+fn vectorized_gt(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
+    use datafusion::arrow::compute::kernels::cmp;
+
+    if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
+        let n = l.len();
+        if n > 0 && r.null_count() == 0 {
+            let first_val = r.value(0);
+            let is_scalar = (1..n).all(|i| r.value(i) == first_val);
+            if is_scalar {
+                let l_values = l.values();
+                let l_nulls = l.nulls();
+                let mut out = Vec::with_capacity(n);
+                if let Some(nulls) = l_nulls {
+                    for i in 0..n {
+                        out.push(if !nulls.is_valid(i) { false } else { l_values[i] > first_val });
+                    }
+                } else {
+                    for i in 0..n {
+                        out.push(l_values[i] > first_val);
+                    }
+                }
+                return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
+            }
+        }
+        let result = cmp::gt(&l, &r).map_err(|e| e.to_string())?;
+        return Ok(Arc::new(result) as ArrayRef);
+    }
+    if let (Some(l), Some(r)) = (
+        left.as_any().downcast_ref::<Float64Array>(),
+        right.as_any().downcast_ref::<Float64Array>(),
+    ) {
+        return Ok(Arc::new(cmp::gt(l, r).map_err(|e| e.to_string())?) as ArrayRef);
+    }
+    Err(format!("Gt: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
+}
+
+/// Sub with direct i64 subtraction (avoids Arrow kernel overhead).
+fn vectorized_sub(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
+    use datafusion::arrow::compute::kernels::numeric;
+
+    if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
+        let n = l.len();
+        let l_values = l.values();
+        let r_values = r.values();
+        let l_nulls = l.nulls();
+        let r_nulls = r.nulls();
+        let has_any_nulls = l_nulls.is_some() || r_nulls.is_some();
+
+        let mut result_values = Vec::with_capacity(n);
+        for i in 0..n {
+            result_values.push(l_values[i].wrapping_sub(r_values[i]));
+        }
+
+        let null_buffer = if has_any_nulls {
+            let mut validity = Vec::with_capacity(n);
+            for i in 0..n {
+                let l_valid = l_nulls.map_or(true, |nb| nb.is_valid(i));
+                let r_valid = r_nulls.map_or(true, |nb| nb.is_valid(i));
+                validity.push(l_valid && r_valid);
+            }
+            Some(datafusion::arrow::buffer::NullBuffer::from(validity))
+        } else {
+            None
+        };
+
+        let result = Int64Array::new(
+            datafusion::arrow::buffer::ScalarBuffer::from(result_values),
+            null_buffer,
+        );
+        return Ok(Arc::new(result) as ArrayRef);
+    }
+    if let (Some(l), Some(r)) = (
+        left.as_any().downcast_ref::<Float64Array>(),
+        right.as_any().downcast_ref::<Float64Array>(),
+    ) {
+        return Ok(Arc::new(numeric::sub(l, r).map_err(|e| e.to_string())?) as ArrayRef);
+    }
+    Err(format!("Sub: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
+}
+
+/// Try i64 coercion, apply a comparison kernel, fall back to f64.
+fn binop_cmp_i64_f64(
+    left: &ArrayRef,
+    right: &ArrayRef,
+    op_name: &str,
+    cmp_fn: fn(&dyn datafusion::arrow::array::Datum, &dyn datafusion::arrow::array::Datum) -> Result<BooleanArray, datafusion::arrow::error::ArrowError>,
+) -> Result<ArrayRef, String> {
+    if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
+        return Ok(Arc::new(cmp_fn(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+    }
+    if let (Some(l), Some(r)) = (
+        left.as_any().downcast_ref::<Float64Array>(),
+        right.as_any().downcast_ref::<Float64Array>(),
+    ) {
+        return Ok(Arc::new(cmp_fn(l, r).map_err(|e| e.to_string())?) as ArrayRef);
+    }
+    Err(format!("{}: unsupported types {:?} and {:?}", op_name, left.data_type(), right.data_type()))
+}
+
 fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::boolean;
@@ -833,157 +1016,13 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
                 .ok_or("AND requires boolean arrays")?;
             Ok(Arc::new(boolean::and(l, r).map_err(|e| e.to_string())?) as ArrayRef)
         }
-        "Ne" => {
-            // Try i64 comparison first (covers Int64, UInt64, Timestamp)
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                // Fused neq + null-as-true in one pass: avoids double allocation.
-                // NULL != X → true (boundary), non-null uses direct value comparison.
-                let n = l.len();
-                let l_values = l.values();
-                let r_values = r.values();
-                let l_nulls = l.nulls();
-                let r_nulls = r.nulls();
-                let has_any_nulls = l_nulls.is_some() || r_nulls.is_some();
-
-                let mut out = Vec::with_capacity(n);
-                if has_any_nulls {
-                    for i in 0..n {
-                        let l_null = l_nulls.map_or(false, |nb| !nb.is_valid(i));
-                        let r_null = r_nulls.map_or(false, |nb| !nb.is_valid(i));
-                        out.push(if l_null || r_null { true } else { l_values[i] != r_values[i] });
-                    }
-                } else {
-                    // Fast path: no nulls at all — pure value comparison
-                    for i in 0..n {
-                        out.push(l_values[i] != r_values[i]);
-                    }
-                }
-                return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
-            }
-            // Float64
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                let result = cmp::neq(l, r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
-            }
-            // String types
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<StringArray>(),
-                right.as_any().downcast_ref::<StringArray>(),
-            ) {
-                let result = cmp::neq(l, r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
-            }
-            Err(format!("Ne: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Eq" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                let result = cmp::eq(&l, &r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
-            }
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                return Ok(Arc::new(cmp::eq(l, r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Eq: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Gt" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                // Check if right is a constant (all same value) — use scalar comparison
-                let n = l.len();
-                if n > 0 && r.null_count() == 0 {
-                    let first_val = r.value(0);
-                    let is_scalar = (1..n).all(|i| r.value(i) == first_val);
-                    if is_scalar {
-                        let l_values = l.values();
-                        let l_nulls = l.nulls();
-                        let mut out = Vec::with_capacity(n);
-                        if let Some(nulls) = l_nulls {
-                            for i in 0..n {
-                                out.push(if !nulls.is_valid(i) { false } else { l_values[i] > first_val });
-                            }
-                        } else {
-                            for i in 0..n {
-                                out.push(l_values[i] > first_val);
-                            }
-                        }
-                        return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
-                    }
-                }
-                let result = cmp::gt(&l, &r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
-            }
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                return Ok(Arc::new(cmp::gt(l, r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Gt: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Lt" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(cmp::lt(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Lt: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Ge" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(cmp::gt_eq(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Ge: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Le" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(cmp::lt_eq(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Le: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
-        "Sub" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                // Direct subtraction on raw i64 values — avoids Arrow kernel overhead
-                let n = l.len();
-                let l_values = l.values();
-                let r_values = r.values();
-                let l_nulls = l.nulls();
-                let r_nulls = r.nulls();
-                let has_any_nulls = l_nulls.is_some() || r_nulls.is_some();
-
-                let mut result_values = Vec::with_capacity(n);
-                for i in 0..n {
-                    result_values.push(l_values[i].wrapping_sub(r_values[i]));
-                }
-
-                let null_buffer = if has_any_nulls {
-                    let mut validity = Vec::with_capacity(n);
-                    for i in 0..n {
-                        let l_valid = l_nulls.map_or(true, |nb| nb.is_valid(i));
-                        let r_valid = r_nulls.map_or(true, |nb| nb.is_valid(i));
-                        validity.push(l_valid && r_valid);
-                    }
-                    Some(datafusion::arrow::buffer::NullBuffer::from(validity))
-                } else {
-                    None
-                };
-
-                let result = Int64Array::new(
-                    datafusion::arrow::buffer::ScalarBuffer::from(result_values),
-                    null_buffer,
-                );
-                return Ok(Arc::new(result) as ArrayRef);
-            }
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                return Ok(Arc::new(numeric::sub(l, r).map_err(|e| e.to_string())?) as ArrayRef);
-            }
-            Err(format!("Sub: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
-        }
+        "Ne" => vectorized_ne(left, right),
+        "Eq" => binop_cmp_i64_f64(left, right, "Eq", cmp::eq),
+        "Gt" => vectorized_gt(left, right),
+        "Lt" => binop_cmp_i64_f64(left, right, "Lt", cmp::lt),
+        "Ge" => binop_cmp_i64_f64(left, right, "Ge", cmp::gt_eq),
+        "Le" => binop_cmp_i64_f64(left, right, "Le", cmp::lt_eq),
+        "Sub" => vectorized_sub(left, right),
         "Add" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
                 return Ok(Arc::new(numeric::add(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
@@ -1041,16 +1080,6 @@ pub(crate) fn build_sort_exprs(sort_keys: &[String]) -> Vec<SortExpr> {
 /// and process batches individually without `concat_batches`.
 pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<LTSeqTable> {
     // ── Streaming fast path for pre-sorted Parquet ───────────────────────
-    //
-    // Conditions:
-    //   1. Data comes from a Parquet file (source_parquet_path is set)
-    //   2. Sort order is declared (sort_exprs is non-empty)
-    //   3. The predicate can be fuse-evaluated (common boundary patterns)
-    //
-    // Benefits over the general path:
-    //   - target_partitions=1: no SortPreservingMerge (single partition preserves order)
-    //   - execute_stream(): batch-by-batch processing, no concat_batches
-    //   - Skip .sort() node: single partition + file_sort_order is sufficient
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_exprs.is_empty() {
             // Direct Parquet streaming — bypasses DataFusion for lower overhead
@@ -1078,20 +1107,83 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     }
 
     // ── General path (non-Parquet or unsorted data) ─────────────────────
+    let concat_batch = collect_projected_for_boundary(table, predicate)?;
+    let total_rows = concat_batch.num_rows();
+
+    if total_rows == 0 {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            Vec::new(),
+            table.source_parquet_path.clone(),
+        ));
+    }
+
+    // ── GPU fast path ────────────────────────────────────────────────────
+    #[cfg(feature = "gpu")]
+    {
+        if crate::gpu::ordered_ops::is_gpu_group_eligible(total_rows) {
+            if let Some(mode) = crate::gpu::ordered_ops::try_match_gpu_boundary_mode(
+                predicate,
+                &concat_batch.schema(),
+            ) {
+                if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                    eprintln!(
+                        "[GPU] linear_scan_group_id: using GPU path for {} rows, mode={:?}",
+                        total_rows,
+                        mode.kernel_name(),
+                    );
+                }
+
+                match crate::gpu::ordered_ops::gpu_group_id_from_batch(&concat_batch, &mode) {
+                    Ok((group_ids, count_values, rn_values)) => {
+                        return build_metadata_table(group_ids, count_values, rn_values, table);
+                    }
+                    Err(e) => {
+                        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                            eprintln!("[GPU] GPU group_id failed, falling back to CPU: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build column name → index mapping
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, field) in concat_batch.schema().fields().iter().enumerate() {
+        name_to_idx.insert(field.name().clone(), i);
+    }
+
+    // Vectorized boundary detection using Arrow compute kernels (SIMD-accelerated)
+    let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
+        .map_err(|e| {
+            LtseqError::Runtime(format!(
+                "Vectorized boundary evaluation failed: {}",
+                e
+            ))
+        })?;
+
+    build_group_metadata_from_boundaries(&boundaries, total_rows, table)
+}
+
+/// Project to predicate-referenced columns, sort, collect, and concatenate into a single batch.
+///
+/// Returns an empty batch (0 rows) when the table has no data.
+fn collect_projected_for_boundary(
+    table: &LTSeqTable,
+    predicate: &PyExpr,
+) -> PyResult<RecordBatch> {
     let df = table
         .dataframe
         .as_ref()
         .ok_or(LtseqError::NoData)?;
 
-    // ── Phase A: Lightweight boundary detection ──────────────────────────
-
-    // Step 1: Extract columns needed by the predicate
+    // Extract columns needed by the predicate
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
 
-    // Only include sort keys that are referenced by the predicate.
-    // Non-referenced sort keys don't affect boundary detection and reading
-    // them from Parquet is wasteful (e.g., watchid adds ~30% I/O overhead).
+    // Only include sort keys that are referenced by the predicate
     let relevant_sort_exprs: Vec<SortExpr> = table
         .sort_exprs
         .iter()
@@ -1103,7 +1195,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         })
         .collect();
 
-    // Step 2: Project to only needed columns + sort
+    // Project to only needed columns + sort
     let col_exprs: Vec<Expr> = needed_cols
         .iter()
         .map(|name| Expr::Column(Column::new_unqualified(name)))
@@ -1131,7 +1223,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         })?
     };
 
-    // Step 3: Collect the small projection
+    // Collect the small projection
     let proj_batches = RUNTIME
         .block_on(async {
             sorted_projected
@@ -1141,86 +1233,34 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
         })
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    if proj_batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
+    if let Some(result) = check_empty_batches(table, &proj_batches, Vec::new()) {
+        // check_empty_batches returns Some when table is truly empty —
+        // we need to return an empty batch, not a table result
+        let _ = result; // discard the table result
+        let schema = if let Some(s) = &table.schema {
+            Arc::clone(s)
+        } else {
+            Arc::new(ArrowSchema::empty())
+        };
+        return Ok(RecordBatch::new_empty(schema));
     }
 
     let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
-
     if total_rows == 0 {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
+        let schema = proj_batches.first()
+            .map(|b| b.schema())
+            .unwrap_or_else(|| Arc::new(ArrowSchema::empty()));
+        return Ok(RecordBatch::new_empty(schema));
     }
 
-    // Step 4: Boundary detection — concat batches then use vectorized SIMD evaluation.
-    // concat_batches is cheap for small projections (2-3 columns) and the vectorized
-    // path using Arrow compute kernels is ~2x faster than per-row evaluation.
+    // Concat batches for vectorized SIMD evaluation
     let schema = proj_batches[0].schema();
-    let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
+    concat_batches(&schema, &proj_batches).map_err(|e| {
         LtseqError::Runtime(format!(
             "Failed to concatenate projected batches: {}",
             e
-        ))
-    })?;
-
-    // ── GPU fast path ────────────────────────────────────────────────────
-    // For simple boundary predicates (adjacent_ne, adjacent_diff_gt) on
-    // large datasets, offload boundary detection + prefix sum to GPU.
-    #[cfg(feature = "gpu")]
-    {
-        if crate::gpu::ordered_ops::is_gpu_group_eligible(total_rows) {
-            if let Some(mode) = crate::gpu::ordered_ops::try_match_gpu_boundary_mode(
-                predicate,
-                &concat_batch.schema(),
-            ) {
-                if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-                    eprintln!(
-                        "[GPU] linear_scan_group_id: using GPU path for {} rows, mode={:?}",
-                        total_rows,
-                        mode.kernel_name(),
-                    );
-                }
-
-                match crate::gpu::ordered_ops::gpu_group_id_from_batch(&concat_batch, &mode) {
-                    Ok((group_ids, count_values, rn_values)) => {
-                        return build_metadata_table(group_ids, count_values, rn_values, table);
-                    }
-                    Err(e) => {
-                        // GPU failed — fall through to CPU path
-                        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-                            eprintln!("[GPU] GPU group_id failed, falling back to CPU: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Build column name → index mapping
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    for (i, field) in concat_batch.schema().fields().iter().enumerate() {
-        name_to_idx.insert(field.name().clone(), i);
-    }
-
-    // Vectorized boundary detection using Arrow compute kernels (SIMD-accelerated)
-    let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Vectorized boundary evaluation failed: {}",
-                e
-            ))
-        })?;
-
-    build_group_metadata_from_boundaries(&boundaries, total_rows, table)
+        )).into()
+    })
 }
 
 /// Streaming fast path: read pre-sorted Parquet with single partition,
@@ -1435,13 +1475,8 @@ fn general_linear_scan_group_id(
         })
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    if proj_batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
+    if let Some(result) = check_empty_batches(table, &proj_batches, Vec::new()) {
+        return result;
     }
 
     let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();

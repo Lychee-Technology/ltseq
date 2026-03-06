@@ -5,12 +5,12 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::helpers::register_temp_table;
 use crate::transpiler::pyexpr_to_sql;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
-use datafusion::datasource::MemTable;
 use datafusion::functions_aggregate::expr_fn as agg_fn;
 use datafusion::logical_expr::{case, Expr};
 use datafusion::prelude::*;
@@ -114,44 +114,11 @@ fn pyexpr_to_agg_expr(
         }
         // Statistical aggregates — native DataFusion path
         "corr" => {
-            // corr(col_a, col_b) — both come from args when on is empty
-            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
-                if args.len() < 2 {
-                    return Err("corr requires two column arguments".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
-                )
-            } else {
-                if args.is_empty() {
-                    return Err("corr requires a second column argument".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                )
-            };
+            let (col_a, col_b) = extract_two_column_args(on, args, schema, "corr")?;
             Ok(Some(agg_fn::corr(col_a, col_b)))
         }
         "covar" => {
-            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
-                if args.len() < 2 {
-                    return Err("covar requires two column arguments".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
-                )
-            } else {
-                if args.is_empty() {
-                    return Err("covar requires a second column argument".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                )
-            };
+            let (col_a, col_b) = extract_two_column_args(on, args, schema, "covar")?;
             Ok(Some(agg_fn::covar_samp(col_a, col_b)))
         }
         "concat_agg" => {
@@ -183,6 +150,35 @@ fn pyexpr_to_agg_expr(
         // skew → SQL fallback using moment formula
         "top_k" | "mode" | "skew" => Ok(None),
         _ => Err(format!("Unknown aggregate function: {}", func)),
+    }
+}
+
+/// Extract two column arguments for bivariate aggregates like `corr` and `covar`.
+///
+/// When `on` is an empty column reference, both columns come from `args`.
+/// Otherwise, `on` is the first column and `args[0]` is the second.
+fn extract_two_column_args(
+    on: &PyExpr,
+    args: &[PyExpr],
+    schema: &ArrowSchema,
+    func_name: &str,
+) -> Result<(Expr, Expr), String> {
+    if matches!(on, PyExpr::Column(name) if name.is_empty()) {
+        if args.len() < 2 {
+            return Err(format!("{} requires two column arguments", func_name));
+        }
+        Ok((
+            crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+            crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
+        ))
+    } else {
+        if args.is_empty() {
+            return Err(format!("{} requires a second column argument", func_name));
+        }
+        Ok((
+            crate::transpiler::pyexpr_to_datafusion(on.clone(), schema)?,
+            crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+        ))
     }
 }
 
@@ -333,23 +329,15 @@ fn agg_impl_sql_fallback(
     let group_cols = parse_group_expr_sql(group_exprs, schema)?;
 
     // Register temp table (must materialize for SQL path)
-    let temp_table_name = "__ltseq_agg_temp";
     let current_batches = collect_dataframe(df)?;
     let arrow_schema = Arc::new((**schema).clone());
+    let guard = register_temp_table(&table.session, &arrow_schema, current_batches, "agg")?;
 
-    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches])
-        .map_err(|e| LtseqError::Runtime(format!("Failed to create table: {}", e)))?;
-
-    table
-        .session
-        .register_table(temp_table_name, Arc::new(temp_table))
-        .map_err(|e| LtseqError::Runtime(format!("Register failed: {}", e)))?;
-
-    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
+    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, guard.name());
     let result_batches =
         execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
 
-    let _ = table.session.deregister_table(temp_table_name);
+    drop(guard);
 
     create_result_table(table, result_batches)
 }
@@ -663,17 +651,7 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
         .map(|b| b.schema())
         .unwrap_or_else(|| Arc::new((**schema).clone()));
 
-    let temp_table_name = format!("__ltseq_filter_temp_{}", std::process::id());
-    let temp_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            LtseqError::Runtime(format!("Create table: {}", e))
-        })?;
-
-    let _ = table.session.deregister_table(&temp_table_name);
-    table
-        .session
-        .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| LtseqError::Runtime(format!("Register: {}", e)))?;
+    let guard = register_temp_table(&table.session, &batch_schema, current_batches, "filter")?;
 
     let column_list: Vec<String> = batch_schema
         .fields()
@@ -684,14 +662,14 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
     let sql_query = format!(
         "SELECT {} FROM \"{}\" WHERE {}",
         column_list.join(", "),
-        temp_table_name,
+        guard.name(),
         where_clause
     );
 
     let result_batches =
         execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
 
-    let _ = table.session.deregister_table(&temp_table_name);
+    drop(guard);
 
     if result_batches.is_empty() {
         return Ok(LTSeqTable::empty(

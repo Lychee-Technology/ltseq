@@ -4,11 +4,11 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::helpers::register_temp_table;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
-use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -107,14 +107,7 @@ pub fn pivot_impl(
     pivot_values.sort();
 
     // Register the source data as a temporary table
-    let source_table_name = "__pivot_source";
-    let source_mem_table = MemTable::try_new(schema.clone(), vec![all_batches])
-        .map_err(|e| LtseqError::Runtime(format!("Failed to create source table: {}", e)))?;
-
-    table
-        .session
-        .register_table(source_table_name, Arc::new(source_mem_table))
-        .map_err(|e| LtseqError::Runtime(format!("Failed to register source table: {}", e)))?;
+    let guard = register_temp_table(&table.session, &schema, all_batches, "pivot")?;
 
     // Build CASE WHEN expressions
     let mut case_exprs = Vec::new();
@@ -141,26 +134,25 @@ pub fn pivot_impl(
     let index_cols_str = index_cols.join(", ");
     let case_str = case_exprs.join(", ");
     let pivot_sql = format!(
-        "SELECT {}, {} FROM {} GROUP BY {}",
-        index_cols_str, case_str, source_table_name, index_cols_str
+        "SELECT {}, {} FROM \"{}\" GROUP BY {}",
+        index_cols_str,
+        case_str,
+        guard.name(),
+        index_cols_str
     );
 
     // Execute pivot query
     let result_df = RUNTIME
         .block_on(table.session.sql(&pivot_sql))
-        .map_err(|e| {
-            let _ = table.session.deregister_table(source_table_name);
-            LtseqError::Runtime(format!("Failed to execute pivot query: {}", e))
-        })?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to execute pivot query: {}", e)))?;
 
     // Collect result
-    let result_batches = RUNTIME.block_on(result_df.collect()).map_err(|e| {
-        let _ = table.session.deregister_table(source_table_name);
-        LtseqError::collect(e)
-    })?;
+    let result_batches = RUNTIME
+        .block_on(result_df.collect())
+        .map_err(|e| LtseqError::collect(e))?;
 
     // Deregister source table
-    let _ = table.session.deregister_table(source_table_name);
+    drop(guard);
 
     // Create result schema from the result batches' schema
     let result_schema = if !result_batches.is_empty() {

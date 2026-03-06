@@ -4,9 +4,9 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::helpers::register_temp_table;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
-use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -329,26 +329,7 @@ pub fn derive_window_sql_impl(
 
     // ── CPU / DataFusion SQL path (fallback) ─────────────────────────────
 
-    let temp_table_name = format!("__ltseq_derive_temp_{}", std::process::id());
-    let temp_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Failed to create memory table: {}",
-                e
-            ))
-        })?;
-
-    let _ = table.session.deregister_table(&temp_table_name);
-
-    table
-        .session
-        .register_table(&temp_table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Failed to register temp table: {}",
-                e
-            ))
-        })?;
+    let guard = register_temp_table(&table.session, &batch_schema, current_batches, "derive")?;
 
     // Build SELECT clause: all existing columns + derived expressions
     let mut select_parts: Vec<String> = Vec::new();
@@ -369,7 +350,7 @@ pub fn derive_window_sql_impl(
     let sql_query = format!(
         "SELECT {} FROM \"{}\"",
         select_parts.join(", "),
-        temp_table_name
+        guard.name()
     );
 
     let result_batches = RUNTIME
@@ -388,7 +369,7 @@ pub fn derive_window_sql_impl(
         })
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    let _ = table.session.deregister_table(&temp_table_name);
+    drop(guard);
 
     if result_batches.is_empty() {
         // Build schema for empty result

@@ -1658,61 +1658,50 @@ pub fn gpu_segmented_aggregate(
     // group_id is 1-based, so we need (num_groups + 1) slots
     let alloc_size = num_groups + 1;
 
+    let ctx = SegAggContext {
+        stream: &stream,
+        d_group_id: &d_group_id,
+        alloc_size,
+        n,
+        n_u32,
+        launch_cfg: &launch_cfg,
+    };
+
     let mut results: Vec<(String, ArrayRef)> = Vec::with_capacity(requests.len());
 
     for req in requests {
         let result_arr: ArrayRef = match req.func {
             SegAggFunc::Count => {
-                run_seg_count(&stream, &d_group_id, alloc_size, n, n_u32, &launch_cfg)?
+                run_seg_count(&ctx)?
             }
             SegAggFunc::Sum => {
                 run_seg_sum(
-                    &stream,
-                    &d_group_id,
+                    &ctx,
                     batch.column(req.column_index),
                     &req.data_type,
-                    alloc_size,
-                    n,
-                    n_u32,
-                    &launch_cfg,
                 )?
             }
             SegAggFunc::Min => {
                 run_seg_min_max(
-                    &stream,
-                    &d_group_id,
+                    &ctx,
                     batch.column(req.column_index),
                     &req.data_type,
-                    alloc_size,
-                    n,
-                    n_u32,
-                    &launch_cfg,
                     true, // is_min
                 )?
             }
             SegAggFunc::Max => {
                 run_seg_min_max(
-                    &stream,
-                    &d_group_id,
+                    &ctx,
                     batch.column(req.column_index),
                     &req.data_type,
-                    alloc_size,
-                    n,
-                    n_u32,
-                    &launch_cfg,
                     false, // is_max
                 )?
             }
             SegAggFunc::Avg => {
                 run_seg_avg(
-                    &stream,
-                    &d_group_id,
+                    &ctx,
                     batch.column(req.column_index),
                     &req.data_type,
-                    alloc_size,
-                    n,
-                    n_u32,
-                    &launch_cfg,
                 )?
             }
             SegAggFunc::FirstValue => {
@@ -1727,14 +1716,9 @@ pub fn gpu_segmented_aggregate(
                 // we reuse min as a placeholder since this path is mainly used by
                 // the collapsed aggregate (hash_ops), not by the windowed aggregate.
                 run_seg_min_max(
-                    &stream,
-                    &d_group_id,
+                    &ctx,
                     batch.column(req.column_index),
                     &req.data_type,
-                    alloc_size,
-                    n,
-                    n_u32,
-                    &launch_cfg,
                     true, // use min as approximation
                 )?
             }
@@ -1746,54 +1730,63 @@ pub fn gpu_segmented_aggregate(
     Ok(results)
 }
 
-/// Run segmented count on GPU → per-row i64 array.
-fn run_seg_count(
-    stream: &Arc<cudarc::driver::safe::CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+/// Shared context for segmented aggregation GPU kernels.
+///
+/// Bundles the common parameters passed to every `run_seg_*` function:
+/// the CUDA stream, device-side group-id array, allocation size for
+/// per-group buffers, row count, and launch configuration.
+struct SegAggContext<'a> {
+    stream: &'a Arc<cudarc::driver::safe::CudaStream>,
+    d_group_id: &'a cudarc::driver::safe::CudaSlice<u32>,
     alloc_size: usize,
     n: usize,
     n_u32: u32,
-    launch_cfg: &LaunchConfig,
+    launch_cfg: &'a LaunchConfig,
+}
+
+/// Run segmented count on GPU → per-row i64 array.
+fn run_seg_count(
+    ctx: &SegAggContext<'_>,
 ) -> std::result::Result<ArrayRef, String> {
     let func = get_ordered_ops_function("seg_count")
         .ok_or("CUDA kernel 'seg_count' not found")?;
 
-    let mut d_counts = stream.alloc_zeros::<i64>(alloc_size)
+    let mut d_counts = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size)
         .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&mut d_counts)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(|e| format!("CUDA launch seg_count: {:?}", e))?;
     }
 
     // Download per-group counts
-    let group_counts = stream.clone_dtoh(&d_counts)
+    let group_counts = ctx.stream.clone_dtoh(&d_counts)
         .map_err(|e| format!("CUDA D2H: {:?}", e))?;
 
     // Broadcast to per-row
     let broadcast_func = get_ordered_ops_function("broadcast_i64")
         .ok_or("CUDA kernel 'broadcast_i64' not found")?;
 
-    let mut d_output = stream.alloc_zeros::<i64>(n)
+    let mut d_output = ctx.stream.alloc_zeros::<i64>(ctx.n)
         .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&broadcast_func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&d_counts)
             .arg(&mut d_output)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(|e| format!("CUDA launch broadcast_i64: {:?}", e))?;
     }
 
-    let output = stream.clone_dtoh(&d_output)
+    let output = ctx.stream.clone_dtoh(&d_output)
         .map_err(|e| format!("CUDA D2H: {:?}", e))?;
 
     Ok(Arc::new(Int64Array::from(output)))
@@ -1801,56 +1794,51 @@ fn run_seg_count(
 
 /// Run segmented sum on GPU → per-row array (i64 or f64).
 fn run_seg_sum(
-    stream: &Arc<cudarc::driver::safe::CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &SegAggContext<'_>,
     column: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    n: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
 ) -> std::result::Result<ArrayRef, String> {
     match data_type {
         DataType::Int64 => {
             let array = column.as_any().downcast_ref::<Int64Array>()
                 .ok_or("Column is not Int64Array")?;
             let values: &[i64] = array.values();
-            let d_data = stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
+            let d_data = ctx.stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             let func = get_ordered_ops_function("seg_sum_i64")
                 .ok_or("CUDA kernel 'seg_sum_i64' not found")?;
-            let mut d_sums = stream.alloc_zeros::<i64>(alloc_size)
+            let mut d_sums = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
             // Broadcast
             let broadcast = get_ordered_ops_function("broadcast_i64")
                 .ok_or("CUDA kernel 'broadcast_i64' not found")?;
-            let mut d_output = stream.alloc_zeros::<i64>(n)
+            let mut d_output = ctx.stream.alloc_zeros::<i64>(ctx.n)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&broadcast)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_sums)
                     .arg(&mut d_output)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
-            let output = stream.clone_dtoh(&d_output)
+            let output = ctx.stream.clone_dtoh(&d_output)
                 .map_err(|e| format!("CUDA D2H: {:?}", e))?;
             Ok(Arc::new(Int64Array::from(output)))
         }
@@ -1858,42 +1846,42 @@ fn run_seg_sum(
             let array = column.as_any().downcast_ref::<Float64Array>()
                 .ok_or("Column is not Float64Array")?;
             let values: &[f64] = array.values();
-            let d_data = stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
+            let d_data = ctx.stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             let func = get_ordered_ops_function("seg_sum_f64")
                 .ok_or("CUDA kernel 'seg_sum_f64' not found")?;
-            let mut d_sums = stream.alloc_zeros::<f64>(alloc_size)
+            let mut d_sums = ctx.stream.alloc_zeros::<f64>(ctx.alloc_size)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
             // Broadcast
             let broadcast = get_ordered_ops_function("broadcast_f64")
                 .ok_or("CUDA kernel 'broadcast_f64' not found")?;
-            let mut d_output = stream.alloc_zeros::<f64>(n)
+            let mut d_output = ctx.stream.alloc_zeros::<f64>(ctx.n)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&broadcast)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_sums)
                     .arg(&mut d_output)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
-            let output = stream.clone_dtoh(&d_output)
+            let output = ctx.stream.clone_dtoh(&d_output)
                 .map_err(|e| format!("CUDA D2H: {:?}", e))?;
             Ok(Arc::new(Float64Array::from(output)))
         }
@@ -1903,14 +1891,9 @@ fn run_seg_sum(
 
 /// Run segmented min or max on GPU → per-row array (i64 or f64).
 fn run_seg_min_max(
-    stream: &Arc<cudarc::driver::safe::CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &SegAggContext<'_>,
     column: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    n: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
     is_min: bool,
 ) -> std::result::Result<ArrayRef, String> {
     let kernel_suffix = if is_min { "min" } else { "max" };
@@ -1920,7 +1903,7 @@ fn run_seg_min_max(
             let array = column.as_any().downcast_ref::<Int64Array>()
                 .ok_or("Column is not Int64Array")?;
             let values: &[i64] = array.values();
-            let d_data = stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
+            let d_data = ctx.stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             let kernel_name = format!("seg_{}_i64", kernel_suffix);
             let func = get_ordered_ops_function(&kernel_name)
@@ -1928,39 +1911,39 @@ fn run_seg_min_max(
 
             // Initialize with identity values
             let init_val = if is_min { i64::MAX } else { i64::MIN };
-            let init: Vec<i64> = vec![init_val; alloc_size];
-            let mut d_result = stream.clone_htod(&init)
+            let init: Vec<i64> = vec![init_val; ctx.alloc_size];
+            let mut d_result = ctx.stream.clone_htod(&init)
                 .map_err(|e| format!("CUDA H2D init: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
             // Broadcast
             let broadcast = get_ordered_ops_function("broadcast_i64")
                 .ok_or("CUDA kernel 'broadcast_i64' not found")?;
-            let mut d_output = stream.alloc_zeros::<i64>(n)
+            let mut d_output = ctx.stream.alloc_zeros::<i64>(ctx.n)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&broadcast)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_result)
                     .arg(&mut d_output)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
-            let output = stream.clone_dtoh(&d_output)
+            let output = ctx.stream.clone_dtoh(&d_output)
                 .map_err(|e| format!("CUDA D2H: {:?}", e))?;
             Ok(Arc::new(Int64Array::from(output)))
         }
@@ -1968,7 +1951,7 @@ fn run_seg_min_max(
             let array = column.as_any().downcast_ref::<Float64Array>()
                 .ok_or("Column is not Float64Array")?;
             let values: &[f64] = array.values();
-            let d_data = stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
+            let d_data = ctx.stream.clone_htod(values).map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             let kernel_name = format!("seg_{}_f64", kernel_suffix);
             let func = get_ordered_ops_function(&kernel_name)
@@ -1976,39 +1959,39 @@ fn run_seg_min_max(
 
             // Initialize with identity values
             let init_val: f64 = if is_min { f64::MAX } else { f64::MIN };
-            let init: Vec<f64> = vec![init_val; alloc_size];
-            let mut d_result = stream.clone_htod(&init)
+            let init: Vec<f64> = vec![init_val; ctx.alloc_size];
+            let mut d_result = ctx.stream.clone_htod(&init)
                 .map_err(|e| format!("CUDA H2D init: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
             // Broadcast
             let broadcast = get_ordered_ops_function("broadcast_f64")
                 .ok_or("CUDA kernel 'broadcast_f64' not found")?;
-            let mut d_output = stream.alloc_zeros::<f64>(n)
+            let mut d_output = ctx.stream.alloc_zeros::<f64>(ctx.n)
                 .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&broadcast)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_result)
                     .arg(&mut d_output)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
 
-            let output = stream.clone_dtoh(&d_output)
+            let output = ctx.stream.clone_dtoh(&d_output)
                 .map_err(|e| format!("CUDA D2H: {:?}", e))?;
             Ok(Arc::new(Float64Array::from(output)))
         }
@@ -2020,38 +2003,33 @@ fn run_seg_min_max(
 ///
 /// Computes sum and count on GPU, then avg = sum / count on host.
 fn run_seg_avg(
-    stream: &Arc<cudarc::driver::safe::CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &SegAggContext<'_>,
     column: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    n: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
 ) -> std::result::Result<ArrayRef, String> {
     // Step 1: Compute per-group count
     let count_func = get_ordered_ops_function("seg_count")
         .ok_or("CUDA kernel 'seg_count' not found")?;
-    let mut d_counts = stream.alloc_zeros::<i64>(alloc_size)
+    let mut d_counts = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size)
         .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&count_func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&mut d_counts)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(|e| format!("CUDA launch: {:?}", e))?;
     }
 
-    let group_counts = stream.clone_dtoh(&d_counts)
+    let group_counts = ctx.stream.clone_dtoh(&d_counts)
         .map_err(|e| format!("CUDA D2H: {:?}", e))?;
 
     // Step 2: Compute per-group sum (always as f64 for avg)
     let sum_func = get_ordered_ops_function("seg_sum_f64")
         .ok_or("CUDA kernel 'seg_sum_f64' not found")?;
-    let mut d_sums = stream.alloc_zeros::<f64>(alloc_size)
+    let mut d_sums = ctx.stream.alloc_zeros::<f64>(ctx.alloc_size)
         .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
     // Upload data as f64 (convert if needed)
@@ -2060,17 +2038,17 @@ fn run_seg_avg(
             let array = column.as_any().downcast_ref::<Int64Array>()
                 .ok_or("Column is not Int64Array")?;
             let f64_values: Vec<f64> = array.values().iter().map(|v| *v as f64).collect();
-            let d_data = stream.clone_htod(&f64_values)
+            let d_data = ctx.stream.clone_htod(&f64_values)
                 .map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&sum_func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
         }
@@ -2078,54 +2056,54 @@ fn run_seg_avg(
             let array = column.as_any().downcast_ref::<Float64Array>()
                 .ok_or("Column is not Float64Array")?;
             let values: &[f64] = array.values();
-            let d_data = stream.clone_htod(values)
+            let d_data = ctx.stream.clone_htod(values)
                 .map_err(|e| format!("CUDA H2D: {:?}", e))?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&sum_func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(|e| format!("CUDA launch: {:?}", e))?;
             }
         }
         _ => return Err(format!("Unsupported data type for GPU seg_avg: {:?}", data_type)),
     }
 
-    let group_sums = stream.clone_dtoh(&d_sums)
+    let group_sums = ctx.stream.clone_dtoh(&d_sums)
         .map_err(|e| format!("CUDA D2H: {:?}", e))?;
 
     // Step 3: Compute avg = sum / count per group on host
-    let mut group_avgs: Vec<f64> = vec![0.0; alloc_size];
-    for i in 0..alloc_size {
+    let mut group_avgs: Vec<f64> = vec![0.0; ctx.alloc_size];
+    for i in 0..ctx.alloc_size {
         if group_counts[i] > 0 {
             group_avgs[i] = group_sums[i] / group_counts[i] as f64;
         }
     }
 
     // Step 4: Broadcast per-group avg to per-row (on GPU)
-    let d_avgs = stream.clone_htod(&group_avgs)
+    let d_avgs = ctx.stream.clone_htod(&group_avgs)
         .map_err(|e| format!("CUDA H2D: {:?}", e))?;
     let broadcast = get_ordered_ops_function("broadcast_f64")
         .ok_or("CUDA kernel 'broadcast_f64' not found")?;
-    let mut d_output = stream.alloc_zeros::<f64>(n)
+    let mut d_output = ctx.stream.alloc_zeros::<f64>(ctx.n)
         .map_err(|e| format!("CUDA alloc: {:?}", e))?;
 
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&broadcast)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&d_avgs)
             .arg(&mut d_output)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(|e| format!("CUDA launch: {:?}", e))?;
     }
 
-    let output = stream.clone_dtoh(&d_output)
+    let output = ctx.stream.clone_dtoh(&d_output)
         .map_err(|e| format!("CUDA D2H: {:?}", e))?;
     Ok(Arc::new(Float64Array::from(output)))
 }
@@ -2481,6 +2459,42 @@ impl GpuSearchMode {
 
 // ── GPU binary search kernel launcher ────────────────────────────────────
 
+/// Downcast a column to a typed array, extract the search value from `GpuSearchMode`,
+/// copy data to GPU, and launch the binary search kernel.
+macro_rules! search_first_typed {
+    ($stream:expr, $column:expr, $search_mode:expr, $func:expr,
+     $launch_cfg:expr, $d_result:expr, $n_u32:expr,
+     $mode_u32:expr, $str_err:expr,
+     $ArrayType:ty, $value_field:ident, $type_name:expr) => {{
+        let arr = $column
+            .as_any()
+            .downcast_ref::<$ArrayType>()
+            .ok_or(concat!("Failed to downcast to ", $type_name))?;
+        let values = arr.values();
+        let d_data = $stream.clone_htod(values.as_ref()).map_err($str_err)?;
+        let value = match $search_mode {
+            GpuSearchMode::Gt { $value_field, .. }
+            | GpuSearchMode::Ge { $value_field, .. }
+            | GpuSearchMode::Eq { $value_field, .. }
+            | GpuSearchMode::Lt { $value_field, .. }
+            | GpuSearchMode::Le { $value_field, .. } => {
+                $value_field.ok_or(concat!("Missing ", $type_name, " search value"))?
+            }
+        };
+        unsafe {
+            $stream
+                .launch_builder(&$func)
+                .arg(&d_data)
+                .arg(&value)
+                .arg($d_result)
+                .arg($n_u32)
+                .arg($mode_u32)
+                .launch($launch_cfg)
+                .map_err($str_err)?;
+        }
+    }};
+}
+
 /// Run a GPU binary search kernel on a sorted column.
 ///
 /// Returns the index of the first matching row, or `None` if no match.
@@ -2514,118 +2528,26 @@ fn run_search_first_kernel(
     let mut d_result = stream.alloc_zeros::<u32>(1).map_err(str_err)?;
 
     match search_mode.data_type() {
-        DataType::Int64 => {
-            let arr = column
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or("Failed to downcast to Int64Array")?;
-            let values: &[i64] = arr.values();
-            let d_data = stream.clone_htod(values).map_err(str_err)?;
-            let value = match search_mode {
-                GpuSearchMode::Gt { value_i64, .. }
-                | GpuSearchMode::Ge { value_i64, .. }
-                | GpuSearchMode::Eq { value_i64, .. }
-                | GpuSearchMode::Lt { value_i64, .. }
-                | GpuSearchMode::Le { value_i64, .. } => {
-                    value_i64.ok_or("Missing i64 search value")?
-                }
-            };
-            unsafe {
-                stream
-                    .launch_builder(&func)
-                    .arg(&d_data)
-                    .arg(&value)
-                    .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .arg(&mode_u32)
-                    .launch(launch_cfg)
-                    .map_err(str_err)?;
-            }
-        }
-        DataType::Int32 => {
-            let arr = column
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or("Failed to downcast to Int32Array")?;
-            let values: &[i32] = arr.values();
-            let d_data = stream.clone_htod(values).map_err(str_err)?;
-            let value = match search_mode {
-                GpuSearchMode::Gt { value_i32, .. }
-                | GpuSearchMode::Ge { value_i32, .. }
-                | GpuSearchMode::Eq { value_i32, .. }
-                | GpuSearchMode::Lt { value_i32, .. }
-                | GpuSearchMode::Le { value_i32, .. } => {
-                    value_i32.ok_or("Missing i32 search value")?
-                }
-            };
-            unsafe {
-                stream
-                    .launch_builder(&func)
-                    .arg(&d_data)
-                    .arg(&value)
-                    .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .arg(&mode_u32)
-                    .launch(launch_cfg)
-                    .map_err(str_err)?;
-            }
-        }
-        DataType::Float64 => {
-            let arr = column
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or("Failed to downcast to Float64Array")?;
-            let values: &[f64] = arr.values();
-            let d_data = stream.clone_htod(values).map_err(str_err)?;
-            let value = match search_mode {
-                GpuSearchMode::Gt { value_f64, .. }
-                | GpuSearchMode::Ge { value_f64, .. }
-                | GpuSearchMode::Eq { value_f64, .. }
-                | GpuSearchMode::Lt { value_f64, .. }
-                | GpuSearchMode::Le { value_f64, .. } => {
-                    value_f64.ok_or("Missing f64 search value")?
-                }
-            };
-            unsafe {
-                stream
-                    .launch_builder(&func)
-                    .arg(&d_data)
-                    .arg(&value)
-                    .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .arg(&mode_u32)
-                    .launch(launch_cfg)
-                    .map_err(str_err)?;
-            }
-        }
-        DataType::Float32 => {
-            let arr = column
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or("Failed to downcast to Float32Array")?;
-            let values: &[f32] = arr.values();
-            let d_data = stream.clone_htod(values).map_err(str_err)?;
-            let value = match search_mode {
-                GpuSearchMode::Gt { value_f32, .. }
-                | GpuSearchMode::Ge { value_f32, .. }
-                | GpuSearchMode::Eq { value_f32, .. }
-                | GpuSearchMode::Lt { value_f32, .. }
-                | GpuSearchMode::Le { value_f32, .. } => {
-                    value_f32.ok_or("Missing f32 search value")?
-                }
-            };
-            unsafe {
-                stream
-                    .launch_builder(&func)
-                    .arg(&d_data)
-                    .arg(&value)
-                    .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .arg(&mode_u32)
-                    .launch(launch_cfg)
-                    .map_err(str_err)?;
-            }
-        }
+        DataType::Int64 => search_first_typed!(
+            stream, column, search_mode, func, launch_cfg,
+            &mut d_result, &n_u32, &mode_u32, str_err,
+            Int64Array, value_i64, "Int64Array"
+        ),
+        DataType::Int32 => search_first_typed!(
+            stream, column, search_mode, func, launch_cfg,
+            &mut d_result, &n_u32, &mode_u32, str_err,
+            Int32Array, value_i32, "Int32Array"
+        ),
+        DataType::Float64 => search_first_typed!(
+            stream, column, search_mode, func, launch_cfg,
+            &mut d_result, &n_u32, &mode_u32, str_err,
+            Float64Array, value_f64, "Float64Array"
+        ),
+        DataType::Float32 => search_first_typed!(
+            stream, column, search_mode, func, launch_cfg,
+            &mut d_result, &n_u32, &mode_u32, str_err,
+            Float32Array, value_f32, "Float32Array"
+        ),
         _ => return Err(format!("Unsupported data type: {:?}", search_mode.data_type())),
     }
 

@@ -758,6 +758,51 @@ fn build_hash_table(
     Ok(())
 }
 
+/// Launch a probe-count kernel for a single typed key column.
+///
+/// Downcasts `probe_keys` to `$ArrayType`, copies to GPU, and launches the
+/// kernel named `$kernel_name`, using `$ht_keys_tls` thread-local for the
+/// hash-table key buffer.
+macro_rules! probe_count_typed {
+    ($stream:expr, $probe_keys:expr, $launch_cfg:expr,
+     $d_counts:expr, $probe_n_u32:expr, $capacity_u32:expr,
+     $ArrayType:ty, $kernel_name:expr, $ht_keys_tls:ident) => {{
+        let arr = $probe_keys.as_any().downcast_ref::<$ArrayType>()
+            .ok_or_else(|| datafusion::common::DataFusionError::Execution(
+                concat!("Probe key is not ", stringify!($ArrayType)).into(),
+            ))?;
+        let d_probe = $stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
+        let func = get_hash_join_function($kernel_name)
+            .ok_or_else(|| datafusion::common::DataFusionError::Execution(
+                format!("CUDA kernel '{}' not found", $kernel_name),
+            ))?;
+        HT_INDICES.with(|cell| -> Result<()> {
+            let borrow = cell.borrow();
+            let d_ht_idx = borrow.as_ref().ok_or_else(|| {
+                datafusion::common::DataFusionError::Execution("Hash table not built".into())
+            })?;
+            $ht_keys_tls.with(|kcell| -> Result<()> {
+                let kborrow = kcell.borrow();
+                let d_ht_keys = kborrow.as_ref().ok_or_else(|| {
+                    datafusion::common::DataFusionError::Execution("Hash table keys not found".into())
+                })?;
+                unsafe {
+                    $stream.launch_builder(&func)
+                        .arg(&d_probe)
+                        .arg(d_ht_idx)
+                        .arg(d_ht_keys)
+                        .arg($d_counts)
+                        .arg($probe_n_u32)
+                        .arg($capacity_u32)
+                        .launch($launch_cfg)
+                        .map_err(cuda_err)?;
+                }
+                Ok(())
+            })
+        })?;
+    }};
+}
+
 /// Probe the hash table and count matches per probe row.
 /// Returns counts as a host Vec<u32>.
 fn probe_count(
@@ -778,146 +823,22 @@ fn probe_count(
     };
 
     match key_type {
-        DataType::Int64 => {
-            let arr = probe_keys.as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "Probe key is not Int64Array".into(),
-                ))?;
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_count_i64")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_count_i64' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().ok_or_else(|| {
-                    datafusion::common::DataFusionError::Execution("Hash table not built".into())
-                })?;
-                HT_KEYS_I64.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().ok_or_else(|| {
-                        datafusion::common::DataFusionError::Execution("Hash table keys not found".into())
-                    })?;
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&mut d_counts)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Int32 => {
-            let arr = probe_keys.as_any().downcast_ref::<Int32Array>()
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "Probe key is not Int32Array".into(),
-                ))?;
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_count_i32")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_count_i32' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().ok_or_else(|| {
-                    datafusion::common::DataFusionError::Execution("Hash table not built".into())
-                })?;
-                HT_KEYS_I32.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().ok_or_else(|| {
-                        datafusion::common::DataFusionError::Execution("Hash table keys not found".into())
-                    })?;
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&mut d_counts)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Float64 => {
-            let arr = probe_keys.as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "Probe key is not Float64Array".into(),
-                ))?;
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_count_f64")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_count_f64' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().ok_or_else(|| {
-                    datafusion::common::DataFusionError::Execution("Hash table not built".into())
-                })?;
-                HT_KEYS_F64.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().ok_or_else(|| {
-                        datafusion::common::DataFusionError::Execution("Hash table keys not found".into())
-                    })?;
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&mut d_counts)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Float32 => {
-            let arr = probe_keys.as_any().downcast_ref::<Float32Array>()
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "Probe key is not Float32Array".into(),
-                ))?;
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_count_f32")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_count_f32' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().ok_or_else(|| {
-                    datafusion::common::DataFusionError::Execution("Hash table not built".into())
-                })?;
-                HT_KEYS_F32.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().ok_or_else(|| {
-                        datafusion::common::DataFusionError::Execution("Hash table keys not found".into())
-                    })?;
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&mut d_counts)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
+        DataType::Int64 => probe_count_typed!(
+            stream, probe_keys, launch_cfg, &mut d_counts, &probe_n_u32, &capacity_u32,
+            Int64Array, "hash_probe_count_i64", HT_KEYS_I64
+        ),
+        DataType::Int32 => probe_count_typed!(
+            stream, probe_keys, launch_cfg, &mut d_counts, &probe_n_u32, &capacity_u32,
+            Int32Array, "hash_probe_count_i32", HT_KEYS_I32
+        ),
+        DataType::Float64 => probe_count_typed!(
+            stream, probe_keys, launch_cfg, &mut d_counts, &probe_n_u32, &capacity_u32,
+            Float64Array, "hash_probe_count_f64", HT_KEYS_F64
+        ),
+        DataType::Float32 => probe_count_typed!(
+            stream, probe_keys, launch_cfg, &mut d_counts, &probe_n_u32, &capacity_u32,
+            Float32Array, "hash_probe_count_f32", HT_KEYS_F32
+        ),
         _ => {
             return Err(datafusion::common::DataFusionError::Execution(
                 format!("Unsupported key type for GPU hash join probe: {:?}", key_type),
@@ -938,6 +859,47 @@ fn cpu_exclusive_prefix_sum(counts: &[u32]) -> Vec<u32> {
         running += c;
     }
     offsets
+}
+
+/// Launch a probe-scatter kernel for a single typed key column.
+///
+/// Downcasts `probe_keys` to `$ArrayType`, copies to GPU, and launches the
+/// kernel named `$kernel_name`, writing matched (probe_idx, build_idx) pairs
+/// into `d_out_probe`/`d_out_build` at positions given by `d_offsets`.
+macro_rules! probe_scatter_typed {
+    ($stream:expr, $probe_keys:expr, $launch_cfg:expr,
+     $d_offsets:expr, $d_out_probe:expr, $d_out_build:expr,
+     $probe_n_u32:expr, $capacity_u32:expr,
+     $ArrayType:ty, $kernel_name:expr, $ht_keys_tls:ident) => {{
+        let arr = $probe_keys.as_any().downcast_ref::<$ArrayType>().unwrap();
+        let d_probe = $stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
+        let func = get_hash_join_function($kernel_name)
+            .ok_or_else(|| datafusion::common::DataFusionError::Execution(
+                format!("CUDA kernel '{}' not found", $kernel_name),
+            ))?;
+        HT_INDICES.with(|cell| -> Result<()> {
+            let borrow = cell.borrow();
+            let d_ht_idx = borrow.as_ref().unwrap();
+            $ht_keys_tls.with(|kcell| -> Result<()> {
+                let kborrow = kcell.borrow();
+                let d_ht_keys = kborrow.as_ref().unwrap();
+                unsafe {
+                    $stream.launch_builder(&func)
+                        .arg(&d_probe)
+                        .arg(d_ht_idx)
+                        .arg(d_ht_keys)
+                        .arg($d_offsets)
+                        .arg($d_out_probe)
+                        .arg($d_out_build)
+                        .arg($probe_n_u32)
+                        .arg($capacity_u32)
+                        .launch($launch_cfg)
+                        .map_err(cuda_err)?;
+                }
+                Ok(())
+            })
+        })?;
+    }};
 }
 
 /// Probe the hash table and scatter matched (probe_idx, build_idx) pairs.
@@ -963,126 +925,30 @@ fn probe_scatter(
     };
 
     match key_type {
-        DataType::Int64 => {
-            let arr = probe_keys.as_any().downcast_ref::<Int64Array>().unwrap();
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_scatter_i64")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_scatter_i64' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().unwrap();
-                HT_KEYS_I64.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().unwrap();
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&d_offsets)
-                            .arg(&mut d_out_probe)
-                            .arg(&mut d_out_build)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Int32 => {
-            let arr = probe_keys.as_any().downcast_ref::<Int32Array>().unwrap();
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_scatter_i32")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_scatter_i32' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().unwrap();
-                HT_KEYS_I32.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().unwrap();
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&d_offsets)
-                            .arg(&mut d_out_probe)
-                            .arg(&mut d_out_build)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Float64 => {
-            let arr = probe_keys.as_any().downcast_ref::<Float64Array>().unwrap();
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_scatter_f64")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_scatter_f64' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().unwrap();
-                HT_KEYS_F64.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().unwrap();
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&d_offsets)
-                            .arg(&mut d_out_probe)
-                            .arg(&mut d_out_build)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
-        DataType::Float32 => {
-            let arr = probe_keys.as_any().downcast_ref::<Float32Array>().unwrap();
-            let d_probe = stream.clone_htod(arr.values().as_ref()).map_err(cuda_err)?;
-            let func = get_hash_join_function("hash_probe_scatter_f32")
-                .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                    "CUDA kernel 'hash_probe_scatter_f32' not found".into(),
-                ))?;
-            HT_INDICES.with(|cell| -> Result<()> {
-                let borrow = cell.borrow();
-                let d_ht_idx = borrow.as_ref().unwrap();
-                HT_KEYS_F32.with(|kcell| -> Result<()> {
-                    let kborrow = kcell.borrow();
-                    let d_ht_keys = kborrow.as_ref().unwrap();
-                    unsafe {
-                        stream.launch_builder(&func)
-                            .arg(&d_probe)
-                            .arg(d_ht_idx)
-                            .arg(d_ht_keys)
-                            .arg(&d_offsets)
-                            .arg(&mut d_out_probe)
-                            .arg(&mut d_out_build)
-                            .arg(&probe_n_u32)
-                            .arg(&capacity_u32)
-                            .launch(launch_cfg)
-                            .map_err(cuda_err)?;
-                    }
-                    Ok(())
-                })
-            })?;
-        }
+        DataType::Int64 => probe_scatter_typed!(
+            stream, probe_keys, launch_cfg,
+            &d_offsets, &mut d_out_probe, &mut d_out_build,
+            &probe_n_u32, &capacity_u32,
+            Int64Array, "hash_probe_scatter_i64", HT_KEYS_I64
+        ),
+        DataType::Int32 => probe_scatter_typed!(
+            stream, probe_keys, launch_cfg,
+            &d_offsets, &mut d_out_probe, &mut d_out_build,
+            &probe_n_u32, &capacity_u32,
+            Int32Array, "hash_probe_scatter_i32", HT_KEYS_I32
+        ),
+        DataType::Float64 => probe_scatter_typed!(
+            stream, probe_keys, launch_cfg,
+            &d_offsets, &mut d_out_probe, &mut d_out_build,
+            &probe_n_u32, &capacity_u32,
+            Float64Array, "hash_probe_scatter_f64", HT_KEYS_F64
+        ),
+        DataType::Float32 => probe_scatter_typed!(
+            stream, probe_keys, launch_cfg,
+            &d_offsets, &mut d_out_probe, &mut d_out_build,
+            &probe_n_u32, &capacity_u32,
+            Float32Array, "hash_probe_scatter_f32", HT_KEYS_F32
+        ),
         _ => unreachable!(),
     }
 

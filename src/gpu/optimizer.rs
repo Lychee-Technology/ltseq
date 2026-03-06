@@ -447,13 +447,7 @@ fn try_replace_aggregate(
         );
     }
 
-    // Only intercept Single mode aggregates. FinalPartitioned/Final are the
-    // top half of DataFusion's two-phase aggregation pipeline where group-by
-    // column indices reference the Partial aggregate's OUTPUT schema (not its
-    // input). Replacing these causes schema mismatches because our GPU aggregate
-    // runs a single-pass aggregation on the raw input. Since Single mode
-    // already covers the case (GPU does one-pass aggregation), we simply skip
-    // the two-phase modes.
+    // Only intercept Single mode aggregates.
     let (effective_input, effective_agg) = match agg_exec.mode() {
         AggregateMode::Single => (Arc::clone(agg_exec.input()), agg_exec),
         _ => {
@@ -479,91 +473,16 @@ fn try_replace_aggregate(
         return Ok(None);
     }
 
-    // Extract group keys — must be simple Column refs with supported types
     let input_schema = effective_input.schema();
-    let mut group_keys = Vec::new();
+    let group_keys = match extract_group_keys(group_by, &input_schema) {
+        Some(keys) => keys,
+        None => return Ok(None),
+    };
 
-    for (expr, _alias) in group_by.expr() {
-        let Some(col) = expr.as_any().downcast_ref::<Column>() else {
-            return Ok(None); // Not a simple column reference
-        };
-        let data_type = input_schema.field(col.index()).data_type().clone();
-        if !is_gpu_agg_supported_type(&data_type) {
-            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-                eprintln!(
-                    "[GPU] try_replace_aggregate: SKIP — unsupported group key type: {:?}",
-                    data_type
-                );
-            }
-            return Ok(None);
-        }
-        group_keys.push(GpuGroupKey {
-            column_index: col.index(),
-            column_name: col.name().to_string(),
-            data_type,
-        });
-    }
-
-    // Extract aggregate functions — must be simple sum/count/min/max/avg
-    // For DISTINCT, aggr_exprs is empty and this loop is a no-op.
-    let mut agg_requests = Vec::new();
-    let aggr_exprs = effective_agg.aggr_expr();
-    let filter_exprs = effective_agg.filter_expr();
-
-    for (i, agg_expr) in aggr_exprs.iter().enumerate() {
-        // No per-aggregate FILTER
-        if filter_exprs.get(i).is_some_and(|f| f.is_some()) {
-            return Ok(None);
-        }
-
-        // No DISTINCT
-        if agg_expr.is_distinct() {
-            return Ok(None);
-        }
-
-        // No ORDER BY on aggregates
-        if !agg_expr.order_bys().is_empty() {
-            return Ok(None);
-        }
-
-        // Match function name to SegAggFunc
-        let func_name = agg_expr.fun().name().to_lowercase();
-        let seg_func = match func_name.as_str() {
-            "count" => SegAggFunc::Count,
-            "sum" => SegAggFunc::Sum,
-            "min" => SegAggFunc::Min,
-            "max" => SegAggFunc::Max,
-            "avg" => SegAggFunc::Avg,
-            "first_value" => SegAggFunc::FirstValue,
-            _ => return Ok(None), // Unsupported aggregate function
-        };
-
-        // For count, we don't need a specific input column
-        // For others, extract the input column
-        let (column_index, data_type) = if seg_func == SegAggFunc::Count {
-            (0, datafusion::arrow::datatypes::DataType::Int64)
-        } else {
-            let input_exprs = agg_expr.expressions();
-            if input_exprs.len() != 1 {
-                return Ok(None);
-            }
-            let Some(col) = input_exprs[0].as_any().downcast_ref::<Column>() else {
-                return Ok(None);
-            };
-            let dt = input_schema.field(col.index()).data_type().clone();
-            if !is_gpu_agg_supported_type(&dt) {
-                return Ok(None);
-            }
-            (col.index(), dt)
-        };
-
-        agg_requests.push(GpuAggRequest {
-            func: seg_func,
-            column_index,
-            data_type,
-            output_name: agg_expr.name().to_string(),
-        });
-    }
+    let agg_requests = match extract_agg_requests(effective_agg, &input_schema) {
+        Some(reqs) => reqs,
+        None => return Ok(None),
+    };
 
     // Check row count statistics
     if let Ok(stats) = effective_input.partition_statistics(None) {
@@ -580,57 +499,15 @@ fn try_replace_aggregate(
         }
     }
 
-    // Check if input is sorted by group key(s)
-    // For multi-key, we check if sorted by the first key only — this enables
-    // the sorted fast path (skip sort step) when at least the primary key is ordered.
+    // Sorted consecutive-group fast path
     let input_sorted = is_sorted_by(&effective_input, &group_keys[0].column_name);
-
-    // Sorted consecutive-group path: when input is sorted by a single group key,
-    // use GpuConsecutiveGroupExec → GpuSegmentedAggregateExec(collapse=true)
-    // instead of GpuHashAggregateExec. This avoids hash table overhead entirely.
     if input_sorted && group_keys.len() == 1 && !agg_requests.is_empty() {
-        let key = &group_keys[0];
-
-        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-            eprintln!(
-                "[GPU] HostToGpuRule: AggregateExec → GpuConsecutiveGroupExec + GpuSegmentedAggregateExec(collapse), \
-                 key={}, aggs={}",
-                key.column_name,
-                agg_requests.len(),
-            );
-        }
-
-        let boundary_mode = GpuBoundaryMode::AdjacentNe {
-            column_index: key.column_index,
-            column_name: key.column_name.clone(),
-            data_type: key.data_type.clone(),
-        };
-
-        // Step 1: ConsecutiveGroup adds __group_id__ column
-        let group_exec = GpuConsecutiveGroupExec::try_new(boundary_mode, effective_input)?;
-
-        // Convert GpuAggRequest → SegAggRequest
-        let seg_requests: Vec<SegAggRequest> = agg_requests
-            .iter()
-            .map(|r| SegAggRequest {
-                func: r.func.clone(),
-                column_index: r.column_index,
-                data_type: r.data_type.clone(),
-                output_name: r.output_name.clone(),
-            })
-            .collect();
-
-        // Step 2: SegmentedAggregate computes per-group aggregates, collapse to 1 row/group
-        let output_schema = effective_agg.schema();
-        let seg_exec = GpuSegmentedAggregateExec::try_new_collapsing(
-            seg_requests,
-            "__group_id__".to_string(),
-            vec![(key.column_name.clone(), key.column_index)],
-            Arc::new(group_exec),
-            output_schema,
-        )?;
-
-        return Ok(Some(Transformed::yes(Arc::new(seg_exec))));
+        return build_sorted_consecutive_group_plan(
+            &group_keys[0],
+            &agg_requests,
+            effective_agg,
+            effective_input,
+        );
     }
 
     if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
@@ -648,28 +525,157 @@ fn try_replace_aggregate(
         input_sorted,
     };
 
-    // Use the original AggregateExec output schema for transparent substitution
     let output_schema = effective_agg.schema();
-
     let gpu_agg = GpuHashAggregateExec::try_new(config, effective_input, output_schema)?;
     Ok(Some(Transformed::yes(Arc::new(gpu_agg))))
 }
 
-/// Attempt to replace a `HashJoinExec` with `GpuHashJoinExec`.
-///
-/// Eligibility criteria:
-/// - Single equi-join key pair
-/// - No non-equi `JoinFilter`
-/// - Join type is Inner or Left only
-/// - Key columns are simple `Column` references with matching supported numeric types
-/// - Max row count of left/right ≥ GPU_MIN_ROWS_THRESHOLD
-fn try_replace_join(
-    plan: &Arc<dyn ExecutionPlan>,
+/// Extract group keys from an `AggregateExec`'s group-by expressions.
+/// Returns `None` if any key is not a simple Column ref or has an unsupported type.
+fn extract_group_keys(
+    group_by: &PhysicalGroupBy,
+    input_schema: &SchemaRef,
+) -> Option<Vec<GpuGroupKey>> {
+    let mut group_keys = Vec::new();
+    for (expr, _alias) in group_by.expr() {
+        let col = expr.as_any().downcast_ref::<Column>()?;
+        let data_type = input_schema.field(col.index()).data_type().clone();
+        if !is_gpu_agg_supported_type(&data_type) {
+            if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                eprintln!(
+                    "[GPU] try_replace_aggregate: SKIP — unsupported group key type: {:?}",
+                    data_type
+                );
+            }
+            return None;
+        }
+        group_keys.push(GpuGroupKey {
+            column_index: col.index(),
+            column_name: col.name().to_string(),
+            data_type,
+        });
+    }
+    Some(group_keys)
+}
+
+/// Extract aggregate function requests from an `AggregateExec`.
+/// Returns `None` if any aggregate is unsupported (DISTINCT, FILTER, ORDER BY, etc.).
+fn extract_agg_requests(
+    agg_exec: &AggregateExec,
+    input_schema: &SchemaRef,
+) -> Option<Vec<GpuAggRequest>> {
+    let mut agg_requests = Vec::new();
+    let aggr_exprs = agg_exec.aggr_expr();
+    let filter_exprs = agg_exec.filter_expr();
+
+    for (i, agg_expr) in aggr_exprs.iter().enumerate() {
+        if filter_exprs.get(i).is_some_and(|f| f.is_some()) {
+            return None;
+        }
+        if agg_expr.is_distinct() {
+            return None;
+        }
+        if !agg_expr.order_bys().is_empty() {
+            return None;
+        }
+
+        let func_name = agg_expr.fun().name().to_lowercase();
+        let seg_func = match func_name.as_str() {
+            "count" => SegAggFunc::Count,
+            "sum" => SegAggFunc::Sum,
+            "min" => SegAggFunc::Min,
+            "max" => SegAggFunc::Max,
+            "avg" => SegAggFunc::Avg,
+            "first_value" => SegAggFunc::FirstValue,
+            _ => return None,
+        };
+
+        let (column_index, data_type) = if seg_func == SegAggFunc::Count {
+            (0, datafusion::arrow::datatypes::DataType::Int64)
+        } else {
+            let input_exprs = agg_expr.expressions();
+            if input_exprs.len() != 1 {
+                return None;
+            }
+            let col = input_exprs[0].as_any().downcast_ref::<Column>()?;
+            let dt = input_schema.field(col.index()).data_type().clone();
+            if !is_gpu_agg_supported_type(&dt) {
+                return None;
+            }
+            (col.index(), dt)
+        };
+
+        agg_requests.push(GpuAggRequest {
+            func: seg_func,
+            column_index,
+            data_type,
+            output_name: agg_expr.name().to_string(),
+        });
+    }
+    Some(agg_requests)
+}
+
+/// Build a GpuConsecutiveGroupExec + GpuSegmentedAggregateExec plan for sorted
+/// single-key aggregation.
+fn build_sorted_consecutive_group_plan(
+    key: &GpuGroupKey,
+    agg_requests: &[GpuAggRequest],
+    effective_agg: &AggregateExec,
+    effective_input: Arc<dyn ExecutionPlan>,
 ) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
-    let Some(hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() else {
-        return Ok(None);
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] HostToGpuRule: AggregateExec → GpuConsecutiveGroupExec + GpuSegmentedAggregateExec(collapse), \
+             key={}, aggs={}",
+            key.column_name,
+            agg_requests.len(),
+        );
+    }
+
+    let boundary_mode = GpuBoundaryMode::AdjacentNe {
+        column_index: key.column_index,
+        column_name: key.column_name.clone(),
+        data_type: key.data_type.clone(),
     };
 
+    let group_exec = GpuConsecutiveGroupExec::try_new(boundary_mode, effective_input)?;
+
+    let seg_requests: Vec<SegAggRequest> = agg_requests
+        .iter()
+        .map(|r| SegAggRequest {
+            func: r.func.clone(),
+            column_index: r.column_index,
+            data_type: r.data_type.clone(),
+            output_name: r.output_name.clone(),
+        })
+        .collect();
+
+    let output_schema = effective_agg.schema();
+    let seg_exec = GpuSegmentedAggregateExec::try_new_collapsing(
+        seg_requests,
+        "__group_id__".to_string(),
+        vec![(key.column_name.clone(), key.column_index)],
+        Arc::new(group_exec),
+        output_schema,
+    )?;
+
+    Ok(Some(Transformed::yes(Arc::new(seg_exec))))
+}
+
+/// Validated join metadata extracted from a `HashJoinExec`.
+struct ValidatedJoinInfo<'a> {
+    gpu_join_type: GpuJoinType,
+    swapped: bool,
+    left_col: &'a Column,
+    right_col: &'a Column,
+    left_input: &'a Arc<dyn ExecutionPlan>,
+    right_input: &'a Arc<dyn ExecutionPlan>,
+    key_type: datafusion::arrow::datatypes::DataType,
+}
+
+/// Validate that a `HashJoinExec` is eligible for GPU replacement and extract
+/// its join metadata. Returns `None` if any eligibility check fails.
+fn validate_join_eligibility<'a>(hash_join: &'a HashJoinExec) -> Option<ValidatedJoinInfo<'a>> {
     // Only single equi-join key
     let on = hash_join.on();
     if on.len() != 1 {
@@ -679,7 +685,7 @@ fn try_replace_join(
                 on.len()
             );
         }
-        return Ok(None);
+        return None;
     }
 
     // No non-equi filter
@@ -687,11 +693,10 @@ fn try_replace_join(
         if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
             eprintln!("[GPU] try_replace_join: SKIP — has non-equi JoinFilter");
         }
-        return Ok(None);
+        return None;
     }
 
     // Only Inner, Left, and Right join types
-    // Right join is implemented as Left join with swapped inputs.
     let (gpu_join_type, swapped) = match hash_join.join_type() {
         JoinType::Inner => (GpuJoinType::Inner, false),
         JoinType::Left => (GpuJoinType::Left, false),
@@ -703,26 +708,15 @@ fn try_replace_join(
                     other
                 );
             }
-            return Ok(None);
+            return None;
         }
     };
 
     // Extract key columns — must be simple Column references
     let (left_key_expr, right_key_expr) = &on[0];
 
-    let Some(left_col) = left_key_expr.as_any().downcast_ref::<Column>() else {
-        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-            eprintln!("[GPU] try_replace_join: SKIP — left key is not a Column ref");
-        }
-        return Ok(None);
-    };
-
-    let Some(right_col) = right_key_expr.as_any().downcast_ref::<Column>() else {
-        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-            eprintln!("[GPU] try_replace_join: SKIP — right key is not a Column ref");
-        }
-        return Ok(None);
-    };
+    let left_col = left_key_expr.as_any().downcast_ref::<Column>()?;
+    let right_col = right_key_expr.as_any().downcast_ref::<Column>()?;
 
     // Check key types: must be supported and matching
     let left_input = hash_join.left();
@@ -740,7 +734,7 @@ fn try_replace_join(
                 left_dt, right_dt
             );
         }
-        return Ok(None);
+        return None;
     }
 
     if !is_hash_join_key_type_supported(&left_dt) {
@@ -750,7 +744,7 @@ fn try_replace_join(
                 left_dt
             );
         }
-        return Ok(None);
+        return None;
     }
 
     // Check row count statistics — use max of left/right
@@ -773,60 +767,87 @@ fn try_replace_join(
                     rows, GPU_MIN_ROWS_THRESHOLD
                 );
             }
-            return Ok(None);
+            return None;
         }
     }
 
-    // Sorted-input optimization: if both inputs are sorted by their join key,
-    // use merge join instead of hash join for O(N+M) instead of O(N*M/buckets).
-    // Check sort order on the original (pre-swap) inputs.
-    let effective_left = if swapped { right_input } else { left_input };
-    let effective_right = if swapped { left_input } else { right_input };
-    let effective_left_key = if swapped {
-        right_col.name()
+    Some(ValidatedJoinInfo {
+        gpu_join_type,
+        swapped,
+        left_col,
+        right_col,
+        left_input,
+        right_input,
+        key_type: left_dt,
+    })
+}
+
+/// Try to build a `GpuMergeJoinExec` if both inputs are sorted by their join key.
+fn try_build_merge_join(
+    info: &ValidatedJoinInfo<'_>,
+    output_schema: SchemaRef,
+) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let effective_left = if info.swapped {
+        info.right_input
     } else {
-        left_col.name()
+        info.left_input
     };
-    let effective_right_key = if swapped {
-        left_col.name()
+    let effective_right = if info.swapped {
+        info.left_input
     } else {
-        right_col.name()
+        info.right_input
+    };
+    let effective_left_key = if info.swapped {
+        info.right_col.name()
+    } else {
+        info.left_col.name()
+    };
+    let effective_right_key = if info.swapped {
+        info.left_col.name()
+    } else {
+        info.right_col.name()
     };
 
     let left_sorted = is_sorted_by(effective_left, effective_left_key);
     let right_sorted = is_sorted_by(effective_right, effective_right_key);
 
-    if left_sorted && right_sorted && is_merge_join_key_type_supported(&left_dt) {
-        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
-            eprintln!(
-                "[GPU] HostToGpuRule: HashJoinExec → GpuMergeJoinExec (both inputs sorted), \
-                 left_key={}, right_key={}, type={:?}, key_type={:?}",
-                effective_left_key, effective_right_key, gpu_join_type, left_dt
-            );
-        }
-
-        let output_schema = hash_join.schema();
-        let gpu_merge = GpuMergeJoinExec::try_new_with_schema(
-            Arc::clone(effective_left),
-            Arc::clone(effective_right),
-            effective_left_key.to_string(),
-            effective_right_key.to_string(),
-            gpu_join_type,
-            output_schema,
-        )?;
-        return Ok(Some(Transformed::yes(Arc::new(gpu_merge))));
+    if !(left_sorted && right_sorted && is_merge_join_key_type_supported(&info.key_type)) {
+        return Ok(None);
     }
 
-    // Fall through to hash join path
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] HostToGpuRule: HashJoinExec → GpuMergeJoinExec (both inputs sorted), \
+             left_key={}, right_key={}, type={:?}, key_type={:?}",
+            effective_left_key, effective_right_key, info.gpu_join_type, info.key_type
+        );
+    }
+
+    let gpu_merge = GpuMergeJoinExec::try_new_with_schema(
+        Arc::clone(effective_left),
+        Arc::clone(effective_right),
+        effective_left_key.to_string(),
+        effective_right_key.to_string(),
+        info.gpu_join_type,
+        output_schema,
+    )?;
+    Ok(Some(Arc::new(gpu_merge)))
+}
+
+/// Build a `GpuHashJoinExec` from validated join info, handling input swapping
+/// for Right joins.
+fn build_hash_join(
+    info: &ValidatedJoinInfo<'_>,
+    output_schema: SchemaRef,
+) -> Result<Arc<dyn ExecutionPlan>> {
     if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
         eprintln!(
             "[GPU] HostToGpuRule: HashJoinExec → GpuHashJoinExec, left_key={}, right_key={}, type={:?}, key_type={:?}, swapped={}",
-            left_col.name(), right_col.name(), gpu_join_type, left_dt, swapped
+            info.left_col.name(), info.right_col.name(), info.gpu_join_type, info.key_type, info.swapped
         );
     }
 
     // When swapped (Right join → Left join), swap left/right inputs and key info.
-    // The GpuHashJoinExec always treats its `left` as probe and `right` as build.
     let (
         exec_left,
         exec_right,
@@ -834,23 +855,23 @@ fn try_replace_join(
         exec_left_key_idx,
         exec_right_key,
         exec_right_key_idx,
-    ) = if swapped {
+    ) = if info.swapped {
         (
-            Arc::clone(right_input),
-            Arc::clone(left_input),
-            right_col.name().to_string(),
-            right_col.index(),
-            left_col.name().to_string(),
-            left_col.index(),
+            Arc::clone(info.right_input),
+            Arc::clone(info.left_input),
+            info.right_col.name().to_string(),
+            info.right_col.index(),
+            info.left_col.name().to_string(),
+            info.left_col.index(),
         )
     } else {
         (
-            Arc::clone(left_input),
-            Arc::clone(right_input),
-            left_col.name().to_string(),
-            left_col.index(),
-            right_col.name().to_string(),
-            right_col.index(),
+            Arc::clone(info.left_input),
+            Arc::clone(info.right_input),
+            info.left_col.name().to_string(),
+            info.left_col.index(),
+            info.right_col.name().to_string(),
+            info.right_col.index(),
         )
     };
 
@@ -859,17 +880,44 @@ fn try_replace_join(
         left_key_idx: exec_left_key_idx,
         right_key: exec_right_key,
         right_key_idx: exec_right_key_idx,
-        key_type: left_dt,
-        join_type: gpu_join_type,
-        swapped,
+        key_type: info.key_type.clone(),
+        join_type: info.gpu_join_type,
+        swapped: info.swapped,
     };
 
-    // Reuse the original HashJoinExec schema for transparent substitution
+    let gpu_join = GpuHashJoinExec::try_new(config, exec_left, exec_right, output_schema)?;
+    Ok(Arc::new(gpu_join))
+}
+
+/// Attempt to replace a `HashJoinExec` with `GpuHashJoinExec`.
+///
+/// Eligibility criteria:
+/// - Single equi-join key pair
+/// - No non-equi `JoinFilter`
+/// - Join type is Inner or Left only
+/// - Key columns are simple `Column` references with matching supported numeric types
+/// - Max row count of left/right ≥ GPU_MIN_ROWS_THRESHOLD
+fn try_replace_join(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    let Some(hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() else {
+        return Ok(None);
+    };
+
+    let Some(info) = validate_join_eligibility(hash_join) else {
+        return Ok(None);
+    };
+
     let output_schema = hash_join.schema();
 
-    let gpu_join = GpuHashJoinExec::try_new(config, exec_left, exec_right, output_schema)?;
+    // Sorted merge-join fast path
+    if let Some(gpu_merge) = try_build_merge_join(&info, output_schema.clone())? {
+        return Ok(Some(Transformed::yes(gpu_merge)));
+    }
 
-    Ok(Some(Transformed::yes(Arc::new(gpu_join))))
+    // Hash join fallback
+    let gpu_join = build_hash_join(&info, output_schema)?;
+    Ok(Some(Transformed::yes(gpu_join)))
 }
 
 /// Attempt to replace a `SortExec` with `GpuSortExec`.

@@ -18,13 +18,13 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::helpers::register_temp_table_pair;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::array::{Array, ArrayRef, UInt32Array};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -61,47 +61,6 @@ fn get_schema_from_batches(
         .first()
         .map(|b| b.schema())
         .unwrap_or_else(|| Arc::new((**stored_schema).clone()))
-}
-
-/// Register both tables as temp MemTables and return their names
-fn register_join_tables(
-    session: &SessionContext,
-    left_schema: &Arc<ArrowSchema>,
-    left_batches: Vec<RecordBatch>,
-    right_schema: &Arc<ArrowSchema>,
-    right_batches: Vec<RecordBatch>,
-    prefix: &str,
-) -> PyResult<(String, String)> {
-    let unique_suffix = std::process::id();
-    let left_name = format!("__ltseq_{}_left_{}", prefix, unique_suffix);
-    let right_name = format!("__ltseq_{}_right_{}", prefix, unique_suffix);
-
-    // Deregister any existing tables
-    let _ = session.deregister_table(&left_name);
-    let _ = session.deregister_table(&right_name);
-
-    let left_mem = MemTable::try_new(Arc::clone(left_schema), vec![left_batches]).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to create left temp table: {}", e))
-    })?;
-
-    let right_mem =
-        MemTable::try_new(Arc::clone(right_schema), vec![right_batches]).map_err(|e| {
-            LtseqError::Runtime(format!("Failed to create right temp table: {}", e))
-        })?;
-
-    session
-        .register_table(&left_name, Arc::new(left_mem))
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to register left temp table: {}", e))
-        })?;
-
-    session
-        .register_table(&right_name, Arc::new(right_mem))
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to register right temp table: {}", e))
-        })?;
-
-    Ok((left_name, right_name))
 }
 
 /// Execute SQL query and collect results
@@ -363,7 +322,7 @@ pub fn join_impl(
     )?;
 
     // Register temp tables and execute query
-    let (left_name, right_name) = register_join_tables(
+    let (left_guard, right_guard) = register_temp_table_pair(
         &table.session,
         &left_schema,
         left_batches,
@@ -373,8 +332,8 @@ pub fn join_impl(
     )?;
 
     let sql_query = build_join_sql(
-        &left_name,
-        &right_name,
+        left_guard.name(),
+        right_guard.name(),
         &left_schema,
         &right_schema,
         &left_col_names,
@@ -387,9 +346,9 @@ pub fn join_impl(
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    // Cleanup
-    let _ = table.session.deregister_table(&left_name);
-    let _ = table.session.deregister_table(&right_name);
+    // Cleanup (RAII guards handle deregistration)
+    drop(left_guard);
+    drop(right_guard);
 
     // Build empty schema for empty results
     let empty_schema = build_join_result_schema(&left_schema, &right_schema, alias);
@@ -505,7 +464,7 @@ fn semi_anti_join_impl(
 
     // Register temp tables
     let join_type_name = if is_anti { "anti" } else { "semi" };
-    let (left_name, right_name) = register_join_tables(
+    let (left_guard, right_guard) = register_temp_table_pair(
         &table.session,
         &left_schema,
         left_batches,
@@ -516,8 +475,8 @@ fn semi_anti_join_impl(
 
     // Build and execute SQL query
     let sql_query = build_semi_anti_join_sql(
-        &left_name,
-        &right_name,
+        left_guard.name(),
+        right_guard.name(),
         &left_schema,
         &left_col_names,
         &right_col_names,
@@ -532,9 +491,9 @@ fn semi_anti_join_impl(
         ))
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    // Cleanup
-    let _ = table.session.deregister_table(&left_name);
-    let _ = table.session.deregister_table(&right_name);
+    // Cleanup (RAII guards handle deregistration)
+    drop(left_guard);
+    drop(right_guard);
 
     build_result_table(
         &table.session,
@@ -813,61 +772,14 @@ fn cpu_merge_join_typed<T: MergeJoinKey>(
         LtseqError::Runtime("Failed to downcast right key array".into())
     })?;
 
-    let left_n = left_arr.len();
-    let right_n = right_arr.len();
-
-    let mut left_indices: Vec<u32> = Vec::new();
-    let mut right_indices: Vec<Option<u32>> = Vec::new();
-
-    let mut li = 0usize;
-    let mut ri = 0usize;
-
-    while li < left_n && ri < right_n {
-        let lv = T::value(left_arr, li);
-        let rv = T::value(right_arr, ri);
-
-        if lv < rv {
-            // Left key < right key: no match for this left row
-            if is_left_join {
-                left_indices.push(li as u32);
-                right_indices.push(None);
-            }
-            li += 1;
-        } else if lv > rv {
-            // Left key > right key: advance right
-            ri += 1;
-        } else {
-            // Equal: find the range of equal keys in right
-            let ri_start = ri;
-            while ri < right_n && T::value(right_arr, ri) == lv {
-                ri += 1;
-            }
-            // Also find range of equal keys in left
-            let li_start = li;
-            while li < left_n && T::value(left_arr, li) == lv {
-                li += 1;
-            }
-            // Cross product of matching ranges
-            for l in li_start..li {
-                for r in ri_start..ri {
-                    left_indices.push(l as u32);
-                    right_indices.push(Some(r as u32));
-                }
-            }
-        }
-    }
-
-    // Remaining left rows (unmatched) for left join
-    if is_left_join {
-        while li < left_n {
-            left_indices.push(li as u32);
-            right_indices.push(None);
-            li += 1;
-        }
-    }
-
-    // Convert Option<u32> to nullable UInt32Array
-    Ok((UInt32Array::from(left_indices), UInt32Array::from(right_indices)))
+    merge_join_loop(
+        left_arr.len(),
+        right_arr.len(),
+        is_left_join,
+        |li, ri| T::value(left_arr, li).partial_cmp(&T::value(right_arr, ri)),
+        |li1, li2| T::value(left_arr, li1) == T::value(left_arr, li2),
+        |ri1, ri2| T::value(right_arr, ri1) == T::value(right_arr, ri2),
+    )
 }
 
 /// Two-pointer merge join for Utf8 (string) keys.
@@ -887,9 +799,32 @@ fn cpu_merge_join_utf8(
         .downcast_ref::<StringArray>()
         .ok_or_else(|| LtseqError::Runtime("Failed to downcast right key to StringArray".into()))?;
 
-    let left_n = left_arr.len();
-    let right_n = right_arr.len();
+    merge_join_loop(
+        left_arr.len(),
+        right_arr.len(),
+        is_left_join,
+        |li, ri| left_arr.value(li).partial_cmp(right_arr.value(ri)),
+        |li1, li2| left_arr.value(li1) == left_arr.value(li2),
+        |ri1, ri2| right_arr.value(ri1) == right_arr.value(ri2),
+    )
+}
 
+/// Core two-pointer merge join loop, generic over value comparison.
+///
+/// Extracts the duplicated merge-join algorithm from `cpu_merge_join_typed` and
+/// `cpu_merge_join_utf8` into a single implementation.
+///
+/// - `cmp_lr(li, ri)`: compare left[li] vs right[ri]
+/// - `eq_ll(li1, li2)`: check left[li1] == left[li2] (for finding equal-key ranges)
+/// - `eq_rr(ri1, ri2)`: check right[ri1] == right[ri2] (for finding equal-key ranges)
+fn merge_join_loop(
+    left_n: usize,
+    right_n: usize,
+    is_left_join: bool,
+    cmp_lr: impl Fn(usize, usize) -> Option<std::cmp::Ordering>,
+    eq_ll: impl Fn(usize, usize) -> bool,
+    eq_rr: impl Fn(usize, usize) -> bool,
+) -> PyResult<(UInt32Array, UInt32Array)> {
     let mut left_indices: Vec<u32> = Vec::new();
     let mut right_indices: Vec<Option<u32>> = Vec::new();
 
@@ -897,29 +832,29 @@ fn cpu_merge_join_utf8(
     let mut ri = 0usize;
 
     while li < left_n && ri < right_n {
-        let lv = left_arr.value(li);
-        let rv = right_arr.value(ri);
-
-        match lv.cmp(rv) {
-            std::cmp::Ordering::Less => {
+        match cmp_lr(li, ri) {
+            Some(std::cmp::Ordering::Less) => {
                 if is_left_join {
                     left_indices.push(li as u32);
                     right_indices.push(None);
                 }
                 li += 1;
             }
-            std::cmp::Ordering::Greater => {
+            Some(std::cmp::Ordering::Greater) => {
                 ri += 1;
             }
-            std::cmp::Ordering::Equal => {
+            Some(std::cmp::Ordering::Equal) => {
+                // Find the range of equal keys in right
                 let ri_start = ri;
-                while ri < right_n && right_arr.value(ri) == lv {
+                while ri < right_n && eq_rr(ri_start, ri) {
                     ri += 1;
                 }
+                // Find the range of equal keys in left
                 let li_start = li;
-                while li < left_n && left_arr.value(li) == lv {
+                while li < left_n && eq_ll(li_start, li) {
                     li += 1;
                 }
+                // Cross product of matching ranges
                 for l in li_start..li {
                     for r in ri_start..ri {
                         left_indices.push(l as u32);
@@ -927,9 +862,18 @@ fn cpu_merge_join_utf8(
                     }
                 }
             }
+            None => {
+                // NaN or uncomparable: skip left row
+                if is_left_join {
+                    left_indices.push(li as u32);
+                    right_indices.push(None);
+                }
+                li += 1;
+            }
         }
     }
 
+    // Remaining left rows (unmatched) for left join
     if is_left_join {
         while li < left_n {
             left_indices.push(li as u32);

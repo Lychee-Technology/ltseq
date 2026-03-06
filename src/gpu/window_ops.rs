@@ -1293,11 +1293,9 @@ fn execute_rolling_gpu(
 
     match agg_func {
         RollingAggFunc::Count => {
-            // Count doesn't need input data — just produces window sizes
             execute_rolling_count_gpu(&module, &stream, launch_cfg, n, ws)
         }
         RollingAggFunc::Avg => {
-            // Avg always works on f64
             let f64_values = column_to_f64(column, data_type)?;
             gpu_rolling_typed::<f64>(
                 &f64_values, &module, &stream, launch_cfg, n, ws,
@@ -1308,192 +1306,157 @@ fn execute_rolling_gpu(
             })
         }
         RollingAggFunc::Sum => {
-            match data_type {
-                DataType::Int64 => {
-                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Int64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<i64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_sum_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float64 => {
-                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Float64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<f64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_sum_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Int32 => {
-                    // Promote i32 sum to i64 to avoid overflow
-                    let i64_values: Vec<i64> = column
-                        .as_any()
-                        .downcast_ref::<Int32Array>()
-                        .ok_or_else(|| DataFusionError::Internal("Expected Int32Array".to_string()))?
-                        .values()
-                        .iter()
-                        .map(|&v| v as i64)
-                        .collect();
-                    gpu_rolling_typed::<i64>(
-                        &i64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_sum_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        // Sum of i32 promoted to i64
-                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float32 => {
-                    // Promote f32 sum to f64 for precision
-                    let f64_values: Vec<f64> = column
-                        .as_any()
-                        .downcast_ref::<Float32Array>()
-                        .ok_or_else(|| DataFusionError::Internal("Expected Float32Array".to_string()))?
-                        .values()
-                        .iter()
-                        .map(|&v| v as f64)
-                        .collect();
-                    gpu_rolling_typed::<f64>(
-                        &f64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_sum_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                _ => Err(DataFusionError::Internal(format!(
-                    "Unsupported data type for GPU rolling sum: {:?}", data_type
-                ))),
-            }
+            rolling_dispatch_sum(column, data_type, &module, &stream, launch_cfg, n, ws)
         }
         RollingAggFunc::Min => {
-            match data_type {
-                DataType::Int64 => {
-                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Int64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<i64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_min_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float64 => {
-                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Float64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<f64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_min_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Int32 => {
-                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Int32Array".to_string())
-                    })?;
-                    let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
-                    gpu_rolling_typed::<i64>(
-                        &i64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_min_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        // Min of i32 values fits in i32, but we keep i64 for consistency
-                        let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
-                        Arc::new(Int32Array::new(i32_values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float32 => {
-                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Float32Array".to_string())
-                    })?;
-                    let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
-                    gpu_rolling_typed::<f64>(
-                        &f64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_min_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-                        Arc::new(Float32Array::new(f32_values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                _ => Err(DataFusionError::Internal(format!(
-                    "Unsupported data type for GPU rolling min: {:?}", data_type
-                ))),
-            }
+            rolling_dispatch_minmax(column, data_type, &module, &stream, launch_cfg, n, ws, "min")
         }
         RollingAggFunc::Max => {
-            match data_type {
-                DataType::Int64 => {
-                    let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Int64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<i64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_max_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float64 => {
-                    let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Float64Array".to_string())
-                    })?;
-                    gpu_rolling_typed::<f64>(
-                        arr.values(), &module, &stream, launch_cfg, n, ws,
-                        "rolling_max_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Int32 => {
-                    let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Int32Array".to_string())
-                    })?;
-                    let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
-                    gpu_rolling_typed::<i64>(
-                        &i64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_max_i64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
-                        Arc::new(Int32Array::new(i32_values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                DataType::Float32 => {
-                    let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
-                        DataFusionError::Internal("Expected Float32Array".to_string())
-                    })?;
-                    let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
-                    gpu_rolling_typed::<f64>(
-                        &f64_values, &module, &stream, launch_cfg, n, ws,
-                        "rolling_max_f64",
-                    ).map(|(values, valid_mask)| {
-                        let null_buffer = build_null_buffer(&valid_mask);
-                        let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-                        Arc::new(Float32Array::new(f32_values.into(), Some(null_buffer))) as ArrayRef
-                    })
-                }
-                _ => Err(DataFusionError::Internal(format!(
-                    "Unsupported data type for GPU rolling max: {:?}", data_type
-                ))),
-            }
+            rolling_dispatch_minmax(column, data_type, &module, &stream, launch_cfg, n, ws, "max")
         }
+    }
+}
+
+/// Dispatch rolling sum by data type. i32 and f32 are promoted to i64/f64 to avoid overflow.
+fn rolling_dispatch_sum(
+    column: &ArrayRef,
+    data_type: &DataType,
+    module: &Arc<CudaModule>,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    launch_cfg: LaunchConfig,
+    n: u32,
+    ws: i32,
+) -> Result<ArrayRef> {
+    match data_type {
+        DataType::Int64 => {
+            let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int64Array".to_string())
+            })?;
+            gpu_rolling_typed::<i64>(
+                arr.values(), module, stream, launch_cfg, n, ws, "rolling_sum_i64",
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Float64 => {
+            let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float64Array".to_string())
+            })?;
+            gpu_rolling_typed::<f64>(
+                arr.values(), module, stream, launch_cfg, n, ws, "rolling_sum_f64",
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Int32 => {
+            let i64_values: Vec<i64> = column
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| DataFusionError::Internal("Expected Int32Array".to_string()))?
+                .values()
+                .iter()
+                .map(|&v| v as i64)
+                .collect();
+            gpu_rolling_typed::<i64>(
+                &i64_values, module, stream, launch_cfg, n, ws, "rolling_sum_i64",
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Float32 => {
+            let f64_values: Vec<f64> = column
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or_else(|| DataFusionError::Internal("Expected Float32Array".to_string()))?
+                .values()
+                .iter()
+                .map(|&v| v as f64)
+                .collect();
+            gpu_rolling_typed::<f64>(
+                &f64_values, module, stream, launch_cfg, n, ws, "rolling_sum_f64",
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        _ => Err(DataFusionError::Internal(format!(
+            "Unsupported data type for GPU rolling sum: {:?}", data_type
+        ))),
+    }
+}
+
+/// Dispatch rolling min/max by data type. `op` is either `"min"` or `"max"`.
+///
+/// For i32/f32, values are promoted to i64/f64 for the kernel, then cast back
+/// to the original type in the result.
+fn rolling_dispatch_minmax(
+    column: &ArrayRef,
+    data_type: &DataType,
+    module: &Arc<CudaModule>,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    launch_cfg: LaunchConfig,
+    n: u32,
+    ws: i32,
+    op: &str,
+) -> Result<ArrayRef> {
+    let kernel_i64 = format!("rolling_{}_i64", op);
+    let kernel_f64 = format!("rolling_{}_f64", op);
+
+    match data_type {
+        DataType::Int64 => {
+            let arr = column.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int64Array".to_string())
+            })?;
+            gpu_rolling_typed::<i64>(
+                arr.values(), module, stream, launch_cfg, n, ws, &kernel_i64,
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Int64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Float64 => {
+            let arr = column.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float64Array".to_string())
+            })?;
+            gpu_rolling_typed::<f64>(
+                arr.values(), module, stream, launch_cfg, n, ws, &kernel_f64,
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                Arc::new(Float64Array::new(values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Int32 => {
+            let arr = column.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Int32Array".to_string())
+            })?;
+            let i64_values: Vec<i64> = arr.values().iter().map(|&v| v as i64).collect();
+            gpu_rolling_typed::<i64>(
+                &i64_values, module, stream, launch_cfg, n, ws, &kernel_i64,
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                let i32_values: Vec<i32> = values.iter().map(|&v| v as i32).collect();
+                Arc::new(Int32Array::new(i32_values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        DataType::Float32 => {
+            let arr = column.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                DataFusionError::Internal("Expected Float32Array".to_string())
+            })?;
+            let f64_values: Vec<f64> = arr.values().iter().map(|&v| v as f64).collect();
+            gpu_rolling_typed::<f64>(
+                &f64_values, module, stream, launch_cfg, n, ws, &kernel_f64,
+            ).map(|(values, valid_mask)| {
+                let null_buffer = build_null_buffer(&valid_mask);
+                let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                Arc::new(Float32Array::new(f32_values.into(), Some(null_buffer))) as ArrayRef
+            })
+        }
+        _ => Err(DataFusionError::Internal(format!(
+            "Unsupported data type for GPU rolling {}: {:?}", op, data_type
+        ))),
     }
 }
 

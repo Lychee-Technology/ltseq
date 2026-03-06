@@ -12,13 +12,13 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::helpers::register_temp_table;
 use crate::transpiler::pyexpr_to_sql;
 use crate::transpiler::pyexpr_to_window_expr;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::common::Column;
-use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -328,35 +328,21 @@ fn derive_with_window_functions_sql_fallback(
         };
 
         // Use unique temp table name to avoid conflicts
-        let temp_table_name = format!("__ltseq_temp_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
-            })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        table
-            .session
-            .register_table(&temp_table_name, Arc::new(temp_table))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
-            })?;
+        let guard = register_temp_table(&table.session, &batch_schema, current_batches, "window")?;
 
         let select_parts = build_derived_select_parts(&batch_schema, parsed_cols, table).await?;
 
         let sql = format!(
             "SELECT {} FROM \"{}\"",
             select_parts.join(", "),
-            temp_table_name
+            guard.name()
         );
 
         let new_df = table.session.sql(&sql).await.map_err(|e| {
-            let _ = table.session.deregister_table(&temp_table_name);
             LtseqError::Runtime(format!("Window function query failed: {}", e))
         })?;
 
-        let _ = table.session.deregister_table(&temp_table_name);
+        drop(guard);
 
         Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),
@@ -608,35 +594,21 @@ fn cum_sum_sql_fallback(
             Arc::new(schema.clone())
         };
 
-        let temp_table_name = format!("__ltseq_cumsum_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
-            })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        table
-            .session
-            .register_table(&temp_table_name, Arc::new(temp_table))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
-            })?;
+        let guard = register_temp_table(&table.session, &batch_schema, current_batches, "cumsum")?;
 
         let select_parts = build_cumsum_select_parts(&batch_schema, &cum_exprs, table).await?;
 
         let sql = format!(
             "SELECT {} FROM \"{}\"",
             select_parts.join(", "),
-            temp_table_name
+            guard.name()
         );
 
         let new_df = table.session.sql(&sql).await.map_err(|e| {
-            let _ = table.session.deregister_table(&temp_table_name);
             LtseqError::Runtime(format!("cum_sum query failed: {}", e))
         })?;
 
-        let _ = table.session.deregister_table(&temp_table_name);
+        drop(guard);
 
         Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),

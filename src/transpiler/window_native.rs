@@ -484,60 +484,48 @@ fn convert_window_ranking(
     }
 }
 
+/// Convert a PyExpr to a DataFusion Expr, using window-aware conversion when the
+/// sub-expression contains window functions, otherwise falling back to standard conversion.
+fn resolve_maybe_window(
+    py_expr: PyExpr,
+    schema: &ArrowSchema,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    use crate::transpiler::contains_window_function;
+    if contains_window_function(&py_expr) {
+        pyexpr_to_window_inner(py_expr, schema, order_by)
+    } else {
+        pyexpr_to_datafusion(py_expr, schema)
+    }
+}
+
+/// Convert a unary math call (abs, ceil, floor) whose argument may contain window functions.
+fn convert_unary_math_window(
+    func_name: &str,
+    args: &[PyExpr],
+    schema: &ArrowSchema,
+    order_by: &[Sort],
+    build: fn(Expr) -> Expr,
+) -> Result<Expr, String> {
+    if args.is_empty() {
+        return Err(format!("{}() requires an argument", func_name));
+    }
+    let arg_expr = resolve_maybe_window(args[0].clone(), schema, order_by)?;
+    Ok(build(arg_expr))
+}
+
 /// Handle expressions that contain window functions in their children (e.g., BinOp, if_else wrapping shift)
 fn convert_expr_with_window_children(
     py_expr: PyExpr,
     schema: &ArrowSchema,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
-    use crate::transpiler::contains_window_function;
-
     match py_expr {
         PyExpr::BinOp { op, left, right } => {
-            let left_has_window = contains_window_function(&left);
-            let right_has_window = contains_window_function(&right);
-
-            let left_expr = if left_has_window {
-                pyexpr_to_window_inner(*left, schema, order_by)?
-            } else {
-                pyexpr_to_datafusion(*left, schema)?
-            };
-
-            let right_expr = if right_has_window {
-                pyexpr_to_window_inner(*right, schema, order_by)?
-            } else {
-                pyexpr_to_datafusion(*right, schema)?
-            };
-
-            let operator = match op.as_str() {
-                "Add" => datafusion::logical_expr::Operator::Plus,
-                "Sub" => datafusion::logical_expr::Operator::Minus,
-                "Mul" => datafusion::logical_expr::Operator::Multiply,
-                "Div" => datafusion::logical_expr::Operator::Divide,
-                "Mod" => datafusion::logical_expr::Operator::Modulo,
-                "Eq" => datafusion::logical_expr::Operator::Eq,
-                "Ne" => datafusion::logical_expr::Operator::NotEq,
-                "Lt" => datafusion::logical_expr::Operator::Lt,
-                "Le" => datafusion::logical_expr::Operator::LtEq,
-                "Gt" => datafusion::logical_expr::Operator::Gt,
-                "Ge" => datafusion::logical_expr::Operator::GtEq,
-                "And" => datafusion::logical_expr::Operator::And,
-                "Or" => datafusion::logical_expr::Operator::Or,
-                _ => return Err(format!("Unknown binary operator: {}", op)),
-            };
-
-            Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                Box::new(left_expr),
-                operator,
-                Box::new(right_expr),
-            )))
+            convert_binop_window(*left, *right, &op, schema, order_by)
         }
         PyExpr::UnaryOp { op, operand } => {
-            let operand_expr = if contains_window_function(&operand) {
-                pyexpr_to_window_inner(*operand, schema, order_by)?
-            } else {
-                pyexpr_to_datafusion(*operand, schema)?
-            };
+            let operand_expr = resolve_maybe_window(*operand, schema, order_by)?;
             match op.as_str() {
                 "Not" => Ok(operand_expr.not()),
                 _ => Err(format!("Unknown unary operator: {}", op)),
@@ -548,143 +536,137 @@ fn convert_expr_with_window_children(
             on,
             args,
             kwargs,
-        } => {
-            // For non-window function calls that might contain window children
-            // (e.g., fill_null(shift(...)), if_else(cond, shift(...), val))
-            // We need to recursively convert window sub-expressions
-
-            match func.as_str() {
-                "fill_null" => {
-                    let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(*on, schema)?
-                    };
-                    if args.is_empty() {
-                        return Err("fill_null requires a default value".to_string());
-                    }
-                    let default_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(coalesce(vec![on_expr, default_expr]))
-                }
-                "is_null" => {
-                    let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(*on, schema)?
-                    };
-                    Ok(on_expr.is_null())
-                }
-                "is_not_null" => {
-                    let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(*on, schema)?
-                    };
-                    Ok(on_expr.is_not_null())
-                }
-                "if_else" => {
-                    if args.len() != 3 {
-                        return Err("if_else requires 3 arguments".to_string());
-                    }
-                    let cond_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    let true_expr = if contains_window_function(&args[1]) {
-                        pyexpr_to_window_inner(args[1].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[1].clone(), schema)?
-                    };
-                    let false_expr = if contains_window_function(&args[2]) {
-                        pyexpr_to_window_inner(args[2].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[2].clone(), schema)?
-                    };
-
-                    use datafusion::logical_expr::case;
-                    case(cond_expr)
-                        .when(lit(true), true_expr)
-                        .otherwise(false_expr)
-                        .map_err(|e| format!("Failed to create CASE expression: {}", e))
-                }
-                "abs" => {
-                    // abs(x) where x might contain window functions
-                    if args.is_empty() {
-                        return Err("abs() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::abs(arg_expr))
-                }
-                "ceil" => {
-                    if args.is_empty() {
-                        return Err("ceil() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::ceil(arg_expr))
-                }
-                "floor" => {
-                    if args.is_empty() {
-                        return Err("floor() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::floor(arg_expr))
-                }
-                "round" => {
-                    if args.is_empty() {
-                        return Err("round() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    // round takes (value, decimal_places)
-                    let decimals = if args.len() > 1 {
-                        if let PyExpr::Literal { value, .. } = &args[1] {
-                            value.parse::<i64>().unwrap_or(0)
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    };
-                    Ok(datafusion::functions::math::expr_fn::round(vec![
-                        arg_expr,
-                        lit(decimals),
-                    ]))
-                }
-                _ => {
-                    // For other function calls, try to handle as non-window
-                    // and reconstruct
-                    let reconstructed = PyExpr::Call {
-                        func,
-                        on,
-                        args,
-                        kwargs,
-                    };
-                    pyexpr_to_datafusion(reconstructed, schema)
-                }
-            }
-        }
+        } => convert_call_with_window_children(func, *on, args, kwargs, schema, order_by),
         // For non-window expressions, use the standard converter
         other => pyexpr_to_datafusion(other, schema),
+    }
+}
+
+/// Convert a BinOp whose children may contain window functions.
+fn convert_binop_window(
+    left: PyExpr,
+    right: PyExpr,
+    op: &str,
+    schema: &ArrowSchema,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    let left_expr = resolve_maybe_window(left, schema, order_by)?;
+    let right_expr = resolve_maybe_window(right, schema, order_by)?;
+
+    let operator = match op {
+        "Add" => datafusion::logical_expr::Operator::Plus,
+        "Sub" => datafusion::logical_expr::Operator::Minus,
+        "Mul" => datafusion::logical_expr::Operator::Multiply,
+        "Div" => datafusion::logical_expr::Operator::Divide,
+        "Mod" => datafusion::logical_expr::Operator::Modulo,
+        "Eq" => datafusion::logical_expr::Operator::Eq,
+        "Ne" => datafusion::logical_expr::Operator::NotEq,
+        "Lt" => datafusion::logical_expr::Operator::Lt,
+        "Le" => datafusion::logical_expr::Operator::LtEq,
+        "Gt" => datafusion::logical_expr::Operator::Gt,
+        "Ge" => datafusion::logical_expr::Operator::GtEq,
+        "And" => datafusion::logical_expr::Operator::And,
+        "Or" => datafusion::logical_expr::Operator::Or,
+        _ => return Err(format!("Unknown binary operator: {}", op)),
+    };
+
+    Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
+        Box::new(left_expr),
+        operator,
+        Box::new(right_expr),
+    )))
+}
+
+/// Convert non-window function calls whose arguments may contain window sub-expressions.
+fn convert_call_with_window_children(
+    func: String,
+    on: PyExpr,
+    args: Vec<PyExpr>,
+    kwargs: std::collections::HashMap<String, PyExpr>,
+    schema: &ArrowSchema,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    match func.as_str() {
+        "fill_null" => {
+            let on_expr = resolve_maybe_window(on, schema, order_by)?;
+            if args.is_empty() {
+                return Err("fill_null requires a default value".to_string());
+            }
+            let default_expr = resolve_maybe_window(args[0].clone(), schema, order_by)?;
+            Ok(coalesce(vec![on_expr, default_expr]))
+        }
+        "is_null" => {
+            let on_expr = resolve_maybe_window(on, schema, order_by)?;
+            Ok(on_expr.is_null())
+        }
+        "is_not_null" => {
+            let on_expr = resolve_maybe_window(on, schema, order_by)?;
+            Ok(on_expr.is_not_null())
+        }
+        "if_else" => {
+            if args.len() != 3 {
+                return Err("if_else requires 3 arguments".to_string());
+            }
+            let cond_expr = resolve_maybe_window(args[0].clone(), schema, order_by)?;
+            let true_expr = resolve_maybe_window(args[1].clone(), schema, order_by)?;
+            let false_expr = resolve_maybe_window(args[2].clone(), schema, order_by)?;
+
+            use datafusion::logical_expr::case;
+            case(cond_expr)
+                .when(lit(true), true_expr)
+                .otherwise(false_expr)
+                .map_err(|e| format!("Failed to create CASE expression: {}", e))
+        }
+        "abs" => convert_unary_math_window(
+            "abs",
+            &args,
+            schema,
+            order_by,
+            datafusion::functions::math::expr_fn::abs,
+        ),
+        "ceil" => convert_unary_math_window(
+            "ceil",
+            &args,
+            schema,
+            order_by,
+            datafusion::functions::math::expr_fn::ceil,
+        ),
+        "floor" => convert_unary_math_window(
+            "floor",
+            &args,
+            schema,
+            order_by,
+            datafusion::functions::math::expr_fn::floor,
+        ),
+        "round" => {
+            if args.is_empty() {
+                return Err("round() requires an argument".to_string());
+            }
+            let arg_expr = resolve_maybe_window(args[0].clone(), schema, order_by)?;
+            let decimals = if args.len() > 1 {
+                if let PyExpr::Literal { value, .. } = &args[1] {
+                    value.parse::<i64>().unwrap_or(0)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            Ok(datafusion::functions::math::expr_fn::round(vec![
+                arg_expr,
+                lit(decimals),
+            ]))
+        }
+        _ => {
+            // For other function calls, try to handle as non-window
+            let reconstructed = PyExpr::Call {
+                func,
+                on: Box::new(on),
+                args,
+                kwargs,
+            };
+            pyexpr_to_datafusion(reconstructed, schema)
+        }
     }
 }
 

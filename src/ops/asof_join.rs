@@ -79,37 +79,8 @@ pub fn asof_join_impl(
         .unwrap_or_else(|| Arc::new((**stored_schema_right).clone()));
 
     // 5. Find time column indices
-    let left_time_idx = left_schema
-        .fields()
-        .iter()
-        .position(|f| f.name() == left_time_col)
-        .ok_or_else(|| {
-            LtseqError::Validation(format!(
-                "Time column '{}' not found in left table. Available: {:?}",
-                left_time_col,
-                left_schema
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect::<Vec<_>>()
-            ))
-        })?;
-
-    let right_time_idx = right_schema
-        .fields()
-        .iter()
-        .position(|f| f.name() == right_time_col)
-        .ok_or_else(|| {
-            LtseqError::Validation(format!(
-                "Time column '{}' not found in right table. Available: {:?}",
-                right_time_col,
-                right_schema
-                    .fields()
-                    .iter()
-                    .map(|f| f.name())
-                    .collect::<Vec<_>>()
-            ))
-        })?;
+    let left_time_idx = find_time_column_index(&left_schema, left_time_col, "left")?;
+    let right_time_idx = find_time_column_index(&right_schema, right_time_col, "right")?;
 
     // 6. Flatten batches and extract time values
     let mut left_times: Vec<i64> = Vec::new();
@@ -192,40 +163,98 @@ pub fn asof_join_impl(
     // Optimization: consolidate all batches into single RecordBatches once,
     // then extract columns directly. This avoids per-column concat (which
     // would redundantly concatenate the same batches N+M times).
+
+    // Consolidate left/right batches into single RecordBatches
+    let consolidated_left = consolidate_batches(left_batches, &left_schema, "left")?;
+    let consolidated_right = consolidate_batches(right_batches, &right_schema, "right")?;
+
     let num_result_rows = left_times.len();
+    // Build result columns (left direct + right via take/null)
+    let result_columns = build_asof_result_columns(
+        &consolidated_left,
+        &consolidated_right,
+        &left_schema,
+        &right_schema,
+        &matched_right_indices,
+        num_result_rows,
+    )?;
+
+    // 10. Create result RecordBatch
+    let result_batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+        Arc::clone(&result_schema),
+        result_columns,
+    )
+    .map_err(|e| {
+        LtseqError::Runtime(format!(
+            "Failed to create result batch: {}",
+            e
+        ))
+    })?;
+
+    // 11. Create result LTSeqTable
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        vec![result_batch],
+        Vec::new(),
+        table.source_parquet_path.clone(),
+    )
+}
+
+/// Find a column index by name in a schema, with a descriptive error.
+fn find_time_column_index(
+    schema: &Arc<ArrowSchema>,
+    col_name: &str,
+    side: &str,
+) -> PyResult<usize> {
+    schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == col_name)
+        .ok_or_else(|| {
+            LtseqError::Validation(format!(
+                "Time column '{}' not found in {} table. Available: {:?}",
+                col_name,
+                side,
+                schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<Vec<_>>()
+            ))
+            .into()
+        })
+}
+
+/// Consolidate multiple RecordBatches into a single one (or None if empty).
+fn consolidate_batches(
+    batches: Vec<datafusion::arrow::record_batch::RecordBatch>,
+    schema: &Arc<ArrowSchema>,
+    side: &str,
+) -> PyResult<Option<datafusion::arrow::record_batch::RecordBatch>> {
+    if batches.len() <= 1 {
+        Ok(batches.into_iter().next())
+    } else {
+        Ok(Some(
+            datafusion::arrow::compute::concat_batches(schema, &batches).map_err(|e| {
+                LtseqError::Runtime(format!(
+                    "Failed to concatenate {} batches: {}",
+                    side, e
+                ))
+            })?,
+        ))
+    }
+}
+
+/// Build result columns: left columns directly, right columns via take() or null.
+fn build_asof_result_columns(
+    consolidated_left: &Option<datafusion::arrow::record_batch::RecordBatch>,
+    consolidated_right: &Option<datafusion::arrow::record_batch::RecordBatch>,
+    left_schema: &Arc<ArrowSchema>,
+    right_schema: &Arc<ArrowSchema>,
+    matched_right_indices: &[Option<usize>],
+    num_result_rows: usize,
+) -> PyResult<Vec<Arc<dyn Array>>> {
     let mut result_columns: Vec<Arc<dyn Array>> = Vec::new();
-
-    // Consolidate left batches into a single RecordBatch
-    let consolidated_left = if left_batches.len() <= 1 {
-        left_batches.into_iter().next()
-    } else {
-        Some(
-            datafusion::arrow::compute::concat_batches(&left_schema, &left_batches).map_err(
-                |e| {
-                    LtseqError::Runtime(format!(
-                        "Failed to concatenate left batches: {}",
-                        e
-                    ))
-                },
-            )?,
-        )
-    };
-
-    // Consolidate right batches into a single RecordBatch
-    let consolidated_right = if right_batches.len() <= 1 {
-        right_batches.into_iter().next()
-    } else {
-        Some(
-            datafusion::arrow::compute::concat_batches(&right_schema, &right_batches).map_err(
-                |e| {
-                    LtseqError::Runtime(format!(
-                        "Failed to concatenate right batches: {}",
-                        e
-                    ))
-                },
-            )?,
-        )
-    };
 
     // Copy left columns directly (all rows kept in order after concat)
     if let Some(ref left_batch) = consolidated_left {
@@ -262,25 +291,7 @@ pub fn asof_join_impl(
         }
     }
 
-    // 10. Create result RecordBatch
-    let result_batch = datafusion::arrow::record_batch::RecordBatch::try_new(
-        Arc::clone(&result_schema),
-        result_columns,
-    )
-    .map_err(|e| {
-        LtseqError::Runtime(format!(
-            "Failed to create result batch: {}",
-            e
-        ))
-    })?;
-
-    // 11. Create result LTSeqTable
-    LTSeqTable::from_batches(
-        Arc::clone(&table.session),
-        vec![result_batch],
-        Vec::new(),
-        table.source_parquet_path.clone(),
-    )
+    Ok(result_columns)
 }
 
 /// CPU sequential as-of search — for each left time, find matching right index.

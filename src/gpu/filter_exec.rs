@@ -653,50 +653,9 @@ fn gpu_filter_leaf(
 ) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
     let column = batch.column(pred.column_index);
 
-    // --- Special-case types that don't use CUDA comparison kernels ---
-
     // Dictionary columns: cast to the underlying value type, then filter as that type.
     if let DataType::Dictionary(_, value_type) = &pred.data_type {
-        let cast_column = cast(column, value_type).map_err(|e| {
-            datafusion::common::DataFusionError::Execution(
-                format!("Failed to cast dictionary column to {:?}: {}", value_type, e),
-            )
-        })?;
-        let mut new_batch_columns: Vec<datafusion::arrow::array::ArrayRef> = Vec::new();
-        for i in 0..batch.num_columns() {
-            if i == pred.column_index {
-                new_batch_columns.push(cast_column.clone());
-            } else {
-                new_batch_columns.push(batch.column(i).clone());
-            }
-        }
-        // Build a new schema with the cast column type
-        let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
-        for (i, field) in batch.schema().fields().iter().enumerate() {
-            if i == pred.column_index {
-                fields.push(datafusion::arrow::datatypes::Field::new(
-                    field.name(),
-                    value_type.as_ref().clone(),
-                    field.is_nullable(),
-                ));
-            } else {
-                fields.push(field.as_ref().clone());
-            }
-        }
-        let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(fields));
-        let new_batch = RecordBatch::try_new(new_schema, new_batch_columns).map_err(|e| {
-            datafusion::common::DataFusionError::Execution(
-                format!("Failed to create batch with cast dictionary column: {}", e),
-            )
-        })?;
-        let cast_pred = GpuFilterPredicate {
-            column_index: pred.column_index,
-            column_name: pred.column_name.clone(),
-            op: pred.op,
-            literal: pred.literal.clone(),
-            data_type: value_type.as_ref().clone(),
-        };
-        return gpu_filter_leaf(&new_batch, &cast_pred, stream, n, launch_cfg);
+        return cast_dictionary_and_recurse(batch, pred, stream, n, launch_cfg, column, value_type);
     }
 
     // Boolean columns: evaluate comparison on CPU, upload mask to GPU.
@@ -709,14 +668,86 @@ fn gpu_filter_leaf(
         return gpu_filter_leaf_string(column, pred, stream, n);
     }
 
-    // --- Numeric / Date / Timestamp types: use CUDA comparison kernels ---
+    // Numeric / Date / Timestamp types: use CUDA comparison kernels
+    filter_numeric_column(column, pred, stream, n, launch_cfg)
+}
 
+/// Cast a dictionary-typed column to its underlying value type and re-invoke `gpu_filter_leaf`.
+fn cast_dictionary_and_recurse(
+    batch: &RecordBatch,
+    pred: &GpuFilterPredicate,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    n: usize,
+    launch_cfg: LaunchConfig,
+    column: &datafusion::arrow::array::ArrayRef,
+    value_type: &DataType,
+) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
+    let cast_column = cast(column, value_type).map_err(|e| {
+        datafusion::common::DataFusionError::Execution(format!(
+            "Failed to cast dictionary column to {:?}: {}",
+            value_type, e
+        ))
+    })?;
+    let new_batch_columns: Vec<datafusion::arrow::array::ArrayRef> = batch
+        .columns()
+        .iter()
+        .enumerate()
+        .map(|(i, col)| {
+            if i == pred.column_index {
+                cast_column.clone()
+            } else {
+                col.clone()
+            }
+        })
+        .collect();
+    let fields: Vec<datafusion::arrow::datatypes::Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            if i == pred.column_index {
+                datafusion::arrow::datatypes::Field::new(
+                    field.name(),
+                    value_type.clone(),
+                    field.is_nullable(),
+                )
+            } else {
+                field.as_ref().clone()
+            }
+        })
+        .collect();
+    let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new(fields));
+    let new_batch = RecordBatch::try_new(new_schema, new_batch_columns).map_err(|e| {
+        datafusion::common::DataFusionError::Execution(format!(
+            "Failed to create batch with cast dictionary column: {}",
+            e
+        ))
+    })?;
+    let cast_pred = GpuFilterPredicate {
+        column_index: pred.column_index,
+        column_name: pred.column_name.clone(),
+        op: pred.op,
+        literal: pred.literal.clone(),
+        data_type: value_type.clone(),
+    };
+    gpu_filter_leaf(&new_batch, &cast_pred, stream, n, launch_cfg)
+}
+
+/// Dispatch numeric / date / timestamp columns to the appropriate CUDA kernel.
+fn filter_numeric_column(
+    column: &datafusion::arrow::array::ArrayRef,
+    pred: &GpuFilterPredicate,
+    stream: &Arc<cudarc::driver::safe::CudaStream>,
+    n: usize,
+    launch_cfg: LaunchConfig,
+) -> Result<cudarc::driver::safe::CudaSlice<u8>> {
     let kernel_name = pred.kernel_name();
-
     let func = get_filter_function(&kernel_name).ok_or_else(|| {
-        datafusion::common::DataFusionError::Execution(
-            format!("CUDA kernel '{}' not found", kernel_name),
-        )
+        datafusion::common::DataFusionError::Execution(format!(
+            "CUDA kernel '{}' not found",
+            kernel_name
+        ))
     })?;
 
     match pred.data_type {
@@ -729,17 +760,17 @@ fn gpu_filter_leaf(
                         "Column is not Int64Array".to_string(),
                     )
                 })?;
-            let values: &[i64] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Int64(Some(v)) => *v,
                 ScalarValue::Int32(Some(v)) => *v as i64,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to i64", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to i64",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_i64_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_i64_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Int32 => {
             let array = column
@@ -750,17 +781,17 @@ fn gpu_filter_leaf(
                         "Column is not Int32Array".to_string(),
                     )
                 })?;
-            let values: &[i32] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Int32(Some(v)) => *v,
                 ScalarValue::Int64(Some(v)) => *v as i32,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to i32", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to i32",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_i32_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_i32_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Float64 => {
             let array = column
@@ -771,17 +802,17 @@ fn gpu_filter_leaf(
                         "Column is not Float64Array".to_string(),
                     )
                 })?;
-            let values: &[f64] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Float64(Some(v)) => *v,
                 ScalarValue::Float32(Some(v)) => *v as f64,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to f64", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to f64",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_f64_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_f64_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Float32 => {
             let array = column
@@ -792,16 +823,16 @@ fn gpu_filter_leaf(
                         "Column is not Float32Array".to_string(),
                     )
                 })?;
-            let values: &[f32] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Float32(Some(v)) => *v,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to f32", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to f32",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_f32_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_f32_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Date32 => {
             let array = column
@@ -812,18 +843,18 @@ fn gpu_filter_leaf(
                         "Column is not Date32Array".to_string(),
                     )
                 })?;
-            let values: &[i32] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Date32(Some(v)) => *v,
                 ScalarValue::Int32(Some(v)) => *v,
                 ScalarValue::Int64(Some(v)) => *v as i32,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to Date32 (i32)", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to Date32 (i32)",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_i32_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_i32_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Date64 => {
             let array = column
@@ -834,47 +865,20 @@ fn gpu_filter_leaf(
                         "Column is not Date64Array".to_string(),
                     )
                 })?;
-            let values: &[i64] = array.values();
             let threshold = match &pred.literal {
                 ScalarValue::Date64(Some(v)) => *v,
                 ScalarValue::Int64(Some(v)) => *v,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to Date64 (i64)", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to Date64 (i64)",
+                        pred.literal
+                    )))
                 }
             };
-            run_kernel_i64_device(stream, &func, values, threshold, n, launch_cfg)
+            run_kernel_i64_device(stream, &func, array.values(), threshold, n, launch_cfg)
         }
         DataType::Timestamp(unit, _) => {
-            // All timestamp variants store underlying data as i64.
-            // Extract the i64 slice by matching on the time unit for the correct array type.
-            let values: &[i64] = match unit {
-                TimeUnit::Second => {
-                    column.as_any().downcast_ref::<TimestampSecondArray>()
-                        .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                            "Column is not TimestampSecondArray".to_string(),
-                        ))?.values()
-                }
-                TimeUnit::Millisecond => {
-                    column.as_any().downcast_ref::<TimestampMillisecondArray>()
-                        .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                            "Column is not TimestampMillisecondArray".to_string(),
-                        ))?.values()
-                }
-                TimeUnit::Microsecond => {
-                    column.as_any().downcast_ref::<TimestampMicrosecondArray>()
-                        .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                            "Column is not TimestampMicrosecondArray".to_string(),
-                        ))?.values()
-                }
-                TimeUnit::Nanosecond => {
-                    column.as_any().downcast_ref::<TimestampNanosecondArray>()
-                        .ok_or_else(|| datafusion::common::DataFusionError::Execution(
-                            "Column is not TimestampNanosecondArray".to_string(),
-                        ))?.values()
-                }
-            };
+            let values: &[i64] = extract_timestamp_values(column, unit)?;
             let threshold = match &pred.literal {
                 ScalarValue::TimestampSecond(Some(v), _) => *v,
                 ScalarValue::TimestampMillisecond(Some(v), _) => *v,
@@ -882,16 +886,63 @@ fn gpu_filter_leaf(
                 ScalarValue::TimestampNanosecond(Some(v), _) => *v,
                 ScalarValue::Int64(Some(v)) => *v,
                 _ => {
-                    return Err(datafusion::common::DataFusionError::Execution(
-                        format!("Cannot convert {:?} to Timestamp (i64)", pred.literal),
-                    ))
+                    return Err(datafusion::common::DataFusionError::Execution(format!(
+                        "Cannot convert {:?} to Timestamp (i64)",
+                        pred.literal
+                    )))
                 }
             };
             run_kernel_i64_device(stream, &func, values, threshold, n, launch_cfg)
         }
-        _ => Err(datafusion::common::DataFusionError::Execution(
-            format!("Unsupported GPU filter type: {:?}", pred.data_type),
-        )),
+        _ => Err(datafusion::common::DataFusionError::Execution(format!(
+            "Unsupported GPU filter type: {:?}",
+            pred.data_type
+        ))),
+    }
+}
+
+/// Extract the underlying `&[i64]` values from a timestamp column, regardless of time unit.
+fn extract_timestamp_values<'a>(
+    column: &'a datafusion::arrow::array::ArrayRef,
+    unit: TimeUnit,
+) -> Result<&'a [i64]> {
+    match unit {
+        TimeUnit::Second => column
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .ok_or_else(|| {
+                datafusion::common::DataFusionError::Execution(
+                    "Column is not TimestampSecondArray".to_string(),
+                )
+            })
+            .map(|a| a.values().as_ref()),
+        TimeUnit::Millisecond => column
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .ok_or_else(|| {
+                datafusion::common::DataFusionError::Execution(
+                    "Column is not TimestampMillisecondArray".to_string(),
+                )
+            })
+            .map(|a| a.values().as_ref()),
+        TimeUnit::Microsecond => column
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .ok_or_else(|| {
+                datafusion::common::DataFusionError::Execution(
+                    "Column is not TimestampMicrosecondArray".to_string(),
+                )
+            })
+            .map(|a| a.values().as_ref()),
+        TimeUnit::Nanosecond => column
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .ok_or_else(|| {
+                datafusion::common::DataFusionError::Execution(
+                    "Column is not TimestampNanosecondArray".to_string(),
+                )
+            })
+            .map(|a| a.values().as_ref()),
     }
 }
 

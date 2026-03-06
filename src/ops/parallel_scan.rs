@@ -992,94 +992,115 @@ fn count_cross_rg_boundary_patterns_from_info(
                 .collect();
 
             if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-                for i in 0..max_start {
-                    if i >= tail_len {
-                        break;
-                    }
-                    let last_row = i + num_steps - 1;
-                    if last_row < tail_len {
-                        continue;
-                    }
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        boundary_count += 1;
-                    }
-                }
+                boundary_count += count_cross_boundary_prefix_matches(
+                    |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
+                    &step1_mask,
+                    &prefixes,
+                    max_start,
+                    tail_len,
+                    num_steps,
+                );
             } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-                for i in 0..max_start {
-                    if i >= tail_len {
-                        break;
-                    }
-                    let last_row = i + num_steps - 1;
-                    if last_row < tail_len {
-                        continue;
-                    }
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        boundary_count += 1;
-                    }
-                }
+                boundary_count += count_cross_boundary_prefix_matches(
+                    |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
+                    &step1_mask,
+                    &prefixes,
+                    max_start,
+                    tail_len,
+                    num_steps,
+                );
             }
         } else {
-            // General fallback for cross-boundary
-            let step_masks: Vec<BooleanArray> = step_predicates
-                .iter()
-                .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
-                .collect();
-
-            if step_masks.len() != step_predicates.len() {
-                continue;
-            }
-
-            for i in 0..max_start {
-                if i >= tail_len {
-                    break;
-                }
-                let last_row = i + num_steps - 1;
-                if last_row < tail_len {
-                    continue;
-                }
-                if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, mask) in step_masks[1..].iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if !mask.is_valid(row) || !mask.value(row) {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if all_match {
-                    boundary_count += 1;
-                }
-            }
+            boundary_count += count_cross_boundary_general(
+                &step_predicates,
+                &combined,
+                name_to_idx,
+                max_start,
+                tail_len,
+                num_steps,
+            );
         }
     }
 
     boundary_count
 }
 
+/// Fast-path cross-boundary prefix matching: only count matches that start in
+/// the tail portion and end in the head portion of the concatenated batch.
+fn count_cross_boundary_prefix_matches<'a>(
+    get_str: impl Fn(usize) -> Option<&'a str>,
+    step1_mask: &BooleanArray,
+    prefixes: &[&str],
+    max_start: usize,
+    tail_len: usize,
+    num_steps: usize,
+) -> usize {
+    let mut count = 0;
+    for i in 0..max_start {
+        if i >= tail_len {
+            break;
+        }
+        let last_row = i + num_steps - 1;
+        if last_row < tail_len {
+            continue;
+        }
+        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+            continue;
+        }
+        let all_match = prefixes.iter().enumerate().all(|(step_offset, prefix)| {
+            let row = i + step_offset + 1;
+            get_str(row).map_or(false, |s| s.starts_with(prefix))
+        });
+        if all_match {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// General fallback cross-boundary matching using evaluated predicate masks.
+fn count_cross_boundary_general(
+    step_predicates: &[PyExpr],
+    combined: &RecordBatch,
+    name_to_idx: &HashMap<String, usize>,
+    max_start: usize,
+    tail_len: usize,
+    num_steps: usize,
+) -> usize {
+    let step_masks: Vec<BooleanArray> = step_predicates
+        .iter()
+        .filter_map(|expr| eval_predicate(expr, combined, name_to_idx).ok())
+        .collect();
+
+    if step_masks.len() != step_predicates.len() {
+        return 0;
+    }
+
+    let mut count = 0;
+    for i in 0..max_start {
+        if i >= tail_len {
+            break;
+        }
+        let last_row = i + num_steps - 1;
+        if last_row < tail_len {
+            continue;
+        }
+        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+            continue;
+        }
+        let all_match = step_masks[1..]
+            .iter()
+            .enumerate()
+            .all(|(step_offset, mask)| {
+                let row = i + step_offset + 1;
+                mask.is_valid(row) && mask.value(row)
+            });
+        if all_match {
+            count += 1;
+        }
+    }
+    count
+}
 /// Unify schemas across batches and concatenate.
 ///
 /// Different Parquet row groups can produce different Arrow types for string columns
@@ -1219,18 +1240,8 @@ fn count_patterns_in_rg_slices(
         return 0;
     }
 
-    // Build partition boundary mask: partition_boundaries[i] = true means row i
-    // starts a new partition (different key from row i-1).
-    // We compute this from the original slices' key + row count info.
-    let mut partition_boundaries = vec![false; n];
-    partition_boundaries[0] = true; // first row always starts a partition
-    let mut offset = 0;
-    for (idx, (key, batch)) in rg_slices.iter().enumerate() {
-        if idx > 0 && *key != rg_slices[idx - 1].0 {
-            partition_boundaries[offset] = true;
-        }
-        offset += batch.num_rows();
-    }
+    // Build partition boundary mask
+    let partition_boundaries = build_partition_boundaries(rg_slices, n);
 
     // Pattern match: skip matches that span partition boundaries
     let step1_mask = match eval_predicate(&step_predicates[0], &combined, name_to_idx) {
@@ -1239,7 +1250,6 @@ fn count_patterns_in_rg_slices(
     };
 
     let max_start = n.saturating_sub(num_steps - 1);
-    let mut count: usize = 0;
 
     // Try fast path: all remaining predicates are starts_with on same column
     let step_prefixes: Vec<Option<String>> = step_predicates[1..]
@@ -1251,7 +1261,6 @@ fn count_patterns_in_rg_slices(
     let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
 
     if all_simple {
-        // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
         let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
         let prefixes: Vec<&str> = step_prefixes
             .iter()
@@ -1259,99 +1268,127 @@ fn count_patterns_in_rg_slices(
             .collect();
 
         if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-            for i in 0..max_start {
-                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                    continue;
-                }
-                // Check that all rows i..i+num_steps are in the same partition
-                let mut crosses_boundary = false;
-                for offset in 1..num_steps {
-                    if partition_boundaries[i + offset] {
-                        crosses_boundary = true;
-                        break;
-                    }
-                }
-                if crosses_boundary {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, prefix) in prefixes.iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if all_match {
-                    count += 1;
-                }
-            }
+            count_prefix_matches(
+                |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
+                &step1_mask,
+                &partition_boundaries,
+                &prefixes,
+                max_start,
+                num_steps,
+            )
         } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-            for i in 0..max_start {
-                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                    continue;
-                }
-                let mut crosses_boundary = false;
-                for offset in 1..num_steps {
-                    if partition_boundaries[i + offset] {
-                        crosses_boundary = true;
-                        break;
-                    }
-                }
-                if crosses_boundary {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, prefix) in prefixes.iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if all_match {
-                    count += 1;
-                }
-            }
+            count_prefix_matches(
+                |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
+                &step1_mask,
+                &partition_boundaries,
+                &prefixes,
+                max_start,
+                num_steps,
+            )
+        } else {
+            0
         }
     } else {
-        // General fallback
-        let step_masks: Vec<BooleanArray> = step_predicates
-            .iter()
-            .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
-            .collect();
+        count_patterns_general(
+            &step_predicates,
+            &combined,
+            name_to_idx,
+            &partition_boundaries,
+            max_start,
+            num_steps,
+        )
+    }
+}
 
-        if step_masks.len() != step_predicates.len() {
-            return 0;
+/// Build a boolean mask where `true` means a row starts a new partition.
+fn build_partition_boundaries(rg_slices: &[(i64, RecordBatch)], n: usize) -> Vec<bool> {
+    let mut boundaries = vec![false; n];
+    boundaries[0] = true;
+    let mut offset = 0;
+    for (idx, (key, batch)) in rg_slices.iter().enumerate() {
+        if idx > 0 && *key != rg_slices[idx - 1].0 {
+            boundaries[offset] = true;
         }
+        offset += batch.num_rows();
+    }
+    boundaries
+}
 
-        for i in 0..max_start {
-            if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-                continue;
-            }
-            let mut crosses_boundary = false;
-            for offset in 1..num_steps {
-                if partition_boundaries[i + offset] {
-                    crosses_boundary = true;
-                    break;
-                }
-            }
-            if crosses_boundary {
-                continue;
-            }
-            let mut all_match = true;
-            for (step_offset, mask) in step_masks[1..].iter().enumerate() {
-                let row = i + step_offset + 1;
-                if !mask.is_valid(row) || !mask.value(row) {
-                    all_match = false;
-                    break;
-                }
-            }
-            if all_match {
-                count += 1;
-            }
+/// Check whether rows `i+1..i+num_steps` cross a partition boundary.
+fn crosses_partition_boundary(
+    partition_boundaries: &[bool],
+    start: usize,
+    num_steps: usize,
+) -> bool {
+    (1..num_steps).any(|offset| partition_boundaries[start + offset])
+}
+
+/// Fast-path prefix matching for a string column.
+///
+/// `get_str` returns `Some(value)` for non-null rows and `None` for nulls.
+fn count_prefix_matches<'a>(
+    get_str: impl Fn(usize) -> Option<&'a str>,
+    step1_mask: &BooleanArray,
+    partition_boundaries: &[bool],
+    prefixes: &[&str],
+    max_start: usize,
+    num_steps: usize,
+) -> usize {
+    let mut count = 0;
+    for i in 0..max_start {
+        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+            continue;
+        }
+        if crosses_partition_boundary(partition_boundaries, i, num_steps) {
+            continue;
+        }
+        let all_match = prefixes.iter().enumerate().all(|(step_offset, prefix)| {
+            let row = i + step_offset + 1;
+            get_str(row).map_or(false, |s| s.starts_with(prefix))
+        });
+        if all_match {
+            count += 1;
         }
     }
+    count
+}
 
+/// General fallback: evaluate all step predicates as masks and count matches.
+fn count_patterns_general(
+    step_predicates: &[PyExpr],
+    combined: &RecordBatch,
+    name_to_idx: &HashMap<String, usize>,
+    partition_boundaries: &[bool],
+    max_start: usize,
+    num_steps: usize,
+) -> usize {
+    let step_masks: Vec<BooleanArray> = step_predicates
+        .iter()
+        .filter_map(|expr| eval_predicate(expr, combined, name_to_idx).ok())
+        .collect();
+
+    if step_masks.len() != step_predicates.len() {
+        return 0;
+    }
+
+    let mut count = 0;
+    for i in 0..max_start {
+        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+            continue;
+        }
+        if crosses_partition_boundary(partition_boundaries, i, num_steps) {
+            continue;
+        }
+        let all_match = step_masks[1..]
+            .iter()
+            .enumerate()
+            .all(|(step_offset, mask)| {
+                let row = i + step_offset + 1;
+                mask.is_valid(row) && mask.value(row)
+            });
+        if all_match {
+            count += 1;
+        }
+    }
     count
 }

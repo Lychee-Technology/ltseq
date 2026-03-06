@@ -1353,6 +1353,20 @@ fn gather_column(
 // Collapsed Aggregation — Per-Group Results (not broadcast)
 // ============================================================================
 
+/// Shared context for collapsed aggregation GPU kernels.
+///
+/// Bundles the common parameters passed to every `run_collapsed_*` function:
+/// the CUDA stream, device-side group-id array, allocation size for
+/// per-group buffers, actual number of groups, and launch configuration.
+struct CollapsedAggContext<'a> {
+    stream: &'a Arc<CudaStream>,
+    d_group_id: &'a cudarc::driver::safe::CudaSlice<u32>,
+    alloc_size: usize,
+    num_groups: usize,
+    n_u32: u32,
+    launch_cfg: &'a LaunchConfig,
+}
+
 /// Run a single aggregation and produce collapsed output (one value per group).
 ///
 /// Unlike `gpu_segmented_aggregate()` in ordered_ops which broadcasts results
@@ -1381,25 +1395,34 @@ fn run_collapsed_aggregate(
     let group_id_values: &[u32] = group_id_u32.values();
     let d_group_id = stream.clone_htod(group_id_values).map_err(cuda_err)?;
 
+    let ctx = CollapsedAggContext {
+        stream,
+        d_group_id: &d_group_id,
+        alloc_size,
+        num_groups,
+        n_u32,
+        launch_cfg: &launch_cfg,
+    };
+
     match agg_req.func {
         SegAggFunc::Count => {
-            run_collapsed_count(stream, &d_group_id, alloc_size, num_groups, n_u32, &launch_cfg)
+            run_collapsed_count(&ctx)
         }
         SegAggFunc::Sum => {
             let sorted_col = get_sorted_value_column(stream, batch, agg_req, permutation, n)?;
-            run_collapsed_sum(stream, &d_group_id, &sorted_col, &agg_req.data_type, alloc_size, num_groups, n_u32, &launch_cfg)
+            run_collapsed_sum(&ctx, &sorted_col, &agg_req.data_type)
         }
         SegAggFunc::Min => {
             let sorted_col = get_sorted_value_column(stream, batch, agg_req, permutation, n)?;
-            run_collapsed_min_max(stream, &d_group_id, &sorted_col, &agg_req.data_type, alloc_size, num_groups, n_u32, &launch_cfg, true)
+            run_collapsed_min_max(&ctx, &sorted_col, &agg_req.data_type, true)
         }
         SegAggFunc::Max => {
             let sorted_col = get_sorted_value_column(stream, batch, agg_req, permutation, n)?;
-            run_collapsed_min_max(stream, &d_group_id, &sorted_col, &agg_req.data_type, alloc_size, num_groups, n_u32, &launch_cfg, false)
+            run_collapsed_min_max(&ctx, &sorted_col, &agg_req.data_type, false)
         }
         SegAggFunc::Avg => {
             let sorted_col = get_sorted_value_column(stream, batch, agg_req, permutation, n)?;
-            run_collapsed_avg(stream, &d_group_id, &sorted_col, &agg_req.data_type, alloc_size, num_groups, n_u32, &launch_cfg)
+            run_collapsed_avg(&ctx, &sorted_col, &agg_req.data_type)
         }
         SegAggFunc::FirstValue => {
             // FirstValue in the collapsed path should be handled in gpu_hash_aggregate
@@ -1430,44 +1453,34 @@ fn get_sorted_value_column(
 
 /// Collapsed count: per-group row count → num_groups output values.
 fn run_collapsed_count(
-    stream: &Arc<CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
-    alloc_size: usize,
-    num_groups: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
+    ctx: &CollapsedAggContext<'_>,
 ) -> Result<ArrayRef> {
     let func = super::ordered_ops::get_ordered_ops_function_pub("seg_count").ok_or_else(|| {
         DataFusionError::Execution("CUDA kernel 'seg_count' not found".to_string())
     })?;
 
-    let mut d_counts = stream.alloc_zeros::<i64>(alloc_size).map_err(cuda_err)?;
+    let mut d_counts = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size).map_err(cuda_err)?;
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&mut d_counts)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(cuda_err)?;
     }
 
     // Download per-group counts, skip slot 0 (group_id is 1-based)
-    let all_counts = stream.clone_dtoh(&d_counts).map_err(cuda_err)?;
-    let counts: Vec<i64> = all_counts[1..=num_groups].to_vec();
+    let all_counts = ctx.stream.clone_dtoh(&d_counts).map_err(cuda_err)?;
+    let counts: Vec<i64> = all_counts[1..=ctx.num_groups].to_vec();
     Ok(Arc::new(Int64Array::from(counts)))
 }
 
 /// Collapsed sum: per-group sum → num_groups output values.
 fn run_collapsed_sum(
-    stream: &Arc<CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &CollapsedAggContext<'_>,
     sorted_col: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    num_groups: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
 ) -> Result<ArrayRef> {
     // Cast i32→i64, f32→f64 for the aggregation kernels
     match data_type {
@@ -1491,22 +1504,22 @@ fn run_collapsed_sum(
             let func = super::ordered_ops::get_ordered_ops_function_pub("seg_sum_i64")
                 .ok_or_else(|| DataFusionError::Execution("CUDA kernel 'seg_sum_i64' not found".to_string()))?;
 
-            let d_data = stream.clone_htod(&values_i64).map_err(cuda_err)?;
-            let mut d_sums = stream.alloc_zeros::<i64>(alloc_size).map_err(cuda_err)?;
+            let d_data = ctx.stream.clone_htod(&values_i64).map_err(cuda_err)?;
+            let mut d_sums = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size).map_err(cuda_err)?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(cuda_err)?;
             }
 
-            let all_sums = stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
-            let sums: Vec<i64> = all_sums[1..=num_groups].to_vec();
+            let all_sums = ctx.stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
+            let sums: Vec<i64> = all_sums[1..=ctx.num_groups].to_vec();
             Ok(Arc::new(Int64Array::from(sums)))
         }
         DataType::Float64 | DataType::Float32 => {
@@ -1529,22 +1542,22 @@ fn run_collapsed_sum(
             let func = super::ordered_ops::get_ordered_ops_function_pub("seg_sum_f64")
                 .ok_or_else(|| DataFusionError::Execution("CUDA kernel 'seg_sum_f64' not found".to_string()))?;
 
-            let d_data = stream.clone_htod(&values_f64).map_err(cuda_err)?;
-            let mut d_sums = stream.alloc_zeros::<f64>(alloc_size).map_err(cuda_err)?;
+            let d_data = ctx.stream.clone_htod(&values_f64).map_err(cuda_err)?;
+            let mut d_sums = ctx.stream.alloc_zeros::<f64>(ctx.alloc_size).map_err(cuda_err)?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_sums)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(cuda_err)?;
             }
 
-            let all_sums = stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
-            let sums: Vec<f64> = all_sums[1..=num_groups].to_vec();
+            let all_sums = ctx.stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
+            let sums: Vec<f64> = all_sums[1..=ctx.num_groups].to_vec();
             Ok(Arc::new(Float64Array::from(sums)))
         }
         _ => Err(DataFusionError::Execution(format!(
@@ -1556,14 +1569,9 @@ fn run_collapsed_sum(
 
 /// Collapsed min/max: per-group min or max → num_groups output values.
 fn run_collapsed_min_max(
-    stream: &Arc<CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &CollapsedAggContext<'_>,
     sorted_col: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    num_groups: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
     is_min: bool,
 ) -> Result<ArrayRef> {
     let kernel_suffix = if is_min { "min" } else { "max" };
@@ -1591,23 +1599,23 @@ fn run_collapsed_min_max(
                 .ok_or_else(|| DataFusionError::Execution(format!("CUDA kernel '{}' not found", kernel_name)))?;
 
             let init_val = if is_min { i64::MAX } else { i64::MIN };
-            let init: Vec<i64> = vec![init_val; alloc_size];
-            let mut d_result = stream.clone_htod(&init).map_err(cuda_err)?;
-            let d_data = stream.clone_htod(&values_i64).map_err(cuda_err)?;
+            let init: Vec<i64> = vec![init_val; ctx.alloc_size];
+            let mut d_result = ctx.stream.clone_htod(&init).map_err(cuda_err)?;
+            let d_data = ctx.stream.clone_htod(&values_i64).map_err(cuda_err)?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(cuda_err)?;
             }
 
-            let all_results = stream.clone_dtoh(&d_result).map_err(cuda_err)?;
-            let results: Vec<i64> = all_results[1..=num_groups].to_vec();
+            let all_results = ctx.stream.clone_dtoh(&d_result).map_err(cuda_err)?;
+            let results: Vec<i64> = all_results[1..=ctx.num_groups].to_vec();
 
             // If original type was i32, cast back
             if matches!(data_type, DataType::Int32) {
@@ -1639,23 +1647,23 @@ fn run_collapsed_min_max(
                 .ok_or_else(|| DataFusionError::Execution(format!("CUDA kernel '{}' not found", kernel_name)))?;
 
             let init_val: f64 = if is_min { f64::MAX } else { f64::MIN };
-            let init: Vec<f64> = vec![init_val; alloc_size];
-            let mut d_result = stream.clone_htod(&init).map_err(cuda_err)?;
-            let d_data = stream.clone_htod(&values_f64).map_err(cuda_err)?;
+            let init: Vec<f64> = vec![init_val; ctx.alloc_size];
+            let mut d_result = ctx.stream.clone_htod(&init).map_err(cuda_err)?;
+            let d_data = ctx.stream.clone_htod(&values_f64).map_err(cuda_err)?;
 
             unsafe {
-                stream
+                ctx.stream
                     .launch_builder(&func)
-                    .arg(d_group_id)
+                    .arg(ctx.d_group_id)
                     .arg(&d_data)
                     .arg(&mut d_result)
-                    .arg(&n_u32)
-                    .launch(*launch_cfg)
+                    .arg(&ctx.n_u32)
+                    .launch(*ctx.launch_cfg)
                     .map_err(cuda_err)?;
             }
 
-            let all_results = stream.clone_dtoh(&d_result).map_err(cuda_err)?;
-            let results: Vec<f64> = all_results[1..=num_groups].to_vec();
+            let all_results = ctx.stream.clone_dtoh(&d_result).map_err(cuda_err)?;
+            let results: Vec<f64> = all_results[1..=ctx.num_groups].to_vec();
 
             // If original type was f32, cast back
             if matches!(data_type, DataType::Float32) {
@@ -1674,34 +1682,29 @@ fn run_collapsed_min_max(
 
 /// Collapsed avg: per-group average → num_groups f64 output values.
 fn run_collapsed_avg(
-    stream: &Arc<CudaStream>,
-    d_group_id: &cudarc::driver::safe::CudaSlice<u32>,
+    ctx: &CollapsedAggContext<'_>,
     sorted_col: &ArrayRef,
     data_type: &DataType,
-    alloc_size: usize,
-    num_groups: usize,
-    n_u32: u32,
-    launch_cfg: &LaunchConfig,
 ) -> Result<ArrayRef> {
     // Step 1: count
     let count_func = super::ordered_ops::get_ordered_ops_function_pub("seg_count")
         .ok_or_else(|| DataFusionError::Execution("CUDA kernel 'seg_count' not found".to_string()))?;
-    let mut d_counts = stream.alloc_zeros::<i64>(alloc_size).map_err(cuda_err)?;
+    let mut d_counts = ctx.stream.alloc_zeros::<i64>(ctx.alloc_size).map_err(cuda_err)?;
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&count_func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&mut d_counts)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(cuda_err)?;
     }
-    let all_counts = stream.clone_dtoh(&d_counts).map_err(cuda_err)?;
+    let all_counts = ctx.stream.clone_dtoh(&d_counts).map_err(cuda_err)?;
 
     // Step 2: sum as f64
     let sum_func = super::ordered_ops::get_ordered_ops_function_pub("seg_sum_f64")
         .ok_or_else(|| DataFusionError::Execution("CUDA kernel 'seg_sum_f64' not found".to_string()))?;
-    let mut d_sums = stream.alloc_zeros::<f64>(alloc_size).map_err(cuda_err)?;
+    let mut d_sums = ctx.stream.alloc_zeros::<f64>(ctx.alloc_size).map_err(cuda_err)?;
 
     // Convert to f64 if needed
     let f64_values: Vec<f64> = match data_type {
@@ -1734,22 +1737,22 @@ fn run_collapsed_avg(
         ))),
     };
 
-    let d_data = stream.clone_htod(&f64_values).map_err(cuda_err)?;
+    let d_data = ctx.stream.clone_htod(&f64_values).map_err(cuda_err)?;
     unsafe {
-        stream
+        ctx.stream
             .launch_builder(&sum_func)
-            .arg(d_group_id)
+            .arg(ctx.d_group_id)
             .arg(&d_data)
             .arg(&mut d_sums)
-            .arg(&n_u32)
-            .launch(*launch_cfg)
+            .arg(&ctx.n_u32)
+            .launch(*ctx.launch_cfg)
             .map_err(cuda_err)?;
     }
-    let all_sums = stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
+    let all_sums = ctx.stream.clone_dtoh(&d_sums).map_err(cuda_err)?;
 
     // Step 3: avg = sum / count (per group, on CPU)
-    let mut avgs = Vec::with_capacity(num_groups);
-    for i in 1..=num_groups {
+    let mut avgs = Vec::with_capacity(ctx.num_groups);
+    for i in 1..=ctx.num_groups {
         let count = all_counts[i];
         let sum = all_sums[i];
         avgs.push(if count > 0 { sum / count as f64 } else { 0.0 });
