@@ -45,7 +45,7 @@ use super::hash_join::{is_hash_join_key_type_supported, GpuHashJoinConfig, GpuHa
 use super::hash_ops::{GpuAggRequest, GpuGroupKey, GpuHashAggConfig, GpuHashAggregateExec};
 use super::merge_join::GpuJoinType;
 use super::ordered_ops::SegAggFunc;
-use super::sort_aware::{extract_sort_columns, is_sorted_by};
+use super::sort_aware::{extract_sort_columns, input_already_sorted, is_sorted_by};
 use super::sort_exec::{is_sort_key_type_supported, GpuSortConfig, GpuSortExec, GpuSortKey};
 use super::window_ops::{
     is_window_gpu_supported_type, GpuWindowOp, GpuWindowShiftConfig, GpuWindowShiftExec,
@@ -671,6 +671,22 @@ fn try_replace_sort(
         return Ok(None);
     };
 
+    // Shuffle elimination: if input is already sorted by the requested keys,
+    // eliminate the sort entirely. This avoids unnecessary repartition and
+    // re-sorting when data is already in the desired order (e.g., pre-sorted
+    // Parquet files, or output of a previous sort that covers this sort's keys).
+    let input = sort_exec.input();
+    let sort_exprs = sort_exec.expr();
+
+    if !sort_exprs.is_empty() && input_already_sorted(input, sort_exprs) {
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] try_replace_sort: ELIMINATED — input already sorted by requested keys"
+            );
+        }
+        return Ok(Some(Transformed::yes(Arc::clone(input))));
+    }
+
     // Skip if preserve_partitioning is true — GPU sort always produces 1 partition
     if sort_exec.preserve_partitioning() {
         if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
@@ -679,9 +695,7 @@ fn try_replace_sort(
         return Ok(None);
     }
 
-    let input = sort_exec.input();
     let input_schema = input.schema();
-    let sort_exprs = sort_exec.expr();
 
     if sort_exprs.is_empty() {
         return Ok(None);

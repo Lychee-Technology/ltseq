@@ -291,8 +291,8 @@ fn process_chunk_session_count(
     name_to_idx: &HashMap<String, usize>,
     is_first_chunk: bool,
 ) -> Result<RgChunkResult, String> {
-    let file = File::open(parquet_path)
-        .map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
+    let file =
+        File::open(parquet_path).map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| format!("PARALLEL_FALLBACK: builder failed: {}", e))?;
     let row_groups: Vec<usize> = (start_rg..end_rg).collect();
@@ -309,8 +309,7 @@ fn process_chunk_session_count(
     let mut is_first_batch = true;
 
     for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
+        let batch = batch_result.map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
         let n = batch.num_rows();
         if n == 0 {
             continue;
@@ -329,7 +328,11 @@ fn process_chunk_session_count(
         // For the first batch of a non-first chunk, skip row 0.
         // `streaming_fuse_eval` always marks it `true` (empty prev_values),
         // but the seam pass decides whether it is a real boundary.
-        let start = if is_first_batch && !is_first_chunk { 1 } else { 0 };
+        let start = if is_first_batch && !is_first_chunk {
+            1
+        } else {
+            0
+        };
         for i in start..n {
             if result[i] {
                 count += 1;
@@ -472,14 +475,175 @@ pub fn parallel_streaming_group_count(
         };
 
         let mut result = vec![false; 1];
-        if streaming_fuse_eval(predicate, first_batch, &name_to_idx, last_state, &mut result)
-            && result[0]
+        if streaming_fuse_eval(
+            predicate,
+            first_batch,
+            &name_to_idx,
+            last_state,
+            &mut result,
+        ) && result[0]
         {
             seam_count += 1;
         }
     }
 
     Ok(total_internal + seam_count)
+}
+
+// ============================================================================
+// Zone Skipping: Row Group Pruning via Parquet Statistics
+// ============================================================================
+
+/// Prune row groups using Parquet column statistics (min/max).
+///
+/// Inspects the partition column's min/max statistics for each row group
+/// and eliminates row groups that cannot contain any of the target partition
+/// keys (if provided) or relevant data in the given range.
+///
+/// # Arguments
+///
+/// * `parquet_metadata` - Parquet file metadata containing row group stats
+/// * `partition_col_name` - Name of the partition column in the Parquet schema
+/// * `parquet_schema_descr` - Parquet schema descriptor for column lookup
+/// * `filter_min` - Optional minimum value (inclusive) for the partition column
+/// * `filter_max` - Optional maximum value (inclusive) for the partition column
+///
+/// # Returns
+///
+/// A vector of eligible row group indices. If statistics are unavailable
+/// for any row group, that row group is conservatively included.
+pub fn prune_row_groups_by_stats(
+    parquet_metadata: &parquet::file::metadata::ParquetMetaData,
+    partition_col_name: &str,
+    filter_min: Option<i64>,
+    filter_max: Option<i64>,
+) -> Vec<usize> {
+    use parquet::file::statistics::Statistics;
+
+    let num_row_groups = parquet_metadata.num_row_groups();
+
+    // If no filter constraints, return all row groups
+    if filter_min.is_none() && filter_max.is_none() {
+        return (0..num_row_groups).collect();
+    }
+
+    // Find the partition column index in the Parquet schema
+    let schema_descr = parquet_metadata.file_metadata().schema_descr();
+    let part_col_parquet_idx = schema_descr
+        .columns()
+        .iter()
+        .position(|c| c.name() == partition_col_name);
+
+    let Some(col_idx) = part_col_parquet_idx else {
+        // Column not found in Parquet schema — conservatively return all
+        return (0..num_row_groups).collect();
+    };
+
+    let mut eligible = Vec::with_capacity(num_row_groups);
+
+    for rg_idx in 0..num_row_groups {
+        let rg_meta = parquet_metadata.row_group(rg_idx);
+        let col_meta = rg_meta.column(col_idx);
+
+        let stats = col_meta.statistics();
+        let Some(stats) = stats else {
+            // No statistics — conservatively include this row group
+            eligible.push(rg_idx);
+            continue;
+        };
+
+        // Extract min/max as i64 from the statistics
+        let (rg_min, rg_max) = match stats {
+            Statistics::Int64(s) => match (s.min_opt(), s.max_opt()) {
+                (Some(&mn), Some(&mx)) => (mn, mx),
+                _ => {
+                    eligible.push(rg_idx);
+                    continue;
+                }
+            },
+            Statistics::Int32(s) => match (s.min_opt(), s.max_opt()) {
+                (Some(&mn), Some(&mx)) => (mn as i64, mx as i64),
+                _ => {
+                    eligible.push(rg_idx);
+                    continue;
+                }
+            },
+            _ => {
+                // Non-integer statistics — conservatively include
+                eligible.push(rg_idx);
+                continue;
+            }
+        };
+
+        // Zone skipping: check if row group's range overlaps with filter range
+        // Row group range: [rg_min, rg_max]
+        // Filter range: [filter_min, filter_max]
+        // Overlap condition: rg_max >= filter_min AND rg_min <= filter_max
+        let overlaps = match (filter_min, filter_max) {
+            (Some(fmin), Some(fmax)) => rg_max >= fmin && rg_min <= fmax,
+            (Some(fmin), None) => rg_max >= fmin,
+            (None, Some(fmax)) => rg_min <= fmax,
+            (None, None) => true, // unreachable due to early return above
+        };
+
+        if overlaps {
+            eligible.push(rg_idx);
+        }
+    }
+
+    eligible
+}
+
+/// Extract the min/max values of a partition column across all row groups.
+///
+/// Useful for understanding the data distribution before deciding on
+/// zone skipping strategies.
+///
+/// Returns `(global_min, global_max)` or `None` if statistics are unavailable.
+pub fn partition_column_range(
+    parquet_metadata: &parquet::file::metadata::ParquetMetaData,
+    partition_col_name: &str,
+) -> Option<(i64, i64)> {
+    use parquet::file::statistics::Statistics;
+
+    let schema_descr = parquet_metadata.file_metadata().schema_descr();
+    let col_idx = schema_descr
+        .columns()
+        .iter()
+        .position(|c| c.name() == partition_col_name)?;
+
+    let mut global_min = i64::MAX;
+    let mut global_max = i64::MIN;
+    let mut found_any = false;
+
+    for rg_idx in 0..parquet_metadata.num_row_groups() {
+        let col_meta = parquet_metadata.row_group(rg_idx).column(col_idx);
+        if let Some(stats) = col_meta.statistics() {
+            match stats {
+                Statistics::Int64(s) => {
+                    if let (Some(&mn), Some(&mx)) = (s.min_opt(), s.max_opt()) {
+                        global_min = global_min.min(mn);
+                        global_max = global_max.max(mx);
+                        found_any = true;
+                    }
+                }
+                Statistics::Int32(s) => {
+                    if let (Some(&mn), Some(&mx)) = (s.min_opt(), s.max_opt()) {
+                        global_min = global_min.min(mn as i64);
+                        global_max = global_max.max(mx as i64);
+                        found_any = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if found_any {
+        Some((global_min, global_max))
+    } else {
+        None
+    }
 }
 
 // ============================================================================
@@ -578,9 +742,15 @@ pub fn parallel_pattern_match_count(
     // Step 3+4: Fused read + match per RG in parallel.
     // Each task reads one RG, pattern-matches it, extracts boundary data, drops RG data.
     // This eliminates the 1.4s dealloc overhead from holding all RG data in memory.
+    //
+    // Zone skipping: skip row groups with 0 rows (Parquet metadata check).
     let path_str = parquet_path.to_string();
 
-    let rg_results: Vec<RgMatchResult> = (0..num_row_groups)
+    let eligible_rgs: Vec<usize> = (0..num_row_groups)
+        .filter(|&rg_idx| parquet_metadata.row_group(rg_idx).num_rows() > 0)
+        .collect();
+
+    let rg_results: Vec<RgMatchResult> = eligible_rgs
         .into_par_iter()
         .map(|rg_idx| {
             read_match_and_extract_boundary(

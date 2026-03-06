@@ -123,6 +123,68 @@ pub fn is_sorted_by_prefix(plan: &Arc<dyn ExecutionPlan>, column_names: &[&str])
         .all(|(expected, actual)| *expected == actual)
 }
 
+/// Check if a physical plan's data is clustered by a partition column.
+///
+/// Data is "partitioned by" a column if that column is the first key in
+/// the sort order. This implies all rows with the same partition key are
+/// contiguous, enabling segmented/partitioned operations without reshuffling.
+///
+/// This is useful for:
+/// - Eliminating repartition/shuffle when data is already sorted by partition key
+/// - Selecting segmented (O(N)) vs hash-based (O(N log N)) algorithms
+/// - Zone skipping when combined with row group statistics
+pub fn is_partitioned_by(plan: &Arc<dyn ExecutionPlan>, partition_col: &str) -> bool {
+    let sort_cols = extract_sort_columns(plan);
+    sort_cols.first().map_or(false, |c| c == partition_col)
+}
+
+/// Check if a plan's output is already sorted by the given sort expressions.
+///
+/// This enables "shuffle elimination": if the input to a SortExec is already
+/// sorted by the requested keys (in the same order and direction), the sort
+/// can be eliminated entirely.
+///
+/// Returns `true` if the plan's output ordering is a prefix-match of the
+/// requested sort expressions (matching column names and sort options).
+pub fn input_already_sorted(
+    plan: &Arc<dyn ExecutionPlan>,
+    requested_sort_exprs: &[PhysicalSortExpr],
+) -> bool {
+    let eq_props = plan.equivalence_properties();
+    let Some(ordering) = eq_props.output_ordering() else {
+        return false;
+    };
+
+    if ordering.len() < requested_sort_exprs.len() {
+        return false;
+    }
+
+    // Check each requested sort expression against the plan's ordering
+    use datafusion::physical_expr::expressions::Column;
+
+    for (requested, actual) in requested_sort_exprs.iter().zip(ordering.iter()) {
+        // Both must be simple Column refs
+        let req_col = requested.expr.as_any().downcast_ref::<Column>();
+        let act_col = actual.expr.as_any().downcast_ref::<Column>();
+
+        match (req_col, act_col) {
+            (Some(r), Some(a)) => {
+                // Column names must match
+                if r.name() != a.name() {
+                    return false;
+                }
+                // Sort options (ascending/descending, nulls first/last) must match
+                if requested.options != actual.options {
+                    return false;
+                }
+            }
+            _ => return false, // Complex expressions — can't determine match
+        }
+    }
+
+    true
+}
+
 /// Build DataFusion `PhysicalSortExpr` from column names and a schema.
 ///
 /// Used by GPU exec nodes that produce a new sort order (SortOrderEffect::Produce)
@@ -160,5 +222,30 @@ mod tests {
             SortOrderEffect::Produce(vec!["a".into()])
         );
         assert_ne!(SortOrderEffect::Preserve, SortOrderEffect::Destroy);
+    }
+
+    // Note: input_already_sorted and is_partitioned_by require DataFusion
+    // physical plan nodes to test, which require a full SessionContext.
+    // They are validated through Python integration tests instead.
+    // The unit tests below verify the sort_order_effect enum behavior.
+
+    #[test]
+    fn test_sort_order_produce_different_columns() {
+        assert_ne!(
+            SortOrderEffect::Produce(vec!["a".into()]),
+            SortOrderEffect::Produce(vec!["b".into()])
+        );
+    }
+
+    #[test]
+    fn test_sort_order_produce_multiple_columns() {
+        assert_eq!(
+            SortOrderEffect::Produce(vec!["a".into(), "b".into()]),
+            SortOrderEffect::Produce(vec!["a".into(), "b".into()])
+        );
+        assert_ne!(
+            SortOrderEffect::Produce(vec!["a".into(), "b".into()]),
+            SortOrderEffect::Produce(vec!["b".into(), "a".into()])
+        );
     }
 }
