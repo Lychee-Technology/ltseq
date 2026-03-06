@@ -601,7 +601,7 @@ pub struct GpuMergeJoinExec {
 }
 
 impl GpuMergeJoinExec {
-    /// Create a new GpuMergeJoinExec.
+    /// Create a new GpuMergeJoinExec with auto-generated output schema.
     pub fn try_new(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
@@ -634,6 +634,34 @@ impl GpuMergeJoinExec {
             right_key,
             join_type,
             alias,
+            output_schema,
+            metrics: ExecutionPlanMetricsSet::new(),
+            cache,
+        })
+    }
+
+    /// Create a new GpuMergeJoinExec with an explicit output schema.
+    ///
+    /// Used by the optimizer to substitute a `HashJoinExec` transparently —
+    /// the output schema is taken from the original `HashJoinExec` so that
+    /// parent nodes see identical field names and types.
+    pub fn try_new_with_schema(
+        left: Arc<dyn ExecutionPlan>,
+        right: Arc<dyn ExecutionPlan>,
+        left_key: String,
+        right_key: String,
+        join_type: GpuJoinType,
+        output_schema: SchemaRef,
+    ) -> Result<Self> {
+        let cache = Self::compute_properties(&left, &output_schema);
+
+        Ok(Self {
+            left,
+            right,
+            left_key,
+            right_key,
+            join_type,
+            alias: String::new(), // Not used when schema is provided externally
             output_schema,
             metrics: ExecutionPlanMetricsSet::new(),
             cache,

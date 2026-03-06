@@ -59,7 +59,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -934,6 +934,11 @@ pub struct GpuSegmentedAggregateExec {
     input: Arc<dyn ExecutionPlan>,
     /// Output schema (input schema + aggregate columns)
     output_schema: SchemaRef,
+    /// When true, output one row per group (GROUP BY semantics).
+    /// When false, broadcast per-group results to all rows (window semantics).
+    collapse_groups: bool,
+    /// Column indices of group-by keys in the input schema (used when collapse_groups=true).
+    group_key_columns: Vec<(String, usize)>,
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
     /// Cached plan properties
@@ -967,6 +972,35 @@ impl GpuSegmentedAggregateExec {
             group_id_column,
             input,
             output_schema,
+            collapse_groups: false,
+            group_key_columns: Vec::new(),
+            metrics: ExecutionPlanMetricsSet::new(),
+            cache,
+        })
+    }
+
+    /// Create a new GpuSegmentedAggregateExec in collapsing mode (GROUP BY semantics).
+    ///
+    /// In this mode, the output contains one row per group instead of broadcasting
+    /// per-group results to all input rows. The output schema should contain the
+    /// group-by key columns plus the aggregate result columns, matching the
+    /// original `AggregateExec.schema()`.
+    pub fn try_new_collapsing(
+        requests: Vec<SegAggRequest>,
+        group_id_column: String,
+        group_key_columns: Vec<(String, usize)>,
+        input: Arc<dyn ExecutionPlan>,
+        output_schema: SchemaRef,
+    ) -> Result<Self> {
+        let cache = Self::compute_properties(&input, &output_schema);
+
+        Ok(Self {
+            requests,
+            group_id_column,
+            group_key_columns,
+            input,
+            output_schema,
+            collapse_groups: true,
             metrics: ExecutionPlanMetricsSet::new(),
             cache,
         })
@@ -1039,11 +1073,21 @@ impl ExecutionPlan for GpuSegmentedAggregateExec {
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(GpuSegmentedAggregateExec::try_new(
-            self.requests.clone(),
-            self.group_id_column.clone(),
-            children.swap_remove(0),
-        )?))
+        if self.collapse_groups {
+            Ok(Arc::new(GpuSegmentedAggregateExec::try_new_collapsing(
+                self.requests.clone(),
+                self.group_id_column.clone(),
+                self.group_key_columns.clone(),
+                children.swap_remove(0),
+                Arc::clone(&self.output_schema),
+            )?))
+        } else {
+            Ok(Arc::new(GpuSegmentedAggregateExec::try_new(
+                self.requests.clone(),
+                self.group_id_column.clone(),
+                children.swap_remove(0),
+            )?))
+        }
     }
 
     fn execute(
@@ -1056,6 +1100,8 @@ impl ExecutionPlan for GpuSegmentedAggregateExec {
         let requests = self.requests.clone();
         let group_id_col = self.group_id_column.clone();
         let metrics = BaselineMetrics::new(&self.metrics, partition);
+        let collapse_groups = self.collapse_groups;
+        let group_key_columns = self.group_key_columns.clone();
 
         let output_stream = futures_util::stream::once(async move {
             let timer = metrics.elapsed_compute().timer();
@@ -1100,16 +1146,53 @@ impl ExecutionPlan for GpuSegmentedAggregateExec {
             let agg_results = gpu_segmented_aggregate(gid_array, &coalesced, num_groups, &requests)
                 .map_err(|e| datafusion::common::DataFusionError::Execution(e))?;
 
-            // Build output batch: input columns + aggregate columns
-            let mut columns: Vec<ArrayRef> = coalesced.columns().to_vec();
-            for (_name, arr) in agg_results {
-                columns.push(arr);
-            }
+            if collapse_groups {
+                // GROUP BY semantics: output one row per group.
+                // Find first-row indices for each group (where group_id changes).
+                let gid_values = gid_array.values();
+                let mut first_row_indices: Vec<u32> = Vec::with_capacity(num_groups + 1);
+                for i in 0..n {
+                    if i == 0 || gid_values[i] != gid_values[i - 1] {
+                        first_row_indices.push(i as u32);
+                    }
+                }
+                let take_indices = UInt32Array::from(first_row_indices);
 
-            let result = RecordBatch::try_new(schema.clone(), columns)?;
-            timer.done();
-            metrics.record_output(result.num_rows());
-            Ok(result)
+                // Build output: group key columns + aggregate columns
+                let mut columns: Vec<ArrayRef> = Vec::with_capacity(
+                    group_key_columns.len() + agg_results.len(),
+                );
+
+                // Take group key columns from original input at first-row positions
+                for (_key_name, key_idx) in &group_key_columns {
+                    let col = coalesced.column(*key_idx);
+                    let taken = datafusion::arrow::compute::take(col.as_ref(), &take_indices, None)?;
+                    columns.push(taken);
+                }
+
+                // Take aggregate result columns at first-row positions
+                // (all rows in same group have the same broadcast value, so any row works)
+                for (_name, arr) in agg_results {
+                    let taken = datafusion::arrow::compute::take(arr.as_ref(), &take_indices, None)?;
+                    columns.push(taken);
+                }
+
+                let result = RecordBatch::try_new(schema.clone(), columns)?;
+                timer.done();
+                metrics.record_output(result.num_rows());
+                Ok(result)
+            } else {
+                // Window semantics: broadcast per-group results to all rows.
+                let mut columns: Vec<ArrayRef> = coalesced.columns().to_vec();
+                for (_name, arr) in agg_results {
+                    columns.push(arr);
+                }
+
+                let result = RecordBatch::try_new(schema.clone(), columns)?;
+                timer.done();
+                metrics.record_output(result.num_rows());
+                Ok(result)
+            }
         });
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -3078,6 +3161,117 @@ pub fn is_search_first_eligible(
     sort_keys: &[String],
 ) -> bool {
     try_match_gpu_search_mode(expr, schema, sort_keys).is_some()
+}
+
+// ============================================================================
+// Physical expression → GpuSearchMode converter (for optimizer integration)
+// ============================================================================
+
+/// Try to convert a DataFusion physical `BinaryExpr` into a `GpuSearchMode`.
+///
+/// This is the physical-plan counterpart of `try_match_gpu_search_mode` (which
+/// works on `PyExpr`). Used by the optimizer to match `FilterExec` predicates
+/// on sorted data for `GpuBinarySearchExec` substitution.
+///
+/// Returns `Some(GpuSearchMode)` if the expression is `Column CMP Literal` on
+/// a supported numeric type and the column matches `sort_column`.
+pub fn try_physical_expr_to_search_mode(
+    expr: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    input_schema: &SchemaRef,
+    sort_column: &str,
+) -> Option<GpuSearchMode> {
+    use datafusion::logical_expr_common::operator::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+
+    let binary = expr.as_any().downcast_ref::<BinaryExpr>()?;
+    let left = binary.left();
+    let right = binary.right();
+    let op = binary.op();
+
+    // Try Column CMP Literal
+    if let (Some(col), Some(lit)) = (
+        left.as_any().downcast_ref::<Column>(),
+        right.as_any().downcast_ref::<Literal>(),
+    ) {
+        if col.name() == sort_column {
+            return physical_scalar_to_search_mode(
+                op,
+                col.name(),
+                col.index(),
+                input_schema.field(col.index()).data_type(),
+                lit.value(),
+            );
+        }
+    }
+
+    // Try Literal CMP Column (reversed)
+    if let (Some(lit), Some(col)) = (
+        left.as_any().downcast_ref::<Literal>(),
+        right.as_any().downcast_ref::<Column>(),
+    ) {
+        if col.name() == sort_column {
+            let reversed_op = match op {
+                Operator::Gt => Operator::Lt,
+                Operator::GtEq => Operator::LtEq,
+                Operator::Lt => Operator::Gt,
+                Operator::LtEq => Operator::GtEq,
+                Operator::Eq => Operator::Eq,
+                _ => return None,
+            };
+            return physical_scalar_to_search_mode(
+                &reversed_op,
+                col.name(),
+                col.index(),
+                input_schema.field(col.index()).data_type(),
+                lit.value(),
+            );
+        }
+    }
+
+    None
+}
+
+/// Convert a DataFusion `Operator` + `ScalarValue` into a `GpuSearchMode`.
+fn physical_scalar_to_search_mode(
+    op: &datafusion::logical_expr_common::operator::Operator,
+    col_name: &str,
+    col_idx: usize,
+    dt: &DataType,
+    value: &ScalarValue,
+) -> Option<GpuSearchMode> {
+    use datafusion::logical_expr_common::operator::Operator;
+
+    // Extract typed values from ScalarValue
+    let value_i64 = if let ScalarValue::Int64(Some(v)) = value { Some(*v) } else { None };
+    let value_i32 = if let ScalarValue::Int32(Some(v)) = value { Some(*v) } else { None };
+    let value_f64 = if let ScalarValue::Float64(Some(v)) = value { Some(*v) } else { None };
+    let value_f32 = if let ScalarValue::Float32(Some(v)) = value { Some(*v) } else { None };
+
+    // Must have at least one supported value
+    if value_i64.is_none() && value_i32.is_none() && value_f64.is_none() && value_f32.is_none() {
+        return None;
+    }
+
+    // Data type must be supported for GPU search
+    if !matches!(dt, DataType::Int64 | DataType::Int32 | DataType::Float64 | DataType::Float32) {
+        return None;
+    }
+
+    let mk = |variant: fn(String, usize, DataType, Option<i64>, Option<i32>, Option<f64>, Option<f32>) -> GpuSearchMode| {
+        Some(variant(
+            col_name.to_string(), col_idx, dt.clone(),
+            value_i64, value_i32, value_f64, value_f32,
+        ))
+    };
+
+    match op {
+        Operator::Gt => mk(|n, i, d, vi64, vi32, vf64, vf32| GpuSearchMode::Gt { column_name: n, column_index: i, data_type: d, value_i64: vi64, value_i32: vi32, value_f64: vf64, value_f32: vf32 }),
+        Operator::GtEq => mk(|n, i, d, vi64, vi32, vf64, vf32| GpuSearchMode::Ge { column_name: n, column_index: i, data_type: d, value_i64: vi64, value_i32: vi32, value_f64: vf64, value_f32: vf32 }),
+        Operator::Eq => mk(|n, i, d, vi64, vi32, vf64, vf32| GpuSearchMode::Eq { column_name: n, column_index: i, data_type: d, value_i64: vi64, value_i32: vi32, value_f64: vf64, value_f32: vf32 }),
+        Operator::Lt => mk(|n, i, d, vi64, vi32, vf64, vf32| GpuSearchMode::Lt { column_name: n, column_index: i, data_type: d, value_i64: vi64, value_i32: vi32, value_f64: vf64, value_f32: vf32 }),
+        Operator::LtEq => mk(|n, i, d, vi64, vi32, vf64, vf32| GpuSearchMode::Le { column_name: n, column_index: i, data_type: d, value_i64: vi64, value_i32: vi32, value_f64: vf64, value_f32: vf32 }),
+        _ => None,
+    }
 }
 
 // ============================================================================

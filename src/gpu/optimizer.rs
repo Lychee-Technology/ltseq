@@ -34,6 +34,7 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::joins::HashJoinExec;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use datafusion::physical_plan::ExecutionPlan;
@@ -44,8 +45,11 @@ use super::adjacent_distinct::{
 use super::filter_exec::{GpuCompoundPredicate, GpuFilterExec};
 use super::hash_join::{is_hash_join_key_type_supported, GpuHashJoinConfig, GpuHashJoinExec};
 use super::hash_ops::{GpuAggRequest, GpuGroupKey, GpuHashAggConfig, GpuHashAggregateExec};
-use super::merge_join::GpuJoinType;
-use super::ordered_ops::SegAggFunc;
+use super::merge_join::{is_merge_join_key_type_supported, GpuJoinType, GpuMergeJoinExec};
+use super::ordered_ops::{
+    try_physical_expr_to_search_mode, GpuBinarySearchExec, GpuBoundaryMode,
+    GpuConsecutiveGroupExec, GpuSegmentedAggregateExec, SegAggFunc, SegAggRequest,
+};
 use super::sort_aware::{extract_sort_columns, input_already_sorted, is_sorted_by};
 use super::sort_exec::{is_sort_key_type_supported, GpuSortConfig, GpuSortExec, GpuSortKey};
 use super::window_ops::{
@@ -94,7 +98,13 @@ impl PhysicalOptimizerRule for HostToGpuRule {
 /// - `SortExec` → `GpuSortExec` (numeric sort keys)
 /// - `BoundedWindowAggExec` / `WindowAggExec` → `GpuWindowShiftExec` (lag/lead/diff)
 fn try_replace_node(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
-    // Try filter replacement first
+    // Try binary search replacement first (most specific: GlobalLimitExec wrapping FilterExec
+    // on sorted data with a simple Column CMP Literal predicate → search_first pattern).
+    if let Some(result) = try_replace_binary_search(&plan)? {
+        return Ok(result);
+    }
+
+    // Try filter replacement
     if let Some(result) = try_replace_filter(&plan)? {
         return Ok(result);
     }
@@ -183,6 +193,94 @@ fn try_replace_filter(
     let gpu_filter =
         GpuFilterExec::try_new_compound(gpu_pred, Arc::clone(predicate), Arc::clone(input))?;
     Ok(Some(Transformed::yes(Arc::new(gpu_filter))))
+}
+
+/// Attempt to replace a `GlobalLimitExec(FilterExec(...))` pattern with `GpuBinarySearchExec`.
+///
+/// This targets the `search_first` use case: find the first row matching a
+/// simple predicate on a sorted column. The pattern is:
+///   `GlobalLimitExec(skip=0, fetch=1)` → `FilterExec(Column CMP Literal)` → sorted input
+///
+/// The `GpuBinarySearchExec` performs an O(log N) binary search on the GPU
+/// instead of O(N) linear scan, returning at most one row.
+///
+/// Eligibility:
+/// - Node is `GlobalLimitExec` with `skip() == 0` and `fetch() == Some(1)`
+/// - Child is `FilterExec` with no projection
+/// - Filter input is sorted by the predicate column (first sort key)
+/// - Predicate is `Column CMP Literal` where CMP is `>`, `>=`, `==`, `<`, `<=`
+/// - Column data type is numeric (i32, i64, f32, f64)
+/// - Row count ≥ GPU_MIN_ROWS_THRESHOLD
+fn try_replace_binary_search(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    // Match GlobalLimitExec with skip=0, fetch=1
+    let Some(limit_exec) = plan.as_any().downcast_ref::<GlobalLimitExec>() else {
+        return Ok(None);
+    };
+    if limit_exec.skip() != 0 || limit_exec.fetch() != Some(1) {
+        return Ok(None);
+    }
+
+    // Child must be FilterExec
+    let children = limit_exec.children();
+    if children.len() != 1 {
+        return Ok(None);
+    }
+    let Some(filter_exec) = children[0].as_any().downcast_ref::<FilterExec>() else {
+        return Ok(None);
+    };
+
+    // Skip if FilterExec has a projection
+    if filter_exec.projection().is_some() {
+        return Ok(None);
+    }
+
+    // Filter input must be sorted
+    let filter_input = filter_exec.input();
+    let sort_cols = extract_sort_columns(filter_input);
+    if sort_cols.is_empty() {
+        return Ok(None);
+    }
+    let sort_col = &sort_cols[0]; // binary search works on the primary sort key
+
+    // Try to convert predicate to GpuSearchMode
+    let predicate = filter_exec.predicate();
+    let input_schema = filter_input.schema();
+    let Some(search_mode) = try_physical_expr_to_search_mode(predicate, &input_schema, sort_col)
+    else {
+        return Ok(None);
+    };
+
+    // Row count check
+    if let Ok(stats) = filter_input.partition_statistics(None) {
+        if let Some(n) = stats.num_rows.get_value() {
+            if *n < GPU_MIN_ROWS_THRESHOLD {
+                if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+                    eprintln!(
+                        "[GPU] try_replace_binary_search: SKIP — row count {} below threshold {}",
+                        n, GPU_MIN_ROWS_THRESHOLD
+                    );
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+        eprintln!(
+            "[GPU] HostToGpuRule: GlobalLimitExec(FilterExec) → GpuBinarySearchExec, \
+             col={}, op={}, type={:?}",
+            search_mode.column_name(),
+            search_mode.op_str(),
+            search_mode.data_type()
+        );
+    }
+
+    // Replace GlobalLimitExec(FilterExec(input)) with GpuBinarySearchExec(input)
+    let gpu_search = GpuBinarySearchExec::try_new(Arc::clone(filter_input), search_mode)?;
+
+    Ok(Some(Transformed::yes(Arc::new(gpu_search))))
 }
 
 /// Attempt to replace a DISTINCT `AggregateExec` with `GpuAdjacentDistinctExec`.
@@ -453,6 +551,54 @@ fn try_replace_aggregate(
     // the sorted fast path (skip sort step) when at least the primary key is ordered.
     let input_sorted = is_sorted_by(&effective_input, &group_keys[0].column_name);
 
+    // Sorted consecutive-group path: when input is sorted by a single group key,
+    // use GpuConsecutiveGroupExec → GpuSegmentedAggregateExec(collapse=true)
+    // instead of GpuHashAggregateExec. This avoids hash table overhead entirely.
+    if input_sorted && group_keys.len() == 1 && !agg_requests.is_empty() {
+        let key = &group_keys[0];
+
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] HostToGpuRule: AggregateExec → GpuConsecutiveGroupExec + GpuSegmentedAggregateExec(collapse), \
+                 key={}, aggs={}",
+                key.column_name,
+                agg_requests.len(),
+            );
+        }
+
+        let boundary_mode = GpuBoundaryMode::AdjacentNe {
+            column_index: key.column_index,
+            column_name: key.column_name.clone(),
+            data_type: key.data_type.clone(),
+        };
+
+        // Step 1: ConsecutiveGroup adds __group_id__ column
+        let group_exec = GpuConsecutiveGroupExec::try_new(boundary_mode, effective_input)?;
+
+        // Convert GpuAggRequest → SegAggRequest
+        let seg_requests: Vec<SegAggRequest> = agg_requests
+            .iter()
+            .map(|r| SegAggRequest {
+                func: r.func.clone(),
+                column_index: r.column_index,
+                data_type: r.data_type.clone(),
+                output_name: r.output_name.clone(),
+            })
+            .collect();
+
+        // Step 2: SegmentedAggregate computes per-group aggregates, collapse to 1 row/group
+        let output_schema = effective_agg.schema();
+        let seg_exec = GpuSegmentedAggregateExec::try_new_collapsing(
+            seg_requests,
+            "__group_id__".to_string(),
+            vec![(key.column_name.clone(), key.column_index)],
+            Arc::new(group_exec),
+            output_schema,
+        )?;
+
+        return Ok(Some(Transformed::yes(Arc::new(seg_exec))));
+    }
+
     if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
         eprintln!(
             "[GPU] HostToGpuRule: AggregateExec → GpuHashAggregateExec, keys=[{}], aggs={}, sorted={}",
@@ -597,6 +743,47 @@ fn try_replace_join(
         }
     }
 
+    // Sorted-input optimization: if both inputs are sorted by their join key,
+    // use merge join instead of hash join for O(N+M) instead of O(N*M/buckets).
+    // Check sort order on the original (pre-swap) inputs.
+    let effective_left = if swapped { right_input } else { left_input };
+    let effective_right = if swapped { left_input } else { right_input };
+    let effective_left_key = if swapped {
+        right_col.name()
+    } else {
+        left_col.name()
+    };
+    let effective_right_key = if swapped {
+        left_col.name()
+    } else {
+        right_col.name()
+    };
+
+    let left_sorted = is_sorted_by(effective_left, effective_left_key);
+    let right_sorted = is_sorted_by(effective_right, effective_right_key);
+
+    if left_sorted && right_sorted && is_merge_join_key_type_supported(&left_dt) {
+        if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
+            eprintln!(
+                "[GPU] HostToGpuRule: HashJoinExec → GpuMergeJoinExec (both inputs sorted), \
+                 left_key={}, right_key={}, type={:?}, key_type={:?}",
+                effective_left_key, effective_right_key, gpu_join_type, left_dt
+            );
+        }
+
+        let output_schema = hash_join.schema();
+        let gpu_merge = GpuMergeJoinExec::try_new_with_schema(
+            Arc::clone(effective_left),
+            Arc::clone(effective_right),
+            effective_left_key.to_string(),
+            effective_right_key.to_string(),
+            gpu_join_type,
+            output_schema,
+        )?;
+        return Ok(Some(Transformed::yes(Arc::new(gpu_merge))));
+    }
+
+    // Fall through to hash join path
     if std::env::var("LTSEQ_GPU_DEBUG").is_ok() {
         eprintln!(
             "[GPU] HostToGpuRule: HashJoinExec → GpuHashJoinExec, left_key={}, right_key={}, type={:?}, key_type={:?}, swapped={}",
