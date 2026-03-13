@@ -18,11 +18,14 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::common::{
+    build_equality_conditions, build_qualified_column_list, build_aliased_join_schema,
+    JoinType, MultiTempTableGuard, schema_from_batches_or_fallback,
+};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -55,51 +58,32 @@ fn get_schema_from_batches(
     batches: &[RecordBatch],
     stored_schema: &Arc<ArrowSchema>,
 ) -> Arc<ArrowSchema> {
-    batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new((**stored_schema).clone()))
+    schema_from_batches_or_fallback(batches, stored_schema)
 }
 
-/// Register both tables as temp MemTables and return their names
+/// Register both tables as temp MemTables and return a guard for automatic cleanup
 fn register_join_tables(
-    session: &SessionContext,
+    session: &Arc<SessionContext>,
     left_schema: &Arc<ArrowSchema>,
     left_batches: Vec<RecordBatch>,
     right_schema: &Arc<ArrowSchema>,
     right_batches: Vec<RecordBatch>,
     prefix: &str,
-) -> PyResult<(String, String)> {
+) -> PyResult<MultiTempTableGuard> {
     let unique_suffix = std::process::id();
     let left_name = format!("__ltseq_{}_left_{}", prefix, unique_suffix);
     let right_name = format!("__ltseq_{}_right_{}", prefix, unique_suffix);
 
-    // Deregister any existing tables
-    let _ = session.deregister_table(&left_name);
-    let _ = session.deregister_table(&right_name);
-
-    let left_mem = MemTable::try_new(Arc::clone(left_schema), vec![left_batches]).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to create left temp table: {}", e))
-    })?;
-
-    let right_mem =
-        MemTable::try_new(Arc::clone(right_schema), vec![right_batches]).map_err(|e| {
-            LtseqError::Runtime(format!("Failed to create right temp table: {}", e))
-        })?;
-
-    session
-        .register_table(&left_name, Arc::new(left_mem))
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to register left temp table: {}", e))
-        })?;
-
-    session
-        .register_table(&right_name, Arc::new(right_mem))
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to register right temp table: {}", e))
-        })?;
-
-    Ok((left_name, right_name))
+    MultiTempTableGuard::register_two(
+        session,
+        &left_name,
+        Arc::clone(left_schema),
+        left_batches,
+        &right_name,
+        Arc::clone(right_schema),
+        right_batches,
+    )
+    .map_err(|e| LtseqError::Runtime(e).into())
 }
 
 /// Execute SQL query and collect results
@@ -272,48 +256,29 @@ fn build_join_sql(
     right_schema: &ArrowSchema,
     left_keys: &[String],
     right_keys: &[String],
-    join_type: &str,
+    join_type: JoinType,
     alias: &str,
 ) -> String {
-    let mut select_parts: Vec<String> = Vec::new();
-
-    // All left columns (preserve as-is)
-    for field in left_schema.fields() {
-        select_parts.push(format!("L.\"{}\"", field.name()));
-    }
-
-    // All right columns with alias prefix
-    for field in right_schema.fields() {
-        select_parts.push(format!(
-            "R.\"{}\" AS \"{}_{}\"",
-            field.name(),
-            alias,
-            field.name()
-        ));
-    }
-
-    // Build ON clause for potentially composite keys
-    let on_conditions: Vec<String> = left_keys
+    // Build SELECT clause using common helpers
+    let left_cols = build_qualified_column_list(left_schema, "L");
+    
+    let right_cols: String = right_schema
+        .fields()
         .iter()
-        .zip(right_keys.iter())
-        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
-        .collect();
-    let on_clause = on_conditions.join(" AND ");
+        .map(|f| format!("R.\"{}\" AS \"{}_{}\"", f.name(), alias, f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    
+    let select_clause = format!("{}, {}", left_cols, right_cols);
 
-    // Map join_type to SQL keyword
-    let sql_join_type = match join_type {
-        "inner" => "INNER JOIN",
-        "left" => "LEFT JOIN",
-        "right" => "RIGHT JOIN",
-        "full" => "FULL OUTER JOIN",
-        _ => "INNER JOIN",
-    };
+    // Build ON clause using common helper
+    let on_clause = build_equality_conditions("L", "R", left_keys);
 
     format!(
         "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
-        select_parts.join(", "),
+        select_clause,
         left_table,
-        sql_join_type,
+        join_type.to_sql(),
         right_table,
         on_clause
     )
@@ -329,20 +294,16 @@ pub fn join_impl(
     other: &LTSeqTable,
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
-    join_type: &str,
+    join_type_str: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
-    // Validate join type
-    if !matches!(join_type, "inner" | "left" | "right" | "full") {
-        return Err(LtseqError::Validation(format!(
-            "Unknown join type: {}",
-            join_type
-        ))
-        .into());
-    }
+    // Parse join type
+    let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+        LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+    })?;
 
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
@@ -360,8 +321,8 @@ pub fn join_impl(
         &right_schema,
     )?;
 
-    // Register temp tables and execute query
-    let (left_name, right_name) = register_join_tables(
+    // Register temp tables (RAII guard will handle cleanup)
+    let table_guard = register_join_tables(
         &table.session,
         &left_schema,
         left_batches,
@@ -369,10 +330,14 @@ pub fn join_impl(
         right_batches,
         "join",
     )?;
+    
+    let table_names = table_guard.names();
+    let left_name = table_names[0];
+    let right_name = table_names[1];
 
     let sql_query = build_join_sql(
-        &left_name,
-        &right_name,
+        left_name,
+        right_name,
         &left_schema,
         &right_schema,
         &left_col_names,
@@ -385,34 +350,10 @@ pub fn join_impl(
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
         .map_err(|e| LtseqError::Runtime(e))?;
 
-    // Cleanup
-    let _ = table.session.deregister_table(&left_name);
-    let _ = table.session.deregister_table(&right_name);
-
     // Build empty schema for empty results
-    let empty_schema = build_join_result_schema(&left_schema, &right_schema, alias);
+    let empty_schema = build_aliased_join_schema(&left_schema, &right_schema, alias);
 
     build_result_table(&table.session, result_batches, empty_schema, &[])
-}
-
-/// Build the result schema for a join (combines left + aliased right)
-fn build_join_result_schema(
-    left_schema: &ArrowSchema,
-    right_schema: &ArrowSchema,
-    alias: &str,
-) -> Arc<ArrowSchema> {
-    let mut result_fields: Vec<Field> = Vec::new();
-    for field in left_schema.fields() {
-        result_fields.push((**field).clone());
-    }
-    for field in right_schema.fields() {
-        result_fields.push(Field::new(
-            format!("{}_{}", alias, field.name()),
-            field.data_type().clone(),
-            true,
-        ));
-    }
-    Arc::new(ArrowSchema::new(result_fields))
 }
 
 /// Build SQL for semi-join or anti-join (returns only left table columns)
@@ -425,18 +366,10 @@ fn build_semi_anti_join_sql(
     is_anti: bool,
 ) -> String {
     // Select all columns from left table only
-    let select_parts: Vec<String> = left_schema
-        .fields()
-        .iter()
-        .map(|f| format!("L.\"{}\"", f.name()))
-        .collect();
+    let select_cols = build_qualified_column_list(left_schema, "L");
 
-    // Build WHERE EXISTS/NOT EXISTS condition
-    let where_conditions: Vec<String> = left_keys
-        .iter()
-        .zip(right_keys.iter())
-        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
-        .collect();
+    // Build WHERE condition using common helper
+    let where_conditions = build_equality_conditions("L", "R", left_keys);
 
     let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
 
@@ -446,11 +379,11 @@ fn build_semi_anti_join_sql(
     format!(
         "SELECT {}{} FROM \"{}\" L WHERE {} (SELECT 1 FROM \"{}\" R WHERE {})",
         distinct,
-        select_parts.join(", "),
+        select_cols,
         left_table,
         exists_keyword,
         right_table,
-        where_conditions.join(" AND ")
+        where_conditions
     )
 }
 
@@ -501,9 +434,9 @@ fn semi_anti_join_impl(
         &right_schema,
     )?;
 
-    // Register temp tables
+    // Register temp tables (RAII guard will handle cleanup)
     let join_type_name = if is_anti { "anti" } else { "semi" };
-    let (left_name, right_name) = register_join_tables(
+    let table_guard = register_join_tables(
         &table.session,
         &left_schema,
         left_batches,
@@ -511,11 +444,15 @@ fn semi_anti_join_impl(
         right_batches,
         join_type_name,
     )?;
+    
+    let table_names = table_guard.names();
+    let left_name = table_names[0];
+    let right_name = table_names[1];
 
     // Build and execute SQL query
     let sql_query = build_semi_anti_join_sql(
-        &left_name,
-        &right_name,
+        left_name,
+        right_name,
         &left_schema,
         &left_col_names,
         &right_col_names,
@@ -529,10 +466,6 @@ fn semi_anti_join_impl(
             join_type_name,
         ))
         .map_err(|e| LtseqError::Runtime(e))?;
-
-    // Cleanup
-    let _ = table.session.deregister_table(&left_name);
-    let _ = table.session.deregister_table(&right_name);
 
     build_result_table(
         &table.session,

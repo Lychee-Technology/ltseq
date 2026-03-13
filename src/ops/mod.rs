@@ -1,6 +1,7 @@
 //! Table operations module
 //!
 //! This module organizes all table operations into logical submodules:
+//! - **common**: Shared utilities (RAII guards, SQL builders, schema helpers)
 //! - **basic**: search_first operation
 //! - **derive**: Column derivation coordination
 //! - **window**: Window functions for derived columns
@@ -38,6 +39,9 @@
 //! - **Testability**: Helper functions can be unit tested without PyO3 overhead
 //! - **Extensibility**: Easy to add new operations or refactor existing ones
 //! - **Single Source of Truth**: Each operation logic lives in exactly one place
+
+// Common utilities (imported first for use by other modules)
+pub(crate) mod common;
 
 // Core modules
 pub(crate) mod basic;

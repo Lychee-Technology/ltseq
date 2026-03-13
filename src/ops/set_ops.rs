@@ -23,10 +23,13 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::common::{
+    build_equality_conditions, build_qualified_column_list, build_quoted_column_list,
+    MultiTempTableGuard, schema_from_batches_or_fallback,
+};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -69,55 +72,6 @@ async fn collect_batches(
         .collect()
         .await
         .map_err(|e| format!("Failed to collect {}: {}", table_name, e))
-}
-
-/// Register two temp tables for set operations
-fn register_temp_tables(
-    session: &SessionContext,
-    schema1: &Arc<ArrowSchema>,
-    batches1: Vec<RecordBatch>,
-    t1_name: &str,
-    schema2: &Arc<ArrowSchema>,
-    batches2: Vec<RecordBatch>,
-    t2_name: &str,
-) -> Result<(), String> {
-    let temp1 = MemTable::try_new(Arc::clone(schema1), vec![batches1])
-        .map_err(|e| format!("Failed to create temp table 1: {}", e))?;
-    let temp2 = MemTable::try_new(Arc::clone(schema2), vec![batches2])
-        .map_err(|e| format!("Failed to create temp table 2: {}", e))?;
-
-    session
-        .register_table(t1_name, Arc::new(temp1))
-        .map_err(|e| format!("Failed to register temp table 1: {}", e))?;
-    session
-        .register_table(t2_name, Arc::new(temp2))
-        .map_err(|e| format!("Failed to register temp table 2: {}", e))?;
-    Ok(())
-}
-
-/// Deregister temp tables (ignores errors)
-fn deregister_temp_tables(session: &SessionContext, t1_name: &str, t2_name: &str) {
-    let _ = session.deregister_table(t1_name);
-    let _ = session.deregister_table(t2_name);
-}
-
-/// Build SELECT column list for t1
-fn build_select_cols(schema: &ArrowSchema) -> String {
-    schema
-        .fields()
-        .iter()
-        .map(|f| format!("t1.\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Build WHERE condition for column comparison
-fn build_where_conditions(compare_cols: &[String]) -> String {
-    compare_cols
-        .iter()
-        .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
-        .collect::<Vec<_>>()
-        .join(" AND ")
 }
 
 /// Create result LTSeqTable from DataFrame
@@ -233,12 +187,7 @@ fn distinct_with_keys(
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
 ) -> PyResult<LTSeqTable> {
-    let all_cols_str = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let all_cols_str = build_quoted_column_list(schema);
 
     let partition_by = key_cols
         .iter()
@@ -251,17 +200,17 @@ fn distinct_with_keys(
         all_cols_str, partition_by, partition_by
     );
 
-    let schema_clone = Arc::clone(schema);
     let distinct_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "data for distinct").await?;
-            let temp_table = MemTable::try_new(schema_clone, vec![batches])
-                .map_err(|e| format!("Failed to create temp table: {}", e))?;
 
-            table
-                .session
-                .register_table("__distinct_source", Arc::new(temp_table))
-                .map_err(|e| format!("Failed to register source table: {}", e))?;
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                "__distinct_source",
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let result = table
                 .session
@@ -269,7 +218,6 @@ fn distinct_with_keys(
                 .await
                 .map_err(|e| format!("Distinct SQL failed: {}", e))?;
 
-            let _ = table.session.deregister_table("__distinct_source");
             Ok(result)
         })
         .map_err(|e: String| LtseqError::Runtime(e))?;
@@ -365,9 +313,19 @@ pub fn is_subset_impl(
 
             let t1_name = "__subset_t1__";
             let t2_name = "__subset_t2__";
-            register_temp_tables(&table1.session, schema1, batches1, t1_name, schema2, batches2, t2_name)?;
+            
+            // Use RAII guard for automatic cleanup
+            let _guard = MultiTempTableGuard::register_two(
+                &table1.session,
+                t1_name,
+                Arc::clone(schema1),
+                batches1,
+                t2_name,
+                Arc::clone(schema2),
+                batches2,
+            )?;
 
-            let where_cond = build_where_conditions(&compare_cols);
+            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
             let sql = format!(
                 "SELECT COUNT(*) as cnt FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
                 t1_name, t2_name, where_cond
@@ -377,8 +335,6 @@ pub fn is_subset_impl(
                 .map_err(|e| format!("Subset query failed: {}", e))?;
             let batches = result.collect().await
                 .map_err(|e| format!("Subset collect failed: {}", e))?;
-
-            deregister_temp_tables(&table1.session, t1_name, t2_name);
 
             // Empty table is subset of anything
             if batches.is_empty() || batches[0].num_rows() == 0 {
@@ -430,10 +386,19 @@ fn set_operation_impl(
             let batches1 = collect_batches(df1, "left table").await?;
             let batches2 = collect_batches(df2, "right table").await?;
 
-            register_temp_tables(&table1.session, schema1, batches1, t1_name, schema2, batches2, t2_name)?;
+            // Use RAII guard for automatic cleanup
+            let _guard = MultiTempTableGuard::register_two(
+                &table1.session,
+                t1_name,
+                Arc::clone(schema1),
+                batches1,
+                t2_name,
+                Arc::clone(schema2),
+                batches2,
+            )?;
 
-            let select_cols = build_select_cols(schema1);
-            let where_cond = build_where_conditions(&compare_cols);
+            let select_cols = build_qualified_column_list(schema1, "t1");
+            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
 
             let sql = match op {
                 SetOperation::Intersect => format!(
@@ -449,7 +414,6 @@ fn set_operation_impl(
             let result = table1.session.sql(&sql).await
                 .map_err(|e| format!("{} query failed: {}", op_name, e))?;
 
-            deregister_temp_tables(&table1.session, t1_name, t2_name);
             Ok::<_, String>(result)
         })
         .map_err(|e| LtseqError::Runtime(e))?;
@@ -467,26 +431,20 @@ fn set_operation_impl(
 pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let all_cols = build_quoted_column_list(schema);
 
     let result_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "rvs").await?;
-            let schema_clone = Arc::clone(schema);
-
-            let temp = MemTable::try_new(schema_clone, vec![batches])
-                .map_err(|e| format!("Failed to create temp table for rvs: {}", e))?;
 
             let t_name = "__rvs_temp__";
-            table
-                .session
-                .register_table(t_name, Arc::new(temp))
-                .map_err(|e| format!("Failed to register rvs table: {}", e))?;
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                t_name,
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let sql = format!(
                 "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER () as __rn FROM \"{}\") ORDER BY __rn DESC",
@@ -499,7 +457,6 @@ pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
                 .await
                 .map_err(|e| format!("rvs SQL failed: {}", e))?;
 
-            let _ = table.session.deregister_table(t_name);
             Ok::<_, String>(result)
         })
         .map_err(|e| LtseqError::Runtime(e))?;
@@ -524,26 +481,20 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
 
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let all_cols = build_quoted_column_list(schema);
 
     let result_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "step").await?;
-            let schema_clone = Arc::clone(schema);
-
-            let temp = MemTable::try_new(schema_clone, vec![batches])
-                .map_err(|e| format!("Failed to create temp table for step: {}", e))?;
 
             let t_name = "__step_temp__";
-            table
-                .session
-                .register_table(t_name, Arc::new(temp))
-                .map_err(|e| format!("Failed to register step table: {}", e))?;
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                t_name,
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let sql = format!(
                 "SELECT {} FROM (SELECT *, (ROW_NUMBER() OVER () - 1) as __rn FROM \"{}\") WHERE __rn % {} = 0",
@@ -556,7 +507,6 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
                 .await
                 .map_err(|e| format!("step SQL failed: {}", e))?;
 
-            let _ = table.session.deregister_table(t_name);
             Ok::<_, String>(result)
         })
         .map_err(|e| LtseqError::Runtime(e))?;
