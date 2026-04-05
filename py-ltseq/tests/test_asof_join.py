@@ -5,8 +5,9 @@ commonly used in time-series and financial data processing.
 """
 
 import pytest
-import pandas as pd
-import numpy as np
+
+pd = pytest.importorskip("pandas")
+np = pytest.importorskip("numpy")
 from ltseq import LTSeq
 
 

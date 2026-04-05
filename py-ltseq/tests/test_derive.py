@@ -10,8 +10,9 @@ Each test validates a specific derive expression pattern and verifies:
 """
 
 import pytest
-import pandas as pd
 import tempfile
+
+pd = pytest.importorskip("pandas")
 import os
 
 # Import LTSeq - tests are run from project root

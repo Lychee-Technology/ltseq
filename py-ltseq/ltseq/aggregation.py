@@ -37,13 +37,6 @@ class AggregationMixin:
         if not cols:
             raise ValueError("cum_sum() requires at least one column argument")
 
-        if not self._sort_keys:
-            raise ValueError(
-                "cum_sum() requires sorted data.\n"
-                "Call .sort('column') before using cum_sum().\n"
-                "Example: t.sort('date').cum_sum('revenue')"
-            )
-
         cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
 
         result = LTSeq()

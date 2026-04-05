@@ -255,6 +255,8 @@ class IOMixin:
             temp_path = f.name
 
         t = LTSeq.read_csv(temp_path)
+        # Honor the explicitly provided schema instead of re-inferring from CSV content
+        t._schema = schema
         return t
 
     def write_csv(self, path: str) -> None:

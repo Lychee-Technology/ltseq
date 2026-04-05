@@ -267,13 +267,6 @@ class TransformMixin(LookupMixin):
         # Normal derive path (no lookups)
         has_window = self._has_window_functions(derived_cols)
 
-        if has_window and not self._sort_keys:
-            raise ValueError(
-                "Window functions (shift, rolling, diff, cum_sum) require sorted data.\n"
-                "Call .sort('column') before using window functions.\n"
-                "Example: t.sort('date').derive(prev=lambda r: r.price.shift(1))"
-            )
-
         if has_window and self._sort_keys:
             result_inner = self._inner.derive_with_window_functions(
                 derived_cols
