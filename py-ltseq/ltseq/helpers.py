@@ -33,9 +33,9 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                 if reader.fieldnames is None:
                     return schema
 
-                # Initialize schema with all columns as string
+                # Initialize schema with sentinel None (not yet determined)
                 for col in reader.fieldnames:
-                    schema[col] = "string"
+                    schema[col] = None
 
                 # Sample rows to infer types
                 for i, row in enumerate(reader):
@@ -49,12 +49,13 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                         # Try to infer type
                         current_type = schema[col]
 
+                        # Once forced to string by a non-parseable value, keep it
                         if current_type == "string":
                             continue
 
                         try:
                             int(value)
-                            if current_type != "int64":
+                            if current_type not in ("int64", "float64"):
                                 schema[col] = "int64"
                         except ValueError:
                             try:
@@ -62,6 +63,11 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                                 schema[col] = "float64"
                             except ValueError:
                                 schema[col] = "string"
+
+                # Convert undetermined columns (all empty or no rows) to string
+                for col in list(schema.keys()):
+                    if schema[col] is None:
+                        schema[col] = "string"
             else:
                 # No header: read first row to determine column count
                 reader = csv.reader(f)
@@ -73,9 +79,9 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                 num_cols = len(first_row)
                 columns = [f"column_{i + 1}" for i in range(num_cols)]
 
-                # Initialize schema with all columns as string
+                # Initialize schema with sentinel None (not yet determined)
                 for col in columns:
-                    schema[col] = "string"
+                    schema[col] = None
 
                 # First row is data, so include it in type inference
                 all_rows = [first_row]
@@ -93,12 +99,13 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                         col = columns[col_idx]
                         current_type = schema[col]
 
+                        # Once forced to string by a non-parseable value, keep it
                         if current_type == "string":
                             continue
 
                         try:
                             int(value)
-                            if current_type != "int64":
+                            if current_type not in ("int64", "float64"):
                                 schema[col] = "int64"
                         except ValueError:
                             try:
@@ -106,6 +113,11 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]
                                 schema[col] = "float64"
                             except ValueError:
                                 schema[col] = "string"
+
+                # Convert undetermined columns to string
+                for col in list(schema.keys()):
+                    if schema[col] is None:
+                        schema[col] = "string"
 
             return schema
     except Exception:
