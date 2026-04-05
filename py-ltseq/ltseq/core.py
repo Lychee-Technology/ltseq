@@ -24,6 +24,18 @@ try:
 except ImportError:
     HAS_RUST_BINDING = False
 
+# Maps Arrow/DataFusion type strings to Python-friendly names
+_ARROW_TO_PYTHON: dict[str, str] = {
+    "Int8": "int", "Int16": "int", "Int32": "int", "Int64": "int",
+    "UInt8": "int", "UInt16": "int", "UInt32": "int", "UInt64": "int",
+    "Float16": "float", "Float32": "float", "Float64": "float",
+    "Boolean": "bool",
+    "Utf8": "str", "LargeUtf8": "str", "string": "str",
+    "Date32": "date", "Date64": "date",
+    "int64": "int", "int32": "int", "float64": "float", "float32": "float",
+    "bool": "bool",
+}
+
 
 class LTSeq(
     IOMixin,
@@ -249,6 +261,27 @@ class LTSeq(
             >>> print(t.schema)  # {"id": "Int64", "name": "Utf8", ...}
         """
         return self._schema.copy()
+
+    @property
+    def python_schema(self) -> dict[str, str]:
+        """
+        Return the table schema with Python-friendly type names.
+
+        Maps Arrow/DataFusion internal type strings to familiar Python names:
+        Int64 → int, Float64 → float, Utf8 → str, Boolean → bool, etc.
+
+        Returns:
+            Dictionary mapping column names to Python type names.
+            Unknown types are returned as-is.
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.python_schema)  # {"id": "int", "name": "str", "score": "float"}
+        """
+        return {
+            col: _ARROW_TO_PYTHON.get(dtype, dtype)
+            for col, dtype in self._schema.items()
+        }
 
     @property
     def columns(self) -> list[str]:
