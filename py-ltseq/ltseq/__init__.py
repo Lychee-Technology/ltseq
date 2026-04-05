@@ -5,6 +5,7 @@ from .core import LTSeq
 from .grouping import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable
+from .aggregation import GroupBy
 
 # Re-export public expression types
 from .expr import (
@@ -61,6 +62,7 @@ __all__ = [
     "NestedTable",
     "LinkedTable",
     "PartitionedTable",
+    "GroupBy",
     "SchemaProxy",
     "BinOpExpr",
     "ColumnExpr",
