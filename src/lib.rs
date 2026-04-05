@@ -198,18 +198,6 @@ impl LTSeqTable {
         Ok((self.require_df()?, self.require_schema()?))
     }
 
-    /// Create a new empty table inheriting metadata from self.
-    ///
-    /// Useful for returning empty results that preserve schema and sort order.
-    pub(crate) fn empty_like(&self, schema: Option<Arc<ArrowSchema>>) -> Self {
-        LTSeqTable {
-            session: Arc::clone(&self.session),
-            dataframe: None,
-            schema,
-            sort_exprs: self.sort_exprs.clone(),
-            source_parquet_path: self.source_parquet_path.clone(),
-        }
-    }
 }
 
 #[pymethods]
