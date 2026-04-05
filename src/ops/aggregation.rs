@@ -226,7 +226,7 @@ pub fn agg_impl(
             .cast::<PyDict>()
             .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict)
+        let py_expr = dict_to_py_expr(val_dict)
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         match pyexpr_to_agg_expr(&py_expr, schema) {
@@ -264,7 +264,7 @@ pub fn agg_impl(
             .map_err(|e| format!("Collect failed: {}", e))?;
         Ok::<_, String>(batches)
     })
-    .map_err(|e| LtseqError::Runtime(e))?;
+    .map_err(LtseqError::Runtime)?;
 
     create_result_table(table, result_df)
 }
@@ -288,7 +288,7 @@ fn agg_impl_sql_fallback(
             .cast::<PyDict>()
             .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict)
+        let py_expr = dict_to_py_expr(val_dict)
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         let agg_result = extract_agg_function(&py_expr, schema).ok_or_else(|| {
@@ -299,7 +299,7 @@ fn agg_impl_sql_fallback(
         })?;
 
         let sql_expr =
-            agg_result_to_sql(agg_result).map_err(|e| LtseqError::Validation(e))?;
+            agg_result_to_sql(agg_result).map_err(LtseqError::Validation)?;
 
         agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
     }
@@ -321,7 +321,7 @@ fn agg_impl_sql_fallback(
 
     let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
     let result_batches =
-        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
+        execute_sql_query(table, &sql_query).map_err(LtseqError::Runtime)?;
 
     let _ = table.session.deregister_table(temp_table_name);
 
@@ -573,7 +573,7 @@ fn collect_dataframe(
                 .await
                 .map_err(|e| format!("Failed to collect: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?)
+        .map_err(LtseqError::Runtime)?)
 }
 
 fn build_agg_sql(
@@ -639,7 +639,7 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
     );
 
     let result_batches =
-        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
+        execute_sql_query(table, &sql_query).map_err(LtseqError::Runtime)?;
 
     let _ = table.session.deregister_table(&temp_table_name);
 

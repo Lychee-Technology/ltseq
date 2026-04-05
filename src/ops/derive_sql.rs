@@ -37,7 +37,7 @@ pub fn derive_window_sql_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let batch_schema = if let Some(first_batch) = current_batches.first() {
         first_batch.schema()
@@ -102,7 +102,7 @@ pub fn derive_window_sql_impl(
                 .await
                 .map_err(|e| format!("Failed to collect derive results: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let _ = table.session.deregister_table(&temp_table_name);
 

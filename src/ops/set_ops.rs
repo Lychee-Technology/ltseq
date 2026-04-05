@@ -25,7 +25,7 @@ use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::common::{
     build_equality_conditions, build_qualified_column_list, build_quoted_column_list,
-    MultiTempTableGuard, schema_from_batches_or_fallback,
+    MultiTempTableGuard,
 };
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -137,7 +137,7 @@ fn distinct_all_columns(
                 .distinct()
                 .map_err(|e| format!("Distinct execution failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -259,7 +259,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
                 .union((**df2).clone())
                 .map_err(|e| format!("Union failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(create_result_table(
         &table1.session,
@@ -350,7 +350,7 @@ pub fn is_subset_impl(
 
             Ok(cnt_array.value(0) == 0)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(is_subset)
 }
@@ -416,7 +416,7 @@ fn set_operation_impl(
 
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(create_result_table(
         &table1.session,
@@ -459,7 +459,7 @@ pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -509,7 +509,7 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
 
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),

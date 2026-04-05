@@ -80,7 +80,7 @@ fn collect_and_get_schema(
             df.clone()
                 .collect()
                 .await
-                .map_err(|e| LtseqError::collect(e))
+                .map_err(LtseqError::collect)
         })?;
 
     let batch_schema = batches
@@ -132,7 +132,7 @@ fn execute_sql_query(
                 .await
                 .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?)
+        .map_err(LtseqError::Runtime)?)
 }
 
 /// Create result LTSeqTable from batches
@@ -310,15 +310,15 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
         pyexpr_to_window_expr(py_expr, schema, &table.sort_exprs)
-            .map_err(|e| LtseqError::Validation(e))?
+            .map_err(LtseqError::Validation)?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
         let expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Validation(e))?;
+            .map_err(LtseqError::Validation)?;
         let lag_expr = lag(expr.clone(), Some(1), None);
         let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
-            .map_err(|e| LtseqError::Validation(e))?;
+            .map_err(LtseqError::Validation)?;
         // IS DISTINCT FROM handles NULLs correctly (unlike !=)
         Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
             Box::new(expr),
@@ -354,7 +354,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
             df_with_boundary
                 .collect()
                 .await
-                .map_err(|e| LtseqError::collect(e))
+                .map_err(LtseqError::collect)
         })?;
 
     if batches.is_empty() {

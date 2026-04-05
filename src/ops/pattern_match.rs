@@ -415,11 +415,11 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or("Failed to downcast partition column to Int64Array")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
@@ -428,11 +428,11 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .ok_or("Failed to downcast partition column to UInt64Array")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
@@ -441,19 +441,19 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or("Failed to downcast partition column to StringArray")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
         dt => {
             // Generic fallback using string representation
-            for i in 1..n {
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
                 if partition_col.is_null(i) != partition_col.is_null(i - 1) {
-                    boundaries[i] = true;
+                    *boundary = true;
                 } else if !partition_col.is_null(i) {
                     // Use Arrow's eq kernel for single-element comparison
                     // This is slower but handles any data type
@@ -469,7 +469,7 @@ fn compute_partition_boundaries(
                         )
                     })?;
                     if !eq_result.value(0) {
-                        boundaries[i] = true;
+                        *boundary = true;
                     }
                 }
             }
@@ -578,7 +578,7 @@ pub fn search_pattern_impl(
     // 4. Collect into a single RecordBatch
     let batches = RUNTIME
         .block_on(async { projected_df.collect().await })
-        .map_err(|e| LtseqError::collect(e))?;
+        .map_err(LtseqError::collect)?;
 
     if batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -619,7 +619,7 @@ pub fn search_pattern_impl(
             ))
         })?;
         let boundaries = compute_partition_boundaries(combined.column(*idx))
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
         Some(build_partition_ids(&boundaries))
     } else {
         None
@@ -627,7 +627,7 @@ pub fn search_pattern_impl(
 
     // 7. Evaluate step 1 predicate vectorized (this is the fast rejection filter)
     let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // 8. Single-pass scan
     let max_start = n.saturating_sub(num_steps - 1);
@@ -648,7 +648,7 @@ pub fn search_pattern_impl(
             .iter()
             .map(|expr| {
                 eval_predicate(expr, &combined, &name_to_idx)
-                    .map_err(|e| LtseqError::Runtime(e))
+                    .map_err(LtseqError::Runtime)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -717,7 +717,7 @@ pub fn search_pattern_impl(
 
     let full_batches = RUNTIME
         .block_on(async { full_df.collect().await })
-        .map_err(|e| LtseqError::collect(e))?;
+        .map_err(LtseqError::collect)?;
 
     if full_batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -851,7 +851,7 @@ pub fn search_pattern_count_impl(
             ))
         })?;
         let boundaries = compute_partition_boundaries(combined.column(*idx))
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
         Some(build_partition_ids(&boundaries))
     } else {
         None
@@ -859,7 +859,7 @@ pub fn search_pattern_count_impl(
 
     // 7. Evaluate step 1 predicate vectorized (fast rejection filter)
     let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // 8. Single-pass scan — count only, with lazy per-row evaluation for steps 2..N
     let max_start = n.saturating_sub(num_steps - 1);
@@ -884,7 +884,7 @@ pub fn search_pattern_count_impl(
         // For simple starts_with predicates, extract the prefix for direct comparison
         let step_prefixes: Vec<Option<String>> = py_exprs[1..]
             .iter()
-            .map(|expr| extract_starts_with_prefix(expr))
+            .map(extract_starts_with_prefix)
             .collect();
 
         let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
@@ -969,7 +969,7 @@ pub fn search_pattern_count_impl(
                 .iter()
                 .map(|expr| {
                     eval_predicate(expr, &combined, &name_to_idx)
-                        .map_err(|e| LtseqError::Runtime(e))
+                        .map_err(LtseqError::Runtime)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 

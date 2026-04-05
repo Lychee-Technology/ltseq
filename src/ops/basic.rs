@@ -43,7 +43,7 @@ pub fn search_first_impl(
 
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
-        .map_err(|e| LtseqError::Validation(e))?;
+        .map_err(LtseqError::Validation)?;
 
     // Apply filter and limit to first result
     let result_df = RUNTIME
@@ -55,7 +55,7 @@ pub fn search_first_impl(
                 .limit(0, Some(1))
                 .map_err(|e| format!("Limit failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(

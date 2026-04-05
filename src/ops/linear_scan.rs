@@ -271,7 +271,7 @@ fn fuse_eval(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
-    out: &mut Vec<bool>,
+    out: &mut [bool],
 ) -> bool {
     let n = out.len();
     match expr {
@@ -469,7 +469,7 @@ pub(crate) fn streaming_fuse_eval(
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
     state: &StreamState,
-    out: &mut Vec<bool>,
+    out: &mut [bool],
 ) -> bool {
     let n = out.len();
     match expr {
@@ -527,7 +527,7 @@ pub(crate) fn streaming_fuse_eval(
                     if state.prev_values.is_empty() {
                         out[0] = true; // First batch: always boundary
                     } else {
-                        let cur_null = nulls.map_or(false, |nb| !nb.is_valid(0));
+                        let cur_null = nulls.is_some_and(|nb| !nb.is_valid(0));
                         match state.prev_values.get(col_name) {
                             Some(Some(prev_val)) => {
                                 out[0] = cur_null || vals[0] != *prev_val;
@@ -575,7 +575,7 @@ pub(crate) fn streaming_fuse_eval(
                                 if state.prev_values.is_empty() {
                                     out[0] = true;
                                 } else {
-                                    let cur_null = nulls.map_or(false, |nb| !nb.is_valid(0));
+                                    let cur_null = nulls.is_some_and(|nb| !nb.is_valid(0));
                                     match state.prev_values.get(col_name) {
                                         Some(Some(prev_val)) => {
                                             out[0] = cur_null || vals[0].wrapping_sub(*prev_val) > threshold;
@@ -848,8 +848,8 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
                 let mut out = Vec::with_capacity(n);
                 if has_any_nulls {
                     for i in 0..n {
-                        let l_null = l_nulls.map_or(false, |nb| !nb.is_valid(i));
-                        let r_null = r_nulls.map_or(false, |nb| !nb.is_valid(i));
+                        let l_null = l_nulls.is_some_and(|nb| !nb.is_valid(i));
+                        let r_null = r_nulls.is_some_and(|nb| !nb.is_valid(i));
                         out.push(if l_null || r_null { true } else { l_values[i] != r_values[i] });
                     }
                 } else {
@@ -961,8 +961,8 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
                 let null_buffer = if has_any_nulls {
                     let mut validity = Vec::with_capacity(n);
                     for i in 0..n {
-                        let l_valid = l_nulls.map_or(true, |nb| nb.is_valid(i));
-                        let r_valid = r_nulls.map_or(true, |nb| nb.is_valid(i));
+                        let l_valid = l_nulls.is_none_or(|nb| nb.is_valid(i));
+                        let r_valid = r_nulls.is_none_or(|nb| nb.is_valid(i));
                         validity.push(l_valid && r_valid);
                     }
                     Some(datafusion::arrow::buffer::NullBuffer::from(validity))
@@ -1139,7 +1139,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
                 .await
                 .map_err(|e| format!("Failed to collect projected data: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     if proj_batches.is_empty() {
         return Ok(LTSeqTable::empty(
@@ -1400,7 +1400,7 @@ fn general_linear_scan_group_id(
                 .await
                 .map_err(|e| format!("Failed to collect projected data: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     if proj_batches.is_empty() {
         return Ok(LTSeqTable::empty(

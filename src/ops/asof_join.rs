@@ -58,14 +58,14 @@ pub fn asof_join_impl(
 
             let left_result = left_future
                 .await
-                .map_err(|e| LtseqError::collect(e))?;
+                .map_err(LtseqError::collect)?;
             let right_result = right_future
                 .await
-                .map_err(|e| LtseqError::collect(e))?;
+                .map_err(LtseqError::collect)?;
 
             Ok::<_, LtseqError>((left_result, right_result))
         })
-        .map_err(|e| PyErr::from(e))?;
+        .map_err(PyErr::from)?;
 
     // 4. Get actual schemas from batches
     let left_schema = left_batches

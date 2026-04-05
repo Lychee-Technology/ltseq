@@ -177,7 +177,7 @@ async fn build_derived_select_parts(
     for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert expression to SQL
         let expr_sql = pyexpr_to_sql(py_expr, schema)
-            .map_err(|e| LtseqError::Transpile(e))?;
+            .map_err(LtseqError::Transpile)?;
 
         // Check what type of window function this is
         let is_rolling_agg = expr_sql.contains("__ROLLING_");
@@ -260,7 +260,7 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
         let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
             LtseqError::Validation("Expression must be dict".into())
         })?;
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
         parsed.push((col_name_str, py_expr));
     }
     Ok(parsed)
@@ -286,7 +286,7 @@ fn try_native_window_derive(
     for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert to native DataFusion window expression
         let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_exprs)
-            .map_err(|e| LtseqError::Transpile(e))?;
+            .map_err(LtseqError::Transpile)?;
 
         all_exprs.push(window_expr.alias(col_name_str));
     }
@@ -386,11 +386,11 @@ async fn build_cumsum_select_parts(
             LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         // Convert expression to SQL
         let expr_sql = pyexpr_to_sql(&py_expr, schema)
-            .map_err(|e| LtseqError::Transpile(e))?;
+            .map_err(LtseqError::Transpile)?;
 
         // Extract column name from expression
         let col_name = if let PyExpr::Column(name) = &py_expr {
@@ -508,7 +508,7 @@ fn try_native_cum_sum(
             LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         // Extract column name
         let col_name = if let PyExpr::Column(name) = &py_expr {
@@ -532,7 +532,7 @@ fn try_native_cum_sum(
 
         // Build native cum_sum expression: SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
         let col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Transpile(e))?;
+            .map_err(LtseqError::Transpile)?;
 
         let sum_agg = datafusion::functions_aggregate::expr_fn::sum(col_expr);
         let frame = WindowFrame::new_bounds(
@@ -660,7 +660,7 @@ async fn handle_empty_cum_sum(
             LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         let col_name = if let PyExpr::Column(name) = &py_expr {
             name.clone()

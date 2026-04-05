@@ -255,7 +255,7 @@ fn build_join_sql(
     left_schema: &ArrowSchema,
     right_schema: &ArrowSchema,
     left_keys: &[String],
-    right_keys: &[String],
+    _right_keys: &[String],
     join_type: JoinType,
     alias: &str,
 ) -> String {
@@ -308,7 +308,7 @@ pub fn join_impl(
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
@@ -348,7 +348,7 @@ pub fn join_impl(
 
     let result_batches = RUNTIME
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // Build empty schema for empty results
     let empty_schema = build_aliased_join_schema(&left_schema, &right_schema, alias);
@@ -362,7 +362,7 @@ fn build_semi_anti_join_sql(
     right_table: &str,
     left_schema: &ArrowSchema,
     left_keys: &[String],
-    right_keys: &[String],
+    _right_keys: &[String],
     is_anti: bool,
 ) -> String {
     // Select all columns from left table only
@@ -421,7 +421,7 @@ fn semi_anti_join_impl(
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
@@ -465,7 +465,7 @@ fn semi_anti_join_impl(
             &sql_query,
             join_type_name,
         ))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     build_result_table(
         &table.session,

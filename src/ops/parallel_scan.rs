@@ -114,8 +114,8 @@ pub fn direct_streaming_group_ordered(
         }
 
         // Accumulate group IDs from boundaries
-        for i in 0..n {
-            if result[i] {
+        for &is_boundary in result.iter().take(n) {
+            if is_boundary {
                 state.current_gid += 1;
             }
             group_ids.push(state.current_gid);
@@ -228,8 +228,8 @@ pub fn direct_streaming_group_count(
         }
 
         // Just count boundaries — no group_ids array needed
-        for i in 0..n {
-            if result[i] {
+        for &is_boundary in result.iter().take(n) {
+            if is_boundary {
                 state.current_gid += 1;
             }
         }
@@ -330,8 +330,8 @@ fn process_chunk_session_count(
         // `streaming_fuse_eval` always marks it `true` (empty prev_values),
         // but the seam pass decides whether it is a real boundary.
         let start = if is_first_batch && !is_first_chunk { 1 } else { 0 };
-        for i in start..n {
-            if result[i] {
+        for &is_boundary in result.iter().take(n).skip(start) {
+            if is_boundary {
                 count += 1;
             }
         }
@@ -436,7 +436,7 @@ pub fn parallel_streaming_group_count(
     // Safety: PyExpr, ProjectionMask, HashMap<String, usize> are all
     // Send+Sync (pure Rust data, no Py<T> or interior mutability).
     let num_threads = rayon::current_num_threads().max(1).min(num_row_groups);
-    let chunk_size = (num_row_groups + num_threads - 1) / num_threads;
+    let chunk_size = num_row_groups.div_ceil(num_threads);
     let path_str = parquet_path.to_string();
 
     let chunk_results: Vec<RgChunkResult> = (0..num_threads)
@@ -456,7 +456,7 @@ pub fn parallel_streaming_group_count(
             )
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // 5. Sum internal boundary counts.
     let total_internal: usize = chunk_results.iter().map(|r| r.count).sum();
@@ -803,7 +803,7 @@ fn count_cross_rg_boundary_patterns_from_info(
 
         let step_prefixes: Vec<Option<String>> = step_predicates[1..]
             .iter()
-            .map(|expr| extract_starts_with_prefix(expr))
+            .map(extract_starts_with_prefix)
             .collect();
 
         let url_idx = name_to_idx.get("url");
@@ -1072,7 +1072,7 @@ fn count_patterns_in_rg_slices(
     // Try fast path: all remaining predicates are starts_with on same column
     let step_prefixes: Vec<Option<String>> = step_predicates[1..]
         .iter()
-        .map(|expr| extract_starts_with_prefix(expr))
+        .map(extract_starts_with_prefix)
         .collect();
 
     let url_idx = name_to_idx.get("url");
