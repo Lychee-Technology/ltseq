@@ -122,16 +122,30 @@ class MutationMixin:
         if not updates:
             return self
 
-        from .expr.base import if_else
+        try:
+            import pandas as pd  # noqa: F401
+        except ImportError:
+            raise RuntimeError("update() requires pandas. Install with: pip install pandas")
 
-        derive_kwargs = {}
+        from .core import LTSeq
+
+        # Derive a boolean mask column (new name, no overwrite), then apply
+        # updates in pandas.  This avoids the DataFusion schema-ambiguity error
+        # that occurs when derive() rewrites an existing column referencing itself.
+        _MASK = "__ltseq_update_mask__"
+        with_mask = self.derive(**{_MASK: predicate})
+        df = with_mask.to_pandas()
+        mask = df[_MASK].astype(bool)
+        df = df.drop(columns=[_MASK])
+
         for col_name, new_val in updates.items():
-            def _make_expr(c: str, v: Any, p: Callable) -> Callable:
-                return lambda r, _c=c, _v=v, _p=p: if_else(_p(r), _v, getattr(r, _c))
+            if col_name in df.columns:
+                df.loc[mask, col_name] = new_val
 
-            derive_kwargs[col_name] = _make_expr(col_name, new_val, predicate)
-
-        return self.derive(**derive_kwargs)
+        rows = df.to_dict("records")
+        result = LTSeq._from_rows(rows, self._schema)
+        result._sort_keys = None
+        return result
 
     def modify(self, pos: int, **updates: Any) -> "LTSeq":
         """

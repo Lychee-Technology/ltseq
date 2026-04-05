@@ -93,25 +93,13 @@ class TestDelete:
 
 
 # ─── update ──────────────────────────────────────────────────────────────────
-# update() is currently broken (issue #17): it calls derive() with an
-# if_else expression that references the existing column, causing DataFusion
-# schema ambiguity. Tests are marked xfail until the bug is fixed.
-
-_update_bug = pytest.mark.xfail(
-    reason="update() broken: derive() cannot overwrite existing column (issue #17)",
-    strict=True,
-)
-
-
 class TestUpdate:
-    @_update_bug
     def test_update_matching_rows(self, sample):
         result = sample.update(lambda r: r.name == "bob", score=99)
         df = result.to_pandas()
         assert df[df["name"] == "bob"]["score"].iloc[0] == 99
         assert df[df["name"] == "alice"]["score"].iloc[0] == 10
 
-    @_update_bug
     def test_update_multiple_columns(self, sample):
         result = sample.update(lambda r: r.id == 1, score=100, name="ALICE")
         df = result.to_pandas()
@@ -119,7 +107,6 @@ class TestUpdate:
         assert row["score"] == 100
         assert row["name"] == "ALICE"
 
-    @_update_bug
     def test_update_no_match_returns_unchanged(self, sample):
         result = sample.update(lambda r: r.id == 999, score=0)
         assert result.to_pandas()["score"].tolist() == [10, 20, 30]
@@ -128,7 +115,6 @@ class TestUpdate:
         result = sample.update(lambda r: r.id == 1)
         assert len(result.to_pandas()) == 3
 
-    @_update_bug
     def test_update_does_not_mutate_original(self, sample):
         _ = sample.update(lambda r: r.id == 1, score=999)
         assert sample.to_pandas().iloc[0]["score"] == 10
