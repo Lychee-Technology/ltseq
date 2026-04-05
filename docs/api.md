@@ -65,7 +65,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 ### Aggregation
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Group aggregate | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())` |
+| Group aggregate | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())` |
 | Partition | `.partition()` | `parts = t.partition("region")` |
 | Pivot | `.pivot()` | `t.pivot(index="date", columns="region", values="amount")` |
 
@@ -943,7 +943,7 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid expressions)
 - **Example**:
 ```python
-summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
+summary = t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())
 ```
 
 ### `top_k` (aggregate function)
@@ -955,7 +955,7 @@ summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
 - **Example**:
 ```python
 # Used inside agg
-result = t.agg(top_prices=lambda g: top_k(g.price, 5))
+result = t.agg(top_prices=lambda r: top_k(r.price, 5))
 ```
 
 ### `LTSeq.partition`
@@ -1455,7 +1455,7 @@ Module-level functions for conditional aggregation in `.agg()` contexts. These t
 ```python
 from ltseq.expr import count_if
 
-result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 100))
+result = t.agg(by=lambda r: r.region, high_count=lambda r: count_if(r.price > 100))
 ```
 
 #### `sum_if`
@@ -1468,7 +1468,7 @@ result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 10
 ```python
 from ltseq.expr import sum_if
 
-result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100, g.quantity))
+result = t.agg(by=lambda r: r.region, high_sales=lambda r: sum_if(r.price > 100, r.quantity))
 ```
 
 #### `avg_if`
@@ -1481,7 +1481,7 @@ result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100,
 ```python
 from ltseq.expr import avg_if
 
-result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g.sales))
+result = t.agg(by=lambda r: r.region, avg_high=lambda r: avg_if(r.price > 100, r.sales))
 ```
 
 #### `min_if`
@@ -1494,7 +1494,7 @@ result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g
 ```python
 from ltseq.expr import min_if
 
-result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, min_active=lambda r: min_if(r.is_active, r.score))
 ```
 
 #### `max_if`
@@ -1507,7 +1507,7 @@ result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g
 ```python
 from ltseq.expr import max_if
 
-result = t.agg(by=lambda r: r.region, max_active=lambda g: max_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, max_active=lambda r: max_if(r.is_active, r.score))
 ```
 
 ## 9. End-to-End Examples
@@ -1611,7 +1611,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df.sort_values('date')` | `t.sort("date")` | |
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
-| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda g: g.sales.sum())` | |
+| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda r: r.sales.sum())` | |
 | `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
 | `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | Requires sort |

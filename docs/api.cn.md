@@ -56,7 +56,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 ### 聚合
 | 操作 | 方法 | 示例 |
 |------|------|------|
-| 分组聚合 | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())` |
+| 分组聚合 | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())` |
 | 分区 | `.partition()` | `parts = t.partition("region")` |
 | 透视 | `.pivot()` | `t.pivot(index="date", columns="region", values="amount")` |
 
@@ -792,7 +792,7 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 - **异常**: `ValueError`（schema 未初始化），`TypeError`（表达式非法）
 - **示例**:
 ```python
-summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
+summary = t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())
 ```
 
 ### `top_k`（聚合函数）
@@ -802,7 +802,7 @@ summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
 - **异常**: `ValueError`（k <= 0），`TypeError`（col 非法）
 - **示例**:
 ```python
-result = t.agg(top_prices=lambda g: top_k(g.price, 5))
+result = t.agg(top_prices=lambda r: top_k(r.price, 5))
 ```
 
 ### `LTSeq.partition`
@@ -1235,7 +1235,7 @@ enriched = orders.derive(product_name=lambda r: r.product_id.lookup(products, "n
 - **示例**:
 ```python
 from ltseq.expr import count_if
-result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 100))
+result = t.agg(by=lambda r: r.region, high_count=lambda r: count_if(r.price > 100))
 ```
 
 #### `sum_if`
@@ -1245,7 +1245,7 @@ result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 10
 - **示例**:
 ```python
 from ltseq.expr import sum_if
-result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100, g.quantity))
+result = t.agg(by=lambda r: r.region, high_sales=lambda r: sum_if(r.price > 100, r.quantity))
 ```
 
 #### `avg_if`
@@ -1254,7 +1254,7 @@ result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100,
 - **示例**:
 ```python
 from ltseq.expr import avg_if
-result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g.sales))
+result = t.agg(by=lambda r: r.region, avg_high=lambda r: avg_if(r.price > 100, r.sales))
 ```
 
 #### `min_if`
@@ -1263,7 +1263,7 @@ result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g
 - **示例**:
 ```python
 from ltseq.expr import min_if
-result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, min_active=lambda r: min_if(r.is_active, r.score))
 ```
 
 #### `max_if`
@@ -1272,7 +1272,7 @@ result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g
 - **示例**:
 ```python
 from ltseq.expr import max_if
-result = t.agg(by=lambda r: r.region, max_active=lambda g: max_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, max_active=lambda r: max_if(r.is_active, r.score))
 ```
 
 ## 9. 综合示例
@@ -1393,7 +1393,7 @@ summary = orders.agg(
 | `df.sort_values('date')` | `t.sort("date")` | |
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
-| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda g: g.sales.sum())` | |
+| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda r: r.sales.sum())` | |
 | `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
 | `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
 | `df[df.id.isin(df2.id)]` | `t.semi_join(t2, on=lambda a, b: a.id == b.id)` | 半连接 |
