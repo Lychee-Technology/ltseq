@@ -248,17 +248,25 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-/// Build SQL JOIN query with proper column aliasing for the result
-fn build_join_sql(
-    left_table: &str,
-    right_table: &str,
-    left_schema: &ArrowSchema,
-    right_schema: &ArrowSchema,
-    left_keys: &[String],
-    _right_keys: &[String],
+struct JoinSqlConfig<'a> {
+    left_table: &'a str,
+    right_table: &'a str,
+    left_schema: &'a ArrowSchema,
+    right_schema: &'a ArrowSchema,
+    left_keys: &'a [String],
     join_type: JoinType,
-    alias: &str,
-) -> String {
+    alias: &'a str,
+}
+
+/// Build SQL JOIN query with proper column aliasing for the result
+fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
+    let left_table = cfg.left_table;
+    let right_table = cfg.right_table;
+    let left_schema = cfg.left_schema;
+    let right_schema = cfg.right_schema;
+    let left_keys = cfg.left_keys;
+    let join_type = cfg.join_type;
+    let alias = cfg.alias;
     // Build SELECT clause using common helpers
     let left_cols = build_qualified_column_list(left_schema, "L");
     
@@ -314,7 +322,7 @@ pub fn join_impl(
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
 
     // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+    let (left_col_names, _right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
         &left_schema,
@@ -335,16 +343,15 @@ pub fn join_impl(
     let left_name = table_names[0];
     let right_name = table_names[1];
 
-    let sql_query = build_join_sql(
-        left_name,
-        right_name,
-        &left_schema,
-        &right_schema,
-        &left_col_names,
-        &right_col_names,
+    let sql_query = build_join_sql(&JoinSqlConfig {
+        left_table: left_name,
+        right_table: right_name,
+        left_schema: &left_schema,
+        right_schema: &right_schema,
+        left_keys: &left_col_names,
         join_type,
         alias,
-    );
+    });
 
     let result_batches = RUNTIME
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
