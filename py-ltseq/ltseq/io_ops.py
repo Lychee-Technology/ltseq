@@ -1,4 +1,4 @@
-"""I/O operations for LTSeq: read_csv, write_csv, scan, _from_rows."""
+"""I/O operations for LTSeq: read_csv, write_csv, scan, from_rows, from_dict, _from_rows."""
 
 from typing import Any, TYPE_CHECKING
 
@@ -7,6 +7,21 @@ if TYPE_CHECKING:
     from .cursor import Cursor
 
 from .helpers import _infer_schema_from_csv, _infer_schema_from_parquet
+
+
+def _infer_schema_from_rows(sample_row: dict[str, Any]) -> dict[str, str]:
+    """Infer Arrow type strings from a sample row's Python values."""
+    schema = {}
+    for col, val in sample_row.items():
+        if isinstance(val, bool):
+            schema[col] = "Boolean"
+        elif isinstance(val, int):
+            schema[col] = "Int64"
+        elif isinstance(val, float):
+            schema[col] = "Float64"
+        else:
+            schema[col] = "Utf8"
+    return schema
 
 try:
     from . import ltseq_core
@@ -123,11 +138,82 @@ class IOMixin:
         return Cursor(rust_cursor)
 
     @classmethod
+    def from_rows(
+        cls, rows: list[dict[str, Any]], schema: dict[str, str] | None = None
+    ) -> "LTSeq":
+        """
+        Create an LTSeq table from a list of row dictionaries.
+
+        Args:
+            rows: List of dicts, one per row. All dicts must have the same keys.
+            schema: Optional column schema as {column_name: arrow_type_string}.
+                    If None, types are inferred from the first row's values.
+                    Explicit schema is required for empty rows lists.
+
+        Returns:
+            New LTSeq instance
+
+        Raises:
+            ValueError: If rows is empty and schema is None
+            TypeError: If rows is not a list of dicts
+
+        Example:
+            >>> t = LTSeq.from_rows([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}])
+            >>> t = LTSeq.from_rows([], schema={"id": "Int64", "name": "Utf8"})
+        """
+        if schema is None:
+            if not rows:
+                raise ValueError(
+                    "from_rows() requires an explicit schema when rows is empty. "
+                    "Use from_rows([], schema={'col': 'Int64', ...})"
+                )
+            schema = _infer_schema_from_rows(rows[0])
+        return cls._from_rows(rows, schema)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, list[Any]]) -> "LTSeq":
+        """
+        Create an LTSeq table from a column-oriented dictionary.
+
+        Args:
+            data: Dict mapping column names to lists of values.
+                  All lists must have the same length.
+
+        Returns:
+            New LTSeq instance
+
+        Raises:
+            ValueError: If column lists have different lengths
+            TypeError: If data is not a dict
+
+        Example:
+            >>> t = LTSeq.from_dict({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
+        """
+        if not isinstance(data, dict):
+            raise TypeError(f"from_dict() expects a dict, got {type(data).__name__}")
+
+        if not data:
+            raise ValueError("from_dict() requires at least one column")
+
+        lengths = [len(v) for v in data.values()]
+        if len(set(lengths)) > 1:
+            raise ValueError(
+                f"All column lists must have the same length. "
+                f"Got lengths: { {k: len(v) for k, v in data.items()} }"
+            )
+
+        n = lengths[0]
+        cols = list(data.keys())
+        rows = [{col: data[col][i] for col in cols} for i in range(n)]
+        return cls.from_rows(rows)
+
+    @classmethod
     def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq":
         """
         Create an LTSeq instance from a list of row dictionaries.
 
         Internal method used by partition() and similar operations.
+        Callers should prefer the public from_rows() which supports schema inference.
 
         Args:
             rows: List of dictionaries, one per row
