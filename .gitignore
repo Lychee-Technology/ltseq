@@ -9,3 +9,4 @@ __pycache__/
 benchmarks/data/*.parquet
 .opencode/
 .claude/
+build/
