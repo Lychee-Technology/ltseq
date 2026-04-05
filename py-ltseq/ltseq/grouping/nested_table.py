@@ -340,9 +340,9 @@ Supported group methods:
                     raise ValueError(get_unsupported_derive_error(source))
             else:
                 raise ValueError(
-                    "Cannot parse derive expression (source not available). "
-                    "This can happen with lambdas defined in REPL. "
-                    "Please define the lambda in a file for now."
+                    "Cannot parse derive expression: proxy-based capture failed and "
+                    "source is not available (common in REPL/Jupyter). "
+                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
                 )
         except ValueError:
             raise
@@ -417,36 +417,46 @@ Supported group methods:
                 "Install it with: pip install pandas"
             )
 
-        import ast
-        import inspect
-
+        # Try proxy-based capture first (works in REPL, Jupyter, and files)
+        derive_exprs = None
         try:
-            source = inspect.getsource(group_mapper)
-        except (OSError, TypeError):
-            raise ValueError(
-                "Cannot parse derive expression (source not available). "
-                "This can happen with lambdas defined in REPL. "
-                "Please define the lambda in a file for now."
-            )
-
-        source_dedented = textwrap.dedent(source)
-        source_to_parse = extract_lambda_from_chain(source_dedented)
-
-        try:
-            tree = ast.parse(source_to_parse)
-        except SyntaxError:
-            try:
-                tree = ast.parse(f"({source_to_parse})", mode="eval")
-            except SyntaxError:
-                raise ValueError(
-                    f"Cannot parse derive lambda expression. Source: {source_to_parse}"
-                )
-
-        schema = self._ltseq._schema.copy()
-        derive_exprs = self._derive_parser.extract_derive_expressions(tree, schema)
+            derive_exprs = self._capture_derive_via_proxy(group_mapper)
+        except Exception:
+            pass
 
         if not derive_exprs:
-            raise ValueError(get_unsupported_derive_error(source))
+            # Fall back to source code parsing
+            import ast
+            import inspect
+
+            source = None
+            try:
+                source = inspect.getsource(group_mapper)
+            except (OSError, TypeError):
+                raise ValueError(
+                    "Cannot parse derive expression: proxy-based capture failed and "
+                    "source is not available (common in REPL/Jupyter). "
+                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
+                )
+
+            source_dedented = textwrap.dedent(source)
+            source_to_parse = extract_lambda_from_chain(source_dedented)
+
+            try:
+                tree = ast.parse(source_to_parse)
+            except SyntaxError:
+                try:
+                    tree = ast.parse(f"({source_to_parse})", mode="eval")
+                except SyntaxError:
+                    raise ValueError(
+                        f"Cannot parse derive lambda expression. Source: {source_to_parse}"
+                    )
+
+            schema = self._ltseq._schema.copy()
+            derive_exprs = self._derive_parser.extract_derive_expressions(tree, schema)
+
+            if not derive_exprs:
+                raise ValueError(get_unsupported_derive_error(source))
 
         df = self._ltseq.to_pandas()
 
@@ -504,29 +514,29 @@ Supported group methods:
         if "COUNT(*)" in sql_expr and "PARTITION BY __group_id__" in sql_expr:
             return df.groupby("__group_id__").transform("size")
 
-        # Handle FIRST_VALUE(col)
-        if "FIRST_VALUE(" in sql_expr:
-            match = re.search(r"FIRST_VALUE\((\w+)\)", sql_expr)
+        # Handle FIRST_VALUE(col) — column name may be bare or double-quoted
+        if "FIRST_VALUE" in sql_expr:
+            match = re.search(r'FIRST_VALUE\s*\("?(\w+)"?\)', sql_expr)
             if match:
                 col_name = match.group(1)
                 return df.groupby("__group_id__")[col_name].transform("first")
 
-        # Handle LAST_VALUE(col)
-        if "LAST_VALUE(" in sql_expr:
-            match = re.search(r"LAST_VALUE\((\w+)\)", sql_expr)
+        # Handle LAST_VALUE(col) — column name may be bare or double-quoted
+        if "LAST_VALUE" in sql_expr:
+            match = re.search(r'LAST_VALUE\s*\("?(\w+)"?\)', sql_expr)
             if match:
                 col_name = match.group(1)
                 return df.groupby("__group_id__")[col_name].transform("last")
 
-        # Handle MAX/MIN/SUM/AVG
+        # Handle MAX/MIN/SUM/AVG — column name may be bare or double-quoted
         for agg_sql, agg_pandas in [
             ("MAX", "max"),
             ("MIN", "min"),
             ("SUM", "sum"),
             ("AVG", "mean"),
         ]:
-            if f"{agg_sql}(" in sql_expr:
-                match = re.search(f"{agg_sql}\\((\\w+)\\)", sql_expr)
+            if agg_sql in sql_expr:
+                match = re.search(f'{agg_sql}\\s*\\("?(\\w+)"?\\)', sql_expr)
                 if match:
                     col_name = match.group(1)
                     return df.groupby("__group_id__")[col_name].transform(agg_pandas)
