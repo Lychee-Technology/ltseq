@@ -303,6 +303,140 @@ class Benchmarks:
 
         return self.run_benchmark(f"read_csv_{num_rows}", num_rows, run)
 
+    # =========================================================================
+    # Benchmark: Sort
+    # =========================================================================
+
+    def bench_sort(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark sort operation."""
+        csv_path = os.path.join(self.temp_dir, f"sort_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            result = t.sort(lambda r: r.value)
+            _ = len(result)
+
+        return self.run_benchmark(f"sort_{num_rows}", num_rows, run)
+
+    def bench_sort_multi(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark sort by multiple keys."""
+        csv_path = os.path.join(self.temp_dir, f"sort_multi_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            result = t.sort("category", "value")
+            _ = len(result)
+
+        return self.run_benchmark(f"sort_multi_{num_rows}", num_rows, run)
+
+    # =========================================================================
+    # Benchmark: Group Ordered (sequential grouping)
+    # =========================================================================
+
+    def bench_group_ordered(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark group_ordered (sequential run-length grouping)."""
+        csv_path = os.path.join(self.temp_dir, f"go_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path).sort(lambda r: r.category)
+            # Derive a group-level count (broadcast to all rows in each run)
+            result = t.group_ordered(lambda r: r.category).derive(
+                lambda g: {"group_size": g.count()}
+            )
+            _ = len(result)
+
+        return self.run_benchmark(f"group_ordered_{num_rows}", num_rows, run)
+
+    # =========================================================================
+    # Benchmark: Search First
+    # =========================================================================
+
+    def bench_search_first(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark search_first (find first matching row)."""
+        csv_path = os.path.join(self.temp_dir, f"sf_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            # Search near the end to stress the scan
+            _ = t.search_first(lambda r: r.id == num_rows - 1)
+
+        return self.run_benchmark(f"search_first_{num_rows}", num_rows, run)
+
+    # =========================================================================
+    # Benchmark: Mutation (insert, delete, update)
+    # =========================================================================
+
+    def bench_mutation_insert(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark insert (copy-on-write row insert)."""
+        csv_path = os.path.join(self.temp_dir, f"mut_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            result = t.insert(0, {"id": -1, "value": 0, "category": "X", "amount": "0.00", "name": "New"})
+            _ = len(result)
+
+        return self.run_benchmark(f"mutation_insert_{num_rows}", num_rows, run)
+
+    def bench_mutation_delete(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark delete by predicate (copy-on-write row delete)."""
+        csv_path = os.path.join(self.temp_dir, f"del_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            # Delete ~20% of rows
+            result = t.delete(lambda r: r.value < 200)
+            _ = len(result)
+
+        return self.run_benchmark(f"mutation_delete_{num_rows}", num_rows, run)
+
+    def bench_mutation_update(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark update by predicate (copy-on-write conditional update)."""
+        csv_path = os.path.join(self.temp_dir, f"upd_{num_rows}.csv")
+        generate_test_csv(csv_path, num_rows)
+
+        def run():
+            t = LTSeq.read_csv(csv_path)
+            # Update ~50% of rows
+            result = t.update(lambda r: r.value > 500, category="Z")
+            _ = len(result)
+
+        return self.run_benchmark(f"mutation_update_{num_rows}", num_rows, run)
+
+    # =========================================================================
+    # Benchmark: Parquet I/O
+    # =========================================================================
+
+    def bench_write_parquet(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark Parquet write."""
+        csv_path = os.path.join(self.temp_dir, f"pq_src_{num_rows}.csv")
+        pq_path = os.path.join(self.temp_dir, f"pq_out_{num_rows}.parquet")
+        generate_test_csv(csv_path, num_rows)
+        t = LTSeq.read_csv(csv_path)  # pre-load outside timed section
+
+        def run():
+            t.write_parquet(pq_path)
+
+        return self.run_benchmark(f"write_parquet_{num_rows}", num_rows, run)
+
+    def bench_read_parquet(self, num_rows: int) -> BenchmarkResult:
+        """Benchmark Parquet read."""
+        csv_path = os.path.join(self.temp_dir, f"pq_r_{num_rows}.csv")
+        pq_path = os.path.join(self.temp_dir, f"pq_r_{num_rows}.parquet")
+        generate_test_csv(csv_path, num_rows)
+        LTSeq.read_csv(csv_path).write_parquet(pq_path)  # pre-write outside timed section
+
+        def run():
+            t = LTSeq.read_parquet(pq_path)
+            _ = len(t)
+
+        return self.run_benchmark(f"read_parquet_{num_rows}", num_rows, run)
+
 
 def print_results(results: list[BenchmarkResult]) -> None:
     """Print results as a formatted table."""
@@ -319,10 +453,57 @@ def print_results(results: list[BenchmarkResult]) -> None:
     print("=" * 70)
 
 
+def collect_host_info() -> dict:
+    """Collect hardware and software environment info."""
+    import platform
+    import subprocess
+
+    info: dict = {
+        "os": f"{platform.system()} {platform.release()}",
+        "python": platform.python_version(),
+    }
+
+    # macOS: chip + memory via system_profiler
+    if platform.system() == "Darwin":
+        try:
+            sp = subprocess.check_output(
+                ["system_profiler", "SPHardwareDataType"], text=True, timeout=10
+            )
+            for line in sp.splitlines():
+                if "Chip:" in line:
+                    info["cpu"] = line.split(":", 1)[1].strip()
+                elif "Total Number of Cores:" in line:
+                    info["cores"] = line.split(":", 1)[1].strip()
+                elif "Memory:" in line:
+                    info["memory"] = line.split(":", 1)[1].strip()
+        except Exception:
+            pass
+    else:
+        info["cpu"] = platform.processor() or "unknown"
+
+    # Git commit
+    try:
+        info["git_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
+        ).strip()
+    except Exception:
+        pass
+
+    # Rust/cargo version
+    try:
+        rustc = subprocess.check_output(["rustc", "--version"], text=True, timeout=5).strip()
+        info["rustc"] = rustc.split()[1] if len(rustc.split()) > 1 else rustc
+    except Exception:
+        pass
+
+    return info
+
+
 def save_results(results: list[BenchmarkResult], path: str) -> None:
     """Save results to JSON file."""
     data = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "host": collect_host_info(),
         "results": [r.to_dict() for r in results],
     }
     with open(path, "w") as f:
@@ -344,48 +525,78 @@ def main():
         bench = Benchmarks(temp_dir)
 
         # Filter benchmarks
-        print("\n[1/7] Running filter benchmarks...")
+        print("\n[1/11] Running filter benchmarks...")
         bench.bench_filter(small)
         bench.bench_filter(medium)
         bench.bench_filter(large)
         bench.bench_filter_complex(medium)
 
         # Derive benchmarks
-        print("[2/7] Running derive benchmarks...")
+        print("[2/11] Running derive benchmarks...")
         bench.bench_derive(small)
         bench.bench_derive(medium)
         bench.bench_derive(large)
         bench.bench_derive_multi(medium)
 
         # Join benchmarks
-        print("[3/7] Running join benchmarks...")
+        print("[3/11] Running join benchmarks...")
         bench.bench_join(small, small)
         bench.bench_join(medium, small)
         bench.bench_join(medium, medium)
 
         # Window benchmarks
-        print("[4/7] Running window benchmarks...")
+        print("[4/11] Running window benchmarks...")
         bench.bench_window_lag(small)
         bench.bench_window_lag(medium)
         bench.bench_window_cumsum(small)
         bench.bench_window_cumsum(medium)
 
         # Group benchmarks
-        print("[5/7] Running group benchmarks...")
+        print("[5/11] Running group benchmarks...")
         bench.bench_group_agg(small)
         bench.bench_group_agg(medium)
 
         # Chain benchmarks
-        print("[6/7] Running chain benchmarks...")
+        print("[6/11] Running chain benchmarks...")
         bench.bench_chain(small)
         bench.bench_chain(medium)
         bench.bench_chain(large)
 
         # I/O benchmarks
-        print("[7/7] Running I/O benchmarks...")
+        print("[7/11] Running CSV I/O benchmarks...")
         bench.bench_read_csv(small)
         bench.bench_read_csv(medium)
         bench.bench_read_csv(large)
+
+        # Sort benchmarks
+        print("[8/11] Running sort benchmarks...")
+        bench.bench_sort(small)
+        bench.bench_sort(medium)
+        bench.bench_sort(large)
+        bench.bench_sort_multi(medium)
+
+        # Group ordered benchmarks
+        print("[9/11] Running group_ordered benchmarks...")
+        bench.bench_group_ordered(small)
+        bench.bench_group_ordered(medium)
+
+        # Search first benchmarks
+        print("[10/11] Running search_first benchmarks...")
+        bench.bench_search_first(small)
+        bench.bench_search_first(medium)
+
+        # Mutation + Parquet I/O benchmarks
+        print("[11/11] Running mutation and Parquet I/O benchmarks...")
+        bench.bench_mutation_insert(small)
+        bench.bench_mutation_insert(medium)
+        bench.bench_mutation_delete(small)
+        bench.bench_mutation_delete(medium)
+        bench.bench_mutation_update(small)
+        bench.bench_mutation_update(medium)
+        bench.bench_write_parquet(small)
+        bench.bench_write_parquet(medium)
+        bench.bench_read_parquet(small)
+        bench.bench_read_parquet(medium)
 
         # Print results
         print_results(bench.results)
