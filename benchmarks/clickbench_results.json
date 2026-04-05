@@ -1,89 +1,39 @@
 {
-  "timestamp": "2026-03-03T10:23:38.098210",
+  "timestamp": "2026-04-05T13:25:31.801012",
   "system": {
-    "platform": "macOS-15.7.4-arm64-arm-64bit-Mach-O",
-    "processor": "arm",
-    "cpu_count": 10,
-    "ram_gb": 32.0,
+    "platform": "Linux-6.18.20-1-cachyos-lts-x86_64-with-glibc2.43",
+    "processor": "",
+    "cpu_count": 32,
+    "ram_gb": 125.1,
     "python_version": "3.14.3"
   },
-  "data_file": "/Users/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
+  "data_file": "/home/ruoshi/code/github/ltseq/benchmarks/data/hits_sorted.parquet",
   "warmup": 1,
   "iterations": 3,
   "rounds": [
     {
-      "round_name": "R1: Top URLs",
-      "duckdb": {
-        "name": "DuckDB",
-        "median_s": 2.5523,
-        "times": [
-          2.5867,
-          2.5523,
-          2.5493
-        ],
-        "mem_delta_mb": 382.1,
-        "result": "[('http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 3288173), ('http://kinopoisk.ru', 1625250), ('http://bdsm_po_yers=0&with_video', 791465), ('http://video.yandex', 582400), ('http://smeshariki.r"
-      },
-      "ltseq": {
-        "name": "LTSeq",
-        "median_s": 4.3235,
-        "times": [
-          4.3313,
-          4.3235,
-          4.2456
-        ],
-        "mem_delta_mb": 1104.3,
-        "result": "[{'url': 'http://liver.ru/belgorod/page/1006.j\u043a\u0438/\u0434\u043e\u043f_\u043f\u0440\u0438\u0431\u043e\u0440\u044b', 'cnt': 3288173}, {'url': 'http://kinopoisk.ru', 'cnt': 1625250}, {'url': 'http://bdsm_po_yers=0&with_video', 'cnt': 791465}, {'url': 'htt"
-      }
-    },
-    {
-      "round_name": "R2: Sessionization",
-      "duckdb": {
-        "name": "DuckDB",
-        "median_s": 1.6755,
-        "times": [
-          1.6604,
-          1.6755,
-          1.7219
-        ],
-        "mem_delta_mb": 167.2,
-        "result": "26181387"
-      },
-      "ltseq": {
-        "name": "LTSeq",
-        "median_s": 0.211,
-        "times": [
-          0.2071,
-          0.2259,
-          0.211
-        ],
-        "mem_delta_mb": 0.1,
-        "result": "26181387"
-      }
-    },
-    {
       "round_name": "R3: Funnel",
       "duckdb": {
         "name": "DuckDB",
-        "median_s": 17.0013,
+        "median_s": 3.473,
         "times": [
-          19.3173,
-          17.0013,
-          16.0207
+          3.4452,
+          3.473,
+          3.5685
         ],
-        "mem_delta_mb": 825.5,
-        "result": "155336"
+        "mem_delta_mb": 128.8,
+        "result": "155373"
       },
       "ltseq": {
         "name": "LTSeq",
-        "median_s": 7.0412,
+        "median_s": 2.3444,
         "times": [
-          7.1717,
-          7.0412,
-          7.0364
+          2.346,
+          2.3444,
+          2.3433
         ],
-        "mem_delta_mb": 0,
-        "result": "155336"
+        "mem_delta_mb": 19.0,
+        "result": "155373"
       }
     }
   ]
