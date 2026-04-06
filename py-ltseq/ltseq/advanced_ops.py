@@ -519,15 +519,16 @@ class AdvancedOpsMixin:
                     f"State transition function failed at row {idx}: {e}"
                 ) from e
 
-        df[output_col] = results
-        rows = df.to_dict("records")
+        import pyarrow as pa
 
+        df[output_col] = results
         result_schema = self._schema.copy()
         result_schema[output_col] = self._infer_type_from_value(
             results[0] if results else init
         )
 
-        result = LTSeq._from_rows(rows, result_schema)
+        result = LTSeq.from_arrow(pa.Table.from_pandas(df, preserve_index=False))
+        result._schema = result_schema
         result._sort_keys = self._sort_keys
         return result
 

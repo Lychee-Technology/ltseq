@@ -1,260 +1,260 @@
 {
-  "timestamp": "2026-04-05 12:16:00",
+  "timestamp": "2026-04-05 19:24:08",
   "host": {
     "os": "Darwin 24.6.0",
     "python": "3.14.3",
     "cpu": "Apple M1 Pro",
     "cores": "10 (8 performance and 2 efficiency)",
     "memory": "32 GB",
-    "git_commit": "0558e9b",
+    "git_commit": "f8c306a",
     "rustc": "1.92.0"
   },
   "results": [
     {
       "name": "filter_10000",
       "rows": 10000,
-      "time_ms": 2.12,
-      "rows_per_sec": 4705913.0
+      "time_ms": 2.19,
+      "rows_per_sec": 4562247.0
     },
     {
       "name": "filter_100000",
       "rows": 100000,
-      "time_ms": 7.9,
-      "rows_per_sec": 12656269.0
+      "time_ms": 8.48,
+      "rows_per_sec": 11794693.0
     },
     {
       "name": "filter_1000000",
       "rows": 1000000,
-      "time_ms": 13.59,
-      "rows_per_sec": 73586071.0
+      "time_ms": 14.33,
+      "rows_per_sec": 69789488.0
     },
     {
       "name": "filter_complex_100000",
       "rows": 100000,
-      "time_ms": 8.33,
-      "rows_per_sec": 12006083.0
+      "time_ms": 8.39,
+      "rows_per_sec": 11915105.0
     },
     {
       "name": "derive_10000",
       "rows": 10000,
-      "time_ms": 1.81,
-      "rows_per_sec": 5530464.0
+      "time_ms": 1.97,
+      "rows_per_sec": 5068390.0
     },
     {
       "name": "derive_100000",
       "rows": 100000,
-      "time_ms": 5.64,
-      "rows_per_sec": 17715228.0
+      "time_ms": 5.68,
+      "rows_per_sec": 17600772.0
     },
     {
       "name": "derive_1000000",
       "rows": 1000000,
-      "time_ms": 10.12,
-      "rows_per_sec": 98828062.0
+      "time_ms": 10.88,
+      "rows_per_sec": 91908720.0
     },
     {
       "name": "derive_multi_100000",
       "rows": 100000,
-      "time_ms": 5.8,
-      "rows_per_sec": 17244186.0
+      "time_ms": 5.85,
+      "rows_per_sec": 17093815.0
     },
     {
       "name": "join_10000x10000",
       "rows": 20000,
-      "time_ms": 5.21,
-      "rows_per_sec": 3840789.0
+      "time_ms": 4.84,
+      "rows_per_sec": 4131248.0
     },
     {
       "name": "join_100000x10000",
       "rows": 110000,
-      "time_ms": 17.05,
-      "rows_per_sec": 6450788.0
+      "time_ms": 15.98,
+      "rows_per_sec": 6883988.0
     },
     {
       "name": "join_100000x100000",
       "rows": 200000,
-      "time_ms": 28.35,
-      "rows_per_sec": 7055548.0
+      "time_ms": 27.94,
+      "rows_per_sec": 7158584.0
     },
     {
       "name": "window_lag_10000",
       "rows": 10000,
-      "time_ms": 2.15,
-      "rows_per_sec": 4648041.0
+      "time_ms": 2.34,
+      "rows_per_sec": 4281382.0
     },
     {
       "name": "window_lag_100000",
       "rows": 100000,
-      "time_ms": 5.7,
-      "rows_per_sec": 17550874.0
+      "time_ms": 5.99,
+      "rows_per_sec": 16694221.0
     },
     {
       "name": "window_cumsum_10000",
       "rows": 10000,
-      "time_ms": 2.28,
-      "rows_per_sec": 4385778.0
+      "time_ms": 2.31,
+      "rows_per_sec": 4325337.0
     },
     {
       "name": "window_cumsum_100000",
       "rows": 100000,
-      "time_ms": 6.1,
-      "rows_per_sec": 16392659.0
+      "time_ms": 5.75,
+      "rows_per_sec": 17393699.0
     },
     {
       "name": "group_agg_10000",
       "rows": 10000,
-      "time_ms": 3.07,
-      "rows_per_sec": 3261785.0
+      "time_ms": 3.04,
+      "rows_per_sec": 3287776.0
     },
     {
       "name": "group_agg_100000",
       "rows": 100000,
-      "time_ms": 12.45,
-      "rows_per_sec": 8030874.0
+      "time_ms": 12.91,
+      "rows_per_sec": 7746717.0
     },
     {
       "name": "chain_10000",
       "rows": 10000,
-      "time_ms": 2.95,
-      "rows_per_sec": 3385766.0
+      "time_ms": 2.67,
+      "rows_per_sec": 3751681.0
     },
     {
       "name": "chain_100000",
       "rows": 100000,
-      "time_ms": 9.21,
-      "rows_per_sec": 10854767.0
+      "time_ms": 8.51,
+      "rows_per_sec": 11749999.0
     },
     {
       "name": "chain_1000000",
       "rows": 1000000,
-      "time_ms": 16.79,
-      "rows_per_sec": 59551380.0
+      "time_ms": 17.45,
+      "rows_per_sec": 57292134.0
     },
     {
       "name": "read_csv_10000",
       "rows": 10000,
-      "time_ms": 1.66,
-      "rows_per_sec": 6038952.0
+      "time_ms": 1.62,
+      "rows_per_sec": 6162220.0
     },
     {
       "name": "read_csv_100000",
       "rows": 100000,
-      "time_ms": 5.63,
-      "rows_per_sec": 17761289.0
+      "time_ms": 5.48,
+      "rows_per_sec": 18239577.0
     },
     {
       "name": "read_csv_1000000",
       "rows": 1000000,
-      "time_ms": 10.25,
-      "rows_per_sec": 97531240.0
+      "time_ms": 11.1,
+      "rows_per_sec": 90077692.0
     },
     {
       "name": "sort_10000",
       "rows": 10000,
-      "time_ms": 1.92,
-      "rows_per_sec": 5218677.0
+      "time_ms": 2.14,
+      "rows_per_sec": 4683658.0
     },
     {
       "name": "sort_100000",
       "rows": 100000,
-      "time_ms": 6.0,
-      "rows_per_sec": 16660303.0
+      "time_ms": 5.42,
+      "rows_per_sec": 18446167.0
     },
     {
       "name": "sort_1000000",
       "rows": 1000000,
-      "time_ms": 11.38,
-      "rows_per_sec": 87868318.0
+      "time_ms": 11.44,
+      "rows_per_sec": 87437216.0
     },
     {
       "name": "sort_multi_100000",
       "rows": 100000,
-      "time_ms": 5.61,
-      "rows_per_sec": 17815389.0
+      "time_ms": 5.7,
+      "rows_per_sec": 17550616.0
     },
     {
       "name": "group_ordered_10000",
       "rows": 10000,
-      "time_ms": 7.68,
-      "rows_per_sec": 1302588.0
+      "time_ms": 7.18,
+      "rows_per_sec": 1392235.0
     },
     {
       "name": "group_ordered_100000",
       "rows": 100000,
-      "time_ms": 49.29,
-      "rows_per_sec": 2028650.0
+      "time_ms": 48.47,
+      "rows_per_sec": 2063034.0
     },
     {
       "name": "search_first_10000",
       "rows": 10000,
-      "time_ms": 1.01,
-      "rows_per_sec": 9929803.0
+      "time_ms": 0.81,
+      "rows_per_sec": 12282286.0
     },
     {
       "name": "search_first_100000",
       "rows": 100000,
-      "time_ms": 0.87,
-      "rows_per_sec": 115166831.0
+      "time_ms": 0.93,
+      "rows_per_sec": 107144447.0
     },
     {
       "name": "mutation_insert_10000",
       "rows": 10000,
-      "time_ms": 43.63,
-      "rows_per_sec": 229201.0
+      "time_ms": 3.15,
+      "rows_per_sec": 3173456.0
     },
     {
       "name": "mutation_insert_100000",
       "rows": 100000,
-      "time_ms": 401.71,
-      "rows_per_sec": 248935.0
+      "time_ms": 16.39,
+      "rows_per_sec": 6099705.0
     },
     {
       "name": "mutation_delete_10000",
       "rows": 10000,
-      "time_ms": 2.34,
-      "rows_per_sec": 4277312.0
+      "time_ms": 2.48,
+      "rows_per_sec": 4034834.0
     },
     {
       "name": "mutation_delete_100000",
       "rows": 100000,
-      "time_ms": 7.95,
-      "rows_per_sec": 12585894.0
+      "time_ms": 7.8,
+      "rows_per_sec": 12826680.0
     },
     {
       "name": "mutation_update_10000",
       "rows": 10000,
-      "time_ms": 43.38,
-      "rows_per_sec": 230519.0
+      "time_ms": 3.89,
+      "rows_per_sec": 2570052.0
     },
     {
       "name": "mutation_update_100000",
       "rows": 100000,
-      "time_ms": 390.75,
-      "rows_per_sec": 255919.0
+      "time_ms": 18.09,
+      "rows_per_sec": 5528943.0
     },
     {
       "name": "write_parquet_10000",
       "rows": 10000,
-      "time_ms": 3.03,
-      "rows_per_sec": 3302389.0
+      "time_ms": 2.86,
+      "rows_per_sec": 3500413.0
     },
     {
       "name": "write_parquet_100000",
       "rows": 100000,
-      "time_ms": 27.5,
-      "rows_per_sec": 3635888.0
+      "time_ms": 28.12,
+      "rows_per_sec": 3556309.0
     },
     {
       "name": "read_parquet_10000",
       "rows": 10000,
-      "time_ms": 0.55,
-      "rows_per_sec": 18279667.0
+      "time_ms": 0.48,
+      "rows_per_sec": 20991863.0
     },
     {
       "name": "read_parquet_100000",
       "rows": 100000,
-      "time_ms": 0.62,
-      "rows_per_sec": 161283038.0
+      "time_ms": 0.66,
+      "rows_per_sec": 151512038.0
     }
   ]
 }
