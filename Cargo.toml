@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 # Python co-op
 pyo3 = { version = "0.27.2", features = ["extension-module", "macros"] }
 
-datafusion = "52.2.0"
+datafusion = "53"
 
 # async executor utilities
 futures-util = "0.3"
@@ -20,7 +20,7 @@ futures-util = "0.3"
 rayon = "1.10"
 
 # Direct Parquet reading (must match datafusion's arrow version)
-parquet = { version = "57.1", default-features = false, features = ["arrow"] }
+parquet = { version = "58.1", default-features = false, features = ["arrow"] }
 
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
 
