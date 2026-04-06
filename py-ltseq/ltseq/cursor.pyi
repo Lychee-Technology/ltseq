@@ -1,9 +1,9 @@
-from typing import Any, Iterator
+from typing import Any
 
 
 class Cursor:
     def __init__(self, rust_cursor: Any) -> None: ...
-    def __iter__(self) -> Iterator[Any]: ...
+    def __iter__(self) -> Cursor: ...
     def __next__(self) -> Any: ...  # returns pyarrow.RecordBatch
 
     @property
