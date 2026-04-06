@@ -27,10 +27,7 @@ class MutationMixin:
             >>> t2 = t.insert(0, {"id": 99, "name": "Alice"})   # prepend
             >>> t2 = t.insert(len(t), {"id": 99, "name": "Bob"}) # append
         """
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError("insert() requires pandas. Install with: pip install pandas")
+        import pyarrow as pa
 
         from .core import LTSeq
 
@@ -39,16 +36,23 @@ class MutationMixin:
                 "Schema not initialized. Call read_csv() first to populate the schema."
             )
 
-        df = self.to_pandas()
-        pos = max(0, min(pos, len(df)))
+        pa_table = self.to_arrow()
+        pos = max(0, min(pos, len(pa_table)))
 
-        new_row = pd.DataFrame([row_dict])
-        result_df = pd.concat(
-            [df.iloc[:pos], new_row, df.iloc[pos:]]
-        ).reset_index(drop=True)
+        # Build single-row Arrow table matching the existing schema.
+        # Infer type from the Python value first, then cast to the column type
+        # so that implicit coercions (e.g. "0.00" str → float64) work correctly.
+        new_row_arrays = {
+            field.name: pa.array([row_dict.get(field.name)]).cast(field.type)
+            for field in pa_table.schema
+        }
+        new_row = pa.table(new_row_arrays, schema=pa_table.schema)
 
-        rows = result_df.to_dict("records")
-        result = LTSeq._from_rows(rows, self._schema)
+        result_table = pa.concat_tables(
+            [pa_table.slice(0, pos), new_row, pa_table.slice(pos)]
+        )
+        result = LTSeq.from_arrow(result_table)
+        result._schema = self._schema
         result._sort_keys = None
         return result
 
@@ -68,6 +72,8 @@ class MutationMixin:
             >>> t2 = t.delete(lambda r: r.status == "deleted")
             >>> t2 = t.delete(0)   # remove first row
         """
+        import pyarrow as pa
+
         from .core import LTSeq
 
         if not self._schema:
@@ -80,19 +86,17 @@ class MutationMixin:
             return self.filter(lambda r, _p=pred: ~_p(r))
 
         # integer positional delete
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError("delete() with int pos requires pandas.")
-
         pos = int(predicate_or_pos)
-        df = self.to_pandas()
+        pa_table = self.to_arrow()
 
-        if 0 <= pos < len(df):
-            df = df.drop(index=df.index[pos]).reset_index(drop=True)
+        if 0 <= pos < len(pa_table):
+            # Keep rows before and after pos
+            pa_table = pa.concat_tables(
+                [pa_table.slice(0, pos), pa_table.slice(pos + 1)]
+            ) if pos < len(pa_table) - 1 else pa_table.slice(0, pos)
 
-        rows = df.to_dict("records")
-        result = LTSeq._from_rows(rows, self._schema)
+        result = LTSeq.from_arrow(pa_table)
+        result._schema = self._schema
         result._sort_keys = None
         return result
 
@@ -122,28 +126,28 @@ class MutationMixin:
         if not updates:
             return self
 
-        try:
-            import pandas as pd  # noqa: F401
-        except ImportError:
-            raise RuntimeError("update() requires pandas. Install with: pip install pandas")
+        import pyarrow as pa
+        import pyarrow.compute as pc
 
         from .core import LTSeq
 
-        # Derive a boolean mask column (new name, no overwrite), then apply
-        # updates in pandas.  This avoids the DataFusion schema-ambiguity error
-        # that occurs when derive() rewrites an existing column referencing itself.
+        # Derive a boolean mask column, then apply updates using Arrow compute
         _MASK = "__ltseq_update_mask__"
         with_mask = self.derive(**{_MASK: predicate})
-        df = with_mask.to_pandas()
-        mask = df[_MASK].astype(bool)
-        df = df.drop(columns=[_MASK])
+        pa_table = with_mask.to_arrow()
+
+        mask_idx = pa_table.schema.get_field_index(_MASK)
+        mask_col = pa_table.column(mask_idx).cast(pa.bool_())
+        pa_table = pa_table.remove_column(mask_idx)
 
         for col_name, new_val in updates.items():
-            if col_name in df.columns:
-                df.loc[mask, col_name] = new_val
+            idx = pa_table.schema.get_field_index(col_name)
+            if idx >= 0:
+                new_arr = pc.if_else(mask_col, new_val, pa_table.column(idx))
+                pa_table = pa_table.set_column(idx, col_name, new_arr)
 
-        rows = df.to_dict("records")
-        result = LTSeq._from_rows(rows, self._schema)
+        result = LTSeq.from_arrow(pa_table)
+        result._schema = self._schema
         result._sort_keys = None
         return result
 
@@ -163,10 +167,7 @@ class MutationMixin:
         Example:
             >>> t2 = t.modify(0, status="active", score=100)
         """
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError("modify() requires pandas. Install with: pip install pandas")
+        import pyarrow as pa
 
         from .core import LTSeq
 
@@ -175,14 +176,20 @@ class MutationMixin:
                 "Schema not initialized. Call read_csv() first to populate the schema."
             )
 
-        df = self.to_pandas()
+        pa_table = self.to_arrow()
 
-        if 0 <= pos < len(df):
+        if 0 <= pos < len(pa_table):
             for col_name, val in updates.items():
-                if col_name in df.columns:
-                    df.iloc[pos, df.columns.get_loc(col_name)] = val
+                idx = pa_table.schema.get_field_index(col_name)
+                if idx >= 0:
+                    col_list = pa_table.column(idx).to_pylist()
+                    col_list[pos] = val
+                    field_type = pa_table.schema.field(col_name).type
+                    pa_table = pa_table.set_column(
+                        idx, col_name, pa.array(col_list, type=field_type)
+                    )
 
-        rows = df.to_dict("records")
-        result = LTSeq._from_rows(rows, self._schema)
+        result = LTSeq.from_arrow(pa_table)
+        result._schema = self._schema
         result._sort_keys = None
         return result
