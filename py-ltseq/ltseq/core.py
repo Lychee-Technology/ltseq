@@ -195,12 +195,18 @@ class LTSeq(
             # No batches returned - empty result
             return pa.table({col: [] for col in self._schema.keys()})
 
-        batches = []
+        tables = []
         for buf in ipc_buffers:
             reader = pa.ipc.open_stream(buf)
-            batches.extend(reader.read_all().to_batches())
+            tables.append(reader.read_all())
 
-        return pa.Table.from_batches(batches)
+        if not tables:
+            return pa.table({col: [] for col in self._schema.keys()})
+
+        result = pa.concat_tables(tables)
+        if result.num_rows == 0 and result.num_columns == 0 and self._schema:
+            return pa.table({col: [] for col in self._schema.keys()})
+        return result
 
     def __len__(self) -> int:
         """

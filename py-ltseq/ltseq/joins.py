@@ -133,11 +133,13 @@ class JoinMixin:
         left_key = left_key_expr.get("name", "")
         right_key = left_key  # Simplified - assume same key name
 
-        merged = _pandas_join_fallback(df1, df2, left_key, right_key, how, "_other")
-        rows = merged.to_dict("records")
+        import pyarrow as pa
 
+        merged = _pandas_join_fallback(df1, df2, left_key, right_key, how, "_other")
         result_schema = _build_join_result_schema(self._schema, other._schema, "_other")
-        return LTSeq._from_rows(rows, result_schema)
+        result = LTSeq.from_arrow(pa.Table.from_pandas(merged, preserve_index=False))
+        result._schema = result_schema
+        return result
 
     def join(
         self,

@@ -210,7 +210,7 @@ class IOMixin:
     @classmethod
     def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq":
         """
-        Create an LTSeq instance from a list of row dictionaries.
+        Create an LTSeq instance from a list of row dictionaries via Arrow IPC.
 
         Internal method used by partition() and similar operations.
         Callers should prefer the public from_rows() which supports schema inference.
@@ -222,42 +222,35 @@ class IOMixin:
         Returns:
             New LTSeq instance
         """
-        import csv
-        import os
-        import tempfile
+        import pyarrow as pa
 
         from .core import LTSeq
 
+        # Map LTSeq schema type strings to PyArrow types (for empty-table creation)
+        _schema_to_arrow: dict[str, Any] = {
+            "int64": pa.int64(), "Int64": pa.int64(),
+            "float64": pa.float64(), "Float64": pa.float64(),
+            "bool": pa.bool_(), "Boolean": pa.bool_(),
+            "string": pa.string(), "Utf8": pa.string(), "utf8": pa.string(),
+            "large_string": pa.large_utf8(), "large_utf8": pa.large_utf8(),
+            "date32": pa.date32(), "date64": pa.date64(),
+        }
+
+        col_names = list(schema.keys())
+
         if not rows:
-            # Create empty table with schema
-            t = LTSeq()
-            t._schema = schema
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".csv", delete=False, newline=""
-            ) as f:
-                writer = csv.DictWriter(f, fieldnames=schema.keys())
-                writer.writeheader()
-                temp_path = f.name
-            try:
-                t._inner.read_csv(temp_path, True)
-            finally:
-                os.unlink(temp_path)
-            return t
+            arrays = {
+                col: pa.array([], type=_schema_to_arrow.get(schema[col], pa.string()))
+                for col in col_names
+            }
+            pa_table = pa.table(arrays)
+        else:
+            col_data = {col: [row.get(col) for row in rows] for col in col_names}
+            pa_table = pa.table(col_data)
 
-        # Convert rows to CSV and load
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".csv", delete=False, newline=""
-        ) as f:
-            writer = csv.DictWriter(f, fieldnames=schema.keys())
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-            temp_path = f.name
-
-        t = LTSeq.read_csv(temp_path)
-        # Honor the explicitly provided schema instead of re-inferring from CSV content
-        t._schema = schema
-        return t
+        result = LTSeq.from_arrow(pa_table)
+        result._schema = schema
+        return result
 
     def write_csv(self, path: str) -> None:
         """

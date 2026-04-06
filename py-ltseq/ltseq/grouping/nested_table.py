@@ -258,10 +258,13 @@ Supported group methods:
         result_df = filtered_df[result_cols]
 
         # Convert back to LTSeq
-        rows = result_df.to_dict("records")
-        schema = self._ltseq._schema.copy()
+        import pyarrow as pa
 
-        result_ltseq = self._ltseq.__class__._from_rows(rows, schema)
+        schema = self._ltseq._schema.copy()
+        result_ltseq = self._ltseq.__class__.from_arrow(
+            pa.Table.from_pandas(result_df, preserve_index=False)
+        )
+        result_ltseq._schema = schema
 
         result_nested = NestedTable(
             result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
@@ -476,8 +479,12 @@ Supported group methods:
         for col_name in derive_exprs.keys():
             result_schema[col_name] = "Unknown"
 
-        rows = df.to_dict("records")
-        result = self._ltseq.__class__._from_rows(rows, result_schema)
+        import pyarrow as pa
+
+        result = self._ltseq.__class__.from_arrow(
+            pa.Table.from_pandas(df, preserve_index=False)
+        )
+        result._schema = result_schema
 
         return result
 
