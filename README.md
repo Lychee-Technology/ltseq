@@ -9,7 +9,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Window Functions**: shift, rolling aggregates, cumulative sums, differences
 - **Ranking Functions**: row_number, rank, dense_rank, ntile with window specifications
 - **Ordered Computing**: group_ordered, search_first for processing sequences
-- **Set Operations**: union, intersect, diff, subset checks
+- **Set Operations**: union, intersect, except, subset checks
 - **Joins**: Standard SQL joins, merge joins, semi/anti joins, as-of joins, lookups
 - **Foreign Key Relationships**: Lightweight pointer-based linking
 - **Aggregation**: group-by aggregation with statistical functions, partitioning, pivots
@@ -27,7 +27,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 
 ### Developer Experience
 - **Pythonic API** - Lambda expressions, method chaining, intuitive syntax
-- **Type hints** - Full IDE support and autocomplete
+- **Type hints** - Full `.pyi` stubs for IDE autocomplete and mypy/pyright support
 - **Lazy evaluation** - Build complex queries before execution
 - **Zero setup** - Works with CSV, JSON, Parquet out of the box
 
@@ -271,7 +271,7 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 
 # Difference (rows in t1 but not in t2)
-only_in_t1 = t1.diff(t2, on=lambda r: r.id)
+only_in_t1 = t1.except_(t2, on=lambda r: r.id)
 
 # Subset check
 is_sub = t1.is_subset(t2, on=lambda r: r.id)  # Returns bool
@@ -288,9 +288,11 @@ quotes = LTSeq.read_csv("quotes.csv")
 joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 
 # Merge join (for pre-sorted tables - more efficient)
-users_sorted = users.sort("id")
-orders_sorted = orders.sort("user_id")
-merged = users_sorted.join_sorted(orders_sorted, on="id", how="inner")
+merged = users.sort("id").join(
+    orders.sort("user_id"),
+    on=lambda u, o: u.id == o.user_id,
+    strategy="merge",
+)
 
 # As-of join (time-series: find closest match)
 trades = LTSeq.read_csv("trades.csv").sort("timestamp")
@@ -439,8 +441,8 @@ See [docs/api.md](docs/api.md) for the complete API specification including:
 - Window functions (shift, rolling, cum_sum, diff)
 - Ranking functions (row_number, rank, dense_rank, ntile)
 - Ordered grouping (group_ordered, group_sorted, search_first)
-- Set operations (union, intersect, diff, is_subset)
-- Joins (join, join_merge, join_sorted, asof_join, semi_join, anti_join)
+- Set operations (union, intersect, except_, is_subset)
+- Joins (join, asof_join, semi_join, anti_join)
 - Linking and lookups (link, lookup)
 - Aggregation (agg, partition, pivot)
 - String operations (contains, replace, concat, pad_left, pad_right, split, regex_match)
