@@ -43,7 +43,7 @@ def make_orders():
 
 
 class TestExceptAndDiff:
-    """Test that except_() works and diff() emits DeprecationWarning."""
+    """Test that except_() works correctly."""
 
     def _make_tables(self):
         t1 = make_table(
@@ -62,23 +62,6 @@ class TestExceptAndDiff:
         rows = result.collect()
         vals = sorted([r["x"] for r in rows])
         assert vals == [1]
-
-    def test_diff_emits_deprecation_warning(self):
-        t1, t2 = self._make_tables()
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = t1.diff(t2)
-            dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warnings) >= 1
-            assert "except_" in str(dep_warnings[0].message)
-
-    def test_diff_returns_same_result_as_except(self):
-        t1, t2 = self._make_tables()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            diff_rows = sorted(t1.diff(t2).collect(), key=lambda r: r["x"])
-        except_rows = sorted(t1.except_(t2).collect(), key=lambda r: r["x"])
-        assert diff_rows == except_rows
 
 
 # ===========================================================================
@@ -146,69 +129,6 @@ class TestJoinStrategy:
             orders, on=lambda u, o: u.id == o.user_id, how="left", strategy="merge"
         )
         assert result.count() == 4
-
-
-class TestJoinMergeDeprecated:
-    """Test that join_merge() emits DeprecationWarning."""
-
-    def test_join_merge_deprecation_warning(self):
-        users = make_users().sort("id")
-        orders = make_orders().sort("user_id")
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = users.join_merge(
-                orders, on=lambda u, o: u.id == o.user_id
-            )
-            dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warnings) >= 1
-            assert "join_merge" in str(dep_warnings[0].message)
-
-    def test_join_merge_still_works(self):
-        users = make_users().sort("id")
-        orders = make_orders().sort("user_id")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = users.join_merge(
-                orders, on=lambda u, o: u.id == o.user_id
-            )
-        assert result.count() == 3
-
-
-class TestJoinSortedDeprecated:
-    """Test that join_sorted() emits DeprecationWarning."""
-
-    def test_join_sorted_deprecation_warning(self):
-        users = make_users().sort("id")
-        orders = make_orders().sort("user_id")
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = users.join_sorted(
-                orders, on=lambda u, o: u.id == o.user_id
-            )
-            dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warnings) >= 1
-            assert "join_sorted" in str(dep_warnings[0].message)
-
-    def test_join_sorted_still_works(self):
-        users = make_users().sort("id")
-        orders = make_orders().sort("user_id")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            result = users.join_sorted(
-                orders, on=lambda u, o: u.id == o.user_id
-            )
-        assert result.count() == 3
-
-    def test_join_sorted_unsorted_raises(self):
-        """Even deprecated join_sorted() still validates sort order."""
-        users = make_users()  # not sorted
-        orders = make_orders().sort("user_id")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            with pytest.raises(ValueError, match="not sorted"):
-                users.join_sorted(
-                    orders, on=lambda u, o: u.id == o.user_id
-                )
 
 
 # ===========================================================================

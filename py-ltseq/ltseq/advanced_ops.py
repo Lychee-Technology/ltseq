@@ -229,22 +229,6 @@ class SetOpsMixin:
         col_values = set(df[key_col].tolist())
         return all(v in col_values for v in values)
 
-    def diff(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
-        """
-        Deprecated: Use except_() instead.
-
-        Set difference: rows in left but not in right.
-        """
-        import warnings
-
-        warnings.warn(
-            "diff() is deprecated for set difference. Use except_() instead. "
-            "diff() will become a row-level difference operation in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.except_(other, on=on)
-
     def is_subset(self, other: "LTSeq", on: Callable | None = None) -> bool:
         """
         Check if this table is a subset of another.

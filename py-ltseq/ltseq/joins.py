@@ -1,4 +1,4 @@
-"""Join operations for LTSeq: join, join_merge, join_sorted, asof_join."""
+"""Join operations for LTSeq: join, asof_join, semi_join, anti_join."""
 
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -75,7 +75,7 @@ class JoinMixin:
     def _execute_join(
         self, other: "LTSeq", on: Callable, how: str, method_name: str = "join"
     ) -> "LTSeq":
-        """Core join implementation shared by join() and join_merge()."""
+        """Core join implementation."""
         from .core import LTSeq
 
         _validate_join_inputs(self, other, how)
@@ -260,58 +260,6 @@ class JoinMixin:
             self._schema, other._schema, "_other"
         )
         return result
-
-    def join_merge(
-        self, other: "LTSeq", on: Callable, join_type: str = "inner"
-    ) -> "LTSeq":
-        """
-        Merge join for pre-sorted tables.
-
-        .. deprecated::
-            Use ``join(..., strategy="merge")`` instead.
-
-        Args:
-            other: Another LTSeq table
-            on: Lambda specifying join condition
-            join_type: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-        """
-        import warnings
-
-        warnings.warn(
-            "join_merge() is deprecated. Use join(..., strategy='merge') instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Preserve original behavior: no sort validation (unlike strategy="merge")
-        return self._execute_join(other, on, join_type, "join_merge")
-
-    def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
-        """
-        Merge join with sort order validation.
-
-        .. deprecated::
-            Use ``join(..., strategy="merge")`` instead.
-
-        Args:
-            other: Another LTSeq table (must be sorted by join key)
-            on: Lambda specifying join condition
-            how: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-        """
-        import warnings
-
-        warnings.warn(
-            "join_sorted() is deprecated. Use join(..., strategy='merge') instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Preserve original behavior: sort validation (same as strategy="merge")
-        return self._join_with_sort_validation(other, on, how)
 
     def _get_sort_direction(self, col_name: str) -> bool | None:
         """Get sort direction for a column, or None if not sorted by it."""

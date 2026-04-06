@@ -189,7 +189,7 @@ class TestDiff:
     """Tests for diff() operation."""
 
     def test_diff_basic(self):
-        """Diff returns rows in first table but not in second."""
+        """except_() returns rows in first table but not in second."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path1 = os.path.join(tmpdir, "t1.csv")
             path2 = os.path.join(tmpdir, "t2.csv")
@@ -202,12 +202,12 @@ class TestDiff:
             t1 = LTSeq.read_csv(path1)
             t2 = LTSeq.read_csv(path2)
 
-            # Diff on all columns
-            result = t1.diff(t2)
+            # except_ on all columns
+            result = t1.except_(t2)
             assert len(result) == 1  # Only Alice is unique to t1
 
     def test_diff_with_key(self):
-        """Diff on specific key column."""
+        """except_() on specific key column."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path1 = os.path.join(tmpdir, "t1.csv")
             path2 = os.path.join(tmpdir, "t2.csv")
@@ -220,12 +220,12 @@ class TestDiff:
             t1 = LTSeq.read_csv(path1)
             t2 = LTSeq.read_csv(path2)
 
-            # Diff on id only
-            result = t1.diff(t2, on=lambda r: r.id)
+            # except_ on id only
+            result = t1.except_(t2, on=lambda r: r.id)
             assert len(result) == 1  # Only id=1 is unique to t1
 
     def test_diff_all_common(self):
-        """Diff returns empty when all rows are in both."""
+        """except_() returns empty when all rows are in both."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path1 = os.path.join(tmpdir, "t1.csv")
             path2 = os.path.join(tmpdir, "t2.csv")
@@ -238,11 +238,11 @@ class TestDiff:
             t1 = LTSeq.read_csv(path1)
             t2 = LTSeq.read_csv(path2)
 
-            result = t1.diff(t2)
+            result = t1.except_(t2)
             assert len(result) == 0  # All t1 rows are in t2
 
     def test_diff_no_common(self):
-        """Diff returns all rows when no overlap."""
+        """except_() returns all rows when no overlap."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path1 = os.path.join(tmpdir, "t1.csv")
             path2 = os.path.join(tmpdir, "t2.csv")
@@ -255,11 +255,11 @@ class TestDiff:
             t1 = LTSeq.read_csv(path1)
             t2 = LTSeq.read_csv(path2)
 
-            result = t1.diff(t2)
+            result = t1.except_(t2)
             assert len(result) == 2  # All t1 rows are unique
 
     def test_diff_empty_right(self):
-        """Diff with empty right returns all left rows."""
+        """except_() with empty right returns all left rows."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path1 = os.path.join(tmpdir, "t1.csv")
             path2 = os.path.join(tmpdir, "t2.csv")
@@ -272,7 +272,7 @@ class TestDiff:
             t1 = LTSeq.read_csv(path1)
             t2 = LTSeq.read_csv(path2)
 
-            result = t1.diff(t2)
+            result = t1.except_(t2)
             assert len(result) == 2
 
     def test_diff_use_case_churned_customers(self):
@@ -292,7 +292,7 @@ class TestDiff:
             active_t = LTSeq.read_csv(active_customers)
 
             # Find churned customers (in all but not in active)
-            churned = all_t.diff(active_t, on=lambda r: r.customer_id)
+            churned = all_t.except_(active_t, on=lambda r: r.customer_id)
             assert len(churned) == 2  # Alice and Charlie churned
 
 
@@ -424,7 +424,7 @@ class TestSetOpsEdgeCases:
                 t.intersect([1, 2, 3])
 
     def test_diff_type_error(self):
-        """Diff with non-LTSeq raises TypeError."""
+        """except_() with non-LTSeq raises TypeError."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "t.csv")
             with open(path, "w") as f:
@@ -432,7 +432,7 @@ class TestSetOpsEdgeCases:
             t = LTSeq.read_csv(path)
 
             with pytest.raises(TypeError):
-                t.diff({"id": 1})
+                t.except_({"id": 1})
 
     def test_is_subset_type_error(self):
         """is_subset with non-LTSeq raises TypeError."""
@@ -461,7 +461,7 @@ class TestSetOpsEdgeCases:
 
             union_result = t1.union(t2)
             intersect_result = t1.intersect(t2)
-            diff_result = t1.diff(t2)
+            diff_result = t1.except_(t2)
 
             # All should have same columns as t1
             for result in [union_result, intersect_result, diff_result]:
