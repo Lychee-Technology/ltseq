@@ -403,7 +403,7 @@ class GroupAggregationMixin:
         valid_values = [str(v) for v in self._get_valid_values(column_name)]
         return delimiter.join(valid_values)
 
-    def top_k(self, column_name: str, k: int) -> List[Any]:
+    def top_k(self, column_name: str, k: int) -> list[Any]:
         """
         Get the top K values from a column in this group.
 
