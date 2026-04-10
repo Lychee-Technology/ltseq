@@ -42,6 +42,8 @@
 
 // Common utilities (imported first for use by other modules)
 pub(crate) mod common;
+// Legacy helpers module (backward compat for window.rs, pivot.rs)
+pub(crate) mod helpers;
 
 // Core modules
 pub(crate) mod basic;

@@ -24,7 +24,9 @@ use crate::ops::common::{
 };
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::array::{Array, ArrayRef, UInt32Array};
+use datafusion::arrow::compute;
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
@@ -479,5 +481,370 @@ fn semi_anti_join_impl(
         result_batches,
         Arc::clone(&left_schema),
         &table.sort_exprs,
+    )
+}
+
+// ============================================================================
+// Merge Join (sorted key join)
+// ============================================================================
+
+/// Merge join: efficient join for pre-sorted data using a two-pointer algorithm.
+///
+/// Falls back to SQL join for non-inner/left types or composite keys.
+pub fn merge_join_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+    join_type: &str,
+    alias: &str,
+) -> PyResult<LTSeqTable> {
+    // Only inner and left joins are supported by merge join;
+    // right/full fall back to standard SQL join
+    if !matches!(join_type, "inner" | "left") {
+        return join_impl(
+            table,
+            other,
+            left_key_expr_dict,
+            right_key_expr_dict,
+            join_type,
+            alias,
+        );
+    }
+
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
+
+    // Collect batches
+    let (left_batches, right_batches) = RUNTIME
+        .block_on(collect_both_tables(df_left, df_right))
+        .map_err(|e| LtseqError::Runtime(e))?;
+
+    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
+    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
+
+    // Parse and validate join keys — must be single column for merge join
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+        left_key_expr_dict,
+        right_key_expr_dict,
+        &left_schema,
+        &right_schema,
+    )?;
+
+    if left_col_names.len() != 1 || right_col_names.len() != 1 {
+        // Composite keys not supported by merge join; fall back to SQL
+        return join_impl(
+            table,
+            other,
+            left_key_expr_dict,
+            right_key_expr_dict,
+            join_type,
+            alias,
+        );
+    }
+
+    let left_key = &left_col_names[0];
+    let right_key = &right_col_names[0];
+
+    // Concatenate batches into single RecordBatch each
+    let left_batch = concat_batches_or_empty(&left_batches, &left_schema)?;
+    let right_batch = concat_batches_or_empty(&right_batches, &right_schema)?;
+
+    // Extract key columns
+    let left_key_idx = left_schema
+        .index_of(left_key)
+        .map_err(|_| LtseqError::Validation(format!("Left key column '{}' not found", left_key)))?;
+    let right_key_idx = right_schema
+        .index_of(right_key)
+        .map_err(|_| LtseqError::Validation(format!("Right key column '{}' not found", right_key)))?;
+
+    let left_key_col = Arc::clone(left_batch.column(left_key_idx));
+    let right_key_col = Arc::clone(right_batch.column(right_key_idx));
+
+    let is_left_join = join_type == "left";
+
+    // Try GPU merge join first (when gpu feature is enabled)
+    #[cfg(feature = "gpu")]
+    {
+        let left_dt = left_key_col.data_type();
+        let right_dt = right_key_col.data_type();
+        if crate::gpu::merge_join::is_gpu_merge_join_eligible(
+            left_batch.num_rows(),
+            right_batch.num_rows(),
+            left_dt,
+            right_dt,
+        ) {
+            let gpu_join_type = if is_left_join {
+                crate::gpu::merge_join::GpuJoinType::Left
+            } else {
+                crate::gpu::merge_join::GpuJoinType::Inner
+            };
+
+            match crate::gpu::merge_join::gpu_merge_join(&left_key_col, &right_key_col, gpu_join_type)
+            {
+                Ok((left_idx, right_idx)) => {
+                    match build_merge_join_result(
+                        &left_batch,
+                        &right_batch,
+                        &left_idx,
+                        &right_idx,
+                        alias,
+                        &table.session,
+                        left_key,
+                    ) {
+                        Ok(result) => return Ok(result),
+                        Err(e) => {
+                            eprintln!("GPU merge join gather failed, falling back to CPU: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("GPU merge join failed, falling back to CPU: {}", e);
+                }
+            }
+        }
+    }
+
+    // CPU two-pointer merge join
+    let (left_idx, right_idx) = cpu_merge_join(&left_key_col, &right_key_col, is_left_join)?;
+
+    build_merge_join_result(
+        &left_batch,
+        &right_batch,
+        &left_idx,
+        &right_idx,
+        alias,
+        &table.session,
+        left_key,
+    )
+}
+
+/// Concatenate batches into a single RecordBatch, or return empty batch if none.
+fn concat_batches_or_empty(
+    batches: &[RecordBatch],
+    schema: &Arc<ArrowSchema>,
+) -> PyResult<RecordBatch> {
+    if batches.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::clone(schema)));
+    }
+    compute::concat_batches(schema, batches.iter()).map_err(|e| {
+        LtseqError::Runtime(format!("Failed to concatenate batches: {}", e)).into()
+    })
+}
+
+/// CPU two-pointer merge join on sorted key columns.
+fn cpu_merge_join(
+    left_keys: &ArrayRef,
+    right_keys: &ArrayRef,
+    is_left_join: bool,
+) -> PyResult<(UInt32Array, UInt32Array)> {
+    let left_n = left_keys.len();
+    let right_n = right_keys.len();
+
+    if left_n == 0 {
+        return Ok((UInt32Array::from(Vec::<u32>::new()), UInt32Array::from(Vec::<u32>::new())));
+    }
+
+    if right_n == 0 {
+        if is_left_join {
+            let left_idx: Vec<u32> = (0..left_n as u32).collect();
+            let right_idx: Vec<Option<u32>> = vec![None; left_n];
+            return Ok((UInt32Array::from(left_idx), UInt32Array::from(right_idx)));
+        } else {
+            return Ok((UInt32Array::from(Vec::<u32>::new()), UInt32Array::from(Vec::<u32>::new())));
+        }
+    }
+
+    match left_keys.data_type() {
+        DataType::Int64 => cpu_merge_join_typed::<i64>(left_keys, right_keys, is_left_join),
+        DataType::Int32 => cpu_merge_join_typed::<i32>(left_keys, right_keys, is_left_join),
+        DataType::Float64 => cpu_merge_join_typed::<f64>(left_keys, right_keys, is_left_join),
+        DataType::Float32 => cpu_merge_join_typed::<f32>(left_keys, right_keys, is_left_join),
+        DataType::Utf8 => cpu_merge_join_utf8(left_keys, right_keys, is_left_join),
+        dt => Err(LtseqError::Validation(format!(
+            "Unsupported key type for merge join: {:?}", dt
+        )).into()),
+    }
+}
+
+trait MergeJoinKey: PartialOrd + Copy + 'static {
+    type ArrowArray: Array + 'static;
+    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray>;
+    fn value(arr: &Self::ArrowArray, idx: usize) -> Self;
+}
+
+impl MergeJoinKey for i64 {
+    type ArrowArray = datafusion::arrow::array::Int64Array;
+    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> { arr.as_any().downcast_ref() }
+    fn value(arr: &Self::ArrowArray, idx: usize) -> Self { arr.value(idx) }
+}
+
+impl MergeJoinKey for i32 {
+    type ArrowArray = datafusion::arrow::array::Int32Array;
+    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> { arr.as_any().downcast_ref() }
+    fn value(arr: &Self::ArrowArray, idx: usize) -> Self { arr.value(idx) }
+}
+
+impl MergeJoinKey for f64 {
+    type ArrowArray = datafusion::arrow::array::Float64Array;
+    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> { arr.as_any().downcast_ref() }
+    fn value(arr: &Self::ArrowArray, idx: usize) -> Self { arr.value(idx) }
+}
+
+impl MergeJoinKey for f32 {
+    type ArrowArray = datafusion::arrow::array::Float32Array;
+    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> { arr.as_any().downcast_ref() }
+    fn value(arr: &Self::ArrowArray, idx: usize) -> Self { arr.value(idx) }
+}
+
+fn cpu_merge_join_typed<T: MergeJoinKey>(
+    left_keys: &ArrayRef,
+    right_keys: &ArrayRef,
+    is_left_join: bool,
+) -> PyResult<(UInt32Array, UInt32Array)> {
+    let left_arr = T::downcast(left_keys)
+        .ok_or_else(|| LtseqError::Runtime("Failed to downcast left key array".into()))?;
+    let right_arr = T::downcast(right_keys)
+        .ok_or_else(|| LtseqError::Runtime("Failed to downcast right key array".into()))?;
+
+    merge_join_loop(
+        left_arr.len(),
+        right_arr.len(),
+        is_left_join,
+        |li, ri| T::value(left_arr, li).partial_cmp(&T::value(right_arr, ri)),
+        |li1, li2| T::value(left_arr, li1) == T::value(left_arr, li2),
+        |ri1, ri2| T::value(right_arr, ri1) == T::value(right_arr, ri2),
+    )
+}
+
+fn cpu_merge_join_utf8(
+    left_keys: &ArrayRef,
+    right_keys: &ArrayRef,
+    is_left_join: bool,
+) -> PyResult<(UInt32Array, UInt32Array)> {
+    use datafusion::arrow::array::StringArray;
+
+    let left_arr = left_keys.as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| LtseqError::Runtime("Failed to downcast left key to StringArray".into()))?;
+    let right_arr = right_keys.as_any().downcast_ref::<StringArray>()
+        .ok_or_else(|| LtseqError::Runtime("Failed to downcast right key to StringArray".into()))?;
+
+    merge_join_loop(
+        left_arr.len(),
+        right_arr.len(),
+        is_left_join,
+        |li, ri| left_arr.value(li).partial_cmp(right_arr.value(ri)),
+        |li1, li2| left_arr.value(li1) == left_arr.value(li2),
+        |ri1, ri2| right_arr.value(ri1) == right_arr.value(ri2),
+    )
+}
+
+fn merge_join_loop(
+    left_n: usize,
+    right_n: usize,
+    is_left_join: bool,
+    cmp_lr: impl Fn(usize, usize) -> Option<std::cmp::Ordering>,
+    eq_ll: impl Fn(usize, usize) -> bool,
+    eq_rr: impl Fn(usize, usize) -> bool,
+) -> PyResult<(UInt32Array, UInt32Array)> {
+    let mut left_indices: Vec<u32> = Vec::new();
+    let mut right_indices: Vec<Option<u32>> = Vec::new();
+
+    let mut li = 0usize;
+    let mut ri = 0usize;
+
+    while li < left_n && ri < right_n {
+        match cmp_lr(li, ri) {
+            Some(std::cmp::Ordering::Less) => {
+                if is_left_join {
+                    left_indices.push(li as u32);
+                    right_indices.push(None);
+                }
+                li += 1;
+            }
+            Some(std::cmp::Ordering::Greater) => {
+                ri += 1;
+            }
+            Some(std::cmp::Ordering::Equal) => {
+                let ri_start = ri;
+                while ri < right_n && eq_rr(ri_start, ri) { ri += 1; }
+                let li_start = li;
+                while li < left_n && eq_ll(li_start, li) { li += 1; }
+                for l in li_start..li {
+                    for r in ri_start..ri {
+                        left_indices.push(l as u32);
+                        right_indices.push(Some(r as u32));
+                    }
+                }
+            }
+            None => {
+                if is_left_join {
+                    left_indices.push(li as u32);
+                    right_indices.push(None);
+                }
+                li += 1;
+            }
+        }
+    }
+
+    if is_left_join {
+        while li < left_n {
+            left_indices.push(li as u32);
+            right_indices.push(None);
+            li += 1;
+        }
+    }
+
+    Ok((UInt32Array::from(left_indices), UInt32Array::from(right_indices)))
+}
+
+fn build_merge_join_result(
+    left_batch: &RecordBatch,
+    right_batch: &RecordBatch,
+    left_idx: &UInt32Array,
+    right_idx: &UInt32Array,
+    alias: &str,
+    session: &Arc<SessionContext>,
+    left_key: &str,
+) -> PyResult<LTSeqTable> {
+    let mut result_columns: Vec<ArrayRef> = Vec::new();
+
+    for col_idx in 0..left_batch.num_columns() {
+        let col = left_batch.column(col_idx);
+        let taken = compute::take(col.as_ref(), left_idx, None)
+            .map_err(|e| LtseqError::Runtime(format!("take() failed on left column: {}", e)))?;
+        result_columns.push(taken);
+    }
+
+    for col_idx in 0..right_batch.num_columns() {
+        let col = right_batch.column(col_idx);
+        let taken = compute::take(col.as_ref(), right_idx, None)
+            .map_err(|e| LtseqError::Runtime(format!("take() failed on right column: {}", e)))?;
+        result_columns.push(taken);
+    }
+
+    let left_schema = left_batch.schema();
+    let right_schema = right_batch.schema();
+    let result_schema = build_aliased_join_schema(&left_schema, &right_schema, alias);
+
+    if result_columns.is_empty() {
+        return LTSeqTable::from_batches_with_schema(
+            Arc::clone(session),
+            vec![],
+            result_schema,
+            vec![left_key.to_string()],
+            None,
+        );
+    }
+
+    let result_batch = RecordBatch::try_new(Arc::clone(&result_schema), result_columns)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to build result batch: {}", e)))?;
+
+    LTSeqTable::from_batches_with_schema(
+        Arc::clone(session),
+        vec![result_batch],
+        result_schema,
+        vec![left_key.to_string()],
+        None,
     )
 }

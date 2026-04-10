@@ -733,7 +733,13 @@ impl LTSeqTable {
         group_exprs: Option<Bound<'_, PyAny>>,
         agg_dict: &Bound<'_, PyDict>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::aggregation::agg_impl(self, group_exprs, agg_dict)
+        let group_dict = group_exprs
+            .map(|e| {
+                e.downcast_into::<PyDict>()
+                    .map_err(|_| pyo3::exceptions::PyTypeError::new_err("group_exprs must be a dict"))
+            })
+            .transpose()?;
+        crate::ops::aggregation::agg_impl(self, group_dict, agg_dict)
     }
 
     /// Filter rows using a raw SQL WHERE clause
