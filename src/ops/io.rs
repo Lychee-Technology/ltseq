@@ -44,6 +44,9 @@ pub fn write_csv_impl(table: &LTSeqTable, path: String) -> PyResult<()> {
 
 /// Write table data to a Parquet file using Arrow's native Parquet writer.
 ///
+/// Batches are streamed from DataFusion and written incrementally, avoiding
+/// full in-memory materialization before the first write.
+///
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     path: Path to the output Parquet file
@@ -56,23 +59,20 @@ pub fn write_parquet_impl(
     let df = table.require_df()?;
 
     RUNTIME.block_on(async {
+        use datafusion::arrow::datatypes::Schema as ArrowSchema;
+        use futures_util::StreamExt;
         use parquet::arrow::ArrowWriter;
         use parquet::basic::Compression;
         use parquet::file::properties::WriterProperties;
         use std::fs::File;
+        use std::sync::Arc;
 
         let df_clone = (**df).clone();
-        let batches = df_clone.collect().await.map_err(LtseqError::collect)?;
 
-        if batches.is_empty() {
-            return Err(LtseqError::Validation("No data to write".into()).into());
-        }
-
-        let schema = batches[0].schema();
-
-        let file = File::create(&path).map_err(|e| {
-            LtseqError::io(&format!("Failed to create file '{}'", path), e)
-        })?;
+        // Extract Arrow schema before consuming the DataFrame
+        let df_schema = df_clone.schema();
+        let arrow_fields: Vec<_> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
+        let schema = Arc::new(ArrowSchema::new(arrow_fields));
 
         let comp = match compression.as_deref() {
             Some("snappy") => Compression::SNAPPY,
@@ -92,14 +92,37 @@ pub fn write_parquet_impl(
             .set_compression(comp)
             .build();
 
+        // Stream batches from DataFusion directly into the Parquet writer
+        let mut stream = df_clone
+            .execute_stream()
+            .await
+            .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
+
+        let file = File::create(&path).map_err(|e| {
+            LtseqError::io(&format!("Failed to create file '{}'", path), e)
+        })?;
+
         let mut writer = ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| {
             LtseqError::Io(format!("Failed to create Parquet writer: {}", e))
         })?;
 
-        for batch in &batches {
-            writer.write(batch).map_err(|e| {
-                LtseqError::Io(format!("Failed to write Parquet batch: {}", e))
+        let mut wrote_any = false;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.map_err(|e| {
+                LtseqError::Io(format!("Failed to read batch: {}", e))
             })?;
+            if batch.num_rows() > 0 {
+                writer.write(&batch).map_err(|e| {
+                    LtseqError::Io(format!("Failed to write Parquet batch: {}", e))
+                })?;
+                wrote_any = true;
+            }
+        }
+
+        if !wrote_any {
+            drop(writer);
+            let _ = std::fs::remove_file(&path);
+            return Err(LtseqError::Validation("No data to write".into()).into());
         }
 
         writer.close().map_err(|e| {

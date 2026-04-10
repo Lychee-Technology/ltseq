@@ -5,6 +5,7 @@ from .core import LTSeq
 from .grouping import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable
+from .aggregation import GroupBy
 
 # Re-export public expression types
 from .expr import (
@@ -64,12 +65,15 @@ from .expr import (
 try:
     from .ltseq_core import gpu_available
 except ImportError:
+
     def gpu_available() -> bool:
         return False
+
 
 # GPU table — conditional import (requires cudf)
 try:
     from .gpu_table import GpuTable
+
     _GPUTABLE_AVAILABLE = True
 except ImportError:
     _GPUTABLE_AVAILABLE = False
@@ -82,6 +86,7 @@ __all__ = [
     "NestedTable",
     "LinkedTable",
     "PartitionedTable",
+    "GroupBy",
     "SchemaProxy",
     "BinOpExpr",
     "ColumnExpr",

@@ -1,7 +1,5 @@
 """Schema proxy classes for expression capturing."""
 
-from typing import Dict, Union
-
 from .types import ColumnExpr
 
 
@@ -19,7 +17,7 @@ class SchemaProxy:
         _schema (dict): Mapping of column name -> type string
     """
 
-    def __init__(self, schema: Dict[str, str]):
+    def __init__(self, schema: dict[str, str]):
         """
         Initialize a SchemaProxy.
 
@@ -29,7 +27,7 @@ class SchemaProxy:
         """
         self._schema = schema
 
-    def __getattr__(self, name: str) -> Union[ColumnExpr, "NestedSchemaProxy"]:
+    def __getattr__(self, name: str) -> "ColumnExpr | NestedSchemaProxy":
         """
         Return a ColumnExpr for the given column name, or NestedSchemaProxy for linked tables.
 
@@ -90,7 +88,7 @@ class SchemaProxy:
             f"Available columns: {list(self._schema.keys())}"
         )
 
-    def get_schema(self) -> Dict[str, str]:
+    def get_schema(self) -> dict[str, str]:
         """
         Return a copy of the underlying schema.
 
@@ -114,7 +112,7 @@ class NestedSchemaProxy:
         _prefixed_schema (dict): Map of unprefixed names to their prefixed column names
     """
 
-    def __init__(self, alias: str, prefixed_columns: Dict[str, str]):
+    def __init__(self, alias: str, prefixed_columns: dict[str, str]):
         """
         Initialize a NestedSchemaProxy for a linked table.
 

@@ -5,18 +5,18 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::helpers::register_temp_table;
 use crate::transpiler::pyexpr_to_sql;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
+use datafusion::datasource::MemTable;
 use datafusion::functions_aggregate::expr_fn as agg_fn;
 use datafusion::logical_expr::{case, Expr};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 use std::sync::Arc;
 
 /// Convert a PyExpr aggregate call to a native DataFusion Expr.
@@ -114,11 +114,44 @@ fn pyexpr_to_agg_expr(
         }
         // Statistical aggregates — native DataFusion path
         "corr" => {
-            let (col_a, col_b) = extract_two_column_args(on, args, schema, "corr")?;
+            // corr(col_a, col_b) — both come from args when on is empty
+            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+                if args.len() < 2 {
+                    return Err("corr requires two column arguments".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
+                )
+            } else {
+                if args.is_empty() {
+                    return Err("corr requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            };
             Ok(Some(agg_fn::corr(col_a, col_b)))
         }
         "covar" => {
-            let (col_a, col_b) = extract_two_column_args(on, args, schema, "covar")?;
+            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+                if args.len() < 2 {
+                    return Err("covar requires two column arguments".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
+                )
+            } else {
+                if args.is_empty() {
+                    return Err("covar requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            };
             Ok(Some(agg_fn::covar_samp(col_a, col_b)))
         }
         "concat_agg" => {
@@ -153,84 +186,29 @@ fn pyexpr_to_agg_expr(
     }
 }
 
-/// Extract two column arguments for bivariate aggregates like `corr` and `covar`.
-///
-/// When `on` is an empty column reference, both columns come from `args`.
-/// Otherwise, `on` is the first column and `args[0]` is the second.
-fn extract_two_column_args(
-    on: &PyExpr,
-    args: &[PyExpr],
-    schema: &ArrowSchema,
-    func_name: &str,
-) -> Result<(Expr, Expr), String> {
-    if matches!(on, PyExpr::Column(name) if name.is_empty()) {
-        if args.len() < 2 {
-            return Err(format!("{} requires two column arguments", func_name));
-        }
-        Ok((
-            crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-            crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
-        ))
-    } else {
-        if args.is_empty() {
-            return Err(format!("{} requires a second column argument", func_name));
-        }
-        Ok((
-            crate::transpiler::pyexpr_to_datafusion(on.clone(), schema)?,
-            crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-        ))
-    }
-}
-
-/// Parse group expressions from Python (list of dicts) into DataFusion Expr(s)
+/// Parse group expression into DataFusion Expr(s)
 fn parse_group_exprs(
-    group_exprs: Option<Bound<'_, PyAny>>,
+    group_expr: Option<Bound<'_, PyDict>>,
     schema: &ArrowSchema,
 ) -> PyResult<Vec<Expr>> {
-    let Some(group_val) = group_exprs else {
+    let Some(group_expr_dict) = group_expr else {
         return Ok(Vec::new());
     };
 
-    // Accept either a single dict (backward compat) or a list of dicts
-    let expr_dicts: Vec<Bound<'_, PyDict>> = if let Ok(list) = group_val.cast::<PyList>() {
-        list.iter()
-            .map(|item| {
-                item.cast::<PyDict>()
-                    .map(|d| d.clone())
-                    .map_err(|_| {
-                        LtseqError::TypeMismatch(
-                            "Each group-by key must be a dict expression".into(),
-                        )
-                        .into()
-                    })
-            })
-            .collect::<PyResult<Vec<_>>>()?
-    } else if let Ok(dict) = group_val.cast::<PyDict>() {
-        vec![dict.clone()]
-    } else {
-        return Err(LtseqError::TypeMismatch(
-            "group_exprs must be a list of dicts or a single dict".into(),
-        )
-        .into());
-    };
+    let py_expr = dict_to_py_expr(&group_expr_dict)
+        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
-    let mut result = Vec::with_capacity(expr_dicts.len());
-    for expr_dict in &expr_dicts {
-        let py_expr = dict_to_py_expr(expr_dict)
-            .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
-        let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
-        result.push(df_expr);
-    }
-    Ok(result)
+    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+        .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
+
+    Ok(vec![df_expr])
 }
-
 
 /// Aggregate rows into a summary table with one row per group.
 /// Uses native DataFusion df.aggregate() API — no materialization needed.
 pub fn agg_impl(
     table: &LTSeqTable,
-    group_exprs: Option<Bound<'_, PyAny>>,
+    group_expr: Option<Bound<'_, PyDict>>,
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
@@ -248,7 +226,7 @@ pub fn agg_impl(
             .cast::<PyDict>()
             .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict)
+        let py_expr = dict_to_py_expr(val_dict)
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         match pyexpr_to_agg_expr(&py_expr, schema) {
@@ -267,11 +245,11 @@ pub fn agg_impl(
     }
 
     if needs_sql_fallback {
-        return agg_impl_sql_fallback(table, group_exprs, agg_dict);
+        return agg_impl_sql_fallback(table, group_expr, agg_dict);
     }
 
     // Parse group expressions
-    let group_exprs = parse_group_exprs(group_exprs, schema)?;
+    let group_exprs = parse_group_exprs(group_expr, schema)?;
 
     // Execute native aggregate — stays lazy until collect!
     let result_df = RUNTIME.block_on(async {
@@ -286,7 +264,7 @@ pub fn agg_impl(
             .map_err(|e| format!("Collect failed: {}", e))?;
         Ok::<_, String>(batches)
     })
-    .map_err(|e| LtseqError::Runtime(e))?;
+    .map_err(LtseqError::Runtime)?;
 
     create_result_table(table, result_df)
 }
@@ -294,7 +272,7 @@ pub fn agg_impl(
 /// SQL-based fallback for complex aggregates (top_k, mode)
 fn agg_impl_sql_fallback(
     table: &LTSeqTable,
-    group_exprs: Option<Bound<'_, PyAny>>,
+    group_expr: Option<Bound<'_, PyDict>>,
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
@@ -310,7 +288,7 @@ fn agg_impl_sql_fallback(
             .cast::<PyDict>()
             .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
 
-        let py_expr = dict_to_py_expr(&val_dict)
+        let py_expr = dict_to_py_expr(val_dict)
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
         let agg_result = extract_agg_function(&py_expr, schema).ok_or_else(|| {
@@ -321,23 +299,31 @@ fn agg_impl_sql_fallback(
         })?;
 
         let sql_expr =
-            agg_result_to_sql(agg_result).map_err(|e| LtseqError::Validation(e))?;
+            agg_result_to_sql(agg_result).map_err(LtseqError::Validation)?;
 
         agg_select_parts.push(format!("{} as {}", sql_expr, key_str));
     }
 
-    let group_cols = parse_group_expr_sql(group_exprs, schema)?;
+    let group_cols = parse_group_expr_sql(group_expr, schema)?;
 
     // Register temp table (must materialize for SQL path)
+    let temp_table_name = "__ltseq_agg_temp";
     let current_batches = collect_dataframe(df)?;
     let arrow_schema = Arc::new((**schema).clone());
-    let guard = register_temp_table(&table.session, &arrow_schema, current_batches, "agg")?;
 
-    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, guard.name());
+    let temp_table = MemTable::try_new(arrow_schema, vec![current_batches])
+        .map_err(|e| LtseqError::Runtime(format!("Failed to create table: {}", e)))?;
+
+    table
+        .session
+        .register_table(temp_table_name, Arc::new(temp_table))
+        .map_err(|e| LtseqError::Runtime(format!("Register failed: {}", e)))?;
+
+    let sql_query = build_agg_sql(&group_cols, &agg_select_parts, temp_table_name);
     let result_batches =
-        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
+        execute_sql_query(table, &sql_query).map_err(LtseqError::Runtime)?;
 
-    drop(guard);
+    let _ = table.session.deregister_table(temp_table_name);
 
     create_result_table(table, result_batches)
 }
@@ -551,52 +537,28 @@ fn create_result_table(
     )
 }
 
-/// Parse group expressions into column names (SQL path)
+/// Parse group expression into column names (SQL path)
 fn parse_group_expr_sql(
-    group_exprs: Option<Bound<'_, PyAny>>,
+    group_expr: Option<Bound<'_, PyDict>>,
     schema: &Arc<ArrowSchema>,
 ) -> PyResult<Option<Vec<String>>> {
-    let Some(group_val) = group_exprs else {
+    let Some(group_expr_dict) = group_expr else {
         return Ok(None);
     };
 
-    // Accept either a single dict or a list of dicts
-    let expr_dicts: Vec<Bound<'_, PyDict>> = if let Ok(list) = group_val.cast::<PyList>() {
-        list.iter()
-            .map(|item| {
-                item.cast::<PyDict>()
-                    .map(|d| d.clone())
-                    .map_err(|_| {
-                        LtseqError::TypeMismatch(
-                            "Each group-by key must be a dict expression".into(),
-                        )
-                        .into()
-                    })
-            })
-            .collect::<PyResult<Vec<_>>>()?
-    } else if let Ok(dict) = group_val.cast::<PyDict>() {
-        vec![dict.clone()]
-    } else {
-        return Err(LtseqError::TypeMismatch(
-            "group_exprs must be a list of dicts or a single dict".into(),
-        )
-        .into());
-    };
+    let py_expr = dict_to_py_expr(&group_expr_dict)
+        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
-    let mut cols = Vec::with_capacity(expr_dicts.len());
-    for expr_dict in &expr_dicts {
-        let py_expr = dict_to_py_expr(expr_dict)
-            .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
-        match py_expr {
-            PyExpr::Column(col_name) => cols.push(col_name),
-            _ => {
-                let sql_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-                    .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
-                cols.push(format!("{}", sql_expr));
-            }
+    match py_expr {
+        PyExpr::Column(col_name) => Ok(Some(vec![col_name])),
+        _ => {
+            let sql_expr =
+                crate::transpiler::pyexpr_to_datafusion(py_expr, schema).map_err(|e| {
+                    LtseqError::Validation(format!("Transpile failed: {}", e))
+                })?;
+            Ok(Some(vec![format!("{}", sql_expr)]))
         }
     }
-    Ok(Some(cols))
 }
 
 /// Collect dataframe into record batches
@@ -611,7 +573,7 @@ fn collect_dataframe(
                 .await
                 .map_err(|e| format!("Failed to collect: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?)
+        .map_err(LtseqError::Runtime)?)
 }
 
 fn build_agg_sql(
@@ -651,7 +613,17 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
         .map(|b| b.schema())
         .unwrap_or_else(|| Arc::new((**schema).clone()));
 
-    let guard = register_temp_table(&table.session, &batch_schema, current_batches, "filter")?;
+    let temp_table_name = format!("__ltseq_filter_temp_{}", std::process::id());
+    let temp_table =
+        MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches]).map_err(|e| {
+            LtseqError::Runtime(format!("Create table: {}", e))
+        })?;
+
+    let _ = table.session.deregister_table(&temp_table_name);
+    table
+        .session
+        .register_table(&temp_table_name, Arc::new(temp_table))
+        .map_err(|e| LtseqError::Runtime(format!("Register: {}", e)))?;
 
     let column_list: Vec<String> = batch_schema
         .fields()
@@ -662,14 +634,14 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
     let sql_query = format!(
         "SELECT {} FROM \"{}\" WHERE {}",
         column_list.join(", "),
-        guard.name(),
+        temp_table_name,
         where_clause
     );
 
     let result_batches =
-        execute_sql_query(table, &sql_query).map_err(|e| LtseqError::Runtime(e))?;
+        execute_sql_query(table, &sql_query).map_err(LtseqError::Runtime)?;
 
-    drop(guard);
+    let _ = table.session.deregister_table(&temp_table_name);
 
     if result_batches.is_empty() {
         return Ok(LTSeqTable::empty(

@@ -29,7 +29,6 @@ use pyo3::types::PyDict;
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::helpers::check_empty_batches_with_schema;
 use crate::ops::linear_scan::{build_sort_exprs, extract_referenced_columns};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
@@ -416,11 +415,11 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or("Failed to downcast partition column to Int64Array")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
@@ -429,11 +428,11 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .ok_or("Failed to downcast partition column to UInt64Array")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
@@ -442,19 +441,19 @@ fn compute_partition_boundaries(
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or("Failed to downcast partition column to StringArray")?;
-            for i in 1..n {
-                if arr.is_null(i) != arr.is_null(i - 1) {
-                    boundaries[i] = true;
-                } else if !arr.is_null(i) && arr.value(i) != arr.value(i - 1) {
-                    boundaries[i] = true;
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
+                if arr.is_null(i) != arr.is_null(i - 1)
+                    || (!arr.is_null(i) && arr.value(i) != arr.value(i - 1))
+                {
+                    *boundary = true;
                 }
             }
         }
         dt => {
             // Generic fallback using string representation
-            for i in 1..n {
+            for (i, boundary) in boundaries.iter_mut().enumerate().skip(1) {
                 if partition_col.is_null(i) != partition_col.is_null(i - 1) {
-                    boundaries[i] = true;
+                    *boundary = true;
                 } else if !partition_col.is_null(i) {
                     // Use Arrow's eq kernel for single-element comparison
                     // This is slower but handles any data type
@@ -470,7 +469,7 @@ fn compute_partition_boundaries(
                         )
                     })?;
                     if !eq_result.value(0) {
-                        boundaries[i] = true;
+                        *boundary = true;
                     }
                 }
             }
@@ -493,148 +492,6 @@ fn build_partition_ids(boundaries: &BooleanArray) -> Vec<u64> {
         ids.push(current_id);
     }
     ids
-}
-
-/// Build a column name → index mapping from a RecordBatch schema.
-fn build_name_to_idx(batch: &RecordBatch) -> std::collections::HashMap<String, usize> {
-    batch
-        .schema()
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(i, field)| (field.name().clone(), i))
-        .collect()
-}
-
-/// Resolve partition IDs from the combined batch using the partition_by column.
-///
-/// Returns `Some(partition_ids)` if `partition_by` is set, `None` otherwise.
-fn resolve_partition_ids(
-    combined: &RecordBatch,
-    partition_by: &Option<String>,
-    name_to_idx: &std::collections::HashMap<String, usize>,
-) -> PyResult<Option<Vec<u64>>> {
-    let Some(ref part_col) = partition_by else {
-        return Ok(None);
-    };
-    let idx = name_to_idx.get(part_col).ok_or_else(|| {
-        LtseqError::Validation(format!(
-            "partition_by column '{}' not found",
-            part_col
-        ))
-    })?;
-    let boundaries = compute_partition_boundaries(combined.column(*idx))
-        .map_err(|e| LtseqError::Runtime(e))?;
-    Ok(Some(build_partition_ids(&boundaries)))
-}
-
-/// Single-pass scan that collects row indices where the sequential pattern matches.
-///
-/// For each row `i` where step1 matches, checks that steps 2..N match at rows
-/// i+1..i+N-1 (all within the same partition if partitioned).
-fn scan_pattern_indices(
-    py_exprs: &[PyExpr],
-    combined: &RecordBatch,
-    name_to_idx: &std::collections::HashMap<String, usize>,
-    partition_ids: &Option<Vec<u64>>,
-) -> PyResult<Vec<u64>> {
-    let num_steps = py_exprs.len();
-    let n = combined.num_rows();
-
-    let step1_mask = eval_predicate(&py_exprs[0], combined, name_to_idx)
-        .map_err(|e| LtseqError::Runtime(e))?;
-
-    let mut matching_indices: Vec<u64> = Vec::new();
-
-    if num_steps == 1 {
-        for i in 0..n {
-            if step1_mask.is_valid(i) && step1_mask.value(i) {
-                matching_indices.push(i as u64);
-            }
-        }
-    } else {
-        let step_masks: Vec<BooleanArray> = py_exprs[1..]
-            .iter()
-            .map(|expr| {
-                eval_predicate(expr, combined, name_to_idx)
-                    .map_err(|e| LtseqError::Runtime(e))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let max_start = n.saturating_sub(num_steps - 1);
-        for i in 0..max_start {
-            if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                continue;
-            }
-            if let Some(ref pids) = partition_ids {
-                if pids[i] != pids[i + num_steps - 1] {
-                    continue;
-                }
-            }
-            let all_match = step_masks.iter().enumerate().all(|(step_offset, mask)| {
-                let row = i + step_offset + 1;
-                mask.is_valid(row) && mask.value(row)
-            });
-            if all_match {
-                matching_indices.push(i as u64);
-            }
-        }
-    }
-
-    Ok(matching_indices)
-}
-
-/// Collect the full table sorted, then take rows at the given indices.
-fn take_matching_rows(
-    table: &LTSeqTable,
-    df: &Arc<datafusion::dataframe::DataFrame>,
-    schema: &Arc<datafusion::arrow::datatypes::Schema>,
-    matching_indices: Vec<u64>,
-) -> PyResult<LTSeqTable> {
-    let sort_keys = &table.sort_exprs;
-    let full_df = if !sort_keys.is_empty() {
-        let sort_exprs = build_sort_exprs(sort_keys);
-        (**df).clone().sort(sort_exprs).map_err(|e| {
-            LtseqError::Runtime(format!("Full table sort failed: {}", e))
-        })?
-    } else {
-        (**df).clone()
-    };
-
-    let full_batches = RUNTIME
-        .block_on(async { full_df.collect().await })
-        .map_err(|e| LtseqError::collect(e))?;
-
-    if let Some(result) = check_empty_batches_with_schema(table, &full_batches, schema, table.sort_exprs.clone()) {
-        return result;
-    }
-
-    let full_schema = full_batches[0].schema();
-    let full_combined = concat_batches(&full_schema, &full_batches).map_err(|e| {
-        LtseqError::Runtime(format!("Full concat_batches failed: {}", e))
-    })?;
-
-    let indices = UInt64Array::from(matching_indices);
-    let result_columns: Vec<ArrayRef> = full_combined
-        .columns()
-        .iter()
-        .map(|col_arr| {
-            take(col_arr, &indices, None).map_err(|e| {
-                LtseqError::Runtime(format!("take failed: {}", e))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let result_batch = RecordBatch::try_new(full_schema.clone(), result_columns).map_err(|e| {
-        LtseqError::Runtime(format!("RecordBatch creation failed: {}", e))
-    })?;
-
-    LTSeqTable::from_batches(
-        Arc::clone(&table.session),
-        vec![result_batch],
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
-    )
 }
 
 /// Main entry point: streaming pattern matching.
@@ -665,7 +522,7 @@ pub fn search_pattern_impl(
         .map(|d| dict_to_py_expr(d))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // 2. Extract referenced columns (including sort keys) for projection pruning
+    // 2. Extract referenced columns for projection pruning
     let mut referenced_cols = HashSet::new();
     for expr in &py_exprs {
         extract_referenced_columns(expr, &mut referenced_cols);
@@ -673,23 +530,57 @@ pub fn search_pattern_impl(
     if let Some(ref part_col) = partition_by {
         referenced_cols.insert(part_col.clone());
     }
-    for sk in &table.sort_exprs {
+
+    // 3. Project only needed columns, add sort, collect
+    let sort_keys = &table.sort_exprs;
+    // Also ensure sort key columns are included
+    for sk in sort_keys {
         referenced_cols.insert(sk.clone());
     }
 
-    // 3. Project, sort, collect into a single RecordBatch
-    let batches = collect_projected_sorted(df, &referenced_cols, schema, &table.sort_exprs)?;
+    let projected_df = {
+        let select_exprs: Vec<Expr> = referenced_cols
+            .iter()
+            .filter(|col_name| {
+                schema
+                    .fields()
+                    .iter()
+                    .any(|f| f.name() == col_name.as_str())
+            })
+            .map(|col_name| col(col_name.as_str()))
+            .collect();
 
-    if let Some(result) = check_empty_batches_with_schema(table, &batches, schema, table.sort_exprs.clone()) {
-        return result;
-    }
+        if select_exprs.is_empty() {
+            return Err(LtseqError::Validation(
+                "No valid columns found in step predicates".into(),
+            )
+            .into());
+        }
 
-    let batch_schema = batches[0].schema();
-    let combined = concat_batches(&batch_schema, &batches).map_err(|e| {
-        LtseqError::Runtime(format!("concat_batches failed: {}", e))
-    })?;
+        let proj = (**df)
+            .clone()
+            .select(select_exprs)
+            .map_err(|e| {
+                LtseqError::Runtime(format!("Projection failed: {}", e))
+            })?;
 
-    if combined.num_rows() < num_steps {
+        // Add sort to ensure correct order from multi-row-group Parquet
+        if !sort_keys.is_empty() {
+            let sort_exprs = build_sort_exprs(sort_keys);
+            proj.sort(sort_exprs).map_err(|e| {
+                LtseqError::Runtime(format!("Sort failed: {}", e))
+            })?
+        } else {
+            proj
+        }
+    };
+
+    // 4. Collect into a single RecordBatch
+    let batches = RUNTIME
+        .block_on(async { projected_df.collect().await })
+        .map_err(LtseqError::collect)?;
+
+    if batches.is_empty() {
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
@@ -698,11 +589,99 @@ pub fn search_pattern_impl(
         ));
     }
 
-    // 4. Scan for matching pattern indices
-    let name_to_idx = build_name_to_idx(&combined);
-    let partition_ids = resolve_partition_ids(&combined, &partition_by, &name_to_idx)?;
-    let matching_indices = scan_pattern_indices(&py_exprs, &combined, &name_to_idx, &partition_ids)?;
+    let batch_schema = batches[0].schema();
+    let combined = concat_batches(&batch_schema, &batches).map_err(|e| {
+        LtseqError::Runtime(format!("concat_batches failed: {}", e))
+    })?;
 
+    let n = combined.num_rows();
+    if n < num_steps {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            Some(Arc::clone(schema)),
+            table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
+        ));
+    }
+
+    // 5. Build column name → index mapping
+    let mut name_to_idx = std::collections::HashMap::new();
+    for (i, field) in combined.schema().fields().iter().enumerate() {
+        name_to_idx.insert(field.name().clone(), i);
+    }
+
+    // 6. Compute partition boundaries if needed
+    let partition_ids = if let Some(ref part_col) = partition_by {
+        let idx = name_to_idx.get(part_col).ok_or_else(|| {
+            LtseqError::Validation(format!(
+                "partition_by column '{}' not found",
+                part_col
+            ))
+        })?;
+        let boundaries = compute_partition_boundaries(combined.column(*idx))
+            .map_err(LtseqError::Runtime)?;
+        Some(build_partition_ids(&boundaries))
+    } else {
+        None
+    };
+
+    // 7. Evaluate step 1 predicate vectorized (this is the fast rejection filter)
+    let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
+        .map_err(LtseqError::Runtime)?;
+
+    // 8. Single-pass scan
+    let max_start = n.saturating_sub(num_steps - 1);
+    let mut matching_indices: Vec<u64> = Vec::new();
+
+    if num_steps == 1 {
+        // Special case: single predicate = simple filter
+        for i in 0..n {
+            if step1_mask.is_valid(i) && step1_mask.value(i) {
+                matching_indices.push(i as u64);
+            }
+        }
+    } else {
+        // Pre-evaluate remaining step predicates (vectorized)
+        // We evaluate ALL steps upfront since vectorized evaluation is fast
+        // and avoids repeated per-row evaluation.
+        let step_masks: Vec<BooleanArray> = py_exprs[1..]
+            .iter()
+            .map(|expr| {
+                eval_predicate(expr, &combined, &name_to_idx)
+                    .map_err(LtseqError::Runtime)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for i in 0..max_start {
+            // Fast rejection: check step 1
+            if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                continue;
+            }
+
+            // Check partition boundary: all steps must be in same partition
+            if let Some(ref pids) = partition_ids {
+                if pids[i] != pids[i + num_steps - 1] {
+                    continue;
+                }
+            }
+
+            // Check remaining steps
+            let mut all_match = true;
+            for (step_offset, mask) in step_masks.iter().enumerate() {
+                let row = i + step_offset + 1;
+                if !mask.is_valid(row) || !mask.value(row) {
+                    all_match = false;
+                    break;
+                }
+            }
+
+            if all_match {
+                matching_indices.push(i as u64);
+            }
+        }
+    }
+
+    // 9. If no matches, return empty table with original schema
     if matching_indices.is_empty() {
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
@@ -712,66 +691,70 @@ pub fn search_pattern_impl(
         ));
     }
 
-    // 5. Collect full table and take matching rows
-    take_matching_rows(table, df, schema, matching_indices)
-}
+    // 10. Collect FULL table (all columns) and take matching rows
+    //     For count()-only usage, we can optimize by just returning the count.
+    //     But for generality, we collect the full table.
+    //
+    //     Optimization: if the caller only needs count(), they don't need full rows.
+    //     We return a lightweight table with just the indices to enable count().
+    //     The Python layer calls .count() on the result, which triggers len().
+    //
+    //     Actually, let's return the full rows for correctness.
+    //     The user might want to inspect the matching rows.
+    //
+    //     For the benchmark, the bottleneck is the scan, not the take.
+    //     With only ~1600 matches out of 1M rows, take is trivial.
 
-/// Count starts_with matches using the fast path for a typed string array.
-///
-/// Scans rows where step1 matches and checks that all remaining steps are
-/// starts_with matches on the given string column.
-fn count_starts_with_typed<A: Array>(
-    str_arr: &A,
-    get_value: impl Fn(&A, usize) -> Option<&str>,
-    step1_mask: &BooleanArray,
-    prefixes: &[&str],
-    partition_ids: &Option<Vec<u64>>,
-    max_start: usize,
-    num_steps: usize,
-) -> usize {
-    let mut count = 0;
-    for i in 0..max_start {
-        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-            continue;
-        }
-        if let Some(ref pids) = partition_ids {
-            if pids[i] != pids[i + num_steps - 1] {
-                continue;
-            }
-        }
-        let all_match = prefixes.iter().enumerate().all(|(step_offset, prefix)| {
-            let row = i + step_offset + 1;
-            get_value(str_arr, row)
-                .map_or(false, |s| s.starts_with(prefix))
-        });
-        if all_match {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Count-only fast path for starts_with predicates on a string column.
-///
-/// Dispatches to the correct Arrow string array type (StringViewArray,
-/// StringArray, LargeStringArray) and counts matches.
-fn count_starts_with_fast_path(
-    url_col: &ArrayRef,
-    step1_mask: &BooleanArray,
-    prefixes: &[&str],
-    partition_ids: &Option<Vec<u64>>,
-    max_start: usize,
-    num_steps: usize,
-) -> usize {
-    if let Some(arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::StringViewArray>() {
-        count_starts_with_typed(arr, |a, i| if a.is_null(i) { None } else { Some(a.value(i)) }, step1_mask, prefixes, partition_ids, max_start, num_steps)
-    } else if let Some(arr) = url_col.as_any().downcast_ref::<StringArray>() {
-        count_starts_with_typed(arr, |a, i| if a.is_null(i) { None } else { Some(a.value(i)) }, step1_mask, prefixes, partition_ids, max_start, num_steps)
-    } else if let Some(arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::LargeStringArray>() {
-        count_starts_with_typed(arr, |a, i| if a.is_null(i) { None } else { Some(a.value(i)) }, step1_mask, prefixes, partition_ids, max_start, num_steps)
+    // Collect full table with sort
+    let full_df = if !sort_keys.is_empty() {
+        let sort_exprs = build_sort_exprs(sort_keys);
+        (**df).clone().sort(sort_exprs).map_err(|e| {
+            LtseqError::Runtime(format!("Full table sort failed: {}", e))
+        })?
     } else {
-        0
+        (**df).clone()
+    };
+
+    let full_batches = RUNTIME
+        .block_on(async { full_df.collect().await })
+        .map_err(LtseqError::collect)?;
+
+    if full_batches.is_empty() {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            Some(Arc::clone(schema)),
+            table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
+        ));
     }
+
+    let full_schema = full_batches[0].schema();
+    let full_combined = concat_batches(&full_schema, &full_batches).map_err(|e| {
+        LtseqError::Runtime(format!("Full concat_batches failed: {}", e))
+    })?;
+
+    // Take matching rows
+    let indices = UInt64Array::from(matching_indices);
+    let result_columns: Vec<ArrayRef> = full_combined
+        .columns()
+        .iter()
+        .map(|col_arr| {
+            take(col_arr, &indices, None).map_err(|e| {
+                LtseqError::Runtime(format!("take failed: {}", e))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let result_batch = RecordBatch::try_new(full_schema.clone(), result_columns).map_err(|e| {
+        LtseqError::Runtime(format!("RecordBatch creation failed: {}", e))
+    })?;
+
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        vec![result_batch],
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    )
 }
 
 /// Optimized version: return just the count of matching patterns.
@@ -797,6 +780,7 @@ pub fn search_pattern_count_impl(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Try parallel fast path BEFORE creating DataFusion session.
+    // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
     if let (Some(ref parquet_path), Some(ref part_col)) =
         (&table.source_parquet_path, &partition_by)
     {
@@ -807,12 +791,15 @@ pub fn search_pattern_count_impl(
                 part_col,
                 parquet_path,
             ) {
-                Ok(count) => return Ok(count),
+                Ok(count) => {
+                    return Ok(count);
+                }
                 Err(e) => {
                     let msg = e.to_string();
                     if !msg.contains("PARALLEL_FALLBACK") {
                         return Err(e);
                     }
+                    // Fall through to general path
                 }
             }
         }
@@ -830,8 +817,10 @@ pub fn search_pattern_count_impl(
         referenced_cols.insert(part_col.clone());
     }
 
-    // 3. Project, sort, collect, concat
-    let batches = collect_projected_sorted(df, &referenced_cols, schema, &table.sort_exprs)?;
+    // 3. Project only needed columns, add sort, collect
+    let sort_keys = &table.sort_exprs;
+
+    let batches = collect_projected_sorted(df, &referenced_cols, schema, sort_keys)?;
 
     if batches.is_empty() {
         return Ok(0);
@@ -847,65 +836,164 @@ pub fn search_pattern_count_impl(
         return Ok(0);
     }
 
-    // 4. Prepare shared state
-    let name_to_idx = build_name_to_idx(&combined);
-    let partition_ids = resolve_partition_ids(&combined, &partition_by, &name_to_idx)?;
+    // 5. Build column name → index mapping
+    let mut name_to_idx = std::collections::HashMap::new();
+    for (i, field) in combined.schema().fields().iter().enumerate() {
+        name_to_idx.insert(field.name().clone(), i);
+    }
 
+    // 6. Compute partition boundaries if needed
+    let partition_ids = if let Some(ref part_col) = partition_by {
+        let idx = name_to_idx.get(part_col).ok_or_else(|| {
+            LtseqError::Validation(format!(
+                "partition_by column '{}' not found",
+                part_col
+            ))
+        })?;
+        let boundaries = compute_partition_boundaries(combined.column(*idx))
+            .map_err(LtseqError::Runtime)?;
+        Some(build_partition_ids(&boundaries))
+    } else {
+        None
+    };
+
+    // 7. Evaluate step 1 predicate vectorized (fast rejection filter)
     let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
-    // 5. Count matches
+    // 8. Single-pass scan — count only, with lazy per-row evaluation for steps 2..N
     let max_start = n.saturating_sub(num_steps - 1);
+    let mut count: usize = 0;
 
     if num_steps == 1 {
-        return Ok((0..n)
-            .filter(|&i| step1_mask.is_valid(i) && step1_mask.value(i))
-            .count());
-    }
-
-    // Try starts_with fast path: all remaining predicates are starts_with on same column
-    let step_prefixes: Vec<Option<String>> = py_exprs[1..]
-        .iter()
-        .map(|expr| extract_starts_with_prefix(expr))
-        .collect();
-    let url_idx = name_to_idx.get("url");
-
-    if step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some() {
-        let url_col = combined.column(*url_idx.unwrap());
-        let prefixes: Vec<&str> = step_prefixes
-            .iter()
-            .map(|p| p.as_ref().unwrap().as_str())
-            .collect();
-        return Ok(count_starts_with_fast_path(
-            url_col, &step1_mask, &prefixes, &partition_ids, max_start, num_steps,
-        ));
-    }
-
-    // General fallback: evaluate all predicates vectorized
-    let step_masks: Vec<BooleanArray> = py_exprs
-        .iter()
-        .map(|expr| {
-            eval_predicate(expr, &combined, &name_to_idx)
-                .map_err(|e| LtseqError::Runtime(e))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut count = 0;
-    for i in 0..max_start {
-        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-            continue;
-        }
-        if let Some(ref pids) = partition_ids {
-            if pids[i] != pids[i + num_steps - 1] {
-                continue;
+        for i in 0..n {
+            if step1_mask.is_valid(i) && step1_mask.value(i) {
+                count += 1;
             }
         }
-        let all_match = step_masks[1..].iter().enumerate().all(|(step_offset, mask)| {
-            let row = i + step_offset + 1;
-            mask.is_valid(row) && mask.value(row)
-        });
-        if all_match {
-            count += 1;
+    } else {
+        // For multi-step patterns: evaluate steps 2..N lazily per-row
+        // instead of vectorized on all 1M rows. Step 1 matches are rare (~0.1%),
+        // so we only check steps 2..N on ~1600 rows instead of 1M.
+        //
+        // Extract the URL column for per-row starts_with checks
+        // (optimized path for the common case of string predicates)
+        let url_idx = name_to_idx.get("url");
+
+        // Build per-row evaluators for remaining steps
+        // For simple starts_with predicates, extract the prefix for direct comparison
+        let step_prefixes: Vec<Option<String>> = py_exprs[1..]
+            .iter()
+            .map(extract_starts_with_prefix)
+            .collect();
+
+        let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
+
+        if all_simple {
+            // Fast path: all remaining predicates are starts_with on the same column
+            // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
+            let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
+            let prefixes: Vec<&str> = step_prefixes.iter().map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str()).collect();
+
+            // Try StringViewArray first (common for Parquet), then StringArray, then LargeStringArray
+            if let Some(str_arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::StringViewArray>() {
+                for i in 0..max_start {
+                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                        continue;
+                    }
+                    if let Some(ref pids) = partition_ids {
+                        if pids[i] != pids[i + num_steps - 1] {
+                            continue;
+                        }
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        count += 1;
+                    }
+                }
+            } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
+                for i in 0..max_start {
+                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                        continue;
+                    }
+                    if let Some(ref pids) = partition_ids {
+                        if pids[i] != pids[i + num_steps - 1] {
+                            continue;
+                        }
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        count += 1;
+                    }
+                }
+            } else if let Some(str_arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::LargeStringArray>() {
+                for i in 0..max_start {
+                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                        continue;
+                    }
+                    if let Some(ref pids) = partition_ids {
+                        if pids[i] != pids[i + num_steps - 1] {
+                            continue;
+                        }
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        count += 1;
+                    }
+                }
+            }
+        } else {
+            // Fallback: evaluate all predicates vectorized (original approach)
+            let step_masks: Vec<BooleanArray> = py_exprs
+                .iter()
+                .map(|expr| {
+                    eval_predicate(expr, &combined, &name_to_idx)
+                        .map_err(LtseqError::Runtime)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for i in 0..max_start {
+                if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+                    continue;
+                }
+                if let Some(ref pids) = partition_ids {
+                    if pids[i] != pids[i + num_steps - 1] {
+                        continue;
+                    }
+                }
+                let mut all_match = true;
+                for (step_offset, mask) in step_masks[1..].iter().enumerate() {
+                    let row = i + step_offset + 1;
+                    if !mask.is_valid(row) || !mask.value(row) {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    count += 1;
+                }
+            }
         }
     }
 

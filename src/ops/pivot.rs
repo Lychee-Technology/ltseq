@@ -93,7 +93,7 @@ pub fn pivot_impl(
     // Collect all batches from the dataframe
     let all_batches = RUNTIME
         .block_on((**df).clone().collect())
-        .map_err(|e| LtseqError::collect(e))?;
+        .map_err(LtseqError::collect)?;
 
     // Extract distinct pivot values
     let mut pivot_values_set = std::collections::HashSet::new();

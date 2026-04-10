@@ -356,3 +356,54 @@ class TestGroupExprToSQL:
         assert "-" in sql
         assert "LAST_VALUE" in sql
         assert "FIRST_VALUE" in sql
+
+
+class TestDeriveInREPLContext:
+    """Test that derive() works when inspect.getsource() is unavailable (REPL/exec)."""
+
+    def test_derive_count_via_exec(self, sample_csv):
+        """derive(lambda g: {'n': g.count()}) works in exec() context."""
+        result_holder = {}
+        code = f"""
+from ltseq import LTSeq
+t = LTSeq.read_csv({repr(sample_csv)})
+grouped = t.group_ordered(lambda r: r.is_up)
+result = grouped.derive(lambda g: {{"n": g.count()}})
+result_holder['result'] = result
+"""
+        exec(code, {"result_holder": result_holder})
+        result = result_holder["result"]
+        assert result.count() == 7
+        assert "n" in result.schema
+
+    def test_derive_first_via_exec(self, sample_csv):
+        """derive(lambda g: {'start': g.first().date}) works in exec() context."""
+        result_holder = {}
+        code = f"""
+from ltseq import LTSeq
+t = LTSeq.read_csv({repr(sample_csv)})
+grouped = t.group_ordered(lambda r: r.is_up)
+result = grouped.derive(lambda g: {{"start": g.first().date}})
+result_holder['result'] = result
+"""
+        exec(code, {"result_holder": result_holder})
+        result = result_holder["result"]
+        assert result.count() == 7
+        assert "start" in result.schema
+
+    def test_filter_then_derive_via_exec(self, sample_csv):
+        """filter().derive() chain works in exec() context."""
+        result_holder = {}
+        code = f"""
+from ltseq import LTSeq
+t = LTSeq.read_csv({repr(sample_csv)})
+grouped = t.group_ordered(lambda r: r.is_up)
+filtered = grouped.filter(lambda g: g.count() > 2)
+result = filtered.derive(lambda g: {{"n": g.count()}})
+result_holder['result'] = result
+"""
+        exec(code, {"result_holder": result_holder})
+        result = result_holder["result"]
+        # Only group 1 (3 rows) passes the count > 2 filter
+        assert result.count() == 3
+        assert "n" in result.schema

@@ -3,7 +3,7 @@
 import math
 import statistics
 from collections import Counter
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .row_proxy import RowProxy
@@ -81,7 +81,7 @@ class GroupAggregationMixin:
     # These will be provided by the base class
     _group_data: Any
 
-    def _get_column_values(self, column_name: str) -> List[Any]:
+    def _get_column_values(self, column_name: str) -> list[Any]:
         """Get all values for a column from group data."""
         if isinstance(self._group_data, list):
             return [
@@ -91,12 +91,12 @@ class GroupAggregationMixin:
         else:
             return self._group_data[column_name].values.tolist()
 
-    def _get_valid_values(self, column_name: str) -> List[Any]:
+    def _get_valid_values(self, column_name: str) -> list[Any]:
         """Get non-None values for a column from group data."""
         values = self._get_column_values(column_name)
         return [v for v in values if v is not None]
 
-    def max(self, column_name: str = None) -> Any:
+    def max(self, column_name: str | None = None) -> Any:
         """
         Get the maximum value in a column for this group.
 
@@ -116,7 +116,7 @@ class GroupAggregationMixin:
         valid_values = self._get_valid_values(column_name)
         return max(valid_values) if valid_values else None
 
-    def min(self, column_name: str = None) -> Any:
+    def min(self, column_name: str | None = None) -> Any:
         """
         Get the minimum value in a column for this group.
 
@@ -136,7 +136,7 @@ class GroupAggregationMixin:
         valid_values = self._get_valid_values(column_name)
         return min(valid_values) if valid_values else None
 
-    def sum(self, column_name: str = None) -> Any:
+    def sum(self, column_name: str | None = None) -> Any:
         """
         Get the sum of values in a column for this group.
 
@@ -156,7 +156,7 @@ class GroupAggregationMixin:
         valid_values = self._get_valid_values(column_name)
         return sum(valid_values) if valid_values else 0
 
-    def avg(self, column_name: str = None) -> Any:
+    def avg(self, column_name: str | None = None) -> Any:
         """
         Get the average value in a column for this group.
 
@@ -178,7 +178,7 @@ class GroupAggregationMixin:
             return sum(valid_values) / len(valid_values)
         return None
 
-    def median(self, column_name: str = None) -> Any:
+    def median(self, column_name: str | None = None) -> Any:
         """
         Get the median value in a column for this group.
 
@@ -226,7 +226,7 @@ class GroupAggregationMixin:
         weight = idx - lower
         return valid_values[lower] * (1 - weight) + valid_values[upper] * weight
 
-    def variance(self, column_name: str = None) -> Any:
+    def variance(self, column_name: str | None = None) -> Any:
         """
         Get the sample variance of values in a column for this group.
 
@@ -251,7 +251,7 @@ class GroupAggregationMixin:
     # Alias for variance
     var = variance
 
-    def std(self, column_name: str = None) -> Any:
+    def std(self, column_name: str | None = None) -> Any:
         """
         Get the sample standard deviation of values in a column for this group.
 
@@ -276,7 +276,7 @@ class GroupAggregationMixin:
     # Alias for std
     stddev = std
 
-    def mode(self, column_name: str = None) -> Any:
+    def mode(self, column_name: str | None = None) -> Any:
         """
         Get the mode (most frequent value) in a column for this group.
 
@@ -304,7 +304,7 @@ class GroupAggregationMixin:
                 return counter.most_common(1)[0][0]
         return None
 
-    def skew(self, column_name: str = None) -> Any:
+    def skew(self, column_name: str | None = None) -> Any:
         """
         Get the skewness of values in a column for this group.
 
@@ -328,7 +328,7 @@ class GroupAggregationMixin:
         std = statistics.stdev(valid_values)
         if std == 0:
             return 0.0
-        return (sum((v - mean) ** 3 for v in valid_values) / n) / (std ** 3)
+        return (sum((v - mean) ** 3 for v in valid_values) / n) / (std**3)
 
     def corr(self, col_a: str, col_b: str) -> Any:
         """
@@ -379,7 +379,9 @@ class GroupAggregationMixin:
             return None
         mean_a = sum(vals_a) / n
         mean_b = sum(vals_b) / n
-        return sum((a - mean_a) * (b - mean_b) for a, b in zip(vals_a, vals_b)) / (n - 1)
+        return sum((a - mean_a) * (b - mean_b) for a, b in zip(vals_a, vals_b)) / (
+            n - 1
+        )
 
     def concat_agg(self, column_name: str, delimiter: str = ",") -> Any:
         """

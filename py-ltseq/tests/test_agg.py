@@ -3,8 +3,9 @@
 import os
 import tempfile
 
-import pandas as pd
 import pytest
+
+pd = pytest.importorskip("pandas")
 
 from ltseq import LTSeq
 

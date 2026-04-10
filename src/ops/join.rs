@@ -18,12 +18,13 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::helpers::register_temp_table_pair;
+use crate::ops::common::{
+    build_equality_conditions, build_qualified_column_list, build_aliased_join_schema,
+    JoinType, MultiTempTableGuard, schema_from_batches_or_fallback,
+};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::array::{Array, ArrayRef, UInt32Array};
-use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
@@ -57,10 +58,32 @@ fn get_schema_from_batches(
     batches: &[RecordBatch],
     stored_schema: &Arc<ArrowSchema>,
 ) -> Arc<ArrowSchema> {
-    batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new((**stored_schema).clone()))
+    schema_from_batches_or_fallback(batches, stored_schema)
+}
+
+/// Register both tables as temp MemTables and return a guard for automatic cleanup
+fn register_join_tables(
+    session: &Arc<SessionContext>,
+    left_schema: &Arc<ArrowSchema>,
+    left_batches: Vec<RecordBatch>,
+    right_schema: &Arc<ArrowSchema>,
+    right_batches: Vec<RecordBatch>,
+    prefix: &str,
+) -> PyResult<MultiTempTableGuard> {
+    let unique_suffix = std::process::id();
+    let left_name = format!("__ltseq_{}_left_{}", prefix, unique_suffix);
+    let right_name = format!("__ltseq_{}_right_{}", prefix, unique_suffix);
+
+    MultiTempTableGuard::register_two(
+        session,
+        &left_name,
+        Arc::clone(left_schema),
+        left_batches,
+        &right_name,
+        Arc::clone(right_schema),
+        right_batches,
+    )
+    .map_err(|e| LtseqError::Runtime(e).into())
 }
 
 /// Execute SQL query and collect results
@@ -225,56 +248,45 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
+struct JoinSqlConfig<'a> {
+    left_table: &'a str,
+    right_table: &'a str,
+    left_schema: &'a ArrowSchema,
+    right_schema: &'a ArrowSchema,
+    left_keys: &'a [String],
+    join_type: JoinType,
+    alias: &'a str,
+}
+
 /// Build SQL JOIN query with proper column aliasing for the result
-fn build_join_sql(
-    left_table: &str,
-    right_table: &str,
-    left_schema: &ArrowSchema,
-    right_schema: &ArrowSchema,
-    left_keys: &[String],
-    right_keys: &[String],
-    join_type: &str,
-    alias: &str,
-) -> String {
-    let mut select_parts: Vec<String> = Vec::new();
-
-    // All left columns (preserve as-is)
-    for field in left_schema.fields() {
-        select_parts.push(format!("L.\"{}\"", field.name()));
-    }
-
-    // All right columns with alias prefix
-    for field in right_schema.fields() {
-        select_parts.push(format!(
-            "R.\"{}\" AS \"{}_{}\"",
-            field.name(),
-            alias,
-            field.name()
-        ));
-    }
-
-    // Build ON clause for potentially composite keys
-    let on_conditions: Vec<String> = left_keys
+fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
+    let left_table = cfg.left_table;
+    let right_table = cfg.right_table;
+    let left_schema = cfg.left_schema;
+    let right_schema = cfg.right_schema;
+    let left_keys = cfg.left_keys;
+    let join_type = cfg.join_type;
+    let alias = cfg.alias;
+    // Build SELECT clause using common helpers
+    let left_cols = build_qualified_column_list(left_schema, "L");
+    
+    let right_cols: String = right_schema
+        .fields()
         .iter()
-        .zip(right_keys.iter())
-        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
-        .collect();
-    let on_clause = on_conditions.join(" AND ");
+        .map(|f| format!("R.\"{}\" AS \"{}_{}\"", f.name(), alias, f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    
+    let select_clause = format!("{}, {}", left_cols, right_cols);
 
-    // Map join_type to SQL keyword
-    let sql_join_type = match join_type {
-        "inner" => "INNER JOIN",
-        "left" => "LEFT JOIN",
-        "right" => "RIGHT JOIN",
-        "full" => "FULL OUTER JOIN",
-        _ => "INNER JOIN",
-    };
+    // Build ON clause using common helper
+    let on_clause = build_equality_conditions("L", "R", left_keys);
 
     format!(
         "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
-        select_parts.join(", "),
+        select_clause,
         left_table,
-        sql_join_type,
+        join_type.to_sql(),
         right_table,
         on_clause
     )
@@ -290,39 +302,35 @@ pub fn join_impl(
     other: &LTSeqTable,
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
-    join_type: &str,
+    join_type_str: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
-    // Validate join type
-    if !matches!(join_type, "inner" | "left" | "right" | "full") {
-        return Err(LtseqError::Validation(format!(
-            "Unknown join type: {}",
-            join_type
-        ))
-        .into());
-    }
+    // Parse join type
+    let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+        LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+    })?;
 
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
 
     // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+    let (left_col_names, _right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
         &left_schema,
         &right_schema,
     )?;
 
-    // Register temp tables and execute query
-    let (left_guard, right_guard) = register_temp_table_pair(
+    // Register temp tables (RAII guard will handle cleanup)
+    let table_guard = register_join_tables(
         &table.session,
         &left_schema,
         left_batches,
@@ -330,50 +338,29 @@ pub fn join_impl(
         right_batches,
         "join",
     )?;
+    
+    let table_names = table_guard.names();
+    let left_name = table_names[0];
+    let right_name = table_names[1];
 
-    let sql_query = build_join_sql(
-        left_guard.name(),
-        right_guard.name(),
-        &left_schema,
-        &right_schema,
-        &left_col_names,
-        &right_col_names,
+    let sql_query = build_join_sql(&JoinSqlConfig {
+        left_table: left_name,
+        right_table: right_name,
+        left_schema: &left_schema,
+        right_schema: &right_schema,
+        left_keys: &left_col_names,
         join_type,
         alias,
-    );
+    });
 
     let result_batches = RUNTIME
         .block_on(execute_and_collect(&table.session, &sql_query, "join"))
-        .map_err(|e| LtseqError::Runtime(e))?;
-
-    // Cleanup (RAII guards handle deregistration)
-    drop(left_guard);
-    drop(right_guard);
+        .map_err(LtseqError::Runtime)?;
 
     // Build empty schema for empty results
-    let empty_schema = build_join_result_schema(&left_schema, &right_schema, alias);
+    let empty_schema = build_aliased_join_schema(&left_schema, &right_schema, alias);
 
     build_result_table(&table.session, result_batches, empty_schema, &[])
-}
-
-/// Build the result schema for a join (combines left + aliased right)
-fn build_join_result_schema(
-    left_schema: &ArrowSchema,
-    right_schema: &ArrowSchema,
-    alias: &str,
-) -> Arc<ArrowSchema> {
-    let mut result_fields: Vec<Field> = Vec::new();
-    for field in left_schema.fields() {
-        result_fields.push((**field).clone());
-    }
-    for field in right_schema.fields() {
-        result_fields.push(Field::new(
-            format!("{}_{}", alias, field.name()),
-            field.data_type().clone(),
-            true,
-        ));
-    }
-    Arc::new(ArrowSchema::new(result_fields))
 }
 
 /// Build SQL for semi-join or anti-join (returns only left table columns)
@@ -382,22 +369,14 @@ fn build_semi_anti_join_sql(
     right_table: &str,
     left_schema: &ArrowSchema,
     left_keys: &[String],
-    right_keys: &[String],
+    _right_keys: &[String],
     is_anti: bool,
 ) -> String {
     // Select all columns from left table only
-    let select_parts: Vec<String> = left_schema
-        .fields()
-        .iter()
-        .map(|f| format!("L.\"{}\"", f.name()))
-        .collect();
+    let select_cols = build_qualified_column_list(left_schema, "L");
 
-    // Build WHERE EXISTS/NOT EXISTS condition
-    let where_conditions: Vec<String> = left_keys
-        .iter()
-        .zip(right_keys.iter())
-        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
-        .collect();
+    // Build WHERE condition using common helper
+    let where_conditions = build_equality_conditions("L", "R", left_keys);
 
     let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
 
@@ -407,11 +386,11 @@ fn build_semi_anti_join_sql(
     format!(
         "SELECT {}{} FROM \"{}\" L WHERE {} (SELECT 1 FROM \"{}\" R WHERE {})",
         distinct,
-        select_parts.join(", "),
+        select_cols,
         left_table,
         exists_keyword,
         right_table,
-        where_conditions.join(" AND ")
+        where_conditions
     )
 }
 
@@ -449,7 +428,7 @@ fn semi_anti_join_impl(
     // Collect batches and get schemas
     let (left_batches, right_batches) = RUNTIME
         .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
@@ -462,9 +441,9 @@ fn semi_anti_join_impl(
         &right_schema,
     )?;
 
-    // Register temp tables
+    // Register temp tables (RAII guard will handle cleanup)
     let join_type_name = if is_anti { "anti" } else { "semi" };
-    let (left_guard, right_guard) = register_temp_table_pair(
+    let table_guard = register_join_tables(
         &table.session,
         &left_schema,
         left_batches,
@@ -472,11 +451,15 @@ fn semi_anti_join_impl(
         right_batches,
         join_type_name,
     )?;
+    
+    let table_names = table_guard.names();
+    let left_name = table_names[0];
+    let right_name = table_names[1];
 
     // Build and execute SQL query
     let sql_query = build_semi_anti_join_sql(
-        left_guard.name(),
-        right_guard.name(),
+        left_name,
+        right_name,
         &left_schema,
         &left_col_names,
         &right_col_names,
@@ -489,456 +472,12 @@ fn semi_anti_join_impl(
             &sql_query,
             join_type_name,
         ))
-        .map_err(|e| LtseqError::Runtime(e))?;
-
-    // Cleanup (RAII guards handle deregistration)
-    drop(left_guard);
-    drop(right_guard);
+        .map_err(LtseqError::Runtime)?;
 
     build_result_table(
         &table.session,
         result_batches,
         Arc::clone(&left_schema),
         &table.sort_exprs,
-    )
-}
-
-// ============================================================================
-// Merge Join — GPU-accelerated with CPU fallback
-// ============================================================================
-
-/// Merge join for pre-sorted tables.
-///
-/// Uses GPU merge join when available and eligible (single numeric key column,
-/// sufficient row count), otherwise falls back to a CPU two-pointer merge.
-///
-/// Both tables must be sorted by their respective join key columns (ascending).
-/// Only single-column equi-joins are supported.
-///
-/// # Arguments
-///
-/// * `table` - Left table (sorted by left join key)
-/// * `other` - Right table (sorted by right join key)
-/// * `left_key_expr_dict` - Serialized expression for left join key
-/// * `right_key_expr_dict` - Serialized expression for right join key
-/// * `join_type` - "inner" or "left" (right/full fall back to SQL)
-/// * `alias` - Prefix for right table columns in result
-pub fn merge_join_impl(
-    table: &LTSeqTable,
-    other: &LTSeqTable,
-    left_key_expr_dict: &Bound<'_, PyDict>,
-    right_key_expr_dict: &Bound<'_, PyDict>,
-    join_type: &str,
-    alias: &str,
-) -> PyResult<LTSeqTable> {
-    // Only inner and left joins are supported by merge join;
-    // right/full fall back to standard SQL join
-    if !matches!(join_type, "inner" | "left") {
-        return join_impl(
-            table,
-            other,
-            left_key_expr_dict,
-            right_key_expr_dict,
-            join_type,
-            alias,
-        );
-    }
-
-    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
-    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
-
-    // Collect batches
-    let (left_batches, right_batches) = RUNTIME
-        .block_on(collect_both_tables(df_left, df_right))
-        .map_err(|e| LtseqError::Runtime(e))?;
-
-    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
-    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
-
-    // Parse and validate join keys — must be single column for merge join
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
-        &left_schema,
-        &right_schema,
-    )?;
-
-    if left_col_names.len() != 1 || right_col_names.len() != 1 {
-        // Composite keys not supported by merge join; fall back to SQL
-        return join_impl(
-            table,
-            other,
-            left_key_expr_dict,
-            right_key_expr_dict,
-            join_type,
-            alias,
-        );
-    }
-
-    let left_key = &left_col_names[0];
-    let right_key = &right_col_names[0];
-
-    // Concatenate batches into single RecordBatch each
-    let left_batch = concat_batches_or_empty(&left_batches, &left_schema)?;
-    let right_batch = concat_batches_or_empty(&right_batches, &right_schema)?;
-
-    // Extract key columns
-    let left_key_idx = left_schema
-        .index_of(left_key)
-        .map_err(|_| LtseqError::Validation(format!("Left key column '{}' not found", left_key)))?;
-    let right_key_idx = right_schema
-        .index_of(right_key)
-        .map_err(|_| LtseqError::Validation(format!("Right key column '{}' not found", right_key)))?;
-
-    let left_key_col = Arc::clone(left_batch.column(left_key_idx));
-    let right_key_col = Arc::clone(right_batch.column(right_key_idx));
-
-    let is_left_join = join_type == "left";
-
-    // Try GPU merge join first (when gpu feature is enabled)
-    #[cfg(feature = "gpu")]
-    {
-        let left_dt = left_key_col.data_type();
-        let right_dt = right_key_col.data_type();
-        if crate::gpu::merge_join::is_gpu_merge_join_eligible(
-            left_batch.num_rows(),
-            right_batch.num_rows(),
-            left_dt,
-            right_dt,
-        ) {
-            let gpu_join_type = if is_left_join {
-                crate::gpu::merge_join::GpuJoinType::Left
-            } else {
-                crate::gpu::merge_join::GpuJoinType::Inner
-            };
-
-            match crate::gpu::merge_join::gpu_merge_join(&left_key_col, &right_key_col, gpu_join_type)
-            {
-                Ok((left_idx, right_idx)) => {
-                    match build_merge_join_result(
-                        &left_batch,
-                        &right_batch,
-                        &left_idx,
-                        &right_idx,
-                        alias,
-                        &table.session,
-                        left_key,
-                    ) {
-                        Ok(result) => return Ok(result),
-                        Err(e) => {
-                            eprintln!("GPU merge join gather failed, falling back to CPU: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("GPU merge join failed, falling back to CPU: {}", e);
-                }
-            }
-        }
-    }
-
-    // CPU two-pointer merge join
-    let (left_idx, right_idx) =
-        cpu_merge_join(&left_key_col, &right_key_col, is_left_join)?;
-
-    build_merge_join_result(
-        &left_batch,
-        &right_batch,
-        &left_idx,
-        &right_idx,
-        alias,
-        &table.session,
-        left_key,
-    )
-}
-
-/// Concatenate batches into a single RecordBatch, or return empty batch if none.
-fn concat_batches_or_empty(
-    batches: &[RecordBatch],
-    schema: &Arc<ArrowSchema>,
-) -> PyResult<RecordBatch> {
-    if batches.is_empty() {
-        return Ok(RecordBatch::new_empty(Arc::clone(schema)));
-    }
-    compute::concat_batches(schema, batches.iter()).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to concatenate batches: {}", e)).into()
-    })
-}
-
-/// CPU two-pointer merge join on sorted key columns.
-///
-/// Both key columns must be sorted ascending. Returns `(left_indices, right_indices)`
-/// as UInt32Arrays suitable for `arrow::compute::take()`.
-fn cpu_merge_join(
-    left_keys: &ArrayRef,
-    right_keys: &ArrayRef,
-    is_left_join: bool,
-) -> PyResult<(UInt32Array, UInt32Array)> {
-    let left_n = left_keys.len();
-    let right_n = right_keys.len();
-
-    if left_n == 0 {
-        return Ok((
-            UInt32Array::from(Vec::<u32>::new()),
-            UInt32Array::from(Vec::<u32>::new()),
-        ));
-    }
-
-    if right_n == 0 {
-        if is_left_join {
-            let left_idx: Vec<u32> = (0..left_n as u32).collect();
-            let right_idx: Vec<Option<u32>> = vec![None; left_n];
-            return Ok((UInt32Array::from(left_idx), UInt32Array::from(right_idx)));
-        } else {
-            return Ok((
-                UInt32Array::from(Vec::<u32>::new()),
-                UInt32Array::from(Vec::<u32>::new()),
-            ));
-        }
-    }
-
-    // Dispatch based on data type
-    match left_keys.data_type() {
-        DataType::Int64 => cpu_merge_join_typed::<i64>(left_keys, right_keys, is_left_join),
-        DataType::Int32 => cpu_merge_join_typed::<i32>(left_keys, right_keys, is_left_join),
-        DataType::Float64 => cpu_merge_join_typed::<f64>(left_keys, right_keys, is_left_join),
-        DataType::Float32 => cpu_merge_join_typed::<f32>(left_keys, right_keys, is_left_join),
-        DataType::Utf8 => cpu_merge_join_utf8(left_keys, right_keys, is_left_join),
-        dt => Err(LtseqError::Validation(format!(
-            "Unsupported key type for merge join: {:?}",
-            dt
-        ))
-        .into()),
-    }
-}
-
-/// Trait to unify numeric array downcasting for merge join.
-trait MergeJoinKey: PartialOrd + Copy + 'static {
-    type ArrowArray: Array + 'static;
-    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray>;
-    fn value(arr: &Self::ArrowArray, idx: usize) -> Self;
-}
-
-impl MergeJoinKey for i64 {
-    type ArrowArray = datafusion::arrow::array::Int64Array;
-    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> {
-        arr.as_any().downcast_ref()
-    }
-    fn value(arr: &Self::ArrowArray, idx: usize) -> Self {
-        arr.value(idx)
-    }
-}
-
-impl MergeJoinKey for i32 {
-    type ArrowArray = datafusion::arrow::array::Int32Array;
-    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> {
-        arr.as_any().downcast_ref()
-    }
-    fn value(arr: &Self::ArrowArray, idx: usize) -> Self {
-        arr.value(idx)
-    }
-}
-
-impl MergeJoinKey for f64 {
-    type ArrowArray = datafusion::arrow::array::Float64Array;
-    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> {
-        arr.as_any().downcast_ref()
-    }
-    fn value(arr: &Self::ArrowArray, idx: usize) -> Self {
-        arr.value(idx)
-    }
-}
-
-impl MergeJoinKey for f32 {
-    type ArrowArray = datafusion::arrow::array::Float32Array;
-    fn downcast(arr: &ArrayRef) -> Option<&Self::ArrowArray> {
-        arr.as_any().downcast_ref()
-    }
-    fn value(arr: &Self::ArrowArray, idx: usize) -> Self {
-        arr.value(idx)
-    }
-}
-
-/// Two-pointer merge join for a specific numeric type.
-fn cpu_merge_join_typed<T: MergeJoinKey>(
-    left_keys: &ArrayRef,
-    right_keys: &ArrayRef,
-    is_left_join: bool,
-) -> PyResult<(UInt32Array, UInt32Array)> {
-    let left_arr = T::downcast(left_keys).ok_or_else(|| {
-        LtseqError::Runtime("Failed to downcast left key array".into())
-    })?;
-    let right_arr = T::downcast(right_keys).ok_or_else(|| {
-        LtseqError::Runtime("Failed to downcast right key array".into())
-    })?;
-
-    merge_join_loop(
-        left_arr.len(),
-        right_arr.len(),
-        is_left_join,
-        |li, ri| T::value(left_arr, li).partial_cmp(&T::value(right_arr, ri)),
-        |li1, li2| T::value(left_arr, li1) == T::value(left_arr, li2),
-        |ri1, ri2| T::value(right_arr, ri1) == T::value(right_arr, ri2),
-    )
-}
-
-/// Two-pointer merge join for Utf8 (string) keys.
-fn cpu_merge_join_utf8(
-    left_keys: &ArrayRef,
-    right_keys: &ArrayRef,
-    is_left_join: bool,
-) -> PyResult<(UInt32Array, UInt32Array)> {
-    use datafusion::arrow::array::StringArray;
-
-    let left_arr = left_keys
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| LtseqError::Runtime("Failed to downcast left key to StringArray".into()))?;
-    let right_arr = right_keys
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| LtseqError::Runtime("Failed to downcast right key to StringArray".into()))?;
-
-    merge_join_loop(
-        left_arr.len(),
-        right_arr.len(),
-        is_left_join,
-        |li, ri| left_arr.value(li).partial_cmp(right_arr.value(ri)),
-        |li1, li2| left_arr.value(li1) == left_arr.value(li2),
-        |ri1, ri2| right_arr.value(ri1) == right_arr.value(ri2),
-    )
-}
-
-/// Core two-pointer merge join loop, generic over value comparison.
-///
-/// Extracts the duplicated merge-join algorithm from `cpu_merge_join_typed` and
-/// `cpu_merge_join_utf8` into a single implementation.
-///
-/// - `cmp_lr(li, ri)`: compare left[li] vs right[ri]
-/// - `eq_ll(li1, li2)`: check left[li1] == left[li2] (for finding equal-key ranges)
-/// - `eq_rr(ri1, ri2)`: check right[ri1] == right[ri2] (for finding equal-key ranges)
-fn merge_join_loop(
-    left_n: usize,
-    right_n: usize,
-    is_left_join: bool,
-    cmp_lr: impl Fn(usize, usize) -> Option<std::cmp::Ordering>,
-    eq_ll: impl Fn(usize, usize) -> bool,
-    eq_rr: impl Fn(usize, usize) -> bool,
-) -> PyResult<(UInt32Array, UInt32Array)> {
-    let mut left_indices: Vec<u32> = Vec::new();
-    let mut right_indices: Vec<Option<u32>> = Vec::new();
-
-    let mut li = 0usize;
-    let mut ri = 0usize;
-
-    while li < left_n && ri < right_n {
-        match cmp_lr(li, ri) {
-            Some(std::cmp::Ordering::Less) => {
-                if is_left_join {
-                    left_indices.push(li as u32);
-                    right_indices.push(None);
-                }
-                li += 1;
-            }
-            Some(std::cmp::Ordering::Greater) => {
-                ri += 1;
-            }
-            Some(std::cmp::Ordering::Equal) => {
-                // Find the range of equal keys in right
-                let ri_start = ri;
-                while ri < right_n && eq_rr(ri_start, ri) {
-                    ri += 1;
-                }
-                // Find the range of equal keys in left
-                let li_start = li;
-                while li < left_n && eq_ll(li_start, li) {
-                    li += 1;
-                }
-                // Cross product of matching ranges
-                for l in li_start..li {
-                    for r in ri_start..ri {
-                        left_indices.push(l as u32);
-                        right_indices.push(Some(r as u32));
-                    }
-                }
-            }
-            None => {
-                // NaN or uncomparable: skip left row
-                if is_left_join {
-                    left_indices.push(li as u32);
-                    right_indices.push(None);
-                }
-                li += 1;
-            }
-        }
-    }
-
-    // Remaining left rows (unmatched) for left join
-    if is_left_join {
-        while li < left_n {
-            left_indices.push(li as u32);
-            right_indices.push(None);
-            li += 1;
-        }
-    }
-
-    Ok((UInt32Array::from(left_indices), UInt32Array::from(right_indices)))
-}
-
-/// Build the final LTSeqTable from merge join index arrays.
-///
-/// Uses `arrow::compute::take()` to gather result columns from both tables,
-/// then constructs the combined schema with aliased right columns.
-fn build_merge_join_result(
-    left_batch: &RecordBatch,
-    right_batch: &RecordBatch,
-    left_idx: &UInt32Array,
-    right_idx: &UInt32Array,
-    alias: &str,
-    session: &Arc<SessionContext>,
-    left_key: &str,
-) -> PyResult<LTSeqTable> {
-    let mut result_columns: Vec<ArrayRef> = Vec::new();
-
-    // Gather left columns
-    for col_idx in 0..left_batch.num_columns() {
-        let col = left_batch.column(col_idx);
-        let taken = compute::take(col.as_ref(), left_idx, None)
-            .map_err(|e| LtseqError::Runtime(format!("take() failed on left column: {}", e)))?;
-        result_columns.push(taken);
-    }
-
-    // Gather right columns
-    for col_idx in 0..right_batch.num_columns() {
-        let col = right_batch.column(col_idx);
-        let taken = compute::take(col.as_ref(), right_idx, None)
-            .map_err(|e| LtseqError::Runtime(format!("take() failed on right column: {}", e)))?;
-        result_columns.push(taken);
-    }
-
-    // Build result schema
-    let left_schema = left_batch.schema();
-    let right_schema = right_batch.schema();
-    let result_schema = build_join_result_schema(&left_schema, &right_schema, alias);
-
-    if result_columns.is_empty() {
-        return LTSeqTable::from_batches_with_schema(
-            Arc::clone(session),
-            vec![],
-            result_schema,
-            vec![left_key.to_string()],
-            None,
-        );
-    }
-
-    let result_batch = RecordBatch::try_new(Arc::clone(&result_schema), result_columns)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to build result batch: {}", e)))?;
-
-    LTSeqTable::from_batches_with_schema(
-        Arc::clone(session),
-        vec![result_batch],
-        result_schema,
-        vec![left_key.to_string()],
-        None,
     )
 }

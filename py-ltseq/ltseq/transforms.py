@@ -1,12 +1,15 @@
 """Transform operations for LTSeq: filter, select, derive, sort, distinct, slice."""
 
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 from .expr import SchemaProxy
 from .lookup import LookupMixin
 
 
-def _process_select_col(col, schema: Dict[str, str]):
+def _process_select_col(col: str | Callable, schema: dict[str, str]) -> dict[str, Any] | list[dict[str, Any]]:
     """Process a single column argument for select()."""
     if isinstance(col, str):
         if col not in schema:
@@ -41,7 +44,12 @@ def _process_select_col(col, schema: Dict[str, str]):
         )
 
 
-def _extract_derive_cols(args, kwargs, schema, capture_expr_fn):
+def _extract_derive_cols(
+    args: tuple,
+    kwargs: dict[str, Callable],
+    schema: dict[str, str],
+    capture_expr_fn: Callable,
+) -> dict[str, dict[str, Any]]:
     """Extract derived columns from derive() arguments."""
     if args:
         if len(args) > 1:
@@ -86,7 +94,11 @@ def _extract_derive_cols(args, kwargs, schema, capture_expr_fn):
     return derived_cols
 
 
-def _collect_key_exprs(key_exprs, schema, capture_expr_fn):
+def _collect_key_exprs(
+    key_exprs: tuple | list,
+    schema: dict[str, str],
+    capture_expr_fn: Callable,
+) -> list[dict[str, Any]]:
     """Collect key expressions from str or Callable arguments."""
     result = []
     for key_expr in key_exprs:
@@ -273,7 +285,7 @@ class TransformMixin(LookupMixin):
     # Alias for discoverability (Polars users expect with_columns)
     with_columns = derive
 
-    def rename(self, mapping: Dict[str, str] = None, **kwargs: str) -> "LTSeq":
+    def rename(self, mapping: dict[str, str] | None = None, **kwargs: str) -> "LTSeq":
         """
         Rename columns.
 
@@ -428,10 +440,10 @@ class TransformMixin(LookupMixin):
 
         return result
 
-    def _has_window_functions(self, derived_cols: Dict[str, Any]) -> bool:
+    def _has_window_functions(self, derived_cols: dict[str, Any]) -> bool:
         """Check if derived columns contain window functions."""
 
-        def check_expr(expr: Dict[str, Any]) -> bool:
+        def check_expr(expr: dict[str, Any]) -> bool:
             if not isinstance(expr, dict):
                 return False
             expr_type = expr.get("type", "")
@@ -463,9 +475,9 @@ class TransformMixin(LookupMixin):
 
     def sort(
         self,
-        *keys: Union[str, Callable],
-        desc: Union[bool, List[bool]] = False,
-        descending: Union[bool, List[bool]] = None,
+        *keys: str | Callable,
+        desc: bool | list[bool] = False,
+        descending: bool | list[bool] | None = None,
     ) -> "LTSeq":
         """
         Sort by one or more keys.
@@ -526,7 +538,7 @@ class TransformMixin(LookupMixin):
     def assume_sorted(
         self,
         *keys: str,
-        desc: Union[bool, List[bool]] = False,
+        desc: bool | list[bool] = False,
     ) -> "LTSeq":
         """
         Declare that data is already sorted by the given keys.
@@ -584,7 +596,7 @@ class TransformMixin(LookupMixin):
 
         return result
 
-    def distinct(self, *key_exprs: Union[str, Callable]) -> "LTSeq":
+    def distinct(self, *key_exprs: str | Callable) -> "LTSeq":
         """
         Deduplicate rows by key columns.
 
@@ -614,7 +626,7 @@ class TransformMixin(LookupMixin):
         result._sort_keys = None
         return result
 
-    def slice(self, offset: int = 0, length: Optional[int] = None) -> "LTSeq":
+    def slice(self, offset: int = 0, length: int | None = None) -> "LTSeq":
         """
         Select a contiguous row range.
 
@@ -690,7 +702,7 @@ class TransformMixin(LookupMixin):
         offset = max(0, total - n)
         return self.slice(offset=offset, length=n)
 
-    def search_pattern(self, *step_predicates: Callable, partition_by: Optional[str] = None) -> "LTSeq":
+    def search_pattern(self, *step_predicates: Callable, partition_by: str | None = None) -> "LTSeq":
         """
         Find rows where consecutive rows match a sequence of predicates.
 
@@ -738,7 +750,7 @@ class TransformMixin(LookupMixin):
         result._sort_keys = self._sort_keys
         return result
 
-    def search_pattern_count(self, *step_predicates: Callable, partition_by: Optional[str] = None) -> int:
+    def search_pattern_count(self, *step_predicates: Callable, partition_by: str | None = None) -> int:
         """
         Count rows where consecutive rows match a sequence of predicates.
 

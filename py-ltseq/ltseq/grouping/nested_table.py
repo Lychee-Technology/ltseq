@@ -2,7 +2,7 @@
 
 import re
 import textwrap
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 from .proxies import GroupProxy, RowProxy
 from .sql_parsing import (
@@ -76,7 +76,7 @@ class NestedTable:
         """Return the number of rows in the grouped table."""
         return len(self._ltseq.to_pandas())
 
-    def to_pandas(self):
+    def to_pandas(self) -> Any:
         """Convert the grouped table to a pandas DataFrame."""
         return self._ltseq.to_pandas()
 
@@ -258,10 +258,13 @@ Supported group methods:
         result_df = filtered_df[result_cols]
 
         # Convert back to LTSeq
-        rows = result_df.to_dict("records")
-        schema = self._ltseq._schema.copy()
+        import pyarrow as pa
 
-        result_ltseq = self._ltseq.__class__._from_rows(rows, schema)
+        schema = self._ltseq._schema.copy()
+        result_ltseq = self._ltseq.__class__.from_arrow(
+            pa.Table.from_pandas(result_df, preserve_index=False)
+        )
+        result_ltseq._schema = schema
 
         result_nested = NestedTable(
             result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
@@ -340,9 +343,9 @@ Supported group methods:
                     raise ValueError(get_unsupported_derive_error(source))
             else:
                 raise ValueError(
-                    "Cannot parse derive expression (source not available). "
-                    "This can happen with lambdas defined in REPL. "
-                    "Please define the lambda in a file for now."
+                    "Cannot parse derive expression: proxy-based capture failed and "
+                    "source is not available (common in REPL/Jupyter). "
+                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
                 )
         except ValueError:
             raise
@@ -350,7 +353,7 @@ Supported group methods:
             source_str = source if source else "<unavailable>"
             raise ValueError(get_derive_parse_error_message(source_str, str(e)))
 
-    def _capture_derive_via_proxy(self, group_mapper: Callable) -> Dict[str, str]:
+    def _capture_derive_via_proxy(self, group_mapper: Callable) -> dict[str, str]:
         """
         Capture derive expressions using proxy pattern.
 
@@ -391,7 +394,7 @@ Supported group methods:
         return derive_exprs
 
     def _derive_via_sql(
-        self, flattened: "LTSeq", derive_exprs: Dict[str, str]
+        self, flattened: "LTSeq", derive_exprs: dict[str, str]
     ) -> "LTSeq":
         """Apply derived column expressions via SQL SELECT with window functions."""
         result = flattened.__class__()
@@ -417,36 +420,46 @@ Supported group methods:
                 "Install it with: pip install pandas"
             )
 
-        import ast
-        import inspect
-
+        # Try proxy-based capture first (works in REPL, Jupyter, and files)
+        derive_exprs = None
         try:
-            source = inspect.getsource(group_mapper)
-        except (OSError, TypeError):
-            raise ValueError(
-                "Cannot parse derive expression (source not available). "
-                "This can happen with lambdas defined in REPL. "
-                "Please define the lambda in a file for now."
-            )
-
-        source_dedented = textwrap.dedent(source)
-        source_to_parse = extract_lambda_from_chain(source_dedented)
-
-        try:
-            tree = ast.parse(source_to_parse)
-        except SyntaxError:
-            try:
-                tree = ast.parse(f"({source_to_parse})", mode="eval")
-            except SyntaxError:
-                raise ValueError(
-                    f"Cannot parse derive lambda expression. Source: {source_to_parse}"
-                )
-
-        schema = self._ltseq._schema.copy()
-        derive_exprs = self._derive_parser.extract_derive_expressions(tree, schema)
+            derive_exprs = self._capture_derive_via_proxy(group_mapper)
+        except Exception:
+            pass
 
         if not derive_exprs:
-            raise ValueError(get_unsupported_derive_error(source))
+            # Fall back to source code parsing
+            import ast
+            import inspect
+
+            source = None
+            try:
+                source = inspect.getsource(group_mapper)
+            except (OSError, TypeError):
+                raise ValueError(
+                    "Cannot parse derive expression: proxy-based capture failed and "
+                    "source is not available (common in REPL/Jupyter). "
+                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
+                )
+
+            source_dedented = textwrap.dedent(source)
+            source_to_parse = extract_lambda_from_chain(source_dedented)
+
+            try:
+                tree = ast.parse(source_to_parse)
+            except SyntaxError:
+                try:
+                    tree = ast.parse(f"({source_to_parse})", mode="eval")
+                except SyntaxError:
+                    raise ValueError(
+                        f"Cannot parse derive lambda expression. Source: {source_to_parse}"
+                    )
+
+            schema = self._ltseq._schema.copy()
+            derive_exprs = self._derive_parser.extract_derive_expressions(tree, schema)
+
+            if not derive_exprs:
+                raise ValueError(get_unsupported_derive_error(source))
 
         df = self._ltseq.to_pandas()
 
@@ -466,8 +479,12 @@ Supported group methods:
         for col_name in derive_exprs.keys():
             result_schema[col_name] = "Unknown"
 
-        rows = df.to_dict("records")
-        result = self._ltseq.__class__._from_rows(rows, result_schema)
+        import pyarrow as pa
+
+        result = self._ltseq.__class__.from_arrow(
+            pa.Table.from_pandas(df, preserve_index=False)
+        )
+        result._schema = result_schema
 
         return result
 
@@ -504,29 +521,29 @@ Supported group methods:
         if "COUNT(*)" in sql_expr and "PARTITION BY __group_id__" in sql_expr:
             return df.groupby("__group_id__").transform("size")
 
-        # Handle FIRST_VALUE(col)
-        if "FIRST_VALUE(" in sql_expr:
-            match = re.search(r"FIRST_VALUE\((\w+)\)", sql_expr)
+        # Handle FIRST_VALUE(col) — column name may be bare or double-quoted
+        if "FIRST_VALUE" in sql_expr:
+            match = re.search(r'FIRST_VALUE\s*\("?(\w+)"?\)', sql_expr)
             if match:
                 col_name = match.group(1)
                 return df.groupby("__group_id__")[col_name].transform("first")
 
-        # Handle LAST_VALUE(col)
-        if "LAST_VALUE(" in sql_expr:
-            match = re.search(r"LAST_VALUE\((\w+)\)", sql_expr)
+        # Handle LAST_VALUE(col) — column name may be bare or double-quoted
+        if "LAST_VALUE" in sql_expr:
+            match = re.search(r'LAST_VALUE\s*\("?(\w+)"?\)', sql_expr)
             if match:
                 col_name = match.group(1)
                 return df.groupby("__group_id__")[col_name].transform("last")
 
-        # Handle MAX/MIN/SUM/AVG
+        # Handle MAX/MIN/SUM/AVG — column name may be bare or double-quoted
         for agg_sql, agg_pandas in [
             ("MAX", "max"),
             ("MIN", "min"),
             ("SUM", "sum"),
             ("AVG", "mean"),
         ]:
-            if f"{agg_sql}(" in sql_expr:
-                match = re.search(f"{agg_sql}\\((\\w+)\\)", sql_expr)
+            if agg_sql in sql_expr:
+                match = re.search(f'{agg_sql}\\s*\\("?(\\w+)"?\\)', sql_expr)
                 if match:
                     col_name = match.group(1)
                     return df.groupby("__group_id__")[col_name].transform(agg_pandas)

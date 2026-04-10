@@ -1,143 +1,260 @@
 {
-  "timestamp": "2026-02-28 09:21:54",
+  "timestamp": "2026-04-05 19:24:08",
+  "host": {
+    "os": "Darwin 24.6.0",
+    "python": "3.14.3",
+    "cpu": "Apple M1 Pro",
+    "cores": "10 (8 performance and 2 efficiency)",
+    "memory": "32 GB",
+    "git_commit": "f8c306a",
+    "rustc": "1.92.0"
+  },
   "results": [
     {
       "name": "filter_10000",
       "rows": 10000,
-      "time_ms": 20.71,
-      "rows_per_sec": 482955.0
+      "time_ms": 2.19,
+      "rows_per_sec": 4562247.0
     },
     {
       "name": "filter_100000",
       "rows": 100000,
-      "time_ms": 104.49,
-      "rows_per_sec": 957025.0
+      "time_ms": 8.48,
+      "rows_per_sec": 11794693.0
     },
     {
       "name": "filter_1000000",
       "rows": 1000000,
-      "time_ms": 87.42,
-      "rows_per_sec": 11438797.0
+      "time_ms": 14.33,
+      "rows_per_sec": 69789488.0
     },
     {
       "name": "filter_complex_100000",
       "rows": 100000,
-      "time_ms": 103.05,
-      "rows_per_sec": 970389.0
+      "time_ms": 8.39,
+      "rows_per_sec": 11915105.0
     },
     {
       "name": "derive_10000",
       "rows": 10000,
-      "time_ms": 18.52,
-      "rows_per_sec": 539964.0
+      "time_ms": 1.97,
+      "rows_per_sec": 5068390.0
     },
     {
       "name": "derive_100000",
       "rows": 100000,
-      "time_ms": 40.84,
-      "rows_per_sec": 2448654.0
+      "time_ms": 5.68,
+      "rows_per_sec": 17600772.0
     },
     {
       "name": "derive_1000000",
       "rows": 1000000,
-      "time_ms": 48.53,
-      "rows_per_sec": 20606192.0
+      "time_ms": 10.88,
+      "rows_per_sec": 91908720.0
     },
     {
       "name": "derive_multi_100000",
       "rows": 100000,
-      "time_ms": 42.59,
-      "rows_per_sec": 2348084.0
+      "time_ms": 5.85,
+      "rows_per_sec": 17093815.0
     },
     {
       "name": "join_10000x10000",
       "rows": 20000,
-      "time_ms": 68.2,
-      "rows_per_sec": 293255.0
+      "time_ms": 4.84,
+      "rows_per_sec": 4131248.0
     },
     {
       "name": "join_100000x10000",
       "rows": 110000,
-      "time_ms": 258.89,
-      "rows_per_sec": 424898.0
+      "time_ms": 15.98,
+      "rows_per_sec": 6883988.0
     },
     {
       "name": "join_100000x100000",
       "rows": 200000,
-      "time_ms": 511.06,
-      "rows_per_sec": 391343.0
+      "time_ms": 27.94,
+      "rows_per_sec": 7158584.0
     },
     {
       "name": "window_lag_10000",
       "rows": 10000,
-      "time_ms": 18.78,
-      "rows_per_sec": 532412.0
+      "time_ms": 2.34,
+      "rows_per_sec": 4281382.0
     },
     {
       "name": "window_lag_100000",
       "rows": 100000,
-      "time_ms": 43.66,
-      "rows_per_sec": 2290165.0
+      "time_ms": 5.99,
+      "rows_per_sec": 16694221.0
     },
     {
       "name": "window_cumsum_10000",
       "rows": 10000,
-      "time_ms": 20.14,
-      "rows_per_sec": 496592.0
+      "time_ms": 2.31,
+      "rows_per_sec": 4325337.0
     },
     {
       "name": "window_cumsum_100000",
       "rows": 100000,
-      "time_ms": 42.43,
-      "rows_per_sec": 2356960.0
+      "time_ms": 5.75,
+      "rows_per_sec": 17393699.0
     },
     {
       "name": "group_agg_10000",
       "rows": 10000,
-      "time_ms": 45.47,
-      "rows_per_sec": 219907.0
+      "time_ms": 3.04,
+      "rows_per_sec": 3287776.0
     },
     {
       "name": "group_agg_100000",
       "rows": 100000,
-      "time_ms": 234.7,
-      "rows_per_sec": 426083.0
+      "time_ms": 12.91,
+      "rows_per_sec": 7746717.0
     },
     {
       "name": "chain_10000",
       "rows": 10000,
-      "time_ms": 28.81,
-      "rows_per_sec": 347134.0
+      "time_ms": 2.67,
+      "rows_per_sec": 3751681.0
     },
     {
       "name": "chain_100000",
       "rows": 100000,
-      "time_ms": 109.36,
-      "rows_per_sec": 914381.0
+      "time_ms": 8.51,
+      "rows_per_sec": 11749999.0
     },
     {
       "name": "chain_1000000",
       "rows": 1000000,
-      "time_ms": 98.76,
-      "rows_per_sec": 10125799.0
+      "time_ms": 17.45,
+      "rows_per_sec": 57292134.0
     },
     {
       "name": "read_csv_10000",
       "rows": 10000,
-      "time_ms": 13.65,
-      "rows_per_sec": 732810.0
+      "time_ms": 1.62,
+      "rows_per_sec": 6162220.0
     },
     {
       "name": "read_csv_100000",
       "rows": 100000,
-      "time_ms": 39.16,
-      "rows_per_sec": 2553728.0
+      "time_ms": 5.48,
+      "rows_per_sec": 18239577.0
     },
     {
       "name": "read_csv_1000000",
       "rows": 1000000,
-      "time_ms": 41.27,
-      "rows_per_sec": 24228712.0
+      "time_ms": 11.1,
+      "rows_per_sec": 90077692.0
+    },
+    {
+      "name": "sort_10000",
+      "rows": 10000,
+      "time_ms": 2.14,
+      "rows_per_sec": 4683658.0
+    },
+    {
+      "name": "sort_100000",
+      "rows": 100000,
+      "time_ms": 5.42,
+      "rows_per_sec": 18446167.0
+    },
+    {
+      "name": "sort_1000000",
+      "rows": 1000000,
+      "time_ms": 11.44,
+      "rows_per_sec": 87437216.0
+    },
+    {
+      "name": "sort_multi_100000",
+      "rows": 100000,
+      "time_ms": 5.7,
+      "rows_per_sec": 17550616.0
+    },
+    {
+      "name": "group_ordered_10000",
+      "rows": 10000,
+      "time_ms": 7.18,
+      "rows_per_sec": 1392235.0
+    },
+    {
+      "name": "group_ordered_100000",
+      "rows": 100000,
+      "time_ms": 48.47,
+      "rows_per_sec": 2063034.0
+    },
+    {
+      "name": "search_first_10000",
+      "rows": 10000,
+      "time_ms": 0.81,
+      "rows_per_sec": 12282286.0
+    },
+    {
+      "name": "search_first_100000",
+      "rows": 100000,
+      "time_ms": 0.93,
+      "rows_per_sec": 107144447.0
+    },
+    {
+      "name": "mutation_insert_10000",
+      "rows": 10000,
+      "time_ms": 3.15,
+      "rows_per_sec": 3173456.0
+    },
+    {
+      "name": "mutation_insert_100000",
+      "rows": 100000,
+      "time_ms": 16.39,
+      "rows_per_sec": 6099705.0
+    },
+    {
+      "name": "mutation_delete_10000",
+      "rows": 10000,
+      "time_ms": 2.48,
+      "rows_per_sec": 4034834.0
+    },
+    {
+      "name": "mutation_delete_100000",
+      "rows": 100000,
+      "time_ms": 7.8,
+      "rows_per_sec": 12826680.0
+    },
+    {
+      "name": "mutation_update_10000",
+      "rows": 10000,
+      "time_ms": 3.89,
+      "rows_per_sec": 2570052.0
+    },
+    {
+      "name": "mutation_update_100000",
+      "rows": 100000,
+      "time_ms": 18.09,
+      "rows_per_sec": 5528943.0
+    },
+    {
+      "name": "write_parquet_10000",
+      "rows": 10000,
+      "time_ms": 2.86,
+      "rows_per_sec": 3500413.0
+    },
+    {
+      "name": "write_parquet_100000",
+      "rows": 100000,
+      "time_ms": 28.12,
+      "rows_per_sec": 3556309.0
+    },
+    {
+      "name": "read_parquet_10000",
+      "rows": 10000,
+      "time_ms": 0.48,
+      "rows_per_sec": 20991863.0
+    },
+    {
+      "name": "read_parquet_100000",
+      "rows": 100000,
+      "time_ms": 0.66,
+      "rows_per_sec": 151512038.0
     }
   ]
 }

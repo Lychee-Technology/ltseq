@@ -169,6 +169,7 @@ impl LTSeqTable {
         sort_exprs: Vec<String>,
         source_parquet_path: Option<String>,
     ) -> Self {
+        // Explicit field initialization for clarity and future-proofing
         LTSeqTable {
             session,
             dataframe: None,
@@ -198,6 +199,7 @@ impl LTSeqTable {
     ) -> PyResult<(&Arc<DataFrame>, &Arc<ArrowSchema>)> {
         Ok((self.require_df()?, self.require_schema()?))
     }
+
 }
 
 #[pymethods]
@@ -315,7 +317,7 @@ impl LTSeqTable {
             let batches = df_clone
                 .collect()
                 .await
-                .map_err(|e| LtseqError::collect(e))?;
+                .map_err(LtseqError::collect)?;
 
             let output = format_table(&batches, schema, n)?;
             Ok(output)
@@ -377,7 +379,7 @@ impl LTSeqTable {
                 df_clone
                     .collect()
                     .await
-                    .map_err(|e| LtseqError::collect(e))
+                    .map_err(LtseqError::collect)
             })
         })?;
 
@@ -426,7 +428,7 @@ impl LTSeqTable {
 
         // 3. Transpile to DataFusion expr
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Transpile(e))?;
+            .map_err(LtseqError::Transpile)?;
 
         // 4. Get DataFrame
         let df = self.require_df()?;
@@ -439,7 +441,7 @@ impl LTSeqTable {
                     .filter(df_expr)
                     .map_err(|e| format!("Filter execution failed: {}", e))
             })
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
 
         // 6. Return new LTSeqTable with filtered data (schema unchanged)
         Ok(LTSeqTable::from_df_with_schema(
@@ -529,7 +531,7 @@ impl LTSeqTable {
 
             // Transpile
             let df_expr = pyexpr_to_datafusion(py_expr, schema)
-                .map_err(|e| LtseqError::Transpile(e))?;
+                .map_err(LtseqError::Transpile)?;
 
             df_exprs.push(df_expr);
         }
@@ -545,7 +547,7 @@ impl LTSeqTable {
                     .select(df_exprs)
                     .map_err(|e| format!("Select execution failed: {}", e))
             })
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
 
         // 5. Return new LTSeqTable with recomputed schema
         Ok(LTSeqTable::from_df(
@@ -688,7 +690,7 @@ impl LTSeqTable {
                     .limit(skip, fetch)
                     .map_err(|e| format!("Slice execution failed: {}", e))
             })
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
 
         // Return new LTSeqTable with sliced data (schema unchanged)
         let schema = self.require_schema()?;

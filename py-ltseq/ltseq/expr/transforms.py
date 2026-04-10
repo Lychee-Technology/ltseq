@@ -2,7 +2,7 @@
 
 import ast
 import inspect
-from typing import Any, Dict
+from typing import Any, Callable
 
 from .base import Expr
 from .proxy import SchemaProxy
@@ -60,7 +60,7 @@ class IsNoneTransformer(ast.NodeTransformer):
         return node
 
 
-def _transform_lambda_for_none_checks(fn):
+def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     """
     Transform lambda functions to replace 'is None' and 'is not None' with comparisons.
 
@@ -173,7 +173,7 @@ def _transform_lambda_for_none_checks(fn):
         return fn
 
 
-def _lambda_to_expr(fn, schema: Dict[str, str]) -> Dict[str, Any]:
+def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
     """
     Execute a lambda with a SchemaProxy to capture its expression tree.
 

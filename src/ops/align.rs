@@ -47,7 +47,7 @@ pub fn align_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // Get actual schema from batches
     let batch_schema = batches
@@ -114,7 +114,7 @@ pub fn align_impl(
                     .await
                     .map_err(|e| format!("Failed to execute ref table creation: {}", e))
             })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
         Ok(())
     })?;
@@ -152,7 +152,7 @@ pub fn align_impl(
                 .await
                 .map_err(|e| format!("Failed to collect align results: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // Cleanup temp tables
     let _ = table.session.deregister_table(&temp_table_name);
