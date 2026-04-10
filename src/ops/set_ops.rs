@@ -23,7 +23,10 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::helpers::{register_temp_table_pair_str, register_temp_table_str};
+use crate::ops::common::{
+    build_equality_conditions, build_qualified_column_list, build_quoted_column_list,
+    MultiTempTableGuard,
+};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -69,25 +72,6 @@ async fn collect_batches(
         .collect()
         .await
         .map_err(|e| format!("Failed to collect {}: {}", table_name, e))
-}
-
-/// Build SELECT column list for t1
-fn build_select_cols(schema: &ArrowSchema) -> String {
-    schema
-        .fields()
-        .iter()
-        .map(|f| format!("t1.\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Build WHERE condition for column comparison
-fn build_where_conditions(compare_cols: &[String]) -> String {
-    compare_cols
-        .iter()
-        .map(|c| format!("t1.\"{}\" = t2.\"{}\"", c, c))
-        .collect::<Vec<_>>()
-        .join(" AND ")
 }
 
 /// Create result LTSeqTable from DataFrame
@@ -153,7 +137,7 @@ fn distinct_all_columns(
                 .distinct()
                 .map_err(|e| format!("Distinct execution failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -196,49 +180,37 @@ fn extract_key_cols_from_exprs(
     Ok(key_cols)
 }
 
-/// Distinct with specific key columns using GROUP BY + FIRST_VALUE.
-///
-/// Uses `GROUP BY key_cols` with `FIRST_VALUE(non_key_col)` for each non-key column,
-/// which produces an `AggregateExec` physical plan node that the GPU optimizer can
-/// intercept (unlike the previous `ROW_NUMBER() OVER (...)` approach which produced
-/// a `WindowAggExec` that was not GPU-interceptable).
+/// Distinct with specific key columns using ROW_NUMBER()
 fn distinct_with_keys(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
 ) -> PyResult<LTSeqTable> {
-    let group_by = key_cols
+    let all_cols_str = build_quoted_column_list(schema);
+
+    let partition_by = key_cols
         .iter()
         .map(|c| format!("\"{}\"", c))
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Build SELECT list: key columns as-is, non-key columns wrapped in FIRST_VALUE
-    let select_cols: Vec<String> = schema
-        .fields()
-        .iter()
-        .map(|f| {
-            let name = f.name();
-            if key_cols.contains(name) {
-                format!("\"{}\"", name)
-            } else {
-                format!("FIRST_VALUE(\"{}\") as \"{}\"", name, name)
-            }
-        })
-        .collect();
-    let select_str = select_cols.join(", ");
+    let sql = format!(
+        "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) as __rn FROM __distinct_source) WHERE __rn = 1",
+        all_cols_str, partition_by, partition_by
+    );
 
-    let schema_clone = Arc::clone(schema);
     let distinct_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "data for distinct").await?;
-            let guard = register_temp_table_str(&table.session, &schema_clone, batches, "distinct")?;
 
-            let sql = format!(
-                "SELECT {} FROM \"{}\" GROUP BY {}",
-                select_str, guard.name(), group_by
-            );
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                "__distinct_source",
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let result = table
                 .session
@@ -246,7 +218,6 @@ fn distinct_with_keys(
                 .await
                 .map_err(|e| format!("Distinct SQL failed: {}", e))?;
 
-            drop(guard);
             Ok(result)
         })
         .map_err(|e: String| LtseqError::Runtime(e))?;
@@ -288,7 +259,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
                 .union((**df2).clone())
                 .map_err(|e| format!("Union failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(create_result_table(
         &table1.session,
@@ -340,23 +311,30 @@ pub fn is_subset_impl(
             let batches1 = collect_batches(df1, "left table").await?;
             let batches2 = collect_batches(df2, "right table").await?;
 
-            let (guard1, guard2) = register_temp_table_pair_str(
-                &table1.session, schema1, batches1, schema2, batches2, "subset",
+            let t1_name = "__subset_t1__";
+            let t2_name = "__subset_t2__";
+            
+            // Use RAII guard for automatic cleanup
+            let _guard = MultiTempTableGuard::register_two(
+                &table1.session,
+                t1_name,
+                Arc::clone(schema1),
+                batches1,
+                t2_name,
+                Arc::clone(schema2),
+                batches2,
             )?;
 
-            let where_cond = build_where_conditions(&compare_cols);
+            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
             let sql = format!(
                 "SELECT COUNT(*) as cnt FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                guard1.name(), guard2.name(), where_cond
+                t1_name, t2_name, where_cond
             );
 
             let result = table1.session.sql(&sql).await
                 .map_err(|e| format!("Subset query failed: {}", e))?;
             let batches = result.collect().await
                 .map_err(|e| format!("Subset collect failed: {}", e))?;
-
-            drop(guard1);
-            drop(guard2);
 
             // Empty table is subset of anything
             if batches.is_empty() || batches[0].num_rows() == 0 {
@@ -372,7 +350,7 @@ pub fn is_subset_impl(
 
             Ok(cnt_array.value(0) == 0)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(is_subset)
 }
@@ -398,9 +376,9 @@ fn set_operation_impl(
     let (df2, schema2) = table2.require_df_and_schema()?;
     let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
-    let op_name = match op {
-        SetOperation::Intersect => "intersect",
-        SetOperation::Diff => "diff",
+    let (t1_name, t2_name, op_name) = match op {
+        SetOperation::Intersect => ("__intersect_t1__", "__intersect_t2__", "Intersect"),
+        SetOperation::Diff => ("__diff_t1__", "__diff_t2__", "Diff"),
     };
 
     let result_df = RUNTIME
@@ -408,32 +386,37 @@ fn set_operation_impl(
             let batches1 = collect_batches(df1, "left table").await?;
             let batches2 = collect_batches(df2, "right table").await?;
 
-            let (guard1, guard2) = register_temp_table_pair_str(
-                &table1.session, schema1, batches1, schema2, batches2, op_name,
+            // Use RAII guard for automatic cleanup
+            let _guard = MultiTempTableGuard::register_two(
+                &table1.session,
+                t1_name,
+                Arc::clone(schema1),
+                batches1,
+                t2_name,
+                Arc::clone(schema2),
+                batches2,
             )?;
 
-            let select_cols = build_select_cols(schema1);
-            let where_cond = build_where_conditions(&compare_cols);
+            let select_cols = build_qualified_column_list(schema1, "t1");
+            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
 
             let sql = match op {
                 SetOperation::Intersect => format!(
                     "SELECT DISTINCT {} FROM \"{}\" t1 WHERE EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                    select_cols, guard1.name(), guard2.name(), where_cond
+                    select_cols, t1_name, t2_name, where_cond
                 ),
                 SetOperation::Diff => format!(
                     "SELECT {} FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                    select_cols, guard1.name(), guard2.name(), where_cond
+                    select_cols, t1_name, t2_name, where_cond
                 ),
             };
 
             let result = table1.session.sql(&sql).await
                 .map_err(|e| format!("{} query failed: {}", op_name, e))?;
 
-            drop(guard1);
-            drop(guard2);
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(create_result_table(
         &table1.session,
@@ -448,24 +431,24 @@ fn set_operation_impl(
 pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let all_cols = build_quoted_column_list(schema);
 
     let result_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "rvs").await?;
-            let schema_clone = Arc::clone(schema);
 
-            let guard =
-                register_temp_table_str(&table.session, &schema_clone, batches, "rvs")?;
+            let t_name = "__rvs_temp__";
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                t_name,
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let sql = format!(
                 "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER () as __rn FROM \"{}\") ORDER BY __rn DESC",
-                all_cols, guard.name()
+                all_cols, t_name
             );
 
             let result = table
@@ -474,10 +457,9 @@ pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
                 .await
                 .map_err(|e| format!("rvs SQL failed: {}", e))?;
 
-            drop(guard);
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -499,24 +481,24 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
 
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = schema
-        .fields()
-        .iter()
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let all_cols = build_quoted_column_list(schema);
 
     let result_df = RUNTIME
         .block_on(async {
             let batches = collect_batches(df, "step").await?;
-            let schema_clone = Arc::clone(schema);
 
-            let guard =
-                register_temp_table_str(&table.session, &schema_clone, batches, "step")?;
+            let t_name = "__step_temp__";
+            // Use RAII guard for automatic cleanup
+            let _guard = crate::ops::common::TempTableGuard::register(
+                &table.session,
+                t_name,
+                Arc::clone(schema),
+                batches,
+            )?;
 
             let sql = format!(
                 "SELECT {} FROM (SELECT *, (ROW_NUMBER() OVER () - 1) as __rn FROM \"{}\") WHERE __rn % {} = 0",
-                all_cols, guard.name(), n
+                all_cols, t_name, n
             );
 
             let result = table
@@ -525,10 +507,9 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
                 .await
                 .map_err(|e| format!("step SQL failed: {}", e))?;
 
-            drop(guard);
             Ok::<_, String>(result)
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),

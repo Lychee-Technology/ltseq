@@ -67,7 +67,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 ### Aggregation
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Group aggregate | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())` |
+| Group aggregate | `.agg()` | `t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())` |
 | Partition | `.partition()` | `parts = t.partition("region")` |
 | Pivot | `.pivot()` | `t.pivot(index="date", columns="region", values="amount")` |
 
@@ -982,7 +982,7 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid expressions)
 - **Example**:
 ```python
-summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
+summary = t.agg(by=lambda r: r.region, total=lambda r: r.sales.sum())
 ```
 
 ### `top_k` (aggregate function)
@@ -994,7 +994,7 @@ summary = t.agg(by=lambda r: r.region, total=lambda g: g.sales.sum())
 - **Example**:
 ```python
 # Used inside agg
-result = t.agg(top_prices=lambda g: top_k(g.price, 5))
+result = t.agg(top_prices=lambda r: top_k(r.price, 5))
 ```
 
 ### `LTSeq.partition`
@@ -1494,7 +1494,7 @@ Module-level functions for conditional aggregation in `.agg()` contexts. These t
 ```python
 from ltseq.expr import count_if
 
-result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 100))
+result = t.agg(by=lambda r: r.region, high_count=lambda r: count_if(r.price > 100))
 ```
 
 #### `sum_if`
@@ -1507,7 +1507,7 @@ result = t.agg(by=lambda r: r.region, high_count=lambda g: count_if(g.price > 10
 ```python
 from ltseq.expr import sum_if
 
-result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100, g.quantity))
+result = t.agg(by=lambda r: r.region, high_sales=lambda r: sum_if(r.price > 100, r.quantity))
 ```
 
 #### `avg_if`
@@ -1520,7 +1520,7 @@ result = t.agg(by=lambda r: r.region, high_sales=lambda g: sum_if(g.price > 100,
 ```python
 from ltseq.expr import avg_if
 
-result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g.sales))
+result = t.agg(by=lambda r: r.region, avg_high=lambda r: avg_if(r.price > 100, r.sales))
 ```
 
 #### `min_if`
@@ -1533,7 +1533,7 @@ result = t.agg(by=lambda r: r.region, avg_high=lambda g: avg_if(g.price > 100, g
 ```python
 from ltseq.expr import min_if
 
-result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, min_active=lambda r: min_if(r.is_active, r.score))
 ```
 
 #### `max_if`
@@ -1546,7 +1546,7 @@ result = t.agg(by=lambda r: r.region, min_active=lambda g: min_if(g.is_active, g
 ```python
 from ltseq.expr import max_if
 
-result = t.agg(by=lambda r: r.region, max_active=lambda g: max_if(g.is_active, g.score))
+result = t.agg(by=lambda r: r.region, max_active=lambda r: max_if(r.is_active, r.score))
 ```
 
 ## 9. End-to-End Examples
@@ -1695,6 +1695,54 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `count_if(cond)` | `COUNT(CASE WHEN cond THEN 1 END)` |
 | `sum_if(cond, col)` | `SUM(CASE WHEN cond THEN col END)` |
 
+### Expression SQL Translation Reference
+
+All expressions are transpiled to the Rust/DataFusion layer before execution. No Python-level evaluation happens inside lambdas.
+
+| Expression | SQL / DataFusion Equivalent |
+|-----------|----------------------------|
+| `if_else(cond, a, b)` | `CASE WHEN cond THEN a ELSE b END` |
+| `r.col.fill_null(v)` | `COALESCE(col, v)` |
+| `r.col.is_null()` | `col IS NULL` |
+| `r.col.is_not_null()` | `col IS NOT NULL` |
+| `r.col.s.contains(p)` | `POSITION(p IN col) > 0` |
+| `r.col.s.starts_with(p)` | `STARTS_WITH(col, p)` |
+| `r.col.s.ends_with(p)` | `ENDS_WITH(col, p)` |
+| `r.col.s.lower()` | `LOWER(col)` |
+| `r.col.s.upper()` | `UPPER(col)` |
+| `r.col.s.strip()` | `TRIM(col)` |
+| `r.col.s.lstrip()` | `LTRIM(col)` |
+| `r.col.s.rstrip()` | `RTRIM(col)` |
+| `r.col.s.len()` | `CHARACTER_LENGTH(col)` |
+| `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
+| `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
+| `r.col.s.left(n)` | `LEFT(col, n)` |
+| `r.col.s.right(n)` | `RIGHT(col, n)` |
+| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
+| `r.col.s.pad_left(n, c)` | `LPAD(col, n, c)` |
+| `r.col.s.pad_right(n, c)` | `RPAD(col, n, c)` |
+| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
+| `str_char(n)` | `CHR(n)` |
+| `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
+| `r.col.dt.year()` | `EXTRACT(YEAR FROM col)` |
+| `r.col.dt.month()` | `EXTRACT(MONTH FROM col)` |
+| `r.col.dt.day()` | `EXTRACT(DAY FROM col)` |
+| `r.col.dt.hour()` | `EXTRACT(HOUR FROM col)` |
+| `r.col.dt.minute()` | `EXTRACT(MINUTE FROM col)` |
+| `r.col.dt.second()` | `EXTRACT(SECOND FROM col)` |
+| `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
+| `r.col.dt.add(hours=n)` | `col + INTERVAL 'n' HOUR` |
+| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other, unit="month")` | `(year(col)-year(other))*12 + month(col)-month(other)` |
+| `r.col.dt.diff(other, unit="year")` | `EXTRACT(YEAR FROM col) - EXTRACT(YEAR FROM other)` |
+| `r.col.dt.age()` | year diff from `CURRENT_DATE` with day-of-year correction |
+| `gcd(a, b)` | `GCD(a, b)` |
+| `lcm(a, b)` | `LCM(a, b)` |
+| `factorial(n)` | `FACTORIAL(n)` |
+| `count_if(cond)` | `COUNT(CASE WHEN cond THEN 1 END)` |
+| `sum_if(cond, col)` | `SUM(CASE WHEN cond THEN col END)` |
+
 ## Appendix A: Migrating from Pandas
 
 | Pandas | LTSeq | Notes |
@@ -1705,7 +1753,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df.sort_values('date')` | `t.sort("date")` | |
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
-| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda g: g.sales.sum())` | |
+| `df.groupby('region').agg({'sales': 'sum'})` | `t.agg(by=lambda r: r.region, sales=lambda r: r.sales.sum())` | |
 | `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
 | `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | Requires sort |

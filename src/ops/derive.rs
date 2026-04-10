@@ -52,7 +52,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
             LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+        let py_expr = dict_to_py_expr(expr_dict)?;
 
         if crate::transpiler::contains_window_function(&py_expr) {
             has_window_functions = true;
@@ -64,7 +64,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     // 3. Handle window functions — pass pre-parsed expressions to avoid re-deserialization
     if has_window_functions {
         return crate::ops::window::derive_with_window_functions_from_parsed(
-            table, schema, &df, &parsed_cols,
+            table, schema, df, &parsed_cols,
         );
     }
 
@@ -73,7 +73,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
 
     for (col_name_str, py_expr) in parsed_cols {
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Validation(e))?
+            .map_err(LtseqError::Validation)?
             .alias(&col_name_str);
 
         df_exprs.push(df_expr);
@@ -100,7 +100,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
                 .select(all_exprs)
                 .map_err(|e| format!("Derive execution failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // 6. Return new LTSeqTable with derived columns added (schema recomputed)
     Ok(LTSeqTable::from_df(

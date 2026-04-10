@@ -1,6 +1,6 @@
 """String and Temporal accessor classes for column operations."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import Expr
 
@@ -24,7 +24,7 @@ class StringAccessor:
         """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
         self._expr = expr
 
-    def _make_call(self, func: str, args: tuple = ()) -> "CallExpr":
+    def _make_call(self, func: str, args: tuple[Any, ...] = ()) -> "CallExpr":
         """Create a CallExpr for this accessor method."""
         from .types import CallExpr
 
@@ -285,7 +285,7 @@ class TemporalAccessor:
         """Accept any Expr (ColumnExpr, CallExpr, etc.) for chaining support."""
         self._expr = expr
 
-    def _make_call(self, func: str, args: tuple = ()) -> "CallExpr":
+    def _make_call(self, func: str, args: tuple[Any, ...] = ()) -> "CallExpr":
         """Create a CallExpr for this accessor method."""
         from .types import CallExpr
 

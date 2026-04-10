@@ -114,8 +114,8 @@ pub fn direct_streaming_group_ordered(
         }
 
         // Accumulate group IDs from boundaries
-        for i in 0..n {
-            if result[i] {
+        for &is_boundary in result.iter().take(n) {
+            if is_boundary {
                 state.current_gid += 1;
             }
             group_ids.push(state.current_gid);
@@ -228,8 +228,8 @@ pub fn direct_streaming_group_count(
         }
 
         // Just count boundaries — no group_ids array needed
-        for i in 0..n {
-            if result[i] {
+        for &is_boundary in result.iter().take(n) {
+            if is_boundary {
                 state.current_gid += 1;
             }
         }
@@ -291,8 +291,8 @@ fn process_chunk_session_count(
     name_to_idx: &HashMap<String, usize>,
     is_first_chunk: bool,
 ) -> Result<RgChunkResult, String> {
-    let file =
-        File::open(parquet_path).map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
+    let file = File::open(parquet_path)
+        .map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| format!("PARALLEL_FALLBACK: builder failed: {}", e))?;
     let row_groups: Vec<usize> = (start_rg..end_rg).collect();
@@ -309,7 +309,8 @@ fn process_chunk_session_count(
     let mut is_first_batch = true;
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
+        let batch = batch_result
+            .map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
         let n = batch.num_rows();
         if n == 0 {
             continue;
@@ -328,13 +329,9 @@ fn process_chunk_session_count(
         // For the first batch of a non-first chunk, skip row 0.
         // `streaming_fuse_eval` always marks it `true` (empty prev_values),
         // but the seam pass decides whether it is a real boundary.
-        let start = if is_first_batch && !is_first_chunk {
-            1
-        } else {
-            0
-        };
-        for i in start..n {
-            if result[i] {
+        let start = if is_first_batch && !is_first_chunk { 1 } else { 0 };
+        for &is_boundary in result.iter().take(n).skip(start) {
+            if is_boundary {
                 count += 1;
             }
         }
@@ -439,7 +436,7 @@ pub fn parallel_streaming_group_count(
     // Safety: PyExpr, ProjectionMask, HashMap<String, usize> are all
     // Send+Sync (pure Rust data, no Py<T> or interior mutability).
     let num_threads = rayon::current_num_threads().max(1).min(num_row_groups);
-    let chunk_size = (num_row_groups + num_threads - 1) / num_threads;
+    let chunk_size = num_row_groups.div_ceil(num_threads);
     let path_str = parquet_path.to_string();
 
     let chunk_results: Vec<RgChunkResult> = (0..num_threads)
@@ -459,7 +456,7 @@ pub fn parallel_streaming_group_count(
             )
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // 5. Sum internal boundary counts.
     let total_internal: usize = chunk_results.iter().map(|r| r.count).sum();
@@ -475,177 +472,14 @@ pub fn parallel_streaming_group_count(
         };
 
         let mut result = vec![false; 1];
-        if streaming_fuse_eval(
-            predicate,
-            first_batch,
-            &name_to_idx,
-            last_state,
-            &mut result,
-        ) && result[0]
+        if streaming_fuse_eval(predicate, first_batch, &name_to_idx, last_state, &mut result)
+            && result[0]
         {
             seam_count += 1;
         }
     }
 
     Ok(total_internal + seam_count)
-}
-
-// ============================================================================
-// Zone Skipping: Row Group Pruning via Parquet Statistics
-// ============================================================================
-
-/// Prune row groups using Parquet column statistics (min/max).
-///
-/// Inspects the partition column's min/max statistics for each row group
-/// and eliminates row groups that cannot contain any of the target partition
-/// keys (if provided) or relevant data in the given range.
-///
-/// # Arguments
-///
-/// * `parquet_metadata` - Parquet file metadata containing row group stats
-/// * `partition_col_name` - Name of the partition column in the Parquet schema
-/// * `parquet_schema_descr` - Parquet schema descriptor for column lookup
-/// * `filter_min` - Optional minimum value (inclusive) for the partition column
-/// * `filter_max` - Optional maximum value (inclusive) for the partition column
-///
-/// # Returns
-///
-/// A vector of eligible row group indices. If statistics are unavailable
-/// for any row group, that row group is conservatively included.
-#[allow(dead_code)]
-pub fn prune_row_groups_by_stats(
-    parquet_metadata: &parquet::file::metadata::ParquetMetaData,
-    partition_col_name: &str,
-    filter_min: Option<i64>,
-    filter_max: Option<i64>,
-) -> Vec<usize> {
-    use parquet::file::statistics::Statistics;
-
-    let num_row_groups = parquet_metadata.num_row_groups();
-
-    // If no filter constraints, return all row groups
-    if filter_min.is_none() && filter_max.is_none() {
-        return (0..num_row_groups).collect();
-    }
-
-    // Find the partition column index in the Parquet schema
-    let schema_descr = parquet_metadata.file_metadata().schema_descr();
-    let part_col_parquet_idx = schema_descr
-        .columns()
-        .iter()
-        .position(|c| c.name() == partition_col_name);
-
-    let Some(col_idx) = part_col_parquet_idx else {
-        // Column not found in Parquet schema — conservatively return all
-        return (0..num_row_groups).collect();
-    };
-
-    let mut eligible = Vec::with_capacity(num_row_groups);
-
-    for rg_idx in 0..num_row_groups {
-        let rg_meta = parquet_metadata.row_group(rg_idx);
-        let col_meta = rg_meta.column(col_idx);
-
-        let stats = col_meta.statistics();
-        let Some(stats) = stats else {
-            // No statistics — conservatively include this row group
-            eligible.push(rg_idx);
-            continue;
-        };
-
-        // Extract min/max as i64 from the statistics
-        let (rg_min, rg_max) = match stats {
-            Statistics::Int64(s) => match (s.min_opt(), s.max_opt()) {
-                (Some(&mn), Some(&mx)) => (mn, mx),
-                _ => {
-                    eligible.push(rg_idx);
-                    continue;
-                }
-            },
-            Statistics::Int32(s) => match (s.min_opt(), s.max_opt()) {
-                (Some(&mn), Some(&mx)) => (mn as i64, mx as i64),
-                _ => {
-                    eligible.push(rg_idx);
-                    continue;
-                }
-            },
-            _ => {
-                // Non-integer statistics — conservatively include
-                eligible.push(rg_idx);
-                continue;
-            }
-        };
-
-        // Zone skipping: check if row group's range overlaps with filter range
-        // Row group range: [rg_min, rg_max]
-        // Filter range: [filter_min, filter_max]
-        // Overlap condition: rg_max >= filter_min AND rg_min <= filter_max
-        let overlaps = match (filter_min, filter_max) {
-            (Some(fmin), Some(fmax)) => rg_max >= fmin && rg_min <= fmax,
-            (Some(fmin), None) => rg_max >= fmin,
-            (None, Some(fmax)) => rg_min <= fmax,
-            (None, None) => true, // unreachable due to early return above
-        };
-
-        if overlaps {
-            eligible.push(rg_idx);
-        }
-    }
-
-    eligible
-}
-
-/// Extract the min/max values of a partition column across all row groups.
-///
-/// Useful for understanding the data distribution before deciding on
-/// zone skipping strategies.
-///
-/// Returns `(global_min, global_max)` or `None` if statistics are unavailable.
-#[allow(dead_code)]
-pub fn partition_column_range(
-    parquet_metadata: &parquet::file::metadata::ParquetMetaData,
-    partition_col_name: &str,
-) -> Option<(i64, i64)> {
-    use parquet::file::statistics::Statistics;
-
-    let schema_descr = parquet_metadata.file_metadata().schema_descr();
-    let col_idx = schema_descr
-        .columns()
-        .iter()
-        .position(|c| c.name() == partition_col_name)?;
-
-    let mut global_min = i64::MAX;
-    let mut global_max = i64::MIN;
-    let mut found_any = false;
-
-    for rg_idx in 0..parquet_metadata.num_row_groups() {
-        let col_meta = parquet_metadata.row_group(rg_idx).column(col_idx);
-        if let Some(stats) = col_meta.statistics() {
-            match stats {
-                Statistics::Int64(s) => {
-                    if let (Some(&mn), Some(&mx)) = (s.min_opt(), s.max_opt()) {
-                        global_min = global_min.min(mn);
-                        global_max = global_max.max(mx);
-                        found_any = true;
-                    }
-                }
-                Statistics::Int32(s) => {
-                    if let (Some(&mn), Some(&mx)) = (s.min_opt(), s.max_opt()) {
-                        global_min = global_min.min(mn as i64);
-                        global_max = global_max.max(mx as i64);
-                        found_any = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if found_any {
-        Some((global_min, global_max))
-    } else {
-        None
-    }
 }
 
 // ============================================================================
@@ -744,15 +578,9 @@ pub fn parallel_pattern_match_count(
     // Step 3+4: Fused read + match per RG in parallel.
     // Each task reads one RG, pattern-matches it, extracts boundary data, drops RG data.
     // This eliminates the 1.4s dealloc overhead from holding all RG data in memory.
-    //
-    // Zone skipping: skip row groups with 0 rows (Parquet metadata check).
     let path_str = parquet_path.to_string();
 
-    let eligible_rgs: Vec<usize> = (0..num_row_groups)
-        .filter(|&rg_idx| parquet_metadata.row_group(rg_idx).num_rows() > 0)
-        .collect();
-
-    let rg_results: Vec<RgMatchResult> = eligible_rgs
+    let rg_results: Vec<RgMatchResult> = (0..num_row_groups)
         .into_par_iter()
         .map(|rg_idx| {
             read_match_and_extract_boundary(
@@ -975,7 +803,7 @@ fn count_cross_rg_boundary_patterns_from_info(
 
         let step_prefixes: Vec<Option<String>> = step_predicates[1..]
             .iter()
-            .map(|expr| extract_starts_with_prefix(expr))
+            .map(extract_starts_with_prefix)
             .collect();
 
         let url_idx = name_to_idx.get("url");
@@ -992,115 +820,94 @@ fn count_cross_rg_boundary_patterns_from_info(
                 .collect();
 
             if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-                boundary_count += count_cross_boundary_prefix_matches(
-                    |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
-                    &step1_mask,
-                    &prefixes,
-                    max_start,
-                    tail_len,
-                    num_steps,
-                );
+                for i in 0..max_start {
+                    if i >= tail_len {
+                        break;
+                    }
+                    let last_row = i + num_steps - 1;
+                    if last_row < tail_len {
+                        continue;
+                    }
+                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                        continue;
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        boundary_count += 1;
+                    }
+                }
             } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-                boundary_count += count_cross_boundary_prefix_matches(
-                    |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
-                    &step1_mask,
-                    &prefixes,
-                    max_start,
-                    tail_len,
-                    num_steps,
-                );
+                for i in 0..max_start {
+                    if i >= tail_len {
+                        break;
+                    }
+                    let last_row = i + num_steps - 1;
+                    if last_row < tail_len {
+                        continue;
+                    }
+                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                        continue;
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        boundary_count += 1;
+                    }
+                }
             }
         } else {
-            boundary_count += count_cross_boundary_general(
-                &step_predicates,
-                &combined,
-                name_to_idx,
-                max_start,
-                tail_len,
-                num_steps,
-            );
+            // General fallback for cross-boundary
+            let step_masks: Vec<BooleanArray> = step_predicates
+                .iter()
+                .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
+                .collect();
+
+            if step_masks.len() != step_predicates.len() {
+                continue;
+            }
+
+            for i in 0..max_start {
+                if i >= tail_len {
+                    break;
+                }
+                let last_row = i + num_steps - 1;
+                if last_row < tail_len {
+                    continue;
+                }
+                if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+                    continue;
+                }
+                let mut all_match = true;
+                for (step_offset, mask) in step_masks[1..].iter().enumerate() {
+                    let row = i + step_offset + 1;
+                    if !mask.is_valid(row) || !mask.value(row) {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    boundary_count += 1;
+                }
+            }
         }
     }
 
     boundary_count
 }
 
-/// Fast-path cross-boundary prefix matching: only count matches that start in
-/// the tail portion and end in the head portion of the concatenated batch.
-fn count_cross_boundary_prefix_matches<'a>(
-    get_str: impl Fn(usize) -> Option<&'a str>,
-    step1_mask: &BooleanArray,
-    prefixes: &[&str],
-    max_start: usize,
-    tail_len: usize,
-    num_steps: usize,
-) -> usize {
-    let mut count = 0;
-    for i in 0..max_start {
-        if i >= tail_len {
-            break;
-        }
-        let last_row = i + num_steps - 1;
-        if last_row < tail_len {
-            continue;
-        }
-        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-            continue;
-        }
-        let all_match = prefixes.iter().enumerate().all(|(step_offset, prefix)| {
-            let row = i + step_offset + 1;
-            get_str(row).map_or(false, |s| s.starts_with(prefix))
-        });
-        if all_match {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// General fallback cross-boundary matching using evaluated predicate masks.
-fn count_cross_boundary_general(
-    step_predicates: &[PyExpr],
-    combined: &RecordBatch,
-    name_to_idx: &HashMap<String, usize>,
-    max_start: usize,
-    tail_len: usize,
-    num_steps: usize,
-) -> usize {
-    let step_masks: Vec<BooleanArray> = step_predicates
-        .iter()
-        .filter_map(|expr| eval_predicate(expr, combined, name_to_idx).ok())
-        .collect();
-
-    if step_masks.len() != step_predicates.len() {
-        return 0;
-    }
-
-    let mut count = 0;
-    for i in 0..max_start {
-        if i >= tail_len {
-            break;
-        }
-        let last_row = i + num_steps - 1;
-        if last_row < tail_len {
-            continue;
-        }
-        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-            continue;
-        }
-        let all_match = step_masks[1..]
-            .iter()
-            .enumerate()
-            .all(|(step_offset, mask)| {
-                let row = i + step_offset + 1;
-                mask.is_valid(row) && mask.value(row)
-            });
-        if all_match {
-            count += 1;
-        }
-    }
-    count
-}
 /// Unify schemas across batches and concatenate.
 ///
 /// Different Parquet row groups can produce different Arrow types for string columns
@@ -1240,8 +1047,18 @@ fn count_patterns_in_rg_slices(
         return 0;
     }
 
-    // Build partition boundary mask
-    let partition_boundaries = build_partition_boundaries(rg_slices, n);
+    // Build partition boundary mask: partition_boundaries[i] = true means row i
+    // starts a new partition (different key from row i-1).
+    // We compute this from the original slices' key + row count info.
+    let mut partition_boundaries = vec![false; n];
+    partition_boundaries[0] = true; // first row always starts a partition
+    let mut offset = 0;
+    for (idx, (key, batch)) in rg_slices.iter().enumerate() {
+        if idx > 0 && *key != rg_slices[idx - 1].0 {
+            partition_boundaries[offset] = true;
+        }
+        offset += batch.num_rows();
+    }
 
     // Pattern match: skip matches that span partition boundaries
     let step1_mask = match eval_predicate(&step_predicates[0], &combined, name_to_idx) {
@@ -1250,17 +1067,19 @@ fn count_patterns_in_rg_slices(
     };
 
     let max_start = n.saturating_sub(num_steps - 1);
+    let mut count: usize = 0;
 
     // Try fast path: all remaining predicates are starts_with on same column
     let step_prefixes: Vec<Option<String>> = step_predicates[1..]
         .iter()
-        .map(|expr| extract_starts_with_prefix(expr))
+        .map(extract_starts_with_prefix)
         .collect();
 
     let url_idx = name_to_idx.get("url");
     let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
 
     if all_simple {
+        // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
         let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
         let prefixes: Vec<&str> = step_prefixes
             .iter()
@@ -1268,127 +1087,99 @@ fn count_patterns_in_rg_slices(
             .collect();
 
         if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-            count_prefix_matches(
-                |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
-                &step1_mask,
-                &partition_boundaries,
-                &prefixes,
-                max_start,
-                num_steps,
-            )
+            for i in 0..max_start {
+                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                    continue;
+                }
+                // Check that all rows i..i+num_steps are in the same partition
+                let mut crosses_boundary = false;
+                for offset in 1..num_steps {
+                    if partition_boundaries[i + offset] {
+                        crosses_boundary = true;
+                        break;
+                    }
+                }
+                if crosses_boundary {
+                    continue;
+                }
+                let mut all_match = true;
+                for (step_offset, prefix) in prefixes.iter().enumerate() {
+                    let row = i + step_offset + 1;
+                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    count += 1;
+                }
+            }
         } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-            count_prefix_matches(
-                |row| (!str_arr.is_null(row)).then(|| str_arr.value(row)),
-                &step1_mask,
-                &partition_boundaries,
-                &prefixes,
-                max_start,
-                num_steps,
-            )
-        } else {
-            0
+            for i in 0..max_start {
+                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+                    continue;
+                }
+                let mut crosses_boundary = false;
+                for offset in 1..num_steps {
+                    if partition_boundaries[i + offset] {
+                        crosses_boundary = true;
+                        break;
+                    }
+                }
+                if crosses_boundary {
+                    continue;
+                }
+                let mut all_match = true;
+                for (step_offset, prefix) in prefixes.iter().enumerate() {
+                    let row = i + step_offset + 1;
+                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    count += 1;
+                }
+            }
         }
     } else {
-        count_patterns_general(
-            &step_predicates,
-            &combined,
-            name_to_idx,
-            &partition_boundaries,
-            max_start,
-            num_steps,
-        )
-    }
-}
-
-/// Build a boolean mask where `true` means a row starts a new partition.
-fn build_partition_boundaries(rg_slices: &[(i64, RecordBatch)], n: usize) -> Vec<bool> {
-    let mut boundaries = vec![false; n];
-    boundaries[0] = true;
-    let mut offset = 0;
-    for (idx, (key, batch)) in rg_slices.iter().enumerate() {
-        if idx > 0 && *key != rg_slices[idx - 1].0 {
-            boundaries[offset] = true;
-        }
-        offset += batch.num_rows();
-    }
-    boundaries
-}
-
-/// Check whether rows `i+1..i+num_steps` cross a partition boundary.
-fn crosses_partition_boundary(
-    partition_boundaries: &[bool],
-    start: usize,
-    num_steps: usize,
-) -> bool {
-    (1..num_steps).any(|offset| partition_boundaries[start + offset])
-}
-
-/// Fast-path prefix matching for a string column.
-///
-/// `get_str` returns `Some(value)` for non-null rows and `None` for nulls.
-fn count_prefix_matches<'a>(
-    get_str: impl Fn(usize) -> Option<&'a str>,
-    step1_mask: &BooleanArray,
-    partition_boundaries: &[bool],
-    prefixes: &[&str],
-    max_start: usize,
-    num_steps: usize,
-) -> usize {
-    let mut count = 0;
-    for i in 0..max_start {
-        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-            continue;
-        }
-        if crosses_partition_boundary(partition_boundaries, i, num_steps) {
-            continue;
-        }
-        let all_match = prefixes.iter().enumerate().all(|(step_offset, prefix)| {
-            let row = i + step_offset + 1;
-            get_str(row).map_or(false, |s| s.starts_with(prefix))
-        });
-        if all_match {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// General fallback: evaluate all step predicates as masks and count matches.
-fn count_patterns_general(
-    step_predicates: &[PyExpr],
-    combined: &RecordBatch,
-    name_to_idx: &HashMap<String, usize>,
-    partition_boundaries: &[bool],
-    max_start: usize,
-    num_steps: usize,
-) -> usize {
-    let step_masks: Vec<BooleanArray> = step_predicates
-        .iter()
-        .filter_map(|expr| eval_predicate(expr, combined, name_to_idx).ok())
-        .collect();
-
-    if step_masks.len() != step_predicates.len() {
-        return 0;
-    }
-
-    let mut count = 0;
-    for i in 0..max_start {
-        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-            continue;
-        }
-        if crosses_partition_boundary(partition_boundaries, i, num_steps) {
-            continue;
-        }
-        let all_match = step_masks[1..]
+        // General fallback
+        let step_masks: Vec<BooleanArray> = step_predicates
             .iter()
-            .enumerate()
-            .all(|(step_offset, mask)| {
+            .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
+            .collect();
+
+        if step_masks.len() != step_predicates.len() {
+            return 0;
+        }
+
+        for i in 0..max_start {
+            if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+                continue;
+            }
+            let mut crosses_boundary = false;
+            for offset in 1..num_steps {
+                if partition_boundaries[i + offset] {
+                    crosses_boundary = true;
+                    break;
+                }
+            }
+            if crosses_boundary {
+                continue;
+            }
+            let mut all_match = true;
+            for (step_offset, mask) in step_masks[1..].iter().enumerate() {
                 let row = i + step_offset + 1;
-                mask.is_valid(row) && mask.value(row)
-            });
-        if all_match {
-            count += 1;
+                if !mask.is_valid(row) || !mask.value(row) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                count += 1;
+            }
         }
     }
+
     count
 }

@@ -1,6 +1,9 @@
 """Advanced operations for LTSeq: align, scan, search_first, pivot, set operations."""
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 
 class _ScanRowProxy:
@@ -83,7 +86,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def intersect(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def intersect(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Intersection of two tables.
 
@@ -123,7 +126,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def except_(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def except_(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Set difference: rows in left but not in right (SQL EXCEPT).
 
@@ -163,7 +166,7 @@ class SetOpsMixin:
         result._sort_keys = None
         return result
 
-    def xunion(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
+    def xunion(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
         """
         Symmetric difference: rows in either table but not in both.
 
@@ -267,23 +270,7 @@ class SetOpsMixin:
         col_values = set(df[key_col].tolist())
         return all(v in col_values for v in values)
 
-    def diff(self, other: "LTSeq", on: Optional[Callable] = None) -> "LTSeq":
-        """
-        Deprecated: Use except_() instead.
-
-        Set difference: rows in left but not in right.
-        """
-        import warnings
-
-        warnings.warn(
-            "diff() is deprecated for set difference. Use except_() instead. "
-            "diff() will become a row-level difference operation in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.except_(other, on=on)
-
-    def is_subset(self, other: "LTSeq", on: Optional[Callable] = None) -> bool:
+    def is_subset(self, other: "LTSeq", on: Callable | None = None) -> bool:
         """
         Check if this table is a subset of another.
 
@@ -321,7 +308,7 @@ class SetOpsMixin:
 class AdvancedOpsMixin:
     """Mixin class providing advanced operations for LTSeq."""
 
-    def align(self, ref_sequence: list, key: Callable) -> "LTSeq":
+    def align(self, ref_sequence: list[Any], key: Callable) -> "LTSeq":
         """
         Align table rows to a reference sequence.
 
@@ -379,7 +366,7 @@ class AdvancedOpsMixin:
 
         return result
 
-    def search_first(self, predicate: Callable) -> Optional["LTSeq"]:
+    def search_first(self, predicate: Callable) -> "LTSeq | None":
         """
         Return the first matching row.
 
@@ -430,7 +417,7 @@ class AdvancedOpsMixin:
 
     def pivot(
         self,
-        index: str | list,
+        index: str | list[str],
         columns: str,
         values: str,
         agg_fn: str = "sum",
@@ -560,15 +547,16 @@ class AdvancedOpsMixin:
                     f"State transition function failed at row {idx}: {e}"
                 ) from e
 
-        df[output_col] = results
-        rows = df.to_dict("records")
+        import pyarrow as pa
 
+        df[output_col] = results
         result_schema = self._schema.copy()
         result_schema[output_col] = self._infer_type_from_value(
             results[0] if results else init
         )
 
-        result = LTSeq._from_rows(rows, result_schema)
+        result = LTSeq.from_arrow(pa.Table.from_pandas(df, preserve_index=False))
+        result._schema = result_schema
         result._sort_keys = self._sort_keys
         return result
 

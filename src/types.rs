@@ -100,8 +100,8 @@ fn parse_binop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .cast::<PyDict>()
         .map_err(|_| PyExprError::InvalidType("right must be a dict".to_string()))?;
 
-    let left = Box::new(dict_to_py_expr(&left_dict)?);
-    let right = Box::new(dict_to_py_expr(&right_dict)?);
+    let left = Box::new(dict_to_py_expr(left_dict)?);
+    let right = Box::new(dict_to_py_expr(right_dict)?);
 
     Ok(PyExpr::BinOp { op, left, right })
 }
@@ -123,7 +123,7 @@ fn parse_unaryop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .cast::<PyDict>()
         .map_err(|_| PyExprError::InvalidType("operand must be a dict".to_string()))?;
 
-    let operand = Box::new(dict_to_py_expr(&operand_dict)?);
+    let operand = Box::new(dict_to_py_expr(operand_dict)?);
     Ok(PyExpr::UnaryOp { op, operand })
 }
 
@@ -138,7 +138,7 @@ fn parse_call_args(args_obj: &Bound<'_, pyo3::PyAny>) -> Result<Vec<PyExpr>, PyE
         let arg_dict = item
             .cast::<PyDict>()
             .map_err(|_| PyExprError::InvalidType("args items must be dicts".to_string()))?;
-        args.push(dict_to_py_expr(&arg_dict)?);
+        args.push(dict_to_py_expr(arg_dict)?);
     }
     Ok(args)
 }
@@ -227,7 +227,7 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     let expr_dict = expr_obj
         .cast::<PyDict>()
         .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
-    let expr = Box::new(dict_to_py_expr(&expr_dict)?);
+    let expr = Box::new(dict_to_py_expr(expr_dict)?);
 
     // Parse partition_by (optional)
     let partition_by = if let Some(pb_obj) = dict
@@ -240,7 +240,7 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let pb_dict = pb_obj
                 .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("partition_by must be a dict".to_string()))?;
-            Some(Box::new(dict_to_py_expr(&pb_dict)?))
+            Some(Box::new(dict_to_py_expr(pb_dict)?))
         }
     } else {
         None
@@ -257,7 +257,7 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             let ob_dict = ob_obj
                 .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("order_by must be a dict".to_string()))?;
-            Some(Box::new(dict_to_py_expr(&ob_dict)?))
+            Some(Box::new(dict_to_py_expr(ob_dict)?))
         }
     } else {
         None
@@ -295,7 +295,7 @@ fn parse_alias_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     let expr_dict = expr_obj
         .cast::<PyDict>()
         .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
-    let expr = Box::new(dict_to_py_expr(&expr_dict)?);
+    let expr = Box::new(dict_to_py_expr(expr_dict)?);
 
     Ok(PyExpr::Alias { expr, alias })
 }

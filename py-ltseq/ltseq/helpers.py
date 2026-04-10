@@ -1,12 +1,12 @@
 """Helper functions for LTSeq core operations."""
 
-from typing import Callable, Dict, Any
 import csv
+from typing import Any, Callable
 
-from .expr import SchemaProxy, BinOpExpr, ColumnExpr
+from .expr import BinOpExpr, ColumnExpr, SchemaProxy
 
 
-def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]:
+def _infer_schema_from_csv(path: str, has_header: bool = True) -> dict[str, str]:
     """
     Infer schema from CSV file by reading the header and sampling rows.
 
@@ -33,9 +33,9 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                 if reader.fieldnames is None:
                     return schema
 
-                # Initialize schema with all columns as string
+                # Initialize schema with sentinel None (not yet determined)
                 for col in reader.fieldnames:
-                    schema[col] = "string"
+                    schema[col] = None
 
                 # Sample rows to infer types
                 for i, row in enumerate(reader):
@@ -49,12 +49,13 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                         # Try to infer type
                         current_type = schema[col]
 
+                        # Once forced to string by a non-parseable value, keep it
                         if current_type == "string":
                             continue
 
                         try:
                             int(value)
-                            if current_type != "int64":
+                            if current_type not in ("int64", "float64"):
                                 schema[col] = "int64"
                         except ValueError:
                             try:
@@ -62,6 +63,11 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                                 schema[col] = "float64"
                             except ValueError:
                                 schema[col] = "string"
+
+                # Convert undetermined columns (all empty or no rows) to string
+                for col in list(schema.keys()):
+                    if schema[col] is None:
+                        schema[col] = "string"
             else:
                 # No header: read first row to determine column count
                 reader = csv.reader(f)
@@ -73,9 +79,9 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                 num_cols = len(first_row)
                 columns = [f"column_{i + 1}" for i in range(num_cols)]
 
-                # Initialize schema with all columns as string
+                # Initialize schema with sentinel None (not yet determined)
                 for col in columns:
-                    schema[col] = "string"
+                    schema[col] = None
 
                 # First row is data, so include it in type inference
                 all_rows = [first_row]
@@ -93,12 +99,13 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                         col = columns[col_idx]
                         current_type = schema[col]
 
+                        # Once forced to string by a non-parseable value, keep it
                         if current_type == "string":
                             continue
 
                         try:
                             int(value)
-                            if current_type != "int64":
+                            if current_type not in ("int64", "float64"):
                                 schema[col] = "int64"
                         except ValueError:
                             try:
@@ -107,13 +114,18 @@ def _infer_schema_from_csv(path: str, has_header: bool = True) -> Dict[str, str]
                             except ValueError:
                                 schema[col] = "string"
 
+                # Convert undetermined columns to string
+                for col in list(schema.keys()):
+                    if schema[col] is None:
+                        schema[col] = "string"
+
             return schema
     except Exception:
         # If anything goes wrong, return empty schema
         return {}
 
 
-def _infer_schema_from_parquet(path: str) -> Dict[str, str]:
+def _infer_schema_from_parquet(path: str) -> dict[str, str]:
     """
     Infer schema from a Parquet file by reading its metadata.
 
@@ -164,10 +176,10 @@ def _infer_schema_from_parquet(path: str) -> Dict[str, str]:
 
 def _extract_join_keys(
     join_fn: Callable,
-    source_schema: Dict[str, str],
-    target_schema: Dict[str, str],
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
     join_type: str = "inner",
-) -> tuple:
+) -> tuple[dict[str, Any], dict[str, Any], str]:
     """
     Extract join key columns from a two-parameter lambda expression.
 
@@ -260,7 +272,7 @@ def _extract_join_keys(
         )
 
 
-def _extract_all_equalities_from_and(expr: BinOpExpr) -> list:
+def _extract_all_equalities_from_and(expr: BinOpExpr) -> list[tuple[Any, Any]]:
     """
     Recursively extract all equality pairs from an And-expression tree.
 
@@ -297,8 +309,8 @@ def _extract_all_equalities_from_and(expr: BinOpExpr) -> list:
 def _validate_equality_pair(
     left_expr: Any,
     right_expr: Any,
-    source_schema: Dict[str, str],
-    target_schema: Dict[str, str],
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
 ) -> None:
     """
     Validate that a left-right pair are both ColumnExprs from correct tables.
@@ -350,9 +362,9 @@ def _validate_equality_pair(
 
 def _extract_asof_keys(
     join_fn: Callable,
-    source_schema: Dict[str, str],
-    target_schema: Dict[str, str],
-) -> tuple:
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
+) -> tuple[str, str, str]:
     """
     Extract time column names and operator from an asof join condition.
 

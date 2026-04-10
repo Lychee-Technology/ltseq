@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 # Python co-op
 pyo3 = { version = "0.27.2", features = ["extension-module", "macros"] }
 
-datafusion = "52.2.0"
+datafusion = "53"
 
 # async executor utilities
 futures-util = "0.3"
@@ -20,31 +20,9 @@ futures-util = "0.3"
 rayon = "1.10"
 
 # Direct Parquet reading (must match datafusion's arrow version)
-parquet = { version = "57.1", default-features = false, features = ["arrow"] }
+parquet = { version = "58.1", default-features = false, features = ["arrow"] }
 
 tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
-
-# async trait support (already transitive via datafusion; needed for QueryPlanner impl)
-async-trait = "0.1"
-
-# GPU acceleration via CUDA (optional)
-cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-13010"], optional = true }
-
-# Arrow with FFI feature for Arrow C Data Interface (used by cudf-bridge, optional)
-arrow = { version = "57", features = ["ffi"], optional = true }
-
-# Substrait plan serialization for GPU query planner (optional, enabled by gpu feature)
-datafusion-substrait = { version = "52", optional = true }
-prost = { version = "0.14", optional = true }
-
-[features]
-default = []
-gpu = ["cudarc", "datafusion-substrait", "prost", "arrow"]
-
-[build-dependencies]
-# Compiles cpp/src/cudf_engine_stub.c when the gpu feature is enabled
-# and CUDF_ENGINE_LIB is not set.
-cc = "1"
 
 [profile.release]
 lto = "fat"

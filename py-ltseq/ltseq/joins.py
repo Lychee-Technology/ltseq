@@ -1,13 +1,16 @@
-"""Join operations for LTSeq: join, join_merge, join_sorted, asof_join."""
+"""Join operations for LTSeq: join, asof_join, semi_join, anti_join."""
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 from .expr import SchemaProxy
 
 
 def _pandas_join_fallback(
-    df1, df2, left_key: str, right_key: str, how: str, suffix: str
-):
+    df1: Any, df2: Any, left_key: str, right_key: str, how: str, suffix: str
+) -> Any:
     """Execute join using pandas as fallback."""
     import pandas as pd
 
@@ -29,7 +32,7 @@ def _pandas_join_fallback(
     return merged
 
 
-def _validate_join_inputs(self_table, other, how: str):
+def _validate_join_inputs(self_table: Any, other: Any, how: str) -> None:
     """Validate join inputs and return error if invalid."""
     if not self_table._schema:
         raise ValueError(
@@ -49,7 +52,11 @@ def _validate_join_inputs(self_table, other, how: str):
         )
 
 
-def _build_join_result_schema(left_schema, right_schema, suffix="_other"):
+def _build_join_result_schema(
+    left_schema: dict[str, str],
+    right_schema: dict[str, str],
+    suffix: str = "_other",
+) -> dict[str, str]:
     """Build result schema for join operations.
 
     Rust joins always prefix ALL right columns with {suffix}_{col},
@@ -68,7 +75,7 @@ class JoinMixin:
     def _execute_join(
         self, other: "LTSeq", on: Callable, how: str, method_name: str = "join"
     ) -> "LTSeq":
-        """Core join implementation shared by join() and join_merge()."""
+        """Core join implementation."""
         from .core import LTSeq
 
         _validate_join_inputs(self, other, how)
@@ -108,7 +115,7 @@ class JoinMixin:
         return result
 
     def _join_pandas_fallback(
-        self, other, on: Callable, how: str, left_key_expr: dict
+        self, other: "LTSeq", on: Callable, how: str, left_key_expr: dict[str, Any]
     ) -> "LTSeq":
         """Fallback join implementation using pandas."""
         from .core import LTSeq
@@ -126,18 +133,20 @@ class JoinMixin:
         left_key = left_key_expr.get("name", "")
         right_key = left_key  # Simplified - assume same key name
 
-        merged = _pandas_join_fallback(df1, df2, left_key, right_key, how, "_other")
-        rows = merged.to_dict("records")
+        import pyarrow as pa
 
+        merged = _pandas_join_fallback(df1, df2, left_key, right_key, how, "_other")
         result_schema = _build_join_result_schema(self._schema, other._schema, "_other")
-        return LTSeq._from_rows(rows, result_schema)
+        result = LTSeq.from_arrow(pa.Table.from_pandas(merged, preserve_index=False))
+        result._schema = result_schema
+        return result
 
     def join(
         self,
         other: "LTSeq",
         on: Callable,
         how: str = "inner",
-        strategy: Optional[str] = None,
+        strategy: str | None = None,
     ) -> "LTSeq":
         """
         Join two tables with configurable strategy.
@@ -252,59 +261,7 @@ class JoinMixin:
         )
         return result
 
-    def join_merge(
-        self, other: "LTSeq", on: Callable, join_type: str = "inner"
-    ) -> "LTSeq":
-        """
-        Merge join for pre-sorted tables.
-
-        .. deprecated::
-            Use ``join(..., strategy="merge")`` instead.
-
-        Args:
-            other: Another LTSeq table
-            on: Lambda specifying join condition
-            join_type: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-        """
-        import warnings
-
-        warnings.warn(
-            "join_merge() is deprecated. Use join(..., strategy='merge') instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Preserve original behavior: no sort validation (unlike strategy="merge")
-        return self._execute_join(other, on, join_type, "join_merge")
-
-    def join_sorted(self, other: "LTSeq", on: Callable, how: str = "inner") -> "LTSeq":
-        """
-        Merge join with sort order validation.
-
-        .. deprecated::
-            Use ``join(..., strategy="merge")`` instead.
-
-        Args:
-            other: Another LTSeq table (must be sorted by join key)
-            on: Lambda specifying join condition
-            how: Join type: "inner", "left", "right", "full"
-
-        Returns:
-            Joined LTSeq
-        """
-        import warnings
-
-        warnings.warn(
-            "join_sorted() is deprecated. Use join(..., strategy='merge') instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Preserve original behavior: sort validation (same as strategy="merge")
-        return self._join_with_sort_validation(other, on, how)
-
-    def _get_sort_direction(self, col_name: str) -> Optional[bool]:
+    def _get_sort_direction(self, col_name: str) -> bool | None:
         """Get sort direction for a column, or None if not sorted by it."""
         if not self._sort_keys:
             return None

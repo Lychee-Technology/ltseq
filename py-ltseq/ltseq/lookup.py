@@ -1,6 +1,6 @@
 """Lookup mixin for handling lookup expressions in derive operations."""
 
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -10,11 +10,11 @@ class LookupMixin:
     """Mixin providing lookup resolution for derive operations."""
 
     # These will be provided by the main class
-    _schema: Dict[str, str]
+    _schema: dict[str, str]
     _inner: Any
     _sort_keys: Any
 
-    def _contains_lookup(self, expr_dict: Dict[str, Any]) -> bool:
+    def _contains_lookup(self, expr_dict: dict[str, Any]) -> bool:
         """
         Recursively check if expression contains a Lookup.
 
@@ -43,8 +43,8 @@ class LookupMixin:
         return False
 
     def _extract_lookup_info(
-        self, expr_dict: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self, expr_dict: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """
         Extract lookup information from an expression.
 
@@ -96,8 +96,8 @@ class LookupMixin:
         return None
 
     def _resolve_lookups(
-        self, derived_cols: Dict[str, Dict]
-    ) -> Tuple["LTSeq", Dict[str, Dict]]:
+        self, derived_cols: dict[str, dict]
+    ) -> tuple["LTSeq", dict[str, dict]]:
         """
         Resolve lookup expressions by joining with target tables.
 
@@ -191,7 +191,11 @@ class LookupMixin:
         return current, simplified
 
     def _perform_lookup_join(
-        self, target_table: "LTSeq", on_column: str, join_key: str, alias: str
+        self,
+        target_table: "LTSeq",
+        on_column: str,
+        join_key: str,
+        alias: str,
     ) -> "LTSeq":
         """
         Perform a left join with a target table for lookup resolution.

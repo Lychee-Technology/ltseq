@@ -1,8 +1,28 @@
-"""I/O operations for LTSeq: read_csv, write_csv, scan_csv, _from_rows."""
+"""I/O operations for LTSeq: read_csv, write_csv, scan, from_rows, from_dict, _from_rows."""
 
-from typing import Any, Dict
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .cursor import Cursor
 
 from .helpers import _infer_schema_from_csv, _infer_schema_from_parquet
+
+
+def _infer_schema_from_rows(sample_row: dict[str, Any]) -> dict[str, str]:
+    """Infer Arrow type strings from a sample row's Python values."""
+    schema = {}
+    for col, val in sample_row.items():
+        if isinstance(val, bool):
+            schema[col] = "Boolean"
+        elif isinstance(val, int):
+            schema[col] = "Int64"
+        elif isinstance(val, float):
+            schema[col] = "Float64"
+        else:
+            schema[col] = "Utf8"
+    return schema
+
 
 try:
     from . import ltseq_core
@@ -119,11 +139,82 @@ class IOMixin:
         return Cursor(rust_cursor)
 
     @classmethod
-    def _from_rows(cls, rows: list[Dict[str, Any]], schema: Dict[str, str]) -> "LTSeq":
+    def from_rows(
+        cls, rows: list[dict[str, Any]], schema: dict[str, str] | None = None
+    ) -> "LTSeq":
         """
-        Create an LTSeq instance from a list of row dictionaries.
+        Create an LTSeq table from a list of row dictionaries.
+
+        Args:
+            rows: List of dicts, one per row. All dicts must have the same keys.
+            schema: Optional column schema as {column_name: arrow_type_string}.
+                    If None, types are inferred from the first row's values.
+                    Explicit schema is required for empty rows lists.
+
+        Returns:
+            New LTSeq instance
+
+        Raises:
+            ValueError: If rows is empty and schema is None
+            TypeError: If rows is not a list of dicts
+
+        Example:
+            >>> t = LTSeq.from_rows([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}])
+            >>> t = LTSeq.from_rows([], schema={"id": "Int64", "name": "Utf8"})
+        """
+        if schema is None:
+            if not rows:
+                raise ValueError(
+                    "from_rows() requires an explicit schema when rows is empty. "
+                    "Use from_rows([], schema={'col': 'Int64', ...})"
+                )
+            schema = _infer_schema_from_rows(rows[0])
+        return cls._from_rows(rows, schema)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, list[Any]]) -> "LTSeq":
+        """
+        Create an LTSeq table from a column-oriented dictionary.
+
+        Args:
+            data: Dict mapping column names to lists of values.
+                  All lists must have the same length.
+
+        Returns:
+            New LTSeq instance
+
+        Raises:
+            ValueError: If column lists have different lengths
+            TypeError: If data is not a dict
+
+        Example:
+            >>> t = LTSeq.from_dict({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
+        """
+        if not isinstance(data, dict):
+            raise TypeError(f"from_dict() expects a dict, got {type(data).__name__}")
+
+        if not data:
+            raise ValueError("from_dict() requires at least one column")
+
+        lengths = [len(v) for v in data.values()]
+        if len(set(lengths)) > 1:
+            raise ValueError(
+                f"All column lists must have the same length. "
+                f"Got lengths: { {k: len(v) for k, v in data.items()} }"
+            )
+
+        n = lengths[0]
+        cols = list(data.keys())
+        rows = [{col: data[col][i] for col in cols} for i in range(n)]
+        return cls.from_rows(rows)
+
+    @classmethod
+    def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq":
+        """
+        Create an LTSeq instance from a list of row dictionaries via Arrow IPC.
 
         Internal method used by partition() and similar operations.
+        Callers should prefer the public from_rows() which supports schema inference.
 
         Args:
             rows: List of dictionaries, one per row
@@ -132,40 +223,42 @@ class IOMixin:
         Returns:
             New LTSeq instance
         """
-        import csv
-        import os
-        import tempfile
+        import pyarrow as pa
 
         from .core import LTSeq
 
+        # Map LTSeq schema type strings to PyArrow types (for empty-table creation)
+        _schema_to_arrow: dict[str, Any] = {
+            "int64": pa.int64(),
+            "Int64": pa.int64(),
+            "float64": pa.float64(),
+            "Float64": pa.float64(),
+            "bool": pa.bool_(),
+            "Boolean": pa.bool_(),
+            "string": pa.string(),
+            "Utf8": pa.string(),
+            "utf8": pa.string(),
+            "large_string": pa.large_utf8(),
+            "large_utf8": pa.large_utf8(),
+            "date32": pa.date32(),
+            "date64": pa.date64(),
+        }
+
+        col_names = list(schema.keys())
+
         if not rows:
-            # Create empty table with schema
-            t = LTSeq()
-            t._schema = schema
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".csv", delete=False, newline=""
-            ) as f:
-                writer = csv.DictWriter(f, fieldnames=schema.keys())
-                writer.writeheader()
-                temp_path = f.name
-            try:
-                t._inner.read_csv(temp_path, True)
-            finally:
-                os.unlink(temp_path)
-            return t
+            arrays = {
+                col: pa.array([], type=_schema_to_arrow.get(schema[col], pa.string()))
+                for col in col_names
+            }
+            pa_table = pa.table(arrays)
+        else:
+            col_data = {col: [row.get(col) for row in rows] for col in col_names}
+            pa_table = pa.table(col_data)
 
-        # Convert rows to CSV and load
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".csv", delete=False, newline=""
-        ) as f:
-            writer = csv.DictWriter(f, fieldnames=schema.keys())
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-            temp_path = f.name
-
-        t = LTSeq.read_csv(temp_path)
-        return t
+        result = LTSeq.from_arrow(pa_table)
+        result._schema = schema
+        return result
 
     def write_csv(self, path: str) -> None:
         """
@@ -203,7 +296,7 @@ class IOMixin:
         self._inner.write_parquet(path, compression)
 
     @classmethod
-    def from_arrow(cls, arrow_table) -> "LTSeq":
+    def from_arrow(cls, arrow_table: Any) -> "LTSeq":
         """
         Create an LTSeq table from a PyArrow Table.
 
@@ -223,16 +316,17 @@ class IOMixin:
         from .core import LTSeq
 
         if not isinstance(arrow_table, pa.Table):
-            raise TypeError(
-                f"Expected pyarrow.Table, got {type(arrow_table).__name__}"
-            )
+            raise TypeError(f"Expected pyarrow.Table, got {type(arrow_table).__name__}")
 
         # Serialize Arrow Table to IPC bytes
         batches = arrow_table.to_batches()
         if not batches and arrow_table.num_rows == 0:
             # Create an empty batch with the schema so Rust receives schema info
             empty_batch = pa.RecordBatch.from_pydict(
-                {field.name: pa.array([], type=field.type) for field in arrow_table.schema},
+                {
+                    field.name: pa.array([], type=field.type)
+                    for field in arrow_table.schema
+                },
                 schema=arrow_table.schema,
             )
             batches = [empty_batch]
@@ -301,10 +395,11 @@ class IOMixin:
             result = t.filter(lambda r: r.counterid > 5000).to_ltseq()
         """
         from .gpu_table import GpuTable
+
         return GpuTable.read_parquet(path, columns=columns)
 
     @classmethod
-    def from_pandas(cls, df) -> "LTSeq":
+    def from_pandas(cls, df: Any) -> "LTSeq":
         """
         Create an LTSeq table from a pandas DataFrame.
 
@@ -331,9 +426,7 @@ class IOMixin:
             )
 
         if not isinstance(df, pd.DataFrame):
-            raise TypeError(
-                f"Expected pandas.DataFrame, got {type(df).__name__}"
-            )
+            raise TypeError(f"Expected pandas.DataFrame, got {type(df).__name__}")
 
         arrow_table = pa.Table.from_pandas(df)
         return cls.from_arrow(arrow_table)

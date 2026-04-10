@@ -1,6 +1,6 @@
 """LookupExpr class for cross-table lookups."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .base import Expr
 
@@ -29,15 +29,15 @@ class LookupExpr(Expr):
 
     # Class-level registry for lookup tables
     # Maps target_name -> actual table object
-    _table_registry: Dict[str, Any] = {}
+    _table_registry: dict[str, Any] = {}
 
     def __init__(
         self,
         on: Expr,
         target_table: Any,
         target_name: str,
-        target_columns: list,
-        join_key: Optional[str] = None,
+        target_columns: list[str],
+        join_key: str | None = None,
     ):
         """
         Initialize a LookupExpr.
@@ -77,7 +77,7 @@ class LookupExpr(Expr):
         """Clear the table registry. Call after derive() completes."""
         cls._table_registry.clear()
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """
         Serialize to dict.
 

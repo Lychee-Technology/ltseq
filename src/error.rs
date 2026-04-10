@@ -8,6 +8,7 @@
 
 use pyo3::{exceptions, PyErr};
 use std::fmt;
+use std::error::Error as StdError;
 
 // ---------------------------------------------------------------------------
 // PyExprError — Expression parsing (types.rs)
@@ -49,6 +50,9 @@ impl From<PyExprError> for PyErr {
 /// - `NoData`, `NoSchema`, `Runtime`, `Io`, `Collect` → `PyRuntimeError`
 /// - `Validation`, `ColumnNotFound`, `Transpile`, `Type` → `PyValueError`
 /// - `TypeMismatch` → `PyTypeError`
+///
+/// The `Context` variant wraps a source error with additional context,
+/// enabling error chain traversal via `std::error::Error::source()`.
 #[derive(Debug)]
 pub enum LtseqError {
     /// Table has no data loaded (dataframe is None).
@@ -77,6 +81,13 @@ pub enum LtseqError {
 
     /// DataFrame collect/execution error.
     Collect(String),
+
+    /// Context error: wraps a source error with additional context.
+    /// Used for preserving error chains.
+    Context {
+        message: String,
+        source: Box<dyn StdError + Send + Sync>,
+    },
 }
 
 impl fmt::Display for LtseqError {
@@ -91,11 +102,21 @@ impl fmt::Display for LtseqError {
             LtseqError::Runtime(msg) => write!(f, "{}", msg),
             LtseqError::Io(msg) => write!(f, "{}", msg),
             LtseqError::Collect(msg) => write!(f, "{}", msg),
+            LtseqError::Context { message, source } => {
+                write!(f, "{}: {}", message, source)
+            }
         }
     }
 }
 
-impl std::error::Error for LtseqError {}
+impl StdError for LtseqError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            LtseqError::Context { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<LtseqError> for PyErr {
     fn from(err: LtseqError) -> Self {
@@ -103,7 +124,8 @@ impl From<LtseqError> for PyErr {
             // Map to PyValueError
             LtseqError::Validation(_)
             | LtseqError::ColumnNotFound(_)
-            | LtseqError::Transpile(_) => {
+            | LtseqError::Transpile(_)
+            | LtseqError::Context { .. } => {
                 PyErr::new::<exceptions::PyValueError, _>(err.to_string())
             }
             // Map to PyTypeError
@@ -127,20 +149,45 @@ impl From<LtseqError> for PyErr {
 // ---------------------------------------------------------------------------
 
 impl LtseqError {
-    /// Create a runtime error by wrapping any Display-able source error with context.
+    /// Create a context error by wrapping any source error with context.
+    ///
+    /// This preserves the error chain for debugging via `std::error::Error::source()`.
     ///
     /// Usage: `LtseqError::with_context("Failed to collect", err)`
-    pub fn with_context(context: &str, source: impl fmt::Display) -> Self {
+    pub fn with_context(context: &str, source: impl StdError + Send + Sync + 'static) -> Self {
+        LtseqError::Context {
+            message: context.to_string(),
+            source: Box::new(source),
+        }
+    }
+
+    /// Create a runtime error by formatting a Display-able source error with context.
+    ///
+    /// Unlike `with_context`, this does NOT preserve the error chain.
+    /// Use when you only need the error message, not the source.
+    ///
+    /// Usage: `LtseqError::runtime("Failed to collect: {}", err)`
+    pub fn runtime(context: &str, source: impl fmt::Display) -> Self {
         LtseqError::Runtime(format!("{}: {}", context, source))
     }
 
     /// Create an I/O error by wrapping a source error with context.
-    pub fn io(context: &str, source: impl fmt::Display) -> Self {
-        LtseqError::Io(format!("{}: {}", context, source))
+    ///
+    /// Preserves the error chain if source implements StdError.
+    pub fn io(context: &str, source: impl StdError + Send + Sync + 'static) -> Self {
+        LtseqError::Context {
+            message: format!("I/O error ({})", context),
+            source: Box::new(source),
+        }
     }
 
     /// Create a collect/execution error from a DataFusion error.
-    pub fn collect(source: impl fmt::Display) -> Self {
-        LtseqError::Collect(format!("Failed to collect results: {}", source))
+    ///
+    /// Preserves the error chain.
+    pub fn collect(source: impl StdError + Send + Sync + 'static) -> Self {
+        LtseqError::Context {
+            message: "Failed to collect results".to_string(),
+            source: Box::new(source),
+        }
     }
 }

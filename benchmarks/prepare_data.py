@@ -68,12 +68,13 @@ def download_data():
 def sort_data():
     """Pre-sort the dataset by (userid, eventtime, watchid) using DuckDB.
 
-    watchid is used as a tiebreaker so that rows with identical (userid, eventtime)
-    have a deterministic order.  This ensures DuckDB window functions (ORDER BY
-    eventtime, watchid) and LTSeq (assume_sorted("userid", "eventtime", "watchid"))
-    process rows in exactly the same sequence, giving matching results for R2/R3.
+    Sort key is (userid, eventtime, watchid).  watchid is used as a tiebreaker
+    for the ~5M rows that share the same (userid, eventtime).  This makes the
+    sort order fully deterministic and matches the physical row order that
+    LTSeq's parallel pattern matcher relies on (via assume_sorted).
 
-    watchid has only 4 duplicates across 100M rows, making it an effective tiebreaker.
+    The DuckDB funnel query uses ORDER BY eventtime, watchid to match this
+    ordering, ensuring both engines produce identical results.
     """
     if os.path.exists(HITS_SORTED):
         size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
@@ -82,7 +83,9 @@ def sort_data():
 
     import duckdb
 
-    print("  Sorting hits.parquet by (userid, eventtime, watchid) with lowercase columns...")
+    print(
+        "  Sorting hits.parquet by (userid, eventtime, watchid) with lowercase columns..."
+    )
     t0 = time.perf_counter()
     con = duckdb.connect()
     # Get all column names and build rename expressions

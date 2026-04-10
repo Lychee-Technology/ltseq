@@ -50,7 +50,7 @@ pub fn sort_impl(
         }
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Validation(e))?;
+            .map_err(LtseqError::Validation)?;
 
         // Get desc flag for this sort key
         let is_desc = desc_flags.get(i).copied().unwrap_or(false);
@@ -72,7 +72,7 @@ pub fn sort_impl(
                 .sort(df_sort_exprs)
                 .map_err(|e| format!("Sort execution failed: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     // Return new LTSeqTable with sorted data and captured sort keys (schema unchanged)
     Ok(LTSeqTable::from_df_with_schema(
@@ -162,7 +162,7 @@ pub fn assume_sorted_impl(
                     .await
                     .map_err(|e| format!("Failed to re-read Parquet with sort order: {}", e))
             })
-            .map_err(|e| LtseqError::Runtime(e))?;
+            .map_err(LtseqError::Runtime)?;
 
         let result_schema = LTSeqTable::schema_from_df(result_df.schema());
 
@@ -184,7 +184,7 @@ pub fn assume_sorted_impl(
                 .await
                 .map_err(|e| format!("Failed to collect data for assume_sorted: {}", e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?;
+        .map_err(LtseqError::Runtime)?;
 
     if batches.is_empty() {
         return Ok(LTSeqTable::empty(

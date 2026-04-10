@@ -1,9 +1,13 @@
 """Core LTSeq table class with data operations."""
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .linking import LinkedTable
+    from .partitioning import PartitionedTable
 
 from .expr import SchemaProxy, _lambda_to_expr
-from .helpers import _infer_schema_from_csv
 
 # Import mixin classes
 from .io_ops import IOMixin
@@ -19,6 +23,32 @@ try:
     HAS_RUST_BINDING = True
 except ImportError:
     HAS_RUST_BINDING = False
+
+# Maps Arrow/DataFusion type strings to Python-friendly names
+_ARROW_TO_PYTHON: dict[str, str] = {
+    "Int8": "int",
+    "Int16": "int",
+    "Int32": "int",
+    "Int64": "int",
+    "UInt8": "int",
+    "UInt16": "int",
+    "UInt32": "int",
+    "UInt64": "int",
+    "Float16": "float",
+    "Float32": "float",
+    "Float64": "float",
+    "Boolean": "bool",
+    "Utf8": "str",
+    "LargeUtf8": "str",
+    "string": "str",
+    "Date32": "date",
+    "Date64": "date",
+    "int64": "int",
+    "int32": "int",
+    "float64": "float",
+    "float32": "float",
+    "bool": "bool",
+}
 
 
 class LTSeq(
@@ -39,11 +69,9 @@ class LTSeq(
                 "Please rebuild with `maturin develop`."
             )
         self._inner = ltseq_core.LTSeqTable()
-        self._schema: Dict[str, str] = {}
-        self._sort_keys: Optional[List[Tuple[str, bool]]] = (
-            None  # [(col, is_desc), ...]
-        )
-        self._name: Optional[str] = None  # Table name for lookup operations
+        self._schema: dict[str, str] = {}
+        self._sort_keys: list[tuple[str, bool]] | None = None  # [(col, is_desc), ...]
+        self._name: str | None = None  # Table name for lookup operations
 
     def show(self, n: int = 10) -> "LTSeq":
         """
@@ -88,9 +116,7 @@ class LTSeq(
         header = f"LTSeq(rows={n_rows}, cols={n_cols})"
 
         # Show column info
-        col_info = ", ".join(
-            f"{name}: {dtype}" for name, dtype in self._schema.items()
-        )
+        col_info = ", ".join(f"{name}: {dtype}" for name, dtype in self._schema.items())
         if len(col_info) > 120:
             col_info = col_info[:117] + "..."
 
@@ -102,7 +128,7 @@ class LTSeq(
 
         return f"{header}\nColumns: [{col_info}]\n{preview}"
 
-    def pipe(self, func, *args, **kwargs) -> "LTSeq":
+    def pipe(self, func: Callable[..., "LTSeq"], *args: Any, **kwargs: Any) -> "LTSeq":
         """
         Apply a function to this table, enabling functional composition in chains.
 
@@ -179,26 +205,18 @@ class LTSeq(
             # No batches returned - empty result
             return pa.table({col: [] for col in self._schema.keys()})
 
-        batches = []
-        schema = None
+        tables = []
         for buf in ipc_buffers:
             reader = pa.ipc.open_stream(buf)
-            table = reader.read_all()
-            if schema is None:
-                schema = table.schema
-            batches.extend(table.to_batches())
+            tables.append(reader.read_all())
 
-        if not batches:
-            # All batches were empty (e.g., filter removed all rows).
-            # Return an empty table preserving the schema.
-            if schema is not None:
-                return pa.table(
-                    {field.name: pa.array([], type=field.type) for field in schema},
-                    schema=schema,
-                )
+        if not tables:
             return pa.table({col: [] for col in self._schema.keys()})
 
-        return pa.Table.from_batches(batches, schema=schema)
+        result = pa.concat_tables(tables)
+        if result.num_rows == 0 and result.num_columns == 0 and self._schema:
+            return pa.table({col: [] for col in self._schema.keys()})
+        return result
 
     def __len__(self) -> int:
         """
@@ -226,7 +244,7 @@ class LTSeq(
         """
         return len(self)
 
-    def collect(self) -> List[Dict[str, Any]]:
+    def collect(self) -> list[dict[str, Any]]:
         """
         Materialize all rows as a list of dictionaries.
 
@@ -247,7 +265,7 @@ class LTSeq(
         return df.to_dict("records")
 
     @property
-    def schema(self) -> Dict[str, str]:
+    def schema(self) -> dict[str, str]:
         """
         Return the table schema with column names and types.
 
@@ -261,7 +279,28 @@ class LTSeq(
         return self._schema.copy()
 
     @property
-    def columns(self) -> List[str]:
+    def python_schema(self) -> dict[str, str]:
+        """
+        Return the table schema with Python-friendly type names.
+
+        Maps Arrow/DataFusion internal type strings to familiar Python names:
+        Int64 → int, Float64 → float, Utf8 → str, Boolean → bool, etc.
+
+        Returns:
+            Dictionary mapping column names to Python type names.
+            Unknown types are returned as-is.
+
+        Example:
+            >>> t = LTSeq.read_csv("data.csv")
+            >>> print(t.python_schema)  # {"id": "int", "name": "str", "score": "float"}
+        """
+        return {
+            col: _ARROW_TO_PYTHON.get(dtype, dtype)
+            for col, dtype in self._schema.items()
+        }
+
+    @property
+    def columns(self) -> list[str]:
         """
         Return list of column names.
 
@@ -275,7 +314,7 @@ class LTSeq(
         return list(self._schema.keys())
 
     @property
-    def dtypes(self) -> List[Tuple[str, str]]:
+    def dtypes(self) -> list[tuple[str, str]]:
         """
         Return list of (column_name, data_type) tuples.
 
@@ -289,7 +328,7 @@ class LTSeq(
         return list(self._schema.items())
 
     @property
-    def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
+    def sort_keys(self) -> list[tuple[str, bool]] | None:
         """
         Get the current sort keys for this table.
 
@@ -306,7 +345,7 @@ class LTSeq(
         """
         return self._sort_keys
 
-    def is_sorted_by(self, *keys: str, desc: Union[bool, List[bool]] = False) -> bool:
+    def is_sorted_by(self, *keys: str, desc: bool | list[bool] = False) -> bool:
         """
         Check if this table is sorted by the specified keys.
 
@@ -357,7 +396,7 @@ class LTSeq(
 
         return True
 
-    def _capture_expr(self, fn: Callable) -> Dict[str, Any]:
+    def _capture_expr(self, fn: Callable) -> dict[str, Any]:
         """
         Capture and serialize an expression tree from a lambda.
 
@@ -448,9 +487,7 @@ class LTSeq(
 
         return LinkedTable(self, target_table, on, as_, join_type)
 
-    def lookup(
-        self, dim_table: "LTSeq", on: Callable, as_: str
-    ) -> "LTSeq":
+    def lookup(self, dim_table: "LTSeq", on: Callable, as_: str) -> "LTSeq":
         """
         Eager lookup join with a dimension table.
 
@@ -487,9 +524,7 @@ class LTSeq(
             >>> fact.show()  # has prod_name, prod_price, etc.
         """
         if not isinstance(dim_table, LTSeq):
-            raise TypeError(
-                f"dim_table must be LTSeq, got {type(dim_table).__name__}"
-            )
+            raise TypeError(f"dim_table must be LTSeq, got {type(dim_table).__name__}")
         if not callable(on):
             raise TypeError("on must be a callable (lambda)")
         if not isinstance(as_, str) or not as_:
@@ -536,12 +571,10 @@ class LTSeq(
         result._schema = dict(self._schema)
         for col_name, col_type in dim_table._schema.items():
             result._schema[f"{as_}_{col_name}"] = col_type
-        result._sort_keys = (
-            list(self._sort_keys) if self._sort_keys else None
-        )
+        result._sort_keys = list(self._sort_keys) if self._sort_keys else None
         return result
 
-    def partition(self, *args, by: Callable | None = None) -> "PartitionedTable":
+    def partition(self, *args: Any, by: Callable | None = None) -> "PartitionedTable":
         """
         Partition the table into groups based on columns or a key function.
 

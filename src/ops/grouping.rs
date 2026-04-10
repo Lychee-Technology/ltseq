@@ -32,7 +32,7 @@ use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::arrow::record_batch::RecordBatch;
-use crate::ops::helpers::{check_empty_batches, register_temp_table};
+use datafusion::datasource::MemTable;
 use datafusion::functions_window::expr_fn::lag;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::{Expr, Operator};
@@ -80,7 +80,7 @@ fn collect_and_get_schema(
             df.clone()
                 .collect()
                 .await
-                .map_err(|e| LtseqError::collect(e))
+                .map_err(LtseqError::collect)
         })?;
 
     let batch_schema = batches
@@ -89,6 +89,29 @@ fn collect_and_get_schema(
         .unwrap_or_else(|| Arc::new((**stored_schema).clone()));
 
     Ok((batches, batch_schema))
+}
+
+/// Register a temp table and return its name
+fn register_temp_table(
+    session: &SessionContext,
+    schema: &Arc<ArrowSchema>,
+    batches: Vec<RecordBatch>,
+    prefix: &str,
+) -> PyResult<String> {
+    let table_name = format!("__ltseq_{}_temp_{}", prefix, std::process::id());
+    let _ = session.deregister_table(&table_name);
+
+    let temp_table = MemTable::try_new(Arc::clone(schema), vec![batches]).map_err(|e| {
+        LtseqError::Runtime(format!("Failed to create memory table: {}", e))
+    })?;
+
+    session
+        .register_table(&table_name, Arc::new(temp_table))
+        .map_err(|e| {
+            LtseqError::Runtime(format!("Failed to register temp table: {}", e))
+        })?;
+
+    Ok(table_name)
 }
 
 /// Execute SQL query and collect results
@@ -109,7 +132,7 @@ fn execute_sql_query(
                 .await
                 .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
         })
-        .map_err(|e| LtseqError::Runtime(e))?)
+        .map_err(LtseqError::Runtime)?)
 }
 
 /// Create result LTSeqTable from batches
@@ -287,15 +310,15 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
         pyexpr_to_window_expr(py_expr, schema, &table.sort_exprs)
-            .map_err(|e| LtseqError::Validation(e))?
+            .map_err(LtseqError::Validation)?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
         let expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(|e| LtseqError::Validation(e))?;
+            .map_err(LtseqError::Validation)?;
         let lag_expr = lag(expr.clone(), Some(1), None);
         let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
-            .map_err(|e| LtseqError::Validation(e))?;
+            .map_err(LtseqError::Validation)?;
         // IS DISTINCT FROM handles NULLs correctly (unlike !=)
         Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
             Box::new(expr),
@@ -331,15 +354,20 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
             df_with_boundary
                 .collect()
                 .await
-                .map_err(|e| LtseqError::collect(e))
+                .map_err(LtseqError::collect)
         })?;
 
-    if let Some(result) = check_empty_batches(table, &batches, Vec::new()) {
-        return result;
+    if batches.is_empty() {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            Vec::new(),
+            table.source_parquet_path.clone(),
+        ));
     }
 
     let batch_schema = batches[0].schema();
-    let guard = register_temp_table(&table.session, &batch_schema, batches, "group_id")?;
+    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, "group_id")?;
 
     // Build column list excluding __boundary__ (internal column)
     let columns_str = batch_schema
@@ -362,12 +390,13 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
           ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__
         FROM grouped"#,
         cols = columns_str,
-        table = guard.name(),
+        table = temp_table_name,
     );
 
     let result_batches = execute_sql_query(&table.session, &sql_query, "group_id")?;
 
-    drop(guard);
+    // Cleanup and return result
+    let _ = table.session.deregister_table(&temp_table_name);
     create_result_from_batches(
         &table.session,
         result_batches,
@@ -408,32 +437,112 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         .any(|f| f.name() == "__group_count__");
 
     // ── Fast path: use existing __rn__ / __group_count__ columns ─────
+    // When linear_scan_group_id produced these columns lazily, we can
+    // filter directly without SQL ROW_NUMBER overhead.
     if is_first && has_rn {
+        // first row = __rn__ == 1
         let filtered = (**df)
             .clone()
             .filter(col("__rn__").eq(lit(1i64)))
             .map_err(|e| {
                 LtseqError::Runtime(format!("Failed to filter first rows: {}", e))
             })?;
-        return strip_internal_and_wrap(table, filtered, "first_row");
+
+        // Remove internal columns (__rn__, __group_id__, __group_count__)
+        let keep_cols: Vec<Expr> = filtered
+            .schema()
+            .fields()
+            .iter()
+            .filter(|f| {
+                let name = f.name();
+                !name.starts_with("__rn")
+                    && !name.starts_with("__group_id__")
+                    && !name.starts_with("__group_count__")
+                    && !name.starts_with("__row_num")
+                    && !name.starts_with("__mask")
+                    && !name.starts_with("__cnt")
+            })
+            .map(|f| col(f.name()))
+            .collect();
+
+        // If no non-internal columns remain (metadata-only table from linear scan),
+        // return the filtered DF as-is — count() will still work correctly.
+        if keep_cols.is_empty() {
+            return Ok(LTSeqTable::from_df(
+                Arc::clone(&table.session),
+                filtered,
+                Vec::new(),
+                table.source_parquet_path.clone(),
+            ));
+        }
+
+        let projected = filtered.select(keep_cols).map_err(|e| {
+            LtseqError::Runtime(format!("Failed to project first_row result: {}", e))
+        })?;
+
+        return Ok(LTSeqTable::from_df(
+            Arc::clone(&table.session),
+            projected,
+            Vec::new(),
+            table.source_parquet_path.clone(),
+        ));
     }
 
     if !is_first && has_rn && has_count {
+        // last row = __rn__ == __group_count__
         let filtered = (**df)
             .clone()
             .filter(col("__rn__").eq(col("__group_count__")))
             .map_err(|e| {
                 LtseqError::Runtime(format!("Failed to filter last rows: {}", e))
             })?;
-        return strip_internal_and_wrap(table, filtered, "last_row");
+
+        // Remove internal columns
+        let keep_cols: Vec<Expr> = filtered
+            .schema()
+            .fields()
+            .iter()
+            .filter(|f| {
+                let name = f.name();
+                !name.starts_with("__rn")
+                    && !name.starts_with("__group_id__")
+                    && !name.starts_with("__group_count__")
+                    && !name.starts_with("__row_num")
+                    && !name.starts_with("__mask")
+                    && !name.starts_with("__cnt")
+            })
+            .map(|f| col(f.name()))
+            .collect();
+
+        if keep_cols.is_empty() {
+            return Ok(LTSeqTable::from_df(
+                Arc::clone(&table.session),
+                filtered,
+                Vec::new(),
+                table.source_parquet_path.clone(),
+            ));
+        }
+
+        let projected = filtered.select(keep_cols).map_err(|e| {
+            LtseqError::Runtime(format!("Failed to project last_row result: {}", e))
+        })?;
+
+        return Ok(LTSeqTable::from_df(
+            Arc::clone(&table.session),
+            projected,
+            Vec::new(),
+            table.source_parquet_path.clone(),
+        ));
     }
 
     // ── Fallback: SQL-based approach for legacy group_id paths ────────
+    // Collect data and register temp table
     let (batches, batch_schema) = collect_and_get_schema(df, schema)?;
     let op_name = if is_first { "first_row" } else { "last_row" };
-    let guard = register_temp_table(&table.session, &batch_schema, batches, op_name)?;
+    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, op_name)?;
     let columns_str = build_column_list(&batch_schema, true);
 
+    // Build SQL query
     let rn_alias = format!("__rn_{}_{}", op_name, std::process::id());
     let sql_query = if is_first {
         format!(
@@ -442,7 +551,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             )
             SELECT {cols} FROM ranked WHERE "{rn}" = 1"#,
             cols = columns_str,
-            table = guard.name(),
+            table = temp_table_name,
             rn = rn_alias
         )
     } else {
@@ -456,7 +565,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             )
             SELECT {cols} FROM ranked WHERE "{rn}" = "{cnt}""#,
             cols = columns_str,
-            table = guard.name(),
+            table = temp_table_name,
             rn = rn_alias,
             cnt = cnt_alias
         )
@@ -464,55 +573,12 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
 
     let result_batches = execute_sql_query(&table.session, &sql_query, op_name)?;
 
-    drop(guard);
+    // Cleanup and return result
+    let _ = table.session.deregister_table(&temp_table_name);
     create_result_from_batches(
         &table.session,
         result_batches,
         table.schema.as_ref(),
         op_name,
     )
-}
-
-/// Strip internal columns (`__rn__`, `__group_id__`, etc.) from a filtered
-/// DataFrame and wrap the result as a new `LTSeqTable`.
-fn strip_internal_and_wrap(
-    table: &LTSeqTable,
-    filtered: DataFrame,
-    op_name: &str,
-) -> PyResult<LTSeqTable> {
-    let keep_cols: Vec<Expr> = filtered
-        .schema()
-        .fields()
-        .iter()
-        .filter(|f| {
-            let name = f.name();
-            !name.starts_with("__rn")
-                && !name.starts_with("__group_id__")
-                && !name.starts_with("__group_count__")
-                && !name.starts_with("__row_num")
-                && !name.starts_with("__mask")
-                && !name.starts_with("__cnt")
-        })
-        .map(|f| col(f.name()))
-        .collect();
-
-    if keep_cols.is_empty() {
-        return Ok(LTSeqTable::from_df(
-            Arc::clone(&table.session),
-            filtered,
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
-    }
-
-    let projected = filtered.select(keep_cols).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to project {} result: {}", op_name, e))
-    })?;
-
-    Ok(LTSeqTable::from_df(
-        Arc::clone(&table.session),
-        projected,
-        Vec::new(),
-        table.source_parquet_path.clone(),
-    ))
 }

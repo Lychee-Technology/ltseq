@@ -3,8 +3,9 @@
 import os
 import tempfile
 
-import pyarrow as pa
 import pytest
+
+pa = pytest.importorskip("pyarrow")
 
 from ltseq import LTSeq
 

@@ -4,7 +4,7 @@ This module provides a Python wrapper around LTSeqCursor for processing
 large datasets without loading everything into memory.
 """
 
-from typing import Dict
+from typing import Any
 
 try:
     from . import ltseq_core
@@ -28,7 +28,7 @@ class Cursor:
         >>> df = LTSeq.scan_csv("file.csv").to_pandas()
     """
 
-    def __init__(self, rust_cursor):
+    def __init__(self, rust_cursor: Any) -> None:
         """Initialize Cursor with a LTSeqCursor instance.
 
         Args:
@@ -46,7 +46,7 @@ class Cursor:
         """Return self as iterator."""
         return self
 
-    def __next__(self):
+    def __next__(self) -> Any:
         """Fetch the next batch.
 
         Returns:
@@ -67,14 +67,14 @@ class Cursor:
         return batch
 
     @property
-    def schema(self) -> Dict[str, str]:
+    def schema(self) -> dict[str, str]:
         """Get the schema as a dict of {column_name: data_type}."""
         if self._schema is None:
             self._schema = dict(self._inner.get_schema())
         return self._schema
 
     @property
-    def columns(self) -> list:
+    def columns(self) -> list[str]:
         """Get column names."""
         return self._inner.get_column_names()
 
@@ -88,7 +88,7 @@ class Cursor:
         """Check if cursor is exhausted."""
         return self._inner.is_exhausted()
 
-    def to_pandas(self):
+    def to_pandas(self) -> Any:
         """Materialize all remaining batches into a pandas DataFrame.
 
         Warning: This loads all remaining data into memory.
@@ -108,7 +108,7 @@ class Cursor:
         table = pa.Table.from_batches(batches)
         return table.to_pandas()
 
-    def to_arrow(self):
+    def to_arrow(self) -> Any:
         """Materialize all remaining batches into a PyArrow Table.
 
         Warning: This loads all remaining data into memory.

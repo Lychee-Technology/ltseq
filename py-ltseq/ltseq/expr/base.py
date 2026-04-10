@@ -1,7 +1,13 @@
 """Base expression class for LTSeq."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .types import CallExpr
+    from .types import BinOpExpr
+    from .types import UnaryOpExpr
+    from .types import LookupExpr
 
 
 def if_else(condition: "Expr", true_value: Any, false_value: Any) -> "CallExpr":
@@ -148,7 +154,7 @@ def sign(x: "Expr") -> "CallExpr":
     return CallExpr("math_sign", (Expr._coerce(x),), {}, on=None)
 
 
-def log(x: "Expr", base=None) -> "CallExpr":
+def log(x: "Expr", base: float | int | None = None) -> "CallExpr":
     """Logarithm. If base=None → natural log; base=10 → log10; base=2 → log2; else log(base, x)."""
     from .types import CallExpr, LiteralExpr
     if base is None:
@@ -460,7 +466,7 @@ class Expr(ABC):
     """
 
     @abstractmethod
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """
         Convert this expression to a serializable nested dict.
 
@@ -470,37 +476,37 @@ class Expr(ABC):
         pass
 
     # Arithmetic operators
-    def __add__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __add__(self, other: "Expr | Any") -> "BinOpExpr":
         """Addition operator: expr + other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Add", self, self._coerce(other))
 
-    def __sub__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __sub__(self, other: "Expr | Any") -> "BinOpExpr":
         """Subtraction operator: expr - other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Sub", self, self._coerce(other))
 
-    def __mul__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __mul__(self, other: "Expr | Any") -> "BinOpExpr":
         """Multiplication operator: expr * other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Mul", self, self._coerce(other))
 
-    def __truediv__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __truediv__(self, other: "Expr | Any") -> "BinOpExpr":
         """Division operator: expr / other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Div", self, self._coerce(other))
 
-    def __floordiv__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __floordiv__(self, other: "Expr | Any") -> "BinOpExpr":
         """Floor division operator: expr // other"""
         from .types import BinOpExpr
 
         return BinOpExpr("FloorDiv", self, self._coerce(other))
 
-    def __mod__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __mod__(self, other: "Expr | Any") -> "BinOpExpr":
         """Modulo operator: expr % other"""
         from .types import BinOpExpr
 
@@ -508,50 +514,50 @@ class Expr(ABC):
 
     # Comparison operators
     # Note: These override object.__eq__ and __ne__, intentionally returning Expr instead of bool
-    def __eq__(self, other: Union["Expr", Any]):  # type: ignore
+    def __eq__(self, other: "Expr | Any") -> "BinOpExpr":  # type: ignore[override]
         """Equality operator: expr == other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Eq", self, self._coerce(other))
 
-    def __ne__(self, other: Union["Expr", Any]):  # type: ignore
+    def __ne__(self, other: "Expr | Any") -> "BinOpExpr":  # type: ignore[override]
         """Inequality operator: expr != other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Ne", self, self._coerce(other))
 
-    def __lt__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __lt__(self, other: "Expr | Any") -> "BinOpExpr":
         """Less than operator: expr < other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Lt", self, self._coerce(other))
 
-    def __le__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __le__(self, other: "Expr | Any") -> "BinOpExpr":
         """Less than or equal operator: expr <= other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Le", self, self._coerce(other))
 
-    def __gt__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __gt__(self, other: "Expr | Any") -> "BinOpExpr":
         """Greater than operator: expr > other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Gt", self, self._coerce(other))
 
-    def __ge__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __ge__(self, other: "Expr | Any") -> "BinOpExpr":
         """Greater than or equal operator: expr >= other"""
         from .types import BinOpExpr
 
         return BinOpExpr("Ge", self, self._coerce(other))
 
     # Logical operators
-    def __and__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __and__(self, other: "Expr | Any") -> "BinOpExpr":
         """Logical AND operator: expr & other"""
         from .types import BinOpExpr
 
         return BinOpExpr("And", self, self._coerce(other))
 
-    def __or__(self, other: Union["Expr", Any]) -> "BinOpExpr":
+    def __or__(self, other: "Expr | Any") -> "BinOpExpr":
         """Logical OR operator: expr | other"""
         from .types import BinOpExpr
 
@@ -570,37 +576,37 @@ class Expr(ABC):
         return CallExpr("abs", (self,), {}, on=None)
 
     # Right-hand operators (for reversed operations like 5 + r.col)
-    def __radd__(self, other: Any) -> "BinOpExpr":
+    def __radd__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right addition: other + expr"""
         from .types import BinOpExpr
 
         return BinOpExpr("Add", self._coerce(other), self)
 
-    def __rsub__(self, other: Any) -> "BinOpExpr":
+    def __rsub__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right subtraction: other - expr"""
         from .types import BinOpExpr
 
         return BinOpExpr("Sub", self._coerce(other), self)
 
-    def __rmul__(self, other: Any) -> "BinOpExpr":
+    def __rmul__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right multiplication: other * expr"""
         from .types import BinOpExpr
 
         return BinOpExpr("Mul", self._coerce(other), self)
 
-    def __rtruediv__(self, other: Any) -> "BinOpExpr":
+    def __rtruediv__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right division: other / expr"""
         from .types import BinOpExpr
 
         return BinOpExpr("Div", self._coerce(other), self)
 
-    def __rfloordiv__(self, other: Any) -> "BinOpExpr":
+    def __rfloordiv__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right floor division: other // expr"""
         from .types import BinOpExpr
 
         return BinOpExpr("FloorDiv", self._coerce(other), self)
 
-    def __rmod__(self, other: Any) -> "BinOpExpr":
+    def __rmod__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right modulo: other % expr"""
         from .types import BinOpExpr
 
@@ -651,7 +657,7 @@ class Expr(ABC):
 
         return CallExpr("is_not_null", (), {}, on=self)
 
-    def is_in(self, values: list) -> "CallExpr":
+    def is_in(self, values: list[Any]) -> "CallExpr":
         """
         Check if the value is contained in a list of values.
 
@@ -808,7 +814,7 @@ class Expr(ABC):
         return LiteralExpr(value)
 
     def lookup(
-        self, target_table: Any, column: str, join_key: Optional[str] = None
+        self, target_table: Any, column: str, join_key: str | None = None
     ) -> "LookupExpr":
         """
         Lookup a value in another table using this expression as the join key.

@@ -1,15 +1,84 @@
-"""Aggregation operations for LTSeq: agg, cum_sum, group_ordered, group_sorted."""
+"""Aggregation operations for LTSeq: agg, cum_sum, group_ordered, group_sorted, group_by."""
 
-from typing import Callable, List, Optional, Union
+from typing import Any, Callable, TYPE_CHECKING, List, Optional, Union
+
+if TYPE_CHECKING:
+    from .core import LTSeq
+    from .grouping import NestedTable
 
 from .expr import SchemaProxy, Expr
 from .transforms import _collect_key_exprs
 
 
+class GroupBy:
+    """
+    Intermediate object returned by LTSeq.group_by().
+
+    Supports Polars/pandas-style chaining: t.group_by("col").agg(total=lambda r: r.sales.sum())
+    """
+
+    def __init__(self, table: "LTSeq", key: str | Callable):
+        self._table = table
+        self._key = key
+
+    def agg(self, **aggregations: Callable) -> "LTSeq":
+        """
+        Aggregate each group into a single row.
+
+        Args:
+            **aggregations: Named aggregation expressions.
+                           E.g., total=lambda r: r.sales.sum()
+
+        Returns:
+            Aggregated LTSeq with one row per group
+
+        Example:
+            >>> t.group_by("region").agg(total=lambda r: r.sales.sum())
+            >>> t.group_by(lambda r: r.region).agg(total=lambda r: r.sales.sum(), n=lambda r: r.id.count())
+        """
+        from .core import LTSeq
+
+        if not aggregations:
+            raise ValueError("agg() requires at least one aggregation expression")
+
+        # Build grouping expression
+        if isinstance(self._key, str):
+            # String column name → Column expr
+            if self._key not in self._table._schema:
+                raise AttributeError(
+                    f"Column '{self._key}' not found. "
+                    f"Available columns: {list(self._table._schema.keys())}"
+                )
+            grouping_expr: dict[str, Any] = {"type": "Column", "name": self._key}
+        else:
+            grouping_expr = self._table._capture_expr(self._key)
+
+        agg_exprs = {}
+        for name, fn in aggregations.items():
+            if not callable(fn):
+                raise TypeError(
+                    f"Aggregation '{name}' must be callable, got {type(fn).__name__}"
+                )
+            agg_exprs[name] = self._table._capture_expr(fn)
+
+        result_inner = self._table._inner.agg(grouping_expr, agg_exprs)
+
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = {}
+        if grouping_expr.get("type") == "Column":
+            col_name = grouping_expr.get("name", "group_key")
+            result._schema[col_name] = self._table._schema.get(col_name, "Unknown")
+        for name in aggregations.keys():
+            result._schema[name] = "Unknown"
+        result._sort_keys = None
+        return result
+
+
 class AggregationMixin:
     """Mixin class providing aggregation operations for LTSeq."""
 
-    def cum_sum(self, *cols: Union[str, Callable]) -> "LTSeq":
+    def cum_sum(self, *cols: str | Callable) -> "LTSeq":
         """
         Add cumulative sum columns for specified columns.
 
@@ -113,11 +182,7 @@ class AggregationMixin:
 
         return NestedTable(self, key, is_sorted=True)
 
-    def agg(
-        self,
-        by: Optional[Union[Callable, List[Union[str, Callable]]]] = None,
-        **aggregations,
-    ) -> "LTSeq":
+    def agg(self, by: Callable | None = None, **aggregations: Callable) -> "LTSeq":
         """
         Grouped aggregation with one row per group.
 
@@ -213,3 +278,33 @@ class AggregationMixin:
 
         result._sort_keys = None
         return result
+
+    def group_by(self, key: "str | Callable") -> "GroupBy":
+        """
+        Start a grouped aggregation using the Polars/pandas chain style.
+
+        Returns a GroupBy intermediate object on which .agg() is called.
+
+        Args:
+            key: Column name (str) or lambda returning the grouping key.
+                 E.g., "region" or lambda r: r.region
+
+        Returns:
+            GroupBy object
+
+        Example:
+            >>> t.group_by("region").agg(total=lambda r: r.sales.sum())
+            >>> t.group_by(lambda r: r.region).agg(total=lambda r: r.sales.sum())
+        """
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+
+        if not isinstance(key, str) and not callable(key):
+            raise TypeError(
+                f"group_by() key must be a column name (str) or callable, "
+                f"got {type(key).__name__}"
+            )
+
+        return GroupBy(self, key)

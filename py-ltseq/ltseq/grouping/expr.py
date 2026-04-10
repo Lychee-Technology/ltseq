@@ -7,14 +7,14 @@ that works in all contexts (pytest, REPL, exec).
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Union
+from typing import Any
 
 
 class GroupExpr(ABC):
     """Base class for group-level expressions."""
 
     @abstractmethod
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         """Serialize this expression to a dictionary."""
         pass
 
@@ -47,7 +47,7 @@ class GroupExpr(ABC):
 class GroupCountExpr(GroupExpr):
     """Expression for g.count() - count of rows in the group."""
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         return {"type": "GroupCount"}
 
 
@@ -58,7 +58,7 @@ class GroupAggExpr(GroupExpr):
         self._func = func
         self._column = column
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         return {
             "type": "GroupAgg",
             "func": self._func,
@@ -78,7 +78,7 @@ class GroupRowColumnExpr(GroupExpr):
         self._row_type = row_type
         self._column = column
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         return {
             "type": "GroupRowColumn",
             "row": self._row_type,
@@ -113,17 +113,17 @@ class BinOpGroupExpr(GroupExpr):
 
     def __init__(
         self,
-        left: Union[GroupExpr, int, float],
+        left: "GroupExpr | int | float",
         op: str,
-        right: Union[GroupExpr, int, float],
+        right: "GroupExpr | int | float",
     ):
         self._left = left
         self._op = op
         self._right = right
 
     def _serialize_operand(
-        self, operand: Union[GroupExpr, int, float]
-    ) -> Dict[str, Any]:
+        self, operand: "GroupExpr | int | float"
+    ) -> dict[str, Any]:
         """Serialize an operand, handling both GroupExpr and literals."""
         if isinstance(operand, GroupExpr):
             return operand.serialize()
@@ -131,7 +131,7 @@ class BinOpGroupExpr(GroupExpr):
             # Literal value (int or float)
             return {"type": "Literal", "value": operand}
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> dict[str, Any]:
         return {
             "type": "BinOp",
             "left": self._serialize_operand(self._left),
