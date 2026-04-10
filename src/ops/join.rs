@@ -19,7 +19,7 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::common::{
-    build_equality_conditions, build_qualified_column_list, build_aliased_join_schema,
+    build_qualified_column_list, build_aliased_join_schema,
     JoinType, MultiTempTableGuard, schema_from_batches_or_fallback,
 };
 use crate::types::{dict_to_py_expr, PyExpr};

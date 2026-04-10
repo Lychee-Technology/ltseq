@@ -197,10 +197,10 @@ fn parse_group_exprs(
     };
 
     // List of dicts → multi-key groupby
-    if let Ok(list) = group_val.downcast::<PyList>() {
+    if let Ok(list) = group_val.cast::<PyList>() {
         let mut exprs = Vec::new();
         for item in list.iter() {
-            let dict = item.downcast::<PyDict>()
+            let dict = item.cast::<PyDict>()
                 .map_err(|_| LtseqError::TypeMismatch("group key list items must be dicts".into()))?;
             let py_expr = dict_to_py_expr(dict)
                 .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
@@ -212,7 +212,7 @@ fn parse_group_exprs(
     }
 
     // Single dict → single-key groupby
-    let dict = group_val.downcast::<PyDict>()
+    let dict = group_val.cast::<PyDict>()
         .map_err(|_| LtseqError::TypeMismatch("group_exprs must be a dict or list of dicts".into()))?;
     let py_expr = dict_to_py_expr(dict)
         .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
@@ -565,10 +565,10 @@ fn parse_group_expr_sql(
     };
 
     // List of dicts → multi-key
-    if let Ok(list) = group_val.downcast::<PyList>() {
+    if let Ok(list) = group_val.cast::<PyList>() {
         let mut cols = Vec::new();
         for item in list.iter() {
-            let dict = item.downcast::<PyDict>()
+            let dict = item.cast::<PyDict>()
                 .map_err(|_| LtseqError::TypeMismatch("group key list items must be dicts".into()))?;
             let py_expr = dict_to_py_expr(dict)
                 .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
@@ -586,7 +586,7 @@ fn parse_group_expr_sql(
     }
 
     // Single dict
-    let dict = group_val.downcast::<PyDict>()
+    let dict = group_val.cast::<PyDict>()
         .map_err(|_| LtseqError::TypeMismatch("group_exprs must be a dict or list of dicts".into()))?;
     let py_expr = dict_to_py_expr(dict)
         .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
