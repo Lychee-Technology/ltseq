@@ -55,10 +55,10 @@ jobs:
           pip install maturin pytest pyarrow pandas numpy
 
       - name: Cargo check
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: Cargo test
-        run: cargo test
+        run: cargo test --locked
 
       - name: Build wheel (maturin)
         run: maturin build --release --out dist/
@@ -113,7 +113,7 @@ jobs:
 
       # GPU compile check (stub mode — no CUDA toolkit needed for check)
       - name: Cargo check (GPU feature)
-        run: cargo check --features gpu
+        run: cargo check --locked --features gpu
 
       # Build the GPU wheel (stub mode — links cudf_engine_stub.c)
       # Note: cudarc with cuda-13010 feature will compile but NVRTC
