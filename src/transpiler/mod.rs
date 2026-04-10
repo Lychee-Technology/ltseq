@@ -42,7 +42,7 @@ use datafusion::functions::unicode::expr_fn::{
     character_length, left, lpad, rpad, right, strpos, substring,
 };
 // Datetime functions
-use datafusion::functions::datetime::expr_fn::{current_date, date_part, now};
+use datafusion::functions::datetime::expr_fn::{current_date, date_part, now, to_unixtime};
 // Regex functions
 use datafusion::functions::regex::expr_fn::regexp_like;
 // Math functions (for gcd, lcm, factorial)
@@ -817,10 +817,12 @@ fn parse_call_temporal(
                 "day".to_string()
             };
 
+            // Use to_unixtime (→ Float64 seconds) for sub-month units.
+            // date_part() no longer accepts Int64/Duration in DataFusion 53.
             match unit.as_str() {
                 "day" | "days" => {
-                    let diff_expr = on_expr - other_expr;
-                    Ok(date_part(lit("day"), diff_expr))
+                    let sec_diff = to_unixtime(vec![on_expr]) - to_unixtime(vec![other_expr]);
+                    Ok(sec_diff / lit(86400_f64))
                 }
                 "month" | "months" => {
                     // (year(on) - year(other)) * 12 + (month(on) - month(other))
@@ -836,23 +838,15 @@ fn parse_call_temporal(
                     Ok(on_year - other_year)
                 }
                 "hour" | "hours" => {
-                    // Cast to epoch seconds, divide by 3600
-                    let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(24_f64) + sec_diff / lit(3600_f64))
+                    let sec_diff = to_unixtime(vec![on_expr]) - to_unixtime(vec![other_expr]);
+                    Ok(sec_diff / lit(3600_f64))
                 }
                 "minute" | "minutes" => {
-                    let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(1440_f64) + sec_diff / lit(60_f64))
+                    let sec_diff = to_unixtime(vec![on_expr]) - to_unixtime(vec![other_expr]);
+                    Ok(sec_diff / lit(60_f64))
                 }
                 "second" | "seconds" => {
-                    let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(86400_f64) + sec_diff)
+                    Ok(to_unixtime(vec![on_expr]) - to_unixtime(vec![other_expr]))
                 }
                 _ => Err(format!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",

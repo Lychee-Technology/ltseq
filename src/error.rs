@@ -183,11 +183,8 @@ impl LtseqError {
 
     /// Create a collect/execution error from a DataFusion error.
     ///
-    /// Preserves the error chain.
-    pub fn collect(source: impl StdError + Send + Sync + 'static) -> Self {
-        LtseqError::Context {
-            message: "Failed to collect results".to_string(),
-            source: Box::new(source),
-        }
+    /// Maps to PyRuntimeError (same as `Collect` variant).
+    pub fn collect(source: impl fmt::Display) -> Self {
+        LtseqError::Collect(format!("Failed to collect results: {}", source))
     }
 }

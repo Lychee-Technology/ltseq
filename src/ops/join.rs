@@ -256,6 +256,7 @@ struct JoinSqlConfig<'a> {
     left_schema: &'a ArrowSchema,
     right_schema: &'a ArrowSchema,
     left_keys: &'a [String],
+    right_keys: &'a [String],
     join_type: JoinType,
     alias: &'a str,
 }
@@ -267,22 +268,28 @@ fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
     let left_schema = cfg.left_schema;
     let right_schema = cfg.right_schema;
     let left_keys = cfg.left_keys;
+    let right_keys = cfg.right_keys;
     let join_type = cfg.join_type;
     let alias = cfg.alias;
     // Build SELECT clause using common helpers
     let left_cols = build_qualified_column_list(left_schema, "L");
-    
+
     let right_cols: String = right_schema
         .fields()
         .iter()
         .map(|f| format!("R.\"{}\" AS \"{}_{}\"", f.name(), alias, f.name()))
         .collect::<Vec<_>>()
         .join(", ");
-    
+
     let select_clause = format!("{}, {}", left_cols, right_cols);
 
-    // Build ON clause using common helper
-    let on_clause = build_equality_conditions("L", "R", left_keys);
+    // Build ON clause using both left and right key names
+    let on_clause = left_keys
+        .iter()
+        .zip(right_keys.iter())
+        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
+        .collect::<Vec<_>>()
+        .join(" AND ");
 
     format!(
         "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
@@ -324,7 +331,7 @@ pub fn join_impl(
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
 
     // Parse and validate join keys
-    let (left_col_names, _right_col_names) = extract_and_validate_join_keys(
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
         &left_schema,
@@ -340,7 +347,7 @@ pub fn join_impl(
         right_batches,
         "join",
     )?;
-    
+
     let table_names = table_guard.names();
     let left_name = table_names[0];
     let right_name = table_names[1];
@@ -351,6 +358,7 @@ pub fn join_impl(
         left_schema: &left_schema,
         right_schema: &right_schema,
         left_keys: &left_col_names,
+        right_keys: &right_col_names,
         join_type,
         alias,
     });
@@ -371,14 +379,19 @@ fn build_semi_anti_join_sql(
     right_table: &str,
     left_schema: &ArrowSchema,
     left_keys: &[String],
-    _right_keys: &[String],
+    right_keys: &[String],
     is_anti: bool,
 ) -> String {
     // Select all columns from left table only
     let select_cols = build_qualified_column_list(left_schema, "L");
 
-    // Build WHERE condition using common helper
-    let where_conditions = build_equality_conditions("L", "R", left_keys);
+    // Build WHERE condition using both left and right key names
+    let where_conditions = left_keys
+        .iter()
+        .zip(right_keys.iter())
+        .map(|(l, r)| format!("L.\"{}\" = R.\"{}\"", l, r))
+        .collect::<Vec<_>>()
+        .join(" AND ");
 
     let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
 
