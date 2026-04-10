@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared helpers for table operations
 //!
 //! Eliminates duplicated patterns across ops/ modules:

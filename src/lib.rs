@@ -735,7 +735,7 @@ impl LTSeqTable {
     ) -> PyResult<LTSeqTable> {
         let group_dict = group_exprs
             .map(|e| {
-                e.downcast_into::<PyDict>()
+                e.cast_into::<PyDict>()
                     .map_err(|_| pyo3::exceptions::PyTypeError::new_err("group_exprs must be a dict"))
             })
             .transpose()?;
