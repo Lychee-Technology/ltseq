@@ -46,11 +46,19 @@ AUTORESEARCH_DIR = Path(__file__).parent
 RESULTS_DIR = AUTORESEARCH_DIR / "results"
 sys.path.insert(0, str(REPO_ROOT / "py-ltseq"))
 
-from .analyzer import extract_hotspots
-from .hypothesis import generate_hypotheses
-from .profiler import profile_round, profile_python_layer, check_dependencies
-from .report import generate_report
-from .tracker import save_run, load_history
+if __package__ in (None, ""):
+    sys.path.insert(0, str(AUTORESEARCH_DIR.parent))
+    from autoresearch.analyzer import extract_hotspots
+    from autoresearch.hypothesis import generate_hypotheses
+    from autoresearch.profiler import profile_round, profile_python_layer, check_dependencies
+    from autoresearch.report import generate_report
+    from autoresearch.tracker import save_run, load_history
+else:
+    from .analyzer import extract_hotspots
+    from .hypothesis import generate_hypotheses
+    from .profiler import profile_round, profile_python_layer, check_dependencies
+    from .report import generate_report
+    from .tracker import save_run, load_history
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +136,16 @@ def run_research(
     iterations: int,
     warmup: int,
     report_only: bool,
+    output_dir: str | None,
 ) -> Path:
     """Execute the full research loop, return path to run directory."""
-    date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    run_dir = RESULTS_DIR / date_str
+    if output_dir:
+        run_dir = Path(output_dir).expanduser()
+        if not run_dir.is_absolute():
+            run_dir = REPO_ROOT / run_dir
+    else:
+        date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        run_dir = RESULTS_DIR / date_str
     run_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_label = "1M-row sample" if data_flag == "--sample" else "full dataset"
@@ -289,6 +303,10 @@ def main() -> int:
         "--report-only", action="store_true",
         help="Generate trend report from history only, do not run benchmarks",
     )
+    parser.add_argument(
+        "--output-dir", type=str,
+        help="Write artifacts to a specific directory instead of a timestamped run dir",
+    )
 
     args = parser.parse_args()
 
@@ -312,6 +330,7 @@ def main() -> int:
         iterations=args.iterations,
         warmup=args.warmup,
         report_only=args.report_only,
+        output_dir=args.output_dir,
     )
     return 0
 

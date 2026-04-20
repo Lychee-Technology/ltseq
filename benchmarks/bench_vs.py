@@ -38,6 +38,50 @@ import psutil
 
 from ltseq import LTSeq
 
+
+def make_validation(status, detail, duckdb_result, ltseq_result, **extra):
+    """Build machine-readable validation metadata for a benchmark round."""
+    validation = {
+        "status": status,
+        "detail": detail,
+        "duckdb_result": duckdb_result,
+        "ltseq_result": ltseq_result,
+    }
+    validation.update(extra)
+    return validation
+
+
+def make_round_result(round_id, round_name):
+    """Create a round result envelope that later gains metrics and validation."""
+    return {
+        "round_id": round_id,
+        "round_name": round_name,
+        "benchmark_status": "completed",
+    }
+
+
+def mark_infra_failure(round_result, error):
+    """Capture a round-level infrastructure failure without aborting the run."""
+    round_result["benchmark_status"] = "infra_failure"
+    round_result["error"] = str(error)
+    return round_result
+
+
+def summarize_rounds(results):
+    """Compute top-level keep/discard inputs from round results."""
+    correctness_failures = sum(
+        1 for r in results if r.get("validation", {}).get("status") == "fail"
+    )
+    infra_failures = sum(1 for r in results if r.get("benchmark_status") == "infra_failure")
+    completed_rounds = sum(1 for r in results if r.get("benchmark_status") == "completed")
+    return {
+        "passed": correctness_failures == 0 and infra_failures == 0,
+        "correctness_failures": correctness_failures,
+        "infra_failures": infra_failures,
+        "completed_rounds": completed_rounds,
+        "total_rounds": len(results),
+    }
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -294,12 +338,14 @@ def get_system_info():
 
 def save_results(results, data_file, warmup, iterations):
     """Save results to JSON."""
+    summary = summarize_rounds(results)
     output = {
         "timestamp": datetime.now().isoformat(),
         "system": get_system_info(),
         "data_file": data_file,
         "warmup": warmup,
         "iterations": iterations,
+        **summary,
         "rounds": results,
     }
     output_path = os.path.join(BENCHMARKS_DIR, "clickbench_results.json")
@@ -389,58 +435,95 @@ def main():
     # -----------------------------------------------------------------------
     if args.round is None or args.round == 1:
         print("\n--- Round 1: Basic Aggregation (Top 10 URLs) ---")
-        duck_r1 = bench("DuckDB", lambda: duckdb_top_url(data_file))
-        ltseq_r1 = bench("LTSeq", lambda: ltseq_top_url(t_ltseq))
+        r1 = make_round_result("r1_top_urls", "R1: Top URLs")
+        try:
+            duck_r1 = bench("DuckDB", lambda: duckdb_top_url(data_file))
+            ltseq_r1 = bench("LTSeq", lambda: ltseq_top_url(t_ltseq))
 
-        # Validate results match
-        duck_urls = [row[0] for row in duckdb_top_url(data_file)]
-        ltseq_urls = [row["url"] for row in ltseq_top_url(t_ltseq)]
-        if set(duck_urls) == set(ltseq_urls):
-            if duck_urls == ltseq_urls:
-                print("  Validation: PASS (same top 10 URLs, same order)")
-            else:
-                print(
-                    "  Validation: PASS (same top 10 URLs, different tie-breaking order)"
+            duck_urls = [row[0] for row in duckdb_top_url(data_file)]
+            ltseq_urls = [row["url"] for row in ltseq_top_url(t_ltseq)]
+            if set(duck_urls) == set(ltseq_urls):
+                if duck_urls == ltseq_urls:
+                    detail = "same top 10 URLs, same order"
+                else:
+                    detail = "same top 10 URLs, different tie-breaking order"
+                print(f"  Validation: PASS ({detail})")
+                validation = make_validation(
+                    "pass",
+                    detail,
+                    duck_urls,
+                    ltseq_urls,
+                    compared_metric="top_10_urls",
                 )
-        else:
-            print("  Validation: WARN (different URL sets)")
-            print(f"    DuckDB:  {duck_urls[:3]}...")
-            print(f"    LTSeq:   {ltseq_urls[:3]}...")
+            else:
+                detail = "different top 10 URL sets"
+                print(f"  Validation: FAIL ({detail})")
+                print(f"    DuckDB:  {duck_urls[:3]}...")
+                print(f"    LTSeq:   {ltseq_urls[:3]}...")
+                validation = make_validation(
+                    "fail",
+                    detail,
+                    duck_urls,
+                    ltseq_urls,
+                    compared_metric="top_10_urls",
+                )
 
-        results.append(
-            {"round_name": "R1: Top URLs", "duckdb": duck_r1, "ltseq": ltseq_r1}
-        )
+            r1.update({"duckdb": duck_r1, "ltseq": ltseq_r1, "validation": validation})
+        except Exception as e:
+            print(f"  Benchmark: INFRA FAILURE ({e})")
+            mark_infra_failure(r1, e)
+
+        results.append(r1)
 
     # -----------------------------------------------------------------------
     # Round 2: User Sessionization
     # -----------------------------------------------------------------------
     if args.round is None or args.round == 2:
         print("\n--- Round 2: User Sessionization (30-min gap) ---")
-        duck_r2 = bench("DuckDB", lambda: duckdb_session(data_file))
-
-        # Try primary LTSeq approach; fall back to v2 if needed
+        r2 = make_round_result("r2_sessionization", "R2: Sessionization")
         try:
-            ltseq_r2 = bench("LTSeq", lambda: ltseq_session(t_ltseq_sorted))
+            duck_r2 = bench("DuckDB", lambda: duckdb_session(data_file))
+
+            try:
+                ltseq_r2 = bench("LTSeq", lambda: ltseq_session(t_ltseq_sorted))
+            except Exception as e:
+                print(f"  LTSeq primary approach failed: {e}")
+                print("  Falling back to v2 (derive + filter)...")
+                ltseq_r2 = bench("LTSeq-v2", lambda: ltseq_session_v2(t_ltseq_sorted))
+
+            duck_count = duckdb_session(data_file)
+            try:
+                ltseq_count = ltseq_session(t_ltseq_sorted)
+            except Exception:
+                ltseq_count = ltseq_session_v2(t_ltseq_sorted)
+
+            if duck_count == ltseq_count:
+                detail = f"both engines returned {duck_count:,} sessions"
+                print(f"  Validation: PASS ({detail})")
+                validation = make_validation(
+                    "pass",
+                    detail,
+                    duck_count,
+                    ltseq_count,
+                    compared_metric="session_count",
+                )
+            else:
+                detail = f"DuckDB={duck_count:,}, LTSeq={ltseq_count:,}"
+                print(f"  Validation: FAIL ({detail})")
+                validation = make_validation(
+                    "fail",
+                    detail,
+                    duck_count,
+                    ltseq_count,
+                    compared_metric="session_count",
+                )
+
+            r2.update({"duckdb": duck_r2, "ltseq": ltseq_r2, "validation": validation})
         except Exception as e:
-            print(f"  LTSeq primary approach failed: {e}")
-            print("  Falling back to v2 (derive + filter)...")
-            ltseq_r2 = bench("LTSeq-v2", lambda: ltseq_session_v2(t_ltseq_sorted))
+            print(f"  Benchmark: INFRA FAILURE ({e})")
+            mark_infra_failure(r2, e)
 
-        # Validate
-        duck_count = duckdb_session(data_file)
-        try:
-            ltseq_count = ltseq_session(t_ltseq_sorted)
-        except Exception:
-            ltseq_count = ltseq_session_v2(t_ltseq_sorted)
-
-        if duck_count == ltseq_count:
-            print(f"  Validation: PASS (both = {duck_count:,} sessions)")
-        else:
-            print(f"  Validation: WARN (DuckDB={duck_count:,}, LTSeq={ltseq_count:,})")
-
-        results.append(
-            {"round_name": "R2: Sessionization", "duckdb": duck_r2, "ltseq": ltseq_r2}
-        )
+        results.append(r2)
 
     # -----------------------------------------------------------------------
     # Round 3: Sequential Funnel
@@ -451,36 +534,54 @@ def main():
             f"  Patterns: '{FUNNEL_PATTERN_1}' -> '{FUNNEL_PATTERN_2}' -> '{FUNNEL_PATTERN_3}'"
         )
 
-        duck_r3 = bench(
-            "DuckDB",
-            lambda: duckdb_funnel(
-                data_file, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
-            ),
-        )
-        ltseq_r3 = bench(
-            "LTSeq",
-            lambda: ltseq_funnel(
-                t_ltseq_sorted, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
-            ),
-        )
-
-        # Validate
-        duck_funnel = duckdb_funnel(
-            data_file, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
-        )
-        ltseq_funnel_count = ltseq_funnel(
-            t_ltseq_sorted, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
-        )
-        if duck_funnel == ltseq_funnel_count:
-            print(f"  Validation: PASS (both = {duck_funnel:,} matches)")
-        else:
-            print(
-                f"  Validation: WARN (DuckDB={duck_funnel:,}, LTSeq={ltseq_funnel_count:,})"
+        r3 = make_round_result("r3_funnel", "R3: Funnel")
+        try:
+            duck_r3 = bench(
+                "DuckDB",
+                lambda: duckdb_funnel(
+                    data_file, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
+                ),
+            )
+            ltseq_r3 = bench(
+                "LTSeq",
+                lambda: ltseq_funnel(
+                    t_ltseq_sorted, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
+                ),
             )
 
-        results.append(
-            {"round_name": "R3: Funnel", "duckdb": duck_r3, "ltseq": ltseq_r3}
-        )
+            duck_funnel = duckdb_funnel(
+                data_file, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
+            )
+            ltseq_funnel_count = ltseq_funnel(
+                t_ltseq_sorted, FUNNEL_PATTERN_1, FUNNEL_PATTERN_2, FUNNEL_PATTERN_3
+            )
+            if duck_funnel == ltseq_funnel_count:
+                detail = f"both engines returned {duck_funnel:,} matches"
+                print(f"  Validation: PASS ({detail})")
+                validation = make_validation(
+                    "pass",
+                    detail,
+                    duck_funnel,
+                    ltseq_funnel_count,
+                    compared_metric="funnel_match_count",
+                )
+            else:
+                detail = f"DuckDB={duck_funnel:,}, LTSeq={ltseq_funnel_count:,}"
+                print(f"  Validation: FAIL ({detail})")
+                validation = make_validation(
+                    "fail",
+                    detail,
+                    duck_funnel,
+                    ltseq_funnel_count,
+                    compared_metric="funnel_match_count",
+                )
+
+            r3.update({"duckdb": duck_r3, "ltseq": ltseq_r3, "validation": validation})
+        except Exception as e:
+            print(f"  Benchmark: INFRA FAILURE ({e})")
+            mark_infra_failure(r3, e)
+
+        results.append(r3)
 
     # -----------------------------------------------------------------------
     # Output
