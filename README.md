@@ -31,6 +31,14 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Lazy evaluation** - Build complex queries before execution
 - **Zero setup** - Works with CSV, JSON, Parquet out of the box
 
+## Benchmarking
+
+Benchmark and benchmark-gated autoresearch tooling live under `benchmarks/`.
+
+- ClickBench comparison harness: `python benchmarks/bench_vs.py --sample`
+- Core operation benchmark: `python benchmarks/bench_core.py`
+- Benchmark autoresearch pilot: `docs/BENCHMARK_AUTORESEARCH.md`
+
 ## Quick Start
 
 ### Installation

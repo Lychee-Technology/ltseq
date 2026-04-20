@@ -27,6 +27,15 @@ dev = [
     "pytest>=7.0",
     "ipdb>=0.13",  # 调试好帮手
 ]
+bench = [
+    "duckdb>=1.4",
+    "psutil>=7.0",
+]
+autoresearch = [
+    "duckdb>=1.4",
+    "psutil>=7.0",
+    "py-spy>=0.4.1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["py-ltseq/tests"]
