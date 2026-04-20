@@ -23,12 +23,18 @@ The pilot reuses `benchmarks/autoresearch/runner.py` and `benchmarks/bench_vs.py
 ## Layout
 
 - `common.py`: shared target config and artifact helpers
+- `common.sh`: shared controller helpers for shell entrypoints
 - `program-perf.md`: benchmark-specific working rules
+- `prompts/`: OpenCode prompt templates for supervised runs
 - `targets/`: target briefs
 - `scripts/benchmark_baseline.py`: capture baseline artifacts
 - `scripts/benchmark_candidate.py`: capture candidate artifacts
 - `scripts/benchmark_gate.py`: compare baseline and candidate artifacts
 - `scripts/evaluate_benchmark_candidate.py`: keep/discard evaluator
+- `scripts/opencode_autoresearch.sh`: single-candidate OpenCode launcher
+- `scripts/autoloop.sh`: supervised benchmark autoresearch controller
+- `results.tsv`: controller-written run ledger
+- `issues.tsv`: controller-written issue ledger
 - `reports/`: generated artifacts
 
 ## Recommended Flow
@@ -62,3 +68,30 @@ python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_sessio
 - baseline/candidate scripts rebuild the extension with `maturin develop --release` by default
 - use `--skip-build` only when you know the native extension is already up to date
 - benchmark dependencies currently include `duckdb` and `psutil`; optional profiling uses `py-spy` or `perf`
+
+## Supervised Autoloop
+
+The pilot now includes a supervised OpenCode-driven loop for one candidate per iteration.
+
+Dry-run first:
+
+```bash
+./benchmarks/autoresearch/pilot/scripts/autoloop.sh \
+  --target clickbench_funnel \
+  --baseline \
+  --iterations 2 \
+  --sample \
+  --dry-run
+```
+
+Controller behavior:
+
+- creates a dedicated research worktree and branch
+- asks OpenCode for exactly one benchmark candidate per iteration
+- runs candidate benchmark capture and gate evaluation after each candidate
+- archives the patch, benchmark artifacts, and recommendation under `reports/runs/`
+- records outcomes in `results.tsv`
+- records harness, environment, and perf-opportunity issues in `issues.tsv`
+- discards worktree changes after archiving so the loop stays supervised and reviewable
+
+The controller does not auto-commit or auto-merge candidate changes.
