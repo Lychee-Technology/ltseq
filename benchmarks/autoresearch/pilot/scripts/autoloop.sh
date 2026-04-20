@@ -54,6 +54,67 @@ USE_SAMPLE=0
 DATA_PATH=""
 SKIP_BUILD=0
 
+default_benchmark_data_path() {
+  if [[ -n "$DATA_PATH" ]]; then
+    printf '%s\n' "$DATA_PATH"
+    return 0
+  fi
+
+  if [[ "$USE_SAMPLE" -eq 1 ]]; then
+    printf '%s\n' "$ROOT_DIR/benchmarks/data/hits_sample.parquet"
+    return 0
+  fi
+
+  printf '%s\n' "$ROOT_DIR/benchmarks/data/hits_sorted.parquet"
+}
+
+preflight_python_modules() {
+  python - <<'PY'
+import importlib
+import sys
+
+missing = []
+for name in ("duckdb", "psutil"):
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError:
+        missing.append(name)
+
+if missing:
+    print("missing-python-modules=" + ",".join(missing))
+    sys.exit(1)
+PY
+}
+
+run_preflight_checks() {
+  local data_file
+  local failures=()
+
+  data_file="$(default_benchmark_data_path)"
+
+  if [[ "$SKIP_BUILD" -ne 1 ]] && ! command -v maturin >/dev/null 2>&1; then
+    failures+=("missing command: maturin (install it or rerun with --skip-build)")
+  fi
+
+  if ! preflight_python_modules >/tmp/benchmark-autoresearch-python-check.$$ 2>&1; then
+    failures+=("python benchmark deps unavailable: $(tr '\n' ' ' < /tmp/benchmark-autoresearch-python-check.$$ | sed 's/[[:space:]]\+/ /g') (run 'uv sync --group bench' or 'uv sync --group autoresearch')")
+  fi
+  rm -f /tmp/benchmark-autoresearch-python-check.$$
+
+  if [[ ! -f "$data_file" ]]; then
+    failures+=("missing benchmark data: $data_file (run 'python benchmarks/prepare_data.py' or pass --data PATH)")
+  fi
+
+  if [[ ${#failures[@]} -ne 0 ]]; then
+    printf 'benchmark autoresearch preflight failed:\n' >&2
+    for failure in "${failures[@]}"; do
+      printf '  - %s\n' "$failure" >&2
+    done
+    printf 'see docs/BENCHMARK_AUTORESEARCH.md for setup details\n' >&2
+    return 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -m|--model)
@@ -163,6 +224,10 @@ fi
 if ! command -v opencode >/dev/null 2>&1; then
   printf 'opencode not found in PATH\n' >&2
   exit 1
+fi
+
+if [[ "$DRY_RUN" -ne 1 ]]; then
+  run_preflight_checks || exit 1
 fi
 
 WORKTREE_DIR="$ROOT_DIR/.worktrees/autoresearch-benchmark-$TARGET"
