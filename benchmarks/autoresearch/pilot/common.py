@@ -20,6 +20,7 @@ class TargetSpec:
     key: str
     title: str
     brief_path: Path
+    source_files: tuple[str, ...]
     rounds: tuple[int, ...]
     target_workloads: tuple[str, ...]
     protected_workloads: tuple[str, ...]
@@ -34,6 +35,7 @@ TARGETS = {
         key="clickbench_funnel",
         title="ClickBench Funnel",
         brief_path=PILOT_DIR / "targets" / "clickbench_funnel_perf.md",
+        source_files=("src/ops/pattern_match.rs",),
         rounds=(1, 2, 3),
         target_workloads=("r3_funnel",),
         protected_workloads=("r1_top_urls", "r2_sessionization"),
@@ -42,6 +44,7 @@ TARGETS = {
         key="clickbench_sessionization",
         title="ClickBench Sessionization",
         brief_path=PILOT_DIR / "targets" / "clickbench_sessionization_perf.md",
+        source_files=("src/ops/window.rs", "src/ops/derive.rs"),
         rounds=(1, 2, 3),
         target_workloads=("r2_sessionization",),
         protected_workloads=("r1_top_urls", "r3_funnel"),
