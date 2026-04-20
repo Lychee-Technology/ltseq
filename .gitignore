@@ -7,6 +7,9 @@ __pycache__/
 
 # Benchmark data files (large parquet datasets)
 benchmarks/data/*.parquet
+
+# autoresearch generated results (flamegraphs, run summaries)
+benchmarks/autoresearch/results/
 .opencode/
 .claude/
 build/
