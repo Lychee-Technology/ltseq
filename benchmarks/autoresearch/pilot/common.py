@@ -38,6 +38,14 @@ TARGETS = {
         target_workloads=("r3_funnel",),
         protected_workloads=("r1_top_urls", "r2_sessionization"),
     ),
+    "clickbench_sessionization": TargetSpec(
+        key="clickbench_sessionization",
+        title="ClickBench Sessionization",
+        brief_path=PILOT_DIR / "targets" / "clickbench_sessionization_perf.md",
+        rounds=(1, 2, 3),
+        target_workloads=("r2_sessionization",),
+        protected_workloads=("r1_top_urls", "r3_funnel"),
+    ),
 }
 
 ROUND_NAME_TO_ID = {
