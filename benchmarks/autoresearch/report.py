@@ -12,6 +12,21 @@ from .hypothesis import render_hypotheses
 from .tracker import render_trend_table
 
 
+def describe_dataset(data_flag: str, data_file: str | None = None) -> str:
+    if data_file:
+        data_path = Path(data_file)
+        if data_path.name == "hits_sample.parquet":
+            return "1M-row sample"
+        if data_path.name == "hits_sorted.parquet":
+            return "full dataset"
+        return f"custom dataset ({data_path})"
+    if data_flag == "--sample":
+        return "1M-row sample"
+    if data_flag.startswith("--data="):
+        return f"custom dataset ({data_flag.split('=', 1)[1]})"
+    return "full dataset"
+
+
 def generate_report(
     run_dir: Path,
     bench_vs_results: dict | None,
@@ -23,7 +38,8 @@ def generate_report(
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     git_sha = (history[0].get("git_sha", "?") if history else "?")
-    dataset_label = "1M-row sample" if "sample" in data_flag else "full dataset"
+    data_file = (bench_vs_results or {}).get("data_file") if bench_vs_results else None
+    dataset_label = describe_dataset(data_flag, data_file)
 
     lines = [
         f"# LTSeq autoresearch report — {now}",

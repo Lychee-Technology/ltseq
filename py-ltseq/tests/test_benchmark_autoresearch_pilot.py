@@ -21,6 +21,8 @@ def load_pilot_modules():
 
 
 def make_summary(*, target: str, r1: tuple[float, float], r2: tuple[float, float], r3: tuple[float, float]) -> dict:
+    target_workload = "r3_funnel" if target == "clickbench_funnel" else "r2_sessionization"
+
     return {
         "target": target,
         "git_sha": "abc123",
@@ -35,7 +37,7 @@ def make_summary(*, target: str, r1: tuple[float, float], r2: tuple[float, float
             {
                 "id": "r1_top_urls",
                 "name": "R1: Top URLs",
-                "role": "protected",
+                "role": "target" if target_workload == "r1_top_urls" else "protected",
                 "benchmark_status": "completed",
                 "validation_status": "pass",
                 "ltseq": {"median_s": r1[0], "p95_s": r1[1], "times": [r1[0]], "mem_delta_mb": 1.0},
@@ -44,7 +46,7 @@ def make_summary(*, target: str, r1: tuple[float, float], r2: tuple[float, float
             {
                 "id": "r2_sessionization",
                 "name": "R2: Sessionization",
-                "role": "protected",
+                "role": "target" if target_workload == "r2_sessionization" else "protected",
                 "benchmark_status": "completed",
                 "validation_status": "pass",
                 "ltseq": {"median_s": r2[0], "p95_s": r2[1], "times": [r2[0]], "mem_delta_mb": 1.0},
@@ -53,7 +55,7 @@ def make_summary(*, target: str, r1: tuple[float, float], r2: tuple[float, float
             {
                 "id": "r3_funnel",
                 "name": "R3: Funnel",
-                "role": "target",
+                "role": "target" if target_workload == "r3_funnel" else "protected",
                 "benchmark_status": "completed",
                 "validation_status": "pass",
                 "ltseq": {"median_s": r3[0], "p95_s": r3[1], "times": [r3[0]], "mem_delta_mb": 1.0},
@@ -128,15 +130,16 @@ def test_clickbench_funnel_evaluator_keeps_target_improvement_without_protected_
 
     assert evaluation["recommendation"] == "keep"
     assert evaluation["protected_status"] == "clean"
-    assert evaluation["target_wins_detail"] == [
-        {
-            "id": "r3_funnel",
-            "name": "R3: Funnel",
-            "role": "target",
-            "median_delta_pct": -11.0,
-            "p95_delta_pct": (1.95 - 2.2) / 2.2 * 100.0,
-        }
-    ]
+    assert len(evaluation["target_wins_detail"]) == 1
+    assert evaluation["target_wins_detail"][0]["id"] == "r3_funnel"
+    assert evaluation["target_wins_detail"][0]["name"] == "R3: Funnel"
+    assert evaluation["target_wins_detail"][0]["role"] == "target"
+    assert math.isclose(evaluation["target_wins_detail"][0]["median_delta_pct"], -11.0, abs_tol=1e-9)
+    assert math.isclose(
+        evaluation["target_wins_detail"][0]["p95_delta_pct"],
+        (1.95 - 2.2) / 2.2 * 100.0,
+        abs_tol=1e-9,
+    )
     assert evaluation["protected_regressions_detail"] == []
     assert evaluation["thresholds"] == {
         "target_improvement_threshold_pct": -3.0,
@@ -282,15 +285,16 @@ def test_clickbench_sessionization_evaluator_keeps_target_improvement_without_pr
 
     assert evaluation["recommendation"] == "keep"
     assert evaluation["protected_status"] == "clean"
-    assert evaluation["target_wins_detail"] == [
-        {
-            "id": "r2_sessionization",
-            "name": "R2: Sessionization",
-            "role": "target",
-            "median_delta_pct": -12.0,
-            "p95_delta_pct": (0.53 - 0.6) / 0.6 * 100.0,
-        }
-    ]
+    assert len(evaluation["target_wins_detail"]) == 1
+    assert evaluation["target_wins_detail"][0]["id"] == "r2_sessionization"
+    assert evaluation["target_wins_detail"][0]["name"] == "R2: Sessionization"
+    assert evaluation["target_wins_detail"][0]["role"] == "target"
+    assert math.isclose(evaluation["target_wins_detail"][0]["median_delta_pct"], -12.0, abs_tol=1e-9)
+    assert math.isclose(
+        evaluation["target_wins_detail"][0]["p95_delta_pct"],
+        (0.53 - 0.6) / 0.6 * 100.0,
+        abs_tol=1e-9,
+    )
     assert evaluation["protected_regressions_detail"] == []
     assert evaluation["thresholds"] == {
         "target_improvement_threshold_pct": -3.0,

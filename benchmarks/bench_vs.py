@@ -181,12 +181,17 @@ def duckdb_top_url(data_file):
 
 
 def ltseq_top_url(t):
-    """LTSeq: agg by url, sort descending, slice top 10."""
+    """LTSeq: agg by url, sort descending, slice top 10.
+
+    Use Arrow materialization instead of pandas so benchmark validation does not
+    depend on an optional pandas install.
+    """
     return (
         t.agg(by=lambda r: r.url, cnt=lambda g: g.url.count())
         .sort("cnt", desc=True)
         .slice(0, 10)
-        .collect()
+        .to_arrow()
+        .to_pylist()
     )
 
 
@@ -313,9 +318,14 @@ def print_results_table(results):
 
     for r in results:
         name = r["round_name"]
-        duck_t = r["duckdb"]["median_s"]
-        ltseq_t = r["ltseq"]["median_s"]
-        if ltseq_t > 0 and duck_t > 0:
+        duck_t = r.get("duckdb", {}).get("median_s")
+        ltseq_t = r.get("ltseq", {}).get("median_s")
+        if (
+            isinstance(ltseq_t, (int, float))
+            and isinstance(duck_t, (int, float))
+            and ltseq_t > 0
+            and duck_t > 0
+        ):
             speedup = duck_t / ltseq_t
             speedup_str = f"{speedup:.1f}x"
             if speedup > 1:
@@ -326,8 +336,10 @@ def print_results_table(results):
             speedup_str = "N/A"
 
         loc_sql, loc_py = loc_data.get(name, (0, 0))
+        duck_display = f"{duck_t:>10.3f}s" if isinstance(duck_t, (int, float)) else f"{'n/a':>11}"
+        ltseq_display = f"{ltseq_t:>10.3f}s" if isinstance(ltseq_t, (int, float)) else f"{'n/a':>11}"
         print(
-            f"{name:<25} | {duck_t:>10.3f}s | {ltseq_t:>10.3f}s | {speedup_str:>8} | {loc_sql:>7} | {loc_py:>6}"
+            f"{name:<25} | {duck_display} | {ltseq_display} | {speedup_str:>8} | {loc_sql:>7} | {loc_py:>6}"
         )
 
     print()

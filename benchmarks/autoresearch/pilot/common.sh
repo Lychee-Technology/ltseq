@@ -66,12 +66,13 @@ resolve_target_sources() {
 
 resolve_target_source_paths() {
   local target="$1"
+  local base_dir="${2:-$ROOT_DIR}"
   local source_paths=()
   local source
 
   while IFS= read -r source; do
     [[ -z "$source" ]] && continue
-    source_paths+=("$ROOT_DIR/$source")
+    source_paths+=("$base_dir/$source")
   done < <(resolve_target_sources "$target" | tr ' ' '\n')
 
   printf '%s' "${source_paths[*]}"
@@ -104,7 +105,7 @@ render_prompt_template_with_decision() {
   rules_file="$worktree_dir/$(resolve_program_rules)"
   candidate_script="$worktree_dir/benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py"
   gate_script="$worktree_dir/benchmarks/autoresearch/pilot/scripts/benchmark_gate.py"
-  source_files="$(resolve_target_source_paths "$target")"
+  source_files="$(resolve_target_source_paths "$target" "$worktree_dir")"
   rendered="$(<"$template_path")"
   rendered="${rendered//\{\{TARGET\}\}/$target}"
   rendered="${rendered//\{\{SOURCE_FILES\}\}/$source_files}"

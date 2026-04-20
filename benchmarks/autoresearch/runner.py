@@ -70,6 +70,10 @@ def run_bench_vs(data_flag: str, rounds: list[int], iterations: int, warmup: int
     bench_script = BENCHMARKS_DIR / "bench_vs.py"
     results_json = BENCHMARKS_DIR / "clickbench_results.json"
 
+    # Avoid reusing stale benchmark output from a previous successful run.
+    if results_json.exists():
+        results_json.unlink()
+
     cmd = [sys.executable, str(bench_script), "--iterations", str(iterations), "--warmup", str(warmup)]
     if data_flag == "--sample":
         cmd.append("--sample")
@@ -79,13 +83,19 @@ def run_bench_vs(data_flag: str, rounds: list[int], iterations: int, warmup: int
     # If all three rounds, run once together to get the combined JSON
     if sorted(rounds) == [1, 2, 3]:
         print("\n  [bench_vs] Running all rounds...")
-        subprocess.run(cmd, cwd=str(REPO_ROOT), text=True)
+        result = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True)
+        if result.returncode != 0:
+            print(f"  [bench_vs] Benchmark run failed (rc={result.returncode})")
+            return None
     else:
         for r in rounds:
             print(f"\n  [bench_vs] Round {r}...")
             result = subprocess.run(cmd + ["--round", str(r)], cwd=str(REPO_ROOT), text=True)
             if result.returncode != 0:
                 print(f"  [bench_vs] Round {r} failed (rc={result.returncode})")
+
+        if not results_json.exists():
+            return None
 
     if results_json.exists():
         try:
@@ -127,6 +137,20 @@ def run_bench_core() -> list[dict] | None:
 # Main research loop
 # ---------------------------------------------------------------------------
 
+
+def describe_dataset(data_flag: str) -> str:
+    if data_flag == "--sample":
+        return "1M-row sample"
+    if data_flag.startswith("--data="):
+        data_path = Path(data_flag.split("=", 1)[1])
+        if data_path.name == "hits_sample.parquet":
+            return "1M-row sample"
+        if data_path.name == "hits_sorted.parquet":
+            return "full dataset"
+        return f"custom dataset ({data_path})"
+    return "full dataset"
+
+
 def run_research(
     rounds: list[int],
     data_flag: str,
@@ -148,7 +172,7 @@ def run_research(
         run_dir = RESULTS_DIR / date_str
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_label = "1M-row sample" if data_flag == "--sample" else "full dataset"
+    dataset_label = describe_dataset(data_flag)
 
     print(f"\n{'='*60}")
     print(f"LTSeq autoresearch — {date_str}")
