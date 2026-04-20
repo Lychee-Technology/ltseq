@@ -57,3 +57,29 @@ python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_funnel
 ```
 
 Use `--sample` for smoke tests only. Review baseline decisions on the full sorted dataset.
+
+## Supervised Controller
+
+The pilot also includes a supervised controller that uses isolated git worktrees and one OpenCode candidate per iteration.
+
+Start with a dry-run:
+
+```bash
+bash benchmarks/autoresearch/pilot/scripts/autoloop.sh \
+  --target clickbench_funnel \
+  --baseline \
+  --iterations 1 \
+  --sample \
+  --dry-run
+```
+
+In non-dry-run mode, the controller performs preflight checks before running the loop.
+
+Required checks:
+
+- `opencode` in `PATH`
+- `maturin` in `PATH` unless `--skip-build` is used
+- Python benchmark modules `duckdb` and `psutil`
+- benchmark data file exists at `benchmarks/data/hits_sorted.parquet`, `benchmarks/data/hits_sample.parquet`, or the `--data` override
+
+If preflight fails, the controller exits early with actionable setup guidance instead of creating partial benchmark artifacts.

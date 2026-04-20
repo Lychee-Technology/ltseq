@@ -95,3 +95,10 @@ Controller behavior:
 - discards worktree changes after archiving so the loop stays supervised and reviewable
 
 The controller does not auto-commit or auto-merge candidate changes.
+
+Non-dry-run controller runs also perform preflight checks before creating benchmark evidence:
+
+- `opencode` must be available in `PATH`
+- `maturin` must be available unless `--skip-build` is used
+- Python benchmark dependencies must include `duckdb` and `psutil`
+- the benchmark dataset must exist at the default path or the `--data` override
