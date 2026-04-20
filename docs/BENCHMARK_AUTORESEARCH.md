@@ -58,6 +58,29 @@ python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_funnel
 
 Use `--sample` for smoke tests only. Review baseline decisions on the full sorted dataset.
 
+## Machine-readable Benchmark Summary
+
+`benchmarks/bench_vs.py` writes `benchmarks/clickbench_results.json` for downstream gating.
+
+Top-level fields used by the pilot:
+
+- `passed`
+- `correctness_failures`
+- `infra_failures`
+- `completed_rounds`
+- `total_rounds`
+- `rounds`
+
+Each round also carries machine-readable status fields:
+
+- `round_id`
+- `round_name`
+- `benchmark_status`
+- `validation.status`
+- `validation.detail`
+
+Infrastructure failures are persisted in JSON with `benchmark_status=infra_failure` and `validation.status=infra_failure`, so the pilot evaluator does not need to parse stdout to decide whether a candidate should be kept or discarded.
+
 ## Supervised Controller
 
 The pilot also includes a supervised controller that uses isolated git worktrees and one OpenCode candidate per iteration.

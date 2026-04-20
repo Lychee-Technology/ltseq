@@ -221,7 +221,7 @@ if [[ -n "$SESSION_ID" && "$CONTINUE_LAST" -eq 1 ]]; then
   exit 1
 fi
 
-if ! command -v opencode >/dev/null 2>&1; then
+if [[ "$DRY_RUN" -ne 1 ]] && ! command -v opencode >/dev/null 2>&1; then
   printf 'opencode not found in PATH\n' >&2
   exit 1
 fi
@@ -453,8 +453,13 @@ build_opencode_command() {
   local decision_file="$2"
   local -n out_ref=$3
   local prompt
+  local prompt_worktree_dir="$WORKTREE_DIR"
 
-  prompt="$(WORKTREE_DIR="$WORKTREE_DIR" bash "$SCRIPT_DIR/opencode_autoresearch.sh" \
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    prompt_worktree_dir="${WORKTREE_DIR:-$ROOT_DIR}"
+  fi
+
+  prompt="$(WORKTREE_DIR="$prompt_worktree_dir" bash "$SCRIPT_DIR/opencode_autoresearch.sh" \
     --target "$TARGET" \
     --single-candidate \
     --decision-file "$decision_file" \
@@ -894,13 +899,8 @@ autoloop_main() {
     cleanup_synced_assets
     discard_candidate_state
   else
-    init_worktree || true
-    bootstrap_worktree_state
-    sync_workspace_overlay
-    sync_autoresearch_assets
-    sync_baseline_reports_to_worktree
+    WORKTREE_DIR="$ROOT_DIR/.worktrees/autoresearch-benchmark-$TARGET"
     run_baseline_if_needed
-    cleanup_synced_assets
   fi
 
   for ((run_index = 1; run_index <= ITERATIONS; run_index++)); do

@@ -139,12 +139,12 @@ def run_research(
     output_dir: str | None,
 ) -> Path:
     """Execute the full research loop, return path to run directory."""
+    date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     if output_dir:
         run_dir = Path(output_dir).expanduser()
         if not run_dir.is_absolute():
             run_dir = REPO_ROOT / run_dir
     else:
-        date_str = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         run_dir = RESULTS_DIR / date_str
     run_dir.mkdir(parents=True, exist_ok=True)
 
