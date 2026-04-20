@@ -409,8 +409,46 @@ sync_baseline_reports_to_worktree() {
     return 0
   fi
 
+  rm -rf "$worktree_baseline_dir"
   mkdir -p "$worktree_baseline_dir"
   cp -R "$root_baseline_dir/." "$worktree_baseline_dir/"
+}
+
+phase_dir_has_artifacts() {
+  local phase_dir="$1"
+  local entry
+  local had_nullglob=0
+  local had_dotglob=0
+
+  [[ -d "$phase_dir" ]] || return 1
+
+  if shopt -q nullglob; then
+    had_nullglob=1
+  fi
+  if shopt -q dotglob; then
+    had_dotglob=1
+  fi
+  shopt -s nullglob dotglob
+  for entry in "$phase_dir"/*; do
+    if [[ "$(basename "$entry")" == ".gitkeep" ]]; then
+      continue
+    fi
+    if [[ "$had_nullglob" -eq 0 ]]; then
+      shopt -u nullglob
+    fi
+    if [[ "$had_dotglob" -eq 0 ]]; then
+      shopt -u dotglob
+    fi
+    return 0
+  done
+
+  if [[ "$had_nullglob" -eq 0 ]]; then
+    shopt -u nullglob
+  fi
+  if [[ "$had_dotglob" -eq 0 ]]; then
+    shopt -u dotglob
+  fi
+  return 1
 }
 
 archive_baseline_reports_from_worktree() {
@@ -426,18 +464,74 @@ archive_baseline_reports_from_worktree() {
   cp -R "$worktree_baseline_dir/." "$root_baseline_dir/"
 }
 
+archive_phase_reports_from_worktree() {
+  local phase="$1"
+  local root_phase_dir="$REPORT_DIR/$phase/$TARGET"
+  local worktree_phase_dir="$WORKTREE_DIR/benchmarks/autoresearch/pilot/reports/$phase/$TARGET"
+
+  if ! phase_dir_has_artifacts "$worktree_phase_dir"; then
+    return 0
+  fi
+
+  rm -rf "$root_phase_dir"
+  mkdir -p "$root_phase_dir"
+  cp -R "$worktree_phase_dir/." "$root_phase_dir/"
+}
+
+clear_root_phase_reports() {
+  local phase="$1"
+  local root_phase_dir="$REPORT_DIR/$phase/$TARGET"
+
+  rm -rf "$root_phase_dir"
+  mkdir -p "$root_phase_dir"
+}
+
 build_benchmark_args() {
   local -n out_ref=$1
+  local data_file
   out_ref=()
+
+  data_file="$(default_benchmark_data_path)"
+  out_ref+=(--data "$data_file")
+
   if [[ "$USE_SAMPLE" -eq 1 ]]; then
-    out_ref+=(--sample)
-  fi
-  if [[ -n "$DATA_PATH" ]]; then
-    out_ref+=(--data "$DATA_PATH")
+    :
   fi
   if [[ "$SKIP_BUILD" -eq 1 ]]; then
     out_ref+=(--skip-build)
   fi
+}
+
+baseline_matches_requested_data() {
+  local baseline_summary="$1"
+  local requested_data_file="$2"
+
+  [[ -f "$baseline_summary" ]] || return 1
+
+  python3 - <<'PY' "$baseline_summary" "$requested_data_file" "$ROOT_DIR"
+import json
+import os
+import sys
+
+summary_path, requested_data_file, repo_root = sys.argv[1:4]
+
+try:
+    with open(summary_path, encoding="utf-8") as handle:
+        data_file = json.load(handle).get("data_file")
+except Exception:
+    raise SystemExit(1)
+
+if not data_file:
+    raise SystemExit(1)
+
+def resolve(path: str) -> str:
+    if os.path.isabs(path):
+        return os.path.realpath(path)
+    return os.path.realpath(os.path.join(repo_root, path))
+
+if resolve(data_file) != resolve(requested_data_file):
+    raise SystemExit(1)
+PY
 }
 
 print_prompt() {
@@ -601,9 +695,15 @@ record_issue_from_decision() {
 run_baseline_if_needed() {
   local baseline_summary="$REPORT_DIR/baseline/$TARGET/benchmark-summary.json"
   local bench_args=()
+  local requested_data_file
+
   build_benchmark_args bench_args
+  requested_data_file="$(default_benchmark_data_path)"
   if [[ "$RUN_BASELINE" -eq 0 && -f "$baseline_summary" ]]; then
-    return 0
+    if baseline_matches_requested_data "$baseline_summary" "$requested_data_file"; then
+      return 0
+    fi
+    append_loop_log "existing baseline dataset does not match requested data; refreshing baseline for $TARGET"
   fi
   append_loop_log "running baseline for $TARGET"
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -625,6 +725,9 @@ validate_candidate_scope() {
   : > "$out_file"
   while IFS= read -r status; do
     path="${status:3}"
+    if path_in_base_overlay "$path"; then
+      continue
+    fi
     case "$path" in
       .benchmark-autoresearch-*)
         continue
@@ -633,9 +736,6 @@ validate_candidate_scope() {
         continue
         ;;
       src/*|py-ltseq/*)
-        if path_in_base_overlay "$path"; then
-          continue
-        fi
         if [[ "$path" == *"_test.py" || "$path" == *"_test.rs" ]] || ! is_target_allowed_perf_file "$path"; then
           printf '%s\n' "$path" >> "$out_file"
           invalid=1
@@ -712,11 +812,11 @@ archive_run_artifacts() {
   fi
   "${diff_cmd[@]}" > "$patch_path"
 
-  if [[ -d "$worktree_report_root/candidates/$TARGET" ]]; then
+  if phase_dir_has_artifacts "$worktree_report_root/candidates/$TARGET"; then
     mkdir -p "$run_dir/candidate"
     cp -R "$worktree_report_root/candidates/$TARGET/." "$run_dir/candidate/"
   fi
-  if [[ -d "$worktree_report_root/diff/$TARGET" ]]; then
+  if phase_dir_has_artifacts "$worktree_report_root/diff/$TARGET"; then
     mkdir -p "$run_dir/diff"
     cp -R "$worktree_report_root/diff/$TARGET/." "$run_dir/diff/"
   fi
@@ -788,6 +888,8 @@ run_iteration() {
   record_issue_from_decision "$decision_file"
 
   if [[ "$status" != "keep" ]]; then
+    clear_root_phase_reports candidates
+    clear_root_phase_reports diff
     printf 'recommendation=discard\nreason=%s\ntarget_win=none\nprotected_status=n/a\nevidence=%s\n' "$reason" "$evidence" > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
     run_dir="${archived[0]}"
@@ -798,6 +900,8 @@ run_iteration() {
   fi
 
   if ! validate_candidate_scope "$scope_file"; then
+    clear_root_phase_reports candidates
+    clear_root_phase_reports diff
     printf 'recommendation=discard\nreason=out-of-scope-or-empty-changes\ntarget_win=none\nprotected_status=n/a\nevidence=%s\n' "$(tr '\n' ';' < "$scope_file")" > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
     run_dir="${archived[0]}"
@@ -813,6 +917,8 @@ run_iteration() {
     cd "$WORKTREE_DIR"
     python benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py "$TARGET" "${bench_args[@]}"
   ); then
+    clear_root_phase_reports candidates
+    clear_root_phase_reports diff
     printf '{"recommendation":"discard","reason":"benchmark-candidate-command-failed","target_win":"none","protected_status":"n/a"}\n' > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
     run_dir="${archived[0]}"
@@ -826,6 +932,7 @@ run_iteration() {
     cd "$WORKTREE_DIR"
     python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py "$TARGET" >/dev/null
   ); then
+    clear_root_phase_reports diff
     printf '{"recommendation":"discard","reason":"benchmark-gate-command-failed","target_win":"none","protected_status":"n/a"}\n' > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
     run_dir="${archived[0]}"
@@ -843,6 +950,8 @@ run_iteration() {
   mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
   run_dir="${archived[0]}"
   patch_path="${archived[1]}"
+  archive_phase_reports_from_worktree candidates
+  archive_phase_reports_from_worktree diff
   recommendation="$(python3 - <<'PY' "$eval_file"
 import json, sys
 data = json.load(open(sys.argv[1]))

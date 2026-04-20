@@ -85,3 +85,28 @@ def test_save_results_writes_gating_summary_fields(tmp_path, monkeypatch):
     assert payload["rounds"][0]["validation"]["status"] == "pass"
     assert payload["rounds"][1]["benchmark_status"] == "infra_failure"
     assert payload["rounds"][1]["validation"]["status"] == "infra_failure"
+
+
+def test_print_results_table_handles_infra_failure_rounds(capsys):
+    bench_vs = load_bench_vs_module()
+
+    passing_round = bench_vs.make_round_result("r3_funnel", "R3: Funnel")
+    passing_round["duckdb"] = {"median_s": 0.5}
+    passing_round["ltseq"] = {"median_s": 0.25}
+    passing_round["validation"] = bench_vs.make_validation(
+        "pass",
+        "both engines returned 123 matches",
+        123,
+        123,
+        compared_metric="funnel_match_count",
+    )
+
+    failing_round = bench_vs.make_round_result("r1_top_urls", "R1: Top URLs")
+    bench_vs.mark_infra_failure(failing_round, RuntimeError("pandas unavailable"))
+
+    bench_vs.print_results_table([failing_round, passing_round])
+
+    output = capsys.readouterr().out
+    assert "R1: Top URLs" in output
+    assert "R3: Funnel" in output
+    assert "n/a" in output
