@@ -29,3 +29,11 @@ lto = "fat"
 codegen-units = 1
 opt-level = 3
 strip = "symbols"
+
+# Profile for flamegraph generation (retains debug symbols)
+# Build with: maturin develop --profile flamegraph
+# Provides readable Rust function names in py-spy/perf flamegraphs.
+[profile.flamegraph]
+inherits = "release"
+debug = true
+strip = "none"
