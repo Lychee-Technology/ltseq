@@ -62,6 +62,16 @@ python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_funnel
 python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_sessionization
 ```
 
+For each target, the gate writes machine-readable evidence under `reports/diff/<target>/`:
+
+- `benchmark-diff.json`: per-workload LTSeq median/p95 deltas for the target workload plus protected workloads
+- `evaluation.json`: keep/discard recommendation, target-win details, protected-regression details, and threshold metadata
+
+Examples:
+
+- `reports/diff/clickbench_funnel/`
+- `reports/diff/clickbench_sessionization/`
+
 ## Notes
 
 - use `--sample` for smoke tests only; baseline decisions should use the full sorted ClickBench dataset

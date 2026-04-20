@@ -62,8 +62,16 @@ def make_round_result(round_id, round_name):
 
 def mark_infra_failure(round_result, error):
     """Capture a round-level infrastructure failure without aborting the run."""
+    error_text = str(error)
     round_result["benchmark_status"] = "infra_failure"
-    round_result["error"] = str(error)
+    round_result["error"] = error_text
+    round_result["validation"] = make_validation(
+        "infra_failure",
+        error_text,
+        None,
+        None,
+        error=error_text,
+    )
     return round_result
 
 
