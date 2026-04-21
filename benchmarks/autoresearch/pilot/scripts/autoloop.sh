@@ -12,7 +12,7 @@ Usage:
   ./benchmarks/autoresearch/pilot/scripts/autoloop.sh [options]
 
 Options:
-  -m, --model MODEL            OpenCode model in provider/model form (default: github-copilot/gpt-5-mini)
+  -m, --model MODEL            OpenCode model in provider/model form (default: github-copilot/gpt-4.1)
   -t, --target TARGET          Benchmark target key (default: clickbench_funnel)
       --agent AGENT            Optional OpenCode agent name
       --iterations N           Number of candidate attempts (default: 3)
@@ -36,7 +36,7 @@ EOF
 }
 
 TARGET="clickbench_funnel"
-MODEL="github-copilot/gpt-5-mini"
+MODEL="github-copilot/gpt-4.1"
 AGENT=""
 ITERATIONS=3
 RUN_BASELINE=0

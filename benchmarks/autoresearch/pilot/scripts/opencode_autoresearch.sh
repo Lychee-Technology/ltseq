@@ -12,7 +12,7 @@ Usage:
   ./benchmarks/autoresearch/pilot/scripts/opencode_autoresearch.sh [options]
 
 Options:
-  -m, --model MODEL        OpenCode model in provider/model form (default: github-copilot/gpt-5-mini)
+  -m, --model MODEL        OpenCode model in provider/model form (default: github-copilot/gpt-4.1)
   -t, --target TARGET      Benchmark target key (default: clickbench_funnel)
       --agent AGENT        Optional OpenCode agent name
       --single-candidate   Generate a single-candidate prompt
@@ -27,7 +27,7 @@ EOF
 }
 
 TARGET="clickbench_funnel"
-MODEL="github-copilot/gpt-5-mini"
+MODEL="github-copilot/gpt-4.1"
 AGENT=""
 SINGLE_CANDIDATE=0
 DECISION_FILE=""
