@@ -325,7 +325,8 @@ pub fn is_subset_impl(
                 batches2,
             )?;
 
-            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
+            let compare_pairs: Vec<(String, String)> = compare_cols.iter().map(|c| (c.clone(), c.clone())).collect();
+            let where_cond = build_equality_conditions("t1", "t2", &compare_pairs);
             let sql = format!(
                 "SELECT COUNT(*) as cnt FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
                 t1_name, t2_name, where_cond
@@ -398,7 +399,8 @@ fn set_operation_impl(
             )?;
 
             let select_cols = build_qualified_column_list(schema1, "t1");
-            let where_cond = build_equality_conditions("t1", "t2", &compare_cols);
+            let compare_pairs: Vec<(String, String)> = compare_cols.iter().map(|c| (c.clone(), c.clone())).collect();
+            let where_cond = build_equality_conditions("t1", "t2", &compare_pairs);
 
             let sql = match op {
                 SetOperation::Intersect => format!(

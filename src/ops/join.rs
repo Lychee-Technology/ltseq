@@ -253,7 +253,7 @@ struct JoinSqlConfig<'a> {
     right_table: &'a str,
     left_schema: &'a ArrowSchema,
     right_schema: &'a ArrowSchema,
-    left_keys: &'a [String],
+    key_pairs: &'a [(String, String)],
     join_type: JoinType,
     alias: &'a str,
 }
@@ -264,7 +264,7 @@ fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
     let right_table = cfg.right_table;
     let left_schema = cfg.left_schema;
     let right_schema = cfg.right_schema;
-    let left_keys = cfg.left_keys;
+    let key_pairs = cfg.key_pairs;
     let join_type = cfg.join_type;
     let alias = cfg.alias;
     // Build SELECT clause using common helpers
@@ -279,8 +279,8 @@ fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
     
     let select_clause = format!("{}, {}", left_cols, right_cols);
 
-    // Build ON clause using common helper
-    let on_clause = build_equality_conditions("L", "R", left_keys);
+    // Build ON clause using paired columns
+    let on_clause = build_equality_conditions("L", "R", key_pairs);
 
     format!(
         "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
@@ -322,12 +322,17 @@ pub fn join_impl(
     let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
 
     // Parse and validate join keys
-    let (left_col_names, _right_col_names) = extract_and_validate_join_keys(
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
         &left_schema,
         &right_schema,
     )?;
+
+    let key_pairs: Vec<(String, String)> = left_col_names
+        .into_iter()
+        .zip(right_col_names.into_iter())
+        .collect();
 
     // Register temp tables (RAII guard will handle cleanup)
     let table_guard = register_join_tables(
@@ -348,7 +353,7 @@ pub fn join_impl(
         right_table: right_name,
         left_schema: &left_schema,
         right_schema: &right_schema,
-        left_keys: &left_col_names,
+        key_pairs: &key_pairs,
         join_type,
         alias,
     });
@@ -368,15 +373,14 @@ fn build_semi_anti_join_sql(
     left_table: &str,
     right_table: &str,
     left_schema: &ArrowSchema,
-    left_keys: &[String],
-    _right_keys: &[String],
+    key_pairs: &[(String, String)],
     is_anti: bool,
 ) -> String {
     // Select all columns from left table only
     let select_cols = build_qualified_column_list(left_schema, "L");
 
-    // Build WHERE condition using common helper
-    let where_conditions = build_equality_conditions("L", "R", left_keys);
+    // Build WHERE condition using paired columns
+    let where_conditions = build_equality_conditions("L", "R", key_pairs);
 
     let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
 
@@ -457,12 +461,16 @@ fn semi_anti_join_impl(
     let right_name = table_names[1];
 
     // Build and execute SQL query
+    let key_pairs: Vec<(String, String)> = left_col_names
+        .into_iter()
+        .zip(right_col_names.into_iter())
+        .collect();
+
     let sql_query = build_semi_anti_join_sql(
         left_name,
         right_name,
         &left_schema,
-        &left_col_names,
-        &right_col_names,
+        &key_pairs,
         is_anti,
     );
 

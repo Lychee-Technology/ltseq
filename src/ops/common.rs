@@ -114,25 +114,25 @@ pub fn build_qualified_column_list(schema: &ArrowSchema, table_alias: &str) -> S
         .join(", ")
 }
 
-/// Build an AND-connected equality condition for multiple columns.
+/// Build an AND-connected equality condition for paired column names.
 ///
-/// Example: `t1."id" = t2."id" AND t1."year" = t2."year"`
+/// Example: `t1."id" = t2."product_id" AND t1."year" = t2."yr"`
 ///
 /// # Arguments
 /// * `left_alias` - Alias for left table
 /// * `right_alias` - Alias for right table
-/// * `columns` - Column names to compare
+/// * `key_pairs` - Paired (left_key, right_key) column names to compare
 ///
 /// # Returns
 /// AND-connected equality conditions
 pub fn build_equality_conditions(
     left_alias: &str,
     right_alias: &str,
-    columns: &[String],
+    key_pairs: &[(String, String)],
 ) -> String {
-    columns
+    key_pairs
         .iter()
-        .map(|c| format!("{}.\"{}\" = {}.\"{}\"", left_alias, c, right_alias, c))
+        .map(|(lk, rk)| format!("{}.\"{}\" = {}.\"{}\"", left_alias, lk, right_alias, rk))
         .collect::<Vec<_>>()
         .join(" AND ")
 }
@@ -361,9 +361,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_equality_conditions() {
-        let columns = vec!["id".to_string(), "year".to_string()];
-        let result = build_equality_conditions("L", "R", &columns);
+    fn test_build_equality_conditions_symmetric() {
+        let pairs = vec![("id".to_string(), "id".to_string()), ("year".to_string(), "year".to_string())];
+        let result = build_equality_conditions("L", "R", &pairs);
         assert_eq!(result, "L.\"id\" = R.\"id\" AND L.\"year\" = R.\"year\"");
+    }
+
+    #[test]
+    fn test_build_equality_conditions_asymmetric() {
+        let pairs = vec![("product_id".to_string(), "id".to_string())];
+        let result = build_equality_conditions("L", "R", &pairs);
+        assert_eq!(result, "L.\"product_id\" = R.\"id\"");
     }
 }
