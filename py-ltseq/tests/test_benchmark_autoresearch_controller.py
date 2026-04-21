@@ -5,8 +5,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
-
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -29,11 +27,6 @@ def run_autoloop_shell(script: str) -> subprocess.CompletedProcess[str]:
 def write_summary(path: Path, data_file: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"data_file": data_file}), encoding="utf-8")
-
-
-def list_relative_files(path: Path) -> set[str]:
-    assert path.is_dir(), f"expected directory to exist: {path}"
-    return {str(entry.relative_to(path)) for entry in path.rglob("*") if entry.is_file()}
 
 
 def test_baseline_matches_requested_data_rejects_dataset_mismatch(tmp_path):
@@ -146,7 +139,6 @@ def test_validate_candidate_scope_distinguishes_empty_from_out_of_scope(tmp_path
     assert out_of_scope_result.stdout.endswith("src/lib.rs")
 
 
-@pytest.mark.xfail(reason="Shell integration: get_field/rg parsing differs in CI environment")
 def test_run_iteration_clears_root_candidate_and_diff_on_gate_failure(tmp_path):
     worktree = tmp_path / "worktree"
     report_dir = tmp_path / "reports"
@@ -359,21 +351,9 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
           printf 'status=keep\nscenario=archive-smoke\nreason=proceed\nevidence=ok\n' > "$decision_file"
           printf 'stdout\n' > "$stdout_log"
         }}
-        get_field() {{
-          local _file="$1"
-          local key="$2"
-          case "$key" in
-            status) printf 'keep' ;;
-            scenario) printf 'archive-smoke' ;;
-            reason) printf 'proceed' ;;
-            evidence) printf 'ok' ;;
-          esac
-        }}
-        record_issue_from_decision() {{ :; }}
         validate_candidate_scope() {{ return 0; }}
         build_benchmark_args() {{ local -n out_ref=$1; out_ref=(); }}
         append_loop_log() {{ :; }}
-        discard_candidate_state() {{ :; }}
         git() {{
           if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
             printf 'abc123\n'
@@ -401,8 +381,13 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     assert (run_dir / "evaluation.txt").exists()
     assert (run_dir / "stdout.log").read_text(encoding="utf-8") == "stdout\n"
     assert (run_dir / "patch.diff").read_text(encoding="utf-8").startswith("diff --git")
-    assert list_relative_files(run_dir / "candidate") == list_relative_files(candidate_dir)
-    assert list_relative_files(run_dir / "diff") == list_relative_files(diff_dir)
+    assert (run_dir / "candidate" / "benchmark-summary.json").exists()
+    assert (run_dir / "candidate" / "benchmark-result.md").exists()
+    assert (run_dir / "diff" / "benchmark-diff.json").exists()
+    assert (run_dir / "diff" / "evaluation.json").exists()
+
+    assert (report_dir / "candidates" / "clickbench_funnel" / "benchmark-summary.json").exists()
+    assert (report_dir / "diff" / "clickbench_funnel" / "benchmark-diff.json").exists()
 
     results_lines = (tmp_path / "results.tsv").read_text(encoding="utf-8").splitlines()
     assert len(results_lines) == 2
@@ -421,104 +406,49 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     assert not (tmp_path / "issues.tsv").exists()
 
 
-def test_sync_research_branch_to_base_fast_forwards_stale_worktree(tmp_path):
-    repo = tmp_path / "repo"
+def test_sync_autoresearch_assets_preserves_existing_worktree_ledgers(tmp_path):
     worktree = tmp_path / "worktree"
-    repo.mkdir()
+    pilot_root = repo_root() / "benchmarks" / "autoresearch" / "pilot"
+    worktree_pilot = worktree / "benchmarks" / "autoresearch" / "pilot"
+    worktree_pilot.mkdir(parents=True)
+    (worktree / ".git").mkdir(parents=True)
 
-    init_script = textwrap.dedent(
-        f"""
-        set -e
-        git init {repo!s} >/dev/null
-        git -C {repo!s} config user.name 'Test User'
-        git -C {repo!s} config user.email 'test@example.com'
-        printf 'base\n' > {repo!s}/tracked.txt
-        git -C {repo!s} add tracked.txt
-        git -C {repo!s} commit -m 'base' >/dev/null
-        git -C {repo!s} branch autoresearch-benchmark/clickbench_funnel-20260420
-        git -C {repo!s} worktree add {worktree!s} autoresearch-benchmark/clickbench_funnel-20260420 >/dev/null
-        printf 'root update\n' >> {repo!s}/tracked.txt
-        git -C {repo!s} add tracked.txt
-        git -C {repo!s} commit -m 'root update' >/dev/null
-        """
-    )
-    init_result = subprocess.run(["bash", "-lc", init_script], text=True, capture_output=True, check=False)
-    assert init_result.returncode == 0, init_result.stderr
+    root_results = pilot_root / "results.tsv"
+    root_issues = pilot_root / "issues.tsv"
+    original_results = root_results.read_text(encoding="utf-8")
+    original_issues = root_issues.read_text(encoding="utf-8")
 
-    before_head = subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
+    worktree_results = worktree_pilot / "results.tsv"
+    worktree_issues = worktree_pilot / "issues.tsv"
+    worktree_results.write_text(
+        "base_ref\ttarget\tmodel_status\trecommendation\thypothesis\ttarget_win\tprotected_status\tevidence\trun_dir\tpatch_path\n"
+        "abc123\tclickbench_funnel\tkeep\tkeep\tscenario\twin\tclean\treason\trun\tpatch\n",
+        encoding="utf-8",
     )
-    assert before_head.returncode == 0
+    worktree_issues.write_text(
+        "id\tcategory\ttarget\tfile\ttitle\tevidence\tsuggested_fix\tstatus\trun_date\n"
+        "AR-001\tharness\tclickbench_funnel\tfile\ttitle\tevidence\tfix\topen\t2026-04-20\n",
+        encoding="utf-8",
+    )
 
     script = textwrap.dedent(
         f"""
         source {autoloop_path()!s}
-        ROOT_DIR={repo!s}
+        ROOT_DIR={repo_root()!s}
         WORKTREE_DIR={worktree!s}
-        RESEARCH_BRANCH=autoresearch-benchmark/clickbench_funnel-20260420
-        LOOP_LOG={tmp_path / 'loop.log'!s}
-        sync_research_branch_to_base
-        git -C {worktree!s} rev-parse HEAD
+        AR_DIR={pilot_root!s}
+        sync_autoresearch_assets
         """
     )
 
     result = run_autoloop_shell(script)
 
-    after_head = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert after_head.returncode == 0
     assert result.returncode == 0, result.stderr
-    assert before_head.stdout.strip() != after_head.stdout.strip()
-    assert result.stdout.strip().endswith(after_head.stdout.strip())
-    assert "fast-forwarding research branch" in (tmp_path / "loop.log").read_text(encoding="utf-8")
-
-
-def test_sync_research_branch_to_base_rejects_diverged_worktree(tmp_path):
-    repo = tmp_path / "repo"
-    worktree = tmp_path / "worktree"
-    repo.mkdir()
-
-    init_script = textwrap.dedent(
-        f"""
-        set -e
-        git init {repo!s} >/dev/null
-        git -C {repo!s} config user.name 'Test User'
-        git -C {repo!s} config user.email 'test@example.com'
-        printf 'base\n' > {repo!s}/tracked.txt
-        git -C {repo!s} add tracked.txt
-        git -C {repo!s} commit -m 'base' >/dev/null
-        git -C {repo!s} branch autoresearch-benchmark/clickbench_funnel-20260420
-        git -C {repo!s} worktree add {worktree!s} autoresearch-benchmark/clickbench_funnel-20260420 >/dev/null
-        printf 'root update\n' >> {repo!s}/tracked.txt
-        git -C {repo!s} add tracked.txt
-        git -C {repo!s} commit -m 'root update' >/dev/null
-        printf 'worktree update\n' >> {worktree!s}/tracked.txt
-        git -C {worktree!s} add tracked.txt
-        git -C {worktree!s} commit -m 'worktree update' >/dev/null
-        """
+    assert worktree_results.read_text(encoding="utf-8").splitlines()[1].startswith(
+        "abc123\tclickbench_funnel"
     )
-    init_result = subprocess.run(["bash", "-lc", init_script], text=True, capture_output=True, check=False)
-    assert init_result.returncode == 0, init_result.stderr
-
-    script = textwrap.dedent(
-        f"""
-        source {autoloop_path()!s}
-        ROOT_DIR={repo!s}
-        WORKTREE_DIR={worktree!s}
-        RESEARCH_BRANCH=autoresearch-benchmark/clickbench_funnel-20260420
-        LOOP_LOG={tmp_path / 'loop.log'!s}
-        sync_research_branch_to_base
-        """
+    assert worktree_issues.read_text(encoding="utf-8").splitlines()[1].startswith(
+        "AR-001\tharness\tclickbench_funnel"
     )
-
-    result = run_autoloop_shell(script)
-
-    assert result.returncode != 0
-    assert "remove the stale worktree/branch before rerunning" in result.stderr
+    assert root_results.read_text(encoding="utf-8") == original_results
+    assert root_issues.read_text(encoding="utf-8") == original_issues

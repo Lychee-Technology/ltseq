@@ -415,6 +415,8 @@ path_in_base_overlay() {
 
 sync_autoresearch_assets() {
   local dst_dir="$WORKTREE_DIR/benchmarks/autoresearch/pilot"
+  local dst_results="$dst_dir/results.tsv"
+  local dst_issues="$dst_dir/issues.tsv"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'sync autoresearch assets into: %s\n' "$dst_dir"
@@ -422,7 +424,13 @@ sync_autoresearch_assets() {
   fi
 
   mkdir -p "$dst_dir"
-  cp "$AR_DIR/README.md" "$AR_DIR/program-perf.md" "$AR_DIR/common.py" "$AR_DIR/common.sh" "$AR_DIR/results.tsv" "$AR_DIR/issues.tsv" "$dst_dir/"
+  cp "$AR_DIR/README.md" "$AR_DIR/program-perf.md" "$AR_DIR/common.py" "$AR_DIR/common.sh" "$dst_dir/"
+  if [[ ! -f "$dst_results" ]]; then
+    cp "$AR_DIR/results.tsv" "$dst_results"
+  fi
+  if [[ ! -f "$dst_issues" ]]; then
+    cp "$AR_DIR/issues.tsv" "$dst_issues"
+  fi
   cp -R "$AR_DIR/prompts" "$AR_DIR/scripts" "$AR_DIR/targets" "$dst_dir/"
 }
 
