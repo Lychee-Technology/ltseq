@@ -57,6 +57,12 @@ ROUND_NAME_TO_ID = {
     "R3: Funnel": "r3_funnel",
 }
 
+ROUND_NUMBER_TO_ID = {
+    1: "r1_top_urls",
+    2: "r2_sessionization",
+    3: "r3_funnel",
+}
+
 
 def resolve_target(target: str) -> TargetSpec:
     try:
@@ -203,9 +209,39 @@ def normalize_round(round_payload: dict, spec: TargetSpec) -> dict:
     }
 
 
+def expected_workload_ids(spec: TargetSpec) -> tuple[str, ...]:
+    return tuple(ROUND_NUMBER_TO_ID[round_num] for round_num in spec.rounds)
+
+
+def ensure_complete_benchmark_capture(spec: TargetSpec, runner_summary: dict) -> None:
+    bench_vs = runner_summary.get("bench_vs")
+    if not isinstance(bench_vs, dict):
+        raise SystemExit("runner summary missing bench_vs benchmark results")
+
+    rounds = bench_vs.get("rounds")
+    if not isinstance(rounds, list) or not rounds:
+        expected = ", ".join(expected_workload_ids(spec))
+        raise SystemExit(
+            f"runner summary missing bench_vs round results; expected workloads: {expected}"
+        )
+
+    actual_ids = {
+        normalize_round(round_payload, spec).get("id")
+        for round_payload in rounds
+        if isinstance(round_payload, dict)
+    }
+    missing = [workload_id for workload_id in expected_workload_ids(spec) if workload_id not in actual_ids]
+    if missing:
+        raise SystemExit(
+            "runner summary missing bench_vs workloads: " + ", ".join(missing)
+        )
+
+
 def build_benchmark_summary(target: str, runner_summary: dict) -> dict:
     spec = resolve_target(target)
-    bench_vs = runner_summary.get("bench_vs") or {}
+    bench_vs = runner_summary.get("bench_vs")
+    if not isinstance(bench_vs, dict):
+        bench_vs = {}
     rounds = [normalize_round(round_payload, spec) for round_payload in bench_vs.get("rounds", [])]
     correctness_failures = int(
         bench_vs.get(
@@ -219,9 +255,9 @@ def build_benchmark_summary(target: str, runner_summary: dict) -> dict:
             sum(1 for workload in rounds if workload.get("benchmark_status") == "infra_failure"),
         )
     )
-    passed = bool(
-        bench_vs.get("passed", correctness_failures == 0 and infra_failures == 0)
-    )
+    passed = bool(bench_vs.get("passed", correctness_failures == 0 and infra_failures == 0))
+    if not rounds:
+        passed = False
     return {
         "target": target,
         "title": spec.title,

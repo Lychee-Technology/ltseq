@@ -12,6 +12,7 @@ if __package__ in (None, ""):
     from pilot.common import (
         build_benchmark_summary,
         clean_output_dir,
+        ensure_complete_benchmark_capture,
         ensure_report_dirs,
         load_json,
         render_benchmark_result,
@@ -25,6 +26,7 @@ else:
     from ..common import (
         build_benchmark_summary,
         clean_output_dir,
+        ensure_complete_benchmark_capture,
         ensure_report_dirs,
         load_json,
         render_benchmark_result,
@@ -67,6 +69,7 @@ def main() -> int:
         return 0
 
     runner_summary = load_json(output_dir / "summary.json")
+    ensure_complete_benchmark_capture(spec, runner_summary)
     benchmark_summary = build_benchmark_summary(spec.key, runner_summary)
     write_json(output_dir / "benchmark-result.json", runner_summary)
     write_json(output_dir / "benchmark-summary.json", benchmark_summary)
