@@ -266,3 +266,189 @@ def test_run_baseline_if_needed_logs_reuse_for_matching_dataset(tmp_path):
     assert (tmp_path / "loop.log").read_text(encoding="utf-8").strip() == (
         "reusing baseline for clickbench_funnel on 1M-row sample"
     )
+
+
+def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
+    worktree = tmp_path / "worktree"
+    report_dir = tmp_path / "reports"
+    logs_dir = report_dir / "logs"
+    fake_bin_dir = tmp_path / "bin"
+    runs_dir = report_dir / "runs" / "clickbench_funnel"
+    baseline_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "baseline" / "clickbench_funnel"
+    candidate_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "candidates" / "clickbench_funnel"
+    diff_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "diff" / "clickbench_funnel"
+    scripts_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "scripts"
+
+    logs_dir.mkdir(parents=True)
+    fake_bin_dir.mkdir(parents=True)
+    runs_dir.mkdir(parents=True)
+    baseline_dir.mkdir(parents=True)
+    candidate_dir.mkdir(parents=True)
+    diff_dir.mkdir(parents=True)
+    scripts_dir.mkdir(parents=True)
+    (worktree / ".git").mkdir(parents=True)
+
+    write_summary(baseline_dir / "benchmark-summary.json", "benchmarks/data/hits_sample.parquet")
+    (scripts_dir / "evaluate_benchmark_candidate.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({\n"
+        "    'recommendation': 'keep',\n"
+        "    'target_win': 'R3: Funnel(median=-6.00%,p95=-2.00%)',\n"
+        "    'protected_status': 'clean',\n"
+        "    'reason': 'target improvement without protected regression',\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    (fake_bin_dir / "python").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"$1\" == \"benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py\" ]]; then\n"
+        "  mkdir -p benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel/benchmark-summary.json <<'JSON'\n"
+        "{\"target\":\"clickbench_funnel\",\"correctness_failures\":0,\"infra_failures\":0,\"workloads\":[]}\n"
+        "JSON\n"
+        "  printf '# candidate\n' > benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel/benchmark-result.md\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"$1\" == \"benchmarks/autoresearch/pilot/scripts/benchmark_gate.py\" ]]; then\n"
+        "  mkdir -p benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel/benchmark-diff.json <<'JSON'\n"
+        "{\"target\":\"clickbench_funnel\",\"workloads\":[]}\n"
+        "JSON\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel/evaluation.json <<'JSON'\n"
+        "{\"recommendation\":\"keep\"}\n"
+        "JSON\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec /usr/bin/python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin_dir / "python").chmod(0o755)
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        TARGET=clickbench_funnel
+        DRY_RUN=0
+        ROOT_DIR={repo_root()!s}
+        REPORT_DIR={report_dir!s}
+        WORKTREE_DIR={worktree!s}
+        export PATH={fake_bin_dir!s}:$PATH
+        LOG_PREFIX=test-log
+        LOOP_LOG={logs_dir / 'loop.log'!s}
+        results_file={tmp_path / 'results.tsv'!s}
+        issues_file={tmp_path / 'issues.tsv'!s}
+        base_overlay_manifest={tmp_path / 'overlay.txt'!s}
+        : > "$base_overlay_manifest"
+        benchmark_log_path() {{
+          printf '%s/%s.log\n' {logs_dir!s} "$1"
+        }}
+        run_single_candidate() {{
+          local _run_index="$1"
+          local decision_file="$2"
+          local stdout_log="$3"
+          printf 'status=keep\nscenario=archive-smoke\nreason=proceed\nevidence=ok\n' > "$decision_file"
+          printf 'stdout\n' > "$stdout_log"
+        }}
+        validate_candidate_scope() {{ return 0; }}
+        build_benchmark_args() {{ local -n out_ref=$1; out_ref=(); }}
+        append_loop_log() {{ :; }}
+        git() {{
+          if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
+            printf 'abc123\n'
+            return 0
+          fi
+          if [[ "$*" == *"diff -- ."* ]]; then
+            printf 'diff --git a/src/ops/pattern_match.rs b/src/ops/pattern_match.rs\n'
+            return 0
+          fi
+          if [[ "$*" == *"restore --worktree ."* ]] || [[ "$*" == *"clean -fd"* ]]; then
+            return 0
+          fi
+          command git "$@"
+        }}
+        run_iteration 1
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    assert result.returncode == 0, result.stderr
+
+    run_dir = runs_dir / "run-001"
+    assert (run_dir / "decision.txt").read_text(encoding="utf-8").startswith("status=keep\n")
+    assert (run_dir / "evaluation.txt").exists()
+    assert (run_dir / "stdout.log").read_text(encoding="utf-8") == "stdout\n"
+    assert (run_dir / "patch.diff").read_text(encoding="utf-8").startswith("diff --git")
+    assert (run_dir / "candidate" / "benchmark-summary.json").exists()
+    assert (run_dir / "candidate" / "benchmark-result.md").exists()
+    assert (run_dir / "diff" / "benchmark-diff.json").exists()
+    assert (run_dir / "diff" / "evaluation.json").exists()
+
+    assert (report_dir / "candidates" / "clickbench_funnel" / "benchmark-summary.json").exists()
+    assert (report_dir / "diff" / "clickbench_funnel" / "benchmark-diff.json").exists()
+
+    results_lines = (tmp_path / "results.tsv").read_text(encoding="utf-8").splitlines()
+    assert len(results_lines) == 2
+    assert results_lines[1].split("\t") == [
+        "abc123",
+        "clickbench_funnel",
+        "keep",
+        "keep",
+        "archive-smoke",
+        "R3: Funnel(median=-6.00%,p95=-2.00%)",
+        "clean",
+        "target improvement without protected regression",
+        str(run_dir),
+        str(run_dir / "patch.diff"),
+    ]
+    assert not (tmp_path / "issues.tsv").exists()
+
+
+def test_sync_autoresearch_assets_preserves_existing_worktree_ledgers(tmp_path):
+    worktree = tmp_path / "worktree"
+    pilot_root = repo_root() / "benchmarks" / "autoresearch" / "pilot"
+    worktree_pilot = worktree / "benchmarks" / "autoresearch" / "pilot"
+    worktree_pilot.mkdir(parents=True)
+    (worktree / ".git").mkdir(parents=True)
+
+    root_results = pilot_root / "results.tsv"
+    root_issues = pilot_root / "issues.tsv"
+    original_results = root_results.read_text(encoding="utf-8")
+    original_issues = root_issues.read_text(encoding="utf-8")
+
+    worktree_results = worktree_pilot / "results.tsv"
+    worktree_issues = worktree_pilot / "issues.tsv"
+    worktree_results.write_text(
+        "base_ref\ttarget\tmodel_status\trecommendation\thypothesis\ttarget_win\tprotected_status\tevidence\trun_dir\tpatch_path\n"
+        "abc123\tclickbench_funnel\tkeep\tkeep\tscenario\twin\tclean\treason\trun\tpatch\n",
+        encoding="utf-8",
+    )
+    worktree_issues.write_text(
+        "id\tcategory\ttarget\tfile\ttitle\tevidence\tsuggested_fix\tstatus\trun_date\n"
+        "AR-001\tharness\tclickbench_funnel\tfile\ttitle\tevidence\tfix\topen\t2026-04-20\n",
+        encoding="utf-8",
+    )
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        ROOT_DIR={repo_root()!s}
+        WORKTREE_DIR={worktree!s}
+        AR_DIR={pilot_root!s}
+        sync_autoresearch_assets
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    assert result.returncode == 0, result.stderr
+    assert worktree_results.read_text(encoding="utf-8").splitlines()[1].startswith(
+        "abc123\tclickbench_funnel"
+    )
+    assert worktree_issues.read_text(encoding="utf-8").splitlines()[1].startswith(
+        "AR-001\tharness\tclickbench_funnel"
+    )
+    assert root_results.read_text(encoding="utf-8") == original_results
+    assert root_issues.read_text(encoding="utf-8") == original_issues

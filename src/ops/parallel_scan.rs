@@ -17,7 +17,7 @@ use crate::error::LtseqError;
 use crate::ops::linear_scan::{
     build_metadata_table, extract_referenced_columns, streaming_fuse_eval, StreamState,
 };
-use crate::ops::pattern_match::{eval_predicate, extract_starts_with_prefix};
+use crate::ops::pattern_match::eval_predicate;
 use crate::types::PyExpr;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
@@ -32,6 +32,56 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::Arc;
+
+struct StartsWithFastPathPlan {
+    column: String,
+    prefixes: Vec<String>,
+}
+
+fn same_string_column_starts_with_plan(
+    step_predicates: &[PyExpr],
+) -> Option<StartsWithFastPathPlan> {
+    if step_predicates.is_empty() {
+        return None;
+    }
+
+    let mut column_name: Option<String> = None;
+    let mut prefixes = Vec::with_capacity(step_predicates.len());
+
+    for expr in step_predicates {
+        let PyExpr::Call { func, args, on, kwargs } = expr else {
+            return None;
+        };
+        if !kwargs.is_empty() || args.len() != 1 {
+            return None;
+        }
+        if func != "starts_with" && func != "str_starts_with" {
+            return None;
+        }
+        let PyExpr::Column(name) = on.as_ref() else {
+            return None;
+        };
+        let PyExpr::Literal { value, dtype } = &args[0] else {
+            return None;
+        };
+        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
+            return None;
+        }
+        let prefix = value.clone();
+
+        match &column_name {
+            Some(existing) if existing != name => return None,
+            Some(_) => {}
+            None => column_name = Some(name.clone()),
+        }
+        prefixes.push(prefix);
+    }
+
+    Some(StartsWithFastPathPlan {
+        column: column_name?,
+        prefixes,
+    })
+}
 
 // ============================================================================
 // Strategy 1: Sequential Streaming for R2 (group_ordered)
@@ -519,6 +569,7 @@ pub fn parallel_pattern_match_count(
     parquet_path: &str,
 ) -> PyResult<usize> {
     let num_steps = step_predicates.len();
+    let fast_path_plan = same_string_column_starts_with_plan(step_predicates);
 
     // Step 1: Extract columns needed by all predicates
     let mut needed_cols: HashSet<String> = HashSet::new();
@@ -589,6 +640,7 @@ pub fn parallel_pattern_match_count(
                 &projection_mask,
                 part_col_idx,
                 step_predicates,
+                fast_path_plan.as_ref(),
                 num_steps,
                 &name_to_idx,
             )
@@ -603,6 +655,7 @@ pub fn parallel_pattern_match_count(
     let boundary_count = count_cross_rg_boundary_patterns_from_info(
         &rg_results,
         step_predicates,
+        fast_path_plan.as_ref(),
         num_steps,
         &name_to_idx,
     );
@@ -618,7 +671,7 @@ pub fn parallel_pattern_match_count(
 
 /// Fused read + match + extract boundary for a single row group.
 ///
-/// Reads the RG, splits by partition key, pattern-matches within the RG,
+/// Reads the RG, concatenates projected batches once, pattern-matches within the RG,
 /// extracts minimal boundary data (first/last few rows), then drops the full
 /// RG data. This means each RG's ~20MB of data is freed immediately after
 /// processing, eliminating the 1.4s dealloc overhead from holding all 814 RGs
@@ -629,6 +682,7 @@ fn read_match_and_extract_boundary(
     projection_mask: &ProjectionMask,
     partition_col_idx: usize,
     step_predicates: &[PyExpr],
+    fast_path_plan: Option<&StartsWithFastPathPlan>,
     num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
 ) -> Result<RgMatchResult, String> {
@@ -644,7 +698,7 @@ fn read_match_and_extract_boundary(
         .build()
         .map_err(|e| format!("Failed to build reader for RG {}: {}", row_group_idx, e))?;
 
-    let mut slices: Vec<(i64, RecordBatch)> = Vec::new();
+    let mut rg_batches: Vec<RecordBatch> = Vec::new();
 
     for batch_result in reader {
         let batch = batch_result
@@ -654,60 +708,78 @@ fn read_match_and_extract_boundary(
             continue;
         }
 
-        let part_col = batch.column(partition_col_idx);
-        let part_values = coerce_partition_to_i64(part_col).ok_or_else(|| {
-            format!(
-                "Partition column has unsupported type {:?}",
-                part_col.data_type()
-            )
-        })?;
-
-        // Split batch at partition key changes
-        let mut start = 0;
-        let mut current_key = part_values.value(0);
-
-        for i in 1..batch.num_rows() {
-            let key = part_values.value(i);
-            if key != current_key {
-                let slice = batch.slice(start, i - start);
-                slices.push((current_key, slice));
-                start = i;
-                current_key = key;
-            }
-        }
-        let slice = batch.slice(start, batch.num_rows() - start);
-        slices.push((current_key, slice));
+        rg_batches.push(batch);
     }
 
-    if slices.is_empty() {
+    if rg_batches.is_empty() {
         return Ok(RgMatchResult {
             count: 0,
             boundary: None,
         });
     }
 
+    let combined = match concat_batches(&rg_batches[0].schema(), &rg_batches) {
+        Ok(batch) => batch,
+        Err(_) => unify_and_concat_batches(&rg_batches)
+            .map_err(|e| format!("Failed to concatenate RG {}: {}", row_group_idx, e))?,
+    };
+
+    let part_col = combined.column(partition_col_idx);
+    let part_values = coerce_partition_to_i64(part_col).ok_or_else(|| {
+        format!(
+            "Partition column has unsupported type {:?}",
+            part_col.data_type()
+        )
+    })?;
+
+    let n = combined.num_rows();
+    let mut partition_boundaries = vec![false; n];
+    partition_boundaries[0] = true;
+    for i in 1..n {
+        if part_values.value(i) != part_values.value(i - 1) {
+            partition_boundaries[i] = true;
+        }
+    }
+
     // Pattern match within this RG
-    let count = count_patterns_in_rg_slices(&slices, step_predicates, num_steps, name_to_idx);
+    let count = count_patterns_in_rg_batch(
+        &combined,
+        &partition_boundaries,
+        step_predicates,
+        fast_path_plan,
+        num_steps,
+        name_to_idx,
+    );
 
     // Extract boundary info for cross-RG matching
-    let (first_key, first_batch) = &slices[0];
-    let first_head_rows = first_batch.num_rows().min(num_steps - 1);
-    let first_head = first_batch.slice(0, first_head_rows);
+    let first_key = part_values.value(0);
+    let first_partition_end = partition_boundaries
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(idx, is_boundary)| is_boundary.then_some(idx))
+        .unwrap_or(n);
+    let first_head_rows = first_partition_end.min(num_steps.saturating_sub(1));
+    let first_head = combined.slice(0, first_head_rows);
 
-    // SAFETY: slices.is_empty() returned early at line 437
-    let (last_key, last_batch) = slices.last().expect("slices is non-empty");
-    let last_rows = last_batch.num_rows();
-    let last_tail_start = last_rows.saturating_sub(num_steps - 1);
-    let last_tail = last_batch.slice(last_tail_start, last_rows - last_tail_start);
+    let last_partition_start = partition_boundaries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, is_boundary)| is_boundary.then_some(idx))
+        .unwrap_or(0);
+    let last_key = part_values.value(last_partition_start);
+    let last_tail_start = last_partition_start.max(n.saturating_sub(num_steps.saturating_sub(1)));
+    let last_tail = combined.slice(last_tail_start, n - last_tail_start);
 
     let boundary = RgBoundaryInfo {
-        first_key: *first_key,
+        first_key,
         first_head,
-        last_key: *last_key,
+        last_key,
         last_tail,
     };
 
-    // `slices` is dropped here — RG data freed immediately
+    // `combined` is dropped here — RG data freed immediately
     Ok(RgMatchResult {
         count,
         boundary: Some(boundary),
@@ -748,6 +820,7 @@ fn coerce_partition_to_i64(col: &ArrayRef) -> Option<Int64Array> {
 fn count_cross_rg_boundary_patterns_from_info(
     rg_results: &[RgMatchResult],
     step_predicates: &[PyExpr],
+    fast_path_plan: Option<&StartsWithFastPathPlan>,
     num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
 ) -> usize {
@@ -796,75 +869,117 @@ fn count_cross_rg_boundary_patterns_from_info(
         // Only count matches that actually cross the boundary (start in tail, end in head)
         let tail_len = tail_slice.num_rows();
 
-        let step1_mask = match eval_predicate(&step_predicates[0], &combined, name_to_idx) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        let step_prefixes: Vec<Option<String>> = step_predicates[1..]
-            .iter()
-            .map(extract_starts_with_prefix)
-            .collect();
-
-        let url_idx = name_to_idx.get("url");
-        let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
+        let fast_path = fast_path_plan.and_then(|plan| {
+            name_to_idx
+                .get(plan.column.as_str())
+                .copied()
+                .map(|col_idx| (col_idx, plan))
+        });
 
         let max_start = n.saturating_sub(num_steps - 1);
 
-        if all_simple {
-            // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
-            let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
-            let prefixes: Vec<&str> = step_prefixes
-                .iter()
-                .map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str())
-                .collect();
+        if let Some((fast_col_idx, plan)) = fast_path {
+            let url_col = combined.column(fast_col_idx);
+            let prefixes = &plan.prefixes;
+            let step1_prefix = prefixes[0].as_str();
+            let remaining_prefixes: Vec<&str> = prefixes[1..].iter().map(|p| p.as_str()).collect();
 
             if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-                for i in 0..max_start {
-                    if i >= tail_len {
-                        break;
-                    }
-                    let last_row = i + num_steps - 1;
-                    if last_row < tail_len {
-                        continue;
-                    }
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
+                if prefixes.len() == 3 {
+                    let step2_prefix = prefixes[1].as_str();
+                    let step3_prefix = prefixes[2].as_str();
+                    for i in 0..max_start {
+                        if i >= tail_len {
                             break;
                         }
-                    }
-                    if all_match {
+                        let row1 = i + 1;
+                        let row2 = i + 2;
+                        if row2 < tail_len {
+                            continue;
+                        }
+                        if str_arr.is_null(i)
+                            || str_arr.is_null(row1)
+                            || str_arr.is_null(row2)
+                            || !str_arr.value(i).starts_with(step1_prefix)
+                            || !str_arr.value(row1).starts_with(step2_prefix)
+                            || !str_arr.value(row2).starts_with(step3_prefix)
+                        {
+                            continue;
+                        }
                         boundary_count += 1;
+                    }
+                } else {
+                    for i in 0..max_start {
+                        if i >= tail_len {
+                            break;
+                        }
+                        let last_row = i + num_steps - 1;
+                        if last_row < tail_len {
+                            continue;
+                        }
+                        if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
+                            continue;
+                        }
+                        let mut all_match = true;
+                        for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
+                            let row = i + step_offset + 1;
+                            if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if all_match {
+                            boundary_count += 1;
+                        }
                     }
                 }
             } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-                for i in 0..max_start {
-                    if i >= tail_len {
-                        break;
-                    }
-                    let last_row = i + num_steps - 1;
-                    if last_row < tail_len {
-                        continue;
-                    }
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
+                if prefixes.len() == 3 {
+                    let step2_prefix = prefixes[1].as_str();
+                    let step3_prefix = prefixes[2].as_str();
+                    for i in 0..max_start {
+                        if i >= tail_len {
                             break;
                         }
-                    }
-                    if all_match {
+                        let row1 = i + 1;
+                        let row2 = i + 2;
+                        if row2 < tail_len {
+                            continue;
+                        }
+                        if str_arr.is_null(i)
+                            || str_arr.is_null(row1)
+                            || str_arr.is_null(row2)
+                            || !str_arr.value(i).starts_with(step1_prefix)
+                            || !str_arr.value(row1).starts_with(step2_prefix)
+                            || !str_arr.value(row2).starts_with(step3_prefix)
+                        {
+                            continue;
+                        }
                         boundary_count += 1;
+                    }
+                } else {
+                    for i in 0..max_start {
+                        if i >= tail_len {
+                            break;
+                        }
+                        let last_row = i + num_steps - 1;
+                        if last_row < tail_len {
+                            continue;
+                        }
+                        if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
+                            continue;
+                        }
+                        let mut all_match = true;
+                        for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
+                            let row = i + step_offset + 1;
+                            if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if all_match {
+                            boundary_count += 1;
+                        }
                     }
                 }
             }
@@ -1012,133 +1127,135 @@ fn unify_data_type(
     }
 }
 
-/// Count pattern matches within a single row group's worth of slices.
-///
-/// Concatenates all partition slices in the RG into one batch, then pattern-matches
-/// across the entire batch — but skips any match where consecutive rows belong to
-/// different partitions. This avoids creating per-user PartitionSlice objects.
-fn count_patterns_in_rg_slices(
-    rg_slices: &[(i64, RecordBatch)],
+/// Count pattern matches within a single row group batch.
+fn count_patterns_in_rg_batch(
+    combined: &RecordBatch,
+    partition_boundaries: &[bool],
     step_predicates: &[PyExpr],
+    fast_path_plan: Option<&StartsWithFastPathPlan>,
     num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
 ) -> usize {
-    if rg_slices.is_empty() {
-        return 0;
-    }
-
-    // Build a combined batch from all slices in this RG
-    let batches: Vec<&RecordBatch> = rg_slices.iter().map(|(_, b)| b).collect();
-    let schema = batches[0].schema();
-
-    let combined = {
-        let batch_refs: Vec<RecordBatch> = batches.iter().map(|b| (*b).clone()).collect();
-        match concat_batches(&schema, &batch_refs) {
-            Ok(b) => b,
-            Err(_) => match unify_and_concat_batches(&batch_refs) {
-                Ok(b) => b,
-                Err(_) => return 0,
-            },
-        }
-    };
-
     let n = combined.num_rows();
     if n < num_steps {
         return 0;
     }
 
-    // Build partition boundary mask: partition_boundaries[i] = true means row i
-    // starts a new partition (different key from row i-1).
-    // We compute this from the original slices' key + row count info.
-    let mut partition_boundaries = vec![false; n];
-    partition_boundaries[0] = true; // first row always starts a partition
-    let mut offset = 0;
-    for (idx, (key, batch)) in rg_slices.iter().enumerate() {
-        if idx > 0 && *key != rg_slices[idx - 1].0 {
-            partition_boundaries[offset] = true;
-        }
-        offset += batch.num_rows();
-    }
-
     // Pattern match: skip matches that span partition boundaries
-    let step1_mask = match eval_predicate(&step_predicates[0], &combined, name_to_idx) {
-        Ok(m) => m,
-        Err(_) => return 0,
-    };
-
     let max_start = n.saturating_sub(num_steps - 1);
     let mut count: usize = 0;
 
     // Try fast path: all remaining predicates are starts_with on same column
-    let step_prefixes: Vec<Option<String>> = step_predicates[1..]
-        .iter()
-        .map(extract_starts_with_prefix)
-        .collect();
+    let fast_path = fast_path_plan.and_then(|plan| {
+        name_to_idx
+            .get(plan.column.as_str())
+            .copied()
+            .map(|col_idx| (col_idx, plan))
+    });
 
-    let url_idx = name_to_idx.get("url");
-    let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
-
-    if all_simple {
-        // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
-        let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
-        let prefixes: Vec<&str> = step_prefixes
-            .iter()
-            .map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str())
-            .collect();
+    if let Some((fast_col_idx, plan)) = fast_path {
+        let url_col = combined.column(fast_col_idx);
+        let prefixes = &plan.prefixes;
+        let step1_prefix = prefixes[0].as_str();
+        let remaining_prefixes: Vec<&str> = prefixes[1..].iter().map(|p| p.as_str()).collect();
 
         if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-            for i in 0..max_start {
-                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                    continue;
-                }
-                // Check that all rows i..i+num_steps are in the same partition
-                let mut crosses_boundary = false;
-                for offset in 1..num_steps {
-                    if partition_boundaries[i + offset] {
-                        crosses_boundary = true;
-                        break;
+            if prefixes.len() == 3 {
+                let step2_prefix = prefixes[1].as_str();
+                let step3_prefix = prefixes[2].as_str();
+                for i in 0..max_start {
+                    let row1 = i + 1;
+                    let row2 = i + 2;
+                    if partition_boundaries[row1] || partition_boundaries[row2] {
+                        continue;
                     }
-                }
-                if crosses_boundary {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, prefix) in prefixes.iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                        all_match = false;
-                        break;
+                    if str_arr.is_null(i)
+                        || str_arr.is_null(row1)
+                        || str_arr.is_null(row2)
+                        || !str_arr.value(i).starts_with(step1_prefix)
+                        || !str_arr.value(row1).starts_with(step2_prefix)
+                        || !str_arr.value(row2).starts_with(step3_prefix)
+                    {
+                        continue;
                     }
-                }
-                if all_match {
                     count += 1;
+                }
+            } else {
+                for i in 0..max_start {
+                    if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
+                        continue;
+                    }
+                    // Check that all rows i..i+num_steps are in the same partition
+                    let mut crosses_boundary = false;
+                    for offset in 1..num_steps {
+                        if partition_boundaries[i + offset] {
+                            crosses_boundary = true;
+                            break;
+                        }
+                    }
+                    if crosses_boundary {
+                        continue;
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        count += 1;
+                    }
                 }
             }
         } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-            for i in 0..max_start {
-                if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                    continue;
-                }
-                let mut crosses_boundary = false;
-                for offset in 1..num_steps {
-                    if partition_boundaries[i + offset] {
-                        crosses_boundary = true;
-                        break;
+            if prefixes.len() == 3 {
+                let step2_prefix = prefixes[1].as_str();
+                let step3_prefix = prefixes[2].as_str();
+                for i in 0..max_start {
+                    let row1 = i + 1;
+                    let row2 = i + 2;
+                    if partition_boundaries[row1] || partition_boundaries[row2] {
+                        continue;
                     }
-                }
-                if crosses_boundary {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, prefix) in prefixes.iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                        all_match = false;
-                        break;
+                    if str_arr.is_null(i)
+                        || str_arr.is_null(row1)
+                        || str_arr.is_null(row2)
+                        || !str_arr.value(i).starts_with(step1_prefix)
+                        || !str_arr.value(row1).starts_with(step2_prefix)
+                        || !str_arr.value(row2).starts_with(step3_prefix)
+                    {
+                        continue;
                     }
-                }
-                if all_match {
                     count += 1;
+                }
+            } else {
+                for i in 0..max_start {
+                    if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
+                        continue;
+                    }
+                    let mut crosses_boundary = false;
+                    for offset in 1..num_steps {
+                        if partition_boundaries[i + offset] {
+                            crosses_boundary = true;
+                            break;
+                        }
+                    }
+                    if crosses_boundary {
+                        continue;
+                    }
+                    let mut all_match = true;
+                    for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
+                        let row = i + step_offset + 1;
+                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    if all_match {
+                        count += 1;
+                    }
                 }
             }
         }
