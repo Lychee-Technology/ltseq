@@ -6,6 +6,8 @@ import math
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def load_pilot_modules():
     repo_root = Path(__file__).resolve().parents[2]
@@ -18,6 +20,15 @@ def load_pilot_modules():
     evaluate = importlib.import_module("pilot.scripts.evaluate_benchmark_candidate")
     gate = importlib.import_module("pilot.scripts.benchmark_gate")
     return common, evaluate, gate
+
+
+def load_capture_module(module_name: str):
+    repo_root = Path(__file__).resolve().parents[2]
+    autoresearch_root = repo_root / "benchmarks" / "autoresearch"
+    autoresearch_root_str = str(autoresearch_root)
+    if autoresearch_root_str not in sys.path:
+        sys.path.insert(0, autoresearch_root_str)
+    return importlib.import_module(module_name)
 
 
 def make_summary(*, target: str, r1: tuple[float, float], r2: tuple[float, float], r3: tuple[float, float]) -> dict:
@@ -91,6 +102,81 @@ def test_build_benchmark_summary_records_dataset_label_for_custom_data():
     assert summary["dataset_label"] == "custom dataset (/tmp/custom-bench.parquet)"
     rendered = common.render_benchmark_result(summary)
     assert "- Dataset: custom dataset (/tmp/custom-bench.parquet)" in rendered
+
+
+def test_build_benchmark_summary_marks_empty_round_capture_as_failed():
+    common, _evaluate, _gate = load_pilot_modules()
+
+    runner_summary = {
+        "git_sha": "abc123",
+        "timestamp": "2026-04-20T12:00:00",
+        "bench_vs": {
+            "data_file": "benchmarks/data/hits_sample.parquet",
+            "warmup": 1,
+            "iterations": 3,
+            "passed": True,
+            "correctness_failures": 0,
+            "infra_failures": 0,
+            "rounds": [],
+        },
+    }
+
+    summary = common.build_benchmark_summary("clickbench_funnel", runner_summary)
+
+    assert summary["passed"] is False
+    assert summary["workloads"] == []
+
+
+def test_ensure_complete_benchmark_capture_rejects_missing_workloads():
+    common, _evaluate, _gate = load_pilot_modules()
+
+    runner_summary = {
+        "bench_vs": {
+            "rounds": [
+                {
+                    "round_id": "r1_top_urls",
+                    "round_name": "R1: Top URLs",
+                    "benchmark_status": "completed",
+                    "validation": {"status": "pass"},
+                }
+            ]
+        }
+    }
+
+    spec = common.resolve_target("clickbench_funnel")
+    with pytest.raises(SystemExit, match="missing bench_vs workloads: r2_sessionization, r3_funnel"):
+        common.ensure_complete_benchmark_capture(spec, runner_summary)
+
+
+def test_benchmark_candidate_fails_explicitly_when_runner_summary_is_incomplete(
+    tmp_path, monkeypatch
+):
+    candidate = load_capture_module("pilot.scripts.benchmark_candidate")
+
+    output_dir = tmp_path / "candidate"
+    output_dir.mkdir()
+    (output_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "git_sha": "abc123",
+                "timestamp": "2026-04-20T12:00:00",
+                "bench_vs": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(candidate, "ensure_report_dirs", lambda: None)
+    monkeypatch.setattr(candidate, "resolve_report_dir", lambda phase, target: output_dir)
+    monkeypatch.setattr(candidate, "clean_output_dir", lambda path: None)
+    monkeypatch.setattr(candidate, "run_build", lambda **kwargs: None)
+    monkeypatch.setattr(candidate, "run_runner", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["benchmark_candidate.py", "clickbench_funnel", "--skip-build"])
+
+    with pytest.raises(SystemExit, match="missing bench_vs benchmark results"):
+        candidate.main()
+
+    assert not (output_dir / "benchmark-summary.json").exists()
 
 
 def test_clickbench_funnel_target_spec_is_configured():

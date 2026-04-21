@@ -65,6 +65,55 @@ else:
 # Benchmark runners
 # ---------------------------------------------------------------------------
 
+
+def summarize_bench_vs_rounds(rounds: list[dict]) -> dict:
+    correctness_failures = sum(
+        1 for round_payload in rounds if round_payload.get("validation", {}).get("status") == "fail"
+    )
+    infra_failures = sum(
+        1 for round_payload in rounds if round_payload.get("benchmark_status") == "infra_failure"
+    )
+    completed_rounds = sum(
+        1 for round_payload in rounds if round_payload.get("benchmark_status") == "completed"
+    )
+    return {
+        "passed": correctness_failures == 0 and infra_failures == 0,
+        "correctness_failures": correctness_failures,
+        "infra_failures": infra_failures,
+        "completed_rounds": completed_rounds,
+        "total_rounds": len(rounds),
+    }
+
+
+def load_bench_vs_results(results_json: Path) -> dict | None:
+    if not results_json.exists():
+        print("  [bench_vs] Benchmark run did not produce clickbench_results.json")
+        return None
+
+    try:
+        parsed = json.loads(results_json.read_text())
+    except Exception as e:
+        print(f"  [bench_vs] Failed to parse JSON: {e}")
+        return None
+
+    if not isinstance(parsed, dict):
+        print("  [bench_vs] Unexpected JSON payload type")
+        return None
+    return parsed
+
+
+def merge_bench_vs_results(results: list[dict]) -> dict | None:
+    if not results:
+        return None
+
+    merged = dict(results[-1])
+    rounds: list[dict] = []
+    for result in results:
+        rounds.extend(result.get("rounds", []))
+    merged["rounds"] = rounds
+    merged.update(summarize_bench_vs_rounds(rounds))
+    return merged
+
 def run_bench_vs(data_flag: str, rounds: list[int], iterations: int, warmup: int) -> dict | None:
     """Run bench_vs.py and return parsed JSON results."""
     bench_script = BENCHMARKS_DIR / "bench_vs.py"
@@ -87,22 +136,24 @@ def run_bench_vs(data_flag: str, rounds: list[int], iterations: int, warmup: int
         if result.returncode != 0:
             print(f"  [bench_vs] Benchmark run failed (rc={result.returncode})")
             return None
+        return load_bench_vs_results(results_json)
     else:
+        collected_results: list[dict] = []
         for r in rounds:
             print(f"\n  [bench_vs] Round {r}...")
+            if results_json.exists():
+                results_json.unlink()
             result = subprocess.run(cmd + ["--round", str(r)], cwd=str(REPO_ROOT), text=True)
             if result.returncode != 0:
                 print(f"  [bench_vs] Round {r} failed (rc={result.returncode})")
+                return None
 
-        if not results_json.exists():
-            return None
+            parsed = load_bench_vs_results(results_json)
+            if parsed is None:
+                return None
+            collected_results.append(parsed)
 
-    if results_json.exists():
-        try:
-            return json.loads(results_json.read_text())
-        except Exception as e:
-            print(f"  [bench_vs] Failed to parse JSON: {e}")
-    return None
+        return merge_bench_vs_results(collected_results)
 
 
 def run_bench_core() -> list[dict] | None:
