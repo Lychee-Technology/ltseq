@@ -71,6 +71,17 @@ def ensure_report_dirs() -> None:
         (REPORT_DIR / phase).mkdir(parents=True, exist_ok=True)
 
 
+def describe_dataset(data_file: str | None) -> str:
+    if not data_file:
+        return "unknown dataset"
+    data_path = Path(data_file)
+    if data_path.name == "hits_sample.parquet":
+        return "1M-row sample"
+    if data_path.name == "hits_sorted.parquet":
+        return "full dataset"
+    return f"custom dataset ({data_path})"
+
+
 def resolve_report_dir(phase: str, target: str) -> Path:
     return REPORT_DIR / phase / target
 
@@ -218,6 +229,7 @@ def build_benchmark_summary(target: str, runner_summary: dict) -> dict:
         "git_sha": runner_summary.get("git_sha"),
         "timestamp": runner_summary.get("timestamp"),
         "data_file": bench_vs.get("data_file"),
+        "dataset_label": describe_dataset(bench_vs.get("data_file")),
         "warmup": bench_vs.get("warmup"),
         "iterations": bench_vs.get("iterations"),
         "passed": passed,
@@ -233,6 +245,7 @@ def render_benchmark_result(summary: dict) -> str:
         "",
         f"- Target: `{summary['target']}`",
         f"- Git SHA: `{summary.get('git_sha', '?')}`",
+        f"- Dataset: {summary.get('dataset_label', describe_dataset(summary.get('data_file')))}",
         f"- Passed: `{summary.get('passed')}`",
         f"- Correctness failures: `{summary.get('correctness_failures')}`",
         f"- Infra failures: `{summary.get('infra_failures')}`",

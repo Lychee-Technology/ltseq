@@ -53,6 +53,13 @@ FORCE=0
 USE_SAMPLE=0
 DATA_PATH=""
 SKIP_BUILD=0
+WORKTREE_DIR=""
+BRANCH_DATE=""
+RESEARCH_BRANCH=""
+LOOP_LOG=""
+results_file=""
+issues_file=""
+base_overlay_manifest=""
 
 default_benchmark_data_path() {
   if [[ -n "$DATA_PATH" ]]; then
@@ -115,128 +122,134 @@ run_preflight_checks() {
   fi
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -m|--model)
-      MODEL="${2:-}"
-      shift 2
-      ;;
-    -t|--target)
-      TARGET="${2:-}"
-      shift 2
-      ;;
-    --agent)
-      AGENT="${2:-}"
-      shift 2
-      ;;
-    --iterations)
-      ITERATIONS="${2:-}"
-      shift 2
-      ;;
-    --baseline)
-      RUN_BASELINE=1
-      shift
-      ;;
-    --attach)
-      ATTACH_URL="${2:-}"
-      shift 2
-      ;;
-    --session)
-      SESSION_ID="${2:-}"
-      shift 2
-      ;;
-    -c|--continue)
-      CONTINUE_LAST=1
-      shift
-      ;;
-    --fork)
-      FORK_SESSION=1
-      shift
-      ;;
-    --dangerously-skip-permissions)
-      SKIP_PERMISSIONS=1
-      shift
-      ;;
-    --sample)
-      USE_SAMPLE=1
-      shift
-      ;;
-    --data)
-      DATA_PATH="${2:-}"
-      shift 2
-      ;;
-    --skip-build)
-      SKIP_BUILD=1
-      shift
-      ;;
-    --sleep-seconds)
-      SLEEP_SECONDS="${2:-}"
-      shift 2
-      ;;
-    --log-prefix)
-      LOG_PREFIX="${2:-}"
-      shift 2
-      ;;
-    --print-prompt)
-      PRINT_PROMPT=1
-      shift
-      ;;
-    --dry-run)
-      DRY_RUN=1
-      shift
-      ;;
-    --force)
-      FORCE=1
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      printf 'unknown option: %s\n\n' "$1" >&2
-      usage >&2
-      exit 1
-      ;;
-  esac
-done
+parse_autoloop_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m|--model)
+        MODEL="${2:-}"
+        shift 2
+        ;;
+      -t|--target)
+        TARGET="${2:-}"
+        shift 2
+        ;;
+      --agent)
+        AGENT="${2:-}"
+        shift 2
+        ;;
+      --iterations)
+        ITERATIONS="${2:-}"
+        shift 2
+        ;;
+      --baseline)
+        RUN_BASELINE=1
+        shift
+        ;;
+      --attach)
+        ATTACH_URL="${2:-}"
+        shift 2
+        ;;
+      --session)
+        SESSION_ID="${2:-}"
+        shift 2
+        ;;
+      -c|--continue)
+        CONTINUE_LAST=1
+        shift
+        ;;
+      --fork)
+        FORK_SESSION=1
+        shift
+        ;;
+      --dangerously-skip-permissions)
+        SKIP_PERMISSIONS=1
+        shift
+        ;;
+      --sample)
+        USE_SAMPLE=1
+        shift
+        ;;
+      --data)
+        DATA_PATH="${2:-}"
+        shift 2
+        ;;
+      --skip-build)
+        SKIP_BUILD=1
+        shift
+        ;;
+      --sleep-seconds)
+        SLEEP_SECONDS="${2:-}"
+        shift 2
+        ;;
+      --log-prefix)
+        LOG_PREFIX="${2:-}"
+        shift 2
+        ;;
+      --print-prompt)
+        PRINT_PROMPT=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --force)
+        FORCE=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        return 1
+        ;;
+      *)
+        printf 'unknown option: %s\n\n' "$1" >&2
+        usage >&2
+        return 2
+        ;;
+    esac
+  done
 
-resolve_target_brief "$TARGET" >/dev/null
+  return 0
+}
 
-for value_name in ITERATIONS SLEEP_SECONDS; do
-  value="${!value_name}"
-  if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 0 ]]; then
-    printf '%s must be a non-negative integer\n' "$value_name" >&2
-    exit 1
+initialize_autoloop_state() {
+  resolve_target_brief "$TARGET" >/dev/null
+
+  for value_name in ITERATIONS SLEEP_SECONDS; do
+    value="${!value_name}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 0 ]]; then
+      printf '%s must be a non-negative integer\n' "$value_name" >&2
+      return 1
+    fi
+  done
+
+  if [[ "$ITERATIONS" -lt 1 ]]; then
+    printf '--iterations must be at least 1\n' >&2
+    return 1
   fi
-done
 
-if [[ "$ITERATIONS" -lt 1 ]]; then
-  printf '--iterations must be at least 1\n' >&2
-  exit 1
-fi
+  if [[ -n "$SESSION_ID" && "$CONTINUE_LAST" -eq 1 ]]; then
+    printf 'use either --continue or --session, not both\n' >&2
+    return 1
+  fi
 
-if [[ -n "$SESSION_ID" && "$CONTINUE_LAST" -eq 1 ]]; then
-  printf 'use either --continue or --session, not both\n' >&2
-  exit 1
-fi
+  if [[ "$DRY_RUN" -ne 1 ]] && ! command -v opencode >/dev/null 2>&1; then
+    printf 'opencode not found in PATH\n' >&2
+    return 1
+  fi
 
-if [[ "$DRY_RUN" -ne 1 ]] && ! command -v opencode >/dev/null 2>&1; then
-  printf 'opencode not found in PATH\n' >&2
-  exit 1
-fi
+  if [[ "$DRY_RUN" -ne 1 ]]; then
+    run_preflight_checks || return 1
+  fi
 
-if [[ "$DRY_RUN" -ne 1 ]]; then
-  run_preflight_checks || exit 1
-fi
-
-WORKTREE_DIR="$ROOT_DIR/.worktrees/autoresearch-benchmark-$TARGET"
-BRANCH_DATE="$(date '+%Y%m%d')"
-RESEARCH_BRANCH="autoresearch-benchmark/${TARGET}-${BRANCH_DATE}"
-LOOP_LOG="$(benchmark_log_path "$LOG_PREFIX-$TARGET")"
-results_file="$AR_DIR/results.tsv"
-issues_file="$AR_DIR/issues.tsv"
-base_overlay_manifest="$WORKTREE_DIR/.benchmark-autoresearch-base-overlay.txt"
+  WORKTREE_DIR="$ROOT_DIR/.worktrees/autoresearch-benchmark-$TARGET"
+  BRANCH_DATE="$(date '+%Y%m%d')"
+  RESEARCH_BRANCH="autoresearch-benchmark/${TARGET}-${BRANCH_DATE}"
+  LOOP_LOG="$(benchmark_log_path "$LOG_PREFIX-$TARGET")"
+  results_file="$AR_DIR/results.tsv"
+  issues_file="$AR_DIR/issues.tsv"
+  base_overlay_manifest="$WORKTREE_DIR/.benchmark-autoresearch-base-overlay.txt"
+}
 
 append_loop_log() {
   local line="$1"
@@ -283,6 +296,8 @@ is_registered_worktree() {
 }
 
 init_worktree() {
+  local base_ref
+
   if [[ -d "$WORKTREE_DIR" ]]; then
     if ! is_registered_worktree; then
       git -C "$ROOT_DIR" worktree prune >/dev/null 2>&1 || true
@@ -297,8 +312,9 @@ init_worktree() {
 
   printf 'creating new worktree: %s\n' "$WORKTREE_DIR"
   mkdir -p "$(dirname "$WORKTREE_DIR")"
+  base_ref="$(git -C "$ROOT_DIR" rev-parse HEAD)"
   if ! git -C "$ROOT_DIR" rev-parse --verify "$RESEARCH_BRANCH" >/dev/null 2>&1; then
-    git -C "$ROOT_DIR" branch "$RESEARCH_BRANCH"
+    git -C "$ROOT_DIR" branch "$RESEARCH_BRANCH" "$base_ref"
   fi
   git -C "$ROOT_DIR" worktree add "$WORKTREE_DIR" "$RESEARCH_BRANCH"
 }
@@ -502,6 +518,23 @@ build_benchmark_args() {
   fi
 }
 
+describe_requested_dataset() {
+  local data_file
+  data_file="$(default_benchmark_data_path)"
+
+  case "$(basename "$data_file")" in
+    hits_sample.parquet)
+      printf '1M-row sample\n'
+      ;;
+    hits_sorted.parquet)
+      printf 'full dataset\n'
+      ;;
+    *)
+      printf 'custom dataset (%s)\n' "$data_file"
+      ;;
+  esac
+}
+
 baseline_matches_requested_data() {
   local baseline_summary="$1"
   local requested_data_file="$2"
@@ -696,16 +729,19 @@ run_baseline_if_needed() {
   local baseline_summary="$REPORT_DIR/baseline/$TARGET/benchmark-summary.json"
   local bench_args=()
   local requested_data_file
+  local dataset_label
 
   build_benchmark_args bench_args
   requested_data_file="$(default_benchmark_data_path)"
+  dataset_label="$(describe_requested_dataset)"
   if [[ "$RUN_BASELINE" -eq 0 && -f "$baseline_summary" ]]; then
     if baseline_matches_requested_data "$baseline_summary" "$requested_data_file"; then
+      append_loop_log "reusing baseline for $TARGET on $dataset_label"
       return 0
     fi
-    append_loop_log "existing baseline dataset does not match requested data; refreshing baseline for $TARGET"
+    append_loop_log "existing baseline dataset does not match requested data; refreshing baseline for $TARGET on $dataset_label"
   fi
-  append_loop_log "running baseline for $TARGET"
+  append_loop_log "running baseline for $TARGET on $dataset_label"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'baseline command: (cd %q && python benchmarks/autoresearch/pilot/scripts/benchmark_baseline.py %q' "$WORKTREE_DIR" "$TARGET"
     printf ' %q' "${bench_args[@]}"
@@ -732,6 +768,9 @@ validate_candidate_scope() {
       .benchmark-autoresearch-*)
         continue
         ;;
+      .opencode/*)
+        continue
+        ;;
       benchmarks/autoresearch/pilot/*)
         continue
         ;;
@@ -750,15 +789,26 @@ validate_candidate_scope() {
     esac
   done < <(git -C "$WORKTREE_DIR" status --porcelain --untracked-files=all)
 
+  if [[ "$invalid" -ne 0 ]]; then
+    return 1
+  fi
   if [[ "$changed" -eq 0 ]]; then
     printf 'no in-scope production changes detected\n' > "$out_file"
     return 1
   fi
-  if [[ "$invalid" -ne 0 ]]; then
-    return 1
-  fi
   rm -f "$out_file"
   return 0
+}
+
+scope_failure_reason() {
+  local scope_file="$1"
+
+  if [[ ! -s "$scope_file" ]] || [[ "$(tr -d '\r' < "$scope_file")" == "no in-scope production changes detected" ]]; then
+    printf 'empty-or-noop-changes\n'
+    return 0
+  fi
+
+  printf 'out-of-scope-changes\n'
 }
 
 next_run_dir() {
@@ -873,6 +923,8 @@ run_iteration() {
 
   if [[ ! -f "$decision_file" ]]; then
     if ! recover_decision_from_stdout "$stdout_log" "$decision_file"; then
+      clear_root_phase_reports candidates
+      clear_root_phase_reports diff
       append_issue "harness" "benchmarks/autoresearch/pilot/scripts/autoloop.sh" "Benchmark autoresearch run produced no usable decision artifact" "run ${run_index} did not emit a recoverable decision block" "Tighten prompt compliance or fallback parsing for benchmark controller"
       discard_candidate_state
       return 1
@@ -900,13 +952,16 @@ run_iteration() {
   fi
 
   if ! validate_candidate_scope "$scope_file"; then
+    local scope_reason
+
+    scope_reason="$(scope_failure_reason "$scope_file")"
     clear_root_phase_reports candidates
     clear_root_phase_reports diff
-    printf 'recommendation=discard\nreason=out-of-scope-or-empty-changes\ntarget_win=none\nprotected_status=n/a\nevidence=%s\n' "$(tr '\n' ';' < "$scope_file")" > "$eval_file"
+    printf 'recommendation=discard\nreason=%s\ntarget_win=none\nprotected_status=n/a\nevidence=%s\n' "$scope_reason" "$(tr '\n' ';' < "$scope_file")" > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
     run_dir="${archived[0]}"
     patch_path="${archived[1]}"
-    record_result "$base_ref" "$status" "discard" "$scenario" "none" "n/a" "out-of-scope-or-empty-changes" "$run_dir" "$patch_path"
+    record_result "$base_ref" "$status" "discard" "$scenario" "none" "n/a" "$scope_reason" "$run_dir" "$patch_path"
     discard_candidate_state
     return 0
   fi
@@ -932,6 +987,7 @@ run_iteration() {
     cd "$WORKTREE_DIR"
     python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py "$TARGET" >/dev/null
   ); then
+    clear_root_phase_reports candidates
     clear_root_phase_reports diff
     printf '{"recommendation":"discard","reason":"benchmark-gate-command-failed","target_win":"none","protected_status":"n/a"}\n' > "$eval_file"
     mapfile -t archived < <(archive_run_artifacts "$run_index" "$decision_file" "$stdout_log" "$eval_file")
@@ -983,6 +1039,19 @@ PY
 }
 
 autoloop_main() {
+  local parse_status
+
+  parse_autoloop_args "$@"
+  parse_status=$?
+  if [[ "$parse_status" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ "$parse_status" -ne 0 ]]; then
+    return "$parse_status"
+  fi
+
+  initialize_autoloop_state || return 1
+
   cd "$ROOT_DIR"
 
   if [[ "$PRINT_PROMPT" -eq 1 ]]; then
@@ -993,7 +1062,7 @@ autoloop_main() {
   ensure_report_dirs
   ensure_results_file
   ensure_issue_file
-  append_loop_log "target=$TARGET research_branch=$RESEARCH_BRANCH worktree=$WORKTREE_DIR model=${MODEL:-default}"
+  append_loop_log "target=$TARGET dataset=$(describe_requested_dataset) research_branch=$RESEARCH_BRANCH worktree=$WORKTREE_DIR model=${MODEL:-default}"
 
   if [[ "$DRY_RUN" -ne 1 ]]; then
     ensure_main_clean

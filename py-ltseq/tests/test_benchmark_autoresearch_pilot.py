@@ -69,6 +69,30 @@ def workload_map(diff: dict) -> dict:
     return {workload["id"]: workload for workload in diff["workloads"]}
 
 
+def test_build_benchmark_summary_records_dataset_label_for_custom_data():
+    common, _evaluate, _gate = load_pilot_modules()
+
+    runner_summary = {
+        "git_sha": "abc123",
+        "timestamp": "2026-04-20T12:00:00",
+        "bench_vs": {
+            "data_file": "/tmp/custom-bench.parquet",
+            "warmup": 1,
+            "iterations": 3,
+            "passed": True,
+            "correctness_failures": 0,
+            "infra_failures": 0,
+            "rounds": [],
+        },
+    }
+
+    summary = common.build_benchmark_summary("clickbench_funnel", runner_summary)
+
+    assert summary["dataset_label"] == "custom dataset (/tmp/custom-bench.parquet)"
+    rendered = common.render_benchmark_result(summary)
+    assert "- Dataset: custom dataset (/tmp/custom-bench.parquet)" in rendered
+
+
 def test_clickbench_funnel_target_spec_is_configured():
     common, _evaluate, _gate = load_pilot_modules()
 
@@ -222,6 +246,52 @@ def test_clickbench_funnel_gate_writes_target_specific_diff_and_evaluation(tmp_p
     ]
     assert evaluation_payload["recommendation"] == "keep"
     assert evaluation_payload["target_wins_detail"][0]["id"] == "r3_funnel"
+
+
+def test_clickbench_funnel_gate_replaces_stale_diff_artifacts(tmp_path, monkeypatch):
+    _common, _evaluate, gate = load_pilot_modules()
+
+    baseline_dir = tmp_path / "baseline"
+    candidate_dir = tmp_path / "candidates"
+    diff_dir = tmp_path / "diff"
+    baseline_dir.mkdir()
+    candidate_dir.mkdir()
+    diff_dir.mkdir()
+    (diff_dir / "stale.txt").write_text("stale", encoding="utf-8")
+
+    baseline = make_summary(
+        target="clickbench_funnel",
+        r1=(1.0, 1.1),
+        r2=(0.5, 0.6),
+        r3=(2.0, 2.2),
+    )
+    candidate = make_summary(
+        target="clickbench_funnel",
+        r1=(1.01, 1.12),
+        r2=(0.49, 0.58),
+        r3=(1.78, 1.95),
+    )
+    (baseline_dir / "benchmark-summary.json").write_text(json.dumps(baseline), encoding="utf-8")
+    (candidate_dir / "benchmark-summary.json").write_text(json.dumps(candidate), encoding="utf-8")
+
+    def fake_resolve_report_dir(phase: str, target: str) -> Path:
+        assert target == "clickbench_funnel"
+        mapping = {
+            "baseline": baseline_dir,
+            "candidates": candidate_dir,
+            "diff": diff_dir,
+        }
+        return mapping[phase]
+
+    monkeypatch.setattr(gate, "resolve_report_dir", fake_resolve_report_dir)
+    monkeypatch.setattr(gate, "ensure_report_dirs", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["benchmark_gate.py", "clickbench_funnel"])
+
+    assert gate.main() == 0
+
+    assert not (diff_dir / "stale.txt").exists()
+    assert (diff_dir / "benchmark-diff.json").exists()
+    assert (diff_dir / "evaluation.json").exists()
 
 
 def test_clickbench_sessionization_target_spec_is_configured():
