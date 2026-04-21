@@ -36,9 +36,6 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --group dev
 
-      - name: Install test extras
-        run: uv run pip install pandas
-
       - name: Build Rust extension
         run: uv run maturin develop
 
