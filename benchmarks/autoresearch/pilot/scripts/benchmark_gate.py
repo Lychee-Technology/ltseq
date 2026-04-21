@@ -12,6 +12,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from pilot.common import (
         build_diff,
+        clean_output_dir,
         ensure_report_dirs,
         load_json,
         render_diff,
@@ -23,6 +24,7 @@ if __package__ in (None, ""):
 else:
     from ..common import (
         build_diff,
+        clean_output_dir,
         ensure_report_dirs,
         load_json,
         render_diff,
@@ -53,7 +55,7 @@ def main() -> int:
     baseline_dir = resolve_report_dir("baseline", spec.key)
     candidate_dir = resolve_report_dir("candidates", spec.key)
     diff_dir = resolve_report_dir("diff", spec.key)
-    diff_dir.mkdir(parents=True, exist_ok=True)
+    clean_output_dir(diff_dir)
 
     baseline = load_json(baseline_dir / "benchmark-summary.json")
     candidate = load_json(candidate_dir / "benchmark-summary.json")
