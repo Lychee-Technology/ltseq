@@ -60,5 +60,6 @@ pub(crate) mod asof_join;
 pub(crate) mod derive_sql;
 pub(crate) mod grouping;
 pub(crate) mod join;
+pub(crate) mod mutation;
 pub(crate) mod pivot;
 pub(crate) mod sort;

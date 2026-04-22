@@ -1,10 +1,9 @@
 """NestedTable class for group-ordered operations."""
 
-import re
 import textwrap
 from typing import TYPE_CHECKING, Any, Callable
 
-from .proxies import GroupProxy, RowProxy
+from .proxies import FilterGroupProxy, FilterExpr
 from .sql_parsing import (
     DeriveSQLParser,
     FilterSQLParser,
@@ -65,16 +64,13 @@ class NestedTable:
         self._group_filter = None
         self._group_derive = None
 
-        # Store group assignments for rows (used when filter() is applied)
-        self._group_assignments = None
-
         # SQL parsers
         self._filter_parser = FilterSQLParser()
         self._derive_parser = DeriveSQLParser()
 
     def __len__(self) -> int:
         """Return the number of rows in the grouped table."""
-        return len(self._ltseq.to_pandas())
+        return len(self._ltseq)
 
     def to_pandas(self) -> Any:
         """Convert the grouped table to a pandas DataFrame."""
@@ -161,7 +157,18 @@ class NestedTable:
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
         """
-        # Try SQL-based approach first
+        # Try proxy-based expression capture first (works in all contexts)
+        try:
+            proxy = FilterGroupProxy()
+            result = group_predicate(proxy)
+            if isinstance(result, FilterExpr):
+                where_clause = result.to_sql()
+                if where_clause:
+                    return self._filter_via_sql(where_clause)
+        except Exception:
+            pass
+
+        # Fall back to source-code-based SQL parsing
         try:
             where_clause = self._filter_parser.try_parse_filter_to_sql(group_predicate)
             if where_clause:
@@ -169,107 +176,133 @@ class NestedTable:
         except Exception:
             pass
 
-        # Fall back to pandas-based evaluation
-        return self._filter_via_pandas(group_predicate)
+        raise ValueError(
+            "group_ordered().filter() could not parse the predicate expression into SQL. "
+            "Supported patterns include:\n"
+            "  - g.count() > N, g.count() < N, g.count() >= N, etc.\n"
+            "  - g.first().column op value (e.g., g.first().price > 100)\n"
+            "  - g.last().column op value\n"
+            "  - g.max('column') op value, g.min(), g.sum(), g.avg()\n"
+            "  - g.all(lambda r: r.col op val), g.any(...), g.none(...)\n"
+            "  - Combinations with & (AND) and | (OR)\n"
+            "Complex Python expressions that cannot be transpiled are not supported.\n"
+            "If you need a predicate that cannot be expressed this way, consider "
+            "using .flatten() and then .filter() on the flattened result."
+        )
 
     def _filter_via_sql(self, where_clause: str) -> "NestedTable":
-        """Filter using SQL WHERE clause with window functions."""
-        flattened = self.flatten()
-        filtered_inner = flattened._inner.filter_where(where_clause)
+        """Filter using SQL WHERE clause with window functions.
 
-        result_ltseq = self._ltseq.__class__()
-        result_ltseq._inner = filtered_inner
-        result_ltseq._schema = flattened._schema.copy()
+        Window functions cannot appear in SQL WHERE clauses. We extract all
+        window function expressions from the where_clause, add them as derived
+        columns via derive_window_sql, then filter on the simplified condition
+        using only column references.
+        """
+        import re
 
-        result_nested = NestedTable(
-            result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
-        )
-        return result_nested
+        _FILTER_COL = "__filter_cond__"
 
-    def _filter_via_pandas(self, group_predicate: Callable) -> "NestedTable":
-        """Filter using pandas iteration (fallback for complex predicates)."""
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "filter() requires pandas. Install it with: pip install pandas"
+        # Find all window function expressions in the where_clause.
+        # Strategy: find each "OVER (PARTITION BY __group_id__...)" pattern,
+        # then scan backwards past any whitespace and matching parens to find
+        # the start of the window function expression (e.g. "COUNT(*)",
+        # "MIN(CASE WHEN ... END)", etc.)
+        window_exprs = []
+        simplified = where_clause
+
+        pattern = r'OVER\s*\(\s*PARTITION\s+BY\s+__group_id__'
+        pos = 0
+        while True:
+            m = re.search(pattern, simplified[pos:])
+            if not m:
+                break
+            over_start = pos + m.start()
+
+            # Find the closing paren of OVER(...)
+            # First find opening paren after OVER
+            rest = simplified[over_start + len("OVER"):]
+            paren_m = re.match(r'\s*\(', rest)
+            if not paren_m:
+                break
+            paren_open = over_start + len("OVER") + paren_m.end() - 1
+
+            # Find matching closing paren
+            depth = 1
+            i = paren_open + 1
+            while i < len(simplified) and depth > 0:
+                if simplified[i] == '(':
+                    depth += 1
+                elif simplified[i] == ')':
+                    depth -= 1
+                i += 1
+            window_end = i  # exclusive (character after closing paren)
+
+            # Scan backwards from OVER keyword to find expr start.
+            # Skip whitespace immediately before OVER, then walk backwards
+            # through any parenthesized expression and function name.
+            j = over_start - 1
+            # Skip whitespace before OVER
+            while j >= 0 and simplified[j] in (' ', '\t', '\n'):
+                j -= 1
+            # Now walk backwards through matching parens and identifier chars
+            paren_depth = 0
+            while j >= 0:
+                ch = simplified[j]
+                if ch == ')':
+                    paren_depth += 1
+                elif ch == '(':
+                    if paren_depth == 0:
+                        break
+                    paren_depth -= 1
+                elif paren_depth == 0 and not (ch.isalnum() or ch in ('_', '.', '*', '"', "'")):
+                    break
+                j -= 1
+            expr_start = j + 1
+
+            window_expr = simplified[expr_start:window_end]
+            col_name = f"{_FILTER_COL}_{len(window_exprs)}"
+            window_exprs.append((col_name, window_expr))
+
+            # Replace the window expression with the column reference
+            simplified = simplified[:expr_start] + f'"{col_name}"' + simplified[window_end:]
+            # Continue scanning after the replacement
+            pos = expr_start + len(f'"{col_name}"')
+
+        if not window_exprs:
+            raise ValueError(
+                f"No window functions found in filter condition: {where_clause}"
             )
 
-        df = self._ltseq.to_pandas()
+        # Build the derive expressions dict
+        filter_exprs = {col_name: expr for col_name, expr in window_exprs}
 
-        # Add __group_id__ column
-        group_values = []
-        group_id = 0
-        prev_group_val = None
+        flattened = self.flatten()
 
-        for idx, row in df.iterrows():
-            row_proxy = RowProxy(row.to_dict())
-            group_val = self._grouping_lambda(row_proxy)
+        # Step 1: Add filter conditions as derived columns
+        derived_inner = flattened._inner.derive_window_sql(filter_exprs)
 
-            if prev_group_val is None or group_val != prev_group_val:
-                group_id += 1
-                prev_group_val = group_val
+        derived_ltseq = flattened.__class__()
+        derived_ltseq._inner = derived_inner
+        derived_schema = flattened._schema.copy()
+        for col_name in filter_exprs:
+            derived_schema[col_name] = "int64"
+        derived_ltseq._schema = derived_schema
 
-            group_values.append(group_id)
+        # Step 2: Filter on the simplified condition
+        filter_condition = simplified
+        filtered_inner = derived_ltseq._inner.filter_where(filter_condition)
 
-        df["__group_id__"] = group_values
-        df["__group_count__"] = df.groupby("__group_id__").transform("size")
+        # Step 3: Remove filter and internal columns via select
+        original_cols = list(self._ltseq._schema.keys())
+        result_ltseq = derived_ltseq.__class__()
+        result_ltseq._inner = filtered_inner
+        result_ltseq._schema = derived_schema
 
-        # Evaluate predicate for each group
-        group_by_id = df.groupby("__group_id__")
-        passing_group_ids = set()
-
-        for gid, group_df in group_by_id:
-            group_proxy = GroupProxy(group_df, self)
-
-            try:
-                result = group_predicate(group_proxy)
-                if result:
-                    passing_group_ids.add(gid)
-            except AttributeError as e:
-                supported_methods = """
-Supported group methods:
-- g.count() - number of rows in group
-- g.first().column - first row's column value
-- g.last().column - last row's column value
-- g.max('column') - maximum value in column
-- g.min('column') - minimum value in column
-- g.sum('column') - sum of column values
-- g.avg('column') - average of column values
-"""
-                raise ValueError(
-                    f"Error evaluating filter predicate on group {gid}: {e}\n{supported_methods}"
-                )
-            except Exception as e:
-                raise ValueError(
-                    f"Error evaluating filter predicate on group {gid}: {e}"
-                )
-
-        # Filter to keep only passing groups
-        filtered_df = df[df["__group_id__"].isin(list(passing_group_ids))]
-
-        # Store group assignments
-        group_assignments = {}
-        for original_idx, (_, row) in enumerate(filtered_df.iterrows()):
-            group_assignments[original_idx] = int(row["__group_id__"])
-
-        # Remove internal columns
-        result_cols = [c for c in filtered_df.columns if not c.startswith("__")]
-        result_df = filtered_df[result_cols]
-
-        # Convert back to LTSeq
-        import pyarrow as pa
-
-        schema = self._ltseq._schema.copy()
-        result_ltseq = self._ltseq.__class__.from_arrow(
-            pa.Table.from_pandas(result_df, preserve_index=False)
-        )
-        result_ltseq._schema = schema
+        result_ltseq = result_ltseq.select(*original_cols)
 
         result_nested = NestedTable(
             result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
         )
-        result_nested._group_assignments = group_assignments
         return result_nested
 
     def derive(self, group_mapper: Callable) -> "LTSeq":
@@ -293,10 +326,6 @@ Supported group methods:
             ...     "end": g.last().date,
             ... })
         """
-        # Use pandas when we have stored group assignments from filter()
-        if self._group_assignments is not None:
-            return self._derive_via_pandas_with_stored_groups(group_mapper)
-
         flattened = self.flatten()
 
         # Try proxy-based expression capture first (works in all contexts)
@@ -409,146 +438,6 @@ Supported group methods:
         result._inner = flattened._inner.derive_window_sql(derive_exprs)
 
         return result
-
-    def _derive_via_pandas_with_stored_groups(self, group_mapper: Callable) -> "LTSeq":
-        """Derive columns using pandas when we have stored group assignments."""
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "derive() with stored group assignments requires pandas. "
-                "Install it with: pip install pandas"
-            )
-
-        # Try proxy-based capture first (works in REPL, Jupyter, and files)
-        derive_exprs = None
-        try:
-            derive_exprs = self._capture_derive_via_proxy(group_mapper)
-        except Exception:
-            pass
-
-        if not derive_exprs:
-            # Fall back to source code parsing
-            import ast
-            import inspect
-
-            source = None
-            try:
-                source = inspect.getsource(group_mapper)
-            except (OSError, TypeError):
-                raise ValueError(
-                    "Cannot parse derive expression: proxy-based capture failed and "
-                    "source is not available (common in REPL/Jupyter). "
-                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
-                )
-
-            source_dedented = textwrap.dedent(source)
-            source_to_parse = extract_lambda_from_chain(source_dedented)
-
-            try:
-                tree = ast.parse(source_to_parse)
-            except SyntaxError:
-                try:
-                    tree = ast.parse(f"({source_to_parse})", mode="eval")
-                except SyntaxError:
-                    raise ValueError(
-                        f"Cannot parse derive lambda expression. Source: {source_to_parse}"
-                    )
-
-            schema = self._ltseq._schema.copy()
-            derive_exprs = self._derive_parser.extract_derive_expressions(tree, schema)
-
-            if not derive_exprs:
-                raise ValueError(get_unsupported_derive_error(source))
-
-        df = self._ltseq.to_pandas()
-
-        df["__rn__"] = range(len(df))
-        group_values = [self._group_assignments[i] for i in range(len(df))]
-        df["__group_id__"] = group_values
-
-        for col_name, sql_expr in derive_exprs.items():
-            try:
-                df[col_name] = self._evaluate_sql_expr_in_pandas(df, sql_expr)
-            except Exception as e:
-                raise ValueError(f"Error evaluating derived column '{col_name}': {e}")
-
-        df = df.drop(columns=["__group_id__", "__rn__"])
-
-        result_schema = self._ltseq._schema.copy()
-        for col_name in derive_exprs.keys():
-            result_schema[col_name] = "Unknown"
-
-        import pyarrow as pa
-
-        result = self._ltseq.__class__.from_arrow(
-            pa.Table.from_pandas(df, preserve_index=False)
-        )
-        result._schema = result_schema
-
-        return result
-
-    def _evaluate_sql_expr_in_pandas(self, df, sql_expr: str):
-        """Evaluate SQL-like window function expression in pandas."""
-        # Handle arithmetic expressions recursively
-        if sql_expr.startswith("(") and sql_expr.endswith(")"):
-            inner = sql_expr[1:-1]
-
-            paren_depth = 0
-            for i, char in enumerate(inner):
-                if char == "(":
-                    paren_depth += 1
-                elif char == ")":
-                    paren_depth -= 1
-                elif paren_depth == 0 and char in ["+", "-", "*", "/"]:
-                    left_expr = inner[:i].strip()
-                    op = char
-                    right_expr = inner[i + 1 :].strip()
-
-                    left_result = self._evaluate_sql_expr_in_pandas(df, left_expr)
-                    right_result = self._evaluate_sql_expr_in_pandas(df, right_expr)
-
-                    if op == "+":
-                        return left_result + right_result
-                    elif op == "-":
-                        return left_result - right_result
-                    elif op == "*":
-                        return left_result * right_result
-                    elif op == "/":
-                        return left_result / right_result
-
-        # Handle COUNT(*)
-        if "COUNT(*)" in sql_expr and "PARTITION BY __group_id__" in sql_expr:
-            return df.groupby("__group_id__").transform("size")
-
-        # Handle FIRST_VALUE(col) — column name may be bare or double-quoted
-        if "FIRST_VALUE" in sql_expr:
-            match = re.search(r'FIRST_VALUE\s*\("?(\w+)"?\)', sql_expr)
-            if match:
-                col_name = match.group(1)
-                return df.groupby("__group_id__")[col_name].transform("first")
-
-        # Handle LAST_VALUE(col) — column name may be bare or double-quoted
-        if "LAST_VALUE" in sql_expr:
-            match = re.search(r'LAST_VALUE\s*\("?(\w+)"?\)', sql_expr)
-            if match:
-                col_name = match.group(1)
-                return df.groupby("__group_id__")[col_name].transform("last")
-
-        # Handle MAX/MIN/SUM/AVG — column name may be bare or double-quoted
-        for agg_sql, agg_pandas in [
-            ("MAX", "max"),
-            ("MIN", "min"),
-            ("SUM", "sum"),
-            ("AVG", "mean"),
-        ]:
-            if agg_sql in sql_expr:
-                match = re.search(f'{agg_sql}\\s*\\("?(\\w+)"?\\)', sql_expr)
-                if match:
-                    col_name = match.group(1)
-                    return df.groupby("__group_id__")[col_name].transform(agg_pandas)
-
-        return df.eval(sql_expr)
 
 
 class _LazyFirstLTSeq:

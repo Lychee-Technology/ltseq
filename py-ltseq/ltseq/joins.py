@@ -8,30 +8,6 @@ if TYPE_CHECKING:
 from .expr import SchemaProxy
 
 
-def _pandas_join_fallback(
-    df1: Any, df2: Any, left_key: str, right_key: str, how: str, suffix: str
-) -> Any:
-    """Execute join using pandas as fallback."""
-    import pandas as pd
-
-    pandas_how = "outer" if how == "full" else how
-    common_cols = sorted(set(df1.columns) & set(df2.columns))
-
-    if left_key == right_key and left_key in common_cols:
-        merged = pd.merge(df1, df2, on=left_key, how=pandas_how, suffixes=("", suffix))
-    else:
-        merged = pd.merge(
-            df1,
-            df2,
-            left_on=left_key,
-            right_on=right_key,
-            how=pandas_how,
-            suffixes=("", suffix),
-        )
-
-    return merged
-
-
 def _validate_join_inputs(self_table: Any, other: Any, how: str) -> None:
     """Validate join inputs and return error if invalid."""
     if not self_table._schema:
@@ -99,46 +75,17 @@ class JoinMixin:
                 other._inner, left_key_expr, right_key_expr, jtype, "_other"
             )
         except RuntimeError as e:
-            import warnings
-
-            warnings.warn(
-                f"Rust {method_name} failed: {e}. Falling back to pandas.",
-                RuntimeWarning,
-            )
-            return self._join_pandas_fallback(other, on, how, left_key_expr)
+            raise RuntimeError(
+                f"Rust {method_name} failed: {e}. "
+                f"This typically indicates an unsupported join expression. "
+                f"Simplify your join condition (e.g., use lambda a, b: a.col == b.col)."
+            ) from e
 
         result = LTSeq()
         result._inner = joined_inner
         result._schema = _build_join_result_schema(
             self._schema, other._schema, "_other"
         )
-        return result
-
-    def _join_pandas_fallback(
-        self, other: "LTSeq", on: Callable, how: str, left_key_expr: dict[str, Any]
-    ) -> "LTSeq":
-        """Fallback join implementation using pandas."""
-        from .core import LTSeq
-
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "join() fallback requires pandas. Install with: pip install pandas"
-            )
-
-        df1 = self.to_pandas()
-        df2 = other.to_pandas()
-
-        left_key = left_key_expr.get("name", "")
-        right_key = left_key  # Simplified - assume same key name
-
-        import pyarrow as pa
-
-        merged = _pandas_join_fallback(df1, df2, left_key, right_key, how, "_other")
-        result_schema = _build_join_result_schema(self._schema, other._schema, "_other")
-        result = LTSeq.from_arrow(pa.Table.from_pandas(merged, preserve_index=False))
-        result._schema = result_schema
         return result
 
     def join(
@@ -246,13 +193,11 @@ class JoinMixin:
                 other._inner, left_key_expr, right_key_expr, jtype, "_other"
             )
         except RuntimeError as e:
-            import warnings
-
-            warnings.warn(
-                f"Rust merge join failed: {e}. Falling back to pandas.",
-                RuntimeWarning,
-            )
-            return self._join_pandas_fallback(other, on, how, left_key_expr)
+            raise RuntimeError(
+                f"Rust merge join failed: {e}. "
+                f"Ensure both tables are sorted by the join key, or use join() "
+                f"without strategy='merge' for unsorted data."
+            ) from e
 
         result = LTSeq()
         result._inner = joined_inner
