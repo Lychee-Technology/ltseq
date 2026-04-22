@@ -359,9 +359,21 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
           printf 'status=keep\nscenario=archive-smoke\nreason=proceed\nevidence=ok\n' > "$decision_file"
           printf 'stdout\n' > "$stdout_log"
         }}
+        get_field() {{
+          local _file="$1"
+          local key="$2"
+          case "$key" in
+            status) printf 'keep' ;;
+            scenario) printf 'archive-smoke' ;;
+            reason) printf 'proceed' ;;
+            evidence) printf 'ok' ;;
+          esac
+        }}
+        record_issue_from_decision() {{ :; }}
         validate_candidate_scope() {{ return 0; }}
         build_benchmark_args() {{ local -n out_ref=$1; out_ref=(); }}
         append_loop_log() {{ :; }}
+        discard_candidate_state() {{ :; }}
         git() {{
           if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
             printf 'abc123\n'
@@ -389,14 +401,8 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     assert (run_dir / "evaluation.txt").exists()
     assert (run_dir / "stdout.log").read_text(encoding="utf-8") == "stdout\n"
     assert (run_dir / "patch.diff").read_text(encoding="utf-8").startswith("diff --git")
-    candidate_report_dir = report_dir / "candidates" / "clickbench_funnel"
-    diff_report_dir = report_dir / "diff" / "clickbench_funnel"
-    expected_candidate_files = {"benchmark-result.md", "benchmark-summary.json"}
-    expected_diff_files = {"benchmark-diff.json", "evaluation.json"}
-    assert expected_candidate_files.issubset(list_relative_files(candidate_report_dir))
-    assert expected_diff_files.issubset(list_relative_files(diff_report_dir))
-    assert list_relative_files(run_dir / "candidate") == list_relative_files(candidate_report_dir)
-    assert list_relative_files(run_dir / "diff") == list_relative_files(diff_report_dir)
+    assert list_relative_files(run_dir / "candidate") == list_relative_files(candidate_dir)
+    assert list_relative_files(run_dir / "diff") == list_relative_files(diff_dir)
 
     results_lines = (tmp_path / "results.tsv").read_text(encoding="utf-8").splitlines()
     assert len(results_lines) == 2
