@@ -62,8 +62,7 @@ class GroupBy:
 
         result_inner = self._table._inner.agg(grouping_expr, agg_exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = {}
         if grouping_expr.get("type") == "Column":
             col_name = grouping_expr.get("name", "group_key")
@@ -104,7 +103,8 @@ class AggregationMixin:
 
         cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
 
-        result = LTSeq()
+        result_inner = self._inner.cum_sum(cum_exprs)
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
 
         for i, col_expr in enumerate(cols):
@@ -115,7 +115,6 @@ class AggregationMixin:
             else:
                 result._schema[f"cum_sum_{i}"] = "float64"
 
-        result._inner = self._inner.cum_sum(cum_exprs)
         result._sort_keys = self._sort_keys
         return result
 
@@ -221,8 +220,7 @@ class AggregationMixin:
 
         result_inner = self._inner.agg(grouping_expr, agg_exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
 
         result._schema = {}
         if grouping_expr and grouping_expr.get("type") == "Column":

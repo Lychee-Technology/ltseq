@@ -6,7 +6,8 @@ if TYPE_CHECKING:
     from .core import LTSeq
     from .cursor import Cursor
 
-from .helpers import _infer_schema_from_csv, _infer_schema_from_parquet
+# Note: _infer_schema_from_csv and _infer_schema_from_parquet are no longer used;
+# schema is now obtained from Rust via get_schema_dict() during file reads.
 
 
 def _infer_schema_from_rows(sample_row: dict[str, Any]) -> dict[str, str]:
@@ -58,11 +59,16 @@ class IOMixin:
         from .core import LTSeq
         import os
 
-        t = LTSeq()
-        # Set table name from file basename (without extension) for lookup support
+        # Use Rust static constructor to load CSV directly without empty init overhead
+        inner = ltseq_core.LTSeqTable.from_csv(path, has_header)
+        
+        # Get schema from Rust (already inferred during load)
+        schema = inner.get_schema_dict()
+        
+        # Wrap in Python layer
+        t = LTSeq._from_inner(inner)
+        t._schema = schema
         t._name = os.path.splitext(os.path.basename(path))[0]
-        t._inner.read_csv(path, has_header)
-        t._schema = _infer_schema_from_csv(path, has_header)
         return t
 
     @classmethod
@@ -86,10 +92,16 @@ class IOMixin:
         from .core import LTSeq
         import os
 
-        t = LTSeq()
+        # Use Rust static constructor to load Parquet directly without empty init overhead
+        inner = ltseq_core.LTSeqTable.from_parquet(path)
+        
+        # Get schema from Rust (already inferred during load)
+        schema = inner.get_schema_dict()
+        
+        # Wrap in Python layer
+        t = LTSeq._from_inner(inner)
+        t._schema = schema
         t._name = os.path.splitext(os.path.basename(path))[0]
-        t._inner.read_parquet(path)
-        t._schema = _infer_schema_from_parquet(path)
         return t
 
     @classmethod
@@ -330,35 +342,11 @@ class IOMixin:
             ipc_buffers.append(sink.getvalue().to_pybytes())
 
         # Load into Rust via the IPC pathway
-        t = LTSeq()
-        t._inner = ltseq_core.LTSeqTable.load_arrow_ipc(ipc_buffers)
+        inner = ltseq_core.LTSeqTable.load_arrow_ipc(ipc_buffers)
+        t = LTSeq._from_inner(inner)
 
-        # Infer schema from Arrow schema
-        _arrow_to_ltseq_type = {
-            "int8": "int64",
-            "int16": "int64",
-            "int32": "int64",
-            "int64": "int64",
-            "uint8": "int64",
-            "uint16": "int64",
-            "uint32": "int64",
-            "uint64": "int64",
-            "float16": "float64",
-            "float32": "float64",
-            "float64": "float64",
-            "double": "float64",
-            "bool": "bool",
-            "string": "string",
-            "large_string": "string",
-            "utf8": "string",
-            "large_utf8": "string",
-            "date32": "date32",
-            "date64": "date32",
-        }
-        schema = {}
-        for field in arrow_table.schema:
-            type_str = str(field.type)
-            schema[field.name] = _arrow_to_ltseq_type.get(type_str, type_str)
+        # Get schema from Rust (already inferred during load)
+        schema = inner.get_schema_dict()
         t._schema = schema
 
         return t
