@@ -1,6 +1,11 @@
 //! SQL-based derive operations for LTSeqTable
 //!
 //! Provides derive operations using raw SQL window expressions.
+//!
+//! Note: This path is inherently SQL-string-based because the Python grouped
+//! expression layer (NestedTable._derive_via_sql) produces SQL strings, not
+//! native DataFusion Expr trees. Making this fully native would require
+//! redesigning the Python→Rust expression contract.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
