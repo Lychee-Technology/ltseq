@@ -31,6 +31,11 @@ def write_summary(path: Path, data_file: str) -> None:
     path.write_text(json.dumps({"data_file": data_file}), encoding="utf-8")
 
 
+def list_relative_files(path: Path) -> set[str]:
+    assert path.is_dir(), f"expected directory to exist: {path}"
+    return {str(entry.relative_to(path)) for entry in path.rglob("*") if entry.is_file()}
+
+
 def test_baseline_matches_requested_data_rejects_dataset_mismatch(tmp_path):
     baseline_summary = tmp_path / "benchmark-summary.json"
     write_summary(baseline_summary, "benchmarks/data/hits_sample.parquet")
@@ -384,13 +389,14 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     assert (run_dir / "evaluation.txt").exists()
     assert (run_dir / "stdout.log").read_text(encoding="utf-8") == "stdout\n"
     assert (run_dir / "patch.diff").read_text(encoding="utf-8").startswith("diff --git")
-    assert (run_dir / "candidate" / "benchmark-summary.json").exists()
-    assert (run_dir / "candidate" / "benchmark-result.md").exists()
-    assert (run_dir / "diff" / "benchmark-diff.json").exists()
-    assert (run_dir / "diff" / "evaluation.json").exists()
-
-    assert (report_dir / "candidates" / "clickbench_funnel" / "benchmark-summary.json").exists()
-    assert (report_dir / "diff" / "clickbench_funnel" / "benchmark-diff.json").exists()
+    candidate_report_dir = report_dir / "candidates" / "clickbench_funnel"
+    diff_report_dir = report_dir / "diff" / "clickbench_funnel"
+    expected_candidate_files = {"benchmark-result.md", "benchmark-summary.json"}
+    expected_diff_files = {"benchmark-diff.json", "evaluation.json"}
+    assert expected_candidate_files.issubset(list_relative_files(candidate_report_dir))
+    assert expected_diff_files.issubset(list_relative_files(diff_report_dir))
+    assert list_relative_files(run_dir / "candidate") == list_relative_files(candidate_report_dir)
+    assert list_relative_files(run_dir / "diff") == list_relative_files(diff_report_dir)
 
     results_lines = (tmp_path / "results.tsv").read_text(encoding="utf-8").splitlines()
     assert len(results_lines) == 2
