@@ -10,7 +10,6 @@ Tests sort by (grp, value) before asserting to ensure deterministic order.
 import os
 import tempfile
 
-import numpy as np
 import pytest
 
 from ltseq import LTSeq

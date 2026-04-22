@@ -443,7 +443,7 @@ class _RowProxy:
     Allows syntax like: partition_fn(lambda r: r.region)
     """
 
-    def __init__(self, row_data: Dict[str, Any]):
+    def __init__(self, row_data: dict[str, Any]):
         """Initialize with row dictionary."""
         self._data = row_data
 
