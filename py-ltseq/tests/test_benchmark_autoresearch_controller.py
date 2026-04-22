@@ -5,6 +5,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
