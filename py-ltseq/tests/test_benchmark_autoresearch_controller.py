@@ -31,6 +31,11 @@ def write_summary(path: Path, data_file: str) -> None:
     path.write_text(json.dumps({"data_file": data_file}), encoding="utf-8")
 
 
+def list_relative_files(path: Path) -> set[str]:
+    assert path.is_dir(), f"expected directory to exist: {path}"
+    return {str(entry.relative_to(path)) for entry in path.rglob("*") if entry.is_file()}
+
+
 def test_baseline_matches_requested_data_rejects_dataset_mismatch(tmp_path):
     baseline_summary = tmp_path / "benchmark-summary.json"
     write_summary(baseline_summary, "benchmarks/data/hits_sample.parquet")
@@ -269,6 +274,145 @@ def test_run_baseline_if_needed_logs_reuse_for_matching_dataset(tmp_path):
     assert (tmp_path / "loop.log").read_text(encoding="utf-8").strip() == (
         "reusing baseline for clickbench_funnel on 1M-row sample"
     )
+
+
+def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
+    worktree = tmp_path / "worktree"
+    report_dir = tmp_path / "reports"
+    logs_dir = report_dir / "logs"
+    fake_bin_dir = tmp_path / "bin"
+    runs_dir = report_dir / "runs" / "clickbench_funnel"
+    baseline_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "baseline" / "clickbench_funnel"
+    candidate_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "candidates" / "clickbench_funnel"
+    diff_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "reports" / "diff" / "clickbench_funnel"
+    scripts_dir = worktree / "benchmarks" / "autoresearch" / "pilot" / "scripts"
+
+    logs_dir.mkdir(parents=True)
+    fake_bin_dir.mkdir(parents=True)
+    runs_dir.mkdir(parents=True)
+    baseline_dir.mkdir(parents=True)
+    candidate_dir.mkdir(parents=True)
+    diff_dir.mkdir(parents=True)
+    scripts_dir.mkdir(parents=True)
+    (worktree / ".git").mkdir(parents=True)
+
+    write_summary(baseline_dir / "benchmark-summary.json", "benchmarks/data/hits_sample.parquet")
+    (scripts_dir / "evaluate_benchmark_candidate.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "print(json.dumps({\n"
+        "    'recommendation': 'keep',\n"
+        "    'target_win': 'R3: Funnel(median=-6.00%,p95=-2.00%)',\n"
+        "    'protected_status': 'clean',\n"
+        "    'reason': 'target improvement without protected regression',\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    (fake_bin_dir / "python").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ \"$1\" == \"benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py\" ]]; then\n"
+        "  mkdir -p benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel/benchmark-summary.json <<'JSON'\n"
+        "{\"target\":\"clickbench_funnel\",\"correctness_failures\":0,\"infra_failures\":0,\"workloads\":[]}\n"
+        "JSON\n"
+        "  printf '# candidate\n' > benchmarks/autoresearch/pilot/reports/candidates/clickbench_funnel/benchmark-result.md\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [[ \"$1\" == \"benchmarks/autoresearch/pilot/scripts/benchmark_gate.py\" ]]; then\n"
+        "  mkdir -p benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel/benchmark-diff.json <<'JSON'\n"
+        "{\"target\":\"clickbench_funnel\",\"workloads\":[]}\n"
+        "JSON\n"
+        "  cat > benchmarks/autoresearch/pilot/reports/diff/clickbench_funnel/evaluation.json <<'JSON'\n"
+        "{\"recommendation\":\"keep\"}\n"
+        "JSON\n"
+        "  exit 0\n"
+        "fi\n"
+        "exec /usr/bin/python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin_dir / "python").chmod(0o755)
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        TARGET=clickbench_funnel
+        DRY_RUN=0
+        ROOT_DIR={repo_root()!s}
+        REPORT_DIR={report_dir!s}
+        WORKTREE_DIR={worktree!s}
+        export PATH={fake_bin_dir!s}:$PATH
+        LOG_PREFIX=test-log
+        LOOP_LOG={logs_dir / 'loop.log'!s}
+        results_file={tmp_path / 'results.tsv'!s}
+        issues_file={tmp_path / 'issues.tsv'!s}
+        base_overlay_manifest={tmp_path / 'overlay.txt'!s}
+        : > "$base_overlay_manifest"
+        benchmark_log_path() {{
+          printf '%s/%s.log\n' {logs_dir!s} "$1"
+        }}
+        run_single_candidate() {{
+          local _run_index="$1"
+          local decision_file="$2"
+          local stdout_log="$3"
+          printf 'status=keep\nscenario=archive-smoke\nreason=proceed\nevidence=ok\n' > "$decision_file"
+          printf 'stdout\n' > "$stdout_log"
+        }}
+        validate_candidate_scope() {{ return 0; }}
+        build_benchmark_args() {{ local -n out_ref=$1; out_ref=(); }}
+        append_loop_log() {{ :; }}
+        git() {{
+          if [[ "$*" == *"rev-parse --short HEAD"* ]]; then
+            printf 'abc123\n'
+            return 0
+          fi
+          if [[ "$*" == *"diff -- ."* ]]; then
+            printf 'diff --git a/src/ops/pattern_match.rs b/src/ops/pattern_match.rs\n'
+            return 0
+          fi
+          if [[ "$*" == *"restore --worktree ."* ]] || [[ "$*" == *"clean -fd"* ]]; then
+            return 0
+          fi
+          command git "$@"
+        }}
+        run_iteration 1
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    assert result.returncode == 0, result.stderr
+
+    run_dir = runs_dir / "run-001"
+    assert (run_dir / "decision.txt").read_text(encoding="utf-8").startswith("status=keep\n")
+    assert (run_dir / "evaluation.txt").exists()
+    assert (run_dir / "stdout.log").read_text(encoding="utf-8") == "stdout\n"
+    assert (run_dir / "patch.diff").read_text(encoding="utf-8").startswith("diff --git")
+    candidate_report_dir = report_dir / "candidates" / "clickbench_funnel"
+    diff_report_dir = report_dir / "diff" / "clickbench_funnel"
+    expected_candidate_files = {"benchmark-result.md", "benchmark-summary.json"}
+    expected_diff_files = {"benchmark-diff.json", "evaluation.json"}
+    assert expected_candidate_files.issubset(list_relative_files(candidate_report_dir))
+    assert expected_diff_files.issubset(list_relative_files(diff_report_dir))
+    assert list_relative_files(run_dir / "candidate") == list_relative_files(candidate_report_dir)
+    assert list_relative_files(run_dir / "diff") == list_relative_files(diff_report_dir)
+
+    results_lines = (tmp_path / "results.tsv").read_text(encoding="utf-8").splitlines()
+    assert len(results_lines) == 2
+    assert results_lines[1].split("\t") == [
+        "abc123",
+        "clickbench_funnel",
+        "keep",
+        "keep",
+        "archive-smoke",
+        "R3: Funnel(median=-6.00%,p95=-2.00%)",
+        "clean",
+        "target improvement without protected regression",
+        str(run_dir),
+        str(run_dir / "patch.diff"),
+    ]
+    assert not (tmp_path / "issues.tsv").exists()
 
 
 def test_sync_research_branch_to_base_fast_forwards_stale_worktree(tmp_path):
