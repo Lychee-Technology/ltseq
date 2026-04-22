@@ -25,6 +25,7 @@ python-source = "./py-ltseq"
 dev = [
     "maturin>=1.11.2",
     "pytest>=7.0",
+    "pandas>=2.0",
     "ipdb>=0.13",  # 调试好帮手
 ]
 bench = [

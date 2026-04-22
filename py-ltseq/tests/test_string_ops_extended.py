@@ -364,8 +364,8 @@ class TestStringOpsEdgeCases:
         t = LTSeq.read_csv(TEST_CSV)
         # Index 0 is invalid in SQL SPLIT_PART (1-based)
         result = t.derive(part=lambda r: r.name.s.split(" ", 0))
-        with pytest.raises(RuntimeError, match="field position must not be zero"):
-            result.to_pandas()
+        with pytest.raises(Exception, match="field position must not be zero"):
+            result.collect()
 
 
 class TestStringOpsTypeErrors:

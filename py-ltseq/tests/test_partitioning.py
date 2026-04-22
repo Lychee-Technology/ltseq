@@ -153,16 +153,12 @@ class TestPartitionWithDifferentKeys:
         assert "West" in partitions.keys()
         assert "East" in partitions.keys()
 
-    def test_partition_numeric_key(self):
-        """partition() should work with numeric partition keys."""
+    def test_partition_complex_lambda_raises(self):
+        """partition() should reject non-capturable Python logic."""
         t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
 
-        # Partition by amount range
-        partitions = t.partition(by=lambda r: "low" if int(r.amount) < 1000 else "high")
-
-        assert len(partitions) >= 1
-        keys = partitions.keys()
-        assert "low" in keys or "high" in keys
+        with pytest.raises(ValueError, match="only supports simple column expressions"):
+            t.partition(by=lambda r: "low" if int(r.amount) < 1000 else "high")
 
 
 class TestPartitionErrorHandling:
@@ -178,11 +174,9 @@ class TestPartitionErrorHandling:
     def test_partition_with_invalid_column_raises(self):
         """partition() with non-existent column should raise."""
         t = LTSeq.read_csv("py-ltseq/tests/test_data/test_agg.csv")
-        partitions = t.partition(by=lambda r: r.nonexistent_column)
 
-        # Error should occur when we try to access partitions
-        with pytest.raises(RuntimeError):
-            _ = partitions.keys()
+        with pytest.raises(ValueError, match="Capture failed"):
+            t.partition(by=lambda r: r.nonexistent_column)
 
 
 class TestPartitionCaching:

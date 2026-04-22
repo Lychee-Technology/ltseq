@@ -360,6 +360,33 @@ ensure_worktree_on_research() {
   fi
 }
 
+sync_research_branch_to_base() {
+  local base_ref
+  local worktree_ref
+  local base_short
+  local worktree_short
+
+  base_ref="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  worktree_ref="$(git -C "$WORKTREE_DIR" rev-parse HEAD)"
+
+  if [[ "$worktree_ref" == "$base_ref" ]]; then
+    return 0
+  fi
+
+  base_short="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+  worktree_short="$(git -C "$WORKTREE_DIR" rev-parse --short HEAD)"
+
+  if git -C "$ROOT_DIR" merge-base --is-ancestor "$worktree_ref" "$base_ref"; then
+    append_loop_log "fast-forwarding research branch $RESEARCH_BRANCH from $worktree_short to $base_short"
+    git -C "$WORKTREE_DIR" merge --ff-only "$base_ref" >/dev/null
+    return 0
+  fi
+
+  printf 'research branch %s is at %s but current base is %s; remove the stale worktree/branch before rerunning\n' \
+    "$RESEARCH_BRANCH" "$worktree_short" "$base_short" >&2
+  return 1
+}
+
 sync_workspace_overlay() {
   local path
   : > "$base_overlay_manifest"
@@ -1078,6 +1105,7 @@ autoloop_main() {
     bootstrap_worktree_state
     ensure_worktree_clean
     ensure_worktree_on_research
+    sync_research_branch_to_base
     sync_workspace_overlay
     sync_autoresearch_assets
     sync_baseline_reports_to_worktree

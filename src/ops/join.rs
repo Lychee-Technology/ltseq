@@ -4,29 +4,27 @@
 //!
 //! # Design
 //!
-//! DataFusion rejects joins where column names overlap. This is resolved via:
-//! 1. Register both tables as temporary MemTables
-//! 2. Build SQL JOIN with explicit column aliasing
-//! 3. Right table columns get user-specified prefix (e.g., `right_id`)
+//! Uses DataFusion's native DataFrame::join() API for lazy evaluation.
+//! Right table columns are renamed before joining to avoid duplicate-column conflicts,
+//! then the result is projected to match the expected aliased schema.
 //!
 //! # Supported Join Types
 //!
 //! - Inner: Only matching rows from both tables
 //! - Left: All left rows, matching right rows or NULL
-//! - Right: All right rows, matching left rows or NULL  
+//! - Right: All right rows, matching left rows or NULL
 //! - Full: All rows from both tables
+//! - Semi: Returns left rows where keys exist in right table
+//! - Anti: Returns left rows where keys do NOT exist in right table
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::common::{
-    build_equality_conditions, build_qualified_column_list, build_aliased_join_schema,
-    JoinType, MultiTempTableGuard, schema_from_batches_or_fallback,
-};
+use crate::ops::common::{build_aliased_join_schema, JoinType};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::SessionContext;
+use datafusion::logical_expr::col;
+use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -34,90 +32,6 @@ use std::sync::Arc;
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Collect both left and right DataFrames to batches
-async fn collect_both_tables(
-    df_left: &datafusion::dataframe::DataFrame,
-    df_right: &datafusion::dataframe::DataFrame,
-) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>), String> {
-    let left_result = df_left
-        .clone()
-        .collect()
-        .await
-        .map_err(|e| format!("Failed to collect left table: {}", e))?;
-    let right_result = df_right
-        .clone()
-        .collect()
-        .await
-        .map_err(|e| format!("Failed to collect right table: {}", e))?;
-    Ok((left_result, right_result))
-}
-
-/// Get schema from batches or use stored schema as fallback
-fn get_schema_from_batches(
-    batches: &[RecordBatch],
-    stored_schema: &Arc<ArrowSchema>,
-) -> Arc<ArrowSchema> {
-    schema_from_batches_or_fallback(batches, stored_schema)
-}
-
-/// Register both tables as temp MemTables and return a guard for automatic cleanup
-fn register_join_tables(
-    session: &Arc<SessionContext>,
-    left_schema: &Arc<ArrowSchema>,
-    left_batches: Vec<RecordBatch>,
-    right_schema: &Arc<ArrowSchema>,
-    right_batches: Vec<RecordBatch>,
-    prefix: &str,
-) -> PyResult<MultiTempTableGuard> {
-    let unique_suffix = std::process::id();
-    let left_name = format!("__ltseq_{}_left_{}", prefix, unique_suffix);
-    let right_name = format!("__ltseq_{}_right_{}", prefix, unique_suffix);
-
-    MultiTempTableGuard::register_two(
-        session,
-        &left_name,
-        Arc::clone(left_schema),
-        left_batches,
-        &right_name,
-        Arc::clone(right_schema),
-        right_batches,
-    )
-    .map_err(|e| LtseqError::Runtime(e).into())
-}
-
-/// Execute SQL query and collect results
-async fn execute_and_collect(
-    session: &SessionContext,
-    sql: &str,
-    op_name: &str,
-) -> Result<Vec<RecordBatch>, String> {
-    let result_df = session
-        .sql(sql)
-        .await
-        .map_err(|e| format!("Failed to execute {} query: {}", op_name, e))?;
-
-    result_df
-        .collect()
-        .await
-        .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
-}
-
-/// Build result LTSeqTable from batches
-fn build_result_table(
-    session: &Arc<SessionContext>,
-    result_batches: Vec<RecordBatch>,
-    empty_schema: Arc<ArrowSchema>,
-    sort_exprs: &[String],
-) -> PyResult<LTSeqTable> {
-    LTSeqTable::from_batches_with_schema(
-        Arc::clone(session),
-        result_batches,
-        empty_schema,
-        sort_exprs.to_vec(),
-        None,
-    )
-}
 
 /// Extract join key column names from either a Column or And-expression
 ///
@@ -248,48 +162,53 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-struct JoinSqlConfig<'a> {
-    left_table: &'a str,
-    right_table: &'a str,
-    left_schema: &'a ArrowSchema,
-    right_schema: &'a ArrowSchema,
-    left_keys: &'a [String],
-    join_type: JoinType,
-    alias: &'a str,
+/// Rename columns in a DataFrame to avoid conflicts during join.
+///
+/// Returns a new DataFrame with columns renamed according to the alias prefix,
+/// plus a mapping of old->new column names for the join key adjustment.
+fn rename_right_df_for_join(
+    df: DataFrame,
+    right_schema: &ArrowSchema,
+    alias: &str,
+    right_key_cols: &[String],
+) -> PyResult<(DataFrame, Vec<String>)> {
+    let mut new_key_cols = Vec::with_capacity(right_key_cols.len());
+    let mut select_exprs = Vec::with_capacity(right_schema.fields().len());
+
+    for field in right_schema.fields() {
+        let old_name = field.name();
+        let new_name = format!("{}_{}", alias, old_name);
+
+        // If this is a join key column, track the mapping
+        if right_key_cols.contains(&old_name.to_string()) {
+            new_key_cols.push(new_name.clone());
+        }
+
+        // Create alias expression: col(old_name).alias(new_name)
+        select_exprs.push(col(old_name).alias(&new_name));
+    }
+
+    let renamed_df = df
+        .select(select_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
+
+    Ok((renamed_df, new_key_cols))
 }
 
-/// Build SQL JOIN query with proper column aliasing for the result
-fn build_join_sql(cfg: &JoinSqlConfig<'_>) -> String {
-    let left_table = cfg.left_table;
-    let right_table = cfg.right_table;
-    let left_schema = cfg.left_schema;
-    let right_schema = cfg.right_schema;
-    let left_keys = cfg.left_keys;
-    let join_type = cfg.join_type;
-    let alias = cfg.alias;
-    // Build SELECT clause using common helpers
-    let left_cols = build_qualified_column_list(left_schema, "L");
-    
-    let right_cols: String = right_schema
-        .fields()
-        .iter()
-        .map(|f| format!("R.\"{}\" AS \"{}_{}\"", f.name(), alias, f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    
-    let select_clause = format!("{}, {}", left_cols, right_cols);
-
-    // Build ON clause using common helper
-    let on_clause = build_equality_conditions("L", "R", left_keys);
-
-    format!(
-        "SELECT {} FROM \"{}\" L {} \"{}\" R ON {}",
-        select_clause,
-        left_table,
-        join_type.to_sql(),
-        right_table,
-        on_clause
-    )
+/// Build result LTSeqTable from a DataFrame
+fn build_result_table_from_df(
+    session: &Arc<SessionContext>,
+    result_df: DataFrame,
+    expected_schema: Arc<ArrowSchema>,
+    sort_exprs: &[String],
+) -> PyResult<LTSeqTable> {
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(session),
+        result_df,
+        expected_schema,
+        sort_exprs.to_vec(),
+        None,
+    ))
 }
 
 // ============================================================================
@@ -313,85 +232,50 @@ pub fn join_impl(
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
     })?;
 
-    // Collect batches and get schemas
-    let (left_batches, right_batches) = RUNTIME
-        .block_on(collect_both_tables(df_left, df_right))
-        .map_err(LtseqError::Runtime)?;
-
-    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
-    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
-
     // Parse and validate join keys
-    let (left_col_names, _right_col_names) = extract_and_validate_join_keys(
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
-        &left_schema,
-        &right_schema,
+        stored_schema_left,
+        stored_schema_right,
     )?;
 
-    // Register temp tables (RAII guard will handle cleanup)
-    let table_guard = register_join_tables(
-        &table.session,
-        &left_schema,
-        left_batches,
-        &right_schema,
-        right_batches,
-        "join",
-    )?;
-    
-    let table_names = table_guard.names();
-    let left_name = table_names[0];
-    let right_name = table_names[1];
+    // Convert to DataFusion JoinType
+    let df_join_type = match join_type {
+        JoinType::Inner => datafusion::logical_expr::JoinType::Inner,
+        JoinType::Left => datafusion::logical_expr::JoinType::Left,
+        JoinType::Right => datafusion::logical_expr::JoinType::Right,
+        JoinType::Full => datafusion::logical_expr::JoinType::Full,
+    };
 
-    let sql_query = build_join_sql(&JoinSqlConfig {
-        left_table: left_name,
-        right_table: right_name,
-        left_schema: &left_schema,
-        right_schema: &right_schema,
-        left_keys: &left_col_names,
-        join_type,
+    // Rename right columns to avoid conflicts
+    let (renamed_right_df, new_right_keys) = rename_right_df_for_join(
+        (**df_right).clone(),
+        stored_schema_right,
         alias,
-    });
+        &right_col_names,
+    )?;
 
-    let result_batches = RUNTIME
-        .block_on(execute_and_collect(&table.session, &sql_query, "join"))
+    // Execute native join
+    let result_df = RUNTIME
+        .block_on(async {
+            (**df_left)
+                .clone()
+                .join(
+                    renamed_right_df,
+                    df_join_type,
+                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    None, // No additional filter
+                )
+                .map_err(|e| format!("Native join failed: {}", e))
+        })
         .map_err(LtseqError::Runtime)?;
 
-    // Build empty schema for empty results
-    let empty_schema = build_aliased_join_schema(&left_schema, &right_schema, alias);
+    // Build expected schema for the result
+    let expected_schema = build_aliased_join_schema(stored_schema_left, stored_schema_right, alias);
 
-    build_result_table(&table.session, result_batches, empty_schema, &[])
-}
-
-/// Build SQL for semi-join or anti-join (returns only left table columns)
-fn build_semi_anti_join_sql(
-    left_table: &str,
-    right_table: &str,
-    left_schema: &ArrowSchema,
-    left_keys: &[String],
-    _right_keys: &[String],
-    is_anti: bool,
-) -> String {
-    // Select all columns from left table only
-    let select_cols = build_qualified_column_list(left_schema, "L");
-
-    // Build WHERE condition using common helper
-    let where_conditions = build_equality_conditions("L", "R", left_keys);
-
-    let exists_keyword = if is_anti { "NOT EXISTS" } else { "EXISTS" };
-
-    // Semi-join uses DISTINCT to deduplicate when right table has multiple matches
-    let distinct = if is_anti { "" } else { "DISTINCT " };
-
-    format!(
-        "SELECT {}{} FROM \"{}\" L WHERE {} (SELECT 1 FROM \"{}\" R WHERE {})",
-        distinct,
-        select_cols,
-        left_table,
-        exists_keyword,
-        right_table,
-        where_conditions
-    )
+    build_result_table_from_df(&table.session, result_df, expected_schema, &[])
 }
 
 /// Semi-join: Return rows from left table where keys exist in right table
@@ -425,59 +309,41 @@ fn semi_anti_join_impl(
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
-    // Collect batches and get schemas
-    let (left_batches, right_batches) = RUNTIME
-        .block_on(collect_both_tables(df_left, df_right))
-        .map_err(LtseqError::Runtime)?;
-
-    let left_schema = get_schema_from_batches(&left_batches, stored_schema_left);
-    let right_schema = get_schema_from_batches(&right_batches, stored_schema_right);
-
     // Parse and validate join keys
     let (left_col_names, right_col_names) = extract_and_validate_join_keys(
         left_key_expr_dict,
         right_key_expr_dict,
-        &left_schema,
-        &right_schema,
+        stored_schema_left,
+        stored_schema_right,
     )?;
 
-    // Register temp tables (RAII guard will handle cleanup)
-    let join_type_name = if is_anti { "anti" } else { "semi" };
-    let table_guard = register_join_tables(
-        &table.session,
-        &left_schema,
-        left_batches,
-        &right_schema,
-        right_batches,
-        join_type_name,
-    )?;
-    
-    let table_names = table_guard.names();
-    let left_name = table_names[0];
-    let right_name = table_names[1];
+    // Convert to DataFusion JoinType
+    let df_join_type = if is_anti {
+        datafusion::logical_expr::JoinType::LeftAnti
+    } else {
+        datafusion::logical_expr::JoinType::LeftSemi
+    };
 
-    // Build and execute SQL query
-    let sql_query = build_semi_anti_join_sql(
-        left_name,
-        right_name,
-        &left_schema,
-        &left_col_names,
-        &right_col_names,
-        is_anti,
-    );
-
-    let result_batches = RUNTIME
-        .block_on(execute_and_collect(
-            &table.session,
-            &sql_query,
-            join_type_name,
-        ))
+    // Execute native semi/anti join (no column renaming needed - only left columns returned)
+    let result_df = RUNTIME
+        .block_on(async {
+            (**df_left)
+                .clone()
+                .join(
+                    (**df_right).clone(),
+                    df_join_type,
+                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    None, // No additional filter
+                )
+                .map_err(|e| format!("Native semi/anti join failed: {}", e))
+        })
         .map_err(LtseqError::Runtime)?;
 
-    build_result_table(
+    build_result_table_from_df(
         &table.session,
-        result_batches,
-        Arc::clone(&left_schema),
+        result_df,
+        Arc::clone(stored_schema_left),
         &table.sort_exprs,
     )
 }

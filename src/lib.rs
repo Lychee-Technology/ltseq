@@ -1126,6 +1126,43 @@ impl LTSeqTable {
     fn step(&self, n: usize) -> PyResult<LTSeqTable> {
         crate::ops::set_ops::step_impl(self, n)
     }
+
+    // ── Mutation operations ─────────────────────────────────────
+
+    /// Insert a row at the given 0-based position (copy-on-write).
+    ///
+    /// The row data is provided as a Python dict mapping column names to values.
+    /// Position is clamped: negative → 0, beyond end → append.
+    fn insert_row(&self, pos: i64, row_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::insert_row_impl(self, pos, row_dict)
+    }
+
+    /// Delete the row at the given 0-based position (copy-on-write).
+    ///
+    /// Out-of-range positions are silently ignored (no-op).
+    fn delete_rows(&self, pos: i64) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::delete_rows_impl(self, pos)
+    }
+
+    /// Conditionally update columns where predicate is True (copy-on-write).
+    ///
+    /// The predicate is the same expression format used by filter().
+    /// Updates is a dict mapping column names to new values (literals only).
+    fn conditional_update(
+        &self,
+        expr_dict: &Bound<'_, PyDict>,
+        updates: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::conditional_update_impl(self, expr_dict, updates)
+    }
+
+    /// Modify specific columns in the row at 0-based position (copy-on-write).
+    ///
+    /// Updates is a dict mapping column names to new values.
+    /// Out-of-range positions are silently ignored (no-op).
+    fn modify_row(&self, pos: i64, updates: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::modify_row_impl(self, pos, updates)
+    }
 }
 
 #[pymodule]

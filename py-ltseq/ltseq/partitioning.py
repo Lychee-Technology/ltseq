@@ -7,7 +7,6 @@ all rows with the same key value regardless of position.
 
 from typing import Any, Callable, Iterator
 
-
 class SQLPartitionedTable:
     """
     SQL-based partitioned table for fast column-based partitioning.
@@ -57,11 +56,12 @@ class SQLPartitionedTable:
         if self._partitions_cache is None:
             self._partitions_cache = {}
 
-        # Normalize key to tuple
-        if len(self._columns) == 1:
-            key_tuple = (key,) if not isinstance(key, tuple) else key
-        else:
-            key_tuple = key if isinstance(key, tuple) else (key,)
+        key_tuple = self._normalize_key(key)
+
+        if self._keys_cache is None:
+            self._compute_keys()
+        if key not in self._keys_cache and key_tuple not in self._keys_cache:
+            raise KeyError(f"Partition key '{key}' not found")
 
         # Check cache first
         if key_tuple in self._partitions_cache:
@@ -93,6 +93,11 @@ class SQLPartitionedTable:
         except Exception as e:
             raise KeyError(f"Failed to access partition for key {key}: {e}")
 
+    def _normalize_key(self, key: Any) -> tuple[Any, ...]:
+        if len(self._columns) == 1:
+            return (key,) if not isinstance(key, tuple) else key
+        return key if isinstance(key, tuple) else (key,)
+
     def keys(self) -> list[Any]:
         """
         Return all partition keys.
@@ -105,18 +110,19 @@ class SQLPartitionedTable:
         return self._keys_cache  # type: ignore[return-value]
 
     def _compute_keys(self) -> None:
-        """Compute distinct keys using SQL."""
-        # Select just the partition columns
+        """Compute distinct keys using Arrow (avoids pandas round-trip)."""
         distinct_ltseq = self._ltseq.select(*self._columns).distinct()
-        df = distinct_ltseq.to_pandas()
+        pa_table = distinct_ltseq.to_arrow()
 
-        # Extract keys from the distinct result
         keys = []
-        for _, row in df.iterrows():
-            if len(self._columns) == 1:
-                keys.append(row[self._columns[0]])
-            else:
-                keys.append(tuple(row[col] for col in self._columns))
+        if len(self._columns) == 1:
+            col_name = self._columns[0]
+            col = pa_table.column(col_name)
+            keys = col.to_pylist()
+        else:
+            columns = [pa_table.column(c).to_pylist() for c in self._columns]
+            for i in range(pa_table.num_rows):
+                keys.append(tuple(columns[j][i] for j in range(len(self._columns))))
 
         self._keys_cache = keys
 
@@ -231,6 +237,29 @@ class PartitionedTable:
         self._ltseq = ltseq_instance
         self._partition_fn = partition_fn
         self._partitions_cache: dict[Any, "LTSeq"] | None = None
+        self._delegate = self._build_delegate()
+
+    def _build_delegate(self) -> SQLPartitionedTable:
+        """Build the SQL-backed delegate for capturable partition expressions."""
+        try:
+            expr_dict = self._ltseq._capture_expr(self._partition_fn)
+        except Exception as e:
+            raise ValueError(
+                "partition(by=callable) only supports simple column expressions such as "
+                "lambda r: r.region. Complex Python logic is no longer supported "
+                "because it forces internal materialization. "
+                f"Capture failed with: {e}"
+            ) from e
+
+        columns = _partition_expr_to_columns(expr_dict)
+        if columns is None:
+            raise ValueError(
+                "partition(by=callable) only supports simple column expressions such as "
+                "lambda r: r.region or lambda r: r.year. Derived Python expressions "
+                "must use explicit column partitioning or another API."
+            )
+
+        return SQLPartitionedTable(self._ltseq, columns)
 
     def __getitem__(self, key: Any) -> "LTSeq":
         """
@@ -248,13 +277,7 @@ class PartitionedTable:
         Example:
             >>> west_sales = partitions["West"]
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-
-        if key not in self._partitions_cache:
-            raise KeyError(f"Partition key '{key}' not found")
-
-        return self._partitions_cache[key]
+        return self._delegate[key]
 
     def keys(self) -> list[Any]:
         """
@@ -267,9 +290,7 @@ class PartitionedTable:
             >>> regions = partitions.keys()
             >>> print(regions)  # ['West', 'East', 'Central']
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-        return list(self._partitions_cache.keys())  # type: ignore[union-attr]
+        return self._delegate.keys()
 
     def values(self) -> list["LTSeq"]:
         """
@@ -278,9 +299,7 @@ class PartitionedTable:
         Returns:
             List of LTSeq objects, one per partition
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-        return list(self._partitions_cache.values())  # type: ignore[union-attr]
+        return self._delegate.values()
 
     def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
         """
@@ -293,9 +312,7 @@ class PartitionedTable:
             >>> for region, data in partitions.items():
             ...     print(f"{region}: {len(data)} rows")
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-        return iter(self._partitions_cache.items())  # type: ignore[union-attr]
+        return self._delegate.items()
 
     def __iter__(self) -> Iterator["LTSeq"]:
         """
@@ -313,9 +330,7 @@ class PartitionedTable:
         Returns:
             Count of distinct partition keys
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-        return len(self._partitions_cache)  # type: ignore[arg-type]
+        return len(self._delegate)
 
     def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
         """
@@ -335,12 +350,8 @@ class PartitionedTable:
             >>> for region, total_row in totals.items():
             ...     print(f"{region}: {total_row}")
         """
-        if self._partitions_cache is None:
-            self._materialize_partitions()
-
-        # Apply function to each partition
         transformed_partitions: dict[Any, "LTSeq"] = {}
-        for key, partition_table in self._partitions_cache.items():  # type: ignore[union-attr]
+        for key, partition_table in self._delegate.items():
             try:
                 result = fn(partition_table)
                 transformed_partitions[key] = result
@@ -364,52 +375,28 @@ class PartitionedTable:
         Compute the partitions (triggered on first access).
 
         This method:
-        1. Gets data from the underlying table via pandas
+        1. Gets data from the underlying table via Arrow
         2. Evaluates partition function on each row
         3. Groups rows by partition key
         4. Creates LTSeq for each partition
         5. Caches results
-
-        Note: Requires pandas. If not installed, raises RuntimeError.
         """
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "partition() requires pandas. Install it with: pip install pandas"
-            )
+        # Retained for backward compatibility with tests/internal calls.
+        # PartitionedTable now delegates to SQLPartitionedTable instead of
+        # materializing Arrow data in Python.
+        self._partitions_cache = {key: table for key, table in self._delegate.items()}
 
-        # Get data as pandas DataFrame
-        df = self._ltseq.to_pandas()
-        rows = df.to_dict("records")
 
-        # Evaluate partition function on each row and group
-        partitions_dict: dict[Any, list[dict]] = {}
+def _partition_expr_to_columns(expr_dict: dict[str, Any]) -> tuple[str, ...] | None:
+    """Convert a captured partition lambda into SQL partition columns.
 
-        for row_idx, row_data in enumerate(rows):
-            try:
-                # Create a proxy-like object to pass to the partition function
-                row_proxy = _RowProxy(row_data)
-                partition_key = self._partition_fn(row_proxy)
-
-                if partition_key not in partitions_dict:
-                    partitions_dict[partition_key] = []
-                partitions_dict[partition_key].append(row_data)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Error evaluating partition function on row {row_idx}: {e}"
-                )
-
-        # Convert grouped rows back to LTSeq tables
-        self._partitions_cache = {}
-        for key, row_list in partitions_dict.items():
-            try:
-                partition_table = self._ltseq.__class__._from_rows(
-                    row_list, self._ltseq._schema
-                )
-                self._partitions_cache[key] = partition_table
-            except Exception as e:
-                raise RuntimeError(f"Error creating LTSeq for partition '{key}': {e}")
+    Strict-mode partitioning accepts only direct column references so the
+    implementation can stay inside Rust/DataFusion without internal Arrow
+    materialization.
+    """
+    if expr_dict.get("type") == "Column":
+        return (expr_dict["name"],)
+    return None
 
 
 class _PrecomputedPartitionedTable(PartitionedTable):
@@ -430,30 +417,25 @@ class _PrecomputedPartitionedTable(PartitionedTable):
         self._ltseq = None
         self._partition_fn = None
         self._partitions_cache = precomputed_partitions
+        self._delegate = None
+
+    def __getitem__(self, key: Any) -> "LTSeq":
+        if key not in self._partitions_cache:
+            raise KeyError(f"Partition key '{key}' not found")
+        return self._partitions_cache[key]
+
+    def keys(self) -> list[Any]:
+        return list(self._partitions_cache.keys())
+
+    def values(self) -> list["LTSeq"]:
+        return list(self._partitions_cache.values())
+
+    def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
+        return iter(self._partitions_cache.items())
+
+    def __len__(self) -> int:
+        return len(self._partitions_cache)
 
     def _materialize_partitions(self) -> None:
         """Override: partitions are already materialized."""
         pass  # No-op since _partitions_cache is already set
-
-
-class _RowProxy:
-    """
-    Proxy object for accessing row data in partition function.
-
-    Allows syntax like: partition_fn(lambda r: r.region)
-    """
-
-    def __init__(self, row_data: Dict[str, Any]):
-        """Initialize with row dictionary."""
-        self._data = row_data
-
-    def __getattr__(self, name: str) -> Any:
-        """Get column value by name."""
-        if name.startswith("_"):
-            # Allow access to internal attributes
-            return object.__getattribute__(self, name)
-
-        if name not in self._data:
-            raise AttributeError(f"Column '{name}' not found in row")
-
-        return self._data[name]

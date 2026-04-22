@@ -819,8 +819,13 @@ fn parse_call_temporal(
 
             match unit.as_str() {
                 "day" | "days" => {
+                    // Date - Date returns Int64 (days) directly in DataFusion 53+;
+                    // no need for date_part, just cast to Float64 for consistency
                     let diff_expr = on_expr - other_expr;
-                    Ok(date_part(lit("day"), diff_expr))
+                    Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
+                        Box::new(diff_expr),
+                        DataType::Float64,
+                    )))
                 }
                 "month" | "months" => {
                     // (year(on) - year(other)) * 12 + (month(on) - month(other))
@@ -836,23 +841,31 @@ fn parse_call_temporal(
                     Ok(on_year - other_year)
                 }
                 "hour" | "hours" => {
-                    // Cast to epoch seconds, divide by 3600
+                    // Date - Date returns Int64 (days); hours = days * 24
                     let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(24_f64) + sec_diff / lit(3600_f64))
+                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
+                        Box::new(diff_expr),
+                        DataType::Float64,
+                    ));
+                    Ok(diff_days * lit(24_f64))
                 }
                 "minute" | "minutes" => {
+                    // Date - Date returns Int64 (days); minutes = days * 1440
                     let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(1440_f64) + sec_diff / lit(60_f64))
+                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
+                        Box::new(diff_expr),
+                        DataType::Float64,
+                    ));
+                    Ok(diff_days * lit(1440_f64))
                 }
                 "second" | "seconds" => {
+                    // Date - Date returns Int64 (days); seconds = days * 86400
                     let diff_expr = on_expr - other_expr;
-                    let day_diff = date_part(lit("day"), diff_expr.clone());
-                    let sec_diff = date_part(lit("second"), diff_expr);
-                    Ok(day_diff * lit(86400_f64) + sec_diff)
+                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
+                        Box::new(diff_expr),
+                        DataType::Float64,
+                    ));
+                    Ok(diff_days * lit(86400_f64))
                 }
                 _ => Err(format!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",

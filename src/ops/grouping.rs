@@ -343,66 +343,157 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
             LtseqError::Runtime(format!("Failed to add __boundary__ column: {}", e))
         })?;
 
-    // ── Step 3: Materialize + compute group_id, count, rn via SQL ─────
+    // ── Step 3: Native window expressions — no materialization ─────
     // From __boundary__ (boolean), build:
     //   mask = COALESCE(CASE WHEN __boundary__ THEN 1 ELSE 0 END, 1)
     //   __group_id__ = SUM(mask) OVER (ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
     //   __group_count__ = COUNT(*) OVER (PARTITION BY __group_id__)
     //   __rn__ = ROW_NUMBER() OVER (PARTITION BY __group_id__)
-    let batches = RUNTIME
-        .block_on(async {
-            df_with_boundary
-                .collect()
-                .await
-                .map_err(LtseqError::collect)
-        })?;
+    use datafusion::functions_aggregate::expr_fn::{count, sum};
+    use datafusion::functions_window::expr_fn::row_number;
+    use datafusion::logical_expr::expr::{Case, WindowFunction, WindowFunctionParams};
+    use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition};
+    use datafusion::scalar::ScalarValue;
 
-    if batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
-    }
+    // Build mask expression: CASE WHEN __boundary__ IS NULL THEN 1 WHEN __boundary__ THEN 1 ELSE 0 END
+    let boundary_col = col("__boundary__");
+    let mask_expr = Expr::Case(Case {
+        expr: None,
+        when_then_expr: vec![
+            (
+                Box::new(boundary_col.clone().is_null()),
+                Box::new(lit(1i64)),
+            ),
+            (
+                Box::new(boundary_col),
+                Box::new(lit(1i64)),
+            ),
+        ],
+        else_expr: Some(Box::new(lit(0i64))),
+    });
 
-    let batch_schema = batches[0].schema();
-    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, "group_id")?;
+    // Build __group_id__: SUM(mask) OVER (ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
+    let sum_mask = sum(mask_expr);
+    let group_id_frame = WindowFrame::new_bounds(
+        WindowFrameUnits::Rows,
+        WindowFrameBound::Preceding(ScalarValue::Null),
+        WindowFrameBound::CurrentRow,
+    );
+    let group_id_expr = match sum_mask {
+        Expr::AggregateFunction(agg) => Expr::WindowFunction(Box::new(WindowFunction {
+            fun: WindowFunctionDefinition::AggregateUDF(agg.func),
+            params: WindowFunctionParams {
+                args: agg.params.args,
+                partition_by: vec![],
+                order_by: vec![],
+                window_frame: group_id_frame,
+                filter: None,
+                null_treatment: None,
+                distinct: false,
+            },
+        })),
+        _ => {
+            return Err(LtseqError::Runtime(
+                "Expected AggregateFunction from sum()".into(),
+            )
+            .into());
+        }
+    };
 
-    // Build column list excluding __boundary__ (internal column)
-    let columns_str = batch_schema
+    // Build select expressions for step 3a: original columns + __group_id__ (drop __boundary__)
+    let mut step3a_exprs: Vec<Expr> = schema
         .fields()
         .iter()
-        .filter(|f| f.name() != "__boundary__")
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .map(|f| Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
+        .collect();
+    step3a_exprs.push(group_id_expr.alias("__group_id__"));
 
-    let sql_query = format!(
-        r#"WITH grouped AS (
-          SELECT {cols},
-            SUM(COALESCE(CASE WHEN "__boundary__" THEN 1 ELSE 0 END, 1))
-              OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as __group_id__
-          FROM "{table}"
-        )
-        SELECT {cols}, __group_id__,
-          COUNT(*) OVER (PARTITION BY __group_id__) as __group_count__,
-          ROW_NUMBER() OVER (PARTITION BY __group_id__) as __rn__
-        FROM grouped"#,
-        cols = columns_str,
-        table = temp_table_name,
-    );
+    let df_with_group_id = df_with_boundary
+        .select(step3a_exprs)
+        .map_err(|e| {
+            LtseqError::Runtime(format!("Failed to add __group_id__ column: {}", e))
+        })?;
 
-    let result_batches = execute_sql_query(&table.session, &sql_query, "group_id")?;
+    // Build __group_count__: COUNT(*) OVER (PARTITION BY __group_id__)
+    let group_id_col = col("__group_id__");
+    let count_star = count(lit(1i64));
+    let group_count_expr = match count_star {
+        Expr::AggregateFunction(agg) => Expr::WindowFunction(Box::new(WindowFunction {
+            fun: WindowFunctionDefinition::AggregateUDF(agg.func),
+            params: WindowFunctionParams {
+                args: agg.params.args,
+                partition_by: vec![group_id_col.clone()],
+                order_by: vec![],
+                window_frame: WindowFrame::new_bounds(
+                    WindowFrameUnits::Rows,
+                    WindowFrameBound::Preceding(ScalarValue::Null),
+                    WindowFrameBound::Following(ScalarValue::Null),
+                ),
+                filter: None,
+                null_treatment: None,
+                distinct: false,
+            },
+        })),
+        _ => {
+            return Err(LtseqError::Runtime(
+                "Expected AggregateFunction from count()".into(),
+            )
+            .into());
+        }
+    };
 
-    // Cleanup and return result
-    let _ = table.session.deregister_table(&temp_table_name);
-    create_result_from_batches(
-        &table.session,
-        result_batches,
-        table.schema.as_ref(),
-        "group_id",
-    )
+    // Build __rn__: ROW_NUMBER() OVER (PARTITION BY __group_id__)
+    let rn_expr = row_number()
+        .partition_by(vec![group_id_col])
+        .build()
+        .map_err(|e| LtseqError::Runtime(format!("Failed to build row_number window: {}", e)))?;
+
+    // Build final select: original columns + __group_id__ + __group_count__ + __rn__
+    let mut final_exprs: Vec<Expr> = schema
+        .fields()
+        .iter()
+        .map(|f| Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
+        .collect();
+    final_exprs.push(col("__group_id__"));
+    final_exprs.push(group_count_expr.alias("__group_count__"));
+    final_exprs.push(rn_expr.alias("__rn__"));
+
+    let result_df = df_with_group_id
+        .select(final_exprs)
+        .map_err(|e| {
+            LtseqError::Runtime(format!("Failed to add __group_count__ and __rn__ columns: {}", e))
+        })?;
+
+    // Build result schema with internal columns
+    let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = schema
+        .fields()
+        .iter()
+        .map(|f| (**f).clone())
+        .collect();
+    result_fields.push(datafusion::arrow::datatypes::Field::new(
+        "__group_id__",
+        datafusion::arrow::datatypes::DataType::Int64,
+        false,
+    ));
+    result_fields.push(datafusion::arrow::datatypes::Field::new(
+        "__group_count__",
+        datafusion::arrow::datatypes::DataType::Int64,
+        false,
+    ));
+    result_fields.push(datafusion::arrow::datatypes::Field::new(
+        "__rn__",
+        datafusion::arrow::datatypes::DataType::Int64,
+        false,
+    ));
+    let result_schema = Arc::new(ArrowSchema::new(result_fields));
+
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        result_df,
+        result_schema,
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
 }
 
 /// Get only the first row of each group
