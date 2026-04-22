@@ -42,6 +42,17 @@ def prices_csv():
 class TestStatefulScanBasic:
     """Basic functionality tests."""
 
+    def test_stateful_scan_emits_small_table_warning(self, sample_csv):
+        """stateful_scan() should explicitly warn about materialization."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        with pytest.warns(UserWarning, match="small-table convenience API"):
+            t.stateful_scan(
+                func=lambda s, r: s + r["value"],
+                init=0,
+                output_col="running_total",
+            )
+
     def test_compound_growth(self, sample_csv):
         """Test compound growth calculation (main use case from API spec)."""
         t = LTSeq.read_csv(sample_csv).sort("date")

@@ -225,8 +225,8 @@ class SetOpsMixin:
         if not values:
             return True
 
-        df = self.to_pandas()
-        col_values = set(df[key_col].tolist())
+        pa_table = self.to_arrow()
+        col_values = set(pa_table.column(key_col).to_pylist())
         return all(v in col_values for v in values)
 
     def is_subset(self, other: "LTSeq", on: Callable | None = None) -> bool:
@@ -354,25 +354,18 @@ class AdvancedOpsMixin:
 
         try:
             result_inner = self._inner.search_first(expr_dict)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"search_first() failed: {e}. "
+                f"The predicate could not be transpiled to a DataFusion expression. "
+                f"Use simpler expressions (column comparisons, boolean logic) that the "
+                f"expression system can handle."
+            ) from e
 
-            result = LTSeq()
-            result._inner = result_inner
-            result._schema = self._schema.copy()
-            return result
-        except Exception:
-            # Fallback to Python iteration
-            df = self.to_pandas()
-            for idx, row in df.iterrows():
-                single_row_df = df.iloc[[idx]]
-                rows = single_row_df.to_dict("records")
-                try:
-                    single_ltseq = LTSeq._from_rows(rows, self._schema)
-                    result_filtered = single_ltseq.filter(predicate)
-                    if len(result_filtered) > 0:
-                        return result_filtered
-                except Exception:
-                    continue
-            return LTSeq._from_rows([], self._schema)
+        result = LTSeq()
+        result._inner = result_inner
+        result._schema = self._schema.copy()
+        return result
 
     def pivot(
         self,
@@ -455,6 +448,12 @@ class AdvancedOpsMixin:
         Returns:
             New LTSeq with state column added
 
+        Notes:
+            This is an explicit small-table convenience API. It materializes the
+            full table into Arrow and executes the transition function row-by-row
+            in Python, so it does not preserve DataFusion laziness or pushdown.
+            Prefer Rust/DataFusion-native transforms when possible.
+
         Example:
             >>> result = t.sort("date").stateful_scan(
             ...     func=lambda s, r: s * (1 + r["rate"]),
@@ -462,6 +461,8 @@ class AdvancedOpsMixin:
             ...     output_col="cumulative_return"
             ... )
         """
+        import warnings
+
         from .core import LTSeq
 
         if not self._schema:
@@ -478,40 +479,49 @@ class AdvancedOpsMixin:
                 f"Use a different name or remove the existing column first."
             )
 
-        try:
-            import pandas as pd
-        except ImportError:
-            raise RuntimeError(
-                "stateful_scan() requires pandas. Install with: pip install pandas"
-            )
+        warnings.warn(
+            "stateful_scan() is a small-table convenience API that materializes "
+            "the table into Arrow and executes row-by-row in Python. It does not "
+            "preserve lazy DataFusion execution.",
+            UserWarning,
+            stacklevel=2,
+        )
 
-        df = self.to_pandas()
+        import pyarrow as pa
 
-        if df.empty:
+        pa_table = self.to_arrow()
+
+        if pa_table.num_rows == 0:
             return self._handle_empty_scan(init, output_col)
+
+        col_names = pa_table.schema.names
+        columns = {name: pa_table.column(name).to_pylist() for name in col_names}
 
         state = init
         results = []
 
-        for idx, row in df.iterrows():
-            row_dict = row.to_dict()
+        for row_idx in range(pa_table.num_rows):
+            row_dict = {name: columns[name][row_idx] for name in col_names}
             try:
                 state = func(state, row_dict)
                 results.append(state)
             except Exception as e:
                 raise RuntimeError(
-                    f"State transition function failed at row {idx}: {e}"
+                    f"State transition function failed at row {row_idx}: {e}"
                 ) from e
 
-        import pyarrow as pa
-
-        df[output_col] = results
         result_schema = self._schema.copy()
         result_schema[output_col] = self._infer_type_from_value(
             results[0] if results else init
         )
 
-        result = LTSeq.from_arrow(pa.Table.from_pandas(df, preserve_index=False))
+        new_columns = {
+            name: pa_table.column(name) for name in col_names
+        }
+        new_columns[output_col] = pa.array(results)
+        result_table = pa.table(new_columns)
+
+        result = LTSeq.from_arrow(result_table)
         result._schema = result_schema
         result._sort_keys = self._sort_keys
         return result

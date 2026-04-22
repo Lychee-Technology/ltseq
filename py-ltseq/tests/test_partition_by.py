@@ -143,6 +143,13 @@ class TestPartitionValidation:
         with pytest.raises(TypeError):
             t.partition(123)
 
+    def test_partition_complex_lambda_raises(self, sample_csv):
+        """Callable partitioning should reject non-capturable Python logic."""
+        t = LTSeq.read_csv(sample_csv)
+
+        with pytest.raises(ValueError, match="only supports simple column expressions"):
+            t.partition(by=lambda r: "low" if r.amount < 200 else "high")
+
 
 class TestPartitionEquivalence:
     """Test that partition(col) produces same results as partition(lambda)."""
