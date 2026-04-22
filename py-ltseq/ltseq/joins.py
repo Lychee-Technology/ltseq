@@ -81,8 +81,7 @@ class JoinMixin:
                 f"Simplify your join condition (e.g., use lambda a, b: a.col == b.col)."
             ) from e
 
-        result = LTSeq()
-        result._inner = joined_inner
+        result = LTSeq._from_inner(joined_inner)
         result._schema = _build_join_result_schema(
             self._schema, other._schema, "_other"
         )
@@ -199,8 +198,7 @@ class JoinMixin:
                 f"without strategy='merge' for unsorted data."
             ) from e
 
-        result = LTSeq()
-        result._inner = joined_inner
+        result = LTSeq._from_inner(joined_inner)
         result._schema = _build_join_result_schema(
             self._schema, other._schema, "_other"
         )
@@ -298,8 +296,7 @@ class JoinMixin:
         except RuntimeError as e:
             raise RuntimeError(f"Asof join failed: {e}")
 
-        result = LTSeq()
-        result._inner = joined_inner
+        result = LTSeq._from_inner(joined_inner)
         result._schema = _build_join_result_schema(
             self._schema, other._schema, "_other"
         )
@@ -373,8 +370,7 @@ class JoinMixin:
         except RuntimeError as e:
             raise RuntimeError(f"{join_type.capitalize()}-join failed: {e}")
 
-        result = LTSeq()
-        result._inner = joined_inner
+        result = LTSeq._from_inner(joined_inner)
         result._schema = self._schema.copy()
         result._sort_keys = self._sort_keys
         return result
