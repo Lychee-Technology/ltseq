@@ -39,8 +39,7 @@ class SetOpsMixin:
 
         result_inner = self._inner.union(other._inner)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -79,8 +78,7 @@ class SetOpsMixin:
 
         result_inner = self._inner.intersect(other._inner, on_expr)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -119,8 +117,7 @@ class SetOpsMixin:
 
         result_inner = self._inner.diff(other._inner, on_expr)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -164,8 +161,7 @@ class SetOpsMixin:
 
         result_inner = self._inner.rvs()
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -196,8 +192,7 @@ class SetOpsMixin:
 
         result_inner = self._inner.step(n)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -318,8 +313,7 @@ class AdvancedOpsMixin:
         except RuntimeError as e:
             raise RuntimeError(f"align() failed: {e}")
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
 
@@ -362,8 +356,7 @@ class AdvancedOpsMixin:
                 f"expression system can handle."
             ) from e
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         return result
 
@@ -416,8 +409,7 @@ class AdvancedOpsMixin:
 
         result_inner = self._inner.pivot(index_cols, columns, values, agg_fn)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
 
         result_schema = {}
         for col in index_cols:

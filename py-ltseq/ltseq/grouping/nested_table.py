@@ -470,9 +470,9 @@ class _LazyFirstLTSeq:
         if self._materialized is None:
             flattened = self._nested.flatten()
             from ..core import LTSeq
-            result = LTSeq()
+            inner = flattened._inner.first_row()
+            result = LTSeq._from_inner(inner)
             result._schema = flattened._schema.copy()
-            result._inner = flattened._inner.first_row()
             self._materialized = result
         return self._materialized
 

@@ -86,8 +86,7 @@ class LinkedTable:
         # Create new LTSeq wrapping the joined result
         from .core import LTSeq
 
-        result = LTSeq()
-        result._inner = joined_inner
+        result = LTSeq._from_inner(joined_inner)
         result._schema = self._schema.copy()
 
         # Cache the result

@@ -151,8 +151,7 @@ class TransformMixin(LookupMixin):
         expr_dict = self._capture_expr(predicate)
         result_inner = self._inner.filter(expr_dict)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = self._sort_keys
         return result
@@ -196,8 +195,7 @@ class TransformMixin(LookupMixin):
 
         result_inner = self._inner.select(exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         # Keep full schema (proper schema reduction requires Rust support)
         result._schema = self._schema.copy()
 
@@ -253,8 +251,7 @@ class TransformMixin(LookupMixin):
                 else:
                     result_inner = resolved_table._inner.derive(simplified_cols)
 
-                result = LTSeq()
-                result._inner = result_inner
+                result = LTSeq._from_inner(result_inner)
                 result._schema = resolved_table._schema.copy()
                 for col_name in simplified_cols.keys():
                     result._schema[col_name] = "Unknown"
@@ -274,8 +271,7 @@ class TransformMixin(LookupMixin):
         else:
             result_inner = self._inner.derive(derived_cols)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         for col_name in derived_cols.keys():
             result._schema[col_name] = "Unknown"
@@ -349,8 +345,7 @@ class TransformMixin(LookupMixin):
 
         result_inner = self._inner.select(select_exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
 
         # Build new schema with renamed columns (preserving order)
         new_schema = {}
@@ -421,8 +416,7 @@ class TransformMixin(LookupMixin):
 
         result_inner = self._inner.select(select_exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = {
             col: self._schema[col] for col in remaining_cols
         }
@@ -518,8 +512,7 @@ class TransformMixin(LookupMixin):
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
         result_inner = self._inner.sort(key_exprs, desc_list)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
 
         # Track sort keys
@@ -586,8 +579,7 @@ class TransformMixin(LookupMixin):
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
         result_inner = self._inner.assume_sorted(key_exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
 
         # Track sort keys
@@ -620,8 +612,7 @@ class TransformMixin(LookupMixin):
         exprs = _collect_key_exprs(key_exprs, self._schema, self._capture_expr)
         result_inner = self._inner.distinct(exprs)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -654,8 +645,7 @@ class TransformMixin(LookupMixin):
 
         result_inner = self._inner.slice(offset, length)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = self._sort_keys
         return result
@@ -744,8 +734,7 @@ class TransformMixin(LookupMixin):
         step_dicts = [self._capture_expr(p) for p in step_predicates]
         result_inner = self._inner.search_pattern(step_dicts, partition_by)
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = self._sort_keys
         return result
