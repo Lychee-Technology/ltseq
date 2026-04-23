@@ -410,6 +410,109 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     assert not (tmp_path / "issues.tsv").exists()
 
 
+def test_sync_research_branch_to_base_fast_forwards_stale_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+
+    init_script = textwrap.dedent(
+        f"""
+        set -e
+        git init {repo!s} >/dev/null
+        git -C {repo!s} config user.name 'Test User'
+        git -C {repo!s} config user.email 'test@example.com'
+        printf 'base\n' > {repo!s}/tracked.txt
+        git -C {repo!s} add tracked.txt
+        git -C {repo!s} commit -m 'base' >/dev/null
+        git -C {repo!s} branch autoresearch-benchmark/clickbench_funnel-20260420
+        git -C {repo!s} worktree add {worktree!s} autoresearch-benchmark/clickbench_funnel-20260420 >/dev/null
+        printf 'root update\n' >> {repo!s}/tracked.txt
+        git -C {repo!s} add tracked.txt
+        git -C {repo!s} commit -m 'root update' >/dev/null
+        """
+    )
+    init_result = subprocess.run(["bash", "-lc", init_script], text=True, capture_output=True, check=False)
+    assert init_result.returncode == 0, init_result.stderr
+
+    before_head = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert before_head.returncode == 0
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        ROOT_DIR={repo!s}
+        WORKTREE_DIR={worktree!s}
+        RESEARCH_BRANCH=autoresearch-benchmark/clickbench_funnel-20260420
+        LOOP_LOG={tmp_path / 'loop.log'!s}
+        sync_research_branch_to_base
+        git -C {worktree!s} rev-parse HEAD
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    after_head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert after_head.returncode == 0
+    assert result.returncode == 0, result.stderr
+    assert before_head.stdout.strip() != after_head.stdout.strip()
+    assert result.stdout.strip().endswith(after_head.stdout.strip())
+    assert "fast-forwarding research branch" in (tmp_path / "loop.log").read_text(encoding="utf-8")
+
+
+def test_sync_research_branch_to_base_rejects_diverged_worktree(tmp_path):
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+
+    init_script = textwrap.dedent(
+        f"""
+        set -e
+        git init {repo!s} >/dev/null
+        git -C {repo!s} config user.name 'Test User'
+        git -C {repo!s} config user.email 'test@example.com'
+        printf 'base\n' > {repo!s}/tracked.txt
+        git -C {repo!s} add tracked.txt
+        git -C {repo!s} commit -m 'base' >/dev/null
+        git -C {repo!s} branch autoresearch-benchmark/clickbench_funnel-20260420
+        git -C {repo!s} worktree add {worktree!s} autoresearch-benchmark/clickbench_funnel-20260420 >/dev/null
+        printf 'root update\n' >> {repo!s}/tracked.txt
+        git -C {repo!s} add tracked.txt
+        git -C {repo!s} commit -m 'root update' >/dev/null
+        printf 'worktree update\n' >> {worktree!s}/tracked.txt
+        git -C {worktree!s} add tracked.txt
+        git -C {worktree!s} commit -m 'worktree update' >/dev/null
+        """
+    )
+    init_result = subprocess.run(["bash", "-lc", init_script], text=True, capture_output=True, check=False)
+    assert init_result.returncode == 0, init_result.stderr
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        ROOT_DIR={repo!s}
+        WORKTREE_DIR={worktree!s}
+        RESEARCH_BRANCH=autoresearch-benchmark/clickbench_funnel-20260420
+        LOOP_LOG={tmp_path / 'loop.log'!s}
+        sync_research_branch_to_base
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    assert result.returncode != 0
+    assert "remove the stale worktree/branch before rerunning" in result.stderr
+
+
 def test_sync_autoresearch_assets_preserves_existing_worktree_ledgers(tmp_path):
     worktree = tmp_path / "worktree"
     pilot_root = repo_root() / "benchmarks" / "autoresearch" / "pilot"
