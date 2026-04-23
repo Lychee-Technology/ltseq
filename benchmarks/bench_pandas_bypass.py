@@ -3,7 +3,7 @@
 LTSeq Pandas Bypass Benchmark
 ================================
 
-Benchmarks the 5 hotspots from GitHub issue #69 that previously materialized
+Benchmarks the main hotspots from GitHub issue #69 that previously materialized
 data through pandas/pyarrow, bypassing the Rust execution engine. After the
 Phase 1 optimization, these paths now use Arrow directly (avoiding pandas
 round-trips) or delegate to Rust-native operations.
@@ -13,7 +13,6 @@ Hotspots benchmarked:
   2. SQLPartitionedTable._compute_keys — was to_pandas()+iterrows(), now to_arrow()+to_pylist()
   3. PartitionedTable._materialize_partitions — was to_pandas()+_from_rows(), now to_arrow()+take()
   4. contain() — was to_pandas(), now to_arrow()+to_pylist()
-  5. stateful_scan() — was to_pandas()+iterrows(), now to_arrow()+column dict iteration
 
 Each benchmark is measured at 3 scales (10K, 100K, 1M rows) with warmup +
 multiple iterations, matching the style of bench_core.py.
@@ -162,26 +161,12 @@ def bench_contain(csv_path):
     return t.contain("category", *cat_values)
 
 
-# ---------------------------------------------------------------------------
-# Benchmark 5: stateful_scan()
-# Previously: df = to_pandas(), iterrows(), pa.Table.from_pandas()
-# Now: pa_table = to_arrow(), column dict iteration, pa.table() construction
-# ---------------------------------------------------------------------------
-
-
-def bench_stateful_scan(csv_path):
-    t = LTSeq.read_csv(csv_path).sort("id")
-    result = t.stateful_scan(
-        func=lambda s, r: s + float(r["value"]),
-        init=0.0,
-        output_col="cum_value",
-    )
-    return len(result)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+BENCHMARKS = [
+    ("nested_len", bench_nested_len),
+    ("partition_keys_sql", bench_partition_keys),
+    ("partition_materialize", bench_partition_materialize),
+    ("contain", bench_contain),
+]
 
 
 def print_results(results: list[BenchResult]):
@@ -225,20 +210,13 @@ def collect_host_info():
     except Exception:
         pass
     try:
-        rustc = subprocess.check_output(["rustc", "--version"], text=True, timeout=5).strip()
+        rustc = subprocess.check_output(
+            ["rustc", "--version"], text=True, timeout=5
+        ).strip()
         info["rustc"] = rustc.split()[1] if len(rustc.split()) > 1 else rustc
     except Exception:
         pass
     return info
-
-
-BENCHMARKS = [
-    ("nested_len", bench_nested_len),
-    ("partition_keys_sql", bench_partition_keys),
-    ("partition_materialize", bench_partition_materialize),
-    ("contain", bench_contain),
-    ("stateful_scan", bench_stateful_scan),
-]
 
 
 def main():

@@ -75,6 +75,8 @@ py-ltseq/ltseq/               # Python package
 
 **Lazy Evaluation**: LinkedTable and NestedTable defer expensive operations (joins, grouping) until materialization is required.
 
+**No Materialization Rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `collect()`, `from_arrow()`, and `from_pandas()`.
+
 ### Expression System
 
 The expression DSL allows Pythonic lambdas that get serialized and executed in Rust:
