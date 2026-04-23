@@ -14,11 +14,14 @@ The pilot reuses `benchmarks/autoresearch/runner.py` and `benchmarks/bench_vs.py
 ## Current Targets
 
 - `clickbench_funnel`
-- target workload: `R3: Funnel`
-- protected workloads: `R1: Top URLs`, `R2: Sessionization`
+  - target workload: `R3: Funnel`
+  - protected workloads: `R1: Top URLs`, `R2: Sessionization`
 - `clickbench_sessionization`
-- target workload: `R2: Sessionization`
-- protected workloads: `R1: Top URLs`, `R3: Funnel`
+  - target workload: `R2: Sessionization`
+  - protected workloads: `R1: Top URLs`, `R3: Funnel`
+- `clickbench_top_urls`
+  - target workload: `R1: Top URLs`
+  - protected workloads: `R2: Sessionization`, `R3: Funnel`
 
 ## Layout
 

@@ -23,8 +23,8 @@ Protected workloads:
 
 - `correctness_failures = 0`
 - `infra_failures = 0`
-- `R2: Sessionization` improves by at least 3% in LTSeq median or p95 latency
-- protected workloads do not regress by 5% or more in LTSeq median or p95 latency
+- `R2: Sessionization` improves by at least 3% in LTSeq median or p95 latency (either metric suffices)
+- protected workloads do not regress by 5% or more in LTSeq median or p95 latency (either metric triggers regression)
 
 ## In Scope
 
