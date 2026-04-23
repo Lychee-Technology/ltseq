@@ -678,7 +678,21 @@ run_single_candidate() {
 recover_decision_from_stdout() {
   local stdout_log="$1"
   local decision_file="$2"
-  python3 "$SCRIPT_DIR/extract_decision_from_stdout.py" "$stdout_log" "$decision_file"
+  local extract_output
+  extract_output="$(python3 "$SCRIPT_DIR/extract_decision_from_stdout.py" "$stdout_log" "$decision_file" 2>&1)" || true
+
+  case "$extract_output" in
+    no_decision_block)
+      append_issue "harness" "benchmarks/autoresearch/pilot/scripts/autoloop.sh" "No decision block found in OpenCode stdout" "run did not emit AUTORESEARCH_DECISION_BEGIN/END markers" "Ensure the prompt instructs OpenCode to emit a structured decision block"
+      return 1
+      ;;
+    empty:*|missing_fields:*|malformed:*)
+      append_issue "harness" "benchmarks/autoresearch/pilot/scripts/autoloop.sh" "Decision block found but invalid" "$extract_output" "Review prompt compliance or parser robustness; the decision block was present but did not meet the contract"
+      return 1
+      ;;
+  esac
+
+  return 0
 }
 
 get_field() {
@@ -960,7 +974,6 @@ run_iteration() {
     if ! recover_decision_from_stdout "$stdout_log" "$decision_file"; then
       clear_root_phase_reports candidates
       clear_root_phase_reports diff
-      append_issue "harness" "benchmarks/autoresearch/pilot/scripts/autoloop.sh" "Benchmark autoresearch run produced no usable decision artifact" "run ${run_index} did not emit a recoverable decision block" "Tighten prompt compliance or fallback parsing for benchmark controller"
       discard_candidate_state
       return 1
     fi
