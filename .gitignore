@@ -13,3 +13,6 @@ benchmarks/autoresearch/results/
 .opencode/
 .claude/
 build/
+
+# autoresearch controller worktrees (local scratch)
+.worktrees/
