@@ -312,3 +312,220 @@ These placeholders should be kept.
 - Local worktrees under `.worktrees/` can be pruned with `git worktree prune`.
 - Old `reports/runs/` directories may be removed if they are no longer needed for
   review, but `results.tsv` and `issues.tsv` should be preserved as the authoritative ledger.
+
+---
+
+## Benchmark Environment Metadata
+
+Reproducibility requires capturing the environment behind each run.
+The following metadata should be available for every archived run.
+
+### Required metadata
+
+| Field | Source | Example |
+|-------|--------|---------|
+| `base_ref` | `results.tsv` | `abc1234` |
+| `target` | `results.tsv` | `clickbench_funnel` |
+| `dataset` | `--data` flag or default path | `benchmarks/data/hits_sorted.parquet` |
+| `dataset_label` | Derived from dataset name | `full dataset` |
+| `model` | `--model` flag | `github-copilot/gpt-4.1` |
+| `iterations` | `--iterations` flag | `3` |
+| `warmup` | Target spec default | `1` |
+| `build_mode` | `--skip-build` flag | `release` or `skipped` |
+| `platform` | `uname -s` / `uname -m` | `Linux x86_64` |
+| `cpu_count` | `nproc` | `32` |
+| `rust_version` | `rustc --version` | `rustc 1.85.0` |
+| `run_date` | Controller execution date | `2026-04-22` |
+
+### Where to find it
+
+- `results.tsv` captures `base_ref`, `target`, `recommendation`, and outcome fields
+- The loop log (`benchmark-autoloop-<target>.log`) records dataset label, model, and iteration count
+- The `benchmark-summary.json` files capture the `data_file` path
+- System details (`platform`, `cpu_count`, `rust_version`) can be obtained from the machine that ran the benchmark
+
+### Reproduction checklist
+
+To reproduce a specific archived run:
+
+1. Check out the `base_ref` commit
+2. Install the same Rust and Python dependency versions
+3. Use the same dataset (sample, full, or custom)
+4. Run the baseline and candidate scripts with the same `--data` and `--skip-build` flags
+5. Compare the resulting `benchmark-diff.json` against the archived evidence
+
+---
+
+## Target Onboarding Checklist
+
+Before adding a new benchmark autoresearch target to the supervised controller,
+verify all items below.
+
+### Required inputs
+
+- [ ] **Target key**: A unique identifier (e.g., `clickbench_funnel`)
+- [ ] **Title**: Human-readable name (e.g., `ClickBench Funnel`)
+- [ ] **Target brief**: A `targets/<key>_perf.md` file describing the optimization goal,
+  target workloads, and protected workloads
+- [ ] **Editable source files**: A list of source files the agent is allowed to modify
+  (e.g., `("src/ops/pattern_match.rs",)`)
+- [ ] **Target workloads**: The round(s) whose improvement is the goal
+  (e.g., `("r3_funnel",)`)
+- [ ] **Protected workloads**: The round(s) that must not regress
+  (e.g., `("r1_top_urls", "r2_sessionization")`)
+
+### Benchmark readiness
+
+- [ ] The target's rounds are supported by `bench_vs.py`
+- [ ] Baseline capture works: `benchmark_baseline.py <key> --sample --dry-run` succeeds
+- [ ] Candidate capture works: `benchmark_candidate.py <key> --sample --dry-run` succeeds
+- [ ] Gate evaluation works: `benchmark_gate.py <key>` produces `benchmark-diff.json` and `evaluation.json`
+- [ ] The target is registered in `TARGETS` dict in `common.py`
+- [ ] The target is registered in `is_target_allowed_perf_file()` in `autoloop.sh`
+
+### Scope validation
+
+- [ ] `is_target_allowed_perf_file()` returns `0` only for the target's editable source files
+- [ ] Test files, benchmark scripts, and autoresearch infrastructure are excluded from allowed edits
+- [ ] The target brief explicitly states what the agent should and should not optimize
+
+### Review readiness
+
+- [ ] Threshold values are defined (default: target improvement `-3.0%`, protected regression `+5.0%`)
+- [ ] The target has at least one validated dry-run through the full autoloop
+- [ ] A human reviewer can interpret the target's `benchmark-diff.json` output
+
+### Wiring into the controller
+
+- [ ] Add the target to `TARGETS` in `benchmarks/autoresearch/pilot/common.py`
+- [ ] Add the target to `is_target_allowed_perf_file()` in `autoloop.sh`
+- [ ] Add the target brief to `targets/<key>_perf.md`
+- [ ] Add `.gitkeep` placeholders under `reports/baseline/<key>/`, `reports/candidates/<key>/`, `reports/diff/<key>/`
+
+---
+
+## Graduation Criteria: From Supervised Pilot to Broader Automation
+
+The current pilot is explicitly supervised and review-first.
+Before transitioning to broader automation (e.g., auto-commit, auto-merge),
+the following criteria must be met.
+
+### Run reliability
+
+- [ ] The controller runs without harness errors for at least N consecutive iterations
+  across all registered targets
+- [ ] Decision artifact parsing recovers from malformed or missing decision files
+  without losing diagnostic information
+- [ ] Preflight checks catch all common setup failures before creating artifacts
+
+### Artifact quality
+
+- [ ] Every archived run contains all required artifacts (see acceptance checklist)
+- [ ] `results.tsv` and `issues.tsv` pass integrity checks (no broken references,
+  no empty required fields)
+- [ ] Archived patches apply cleanly to the base commit
+
+### Reviewer trust
+
+- [ ] Multiple reviewers have applied the reviewer rubric consistently to the same runs
+- [ ] The false-positive rate (discard recommendations that would have been valid) is acceptably low
+- [ ] The false-negative rate (keep recommendations that introduced regressions) is zero
+
+### Benchmark confidence
+
+- [ ] Threshold values are calibrated against observed run data for each target
+- [ ] Sample-versus-full dataset variance is characterized and documented
+- [ ] Median and p95 gate behavior is reviewed against observed pilot runs
+
+### Automation readiness
+
+- [ ] A clear rollback path exists for auto-committed changes
+- [ ] Protected-workload regressions are caught before any auto-merge
+- [ ] The project has explicit criteria for when to revert to supervised mode
+  (e.g., after a regression slips through)
+
+---
+
+## Readiness Criteria: Widening Editable Scope
+
+The current controller restricts candidate edits to a narrow set of target files.
+Before widening the editable scope, the following readiness gates must be met.
+
+### Evidence gates
+
+- [ ] At least N successful `keep` runs have been archived across all current targets
+- [ ] No protected-workload regression has been introduced by a `keep` candidate
+- [ ] The reviewer rubric has been applied consistently to at least N runs
+
+### Review capacity
+
+- [ ] The project has enough reviewers to handle the increased review load
+- [ ] Review turnaround time is acceptable (e.g., within 1-2 days)
+- [ ] The false-positive and false-negative rates are characterized
+
+### Risk assessment
+
+- [ ] The expanded file list has been reviewed for blast radius
+  (e.g., adding `src/ops/derive.rs` affects more code paths than `src/ops/pattern_match.rs`)
+- [ ] Protected workloads cover the expanded scope
+- [ ] The controller's scope validation (`validate_candidate_scope`) correctly rejects
+  files outside the expanded allowed set
+
+### Gradual expansion
+
+Scope expansion should be incremental:
+
+1. Add one file or file pattern at a time
+2. Run at least N iterations with the expanded scope
+3. Review all resulting runs before further expansion
+4. Document the rationale for each expansion in the target brief
+
+---
+
+## Run Archive Completeness Validation
+
+This section documents the validation of run archive completeness across
+keep and discard paths.
+
+### Validated paths
+
+The following archive paths have been validated against the acceptance checklist:
+
+#### Discard paths
+
+| Path | Artifact | Source |
+|------|----------|--------|
+| `run-NNN/decision.txt` | Structured decision | `archive_run_artifacts()` line 888 |
+| `run-NNN/stdout.log` | Full OpenCode stdout | `archive_run_artifacts()` line 889 |
+| `run-NNN/evaluation.txt` | Controller evaluation | `archive_run_artifacts()` line 890 |
+| `run-NNN/patch.diff` | Git diff of changes | `archive_run_artifacts()` lines 891-898 |
+
+All discard paths (status != keep, scope failure, benchmark failure, gate failure)
+archive these four artifacts before calling `discard_candidate_state()`.
+
+#### Successful benchmarked paths
+
+In addition to the four discard artifacts, successful runs also archive:
+
+| Path | Artifact | Source |
+|------|----------|--------|
+| `run-NNN/candidate/` | Candidate benchmark outputs | `archive_run_artifacts()` lines 900-903 |
+| `run-NNN/diff/` | Diff and evaluation artifacts | `archive_run_artifacts()` lines 904-907 |
+
+These are copied from the worktree report root only when artifacts exist
+(`phase_dir_has_artifacts` check).
+
+### Validation status
+
+**All acceptance criteria are met:**
+
+- [x] Discard runs archive `decision.txt`, `stdout.log`, `evaluation.txt`, and `patch.diff`
+- [x] Successful benchmarked runs also archive candidate and diff artifacts
+- [x] Every archived run directory is self-contained enough for later review
+- [x] Missing archive content would be a bug (the controller always creates these files)
+
+### Related PRs
+
+- PR #63: Stabilized controller contracts, added archive test coverage
+- PR #67: Added archive artifact assertions and ledger preservation
+- PR #85: Relaxed archive artifact assertions to verify directories rather than hard-coded paths
