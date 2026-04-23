@@ -223,8 +223,7 @@ class LookupMixin:
             alias,
         )
 
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
 
         # Combine schemas
         # Rust join creates columns as {alias}_{column}

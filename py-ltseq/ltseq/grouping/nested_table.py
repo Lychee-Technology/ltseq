@@ -1,17 +1,9 @@
 """NestedTable class for group-ordered operations."""
 
-import textwrap
 from typing import TYPE_CHECKING, Any, Callable
 
 from .proxies import FilterGroupProxy, FilterExpr
-from .sql_parsing import (
-    DeriveSQLParser,
-    FilterSQLParser,
-    extract_lambda_from_chain,
-    get_derive_parse_error_message,
-    get_unsupported_derive_error,
-    group_expr_to_sql,
-)
+from .sql_parsing import group_expr_to_sql
 
 if TYPE_CHECKING:
     from ..core import LTSeq
@@ -63,10 +55,6 @@ class NestedTable:
         # Optional filters and derivations
         self._group_filter = None
         self._group_derive = None
-
-        # SQL parsers
-        self._filter_parser = FilterSQLParser()
-        self._derive_parser = DeriveSQLParser()
 
     def __len__(self) -> int:
         """Return the number of rows in the grouped table."""
@@ -157,38 +145,30 @@ class NestedTable:
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
         """
-        # Try proxy-based expression capture first (works in all contexts)
-        try:
-            proxy = FilterGroupProxy()
-            result = group_predicate(proxy)
-            if isinstance(result, FilterExpr):
-                where_clause = result.to_sql()
-                if where_clause:
-                    return self._filter_via_sql(where_clause)
-        except Exception:
-            pass
+        proxy = FilterGroupProxy()
+        result = group_predicate(proxy)
 
-        # Fall back to source-code-based SQL parsing
-        try:
-            where_clause = self._filter_parser.try_parse_filter_to_sql(group_predicate)
-            if where_clause:
-                return self._filter_via_sql(where_clause)
-        except Exception:
-            pass
+        if not isinstance(result, FilterExpr):
+            raise ValueError(
+                "group_ordered().filter() predicate must return a boolean expression. "
+                "Supported patterns include:\n"
+                "  - g.count() > N, g.count() < N, g.count() >= N, etc.\n"
+                "  - g.first().column op value (e.g., g.first().price > 100)\n"
+                "  - g.last().column op value\n"
+                "  - g.max('column') op value, g.min(), g.sum(), g.avg()\n"
+                "  - g.all(lambda r: r.col op val), g.any(...), g.none(...)\n"
+                "  - Combinations with & (AND) and | (OR)\n"
+                "If you need a predicate that cannot be expressed this way, consider "
+                "using .flatten() and then .filter() on the flattened result."
+            )
 
-        raise ValueError(
-            "group_ordered().filter() could not parse the predicate expression into SQL. "
-            "Supported patterns include:\n"
-            "  - g.count() > N, g.count() < N, g.count() >= N, etc.\n"
-            "  - g.first().column op value (e.g., g.first().price > 100)\n"
-            "  - g.last().column op value\n"
-            "  - g.max('column') op value, g.min(), g.sum(), g.avg()\n"
-            "  - g.all(lambda r: r.col op val), g.any(...), g.none(...)\n"
-            "  - Combinations with & (AND) and | (OR)\n"
-            "Complex Python expressions that cannot be transpiled are not supported.\n"
-            "If you need a predicate that cannot be expressed this way, consider "
-            "using .flatten() and then .filter() on the flattened result."
-        )
+        where_clause = result.to_sql()
+        if not where_clause:
+            raise ValueError(
+                "group_ordered().filter() could not convert the predicate to SQL."
+            )
+
+        return self._filter_via_sql(where_clause)
 
     def _filter_via_sql(self, where_clause: str) -> "NestedTable":
         """Filter using SQL WHERE clause with window functions.
@@ -327,60 +307,8 @@ class NestedTable:
             ... })
         """
         flattened = self.flatten()
-
-        # Try proxy-based expression capture first (works in all contexts)
-        try:
-            derive_exprs = self._capture_derive_via_proxy(group_mapper)
-            if derive_exprs:
-                return self._derive_via_sql(flattened, derive_exprs)
-        except Exception:
-            pass  # Fall through to source parsing
-
-        # Fall back to source code parsing (for backward compatibility)
-        import ast
-        import inspect
-
-        source = None
-        try:
-            try:
-                source = inspect.getsource(group_mapper)
-            except (OSError, TypeError):
-                source = None
-
-            if source:
-                source_dedented = textwrap.dedent(source)
-                source_to_parse = extract_lambda_from_chain(source_dedented)
-
-                try:
-                    tree = ast.parse(source_to_parse)
-                except SyntaxError:
-                    try:
-                        tree = ast.parse(f"({source_to_parse})", mode="eval")
-                    except SyntaxError:
-                        raise ValueError(
-                            f"Cannot parse derive lambda expression. "
-                            f"Source: {source_to_parse}"
-                        )
-
-                derive_exprs = self._derive_parser.extract_derive_expressions(
-                    tree, flattened._schema
-                )
-
-                if derive_exprs:
-                    return self._derive_via_sql(flattened, derive_exprs)
-                else:
-                    raise ValueError(get_unsupported_derive_error(source))
-            else:
-                raise ValueError(
-                    "Cannot parse derive expression: proxy-based capture failed and "
-                    "source is not available (common in REPL/Jupyter). "
-                    "Use g.count(), g.first().col, g.last().col, g.max('col'), etc."
-                )
-        except ValueError:
-            raise
-        except Exception as e:
-            source_str = source if source else "<unavailable>"
-            raise ValueError(get_derive_parse_error_message(source_str, str(e)))
+        derive_exprs = self._capture_derive_via_proxy(group_mapper)
+        return self._derive_via_sql(flattened, derive_exprs)
 
     def _capture_derive_via_proxy(self, group_mapper: Callable) -> dict[str, str]:
         """
@@ -470,9 +398,9 @@ class _LazyFirstLTSeq:
         if self._materialized is None:
             flattened = self._nested.flatten()
             from ..core import LTSeq
-            result = LTSeq()
+            inner = flattened._inner.first_row()
+            result = LTSeq._from_inner(inner)
             result._schema = flattened._schema.copy()
-            result._inner = flattened._inner.first_row()
             self._materialized = result
         return self._materialized
 

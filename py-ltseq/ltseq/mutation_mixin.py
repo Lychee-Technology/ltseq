@@ -39,8 +39,7 @@ class MutationMixin:
             )
 
         result_inner = self._inner.insert_row(pos, row_dict)
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -75,8 +74,7 @@ class MutationMixin:
         # integer positional delete — delegate to Rust
         pos = int(predicate_or_pos)
         result_inner = self._inner.delete_rows(pos)
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -111,8 +109,7 @@ class MutationMixin:
 
         expr_dict = self._capture_expr(predicate)
         result_inner = self._inner.conditional_update(expr_dict, updates)
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result
@@ -141,8 +138,7 @@ class MutationMixin:
             )
 
         result_inner = self._inner.modify_row(pos, updates)
-        result = LTSeq()
-        result._inner = result_inner
+        result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()
         result._sort_keys = None
         return result

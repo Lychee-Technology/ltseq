@@ -61,6 +61,35 @@ class LTSeq(
         )
         self._name: str | None = None  # Table name for lookup operations
 
+    @classmethod
+    def _from_inner(cls, inner: "ltseq_core.LTSeqTable") -> "LTSeq":
+        """
+        Create an LTSeq instance from an already-initialized Rust LTSeqTable.
+
+        This is an internal helper used by operations that already have a fully
+        loaded LTSeqTable from Rust (e.g., read_csv, join, filter results).
+        It bypasses the expensive __init__ that would create an unnecessary
+        SessionContext and empty table.
+
+        Args:
+            inner: A fully initialized ltseq_core.LTSeqTable instance
+
+        Returns:
+            LTSeq instance wrapping the provided inner table
+        """
+        if not HAS_RUST_BINDING:
+            raise RuntimeError(
+                "Rust extension ltseq_core not available. "
+                "Please rebuild with `maturin develop`."
+            )
+        # Create instance without calling __init__
+        instance = cls.__new__(cls)
+        instance._inner = inner
+        instance._schema = {}
+        instance._sort_keys = None
+        instance._name = None
+        return instance
+
     def show(self, n: int = 10) -> "LTSeq":
         """
         Display the data as a pretty-printed ASCII table.

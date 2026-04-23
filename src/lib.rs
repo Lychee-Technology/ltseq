@@ -291,6 +291,58 @@ impl LTSeqTable {
             .map_err(|e| LtseqError::Runtime(e).into())
     }
 
+    /// Load and return a CSV file as a fully initialized LTSeqTable.
+    ///
+    /// This static constructor reads the CSV file into memory and returns
+    /// a fully loaded table in one operation, without requiring an
+    /// intermediate LTSeqTable instance.
+    ///
+    /// Args:
+    ///     path: Path to CSV file
+    ///     has_header: Whether the CSV file has a header row (default: true)
+    ///
+    /// Returns:
+    ///     LTSeqTable with loaded data
+    #[staticmethod]
+    #[pyo3(signature = (path, has_header=true))]
+    fn from_csv(path: String, has_header: bool) -> PyResult<LTSeqTable> {
+        let session = create_session_context();
+        let mut table = LTSeqTable {
+            session,
+            dataframe: None,
+            schema: None,
+            sort_exprs: Vec::new(),
+            source_parquet_path: None,
+        };
+        table.read_csv(path, has_header)?;
+        Ok(table)
+    }
+
+    /// Load and return a Parquet file as a fully initialized LTSeqTable.
+    ///
+    /// This static constructor reads the Parquet file into memory and returns
+    /// a fully loaded table in one operation, without requiring an
+    /// intermediate LTSeqTable instance.
+    ///
+    /// Args:
+    ///     path: Path to Parquet file
+    ///
+    /// Returns:
+    ///     LTSeqTable with loaded data
+    #[staticmethod]
+    fn from_parquet(path: String) -> PyResult<LTSeqTable> {
+        let session = create_session_context();
+        let mut table = LTSeqTable {
+            session,
+            dataframe: None,
+            schema: None,
+            sort_exprs: Vec::new(),
+            source_parquet_path: None,
+        };
+        table.read_parquet(path)?;
+        Ok(table)
+    }
+
     /// Display the data as a pretty-printed ASCII table
     ///
     /// Args:
@@ -336,6 +388,32 @@ impl LTSeqTable {
             .iter()
             .map(|f| f.name().to_string())
             .collect())
+    }
+
+    /// Get the schema as a dict mapping column names to lowercase type strings.
+    ///
+    /// This exposes the Arrow schema that DataFusion already inferred, normalized
+    /// to lowercase type strings (int64, float64, string, bool, etc.) for consistency
+    /// with the Python layer.
+    ///
+    /// Returns:
+    ///     PyDict mapping column name (str) -> type string (str)
+    ///     Returns empty dict if no schema is available.
+    fn get_schema_dict(&self) -> PyResult<Py<PyDict>> {
+        use pyo3::Python;
+        
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            
+            if let Some(schema) = &self.schema {
+                for field in schema.fields() {
+                    let type_str = datatype_to_schema_string(field.data_type());
+                    dict.set_item(field.name(), type_str)?;
+                }
+            }
+            
+            Ok(dict.into())
+        })
     }
 
     /// Get the number of rows in the table
@@ -1162,6 +1240,38 @@ impl LTSeqTable {
     /// Out-of-range positions are silently ignored (no-op).
     fn modify_row(&self, pos: i64, updates: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
         crate::ops::mutation::modify_row_impl(self, pos, updates)
+    }
+}
+
+
+/// Convert Arrow DataType to normalized lowercase schema type string.
+/// This matches the Python-layer convention for schema representation.
+fn datatype_to_schema_string(data_type: &datafusion::arrow::datatypes::DataType) -> String {
+    use datafusion::arrow::datatypes::DataType;
+    match data_type {
+        // Integer types → int64
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+        | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            "int64".to_string()
+        }
+        // Float types → float64
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => "float64".to_string(),
+        // String types → string
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => "string".to_string(),
+        DataType::Binary | DataType::LargeBinary => "binary".to_string(),
+        // Boolean → bool
+        DataType::Boolean => "bool".to_string(),
+        // Date/Time types
+        DataType::Date32 | DataType::Date64 => "date32".to_string(),
+        DataType::Timestamp(_, _) => "timestamp".to_string(),
+        DataType::Time32(_) | DataType::Time64(_) => "time".to_string(),
+        DataType::Duration(_) => "duration".to_string(),
+        // Decimal → decimal (preserve precision info if needed, or simplify)
+        DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => "decimal".to_string(),
+        // Null type
+        DataType::Null => "null".to_string(),
+        // List/Struct types → use debug format
+        _ => format!("{:?}", data_type).to_lowercase(),
     }
 }
 
