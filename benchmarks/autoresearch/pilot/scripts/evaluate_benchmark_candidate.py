@@ -74,8 +74,11 @@ def evaluate_candidate(target: str, baseline: dict, candidate: dict) -> dict:
         median_delta = workload.get("ltseq_median_delta_pct")
         p95_delta = workload.get("ltseq_p95_delta_pct")
         if (
-            median_delta is not None and median_delta <= spec.target_improvement_threshold_pct
-        ) or (p95_delta is not None and p95_delta <= spec.target_improvement_threshold_pct):
+            median_delta is not None
+            and p95_delta is not None
+            and median_delta <= spec.target_improvement_threshold_pct
+            and p95_delta <= spec.target_improvement_threshold_pct
+        ):
             target_wins_detail.append(workload_signal(workload))
             target_wins.append(
                 f"{workload['name']}(median={format_delta(median_delta)},p95={format_delta(p95_delta)})"

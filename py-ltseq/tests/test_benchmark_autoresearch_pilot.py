@@ -533,3 +533,100 @@ def test_clickbench_sessionization_gate_writes_target_specific_diff_and_evaluati
     ]
     assert evaluation_payload["recommendation"] == "keep"
     assert evaluation_payload["target_wins_detail"][0]["id"] == "r2_sessionization"
+
+
+def test_evaluator_discards_when_only_median_improves():
+    _common, evaluate, _gate = load_pilot_modules()
+
+    baseline = make_summary(
+        target="clickbench_funnel",
+        r1=(1.0, 1.1),
+        r2=(0.5, 0.6),
+        r3=(2.0, 2.2),
+    )
+    candidate = make_summary(
+        target="clickbench_funnel",
+        r1=(1.01, 1.12),
+        r2=(0.49, 0.58),
+        r3=(1.90, 2.15),
+    )
+
+    evaluation = evaluate.evaluate_candidate("clickbench_funnel", baseline, candidate)
+
+    assert evaluation["recommendation"] == "discard"
+    assert evaluation["target_wins_detail"] == []
+    assert "no target workload met the improvement threshold" in evaluation["reason"]
+
+
+def test_evaluator_discards_when_only_p95_improves():
+    _common, evaluate, _gate = load_pilot_modules()
+
+    baseline = make_summary(
+        target="clickbench_funnel",
+        r1=(1.0, 1.1),
+        r2=(0.5, 0.6),
+        r3=(2.0, 2.2),
+    )
+    candidate = make_summary(
+        target="clickbench_funnel",
+        r1=(1.01, 1.12),
+        r2=(0.49, 0.58),
+        r3=(1.97, 2.05),
+    )
+
+    evaluation = evaluate.evaluate_candidate("clickbench_funnel", baseline, candidate)
+
+    assert evaluation["recommendation"] == "discard"
+    assert evaluation["target_wins_detail"] == []
+    assert "no target workload met the improvement threshold" in evaluation["reason"]
+
+
+def test_evaluator_keeps_when_both_median_and_p95_improve():
+    _common, evaluate, _gate = load_pilot_modules()
+
+    baseline = make_summary(
+        target="clickbench_funnel",
+        r1=(1.0, 1.1),
+        r2=(0.5, 0.6),
+        r3=(2.0, 2.2),
+    )
+    candidate = make_summary(
+        target="clickbench_funnel",
+        r1=(1.01, 1.12),
+        r2=(0.49, 0.58),
+        r3=(1.90, 2.10),
+    )
+
+    evaluation = evaluate.evaluate_candidate("clickbench_funnel", baseline, candidate)
+
+    assert evaluation["recommendation"] == "keep"
+    assert len(evaluation["target_wins_detail"]) == 1
+    assert evaluation["target_wins_detail"][0]["id"] == "r3_funnel"
+
+
+def test_evaluator_protected_regression_still_uses_or_rule():
+    _common, evaluate, _gate = load_pilot_modules()
+
+    baseline = make_summary(
+        target="clickbench_funnel",
+        r1=(1.0, 1.1),
+        r2=(0.5, 0.6),
+        r3=(2.0, 2.2),
+    )
+    candidate = make_summary(
+        target="clickbench_funnel",
+        r1=(1.01, 1.16),
+        r2=(0.49, 0.58),
+        r3=(1.90, 2.10),
+    )
+
+    evaluation = evaluate.evaluate_candidate("clickbench_funnel", baseline, candidate)
+
+    assert evaluation["recommendation"] == "discard"
+    assert len(evaluation["protected_regressions_detail"]) == 1
+    assert evaluation["protected_regressions_detail"][0]["id"] == "r1_top_urls"
+    assert math.isclose(
+        evaluation["protected_regressions_detail"][0]["p95_delta_pct"],
+        (1.16 - 1.1) / 1.1 * 100.0,
+        abs_tol=1e-9,
+    )
