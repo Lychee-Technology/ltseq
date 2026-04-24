@@ -5,7 +5,7 @@ expression trees, enabling proxy-based filter capture that works in all contexts
 (pytest, REPL, exec) without requiring source code inspection.
 """
 
-from typing import Callable
+from typing import Any, Callable
 
 from ..expr import (
     GroupExpr,
@@ -240,10 +240,10 @@ class _InnerColumnRef:
     def __le__(self, other):
         return _InnerPredicateExpr(self, "<=", other)
 
-    def __eq__(self, other):
+    def __eq__(self, other) -> Any:
         return _InnerPredicateExpr(self, "=", other)
 
-    def __ne__(self, other):
+    def __ne__(self, other) -> Any:
         return _InnerPredicateExpr(self, "!=", other)
 
 

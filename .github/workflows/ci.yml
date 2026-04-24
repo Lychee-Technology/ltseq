@@ -39,5 +39,11 @@ jobs:
       - name: Build Rust extension
         run: uv run maturin develop
 
+      - name: Run pyright on library
+        run: uv run pyright py-ltseq/ltseq
+
+      - name: Run pyright on typecheck tests
+        run: uv run pyright py-ltseq/typecheck_tests
+
       - name: Run tests
         run: uv run pytest py-ltseq/tests/ -v

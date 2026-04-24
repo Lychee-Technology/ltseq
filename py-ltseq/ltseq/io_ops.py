@@ -1,6 +1,6 @@
 """I/O operations for LTSeq: read_csv, write_csv, scan, from_rows, from_dict, _from_rows."""
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -29,11 +29,14 @@ try:
 
     HAS_RUST_BINDING = True
 except ImportError:
+    ltseq_core = cast(Any, None)
     HAS_RUST_BINDING = False
 
 
 class IOMixin:
     """Mixin class providing I/O operations for LTSeq."""
+
+    _inner: Any
 
     @classmethod
     def read_csv(cls, path: str, has_header: bool = True) -> "LTSeq":

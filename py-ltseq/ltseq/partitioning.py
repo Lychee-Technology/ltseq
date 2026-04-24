@@ -5,7 +5,10 @@ Unlike group_ordered() which handles consecutive groups, partition() groups
 all rows with the same key value regardless of position.
 """
 
-from typing import Any, Callable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
+
+if TYPE_CHECKING:
+    from .core import LTSeq
 
 class SQLPartitionedTable:
     """
@@ -60,6 +63,7 @@ class SQLPartitionedTable:
 
         if self._keys_cache is None:
             self._compute_keys()
+        assert self._keys_cache is not None
         if key not in self._keys_cache and key_tuple not in self._keys_cache:
             raise KeyError(f"Partition key '{key}' not found")
 
@@ -147,6 +151,7 @@ class SQLPartitionedTable:
         """
         if self._keys_cache is None:
             self._compute_keys()
+        assert self._keys_cache is not None
 
         for key in self._keys_cache:
             yield key, self[key]
@@ -169,6 +174,7 @@ class SQLPartitionedTable:
         """
         if self._keys_cache is None:
             self._compute_keys()
+        assert self._keys_cache is not None
         return len(self._keys_cache)
 
     def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
@@ -420,20 +426,25 @@ class _PrecomputedPartitionedTable(PartitionedTable):
         self._delegate = None
 
     def __getitem__(self, key: Any) -> "LTSeq":
+        assert self._partitions_cache is not None
         if key not in self._partitions_cache:
             raise KeyError(f"Partition key '{key}' not found")
         return self._partitions_cache[key]
 
     def keys(self) -> list[Any]:
+        assert self._partitions_cache is not None
         return list(self._partitions_cache.keys())
 
     def values(self) -> list["LTSeq"]:
+        assert self._partitions_cache is not None
         return list(self._partitions_cache.values())
 
     def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
+        assert self._partitions_cache is not None
         return iter(self._partitions_cache.items())
 
     def __len__(self) -> int:
+        assert self._partitions_cache is not None
         return len(self._partitions_cache)
 
     def _materialize_partitions(self) -> None:

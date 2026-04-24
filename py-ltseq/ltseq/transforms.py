@@ -1,7 +1,8 @@
 """Transform operations for LTSeq: filter, select, derive, sort, distinct, slice."""
 
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING, cast
 
+from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
 
@@ -45,13 +46,13 @@ def _process_select_col(col: str | Callable, schema: dict[str, str]) -> dict[str
 
 
 def _extract_derive_cols(
-    args: tuple,
+    args: tuple[Any, ...],
     kwargs: dict[str, Callable],
     schema: dict[str, str],
     capture_expr_fn: Callable,
 ) -> dict[str, dict[str, Any]]:
     """Extract derived columns from derive() arguments."""
-    if args:
+    if len(args) > 0:
         if len(args) > 1:
             raise TypeError(
                 f"derive() takes at most 1 positional argument ({len(args)} given)"
@@ -61,7 +62,7 @@ def _extract_derive_cols(
                 "derive() cannot use both positional argument and keyword arguments"
             )
 
-        func = args[0]
+        func = cast(Callable, next(iter(args)))
         if not callable(func):
             raise TypeError(
                 f"derive() positional argument must be callable, got {type(func).__name__}"
@@ -114,7 +115,7 @@ def _collect_key_exprs(
     return result
 
 
-class TransformMixin(LookupMixin):
+class TransformMixin(LookupMixin, LTSeqLike):
     """Mixin class providing transform operations for LTSeq."""
 
     def filter(self, predicate: Callable) -> "LTSeq":

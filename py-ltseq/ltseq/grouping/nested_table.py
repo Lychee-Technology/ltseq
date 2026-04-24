@@ -1,13 +1,13 @@
 """NestedTable class for group-ordered operations."""
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from .proxies import FilterGroupProxy, FilterExpr
 from .sql_parsing import group_expr_to_sql
 
 if TYPE_CHECKING:
     from ..core import LTSeq
-    from ..expr import ColumnExpr
+    from ..expr import CallExpr, ColumnExpr
 
 
 class NestedTable:
@@ -76,8 +76,7 @@ class NestedTable:
             >>> grouped.first()  # Returns LTSeq with first row per group
             >>> grouped.first().count()  # Fast path: just counts groups
         """
-        result = _LazyFirstLTSeq(self)
-        return result
+        return cast("LTSeq", _LazyFirstLTSeq(self))
 
     def last(self) -> "LTSeq":
         """
@@ -94,7 +93,7 @@ class NestedTable:
         result._inner = flattened._inner.last_row()
         return result
 
-    def count(self) -> "ColumnExpr":
+    def count(self) -> "CallExpr":
         """
         Get the count of rows in each group.
 

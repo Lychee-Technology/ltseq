@@ -47,7 +47,7 @@ class BinOpExpr(Expr):
         right (Expr): Right operand
     """
 
-    def __init__(self, op: str, left: Expr, right: Expr):
+    def __init__(self, op: str, left: Any, right: Any):
         """Initialize a BinOpExpr with operation and operands."""
         self.op = op
         self.left = left
@@ -72,7 +72,7 @@ class UnaryOpExpr(Expr):
         operand (Expr): The operand
     """
 
-    def __init__(self, op: str, operand: Expr):
+    def __init__(self, op: str, operand: Any):
         """Initialize a UnaryOpExpr with operation and operand."""
         self.op = op
         self.operand = operand

@@ -1,12 +1,14 @@
 """Advanced operations for LTSeq: align, search_first, pivot, set operations."""
 
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING, cast
+
+from ._typing import LTSeqLike
 
 if TYPE_CHECKING:
     from .core import LTSeq
 
 
-class SetOpsMixin:
+class SetOpsMixin(LTSeqLike):
     """Mixin class providing set operations for LTSeq."""
 
     def union(self, other: "LTSeq") -> "LTSeq":
@@ -138,8 +140,9 @@ class SetOpsMixin:
         Example:
             >>> unique_to_either = t1.xunion(t2, on=lambda r: r.id)
         """
-        left = self.except_(other, on=on)
-        right = other.except_(self, on=on)
+        self_table = cast("LTSeq", self)
+        left = self_table.except_(other, on=on)
+        right = other.except_(cast("LTSeq", self), on=on)
         return left.union(right)
 
     def rvs(self) -> "LTSeq":
@@ -259,7 +262,7 @@ class SetOpsMixin:
         return self._inner.is_subset(other._inner, on_expr)
 
 
-class AdvancedOpsMixin:
+class AdvancedOpsMixin(LTSeqLike):
     """Mixin class providing advanced operations for LTSeq."""
 
     def align(self, ref_sequence: list[Any], key: Callable) -> "LTSeq":

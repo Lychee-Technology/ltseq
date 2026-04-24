@@ -1,6 +1,6 @@
 """Helper functions for LTSeq core operations."""
 
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from .expr import BinOpExpr, ColumnExpr, SchemaProxy
 
@@ -254,26 +254,28 @@ def _extract_asof_keys(
         )
 
     # Validate that left operand is from source and right from target
-    left_in_source = left_expr.name in source_schema
-    right_in_target = right_expr.name in target_schema
+    left_name = cast(str, left_expr.name)
+    right_name = cast(str, right_expr.name)
+    left_in_source = left_name in source_schema
+    right_in_target = right_name in target_schema
 
     if not left_in_source:
         # Check if reversed
-        if left_expr.name in target_schema and right_expr.name in source_schema:
+        if left_name in target_schema and right_name in source_schema:
             raise ValueError(
                 f"Asof join condition has reversed order. Expected: left_table.col >= right_table.col, "
-                f"but got: {left_expr.name} {expr.op} {right_expr.name}. "
+                f"but got: {left_name} {expr.op} {right_name}. "
                 f"Please reverse the comparison."
             )
         raise ValueError(
-            f"Column '{left_expr.name}' not found in source (left) schema. "
+            f"Column '{left_name}' not found in source (left) schema. "
             f"Available columns: {list(source_schema.keys())}"
         )
 
     if not right_in_target:
         raise ValueError(
-            f"Column '{right_expr.name}' not found in target (right) schema. "
+            f"Column '{right_name}' not found in target (right) schema. "
             f"Available columns: {list(target_schema.keys())}"
         )
 
-    return (left_expr.name, right_expr.name, expr.op)
+    return (left_name, right_name, expr.op)

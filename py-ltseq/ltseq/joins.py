@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING
 
+from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
 
@@ -45,7 +46,7 @@ def _build_join_result_schema(
     return result_schema
 
 
-class JoinMixin:
+class JoinMixin(LTSeqLike):
     """Mixin class providing join operations for LTSeq."""
 
     def _execute_join(

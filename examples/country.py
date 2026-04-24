@@ -7,7 +7,7 @@ from pathlib import Path
 from ltseq import LTSeq
 
 
-def most_official_language_countries(lang_table, t_country) -> any:
+def most_official_language_countries(lang_table: LTSeq, t_country) -> any:
     """Return countries with the most official languages and their populations."""
     official_langs = lang_table.filter(lambda r: r.IsOfficial == "T")
 
