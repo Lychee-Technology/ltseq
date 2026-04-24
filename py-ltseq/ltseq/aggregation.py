@@ -2,6 +2,8 @@
 
 from typing import Any, Callable, TYPE_CHECKING
 
+from ._typing import LTSeqLike
+
 if TYPE_CHECKING:
     from .core import LTSeq
     from .grouping import NestedTable
@@ -73,7 +75,7 @@ class GroupBy:
         return result
 
 
-class AggregationMixin:
+class AggregationMixin(LTSeqLike):
     """Mixin class providing aggregation operations for LTSeq."""
 
     def cum_sum(self, *cols: str | Callable) -> "LTSeq":
@@ -135,6 +137,7 @@ class AggregationMixin:
             >>> groups = t.sort("date").group_ordered(lambda r: r.is_up)
         """
         from .grouping import NestedTable
+        from .core import LTSeq
 
         if not self._schema:
             raise ValueError(
@@ -146,7 +149,7 @@ class AggregationMixin:
                 f"grouping_fn must be callable, got {type(grouping_fn).__name__}"
             )
 
-        return NestedTable(self, grouping_fn, is_sorted=False)
+        return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), grouping_fn, is_sorted=False)
 
     # Alias: group_consecutive is a more descriptive name for group_ordered
     group_consecutive = group_ordered
@@ -169,6 +172,7 @@ class AggregationMixin:
             >>> groups = t.sort("user_id").group_sorted(lambda r: r.user_id)
         """
         from .grouping import NestedTable
+        from .core import LTSeq
 
         if not self._schema:
             raise ValueError(
@@ -178,7 +182,7 @@ class AggregationMixin:
         if not callable(key):
             raise TypeError(f"key must be callable, got {type(key).__name__}")
 
-        return NestedTable(self, key, is_sorted=True)
+        return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), key, is_sorted=True)
 
     def agg(self, by: Callable | None = None, **aggregations: Callable) -> "LTSeq":
         """
@@ -260,4 +264,9 @@ class AggregationMixin:
                 f"got {type(key).__name__}"
             )
 
-        return GroupBy(self, key)
+        from .core import LTSeq
+
+        table = self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner)
+        table._schema = self._schema.copy()
+        table._sort_keys = self._sort_keys
+        return GroupBy(table, key)

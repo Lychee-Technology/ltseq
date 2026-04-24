@@ -16,7 +16,7 @@ class ColumnExpr(Expr):
     def dt(self) -> TemporalAccessor: ...
 
     # Common window / sequence methods
-    def shift(self, n: int = ...) -> CallExpr: ...
+    def shift(self, n: int = ..., default: Any = ...) -> CallExpr: ...
     def rolling(self, window: int) -> CallExpr: ...
     def diff(self, n: int = ...) -> CallExpr: ...
 
@@ -33,21 +33,21 @@ class ColumnExpr(Expr):
     def median(self) -> CallExpr: ...
 
     # Fallback for any other method call (e.g. r.col.custom_func())
-    def __getattr__(self, name: str) -> Callable[..., CallExpr]: ...
+    def __getattr__(self, name: str) -> Any: ...
 
 
 class CallExpr(Expr):
     func: str
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
-    on: Expr | None
+    on: Any | None
 
     def __init__(
         self,
         func: str,
         args: tuple[Any, ...] = ...,
         kwargs: dict[str, Any] | None = ...,
-        on: Expr | None = ...,
+        on: Any | None = ...,
     ) -> None: ...
     def serialize(self) -> dict[str, Any]: ...
 
@@ -58,6 +58,7 @@ class CallExpr(Expr):
 
     # Rolling chain targets (e.g. r.col.rolling(3).mean())
     def mean(self) -> CallExpr: ...
+    def shift(self, n: int = ..., default: Any = ...) -> CallExpr: ...
     def sum(self) -> CallExpr: ...
     def std(self) -> CallExpr: ...
     def min(self) -> CallExpr: ...
@@ -70,25 +71,25 @@ class CallExpr(Expr):
 
     def over(
         self,
-        partition_by: Expr | None = ...,
-        order_by: Expr | None = ...,
+        partition_by: Any | None = ...,
+        order_by: Any | None = ...,
         descending: bool = ...,
     ) -> WindowExpr: ...
 
-    def __getattr__(self, name: str) -> Callable[..., CallExpr]: ...
+    def __getattr__(self, name: str) -> Any: ...
 
 
 class WindowExpr(Expr):
-    expr: CallExpr
-    partition_by: Expr | None
-    order_by: Expr | None
+    expr: Any
+    partition_by: Any | None
+    order_by: Any | None
     descending: bool
 
     def __init__(
         self,
-        expr: CallExpr,
-        partition_by: Expr | None = ...,
-        order_by: Expr | None = ...,
+        expr: Any,
+        partition_by: Any | None = ...,
+        order_by: Any | None = ...,
         descending: bool = ...,
     ) -> None: ...
     def serialize(self) -> dict[str, Any]: ...

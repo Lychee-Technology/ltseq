@@ -10,14 +10,14 @@ class LiteralExpr(Expr):
 
 class BinOpExpr(Expr):
     op: str
-    left: Expr
-    right: Expr
-    def __init__(self, op: str, left: Expr, right: Expr) -> None: ...
+    left: Any
+    right: Any
+    def __init__(self, op: str, left: Any, right: Any) -> None: ...
     def serialize(self) -> dict[str, Any]: ...
 
 
 class UnaryOpExpr(Expr):
     op: str
-    operand: Expr
-    def __init__(self, op: str, operand: Expr) -> None: ...
+    operand: Any
+    def __init__(self, op: str, operand: Any) -> None: ...
     def serialize(self) -> dict[str, Any]: ...

@@ -5,6 +5,15 @@ if TYPE_CHECKING:
 
 
 class LinkedTable:
+    _schema: dict[str, str]
+    def __init__(
+        self,
+        source_table: LTSeq,
+        target_table: LTSeq,
+        join_fn: Callable,
+        alias: str,
+        join_type: str = ...,
+    ) -> None: ...
     def __len__(self) -> int: ...
     def show(self, n: int = ...) -> None: ...
     def filter(self, predicate: Callable) -> LinkedTable | LTSeq: ...

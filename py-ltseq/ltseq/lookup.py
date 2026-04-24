@@ -1,6 +1,6 @@
 """Lookup mixin for handling lookup expressions in derive operations."""
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -115,7 +115,7 @@ class LookupMixin:
         from .core import LTSeq
         from .expr.types import LookupExpr
 
-        current = self
+        current = cast("LTSeq", self)
         simplified = {}
         joined_targets = {}  # Track which targets we've already joined
 

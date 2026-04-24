@@ -27,6 +27,7 @@ dev = [
     "pytest>=7.0",
     "pandas>=2.0",
     "ipdb>=0.13",  # 调试好帮手
+    "pyright>=1.1.409",
 ]
 bench = [
     "duckdb>=1.4",

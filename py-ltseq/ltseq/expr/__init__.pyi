@@ -44,6 +44,7 @@ from .lookup_expr import LookupExpr
 from .accessors import StringAccessor, TemporalAccessor
 from .types import CallExpr, ColumnExpr, WindowExpr
 from .proxy import NestedSchemaProxy, SchemaProxy
+from .transforms import _lambda_to_expr
 
 __all__ = [
     "Expr",
@@ -96,4 +97,5 @@ __all__ = [
     "corr",
     "covar",
     "concat_agg",
+    "_lambda_to_expr",
 ]

@@ -30,6 +30,8 @@ class ColumnExpr(Expr):
         name (str): The column name
     """
 
+    name: str
+
     def __init__(self, name: str):
         """Initialize a ColumnExpr with a column name."""
         self.name = name
@@ -82,7 +84,7 @@ class CallExpr(Expr):
         func: str,
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
-        on: "Expr | None" = None,
+        on: Any | None = None,
     ):
         """Initialize a CallExpr with function name, args, kwargs, and target."""
         self.func = func
@@ -180,9 +182,9 @@ class WindowExpr(Expr):
 
     def __init__(
         self,
-        expr: "CallExpr",
-        partition_by: "Expr | None" = None,
-        order_by: "Expr | None" = None,
+        expr: Any,
+        partition_by: Any | None = None,
+        order_by: Any | None = None,
         descending: bool = False,
     ):
         """Initialize a WindowExpr with expression and window specification."""

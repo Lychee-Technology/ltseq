@@ -1,7 +1,7 @@
 """Base expression class for LTSeq."""
 
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .types import CallExpr
@@ -480,37 +480,37 @@ class Expr(ABC):
         """Addition operator: expr + other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Add", self, self._coerce(other))
+        return BinOpExpr("Add", cast(Any, self), self._coerce(other))
 
     def __sub__(self, other: "Expr | Any") -> "BinOpExpr":
         """Subtraction operator: expr - other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Sub", self, self._coerce(other))
+        return BinOpExpr("Sub", cast(Any, self), self._coerce(other))
 
     def __mul__(self, other: "Expr | Any") -> "BinOpExpr":
         """Multiplication operator: expr * other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Mul", self, self._coerce(other))
+        return BinOpExpr("Mul", cast(Any, self), self._coerce(other))
 
     def __truediv__(self, other: "Expr | Any") -> "BinOpExpr":
         """Division operator: expr / other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Div", self, self._coerce(other))
+        return BinOpExpr("Div", cast(Any, self), self._coerce(other))
 
     def __floordiv__(self, other: "Expr | Any") -> "BinOpExpr":
         """Floor division operator: expr // other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("FloorDiv", self, self._coerce(other))
+        return BinOpExpr("FloorDiv", cast(Any, self), self._coerce(other))
 
     def __mod__(self, other: "Expr | Any") -> "BinOpExpr":
         """Modulo operator: expr % other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Mod", self, self._coerce(other))
+        return BinOpExpr("Mod", cast(Any, self), self._coerce(other))
 
     # Comparison operators
     # Note: These override object.__eq__ and __ne__, intentionally returning Expr instead of bool
@@ -518,56 +518,56 @@ class Expr(ABC):
         """Equality operator: expr == other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Eq", self, self._coerce(other))
+        return BinOpExpr("Eq", cast(Any, self), self._coerce(other))
 
     def __ne__(self, other: "Expr | Any") -> "BinOpExpr":  # type: ignore[override]
         """Inequality operator: expr != other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Ne", self, self._coerce(other))
+        return BinOpExpr("Ne", cast(Any, self), self._coerce(other))
 
     def __lt__(self, other: "Expr | Any") -> "BinOpExpr":
         """Less than operator: expr < other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Lt", self, self._coerce(other))
+        return BinOpExpr("Lt", cast(Any, self), self._coerce(other))
 
     def __le__(self, other: "Expr | Any") -> "BinOpExpr":
         """Less than or equal operator: expr <= other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Le", self, self._coerce(other))
+        return BinOpExpr("Le", cast(Any, self), self._coerce(other))
 
     def __gt__(self, other: "Expr | Any") -> "BinOpExpr":
         """Greater than operator: expr > other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Gt", self, self._coerce(other))
+        return BinOpExpr("Gt", cast(Any, self), self._coerce(other))
 
     def __ge__(self, other: "Expr | Any") -> "BinOpExpr":
         """Greater than or equal operator: expr >= other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Ge", self, self._coerce(other))
+        return BinOpExpr("Ge", cast(Any, self), self._coerce(other))
 
     # Logical operators
     def __and__(self, other: "Expr | Any") -> "BinOpExpr":
         """Logical AND operator: expr & other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("And", self, self._coerce(other))
+        return BinOpExpr("And", cast(Any, self), self._coerce(other))
 
     def __or__(self, other: "Expr | Any") -> "BinOpExpr":
         """Logical OR operator: expr | other"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Or", self, self._coerce(other))
+        return BinOpExpr("Or", cast(Any, self), self._coerce(other))
 
     def __invert__(self) -> "UnaryOpExpr":
         """Logical NOT operator: ~expr"""
         from .types import UnaryOpExpr
 
-        return UnaryOpExpr("Not", self)
+        return UnaryOpExpr("Not", cast(Any, self))
 
     def __abs__(self) -> "CallExpr":
         """Absolute value operator: abs(expr)"""
@@ -580,37 +580,37 @@ class Expr(ABC):
         """Right addition: other + expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Add", self._coerce(other), self)
+        return BinOpExpr("Add", self._coerce(other), cast(Any, self))
 
     def __rsub__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right subtraction: other - expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Sub", self._coerce(other), self)
+        return BinOpExpr("Sub", self._coerce(other), cast(Any, self))
 
     def __rmul__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right multiplication: other * expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Mul", self._coerce(other), self)
+        return BinOpExpr("Mul", self._coerce(other), cast(Any, self))
 
     def __rtruediv__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right division: other / expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Div", self._coerce(other), self)
+        return BinOpExpr("Div", self._coerce(other), cast(Any, self))
 
     def __rfloordiv__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right floor division: other // expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("FloorDiv", self._coerce(other), self)
+        return BinOpExpr("FloorDiv", self._coerce(other), cast(Any, self))
 
     def __rmod__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
         """Right modulo: other % expr"""
         from .types import BinOpExpr
 
-        return BinOpExpr("Mod", self._coerce(other), self)
+        return BinOpExpr("Mod", self._coerce(other), cast(Any, self))
 
     def fill_null(self, default: Any) -> "CallExpr":
         """
@@ -627,7 +627,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("fill_null", (self._coerce(default),), {}, on=self)
+        return CallExpr("fill_null", (self._coerce(default),), {}, on=cast(Any, self))
 
     def is_null(self) -> "CallExpr":
         """
@@ -641,7 +641,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("is_null", (), {}, on=self)
+        return CallExpr("is_null", (), {}, on=cast(Any, self))
 
     def is_not_null(self) -> "CallExpr":
         """
@@ -655,7 +655,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("is_not_null", (), {}, on=self)
+        return CallExpr("is_not_null", (), {}, on=cast(Any, self))
 
     def is_in(self, values: list[Any]) -> "CallExpr":
         """
@@ -676,7 +676,7 @@ class Expr(ABC):
         from .types import CallExpr
 
         coerced_values = [self._coerce(v) for v in values]
-        return CallExpr("is_in", tuple(coerced_values), {}, on=self)
+        return CallExpr("is_in", tuple(coerced_values), {}, on=cast(Any, self))
 
     def between(self, low: Any, high: Any) -> "BinOpExpr":
         """
@@ -716,7 +716,7 @@ class Expr(ABC):
         """
         from .types import CallExpr, LiteralExpr
 
-        return CallExpr("cast", (LiteralExpr(dtype),), {}, on=self)
+        return CallExpr("cast", (LiteralExpr(dtype),), {}, on=cast(Any, self))
 
     def abs(self) -> "CallExpr":
         """
@@ -730,7 +730,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("abs", (), {}, on=self)
+        return CallExpr("abs", (), {}, on=cast(Any, self))
 
     def round(self, decimals: int = 0) -> "CallExpr":
         """
@@ -747,7 +747,7 @@ class Expr(ABC):
         """
         from .types import CallExpr, LiteralExpr
 
-        return CallExpr("round", (LiteralExpr(decimals),), {}, on=self)
+        return CallExpr("round", (LiteralExpr(decimals),), {}, on=cast(Any, self))
 
     def floor(self) -> "CallExpr":
         """
@@ -761,7 +761,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("floor", (), {}, on=self)
+        return CallExpr("floor", (), {}, on=cast(Any, self))
 
     def ceil(self) -> "CallExpr":
         """
@@ -775,7 +775,7 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        return CallExpr("ceil", (), {}, on=self)
+        return CallExpr("ceil", (), {}, on=cast(Any, self))
 
     def pct_change(self) -> "BinOpExpr":
         """
@@ -793,11 +793,11 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        shifted = CallExpr("shift", (self._coerce(1),), {}, on=self)
+        shifted = CallExpr("shift", (self._coerce(1),), {}, on=cast(Any, self))
         return (self - shifted) / shifted
 
     @staticmethod
-    def _coerce(value: Any) -> "Expr":
+    def _coerce(value: Any) -> Any:
         """
         Convert Python literals to LiteralExpr.
 
@@ -811,7 +811,7 @@ class Expr(ABC):
             return value
         from .types import LiteralExpr
 
-        return LiteralExpr(value)
+        return cast(Any, LiteralExpr(value))
 
     def lookup(
         self, target_table: Any, column: str, join_key: str | None = None
@@ -850,7 +850,7 @@ class Expr(ABC):
             target_name = f"lookup_table_{id(target_table)}"
 
         return LookupExpr(
-            on=self,
+            on=cast(Any, self),
             target_table=target_table,
             target_name=target_name,
             target_columns=[column],

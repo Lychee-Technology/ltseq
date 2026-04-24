@@ -4,12 +4,13 @@ This module provides a Python wrapper around LTSeqCursor for processing
 large datasets without loading everything into memory.
 """
 
-from typing import Any
+from typing import Any, cast
 
 try:
     from . import ltseq_core
     HAS_RUST_BINDING = True
 except ImportError:
+    ltseq_core = cast(Any, None)
     HAS_RUST_BINDING = False
 
 

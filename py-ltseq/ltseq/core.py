@@ -1,11 +1,11 @@
 """Core LTSeq table class with data operations."""
 
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .core import LTSeq
     from .linking import LinkedTable
-    from .partitioning import PartitionedTable 
+    from .partitioning import PartitionedTable, SQLPartitionedTable
 
 from .expr import SchemaProxy, _lambda_to_expr
 
@@ -22,6 +22,7 @@ try:
 
     HAS_RUST_BINDING = True
 except ImportError:
+    ltseq_core = cast(Any, None)
     HAS_RUST_BINDING = False
 
 # Maps Arrow/DataFusion type strings to Python-friendly names
@@ -62,7 +63,7 @@ class LTSeq(
         self._name: str | None = None  # Table name for lookup operations
 
     @classmethod
-    def _from_inner(cls, inner: "ltseq_core.LTSeqTable") -> "LTSeq":
+    def _from_inner(cls, inner: Any) -> "LTSeq":
         """
         Create an LTSeq instance from an already-initialized Rust LTSeqTable.
 
@@ -262,6 +263,10 @@ class LTSeq(
             >>> n = t.filter(lambda r: r.status == "active").count()
         """
         return len(self)
+
+    def explain_plan(self) -> tuple[str, str]:
+        """Return optimized logical and physical plans for debugging."""
+        return self._inner.explain_plan()
 
     def collect(self) -> list[dict[str, Any]]:
         """
@@ -504,9 +509,10 @@ class LTSeq(
 
         from .linking import LinkedTable
 
-        return LinkedTable(self, target_table, on, as_, join_type)
+        linked_table = LinkedTable(self, target_table, on, as_, join_type)
+        return linked_table
 
-    def partition(self, *args: Any, by: Callable | None = None) -> "PartitionedTable":
+    def partition(self, *args: Any, by: Callable | None = None) -> "PartitionedTable | SQLPartitionedTable":
         """
         Partition the table into groups based on columns or a key function.
 

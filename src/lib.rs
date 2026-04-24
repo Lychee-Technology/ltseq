@@ -2,6 +2,7 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::common::DFSchema;
 use datafusion::datasource::MemTable;
+use datafusion::physical_plan::displayable;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -435,6 +436,32 @@ impl LTSeqTable {
                     .map_err(|e| LtseqError::with_context("Failed to count rows", e).into())
             })
         })
+    }
+
+    /// Return optimized logical and physical plans for debugging.
+    fn explain_plan(&self) -> PyResult<(String, String)> {
+        let df = self
+            .dataframe
+            .as_ref()
+            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
+
+        let logical = (**df)
+            .clone()
+            .into_optimized_plan()
+            .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
+        let logical_text = format!("{}", logical.display_indent());
+
+        let physical_text = RUNTIME.block_on(async {
+            let plan = (**df)
+                .clone()
+                .create_physical_plan()
+                .await
+                .map_err(|e| LtseqError::with_context("Failed to create physical plan", e))?;
+            let text = displayable(plan.as_ref()).indent(true).to_string();
+            Ok::<_, LtseqError>(text)
+        })?;
+
+        Ok((logical_text, physical_text))
     }
 
     /// Collect the DataFrame and return all record batches as Arrow IPC bytes.

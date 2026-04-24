@@ -1,0 +1,10 @@
+{
+  "include": [
+    "py-ltseq"
+  ],
+  "extraPaths": [
+    "py-ltseq"
+  ],
+  "venvPath": ".",
+  "venv": ".venv"
+}

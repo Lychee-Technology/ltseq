@@ -6,6 +6,8 @@ if TYPE_CHECKING:
 
 
 class Expr:
+    @staticmethod
+    def _coerce(value: Any) -> Expr: ...
     def serialize(self) -> dict[str, Any]: ...
 
     # Arithmetic

@@ -6,11 +6,13 @@ All operations return new LTSeq instances — the original is never modified.
 
 from typing import Any, Callable, TYPE_CHECKING
 
+from ._typing import LTSeqLike
+
 if TYPE_CHECKING:
     from .core import LTSeq
 
 
-class MutationMixin:
+class MutationMixin(LTSeqLike):
     """Mixin providing copy-on-write row mutation operations for LTSeq."""
 
     def insert(self, pos: int, row_dict: dict[str, Any]) -> "LTSeq":
@@ -105,7 +107,12 @@ class MutationMixin:
             )
 
         if not updates:
-            return self
+            from .core import LTSeq
+
+            result = LTSeq._from_inner(self._inner)
+            result._schema = self._schema.copy()
+            result._sort_keys = self._sort_keys
+            return result
 
         expr_dict = self._capture_expr(predicate)
         result_inner = self._inner.conditional_update(expr_dict, updates)
