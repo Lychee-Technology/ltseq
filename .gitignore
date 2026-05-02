@@ -16,3 +16,4 @@ build/
 
 # autoresearch controller worktrees (local scratch)
 .worktrees/
+.vscode/
