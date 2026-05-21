@@ -1,5 +1,13 @@
 # Pointer-Based Linking - User Guide
 
+Related documents:
+
+- `docs/README.md`: documentation index
+- `docs/USER_MODEL.md`: user mental model and usage guidance
+- `docs/ARCHITECTURE.md`: system architecture and execution model
+- `docs/api.md`: API reference
+- `docs/LINKING_GUIDE.cn.md`: Chinese linking guide
+
 ## Overview
 
 ltseq's **linking feature** provides a lightweight, pointer-based approach to foreign key relationships between tables. Instead of materializing expensive joins upfront, links create references that are evaluated only when needed.
@@ -288,60 +296,11 @@ result = linked.select("id", "quantity", "prod_name")
 ```
 
 #### `link(target, on, as_, join_type="inner")`
-Chain another link (with limitations - see Known Limitations).
+Chain another link.
 
 ```python
 linked1 = orders.link(products, on=..., as_="prod")
 linked2 = linked1.link(categories, on=..., as_="cat")
-# See Known Limitations for caveats
-```
-
-## Known Limitations
-
-### Chained Materialization Issue
-
-You cannot materialize a link, then link the result:
-
-```python
-# ❌ DON'T DO THIS:
-linked1 = orders.link(products, on=..., as_="prod")
-mat1 = linked1._materialize()      # Works
-linked2 = mat1.link(categories, on=..., as_="cat")  # Works
-mat2 = linked2._materialize()      # ❌ Problem!
-```
-
-**Workaround**: Materialize only at the end:
-
-```python
-# ✅ DO THIS INSTEAD:
-linked1 = orders.link(products, on=..., as_="prod")
-linked2 = linked1.link(categories, on=..., as_="cat")
-result = linked2._materialize()  # Materialize at the very end
-```
-
-The underlying issue is related to schema synchronization between Python and Rust layers after materialization.
-
-### Accessing Linked Columns in Lambdas
-
-After materialization, you cannot easily access linked columns by object notation:
-
-```python
-linked = orders.link(products, on=..., as_="prod")
-result = linked._materialize()
-
-# ❌ This might not work:
-filtered = result.filter(lambda r: r.prod_name == "Widget")
-
-# ✓ This works better:
-result.show()  # Manual inspection instead
-```
-
-As a workaround, filter on linked table before materialization:
-
-```python
-# Filter before materializing (works on source columns)
-filtered = linked.filter(lambda r: r.quantity > 10)
-filtered.show()
 ```
 
 ## Troubleshooting
@@ -471,8 +430,7 @@ See [Examples](#examples) section below for code snippets.
 
 ## What's Next
 
-Future enhancements under consideration:
-- Object-style pointer access: `r.prod.name` (currently `r.prod_name`)
+Possible future improvements:
 - Performance optimizations for multi-level chains
 - Additional aggregation patterns
 
@@ -495,4 +453,4 @@ Use linking when you need to:
 - Filter before joining for better performance
 - Work with foreign key references
 
-See [Known Limitations](#known-limitations) and [Troubleshooting](#troubleshooting) for edge cases.
+See [Troubleshooting](#troubleshooting) for edge cases.
