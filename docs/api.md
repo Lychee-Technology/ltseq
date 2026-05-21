@@ -1,5 +1,14 @@
 # LTSeq API Design Document
 
+Related documents:
+
+- `docs/README.md`: documentation index
+- `docs/USER_MODEL.md`: user mental model and usage guidance
+- `docs/ARCHITECTURE.md`: system architecture and execution model
+- `docs/MODULE_GUIDE.md`: contributor-oriented codebase tour
+- `docs/DESIGN_SUMMARY.md`: current architecture summary and design archive
+- `docs/LINKING_GUIDE.md`: focused guide for pointer-based linking
+
 LTSeq is an ordered-sequence data processing library for Python backed by Rust/DataFusion. Unlike traditional DataFrames, LTSeq emphasizes order semantics and provides SPL-style capabilities such as window functions, ordered grouping, and cursor-based streaming.
 
 ## 0. Conventions and Terms
@@ -18,7 +27,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` before window operations |
 | `AttributeError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
 | `ValueError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
-| `ValueError: tables not sorted by join keys` | `join_sorted` called on unsorted tables | Call `.sort(join_key)` on both tables first |
+| `ValueError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 
@@ -73,7 +82,7 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | Operation | Method | Example |
 |-----------|--------|---------|
 | Hash join | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
-| Merge join | `.join_sorted()` | `a.sort("id").join_sorted(b.sort("id"), on="id")` |
+| Merge join | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
 
@@ -100,25 +109,24 @@ t = LTSeq.read_csv("data.csv")
 ```
 
 ### `LTSeq.schema` (property)
-- **Signature**: `LTSeq.schema -> Schema`
-- **Behavior**: Return the table schema with column names and types
+- **Signature**: `LTSeq.schema -> Dict[str, str]`
+- **Behavior**: Return the table schema as a dictionary mapping column names to type strings
 - **Parameters**: none (property)
-- **Returns**: `Schema` object with `.names` and `.types` attributes
+- **Returns**: dictionary mapping column names to their data types
 - **Exceptions**: none
 - **Example**:
 ```python
 t = LTSeq.read_csv("data.csv")
-print(t.schema.names)   # ["id", "name", "age", "created_at"]
-print(t.schema.types)   # [Int64, Utf8, Int64, Timestamp]
+print(t.schema)   # {"id": "Int64", "name": "Utf8", ...}
 
 # Iterate columns
-for name, dtype in zip(t.schema.names, t.schema.types):
+for name, dtype in t.schema.items():
     print(f"{name}: {dtype}")
 ```
 
 ### `LTSeq.columns` (property)
 - **Signature**: `LTSeq.columns -> List[str]`
-- **Behavior**: Return list of column names (shortcut for `schema.names`)
+- **Behavior**: Return list of column names (shortcut for `list(schema.keys())`)
 - **Parameters**: none (property)
 - **Returns**: list of column name strings
 - **Exceptions**: none
@@ -798,7 +806,7 @@ common = t1.intersect(t2, on=lambda r: r.id)
 only_left = t1.except_(t2, on=lambda r: r.id)
 ```
 
-> ⚠️ `LTSeq.diff()` is a deprecated alias for `except_()`. Note: `Expr.diff()` (row-level differences, Section 3) is an unrelated operation.
+> Note: `Expr.diff()` (row-level differences, Section 3) is unrelated to table set difference. Use `except_()` for table set difference.
 
 ### `LTSeq.is_subset`
 - **Signature**: `LTSeq.is_subset(other: LTSeq, on: Optional[Callable] = None) -> bool`
@@ -824,43 +832,21 @@ flag = t_small.is_subset(t_big, on=lambda r: r.id)
 joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
-### `LTSeq.join_merge`
-- **Signature**: `LTSeq.join_merge(other: LTSeq, on: Callable, join_type: str = "inner") -> LTSeq`
-- **Behavior**: Merge join; requires both sides sorted by join key; O(N+M)
-- **Parameters**: `other` other table; `on` join condition; `join_type` in {inner,left,right,full}
+### Merge Join Strategy
+- **Signature**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str = "hash") -> LTSeq`
+- **Behavior**: Use `strategy="merge"` to perform a merge join on sorted inputs
+- **Parameters**: `other` other table; `on` join condition; `how` in {inner,left,right,full}; `strategy` in {hash,merge}
 - **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid join_type or unsorted)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (unsupported strategy or unsorted inputs for merge)
 - **Example**:
 ```python
-result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
-```
-
-### `LTSeq.join_sorted`
-- **Signature**: `LTSeq.join_sorted(other: LTSeq, on: Union[str, List[str]], how: str = "inner") -> LTSeq`
-- **Behavior**: Merge join with strict validation that both tables are sorted by join keys. Validates sort order using `is_sorted_by()` before executing.
-- **Parameters**: `other` other table (must be sorted by join key); `on` join column name(s); `how` in {inner,left,right,full}
-- **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (tables not sorted by join keys, or sort directions don't match)
-- **Example**:
-```python
-# Both tables must be sorted by their join keys
 t1_sorted = t1.sort("id")
 t2_sorted = t2.sort("id")
-result = t1_sorted.join_sorted(t2_sorted, on="id")
-
-# Composite keys: both tables must be sorted by all join keys
-t1_sorted = t1.sort("region", "date")
-t2_sorted = t2.sort("region", "date")
-result = t1_sorted.join_sorted(t2_sorted, on=["region", "date"])
-
-# Descending sort also supported (must match)
-t1_desc = t1.sort("id", desc=True)
-t2_desc = t2.sort("id", desc=True)
-result = t1_desc.join_sorted(t2_desc, on="id")
-
-# Raises ValueError if not sorted correctly
-t_unsorted = LTSeq.read_csv("data.csv")
-t_unsorted.join_sorted(t2_sorted, on="id")  # ValueError!
+result = t1_sorted.join(
+    t2_sorted,
+    on=lambda a, b: a.id == b.id,
+    strategy="merge",
+)
 ```
 
 ### `LTSeq.asof_join`
@@ -926,7 +912,7 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 | Method | Best Use Case | Algorithm | SQL Equivalent |
 | --- | --- | --- | --- |
 | `join` | Unsorted general data | Hash Join | `JOIN` |
-| `join_sorted` / `join_merge` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
+| `join(..., strategy="merge")` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
 | `semi_join` | Filter by key existence | Hash Semi-Join | `WHERE EXISTS` |
 | `anti_join` | Filter by key non-existence | Hash Anti-Join | `WHERE NOT EXISTS` |
 | `link` | Fact-to-dimension pointer access | Pointer | `LEFT JOIN` (lazy) |

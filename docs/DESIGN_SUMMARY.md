@@ -1,529 +1,321 @@
 # LTSeq Design Summary
 
-**Last Updated**: January 9, 2026  
-**Status**: Comprehensive Design Archive
+Related documents:
+
+- `docs/README.md`: documentation index
+- `docs/ARCHITECTURE.md`: full architecture walkthrough
+- `docs/MODULE_GUIDE.md`: contributor codebase tour
+- `docs/USER_MODEL.md`: user-facing design model
+- `docs/api.md`: API reference
+- `docs/LINKING_GUIDE.md`: focused linking guide
+- `docs/DESIGN_SUMMARY.cn.md`: Chinese design summary
+
+**Last Updated**: May 20, 2026  
+**Status**: Current Architecture Summary and Design Archive
 
 ## Overview
-LTSeq is a hybrid Python-Rust library for high-performance sequential data processing. It combines a Pythonic lambda-based DSL with the raw speed of Rust's DataFusion engine. The core philosophy is **lazy evaluation with strict ordering guarantees**, enabling complex time-series and sequential operations (shift, rolling, diff, cum_sum) that are difficult or slow in standard SQL/pandas.
 
-This document consolidates design decisions, architectural patterns, and lessons learned throughout development.
+LTSeq is a hybrid Python-Rust library for sequence-oriented data processing. It combines a Pythonic lambda-based DSL with a Rust/DataFusion execution engine and treats row order as part of the query model rather than as display-only metadata.
+
+The core philosophy is:
+
+- lazy evaluation
+- explicit ordering guarantees
+- fluent Python ergonomics
+- Rust-side execution for performance and consistency
+
+This document now serves two roles:
+
+- a concise summary of the current architecture
+- a design archive for important implementation decisions and historical lessons
+
+For deeper reading:
+
+- `docs/ARCHITECTURE.md`: full architecture walkthrough
+- `docs/MODULE_GUIDE.md`: contributor codebase tour
+- `docs/USER_MODEL.md`: user-facing design model
+- `docs/api.md`: API reference
+- `docs/LINKING_GUIDE.md`: focused linking guide
 
 ---
 
 ## Table of Contents
-1. [Core Architecture](#1-core-architecture)
+
+1. [Current Architecture](#1-current-architecture)
 2. [Expression System](#2-expression-system)
-3. [Relational Operations](#3-relational-operations)
-4. [Sequence Operators](#4-sequence-operators)
-5. [Linking & Joins](#5-linking--joins)
-6. [Optimization Strategy](#6-optimization-strategy)
-7. [Grouping Operations](#7-grouping-operations)
-8. [API Design Patterns](#8-api-design-patterns)
-9. [Lessons Learned](#9-lessons-learned)
-10. [Phase 10: Performance Optimization](#10-phase-10-performance-optimization)
+3. [Ordered Semantics](#3-ordered-semantics)
+4. [Linking, Joining, and Grouping](#4-linking-joining-and-grouping)
+5. [Execution Strategy](#5-execution-strategy)
+6. [Testing and Performance](#6-testing-and-performance)
+7. [Design Lessons](#7-design-lessons)
+8. [Historical Notes](#8-historical-notes)
 
 ---
 
-## 1. Core Architecture
+## 1. Current Architecture
 
 ### 1.1 Hybrid Python-Rust Design
-- **Python Layer**: Handles API surface, DSL parsing, schema tracking, and high-level logic. Uses `_schema` dict to track columns without querying the engine.
-- **Rust Layer (py-ltseq)**: Exposes a `RustTable` class via PyO3. Wraps Apache DataFusion for execution.
-- **Interaction**: Python builds a logical plan; Rust executes it only when `.show()`, `.to_pandas()`, or `.count()` is called.
+
+LTSeq is split into two primary layers.
+
+- **Python layer** in `py-ltseq/ltseq/`: public API, mixin organization, schema tracking, sort metadata tracking, lambda capture, and high-level wrapper objects
+- **Rust layer** in `src/`: PyO3 extension module, lazy DataFusion plan handling, expression transpilation, terminal execution, and specialized sequence implementations
+
+In current code, the main user-facing Python object is `LTSeq`, and the main Rust execution object is `LTSeqTable`.
 
 ### 1.2 Lazy Evaluation Model
-- Operations like `filter()`, `select()`, `with_columns()` return a *new* `LTSeq` instance with an updated plan.
-- No data is processed until terminal actions.
-- **Benefit**: Allows query optimization (predicate pushdown, projection pushdown) by DataFusion.
 
-### 1.3 Sort Order Tracking
-- **Crucial Feature**: Unlike standard SQL engines which treat tables as unordered sets, LTSeq respects order.
-- **Mechanism**: `RustTable` maintains a `sort_exprs` vector.
-- **Invariant**: Window functions (shift, rolling) require explicit sorting. If `.sort()` hasn't been called, these operations raise an error.
+Most operations return a new lazy query object instead of executing immediately.
+
+Common lazy operations include:
+
+- `filter()`
+- `select()`
+- `derive()`
+- `sort()`
+- `slice()`
+- `join()`
+- `group_ordered()`
+
+Execution happens at terminal boundaries such as:
+
+- `show()`
+- `count()`
+- `collect()`
+- `to_arrow()`
+- `to_pandas()`
+- file writes
+
+This allows DataFusion to optimize logical plans and lets LTSeq preserve a consistent query-first model.
+
+### 1.3 Python API Composition
+
+`LTSeq` is built through mixin composition rather than a single oversized class.
+
+Key Python modules include:
+
+- `core.py`
+- `io_ops.py`
+- `transforms.py`
+- `joins.py`
+- `aggregation.py`
+- `advanced_ops.py`
+- `mutation_mixin.py`
+
+This keeps the public surface broad while keeping responsibilities reasonably separated.
+
+### 1.4 Rust Execution Shell + Modular Ops
+
+Rust exposes `LTSeqTable` through a single `#[pymethods]` block in `src/lib.rs`, then delegates most real work to `src/ops/*` helper modules.
+
+That pattern exists for two reasons:
+
+- PyO3 favors a centralized method exposure surface
+- the implementation stays maintainable only if execution logic is split by capability
+
+Representative Rust modules:
+
+- `src/ops/derive.rs`
+- `src/ops/window.rs`
+- `src/ops/grouping.rs`
+- `src/ops/join.rs`
+- `src/ops/asof_join.rs`
+- `src/ops/parallel_scan.rs`
+
+### 1.5 Core Metadata Model
+
+Two metadata systems are central to the architecture:
+
+- Python-side `_schema` / Rust-side Arrow schema
+- Python-side `_sort_keys` / Rust-side `sort_exprs`
+
+The first keeps user-visible validation and execution state aligned. The second makes ordered operations explicit and safe.
 
 ---
 
 ## 2. Expression System
 
 ### 2.1 Lambda DSL via SchemaProxy
-- **Problem**: Python lambdas are opaque. We need to convert `lambda r: r.age > 18` into a DataFusion logical expression.
-- **Solution**: `SchemaProxy` object intercepts attribute access (`r.age`).
-- **Mechanism**:
-  1. `r` is a `SchemaProxy`.
-  2. `r.age` returns a `CallExpr` representing column "age".
-  3. `r.age > 18` returns a `CallExpr` representing "binary op >".
-- **Result**: A serializable expression tree (AST) built at runtime.
 
-### 2.2 CallExpr Pattern
-- Instead of complex enum variants for every operation type, we use a generic `CallExpr`.
-- **Structure**: `{ func: "gt", args: [col_expr, lit_expr] }`
-- **Benefit**: Reduced boilerplate by ~40% compared to explicit expression classes.
+Python lambdas are used as a declarative DSL.
 
-### 2.3 Serialization
-- Expressions are serialized to JSON-compatible dictionaries before being passed to Rust.
-- **Format**: `{"type": "Column", "name": "age"}` or `{"type": "Literal", "value": 18, "dtype": "Int64"}`.
-
-### 2.4 Type Inference
-- Automatic inference for literals: `bool`, `int`, `float`, `string`, `null`.
-- Rust side deserializes these into DataFusion `ScalarValue` types.
-
----
-
-## 3. Relational Operations
-
-### 3.1 sort()
-- **Constraint**: Ascending only (in early phases), multi-column support.
-- **Requirement**: Must specify at least one key.
-- **State**: Updates the internal `sort_exprs` state, enabling sequence operations.
-
-### 3.2 distinct()
-- **Implementation**: Hash-based deduplication using DataFusion's `LogicalPlan::Distinct`.
-- **Scope**: Global by default (deduplicates across entire dataset).
-
-### 3.3 slice()
-- **Implementation**: Zero-copy logical operation mapping to SQL `LIMIT` / `OFFSET`.
-- **Performance**: Extremely fast as it modifies the plan limit, not the data.
-
----
-
-## 4. Sequence Operators
-
-### 4.1 Strict Sort Requirement
-- `shift()`, `diff()`, `rolling()`, `cum_sum()` **fail hard** if `.sort()` was not called previously.
-- **Rationale**: Sequential operations are undefined without order. Explicit is better than implicit.
-
-### 4.2 Sort Metadata Preservation
-- "Safe" operations (filter, derive, slice) preserve the `sort_exprs` metadata.
-- "Unsafe" operations (group by, join) might reset or invalidate sort requirements.
-
-### 4.3 NULL Handling & Boundaries
-- **shift(n)**: Introduces NULLs at boundaries (first `n` rows).
-- **diff()**: `val - shift(1)`. First row is NULL.
-- **rolling()**: Configurable `min_periods`. Defaults to window size (result is NULL until window is full).
-- **cum_sum()**: Always has value (running total).
-
-### 4.4 Expression Architecture
-- Sequence ops are implemented via pattern matching on the `CallExpr` function string in the transpiler.
-- They translate to DataFusion Window Functions (e.g., `LEAD/LAG`, `SUM() OVER (...)`).
-
----
-
-## 5. Linking & Joins
-
-### 5.1 Pointer-Based LinkedTable
-- **Concept**: `left.link(right, on=...)` returns a `LinkedTable`.
-- **State**: Stores references to left/right tables and join keys. Does **not** execute join immediately.
-- **API**: Allows chaining operations on the "virtual" joined result.
-
-### 5.2 Transparent Materialization ("Detect & Materialize")
-- **Design Decision**: When a user filters or selects a column belonging to the linked (right) table, the system automatically materializes the join.
-- **User Experience**: "It just works". `linked.filter(lambda r: r.right_col > 5)` triggers the join.
-- **Return Types**:
-  - `LinkedTable`: No materialization happened (operations were on left table only).
-  - `LTSeq`: Materialization occurred (result is a flat table).
-
-### 5.3 Column Renaming Strategy
-- **Critical Issue**: DataFusion joins fail or behave unpredictably with duplicate column names.
-- **Solution**: **ALL** columns from the right table are renamed with unique temporary identifiers before joining.
-- **Restoration**: After join, columns are aliased back to their expected names (or user-provided prefixes).
-
-### 5.4 Join Types
-- Supported: `inner` (default), `left`, `right`, `full`.
-- Defaults to `inner` to match SQL intuition.
-
-### 5.5 Chained Materialization
-- **Bug Fix**: Fixed a critical bug where chaining multiple links caused schema mismatches.
-- **Solution**: Ensure schema synchronization between Python `_schema` and Rust `ArrowSchema` after every materialization.
-
----
-
-## 6. Optimization Strategy
-
-### 6.1 Native Rust Implementations
-- **join_merge**: Moved join logic to Rust. **5-10x speedup**.
-- **search_first**: Implemented as `Limit(1)` + `Filter` in Rust. **10-87x speedup** (dataset dependent).
-
-### 6.2 Deferred Optimizations
-- **pivot**: Analysis showed Pandas pivot is sufficient for typical result set sizes (hundreds/thousands of rows). Kept in Python for now.
-- **Window Functions**: Already optimized by DataFusion's execution planner. No custom Rust needed.
-
----
-
-## 7. Grouping Operations
-
-### 7.1 group_ordered Algorithm
-- **Problem**: Standard `GROUP BY` destroys order. We need "group by X, but keep rows ordered by time within groups".
-- **Solution**: Window Functions.
-  - Assign `__group_id__` using dense rank or hashing.
-  - Maintain sort order within partitions.
-
-### 7.2 NestedTable Structure
-- `group_ordered()` returns a `NestedTable`.
-- **Metadata**: Tracks `__group_id__` and `__group_count__`.
-- **Operations**: `aggregate()` reduces to 1 row per group. `filter()`/`derive()` maintain group structure.
-
-### 7.3 Context Preservation
-- `_group_assignments` dictionary preserves original group IDs even after filtering.
-- Allows operations like "filter out first 2 rows of each group" while keeping group integrity.
-
----
-
-## 8. API Design Patterns
-
-### 8.1 Method Chaining
-- Fluent interface: `df.sort().filter().derive()`.
-- Immutability: Each call returns a new instance; original is untouched.
-
-### 8.2 Dual Argument Forms
-- **String Columns**: `df.select("a", "b")`
-- **Lambda Expressions**: `df.select(lambda r: r.a + r.b)`
-- **Mixed**: Supported in `with_columns` / `derive`.
-
-### 8.3 Return Type Signals
-- The type of object returned tells the user what happened:
-  - `LinkedTable`: Virtual join.
-  - `LTSeq`: Physical table.
-  - `NestedTable`: Grouped context.
-
-### 8.4 Error Messages
-- **Philosophy**: Helpful & specific.
-- **Example**: If column missing, list *available* columns.
-- **Example**: If sort missing for window op, explain *why* sort is needed.
-
----
-
-## 9. Lessons Learned
-
-### 9.1 DataFusion Join Conflicts
-- **Lesson**: Never trust default name handling in joins.
-- **Fix**: Aggressively rename everything on the right side of a join to UUIDs/temps, then alias back.
-
-### 9.2 AST Parsing Challenges
-- **Lesson**: `inspect.getsource()` is messy. It returns the whole line/block.
-- **Fix**: Use `ast` module to parse the source, then walk the tree to find the specific lambda corresponding to the argument.
-
-### 9.3 Phased Implementation
-- **Strategy**: Start narrow, expand later.
-- **Example**: `cum_sum` started as "column name only". Later expanded to "arbitrary expressions". This kept momentum high.
-
-### 9.4 Python 3.14 Compatibility
-- **Lesson**: `ast.NameConstant` is deprecated.
-- **Fix**: Migrated to `ast.Constant` proactively to ensure future-proofing.
-
----
-
-## 10. Phase 10: Performance Optimization
-
-### 10.1 Analysis Summary (January 2026)
-
-**Key Finding**: DataFusion and Arrow already handle low-level optimizations.
-- **SIMD**: Arrow arrays use SIMD-optimized compute kernels automatically.
-- **Multi-threading**: DataFusion parallelizes partition-level operations; Tokio runtime is multi-threaded.
-- **Batch processing**: Default batch size (8192 rows) is cache-optimized.
-
-**Actual Bottleneck**: The **materialization pattern** used for complex operations.
-```rust
-// This pattern appears in 15+ places:
-let batches = df.collect().await?;           // Full materialization
-let temp = MemTable::try_new(schema, batches)?;
-session.register_table("__temp", temp)?;
-session.sql("SELECT ... FROM __temp").await?; // SQL execution
-```
-Operations using this pattern: window functions, joins, group_by, pivot.
-
-### 10.2 Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **No custom SIMD code** | Arrow/DataFusion already optimized; custom SIMD adds maintenance burden with minimal gain |
-| **No custom threading** | DataFusion + Tokio handle parallelization; adding custom threading risks contention |
-| **Focus on configuration** | SessionContext uses bare defaults; proper tuning gives easy wins |
-| **Focus on materialization** | Reducing collect() → MemTable round-trips has highest impact |
-| **Smart defaults, no config API** | 80% of users won't tune; add Python config API later if requested |
-| **Benchmark suite required** | Can't optimize what we don't measure |
-
-### 10.3 Implementation Plan
-
-| # | Task | Description | Effort |
-|---|------|-------------|--------|
-| 1 | Benchmark suite | 5-10 key benchmarks (filter, join, window, group, chain) | 0.5 day |
-| 2 | DataFusion configuration | Configure SessionContext with batch_size, target_partitions, memory settings | 1 day |
-| 3 | Reduce join materialization | Refactor join_impl to avoid double-collection where possible | 1-2 days |
-| 4 | Reduce window materialization | Optimize derive_with_window_functions_impl to batch operations | 1 day |
-| 5 | Expression optimization | Constant folding, predicate combining in transpiler | 1 day |
-
-### 10.4 Configuration Strategy
-
-**SessionContext** (to be implemented in `src/lib.rs`):
-```rust
-let config = SessionConfig::new()
-    .with_target_partitions(num_cpus::get())  // Match CPU cores
-    .with_batch_size(8192)                     // DataFusion default, tunable
-    .with_information_schema(false);           // Disable unused feature
-
-let session = SessionContext::new_with_config(config);
-```
-
-**Tokio Runtime** (already multi-threaded, minimal changes needed).
-
-### 10.5 Benchmark Categories
-
-1. **Filter**: 10K, 1M, 10M rows with simple and complex predicates
-2. **Join**: Small×Small, Large×Small, Large×Large
-3. **Window**: LAG/LEAD, running sum, rolling average
-4. **Group**: group_ordered + aggregate
-5. **Chain**: filter → derive → select (typical workflow)
-
----
-
-## 11. As-Of Join (Phase 1.3)
-
-### 11.1 Overview
-
-As-of join is a specialized join operation for time-series data that matches each row from the left table with the "nearest" row from the right table based on a time/key column. This is commonly used in financial applications (e.g., matching trades with quotes).
-
-### 11.2 API Design
+Example:
 
 ```python
-def asof_join(
-    self,
-    other: LTSeq,
-    on: Callable,
-    direction: str = "backward",
-    is_sorted: bool = False
-) -> LTSeq
+t.filter(lambda r: r.age > 18)
 ```
 
-**Parameters:**
-- `other`: Right table to join with
-- `on`: Lambda with inequality condition, e.g., `lambda t, q: t.time >= q.time`
-- `direction`: One of `"backward"` (default), `"forward"`, `"nearest"`
-- `is_sorted`: If `True`, trust that both tables are sorted by time column (skip verification/sorting)
+`r` is a `SchemaProxy`, not a real row object. Attribute access and operators build expression nodes instead of evaluating row values in Python.
 
-**Direction Semantics:**
-- **backward**: Find largest `right.time` where `right.time <= left.time` (most recent quote before trade)
-- **forward**: Find smallest `right.time` where `right.time >= left.time` (next quote after trade)
-- **nearest**: Find closest `right.time` (backward bias on ties)
+### 2.2 Serialization Boundary
 
-**Example:**
-```python
-# Auto-sort (safe, default)
-result = trades.asof_join(quotes, lambda t, q: t.time >= q.time)
+Captured expressions are serialized into dictionaries before crossing into Rust.
 
-# Skip sort verification (faster, requires pre-sorted data)
-trades_sorted = trades.sort("time")
-quotes_sorted = quotes.sort("time")
-result = trades_sorted.asof_join(
-    quotes_sorted,
-    lambda t, q: t.time >= q.time,
-    is_sorted=True
-)
-```
-
-### 11.3 Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **Pure Rust binary search** | O(N log M) complexity; more efficient than SQL window function workarounds |
-| **NULL for unmatched rows** | LEFT JOIN semantics - keep all left rows, NULL for missing right columns |
-| **`_other_` column prefix** | Consistent with `join_merge()` for right table column naming |
-| **Optional `is_sorted` parameter** | Allow users who know their data is sorted to skip sort overhead |
-| **Default `is_sorted=False`** | Safe default - auto-sort tables if not explicitly marked as sorted |
-| **Backward bias on ties** | For `direction="nearest"` with equal distances, prefer earlier timestamp |
-| **Inequality-based `on` condition** | Parse `>=` or `<=` from lambda to extract time columns (not equality like regular joins) |
-
-### 11.4 Algorithm Details
-
-**Binary Search Implementation (Rust):**
-
-```rust
-// For direction="backward": find largest index where right[i] <= left_time
-fn find_asof_backward(left_time: i64, right_times: &[i64]) -> Option<usize> {
-    let idx = right_times.partition_point(|&t| t <= left_time);
-    if idx == 0 { None } else { Some(idx - 1) }
-}
-
-// For direction="forward": find smallest index where right[i] >= left_time
-fn find_asof_forward(left_time: i64, right_times: &[i64]) -> Option<usize> {
-    let idx = right_times.partition_point(|&t| t < left_time);
-    if idx >= right_times.len() { None } else { Some(idx) }
-}
-
-// For direction="nearest": compute both, pick closer (backward bias on ties)
-fn find_asof_nearest(left_time: i64, right_times: &[i64]) -> Option<usize> {
-    match (find_asof_backward(left_time, right_times),
-           find_asof_forward(left_time, right_times)) {
-        (None, None) => None,
-        (Some(b), None) => Some(b),
-        (None, Some(f)) => Some(f),
-        (Some(b), Some(f)) => {
-            let diff_back = left_time - right_times[b];
-            let diff_fwd = right_times[f] - left_time;
-            if diff_back <= diff_fwd { Some(b) } else { Some(f) }
-        }
-    }
-}
-```
-
-**Complexity:** O(N log M) where N = left rows, M = right rows
-
-### 11.5 Expression Parsing
-
-Unlike regular joins that use equality (`==`), asof_join uses inequality operators (`>=`, `<=`). The helper `_extract_asof_keys()` parses:
+Examples:
 
 ```python
-lambda t, q: t.time >= q.time  # -> ("time", "time", "Gte")
-lambda t, q: t.trade_time <= q.quote_time  # -> ("trade_time", "quote_time", "Lte")
+{"type": "Column", "name": "age"}
+{"type": "Literal", "value": 18, "dtype": "Int64"}
 ```
 
-### 11.6 Result Schema
+On the Rust side, these become `PyExpr` values in `src/types.rs`.
 
-- All columns from left table (unchanged)
-- All columns from right table with `_other_` prefix
-- For unmatched rows (no right match): right columns are NULL
+### 2.3 Transpilation Paths
 
-### 11.7 Why Not SQL/DataFusion Native?
+After deserialization, expressions may follow one of several paths:
 
-DataFusion does not support:
-- `ASOF JOIN` syntax (like DuckDB)
-- `LATERAL JOIN` (PostgreSQL-style)
-- `RANGE` frame in window functions for this use case
+- native DataFusion expression generation
+- native window expression generation
+- SQL generation fallback
 
-Custom Rust implementation with binary search is the most efficient approach.
+Key files:
+
+- `src/transpiler/mod.rs`
+- `src/transpiler/window_native.rs`
+- `src/transpiler/sql_gen.rs`
+- `src/transpiler/optimization.rs`
+
+### 2.4 Practical Boundaries
+
+LTSeq's expression system is intentionally constrained. It supports Pythonic column expressions well, but it does not attempt to execute arbitrary Python logic row-by-row. That tradeoff keeps the system serializable and Rust-executable.
 
 ---
 
-## 12. Sort Order Tracking (Phase 3.1)
+## 3. Ordered Semantics
 
-### 12.1 Overview
+### 3.1 Explicit Sort Requirement
 
-Sort order tracking is a metadata system that tracks which columns an `LTSeq` table is sorted by. This enables:
-- Efficient `join_sorted()` with validation
-- Smart auto-detection in `asof_join()` (skip unnecessary sorting)
-- Clear user feedback about table state
+One of LTSeq's strongest design decisions is that sequence-dependent operations require explicit order.
 
-### 12.2 Core Data Structure
+- `shift()`
+- `diff()`
+- `rolling()`
+- many ranking/window workflows
 
-```python
-class LTSeq:
-    _sort_keys: Optional[List[Tuple[str, bool]]] = None  # [(col_name, is_desc), ...]
-```
+If sort order is unknown, LTSeq prefers to raise instead of guessing.
 
-- `None`: Sort order unknown (unsorted or invalidated)
-- `[(col, False), ...]`: Sorted ascending by columns in order
-- `[(col, True), ...]`: Sorted descending
+### 3.2 Sort Metadata Preservation
 
-### 12.3 API Design
+Some operations preserve sort metadata because they keep row order meaningful, including many filters, derives, and slices.
 
-**Property: `sort_keys`**
-```python
-@property
-def sort_keys(self) -> Optional[List[Tuple[str, bool]]]:
-    """Return current sort keys or None if unknown."""
-```
+Other operations may invalidate sort metadata, including operations that reorder rows or produce structurally new tables.
 
-**Method: `is_sorted_by()`**
-```python
-def is_sorted_by(self, *keys: str, desc: Union[bool, List[bool]] = False) -> bool:
-    """
-    Check if table is sorted by specified keys using prefix matching.
-    
-    Example:
-        t.sort("a", "b").is_sorted_by("a")  # True (prefix match)
-        t.sort("a", "b").is_sorted_by("a", "b")  # True (exact match)
-        t.sort("a", "b").is_sorted_by("b")  # False (wrong order)
-    """
-```
+This propagation behavior is part of the core semantics, not just an optimization detail.
 
-**Method: `join_sorted()`**
-```python
-def join_sorted(self, other: LTSeq, on: Callable, how: str = "inner") -> LTSeq:
-    """
-    Merge join with sort validation. Raises ValueError if either table
-    is not sorted by join keys.
-    """
-```
+### 3.3 Sorted Fast Paths
 
-### 12.4 Operation Classification
+Sort metadata also enables optimized execution paths for specific workloads, especially on sorted Parquet inputs and sequence scans.
 
-| Operation | Sort Behavior | Rationale |
-|-----------|---------------|-----------|
-| `filter()` | Preserves | Row subset, order unchanged |
-| `derive()` | Preserves | Adds columns, order unchanged |
-| `slice()` | Preserves | Contiguous row subset |
-| `select()` | Conditional | Preserves if sort key columns included |
-| `cum_sum()` | Preserves | Adds columns, order unchanged |
-| `sort()` | Sets new | Explicitly sets sort order |
-| `distinct()` | Invalidates | Row reordering may occur |
-| `union()` | Invalidates | Combines tables, no guaranteed order |
-| `join()` | Invalidates | Hash join doesn't preserve order |
-| `agg()` | Invalidates | Creates new rows |
-| `pivot()` | Invalidates | Creates new structure |
+---
 
-### 12.5 Design Decisions
+## 4. Linking, Joining, and Grouping
 
-| Decision | Rationale |
-|----------|-----------|
-| **Prefix matching for `is_sorted_by()`** | `t.sort("a", "b")` is sorted by "a" (prefix), enabling flexible checks |
-| **Descending support** | Both ascending and descending sorts are tracked; merge join works with either direction as long as both tables match |
-| **Strict validation in `join_sorted()`** | Raises `ValueError` rather than silent fallback; users should know if their data isn't sorted |
-| **Lambda-only sort keys not tracked** | Complex expressions like `lambda r: r.a + r.b` result in `_sort_keys = None` (can't reliably track computed sorts) |
-| **Direction matching required** | Both tables in `join_sorted()` must have same direction (both ASC or both DESC) |
+### 4.1 Pointer-Based LinkedTable
 
-### 12.6 Integration with `asof_join()`
+`link()` returns a `LinkedTable`, a lazy relationship object rather than an immediately joined flat table.
 
-`asof_join()` now uses `is_sorted_by()` for smart auto-detection:
+This allows source-only operations to remain cheap and delays join cost until linked-side columns are actually needed.
 
-```python
-# Before: Always sorted when is_sorted=False
-if not is_sorted:
-    left_table = self.sort(left_time_col)
-    right_table = other.sort(right_time_col)
+### 4.2 Join Column Conflict Strategy
 
-# After: Check sort tracking, only sort if needed
-if is_sorted:
-    pass  # Trust user
-else:
-    # Auto-detect using sort tracking
-    if not self.is_sorted_by(left_time_col):
-        left_table = self.sort(left_time_col)
-    if not other.is_sorted_by(right_time_col):
-        right_table = other.sort(right_time_col)
-```
+Join execution must handle duplicate or conflicting right-side column names carefully. LTSeq's join implementation aggressively renames right-side columns before joining, then aliases them back into the user-visible schema shape.
 
-**Benefit**: If user has already sorted the tables, `asof_join()` skips redundant sorting automatically.
+This has proven necessary for correctness and predictability.
 
-### 12.7 Example Usage
+### 4.3 Grouped Sequential Context
 
-```python
-# Basic sort tracking
-t = LTSeq.read_csv("data.csv")
-print(t.sort_keys)  # None (unsorted)
+`group_ordered()` and `group_sorted()` return `NestedTable`, not a collapsed aggregate result. These workflows preserve grouped row context through internal columns such as:
 
-t_sorted = t.sort("id", "date")
-print(t_sorted.sort_keys)  # [('id', False), ('date', False)]
+- `__group_id__`
+- `__group_count__`
+- `__rn__`
 
-# Prefix matching
-t_sorted.is_sorted_by("id")  # True
-t_sorted.is_sorted_by("id", "date")  # True
-t_sorted.is_sorted_by("date")  # False (wrong position)
+This enables group-aware filtering, deriving, and first/last style analysis without immediately flattening the grouped structure.
 
-# Sort-preserving operations
-t_filtered = t_sorted.filter(lambda r: r.value > 100)
-print(t_filtered.sort_keys)  # [('id', False), ('date', False)] - preserved
+### 4.4 Partitioning
 
-# Sort-invalidating operations
-t_distinct = t_sorted.distinct("id")
-print(t_distinct.sort_keys)  # None - invalidated
+`partition()` exposes grouped access patterns while staying as close as possible to the lazy/query path. Callable partitioning is intentionally constrained to expressions that can still be captured and executed by the engine.
 
-# join_sorted() with validation
-users = LTSeq.read_csv("users.csv").sort("user_id")
-orders = LTSeq.read_csv("orders.csv").sort("user_id")
-result = users.join_sorted(orders, on=lambda u, o: u.user_id == o.user_id)
+---
 
-# This would raise ValueError:
-# users_unsorted = LTSeq.read_csv("users.csv")  # Not sorted
-# result = users_unsorted.join_sorted(orders, on=lambda u, o: u.user_id == o.user_id)
-# ValueError: Left table is not sorted by join keys: ['user_id']
-```
+## 5. Execution Strategy
 
+### 5.1 DataFusion-First
+
+The preferred path is to keep work as native DataFusion logical plans and expressions.
+
+### 5.2 SQL Fallback
+
+Some operations, especially grouped or window-heavy transformations, still use generated SQL and temporary tables when that is the most practical implementation route.
+
+### 5.3 Specialized Rust Paths
+
+LTSeq also contains specialized implementations for ordered workloads where generic planning is not the best fit.
+
+Examples include:
+
+- direct sequence scans
+- parallel scans
+- pattern matching
+- as-of join binary search logic
+
+### 5.4 No-Materialization Rule
+
+Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` should stay on the lazy Rust/DataFusion path whenever possible. Materialization is reserved for explicit export or terminal APIs.
+
+This is a defining architectural rule and is enforced by tests.
+
+---
+
+## 6. Testing and Performance
+
+### 6.1 Capability-Oriented Tests
+
+The test suite in `py-ltseq/tests/` is organized primarily by behavior and capability rather than by source file.
+
+Major categories include:
+
+- expressions
+- transforms
+- sort tracking and windows
+- grouping and nested tables
+- joins and as-of joins
+- linking and pointer syntax
+- partitioning and set operations
+- architecture guardrails such as no accidental materialization
+
+### 6.2 Benchmarks as Architecture Feedback
+
+Benchmarks are used to validate whether architectural choices hold up under realistic ordered workloads. The project uses them to identify materialization bottlenecks and justify specialized native implementations where necessary.
+
+---
+
+## 7. Design Lessons
+
+### 7.1 Order Must Be Explicit
+
+Trying to make ordered semantics implicit leads to confusing results and fragile APIs. Requiring explicit sort state has been a net improvement.
+
+### 7.2 Schema Synchronization Is Critical
+
+The combination of Python-side schema tracking and Rust-side Arrow schema tracking improves ergonomics but requires strict synchronization, especially after joins and materialization boundaries.
+
+### 7.3 DataFusion Is Strong, but Not Sufficient for Everything
+
+DataFusion handles a large part of LTSeq's execution needs well, but sequence-specific workloads still justify dedicated logic in some paths.
+
+### 7.4 Materialization Is the Main Architectural Cost Center
+
+The most important performance problems tend not to be low-level compute kernels. They tend to come from collect/register/re-query patterns around complex operations.
+
+---
+
+## 8. Historical Notes
+
+The previous version of this document served as a comprehensive design archive. That historical role is still useful, but the repository now separates current architecture, contributor orientation, and user mental model into dedicated companion documents.
+
+When updating this file in the future:
+
+- keep the high-level architecture summary current
+- preserve important design lessons and rationale
+- move deep implementation walkthroughs into `docs/ARCHITECTURE.md` or targeted guides where appropriate

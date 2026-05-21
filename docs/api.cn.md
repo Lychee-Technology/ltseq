@@ -1,5 +1,14 @@
 # LTSeq API 设计文档
 
+相关文档：
+
+- `docs/README.md`：文档索引
+- `docs/USER_MODEL.cn.md`：用户心智模型与使用说明
+- `docs/ARCHITECTURE.cn.md`：系统架构与执行模型
+- `docs/MODULE_GUIDE.cn.md`：面向贡献者的代码导览
+- `docs/DESIGN_SUMMARY.cn.md`：中文设计摘要与设计归档
+- `docs/LINKING_GUIDE.cn.md`：中文 Linking 专题文档
+
 LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusion 执行。与传统 DataFrame 不同，LTSeq 强调"顺序"语义，支持窗口、连续分组、游标式处理等 SPL 风格能力。
 
 ## 常见错误与解决方案
@@ -9,7 +18,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | `RuntimeError: window function used without sort` | 未排序直接调用 `shift`/`rolling`/`diff` | 在窗口函数前添加 `.sort(order_column)` |
 | `AttributeError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
 | `ValueError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
-| `ValueError: tables not sorted by join keys` | 对未排序的表调用 `join_sorted` | 先对双方调用 `.sort(join_key)` |
+| `ValueError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
 
@@ -64,7 +73,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 操作 | 方法 | 示例 |
 |------|------|------|
 | 哈希连接 | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
-| 归并连接 | `.join_sorted()` | `a.sort("id").join_sorted(b.sort("id"), on="id")` |
+| 归并连接 | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | 半连接 | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | 反连接 | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
 
@@ -100,24 +109,23 @@ t = LTSeq.read_csv("data.csv")
 ```
 
 ### `LTSeq.schema`（属性）
-- **签名**: `LTSeq.schema -> Schema`
-- **行为**: 返回表的 schema，包含列名和类型信息
+- **签名**: `LTSeq.schema -> Dict[str, str]`
+- **行为**: 以字典形式返回表的 schema，包含列名到类型字符串的映射
 - **参数**: 无（属性）
-- **返回**: `Schema` 对象，包含 `.names` 和 `.types` 属性
+- **返回**: 列名到类型字符串的字典
 - **异常**: 无
 - **示例**:
 ```python
 t = LTSeq.read_csv("data.csv")
-print(t.schema.names)   # ["id", "name", "age", "created_at"]
-print(t.schema.types)   # [Int64, Utf8, Int64, Timestamp]
+print(t.schema)   # {"id": "Int64", "name": "Utf8", ...}
 
-for name, dtype in zip(t.schema.names, t.schema.types):
+for name, dtype in t.schema.items():
     print(f"{name}: {dtype}")
 ```
 
 ### `LTSeq.columns`（属性）
 - **签名**: `LTSeq.columns -> List[str]`
-- **行为**: 返回列名列表（`schema.names` 的快捷方式）
+- **行为**: 返回列名列表（`list(schema.keys())` 的快捷方式）
 - **参数**: 无（属性）
 - **返回**: 列名字符串列表
 - **异常**: 无
@@ -653,7 +661,7 @@ common = t1.intersect(t2, on=lambda r: r.id)
 only_left = t1.except_(t2, on=lambda r: r.id)
 ```
 
-> ⚠️ `LTSeq.diff()` 是 `except_()` 的废弃别名。注意：`Expr.diff()`（第 3 节中的行级差分）是不同的操作。
+> 注意：表达式里的 `Expr.diff()`（第 3 节中的行级差分）与表级差集不同。表级差集请使用 `except_()`。
 
 ### `LTSeq.is_subset`
 - **签名**: `LTSeq.is_subset(other: LTSeq, on: Optional[Callable] = None) -> bool`
@@ -680,30 +688,21 @@ flag = t_small.is_subset(t_big, on=lambda r: r.id)
 joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
-### `LTSeq.join_merge`
-- **签名**: `LTSeq.join_merge(other: LTSeq, on: Callable, join_type: str = "inner") -> LTSeq`
-- **行为**: 归并连接，要求双方按连接键排序，复杂度 O(N+M)
-- **参数**: `other` 另一表；`on` 连接条件；`join_type` in {inner,left,right,full}
+### 归并连接策略
+- **签名**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str = "hash") -> LTSeq`
+- **行为**: 通过 `strategy="merge"` 在已排序输入上执行归并连接
+- **参数**: `other` 另一表；`on` 连接条件；`how` in {inner,left,right,full}；`strategy` in {hash,merge}
 - **返回**: 连接后的 `LTSeq`
-- **SPL 对应**: `join@m`
-- **异常**: `TypeError`（other/on 非法），`ValueError`（join_type 非法或未排序）
+- **异常**: `TypeError`（other/on 非法），`ValueError`（strategy 非法或归并连接输入未排序）
 - **示例**:
 ```python
-result = t1.sort("id").join_merge(t2.sort("id"), on=lambda a, b: a.id == b.id)
-```
-
-### `LTSeq.join_sorted`
-- **签名**: `LTSeq.join_sorted(other: LTSeq, on: Union[str, List[str]], how: str = "inner") -> LTSeq`
-- **行为**: 归并连接，严格验证双方按连接键排序后执行；通过 `is_sorted_by()` 验证排序状态
-- **参数**: `other` 已排序的另一表；`on` 连接列名（或列名列表）；`how` in {inner,left,right,full}
-- **返回**: 连接后的 `LTSeq`
-- **SPL 对应**: `joinx`
-- **异常**: `TypeError`（other/on 非法），`ValueError`（表未按连接键排序）
-- **示例**:
-```python
-result = t1.sort("id").join_sorted(t2.sort("id"), on="id")
-# 复合键
-result = t1.sort("region", "date").join_sorted(t2.sort("region", "date"), on=["region", "date"])
+t1_sorted = t1.sort("id")
+t2_sorted = t2.sort("id")
+result = t1_sorted.join(
+    t2_sorted,
+    on=lambda a, b: a.id == b.id,
+    strategy="merge",
+)
 ```
 
 ### `LTSeq.semi_join`
@@ -774,7 +773,7 @@ fact = orders.lookup(products, on=lambda o, p: o.product_id == p.id, as_="prod")
 | 方法 | 适用场景 | 算法 | SQL 对应 |
 | --- | --- | --- | --- |
 | `join` | 无序通用数据 | Hash Join | `JOIN` |
-| `join_sorted` / `join_merge` | 已排序大表 | Merge Join | `JOIN`（优化） |
+| `join(..., strategy="merge")` | 已排序大表 | Merge Join | `JOIN`（优化） |
 | `semi_join` | 按键存在性过滤 | Hash Semi-Join | `WHERE EXISTS` |
 | `anti_join` | 按键不存在性过滤 | Hash Anti-Join | `WHERE NOT EXISTS` |
 | `link` | 事实表到维表的指针访问 | Pointer | `LEFT JOIN`（懒加载） |
