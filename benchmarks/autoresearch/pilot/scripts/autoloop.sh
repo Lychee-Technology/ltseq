@@ -699,11 +699,15 @@ get_field() {
   local file="$1"
   local key="$2"
   local line
-  line="$(rg "^${key}=" "$file" | head -1 || true)"
-  if [[ -z "$line" ]]; then
-    return 0
-  fi
-  printf '%s' "${line#*=}" | tr -d '\r'
+
+  [[ -r "$file" ]] || return 0
+
+  while IFS= read -r line; do
+    if [[ "$line" == "$key="* ]]; then
+      printf '%s' "${line#*=}" | tr -d '\r'
+      return 0
+    fi
+  done < "$file"
 }
 
 next_issue_id() {

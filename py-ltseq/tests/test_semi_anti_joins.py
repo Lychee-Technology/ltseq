@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import warnings
 
 import pytest
 
@@ -334,17 +335,29 @@ class TestValidationErrors:
 
 
 class TestSchemaOverlapWarning:
-    """Tests for schema overlap warning."""
+    """Tests for avoiding noisy schema overlap warnings."""
 
-    def test_no_overlap_warning(self, users_csv, products_csv):
-        """Warning is raised when tables have no overlapping columns."""
+    def test_no_warning_for_valid_different_column_names(self, users_csv, orders_csv):
+        """Valid foreign-key style joins should not warn just because names differ."""
+        users = LTSeq.read_csv(users_csv)
+        orders = LTSeq.read_csv(orders_csv)
+
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
+
+        assert len(record) == 0
+
+    def test_no_warning_for_explicit_non_overlapping_join(self, users_csv, products_csv):
+        """Explicit join conditions should not warn just because schemas differ."""
         users = LTSeq.read_csv(users_csv)
         products = LTSeq.read_csv(products_csv)
 
-        # Users and products have no overlapping columns
-        with pytest.warns(UserWarning, match="No overlapping column names"):
-            # This will still work but warn
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
             users.semi_join(products, on=lambda u, p: u.id == p.product_id)
+
+        assert len(record) == 0
 
 
 class TestCompositeKeys:

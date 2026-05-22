@@ -31,6 +31,23 @@ def write_summary(path: Path, data_file: str) -> None:
     path.write_text(json.dumps({"data_file": data_file}), encoding="utf-8")
 
 
+def test_get_field_returns_empty_for_missing_file(tmp_path):
+    missing_file = tmp_path / "missing.txt"
+
+    script = textwrap.dedent(
+        f"""
+        source {autoloop_path()!s}
+        value="$(get_field {missing_file!s} status)"
+        printf 'value=%s' "$value"
+        """
+    )
+
+    result = run_autoloop_shell(script)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "value="
+
+
 def test_baseline_matches_requested_data_rejects_dataset_mismatch(tmp_path):
     baseline_summary = tmp_path / "benchmark-summary.json"
     write_summary(baseline_summary, "benchmarks/data/hits_sample.parquet")
@@ -141,7 +158,6 @@ def test_validate_candidate_scope_distinguishes_empty_from_out_of_scope(tmp_path
     assert out_of_scope_result.stdout.endswith("src/lib.rs")
 
 
-@pytest.mark.xfail(reason="Shell integration: get_field/rg parsing differs in CI environment")
 def test_run_iteration_clears_root_candidate_and_diff_on_gate_failure(tmp_path):
     worktree = tmp_path / "worktree"
     report_dir = tmp_path / "reports"
@@ -175,7 +191,7 @@ def test_run_iteration_clears_root_candidate_and_diff_on_gate_failure(tmp_path):
         "if [[ \"$1\" == \"benchmarks/autoresearch/pilot/scripts/benchmark_gate.py\" ]]; then\n"
         "  exit 1\n"
         "fi\n"
-        "exec /usr/bin/python \"$@\"\n",
+        "exec python3 \"$@\"\n",
         encoding="utf-8",
     )
     (fake_bin_dir / "python").chmod(0o755)
@@ -271,7 +287,6 @@ def test_run_baseline_if_needed_logs_reuse_for_matching_dataset(tmp_path):
     )
 
 
-@pytest.mark.xfail(reason="Shell integration: artifact paths differ in CI environment")
 def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
     worktree = tmp_path / "worktree"
     report_dir = tmp_path / "reports"
@@ -325,7 +340,7 @@ def test_run_iteration_archives_artifacts_and_records_result(tmp_path):
         "JSON\n"
         "  exit 0\n"
         "fi\n"
-        "exec /usr/bin/python3 \"$@\"\n",
+        "exec python3 \"$@\"\n",
         encoding="utf-8",
     )
     (fake_bin_dir / "python").chmod(0o755)

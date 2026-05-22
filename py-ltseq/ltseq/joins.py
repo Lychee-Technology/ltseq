@@ -340,19 +340,6 @@ class JoinMixin(LTSeqLike):
         except Exception as e:
             raise TypeError(f"Invalid join condition: {e}")
 
-        # Warn if no schema overlap (likely user error)
-        left_cols = set(self._schema.keys())
-        right_cols = set(other._schema.keys())
-        if not left_cols & right_cols:
-            import warnings
-
-            warnings.warn(
-                "No overlapping column names between tables. "
-                "This may indicate an error in join condition. "
-                "Use lambda a, b: a.left_key == b.right_key syntax.",
-                UserWarning,
-            )
-
         from .helpers import _extract_join_keys
 
         left_key_expr, right_key_expr, _ = _extract_join_keys(
