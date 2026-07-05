@@ -6,6 +6,8 @@ types, and rename of a sort column diverged Python _sort_keys (remapped)
 from Rust sort_specs (cleared by select validation).
 """
 
+from typing import Any
+
 import pandas as pd
 import pytest
 
@@ -71,6 +73,45 @@ class TestDropSortPrefix:
         r = LTSeq.from_pandas(df).sort("a", "b").drop("b")
         assert r.is_sorted_by("a")
         assert r._inner.get_sort_keys() == [("a", False)]
+
+
+class TestSemiAntiJoinSortPropagation:
+    """semi/anti joins are order-preserving filters on the left table: the
+    Rust kernel must propagate the left table's sort specs (a #98 over-reach
+    cleared them along with regular joins)."""
+
+    def _sorted_left(self):
+        df = pd.DataFrame({"k": [3, 1, 2], "v": [30.0, 10.0, 20.0]})
+        return LTSeq.from_pandas(df).sort("k")
+
+    def test_semi_join_preserves_sort_order(self):
+        t = self._sorted_left()
+        matches = LTSeq.from_pandas(pd.DataFrame({"k": [1, 3]}))
+        r = t.semi_join(matches, on=lambda a, b: a.k == b.k)
+        assert r.is_sorted_by("k")
+        assert r._inner.get_sort_keys() == [("k", False)]
+        assert r.to_pandas()["k"].tolist() == [1, 3]
+
+    def test_anti_join_preserves_sort_order(self):
+        t = self._sorted_left()
+        matches = LTSeq.from_pandas(pd.DataFrame({"k": [2]}))
+        r = t.anti_join(matches, on=lambda a, b: a.k == b.k)
+        assert r.is_sorted_by("k")
+        assert r._inner.get_sort_keys() == [("k", False)]
+        assert r.to_pandas()["k"].tolist() == [1, 3]
+
+
+class TestLazyFirstSortKeysNoMaterialize:
+    def test_sort_keys_read_does_not_materialize(self):
+        """_LazyFirstLTSeq._sort_keys must answer from the source table
+        instead of materializing the first-row join as a side effect."""
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [1.0, 2.0, 3.0]})
+        t = LTSeq.from_pandas(df).sort("g")
+        # .first() is statically typed as LTSeq; the lazy wrapper's
+        # _materialized attribute is an implementation detail under test.
+        lazy_first: Any = t.group_ordered(lambda r: r.g != r.g.shift(1)).first()
+        assert lazy_first._sort_keys == [("g", False)]
+        assert lazy_first._materialized is None
 
 
 class TestEmptyTableGuard:

@@ -392,6 +392,19 @@ class _LazyFirstLTSeq:
         self._schema_cache = dict(nested._ltseq._schema)
         self._name = None
 
+    @property
+    def _sort_keys(self):
+        """Sort keys without forcing materialization.
+
+        LTSeq._sort_keys reads self._inner, which this lazy wrapper lacks
+        until materialized; going through __getattr__ would materialize as
+        a side effect. Before materialization, answer from the source table
+        (first_row preserves its sort specs, so the value is identical).
+        """
+        source = self._materialized if self._materialized is not None else self._nested._ltseq
+        keys = source._inner.get_sort_keys()
+        return keys if keys else None
+
     def _materialize(self):
         """Eagerly materialize the first-row-per-group LTSeq."""
         if self._materialized is None:
