@@ -42,8 +42,6 @@ class MutationMixin(LTSeqLike):
 
         result_inner = self._inner.insert_row(pos, row_dict)
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def delete(self, predicate_or_pos: Callable | int) -> "LTSeq":
@@ -77,8 +75,6 @@ class MutationMixin(LTSeqLike):
         pos = int(predicate_or_pos)
         result_inner = self._inner.delete_rows(pos)
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def update(self, predicate: Callable, **updates: Any) -> "LTSeq":
@@ -110,15 +106,11 @@ class MutationMixin(LTSeqLike):
             from .core import LTSeq
 
             result = LTSeq._from_inner(self._inner)
-            result._schema = self._schema.copy()
-            result._sort_keys = self._sort_keys
             return result
 
         expr_dict = self._capture_expr(predicate)
         result_inner = self._inner.conditional_update(expr_dict, updates)
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def modify(self, pos: int, **updates: Any) -> "LTSeq":
@@ -146,6 +138,4 @@ class MutationMixin(LTSeqLike):
 
         result_inner = self._inner.modify_row(pos, updates)
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result

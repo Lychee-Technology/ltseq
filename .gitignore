@@ -17,3 +17,4 @@ build/
 # autoresearch controller worktrees (local scratch)
 .worktrees/
 .vscode/
+libltseq_core.dylib.dSYM/

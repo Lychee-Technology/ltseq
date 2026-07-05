@@ -42,8 +42,6 @@ class SetOpsMixin(LTSeqLike):
         result_inner = self._inner.union(other._inner)
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def intersect(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
@@ -81,8 +79,6 @@ class SetOpsMixin(LTSeqLike):
         result_inner = self._inner.intersect(other._inner, on_expr)
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def except_(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
@@ -120,8 +116,6 @@ class SetOpsMixin(LTSeqLike):
         result_inner = self._inner.diff(other._inner, on_expr)
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def xunion(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
@@ -165,8 +159,6 @@ class SetOpsMixin(LTSeqLike):
         result_inner = self._inner.rvs()
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def step(self, n: int) -> "LTSeq":
@@ -196,8 +188,6 @@ class SetOpsMixin(LTSeqLike):
         result_inner = self._inner.step(n)
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
         return result
 
     def contain(self, key_col: str, *values) -> bool:
@@ -317,8 +307,6 @@ class AdvancedOpsMixin(LTSeqLike):
             raise RuntimeError(f"align() failed: {e}")
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
 
         return result
 
@@ -360,7 +348,6 @@ class AdvancedOpsMixin(LTSeqLike):
             ) from e
 
         result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
         return result
 
     def pivot(
@@ -412,13 +399,4 @@ class AdvancedOpsMixin(LTSeqLike):
 
         result_inner = self._inner.pivot(index_cols, columns, values, agg_fn)
 
-        result = LTSeq._from_inner(result_inner)
-
-        result_schema = {}
-        for col in index_cols:
-            result_schema[col] = self._schema[col]
-        result_schema["_pivot_columns"] = "Unknown"
-        result._schema = result_schema
-        result._sort_keys = None
-
-        return result
+        return LTSeq._from_inner(result_inner)

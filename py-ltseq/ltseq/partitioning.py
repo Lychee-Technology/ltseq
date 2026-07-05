@@ -90,7 +90,6 @@ class SQLPartitionedTable:
         try:
             filtered_inner = self._ltseq._inner.filter_where(where_clause)
             partition = self._ltseq.__class__()
-            partition._schema = self._ltseq._schema.copy()
             partition._inner = filtered_inner
             self._partitions_cache[key_tuple] = partition
             return partition

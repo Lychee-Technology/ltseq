@@ -119,18 +119,21 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         })
         .map_err(LtseqError::Runtime)?;
 
-    // 5. Keep sort metadata only if every sort column survived the projection;
-    // otherwise downstream ORDER BY would reference a nonexistent column.
+    // 5. Keep the longest prefix of sort keys whose columns survived the
+    // projection: a table sorted by (a, b) is still sorted by (a) after b is
+    // projected away, but nothing is guaranteed past the first missing column.
     let result_schema = LTSeqTable::schema_from_df(selected_df.schema());
-    let all_sort_cols_present = table
+    let sort_specs: Vec<crate::SortSpec> = table
         .sort_specs
         .iter()
-        .all(|spec| result_schema.fields().iter().any(|f| f.name() == &spec.column));
-    let sort_specs = if all_sort_cols_present {
-        table.sort_specs.clone()
-    } else {
-        Vec::new()
-    };
+        .take_while(|spec| {
+            result_schema
+                .fields()
+                .iter()
+                .any(|f| f.name() == &spec.column)
+        })
+        .cloned()
+        .collect();
 
     // 6. Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(
@@ -138,6 +141,79 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         selected_df,
         sort_specs,
         None, // row set / columns diverge from the raw file: drop fast-path token
+    ))
+}
+
+/// Rename columns via an aliased projection, remapping sort metadata.
+///
+/// Unlike a plain `select` with aliases (which cannot know a projection is a
+/// rename and therefore drops sort specs whose columns "disappear"), this
+/// remaps each sort spec's column to its new name so declared order survives.
+/// Execution cost is identical to the aliased select it wraps.
+///
+/// Args:
+///     table: Reference to LTSeqTable
+///     mapping: old column name -> new column name
+pub fn rename_columns_impl(
+    table: &LTSeqTable,
+    mapping: &std::collections::HashMap<String, String>,
+) -> PyResult<LTSeqTable> {
+    use datafusion::logical_expr::col;
+
+    let schema = table.require_schema()?;
+
+    // Validate all old names exist
+    for old_name in mapping.keys() {
+        if !schema.fields().iter().any(|f| f.name() == old_name) {
+            return Err(LtseqError::Validation(format!(
+                "Column '{}' not found in schema",
+                old_name
+            ))
+            .into());
+        }
+    }
+
+    // Build aliased projection preserving column order
+    let df_exprs: Vec<datafusion::logical_expr::Expr> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let name = f.name();
+            match mapping.get(name) {
+                Some(new_name) => col(format!("\"{}\"", name)).alias(new_name),
+                None => col(format!("\"{}\"", name)),
+            }
+        })
+        .collect();
+
+    let df = table.require_df()?;
+    let renamed_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .select(df_exprs)
+                .map_err(|e| format!("Rename execution failed: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    // Remap sort metadata to the new names (a rename preserves row order)
+    let sort_specs: Vec<crate::SortSpec> = table
+        .sort_specs
+        .iter()
+        .map(|spec| {
+            let mut spec = spec.clone();
+            if let Some(new_name) = mapping.get(&spec.column) {
+                spec.column = new_name.clone();
+            }
+            spec
+        })
+        .collect();
+
+    Ok(LTSeqTable::from_df(
+        Arc::clone(&table.session),
+        renamed_df,
+        sort_specs,
+        None, // columns diverge from the raw file: drop fast-path token
     ))
 }
 

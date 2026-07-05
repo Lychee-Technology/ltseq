@@ -9,10 +9,14 @@ if TYPE_CHECKING:
 class LookupMixin:
     """Mixin providing lookup resolution for derive operations."""
 
-    # These will be provided by the main class
-    _schema: dict[str, str]
+    # These will be provided by the main class (lazy properties on LTSeq)
     _inner: Any
-    _sort_keys: Any
+
+    @property
+    def _schema(self) -> dict[str, str]: ...
+
+    @property
+    def _sort_keys(self) -> Any: ...
 
     def _contains_lookup(self, expr_dict: dict[str, Any]) -> bool:
         """
@@ -223,14 +227,5 @@ class LookupMixin:
             alias,
         )
 
-        result = LTSeq._from_inner(result_inner)
-
-        # Combine schemas
-        # Rust join creates columns as {alias}_{column}
-        result._schema = self._schema.copy()
-        target_schema = getattr(target_table, "_schema", {})
-        for col_name, col_type in target_schema.items():
-            result._schema[f"{alias}_{col_name}"] = col_type
-
-        result._sort_keys = self._sort_keys
-        return result
+        # The executed join's real schema comes from the Rust kernel.
+        return LTSeq._from_inner(result_inner)
