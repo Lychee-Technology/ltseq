@@ -210,3 +210,24 @@ class TestTopKWithOtherAggregates:
         for _, row in df.iterrows():
             top_values = parse_top_k(row["top_quarters"])
             assert len(top_values) == 2
+
+
+class TestTopKNulls:
+    """Locks the legacy null semantics through the native migration (#91):
+    ORDER BY col DESC places nulls first (DataFusion SQL default), so nulls
+    consume top-k slots and are then dropped by array_to_string."""
+
+    def test_top_k_nulls_consume_slots(self):
+        csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
+        csv.write("g,v\n")
+        for row in ["a,10", "a,", "a,30", "a,20"]:
+            csv.write(row + "\n")
+        csv.close()
+        try:
+            t = LTSeq.read_csv(csv.name)
+            top_fn = lambda g: g.v.top_k(2)  # noqa: E731
+            df = t.agg(by=lambda r: r.g, top=top_fn).to_pandas()
+            # [null, 30, 20, 10] sliced to [null, 30]; null dropped in join.
+            assert df["top"][0] == "30"
+        finally:
+            os.unlink(csv.name)

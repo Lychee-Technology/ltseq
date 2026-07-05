@@ -112,21 +112,37 @@ RUST_ROUNDTRIP_TOKENS = (
     "register_table(",
 )
 
+# Matches only column-0 `fn` declarations. Assumption (holds for all scanned
+# ops modules): helpers are top-level fns, not methods in `impl` blocks.
+# Anything between two top-level fns — including an indented `impl` block —
+# is attributed to the PRECEDING fn's segment, so its tokens are still
+# scanned (just reported under that fn's name); text before the first fn is
+# scanned as "<module-prelude>". A token can therefore never hide entirely,
+# but if an impl block ever follows an allowlisted fn, move it or split the
+# allowlist entry.
 _RUST_FN_RE = re.compile(r"^(?:pub(?:\(crate\))? )?(?:async )?fn (\w+)", re.M)
 
 
 def _rust_functions(source: str) -> list[tuple[str, str]]:
-    """Split a Rust source file into (fn_name, body_text) at top-level fns."""
+    """Split a Rust source file into (name, segment) chunks covering the file."""
     matches = list(_RUST_FN_RE.finditer(source))
     out = []
+    if matches and matches[0].start() > 0:
+        out.append(("<module-prelude>", source[: matches[0].start()]))
+    elif not matches:
+        out.append(("<module-prelude>", source))
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(source)
         out.append((m.group(1), source[m.start():end]))
     return out
 
 
+_RUST_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
 def _scan_rust_file(rel_path: str, allowed_fns: set) -> list[str]:
-    source = (REPO_ROOT / rel_path).read_text()
+    # Strip line comments so documentation may mention the forbidden tokens.
+    source = _RUST_LINE_COMMENT_RE.sub("", (REPO_ROOT / rel_path).read_text())
     violations = []
     for fn_name, body in _rust_functions(source):
         if fn_name in allowed_fns:

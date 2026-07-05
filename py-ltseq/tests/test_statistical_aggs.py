@@ -284,3 +284,60 @@ class TestStatisticalEdgeCases:
 
         a_row = df[df["group"] == "A"].iloc[0]
         assert a_row["p50"] == 100.0
+
+
+class TestSkew:
+    """Numeric tests for skew() (added with the native migration, #91 PR 2).
+
+    Expected values follow the population-moment formula the implementation
+    (and the legacy SQL before it) uses:
+        (E[x**3] - 3*E[x**2]*E[x] + 2*E[x]**3) / stddev_pop(x)**3
+    """
+
+    @pytest.fixture
+    def grouped_table(self):
+        csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
+        csv.write("g,x\n")
+        for row in ["a,1", "a,2", "a,9", "b,1", "b,2", "b,3"]:
+            csv.write(row + "\n")
+        csv.close()
+        yield LTSeq.read_csv(csv.name)
+        os.unlink(csv.name)
+
+    @staticmethod
+    def _expected_skew(values):
+        n = len(values)
+        m1 = sum(values) / n
+        m2 = sum(v * v for v in values) / n
+        m3 = sum(v * v * v for v in values) / n
+        sd = (m2 - m1 * m1) ** 0.5
+        return (m3 - 3 * m2 * m1 + 2 * m1**3) / sd**3
+
+    def test_skew_method_form(self, grouped_table):
+        """g.x.skew(): symmetric group -> 0, right-skewed group -> positive."""
+        df = (
+            grouped_table.agg(by=lambda r: r.g, s=lambda g: g.x.skew())
+            .to_pandas()
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        assert df["s"][0] == pytest.approx(self._expected_skew([1, 2, 9]))
+        assert df["s"][0] > 0  # right-skewed
+        assert df["s"][1] == pytest.approx(0.0)  # symmetric
+
+    def test_skew_free_function_form(self, grouped_table):
+        """skew(g.x): the exported free function must match the method form.
+
+        (Previously broken on both the SQL and native paths: the free
+        function carries the column in args[0], not `on`.)
+        """
+        from ltseq import skew
+
+        df = (
+            grouped_table.agg(by=lambda r: r.g, s=lambda g: skew(g.x))
+            .to_pandas()
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        assert df["s"][0] == pytest.approx(self._expected_skew([1, 2, 9]))
+        assert df["s"][1] == pytest.approx(0.0)

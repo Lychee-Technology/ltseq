@@ -257,11 +257,18 @@ fn pyexpr_to_agg_plan(
         // hidden aliases: (E[x³] - 3·E[x²]·E[x] + 2·E[x]³) / stddev_pop(x)³.
         // Values are cast to Float64 up front to avoid integer overflow.
         "skew" => {
-            let PyExpr::Column(col_name) = on.as_ref() else {
-                return Err("skew requires a column reference".to_string());
+            // Method form g.col.skew() carries the column in `on`; the
+            // exported free function skew(g.col) leaves `on` as the empty
+            // placeholder and passes the column in args[0].
+            let col_name = match on.as_ref() {
+                PyExpr::Column(name) if !name.is_empty() => name.clone(),
+                _ => match args.first() {
+                    Some(PyExpr::Column(name)) if !name.is_empty() => name.clone(),
+                    _ => return Err("skew requires a column reference".to_string()),
+                },
             };
             let x = cast(
-                Expr::Column(Column::new_unqualified(col_name)),
+                Expr::Column(Column::new_unqualified(&col_name)),
                 DataType::Float64,
             );
 
@@ -277,13 +284,14 @@ fn pyexpr_to_agg_plan(
                 (sd_name.clone(), agg_fn::stddev_pop(x)),
             ];
 
-            let m1 = || Expr::Column(Column::new_unqualified(&m1_name));
+            let m1 = Expr::Column(Column::new_unqualified(&m1_name));
             let m2 = Expr::Column(Column::new_unqualified(&m2_name));
             let m3 = Expr::Column(Column::new_unqualified(&m3_name));
             let sd = Expr::Column(Column::new_unqualified(&sd_name));
 
             use datafusion::functions::expr_fn::{nullif, power};
-            let numerator = m3 - lit(3.0) * m2 * m1() + lit(2.0) * power(m1(), lit(3.0));
+            let numerator =
+                m3 - lit(3.0) * m2 * m1.clone() + lit(2.0) * power(m1, lit(3.0));
             let post = numerator / nullif(power(sd, lit(3.0)), lit(0.0));
             Ok(AggPlan::Staged { parts, post })
         }
