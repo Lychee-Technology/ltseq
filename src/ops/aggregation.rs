@@ -803,7 +803,7 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
         Arc::clone(&table.session),
         filtered_df,
         Arc::clone(schema),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }

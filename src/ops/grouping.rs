@@ -54,7 +54,7 @@ fn get_df_and_schema_or_empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
     // SAFETY: dataframe.is_none() is checked above
@@ -64,7 +64,7 @@ fn get_df_and_schema_or_empty(
             Arc::clone(&table.session),
             None,
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         )
     })?;
     Ok((df, schema))
@@ -205,7 +205,7 @@ pub fn group_ordered_count_impl(
 
     // Try Parquet fast paths (bypass DataFusion entirely).
     if let Some(ref parquet_path) = table.source_parquet_path {
-        if !table.sort_exprs.is_empty() {
+        if !table.sort_specs.is_empty() {
             // Preferred: parallel per-RG counting with seam stitching.
             match crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
@@ -293,23 +293,15 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     let has_window = contains_window_function(&py_expr);
 
-    // Build ORDER BY from table's sort_exprs
-    let order_by: Vec<Sort> = table
-        .sort_exprs
-        .iter()
-        .map(|col_name| Sort {
-            expr: Expr::Column(datafusion::common::Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
-        .collect();
+    // Build ORDER BY from table's sort specs (direction-aware)
+    let order_by: Vec<Sort> = crate::metadata::sort_specs_to_window_sorts(&table.sort_specs);
 
     // ── Step 1: Build the boundary boolean expression ──────────────────
     let boundary_expr = if has_window {
         // The expression itself IS the boundary condition (contains shift/diff/etc.)
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
-        pyexpr_to_window_expr(py_expr, schema, &table.sort_exprs)
+        pyexpr_to_window_expr(py_expr, schema, &table.sort_specs)
             .map_err(LtseqError::Validation)?
     } else {
         // Simple expression (e.g., column reference) — build:
@@ -491,8 +483,8 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         Arc::clone(&table.session),
         result_df,
         result_schema,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }
 
@@ -563,7 +555,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
                 Arc::clone(&table.session),
                 filtered,
                 Vec::new(),
-                table.source_parquet_path.clone(),
+                None, // row set / columns diverge from the raw file: drop fast-path token
             ));
         }
 
@@ -575,7 +567,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             Arc::clone(&table.session),
             projected,
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -610,7 +602,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
                 Arc::clone(&table.session),
                 filtered,
                 Vec::new(),
-                table.source_parquet_path.clone(),
+                None, // row set / columns diverge from the raw file: drop fast-path token
             ));
         }
 
@@ -622,7 +614,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
             Arc::clone(&table.session),
             projected,
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 

@@ -106,8 +106,8 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }
 

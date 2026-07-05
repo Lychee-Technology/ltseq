@@ -34,8 +34,8 @@ pub fn insert_row_impl(
         return LTSeqTable::from_batches(
             Arc::clone(&table.session),
             vec![new_batch],
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            Vec::new(),
+            None,
         );
     }
 
@@ -74,8 +74,8 @@ pub fn insert_row_impl(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
+        None,
     )
 }
 
@@ -97,8 +97,8 @@ pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> PyResult<LTSeqTable> {
             Arc::clone(&table.session),
             (**df).clone(),
             Arc::clone(schema),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            Vec::new(),
+            None,
         ));
     }
 
@@ -127,8 +127,8 @@ pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> PyResult<LTSeqTable> {
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
+        None,
     )
 }
 
@@ -148,8 +148,8 @@ pub fn conditional_update_impl(
             Arc::clone(&table.session),
             (**df).clone(),
             Arc::clone(schema),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            Vec::new(),
+            None,
         ));
     }
 
@@ -209,8 +209,8 @@ pub fn conditional_update_impl(
         Arc::clone(&table.session),
         result_df,
         Arc::clone(schema),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
+        None,
     ))
 }
 
@@ -236,8 +236,8 @@ pub fn modify_row_impl(
             Arc::clone(&table.session),
             (**df).clone(),
             Arc::clone(schema),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            Vec::new(),
+            None,
         ));
     }
 
@@ -292,8 +292,8 @@ pub fn modify_row_impl(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
+        None,
     )
 }
 

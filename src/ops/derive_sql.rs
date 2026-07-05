@@ -133,7 +133,7 @@ pub fn derive_window_sql_impl(
             Arc::clone(&table.session),
             Some(empty_schema),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -141,6 +141,6 @@ pub fn derive_window_sql_impl(
         Arc::clone(&table.session),
         result_batches,
         Vec::new(),
-        table.source_parquet_path.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }

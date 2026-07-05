@@ -578,7 +578,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
             raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
 
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
-        result_inner = self._inner.assume_sorted(key_exprs)
+        result_inner = self._inner.assume_sorted(key_exprs, desc_list)
 
         result = LTSeq._from_inner(result_inner)
         result._schema = self._schema.copy()

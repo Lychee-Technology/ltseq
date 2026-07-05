@@ -40,8 +40,8 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -69,8 +69,8 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
         Arc::clone(&table.session),
         filtered_df,
         Arc::clone(schema),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }
 
@@ -85,8 +85,8 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -119,12 +119,25 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         })
         .map_err(LtseqError::Runtime)?;
 
-    // 5. Return new LTSeqTable with recomputed schema
+    // 5. Keep sort metadata only if every sort column survived the projection;
+    // otherwise downstream ORDER BY would reference a nonexistent column.
+    let result_schema = LTSeqTable::schema_from_df(selected_df.schema());
+    let all_sort_cols_present = table
+        .sort_specs
+        .iter()
+        .all(|spec| result_schema.fields().iter().any(|f| f.name() == &spec.column));
+    let sort_specs = if all_sort_cols_present {
+        table.sort_specs.clone()
+    } else {
+        Vec::new()
+    };
+
+    // 6. Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         selected_df,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        sort_specs,
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }
 
@@ -165,7 +178,7 @@ pub fn search_first_impl(
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }

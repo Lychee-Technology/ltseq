@@ -1010,16 +1010,9 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
 // Main entry point
 // ============================================================================
 
-/// Build DataFusion sort expressions from the table's `sort_exprs` column names.
-pub(crate) fn build_sort_exprs(sort_keys: &[String]) -> Vec<SortExpr> {
-    sort_keys
-        .iter()
-        .map(|col_name| SortExpr {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
-        .collect()
+/// Build DataFusion sort expressions from the table's `sort_specs`.
+pub(crate) fn build_sort_exprs(sort_specs: &[crate::SortSpec]) -> Vec<SortExpr> {
+    crate::metadata::sort_specs_to_df_sort_exprs(sort_specs)
 }
 
 /// Single-pass group ID assignment with `__group_count__` and `__rn__`.
@@ -1052,7 +1045,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     //   - execute_stream(): batch-by-batch processing, no concat_batches
     //   - Skip .sort() node: single partition + file_sort_order is sufficient
     if let Some(ref parquet_path) = table.source_parquet_path {
-        if !table.sort_exprs.is_empty() {
+        if !table.sort_specs.is_empty() {
             // Direct Parquet streaming — bypasses DataFusion for lower overhead
             match crate::ops::parallel_scan::direct_streaming_group_ordered(
                 table,
@@ -1093,14 +1086,10 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     // Non-referenced sort keys don't affect boundary detection and reading
     // them from Parquet is wasteful (e.g., watchid adds ~30% I/O overhead).
     let relevant_sort_exprs: Vec<SortExpr> = table
-        .sort_exprs
+        .sort_specs
         .iter()
-        .filter(|key| needed_cols.contains(key.as_str()))
-        .map(|col_name| SortExpr {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
+        .filter(|spec| needed_cols.contains(spec.column.as_str()))
+        .map(|spec| spec.to_df_sort_expr())
         .collect();
 
     // Step 2: Project to only needed columns + sort
@@ -1146,7 +1135,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -1157,7 +1146,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -1204,16 +1193,9 @@ fn streaming_linear_scan_group_id(
     // Step 2: Create single-partition session and read Parquet with declared sort order
     let seq_session = create_sequential_session();
 
-    // Build file_sort_order from sort_exprs (same as assume_sorted_impl)
-    let sort_order: Vec<Vec<SortExpr>> = vec![table
-        .sort_exprs
-        .iter()
-        .map(|col_name| SortExpr {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
-        .collect()];
+    // Build file_sort_order from sort_specs (same as assume_sorted_impl)
+    let sort_order: Vec<Vec<SortExpr>> =
+        crate::metadata::sort_specs_to_file_sort_order(&table.sort_specs);
 
     let col_names: Vec<String> = needed_cols.into_iter().collect();
 
@@ -1315,7 +1297,7 @@ fn streaming_linear_scan_group_id(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -1356,14 +1338,10 @@ fn general_linear_scan_group_id(
     extract_referenced_columns(predicate, &mut needed_cols);
 
     let relevant_sort_exprs: Vec<SortExpr> = table
-        .sort_exprs
+        .sort_specs
         .iter()
-        .filter(|key| needed_cols.contains(key.as_str()))
-        .map(|col_name| SortExpr {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
+        .filter(|spec| needed_cols.contains(spec.column.as_str()))
+        .map(|spec| spec.to_df_sort_expr())
         .collect();
 
     let col_exprs: Vec<Expr> = needed_cols
@@ -1407,7 +1385,7 @@ fn general_linear_scan_group_id(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -1418,7 +1396,7 @@ fn general_linear_scan_group_id(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -1523,6 +1501,6 @@ pub(crate) fn build_metadata_table(
         Arc::clone(&table.session),
         vec![meta_batch],
         Vec::new(),
-        table.source_parquet_path.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }

@@ -195,18 +195,20 @@ fn rename_right_df_for_join(
     Ok((renamed_df, new_key_cols))
 }
 
-/// Build result LTSeqTable from a DataFrame
+/// Build result LTSeqTable from a DataFrame.
+///
+/// Joins merge rows from two sources, so neither input's sort metadata
+/// describes the result: always empty.
 fn build_result_table_from_df(
     session: &Arc<SessionContext>,
     result_df: DataFrame,
     expected_schema: Arc<ArrowSchema>,
-    sort_exprs: &[String],
 ) -> PyResult<LTSeqTable> {
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(session),
         result_df,
         expected_schema,
-        sort_exprs.to_vec(),
+        Vec::new(),
         None,
     ))
 }
@@ -275,7 +277,7 @@ pub fn join_impl(
     // Build expected schema for the result
     let expected_schema = build_aliased_join_schema(stored_schema_left, stored_schema_right, alias);
 
-    build_result_table_from_df(&table.session, result_df, expected_schema, &[])
+    build_result_table_from_df(&table.session, result_df, expected_schema)
 }
 
 /// Semi-join: Return rows from left table where keys exist in right table
@@ -344,6 +346,5 @@ fn semi_anti_join_impl(
         &table.session,
         result_df,
         Arc::clone(stored_schema_left),
-        &table.sort_exprs,
     )
 }

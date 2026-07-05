@@ -74,16 +74,18 @@ async fn collect_batches(
         .map_err(|e| format!("Failed to collect {}: {}", table_name, e))
 }
 
-/// Create result LTSeqTable from DataFrame
+/// Create result LTSeqTable from DataFrame.
+///
+/// Set operations (union/intersect/diff) and rvs merge or reorder rows, so
+/// the input sort metadata no longer describes the result: always empty.
 fn create_result_table(
     session: &Arc<SessionContext>,
     result_df: datafusion::dataframe::DataFrame,
-    sort_exprs: &[String],
 ) -> LTSeqTable {
     LTSeqTable::from_df(
         Arc::clone(session),
         result_df,
-        sort_exprs.to_vec(),
+        Vec::new(),
         None,
     )
 }
@@ -106,8 +108,8 @@ pub fn distinct_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            Vec::new(),
+            None,
         ));
     }
 
@@ -144,8 +146,8 @@ fn distinct_all_columns(
         distinct_df,
         // SAFETY: schema validated by require_df_and_schema() before this function
         Arc::clone(table.schema.as_ref().expect("schema validated by caller")),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // distinct reorders rows: sort metadata no longer holds
+        None,
     ))
 }
 
@@ -227,8 +229,8 @@ fn distinct_with_keys(
         distinct_df,
         // SAFETY: schema validated by require_df_and_schema() before this function
         Arc::clone(table.schema.as_ref().expect("schema validated by caller")),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        Vec::new(), // distinct reorders rows: sort metadata no longer holds
+        None,
     ))
 }
 
@@ -261,11 +263,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
         })
         .map_err(LtseqError::Runtime)?;
 
-    Ok(create_result_table(
-        &table1.session,
-        union_df,
-        &table1.sort_exprs,
-    ))
+    Ok(create_result_table(&table1.session, union_df))
 }
 
 /// Intersect: Return rows present in both tables
@@ -420,11 +418,7 @@ fn set_operation_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
-    Ok(create_result_table(
-        &table1.session,
-        result_df,
-        &table1.sort_exprs,
-    ))
+    Ok(create_result_table(&table1.session, result_df))
 }
 
 /// Reverse: Return rows in reversed order

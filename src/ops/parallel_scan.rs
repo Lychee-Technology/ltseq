@@ -181,7 +181,7 @@ pub fn direct_streaming_group_ordered(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 

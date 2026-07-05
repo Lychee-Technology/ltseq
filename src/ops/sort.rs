@@ -4,13 +4,13 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::metadata::{sort_specs_to_file_sort_order, SortSpec};
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::common::Column;
 use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::datasource::MemTable;
-use datafusion::logical_expr::{Expr, SortExpr};
+use datafusion::logical_expr::SortExpr;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -30,30 +30,30 @@ pub fn sort_impl(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
             Vec::new(),
-            table.source_parquet_path.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
     let (df, schema) = table.require_df_and_schema()?;
 
-    // Capture sort column names for Phase 6 window functions
-    let mut captured_sort_keys = Vec::new();
+    // Capture full sort specs (column + direction) for downstream window ops
+    let mut captured_specs = Vec::new();
 
     // Deserialize and transpile each sort expression
     let mut df_sort_exprs = Vec::new();
     for (i, expr_dict) in sort_exprs.iter().enumerate() {
         let py_expr = dict_to_py_expr(expr_dict)?;
 
+        // Get desc flag for this sort key
+        let is_desc = desc_flags.get(i).copied().unwrap_or(false);
+
         // Capture column name if this is a simple column reference
         if let PyExpr::Column(ref col_name) = py_expr {
-            captured_sort_keys.push(col_name.clone());
+            captured_specs.push(SortSpec::new(col_name.clone(), is_desc));
         }
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(LtseqError::Validation)?;
-
-        // Get desc flag for this sort key
-        let is_desc = desc_flags.get(i).copied().unwrap_or(false);
 
         // Create SortExpr with asc = !is_desc
         // For descending, nulls_first = true by default
@@ -74,30 +74,18 @@ pub fn sort_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
-    // Return new LTSeqTable with sorted data and captured sort keys (schema unchanged)
+    // Return new LTSeqTable with sorted data and captured sort specs
+    // (schema unchanged). The physical sort defines a new row order, so the
+    // raw-file fast-path token must not survive: the Parquet file's physical
+    // order no longer matches the table's logical order.
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
         sorted_df,
-        // SAFETY: require_df_and_schema() validated schema on line 37
+        // SAFETY: require_df_and_schema() validated schema above
         Arc::clone(table.schema.as_ref().expect("schema validated by require_df_and_schema")),
-        captured_sort_keys,
-        table.source_parquet_path.clone(),
+        captured_specs,
+        None,
     ))
-}
-
-/// Build DataFusion `Vec<Vec<SortExpr>>` from column name strings.
-///
-/// Each column is assumed ascending with nulls_first = true, matching
-/// `build_sort_exprs` in linear_scan.rs.
-fn build_df_sort_order(sort_keys: &[String]) -> Vec<Vec<SortExpr>> {
-    vec![sort_keys
-        .iter()
-        .map(|col_name| SortExpr {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
-        .collect()]
 }
 
 /// Declare sort order metadata without physically sorting the data.
@@ -123,6 +111,7 @@ fn build_df_sort_order(sort_keys: &[String]) -> Vec<Vec<SortExpr>> {
 pub fn assume_sorted_impl(
     table: &LTSeqTable,
     sort_exprs: Vec<Bound<'_, PyDict>>,
+    desc_flags: Vec<bool>,
 ) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result
     if table.dataframe.is_none() {
@@ -136,18 +125,19 @@ pub fn assume_sorted_impl(
 
     let (df, _schema) = table.require_df_and_schema()?;
 
-    // Capture sort column names (same logic as sort_impl, but skip the actual sort)
-    let mut captured_sort_keys = Vec::new();
-    for expr_dict in sort_exprs.iter() {
+    // Capture sort specs (same logic as sort_impl, but skip the actual sort)
+    let mut captured_specs = Vec::new();
+    for (i, expr_dict) in sort_exprs.iter().enumerate() {
         let py_expr = dict_to_py_expr(expr_dict)?;
 
         if let PyExpr::Column(ref col_name) = py_expr {
-            captured_sort_keys.push(col_name.clone());
+            let is_desc = desc_flags.get(i).copied().unwrap_or(false);
+            captured_specs.push(SortSpec::new(col_name.clone(), is_desc));
         }
     }
 
     // Build DataFusion sort order for the optimizer
-    let sort_order = build_df_sort_order(&captured_sort_keys);
+    let sort_order = sort_specs_to_file_sort_order(&captured_specs);
 
     // Try Parquet re-read path first (fully lazy, no materialization)
     if let Some(ref path) = table.source_parquet_path {
@@ -170,7 +160,7 @@ pub fn assume_sorted_impl(
             Arc::clone(&table.session),
             result_df,
             result_schema,
-            captured_sort_keys,
+            captured_specs,
             table.source_parquet_path.clone(),
         ));
     }
@@ -190,7 +180,7 @@ pub fn assume_sorted_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
-            captured_sort_keys,
+            captured_specs,
             None,
         ));
     }
@@ -220,7 +210,7 @@ pub fn assume_sorted_impl(
         Arc::clone(&table.session),
         result_df,
         batch_schema,
-        captured_sort_keys,
+        captured_specs,
         None,
     ))
 }

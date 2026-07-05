@@ -532,10 +532,10 @@ pub fn search_pattern_impl(
     }
 
     // 3. Project only needed columns, add sort, collect
-    let sort_keys = &table.sort_exprs;
+    let sort_keys = &table.sort_specs;
     // Also ensure sort key columns are included
-    for sk in sort_keys {
-        referenced_cols.insert(sk.clone());
+    for sk in sort_keys.iter() {
+        referenced_cols.insert(sk.column.clone());
     }
 
     let projected_df = {
@@ -584,8 +584,8 @@ pub fn search_pattern_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -599,8 +599,8 @@ pub fn search_pattern_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -686,8 +686,8 @@ pub fn search_pattern_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -723,8 +723,8 @@ pub fn search_pattern_impl(
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             Some(Arc::clone(schema)),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // row set / columns diverge from the raw file: drop fast-path token
         ));
     }
 
@@ -752,8 +752,8 @@ pub fn search_pattern_impl(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         vec![result_batch],
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }
 
@@ -784,7 +784,7 @@ pub fn search_pattern_count_impl(
     if let (Some(ref parquet_path), Some(ref part_col)) =
         (&table.source_parquet_path, &partition_by)
     {
-        if !table.sort_exprs.is_empty() {
+        if !table.sort_specs.is_empty() {
             match crate::ops::parallel_scan::parallel_pattern_match_count(
                 table,
                 &py_exprs,
@@ -818,7 +818,7 @@ pub fn search_pattern_count_impl(
     }
 
     // 3. Project only needed columns, add sort, collect
-    let sort_keys = &table.sort_exprs;
+    let sort_keys = &table.sort_specs;
 
     let batches = collect_projected_sorted(df, &referenced_cols, schema, sort_keys)?;
 
@@ -1005,7 +1005,7 @@ fn collect_projected_sorted(
     df: &Arc<datafusion::dataframe::DataFrame>,
     referenced_cols: &HashSet<String>,
     schema: &Arc<datafusion::arrow::datatypes::Schema>,
-    sort_keys: &[String],
+    sort_keys: &[crate::SortSpec],
 ) -> PyResult<Vec<RecordBatch>> {
     let select_exprs: Vec<Expr> = referenced_cols
         .iter()
