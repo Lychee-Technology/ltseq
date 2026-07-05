@@ -256,3 +256,63 @@ class TestLinkedTableSortSliceDistinct:
         linked = self._make_linked(orders_table, products_table)
         distinct_linked = linked.distinct()
         assert "prod_name" in distinct_linked._schema
+
+
+class TestLinkedTableJoinTypePropagation:
+    """Regression tests: transforms must preserve join_type (issue #92).
+
+    Previously filter/derive/sort/slice/distinct rebuilt the LinkedTable
+    without passing join_type, silently downgrading left joins to inner.
+    """
+
+    @pytest.fixture
+    def orders_with_unmatched(self, tmp_path):
+        """Orders table containing a product_id absent from products."""
+        p = tmp_path / "orders_unmatched.csv"
+        p.write_text(
+            "id,product_id,quantity\n"
+            "1,101,5\n"
+            "2,102,3\n"
+            "3,999,7\n"  # 999 has no match in products.csv
+        )
+        return LTSeq.read_csv(str(p))
+
+    @pytest.fixture
+    def products_table(self):
+        return LTSeq.read_csv("examples/products.csv")
+
+    def _make_left_linked(self, orders, products):
+        return orders.link(
+            products,
+            on=lambda o, p: o.product_id == p.product_id,
+            as_="prod",
+            join_type="left",
+        )
+
+    def test_transforms_preserve_join_type_attribute(
+        self, orders_with_unmatched, products_table
+    ):
+        linked = self._make_left_linked(orders_with_unmatched, products_table)
+        assert linked._join_type == "left"
+
+        assert linked.derive(lambda r: {"qty2": r.quantity * 2})._join_type == "left"
+        assert linked.sort("id")._join_type == "left"
+        assert linked.slice(0, 2)._join_type == "left"
+        assert linked.distinct()._join_type == "left"
+        filtered = linked.filter(lambda r: r.quantity > 0)
+        assert isinstance(filtered, LinkedTable)
+        assert filtered._join_type == "left"
+
+    def test_left_join_row_kept_after_transform(
+        self, orders_with_unmatched, products_table
+    ):
+        """The unmatched row must survive materialization after a transform."""
+        linked = self._make_left_linked(orders_with_unmatched, products_table)
+
+        # Baseline: left join keeps all 3 orders
+        assert len(linked) == 3
+
+        # After sort (a rebuilding transform), left semantics must survive.
+        # Before the fix this materialized as an inner join and dropped id=3.
+        assert len(linked.sort("id")) == 3
+        assert len(linked.filter(lambda r: r.quantity > 0)) == 3

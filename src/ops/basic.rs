@@ -1,4 +1,4 @@
-//! Basic table operations: search_first
+//! Basic table operations: filter, select, search_first
 //!
 //! This module contains helper functions for basic table operations.
 //! The actual methods are implemented in the #[pymethods] impl block in lib.rs
@@ -12,6 +12,8 @@
 //!
 //! # Operations Provided
 //!
+//! - **filter_impl**: Filter rows based on a predicate expression
+//! - **select_impl**: Select columns or derived expressions
 //! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
 
 use crate::error::LtseqError;
@@ -23,6 +25,108 @@ use pyo3::types::PyDict;
 use std::sync::Arc;
 
 use crate::engine::RUNTIME;
+
+/// Helper function to filter rows based on a predicate expression
+///
+/// Args:
+///     table: Reference to LTSeqTable
+///     expr_dict: Serialized expression dict (from Python)
+pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+    // 1. Deserialize expression
+    let py_expr = dict_to_py_expr(expr_dict)?;
+
+    // If no dataframe, return empty result (for unit tests)
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
+        ));
+    }
+
+    // 2. Get schema (required for transpilation)
+    let schema = table.require_schema()?;
+
+    // 3. Transpile to DataFusion expr
+    let df_expr = pyexpr_to_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
+
+    // 4. Get DataFrame
+    let df = table.require_df()?;
+
+    // 5. Apply filter (async operation)
+    let filtered_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .filter(df_expr)
+                .map_err(|e| format!("Filter execution failed: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    // 6. Return new LTSeqTable with filtered data (schema unchanged)
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        filtered_df,
+        Arc::clone(schema),
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
+}
+
+/// Helper function to select columns or derived expressions
+///
+/// Args:
+///     table: Reference to LTSeqTable
+///     exprs: List of serialized expression dicts (from Python)
+pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
+    // If no dataframe, return empty result (for unit tests)
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            table.sort_exprs.clone(),
+            table.source_parquet_path.clone(),
+        ));
+    }
+
+    // 1. Get schema
+    let schema = table.require_schema()?;
+
+    // 2. Deserialize and transpile all expressions
+    let mut df_exprs = Vec::new();
+
+    for expr_dict in exprs {
+        // Deserialize
+        let py_expr = dict_to_py_expr(&expr_dict)?;
+
+        // Transpile
+        let df_expr = pyexpr_to_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
+
+        df_exprs.push(df_expr);
+    }
+
+    // 3. Get DataFrame
+    let df = table.require_df()?;
+
+    // 4. Apply select (async operation)
+    let selected_df = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .select(df_exprs)
+                .map_err(|e| format!("Select execution failed: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    // 5. Return new LTSeqTable with recomputed schema
+    Ok(LTSeqTable::from_df(
+        Arc::clone(&table.session),
+        selected_df,
+        table.sort_exprs.clone(),
+        table.source_parquet_path.clone(),
+    ))
+}
 
 /// Helper function to find the first row matching a predicate
 ///

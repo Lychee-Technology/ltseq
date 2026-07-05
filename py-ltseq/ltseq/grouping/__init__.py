@@ -1,7 +1,7 @@
 """Grouping subpackage for LTSeq group operations."""
 
 from .nested_table import NestedTable
-from .proxies import GroupProxy, RowProxy, DeriveGroupProxy
+from .proxies import DeriveGroupProxy
 from .expr import (
     GroupExpr,
     GroupCountExpr,
@@ -11,7 +11,6 @@ from .expr import (
     BinOpGroupExpr,
 )
 from .sql_parsing import (
-    DeriveSQLParser,
     FilterSQLParser,
     extract_lambda_from_chain,
     get_derive_parse_error_message,
@@ -21,8 +20,6 @@ from .sql_parsing import (
 
 __all__ = [
     "NestedTable",
-    "GroupProxy",
-    "RowProxy",
     "DeriveGroupProxy",
     "GroupExpr",
     "GroupCountExpr",
@@ -31,7 +28,6 @@ __all__ = [
     "DeriveRowProxy",
     "BinOpGroupExpr",
     "FilterSQLParser",
-    "DeriveSQLParser",
     "extract_lambda_from_chain",
     "get_unsupported_derive_error",
     "get_derive_parse_error_message",
