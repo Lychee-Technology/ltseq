@@ -88,3 +88,104 @@ def test_table_returning_query_apis_do_not_materialize() -> None:
                     )
 
     assert not violations, "\n".join(violations)
+
+
+# =============================================================================
+# Rust-side guard (issue #91): table-returning ops must not round-trip through
+# "collect → MemTable → session.sql() → collect".
+#
+# Function-level allowlist per the issue's matrix. Modules still on the SQL
+# path are strict-xfail: when a migration PR lands, its xpass forces the
+# marker's removal, turning the guard into the module's acceptance lock.
+# =============================================================================
+
+import re
+
+import pytest
+
+# Tokens that indicate a SQL round-trip / temp-table materialization.
+RUST_ROUNDTRIP_TOKENS = (
+    "session.sql",
+    ".sql(&",
+    "execute_sql_query(",
+    "MemTable::try_new",
+    "register_table(",
+)
+
+_RUST_FN_RE = re.compile(r"^(?:pub(?:\(crate\))? )?(?:async )?fn (\w+)", re.M)
+
+
+def _rust_functions(source: str) -> list[tuple[str, str]]:
+    """Split a Rust source file into (fn_name, body_text) at top-level fns."""
+    matches = list(_RUST_FN_RE.finditer(source))
+    out = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(source)
+        out.append((m.group(1), source[m.start():end]))
+    return out
+
+
+def _scan_rust_file(rel_path: str, allowed_fns: set) -> list[str]:
+    source = (REPO_ROOT / rel_path).read_text()
+    violations = []
+    for fn_name, body in _rust_functions(source):
+        if fn_name in allowed_fns:
+            continue
+        for token in RUST_ROUNDTRIP_TOKENS:
+            if token in body:
+                violations.append(f"{rel_path}: fn {fn_name} uses {token}")
+    return violations
+
+
+RUST_GUARD_PARAMS = [
+    # (file, allowlisted fns, xfail reason or None)
+    pytest.param(
+        "src/ops/aggregation.rs",
+        # filter_where uses session.sql as a parser-as-library (empty table,
+        # no data round-trip) — explicitly allowlisted by issue #91.
+        {"filter_where_impl"},
+        id="aggregation",
+    ),
+    pytest.param(
+        "src/ops/window.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 3 of #91 (window SQL fallback)", strict=True),
+        id="window",
+    ),
+    pytest.param(
+        "src/ops/grouping.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 4 of #91 (group window)", strict=True),
+        id="grouping",
+    ),
+    pytest.param(
+        "src/ops/derive_sql.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 4 of #91 (group window)", strict=True),
+        id="derive_sql",
+    ),
+    pytest.param(
+        "src/ops/align.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 5 of #91 (native align join)", strict=True),
+        id="align",
+    ),
+    pytest.param(
+        "src/ops/set_ops.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 6 of #91 (native set ops)", strict=True),
+        id="set_ops",
+    ),
+    pytest.param(
+        "src/ops/common.rs",
+        set(),
+        marks=pytest.mark.xfail(reason="pending PR 6/7 of #91 (SQL helper removal)", strict=True),
+        id="common",
+    ),
+]
+
+
+@pytest.mark.parametrize("rel_path,allowed_fns", RUST_GUARD_PARAMS)
+def test_rust_table_ops_do_not_sql_roundtrip(rel_path: str, allowed_fns: set) -> None:
+    violations = _scan_rust_file(rel_path, allowed_fns)
+    assert not violations, "\n".join(violations)
