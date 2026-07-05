@@ -9,7 +9,8 @@
 //! Propagation rules (issue #95): ops that preserve row order (filter,
 //! select, slice, derive, head/tail) clone `sort_specs`; ops that destroy
 //! or redefine order (sort output = new specs; distinct/join/agg/set ops/
-//! insert/rvs = empty). `source_parquet_path` survives only `assume_sorted`:
+//! insert/delete/update/modify = empty). `source_parquet_path` survives
+//! only `assume_sorted`:
 //! any op that changes the row set must clear it so Parquet fast paths
 //! cannot scan stale raw data.
 

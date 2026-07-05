@@ -133,14 +133,14 @@ pub fn derive_window_sql_impl(
             Arc::clone(&table.session),
             Some(empty_schema),
             Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
+            None, // SQL-reconstructed result: no known sort or raw-file source
         ));
     }
 
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
-        Vec::new(),
-        None, // row set / columns diverge from the raw file: drop fast-path token
+        Vec::new(), // SQL window queries define their own ORDER BY; source sort is obsolete
+        None,       // SQL-reconstructed result: no known raw-file source
     )
 }
