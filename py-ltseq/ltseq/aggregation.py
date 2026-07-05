@@ -64,15 +64,7 @@ class GroupBy:
 
         result_inner = self._table._inner.agg(grouping_expr, agg_exprs)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = {}
-        if grouping_expr.get("type") == "Column":
-            col_name = grouping_expr.get("name", "group_key")
-            result._schema[col_name] = self._table._schema.get(col_name, "Unknown")
-        for name in aggregations.keys():
-            result._schema[name] = "Unknown"
-        result._sort_keys = None
-        return result
+        return LTSeq._from_inner(result_inner)
 
 
 class AggregationMixin(LTSeqLike):
@@ -106,19 +98,7 @@ class AggregationMixin(LTSeqLike):
         cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
 
         result_inner = self._inner.cum_sum(cum_exprs)
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-
-        for i, col_expr in enumerate(cols):
-            if isinstance(col_expr, str):
-                result._schema[f"{col_expr}_cumsum"] = result._schema.get(
-                    col_expr, "float64"
-                )
-            else:
-                result._schema[f"cum_sum_{i}"] = "float64"
-
-        result._sort_keys = self._sort_keys
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def group_ordered(self, grouping_fn: Callable) -> "NestedTable":
         """
@@ -224,17 +204,7 @@ class AggregationMixin(LTSeqLike):
 
         result_inner = self._inner.agg(grouping_expr, agg_exprs)
 
-        result = LTSeq._from_inner(result_inner)
-
-        result._schema = {}
-        if grouping_expr and grouping_expr.get("type") == "Column":
-            col_name = grouping_expr.get("name", "group_key")
-            result._schema[col_name] = self._schema.get(col_name, "Unknown")
-        for name in aggregations.keys():
-            result._schema[name] = "Unknown"
-
-        result._sort_keys = None
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def group_by(self, key: "str | Callable") -> "GroupBy":
         """
@@ -267,6 +237,4 @@ class AggregationMixin(LTSeqLike):
         from .core import LTSeq
 
         table = self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner)
-        table._schema = self._schema.copy()
-        table._sort_keys = self._sort_keys
         return GroupBy(table, key)

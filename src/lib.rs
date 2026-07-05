@@ -407,9 +407,49 @@ impl LTSeqTable {
                     dict.set_item(field.name(), type_str)?;
                 }
             }
-            
+
             Ok(dict.into())
         })
+    }
+
+    /// Get the declared sort order as (column, descending) pairs.
+    ///
+    /// Returns:
+    ///     List of (column_name, is_descending) tuples; empty when unsorted.
+    fn get_sort_keys(&self) -> Vec<(String, bool)> {
+        self.sort_specs
+            .iter()
+            .map(|s| (s.column.clone(), s.descending))
+            .collect()
+    }
+
+    /// Compute the schema a join with `other` under `alias` would produce,
+    /// without executing the join. Left columns keep their names; right
+    /// columns are prefixed `{alias}_`. Single source of truth: the same
+    /// `build_aliased_join_schema` the join execution path uses.
+    ///
+    /// Returns:
+    ///     PyDict mapping column name (str) -> type string (str)
+    fn preview_join_schema(&self, other: &LTSeqTable, alias: String) -> PyResult<Py<PyDict>> {
+        let left = self.require_schema()?;
+        let right = other.require_schema()?;
+        let joined = crate::ops::common::build_aliased_join_schema(left, right, &alias);
+
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            for field in joined.fields() {
+                dict.set_item(field.name(), datatype_to_schema_string(field.data_type()))?;
+            }
+            Ok(dict.into())
+        })
+    }
+
+    /// Rename columns, remapping sort metadata to the new names.
+    ///
+    /// Args:
+    ///     mapping: Dict of {old_name: new_name}
+    fn rename_columns(&self, mapping: std::collections::HashMap<String, String>) -> PyResult<LTSeqTable> {
+        crate::ops::basic::rename_columns_impl(self, &mapping)
     }
 
     /// Get the number of rows in the table

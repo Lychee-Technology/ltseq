@@ -7,11 +7,16 @@ if TYPE_CHECKING:
 
 
 class LTSeqLike:
-    # Shared attributes provided by LTSeq.
-    _schema: dict[str, str]
+    # Shared members provided by LTSeq. _schema and _sort_keys are lazy
+    # properties backed by the Rust kernel (issue #93).
     _inner: Any
-    _sort_keys: list[tuple[str, bool]] | None
     _name: str | None
+
+    @property
+    def _schema(self) -> dict[str, str]: ...
+
+    @property
+    def _sort_keys(self) -> list[tuple[str, bool]] | None: ...
 
     def __len__(self) -> int: ...
 

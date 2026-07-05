@@ -65,12 +65,8 @@ class IOMixin:
         # Use Rust static constructor to load CSV directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_csv(path, has_header)
         
-        # Get schema from Rust (already inferred during load)
-        schema = inner.get_schema_dict()
-        
-        # Wrap in Python layer
+        # Wrap in Python layer (schema is fetched lazily from Rust)
         t = LTSeq._from_inner(inner)
-        t._schema = schema
         t._name = os.path.splitext(os.path.basename(path))[0]
         return t
 
@@ -98,12 +94,8 @@ class IOMixin:
         # Use Rust static constructor to load Parquet directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_parquet(path)
         
-        # Get schema from Rust (already inferred during load)
-        schema = inner.get_schema_dict()
-        
-        # Wrap in Python layer
+        # Wrap in Python layer (schema is fetched lazily from Rust)
         t = LTSeq._from_inner(inner)
-        t._schema = schema
         t._name = os.path.splitext(os.path.basename(path))[0]
         return t
 
@@ -263,9 +255,9 @@ class IOMixin:
             col_data = {col: [row.get(col) for row in rows] for col in col_names}
             pa_table = pa.table(col_data)
 
-        result = LTSeq.from_arrow(pa_table)
-        result._schema = schema
-        return result
+        # Rust's Arrow-derived schema is authoritative; the Python-side
+        # inference above is only used to build the Arrow table.
+        return LTSeq.from_arrow(pa_table)
 
     def write_csv(self, path: str) -> None:
         """
@@ -346,13 +338,7 @@ class IOMixin:
 
         # Load into Rust via the IPC pathway
         inner = ltseq_core.LTSeqTable.load_arrow_ipc(ipc_buffers)
-        t = LTSeq._from_inner(inner)
-
-        # Get schema from Rust (already inferred during load)
-        schema = inner.get_schema_dict()
-        t._schema = schema
-
-        return t
+        return LTSeq._from_inner(inner)
 
     @classmethod
     def from_pandas(cls, df: Any) -> "LTSeq":

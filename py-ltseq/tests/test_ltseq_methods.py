@@ -13,6 +13,25 @@ import pytest
 from ltseq import LTSeq
 
 
+def _make_table(schema: dict) -> LTSeq:
+    """Build a real one-op table matching a column-name -> type-string spec.
+
+    Replaces the pre-#93 mock pattern (dataframe-less LTSeq() with an
+    injected _schema): schema now always comes from the Rust kernel, so
+    tests exercise real tables.
+    """
+    _values = {
+        "int64": [1, 2], "Int64": [1, 2],
+        "float64": [1.5, 2.5], "Float64": [1.5, 2.5],
+        "string": ["a", "b"], "Utf8": ["a", "b"],
+        "bool": [True, False], "Boolean": [True, False],
+    }
+    rows = []
+    for i in range(2):
+        rows.append({col: _values.get(t, [1, 2])[i] for col, t in schema.items()})
+    return LTSeq.from_rows(rows)
+
+
 class TestFilterBasic:
     """Test basic filter functionality."""
 
@@ -29,8 +48,7 @@ class TestFilterBasic:
         """filter() returns a new LTSeq instance."""
         # This test would need a mock LTSeqTable for full testing
         # For now, we test the method signature and basic logic
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         # We can't actually call filter without a working LTSeqTable,
         # but we can verify the method exists and has the right signature
@@ -39,9 +57,8 @@ class TestFilterBasic:
 
     def test_filter_preserves_schema(self):
         """filter() preserves the schema of the original table."""
-        t = LTSeq()
         original_schema = {"age": "int64", "name": "string"}
-        t._schema = original_schema.copy()
+        t = _make_table(original_schema)
 
         # filter should return a new LTSeq with schema preserved
         result = t.filter(lambda r: r.age > 18)
@@ -63,8 +80,7 @@ class TestSelectBasic:
 
     def test_select_invalid_column_name(self):
         """select() raises AttributeError for invalid column names."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "name": "string"}
+        t = _make_table({"age": "int64", "name": "string"})
 
         with pytest.raises(AttributeError) as exc_info:
             t.select("age", "invalid_col")
@@ -73,8 +89,7 @@ class TestSelectBasic:
 
     def test_select_invalid_argument_type(self):
         """select() raises TypeError for invalid argument types."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         with pytest.raises(TypeError) as exc_info:
             t.select("age", 123)  # int is not valid
@@ -83,21 +98,20 @@ class TestSelectBasic:
 
     def test_select_returns_ltseq(self):
         """select() returns a new LTSeq instance."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "name": "string"}
+        t = _make_table({"age": "int64", "name": "string"})
 
         assert hasattr(t, "select")
         assert callable(t.select)
 
     def test_select_column_names(self):
         """select() can be called with column names."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "name": "string", "salary": "float64"}
+        t = _make_table({"age": "int64", "name": "string", "salary": "float64"})
 
-        # select should return a new LTSeq instance with schema preserved
+        # select projects the schema down to the selected columns (#93:
+        # the old assertion result._schema == t._schema documented bug B3)
         result = t.select("age", "name")
         assert isinstance(result, LTSeq)
-        assert result._schema == t._schema
+        assert list(result._schema.keys()) == ["age", "name"]
 
 
 class TestDeriveBasic:
@@ -114,8 +128,7 @@ class TestDeriveBasic:
 
     def test_derive_invalid_argument_type(self):
         """derive() raises TypeError if lambda is not callable."""
-        t = LTSeq()
-        t._schema = {"price": "float64"}
+        t = _make_table({"price": "float64"})
 
         with pytest.raises(TypeError) as exc_info:
             t.derive(total=123)  # int is not callable
@@ -124,17 +137,15 @@ class TestDeriveBasic:
 
     def test_derive_returns_ltseq(self):
         """derive() returns a new LTSeq instance."""
-        t = LTSeq()
-        t._schema = {"price": "float64"}
+        t = _make_table({"price": "float64"})
 
         assert hasattr(t, "derive")
         assert callable(t.derive)
 
     def test_derive_updates_schema(self):
         """derive() updates schema with new derived columns."""
-        t = LTSeq()
         original_schema = {"price": "float64", "qty": "int64"}
-        t._schema = original_schema.copy()
+        t = _make_table(original_schema)
 
         # Can't call the actual method without LTSeqTable,
         # but we verify the method exists
@@ -155,8 +166,7 @@ class TestCaptureExprInternal:
 
     def test_capture_expr_returns_dict(self):
         """_capture_expr() returns a serialized expression dict."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         expr_dict = t._capture_expr(lambda r: r.age > 18)
 
@@ -166,8 +176,7 @@ class TestCaptureExprInternal:
 
     def test_capture_expr_with_invalid_column(self):
         """_capture_expr() raises AttributeError for invalid columns."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         with pytest.raises(AttributeError) as exc_info:
             t._capture_expr(lambda r: r.invalid_col > 18)
@@ -176,8 +185,7 @@ class TestCaptureExprInternal:
 
     def test_capture_expr_with_non_expr_return(self):
         """_capture_expr() raises TypeError if lambda doesn't return Expr."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         with pytest.raises(TypeError) as exc_info:
             t._capture_expr(lambda r: 42)
@@ -190,8 +198,7 @@ class TestMethodChaining:
 
     def test_filter_chain(self):
         """Multiple filter() calls can be chained (schema validation only)."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "salary": "float64"}
+        t = _make_table({"age": "int64", "salary": "float64"})
 
         # We test that the methods accept the right arguments
         # Actual chaining would require working LTSeqTable
@@ -199,8 +206,7 @@ class TestMethodChaining:
 
     def test_mixed_method_calls(self):
         """Different methods can be used together (schema validation only)."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "name": "string", "price": "float64"}
+        t = _make_table({"age": "int64", "name": "string", "price": "float64"})
 
         assert hasattr(t, "filter")
         assert hasattr(t, "select")
@@ -208,9 +214,8 @@ class TestMethodChaining:
 
     def test_schema_preservation_through_chain(self):
         """Schema is preserved through method calls."""
-        t = LTSeq()
         original_schema = {"age": "int64", "name": "string"}
-        t._schema = original_schema.copy()
+        t = _make_table(original_schema)
 
         # Can't test actual execution without LTSeqTable,
         # but we verify schema is accessible
@@ -222,16 +227,14 @@ class TestSelectWithLambdas:
 
     def test_select_with_lambda(self):
         """select() accepts lambda expressions."""
-        t = LTSeq()
-        t._schema = {"price": "float64", "qty": "int64"}
+        t = _make_table({"price": "float64", "qty": "int64"})
 
         # This validates lambda expressions are accepted
         assert hasattr(t, "select")
 
     def test_select_mixed_strings_and_lambdas(self):
         """select() accepts both column names and lambdas."""
-        t = LTSeq()
-        t._schema = {"price": "float64", "qty": "int64"}
+        t = _make_table({"price": "float64", "qty": "int64"})
 
         # Test that method accepts mixed argument types
         assert hasattr(t, "select")
@@ -242,24 +245,21 @@ class TestDeriveWithMultipleColumns:
 
     def test_derive_single_column(self):
         """derive() creates a single derived column."""
-        t = LTSeq()
-        t._schema = {"price": "float64", "qty": "int64"}
+        t = _make_table({"price": "float64", "qty": "int64"})
 
         # Test method signature accepts kwargs
         assert hasattr(t, "derive")
 
     def test_derive_multiple_columns(self):
         """derive() creates multiple derived columns."""
-        t = LTSeq()
-        t._schema = {"price": "float64", "qty": "int64", "discount": "float64"}
+        t = _make_table({"price": "float64", "qty": "int64", "discount": "float64"})
 
         # Test method can be called with multiple kwargs
         assert hasattr(t, "derive")
 
     def test_derive_column_depends_on_other_derived(self):
         """Multiple derives can be chained for column dependencies."""
-        t = LTSeq()
-        t._schema = {"a": "int64", "b": "int64"}
+        t = _make_table({"a": "int64", "b": "int64"})
 
         # This would need to be tested with actual LTSeqTable for full verification
         assert hasattr(t, "derive")
@@ -275,16 +275,14 @@ class TestSchemaInitialization:
 
     def test_schema_can_be_set_manually(self):
         """Schema can be set manually for testing."""
-        t = LTSeq()
         schema = {"age": "int64", "name": "string"}
-        t._schema = schema
+        t = _make_table(schema)
 
         assert t._schema == schema
 
     def test_schema_copy_preserved(self):
         """Schema copies are preserved in filter/select/derive."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         # Verify methods preserve schema type
         assert isinstance(t._schema, dict)
@@ -295,8 +293,7 @@ class TestErrorMessages:
 
     def test_invalid_column_error_lists_available(self):
         """AttributeError for invalid column lists available columns."""
-        t = LTSeq()
-        t._schema = {"age": "int64", "name": "string"}
+        t = _make_table({"age": "int64", "name": "string"})
 
         with pytest.raises(AttributeError) as exc_info:
             t.select("invalid")
@@ -318,8 +315,7 @@ class TestErrorMessages:
 
     def test_non_callable_derive_argument_error(self):
         """TypeError for non-callable derive arguments is clear."""
-        t = LTSeq()
-        t._schema = {"x": "int64"}
+        t = _make_table({"x": "int64"})
 
         with pytest.raises(TypeError) as exc_info:
             t.derive(new_col="not_callable")
@@ -334,8 +330,7 @@ class TestTypeConsistency:
 
     def test_filter_returns_ltseq_type(self):
         """filter() return type is LTSeq."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         # We can't test the actual return without LTSeqTable
         # but we verify method exists and would return LTSeq
@@ -343,14 +338,12 @@ class TestTypeConsistency:
 
     def test_select_returns_ltseq_type(self):
         """select() return type is LTSeq."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         assert hasattr(t, "select")
 
     def test_derive_returns_ltseq_type(self):
         """derive() return type is LTSeq."""
-        t = LTSeq()
-        t._schema = {"age": "int64"}
+        t = _make_table({"age": "int64"})
 
         assert hasattr(t, "derive")

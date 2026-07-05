@@ -56,11 +56,38 @@ class LTSeq(
                 "Please rebuild with `maturin develop`."
             )
         self._inner = ltseq_core.LTSeqTable()
-        self._schema: dict[str, str] = {}
-        self._sort_keys: list[tuple[str, bool]] | None = (
-            None  # [(col, is_desc), ...]
-        )
+        self._schema_cache: dict[str, str] | None = None
         self._name: str | None = None  # Table name for lookup operations
+
+    @property
+    def _schema(self) -> dict[str, str]:
+        """Column name -> type string, fetched lazily from the Rust kernel.
+
+        Rust owns the authoritative Arrow schema (issue #93); Python only
+        caches it per instance. Empty tables yield ``{}``, preserving the
+        ``if not self._schema:`` "Schema not initialized" guards.
+        """
+        cache = self._schema_cache
+        if cache is None:
+            cache = self._inner.get_schema_dict()
+            self._schema_cache = cache
+        return cache
+
+    @_schema.setter
+    def _schema(self, value: dict[str, str]) -> None:
+        # Migration-period compatibility: no in-package writers remain, but
+        # external code that assigned _schema keeps working (cache override).
+        self._schema_cache = value
+
+    @property
+    def _sort_keys(self) -> "list[tuple[str, bool]] | None":
+        """Declared sort order [(column, is_desc), ...] from the Rust kernel.
+
+        Not cached: reads are rare and the FFI call is microseconds. ``None``
+        (not ``[]``) when unsorted, preserving ``if self._sort_keys:`` guards.
+        """
+        keys = self._inner.get_sort_keys()
+        return keys if keys else None
 
     @classmethod
     def _from_inner(cls, inner: Any) -> "LTSeq":
@@ -86,8 +113,7 @@ class LTSeq(
         # Create instance without calling __init__
         instance = cls.__new__(cls)
         instance._inner = inner
-        instance._schema = {}
-        instance._sort_keys = None
+        instance._schema_cache = None
         instance._name = None
         return instance
 

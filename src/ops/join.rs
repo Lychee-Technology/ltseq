@@ -197,18 +197,21 @@ fn rename_right_df_for_join(
 
 /// Build result LTSeqTable from a DataFrame.
 ///
-/// Joins merge rows from two sources, so neither input's sort metadata
-/// describes the result: always empty.
+/// Regular joins merge rows from two sources, so neither input's sort
+/// metadata describes the result (pass empty). Semi/anti joins are row
+/// filters on the left table — they preserve its order, so they pass the
+/// left table's sort specs through.
 fn build_result_table_from_df(
     session: &Arc<SessionContext>,
     result_df: DataFrame,
     expected_schema: Arc<ArrowSchema>,
+    sort_specs: Vec<crate::SortSpec>,
 ) -> PyResult<LTSeqTable> {
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(session),
         result_df,
         expected_schema,
-        Vec::new(),
+        sort_specs,
         None,
     ))
 }
@@ -277,7 +280,7 @@ pub fn join_impl(
     // Build expected schema for the result
     let expected_schema = build_aliased_join_schema(stored_schema_left, stored_schema_right, alias);
 
-    build_result_table_from_df(&table.session, result_df, expected_schema)
+    build_result_table_from_df(&table.session, result_df, expected_schema, Vec::new())
 }
 
 /// Semi-join: Return rows from left table where keys exist in right table
@@ -342,9 +345,11 @@ fn semi_anti_join_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
+    // Semi/anti join = order-preserving filter on the left table
     build_result_table_from_df(
         &table.session,
         result_df,
         Arc::clone(stored_schema_left),
+        table.sort_specs.clone(),
     )
 }

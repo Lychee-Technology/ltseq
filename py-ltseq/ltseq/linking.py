@@ -41,12 +41,13 @@ class LinkedTable:
         self._join_fn = join_fn
         self._alias = alias
         self._join_type = join_type
-        self._schema = source_table._schema.copy()
+        # Ask Rust for the joined schema without executing the join — the
+        # same build_aliased_join_schema the join execution path uses, so the
+        # {alias}_{col} naming convention has exactly one implementation.
+        self._schema = source_table._inner.preview_join_schema(
+            target_table._inner, alias
+        )
         self._materialized: "LTSeq | None" = None  # Lazy materialization
-
-        # Add linked column metadata to schema with prefix
-        for col_name, col_type in target_table._schema.items():
-            self._schema[f"{alias}_{col_name}"] = col_type
 
     def _materialize(self) -> "LTSeq":
         """
@@ -86,8 +87,8 @@ class LinkedTable:
         # Create new LTSeq wrapping the joined result
         from .core import LTSeq
 
+        # The executed join's schema comes from the Rust kernel.
         result = LTSeq._from_inner(joined_inner)
-        result._schema = self._schema.copy()
 
         # Cache the result
         self._materialized = result

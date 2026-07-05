@@ -152,10 +152,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         expr_dict = self._capture_expr(predicate)
         result_inner = self._inner.filter(expr_dict)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = self._sort_keys
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def select(self, *cols) -> "LTSeq":
         """
@@ -196,17 +193,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         result_inner = self._inner.select(exprs)
 
-        result = LTSeq._from_inner(result_inner)
-        # Keep full schema (proper schema reduction requires Rust support)
-        result._schema = self._schema.copy()
-
-        # Clear sort keys if any sort column is not in selected columns
-        if self._sort_keys:
-            sort_cols_present = all(col in selected_cols for col, _ in self._sort_keys)
-            result._sort_keys = self._sort_keys if sort_cols_present else None
-        else:
-            result._sort_keys = None
-        return result
+        # Schema and sort metadata now come from the Rust kernel (issue #93);
+        # select's sort-prefix retention lives in Rust's select_impl.
+        return LTSeq._from_inner(result_inner)
 
     def derive(self, *args, **kwargs: Callable) -> "LTSeq":
         """
@@ -252,12 +241,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 else:
                     result_inner = resolved_table._inner.derive(simplified_cols)
 
-                result = LTSeq._from_inner(result_inner)
-                result._schema = resolved_table._schema.copy()
-                for col_name in simplified_cols.keys():
-                    result._schema[col_name] = "Unknown"
-                result._sort_keys = resolved_table._sort_keys
-                return result
+                return LTSeq._from_inner(result_inner)
             finally:
                 # Always clear the registry after derive completes
                 LookupExpr.clear_registry()
@@ -272,12 +256,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         else:
             result_inner = self._inner.derive(derived_cols)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        for col_name in derived_cols.keys():
-            result._schema[col_name] = "Unknown"
-        result._sort_keys = self._sort_keys
-        return result
+        return LTSeq._from_inner(result_inner)
 
     # Alias for discoverability (Polars users expect with_columns)
     with_columns = derive
@@ -331,40 +310,10 @@ class TransformMixin(LookupMixin, LTSeqLike):
                     f"Available columns: {list(self._schema.keys())}"
                 )
 
-        # Build select expressions with aliases
-        select_exprs = []
-        for col_name in self._schema:
-            if col_name in renames:
-                new_name = renames[col_name]
-                select_exprs.append({
-                    "type": "Alias",
-                    "expr": {"type": "Column", "name": col_name},
-                    "alias": new_name,
-                })
-            else:
-                select_exprs.append({"type": "Column", "name": col_name})
-
-        result_inner = self._inner.select(select_exprs)
-
-        result = LTSeq._from_inner(result_inner)
-
-        # Build new schema with renamed columns (preserving order)
-        new_schema = {}
-        for col_name, col_type in self._schema.items():
-            new_name = renames.get(col_name, col_name)
-            new_schema[new_name] = col_type
-        result._schema = new_schema
-
-        # Update sort keys if any were renamed
-        if self._sort_keys:
-            result._sort_keys = [
-                (renames.get(col, col), is_desc)
-                for col, is_desc in self._sort_keys
-            ]
-        else:
-            result._sort_keys = None
-
-        return result
+        # Rust remaps sort metadata to the new names (a plain aliased select
+        # cannot know it's a rename and would drop the renamed sort columns).
+        result_inner = self._inner.rename_columns(renames)
+        return LTSeq._from_inner(result_inner)
 
     def drop(self, *cols: str) -> "LTSeq":
         """
@@ -417,23 +366,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         result_inner = self._inner.select(select_exprs)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = {
-            col: self._schema[col] for col in remaining_cols
-        }
-
-        # Update sort keys — remove any that were dropped
-        if self._sort_keys:
-            new_sort_keys = [
-                (col, is_desc)
-                for col, is_desc in self._sort_keys
-                if col not in cols_to_drop
-            ]
-            result._sort_keys = new_sort_keys if new_sort_keys else None
-        else:
-            result._sort_keys = None
-
-        return result
+        # Rust keeps the longest surviving prefix of the sort keys.
+        return LTSeq._from_inner(result_inner)
 
     def _has_window_functions(self, derived_cols: dict[str, Any]) -> bool:
         """Check if derived columns contain window functions."""
@@ -513,21 +447,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
         result_inner = self._inner.sort(key_exprs, desc_list)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-
-        # Track sort keys
-        sort_keys = []
-        for i, key in enumerate(keys):
-            if isinstance(key, str):
-                sort_keys.append((key, desc_list[i]))
-            elif callable(key):
-                expr = key_exprs[i]
-                if expr.get("type") == "Column":
-                    sort_keys.append((expr["name"], desc_list[i]))
-        result._sort_keys = sort_keys if sort_keys else None
-
-        return result
+        # Rust captures the sort specs (column + direction) itself.
+        return LTSeq._from_inner(result_inner)
 
     def assume_sorted(
         self,
@@ -580,14 +501,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
         result_inner = self._inner.assume_sorted(key_exprs, desc_list)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-
-        # Track sort keys
-        sort_keys = [(key, desc_list[i]) for i, key in enumerate(keys)]
-        result._sort_keys = sort_keys if sort_keys else None
-
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def distinct(self, *key_exprs: str | Callable) -> "LTSeq":
         """
@@ -613,10 +527,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         exprs = _collect_key_exprs(key_exprs, self._schema, self._capture_expr)
         result_inner = self._inner.distinct(exprs)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = None
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def slice(self, offset: int = 0, length: int | None = None) -> "LTSeq":
         """
@@ -646,10 +557,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         result_inner = self._inner.slice(offset, length)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = self._sort_keys
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def head(self, n: int = 10) -> "LTSeq":
         """
@@ -735,10 +643,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         step_dicts = [self._capture_expr(p) for p in step_predicates]
         result_inner = self._inner.search_pattern(step_dicts, partition_by)
 
-        result = LTSeq._from_inner(result_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = self._sort_keys
-        return result
+        return LTSeq._from_inner(result_inner)
 
     def search_pattern_count(self, *step_predicates: Callable, partition_by: str | None = None) -> int:
         """

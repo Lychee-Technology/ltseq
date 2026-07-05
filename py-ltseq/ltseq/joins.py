@@ -29,23 +29,6 @@ def _validate_join_inputs(self_table: Any, other: Any, how: str) -> None:
         )
 
 
-def _build_join_result_schema(
-    left_schema: dict[str, str],
-    right_schema: dict[str, str],
-    suffix: str = "_other",
-) -> dict[str, str]:
-    """Build result schema for join operations.
-
-    Rust joins always prefix ALL right columns with {suffix}_{col},
-    so we must match that behavior here.
-    """
-    result_schema = left_schema.copy()
-    for col_name, col_type in right_schema.items():
-        # Always add suffix prefix to right columns (matching Rust behavior)
-        result_schema[f"{suffix}_{col_name}"] = col_type
-    return result_schema
-
-
 class JoinMixin(LTSeqLike):
     """Mixin class providing join operations for LTSeq."""
 
@@ -82,11 +65,7 @@ class JoinMixin(LTSeqLike):
                 f"Simplify your join condition (e.g., use lambda a, b: a.col == b.col)."
             ) from e
 
-        result = LTSeq._from_inner(joined_inner)
-        result._schema = _build_join_result_schema(
-            self._schema, other._schema, "_other"
-        )
-        return result
+        return LTSeq._from_inner(joined_inner)
 
     def join(
         self,
@@ -199,11 +178,7 @@ class JoinMixin(LTSeqLike):
                 f"without strategy='merge' for unsorted data."
             ) from e
 
-        result = LTSeq._from_inner(joined_inner)
-        result._schema = _build_join_result_schema(
-            self._schema, other._schema, "_other"
-        )
-        return result
+        return LTSeq._from_inner(joined_inner)
 
     def _get_sort_direction(self, col_name: str) -> bool | None:
         """Get sort direction for a column, or None if not sorted by it."""
@@ -297,11 +272,7 @@ class JoinMixin(LTSeqLike):
         except RuntimeError as e:
             raise RuntimeError(f"Asof join failed: {e}")
 
-        result = LTSeq._from_inner(joined_inner)
-        result._schema = _build_join_result_schema(
-            self._schema, other._schema, "_other"
-        )
-        return result
+        return LTSeq._from_inner(joined_inner)
 
     def _filtering_join(self, other: "LTSeq", on: Callable, join_type: str) -> "LTSeq":
         """
@@ -359,8 +330,6 @@ class JoinMixin(LTSeqLike):
             raise RuntimeError(f"{join_type.capitalize()}-join failed: {e}")
 
         result = LTSeq._from_inner(joined_inner)
-        result._schema = self._schema.copy()
-        result._sort_keys = self._sort_keys
         return result
 
     def semi_join(self, other: "LTSeq", on: Callable) -> "LTSeq":
