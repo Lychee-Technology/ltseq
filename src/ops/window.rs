@@ -183,17 +183,8 @@ async fn build_derived_select_parts(
         let is_rolling_agg = expr_sql.contains("__ROLLING_");
         let is_diff = expr_sql.contains("__DIFF_");
 
-        // Build ORDER BY clause from sort expressions
-        let order_by = if !table.sort_exprs.is_empty() {
-            table
-                .sort_exprs
-                .iter()
-                .map(|col| format!("\"{}\"", col))
-                .collect::<Vec<_>>()
-                .join(", ")
-        } else {
-            "".to_string()
-        };
+        // Build ORDER BY clause from sort specs (direction-aware)
+        let order_by = crate::metadata::sort_specs_to_sql_order_by(&table.sort_specs);
 
         // Apply window frame transformation
         let full_expr = apply_window_frame(&expr_sql, &order_by, is_rolling_agg, is_diff);
@@ -285,7 +276,7 @@ fn try_native_window_derive(
     // Convert each derived column's PyExpr to a native DataFusion window Expr
     for (col_name_str, py_expr) in parsed_cols.iter() {
         // Convert to native DataFusion window expression
-        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_exprs)
+        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
             .map_err(LtseqError::Transpile)?;
 
         all_exprs.push(window_expr.alias(col_name_str));
@@ -302,8 +293,8 @@ fn try_native_window_derive(
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // column set changed relative to the raw file: drop fast-path token
     ))
 }
 
@@ -361,8 +352,8 @@ fn derive_with_window_functions_sql_fallback(
         Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),
             new_df,
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // column set changed relative to the raw file: drop fast-path token
         ))
     })
 }
@@ -412,14 +403,9 @@ async fn build_cumsum_select_parts(
             }
         }
 
-        // Build ORDER BY clause from sort expressions
-        let order_by = if !table.sort_exprs.is_empty() {
-            let order_cols = table
-                .sort_exprs
-                .iter()
-                .map(|col| format!("\"{}\"", col))
-                .collect::<Vec<_>>()
-                .join(", ");
+        // Build ORDER BY clause from sort specs (direction-aware)
+        let order_cols = crate::metadata::sort_specs_to_sql_order_by(&table.sort_specs);
+        let order_by = if !order_cols.is_empty() {
             format!(" ORDER BY {}", order_cols)
         } else {
             "".to_string()
@@ -454,8 +440,8 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
         return Ok(LTSeqTable::empty(
             Arc::clone(&table.session),
             table.schema.as_ref().map(Arc::clone),
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // column set changed relative to the raw file: drop fast-path token
         ));
     }
 
@@ -491,16 +477,8 @@ fn try_native_cum_sum(
         all_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
     }
 
-    // Build sort expressions
-    let order_by: Vec<Sort> = table
-        .sort_exprs
-        .iter()
-        .map(|col_name| Sort {
-            expr: Expr::Column(Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
-        .collect();
+    // Build sort expressions from sort specs (direction-aware)
+    let order_by: Vec<Sort> = crate::metadata::sort_specs_to_window_sorts(&table.sort_specs);
 
     // Add cumulative sum columns for each input column
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
@@ -580,8 +558,8 @@ fn try_native_cum_sum(
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // column set changed relative to the raw file: drop fast-path token
     ))
 }
 
@@ -641,8 +619,8 @@ fn cum_sum_sql_fallback(
         Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),
             new_df,
-            table.sort_exprs.clone(),
-            table.source_parquet_path.clone(),
+            table.sort_specs.clone(),
+            None, // column set changed relative to the raw file: drop fast-path token
         ))
     })
 }
@@ -683,7 +661,7 @@ async fn handle_empty_cum_sum(
     Ok(LTSeqTable::empty(
         Arc::clone(&table.session),
         Some(Arc::new(new_arrow_schema)),
-        table.sort_exprs.clone(),
-        table.source_parquet_path.clone(),
+        table.sort_specs.clone(),
+        None, // column set changed relative to the raw file: drop fast-path token
     ))
 }

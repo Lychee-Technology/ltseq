@@ -166,21 +166,17 @@ pub(crate) fn finalize_window_expr(
 pub fn pyexpr_to_window_expr(
     py_expr: PyExpr,
     schema: &ArrowSchema,
-    sort_exprs: &[String],
+    sort_specs: &[crate::SortSpec],
 ) -> Result<Expr, String> {
     // Filter out sort expressions that duplicate partition_by columns.
     // Within a partition, all rows share the same partition key values,
     // so ordering by a partition key is redundant and wastes sort effort.
     let partition_cols = peek_partition_by_cols(&py_expr);
 
-    let order_by: Vec<Sort> = sort_exprs
+    let order_by: Vec<Sort> = sort_specs
         .iter()
-        .filter(|col_name| !partition_cols.contains(col_name))
-        .map(|col_name| Sort {
-            expr: Expr::Column(datafusion::common::Column::new_unqualified(col_name)),
-            asc: true,
-            nulls_first: true,
-        })
+        .filter(|spec| !partition_cols.contains(&spec.column))
+        .map(|spec| spec.to_window_sort())
         .collect();
 
     pyexpr_to_window_inner(py_expr, schema, &order_by)

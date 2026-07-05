@@ -15,6 +15,7 @@ pub(crate) mod cursor;
 pub(crate) mod engine; // DataFusion session and LTSeqTable struct
 mod error;
 pub(crate) mod format; // Formatting and display functions
+pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // Streaming cursor for lazy iteration
@@ -22,6 +23,7 @@ mod types; // Streaming cursor for lazy iteration
 // Re-exports for internal use
 pub(crate) use error::LtseqError;
 pub(crate) use format::format_table;
+pub(crate) use metadata::SortSpec;
 use crate::engine::{create_session_context, RUNTIME};
 
 /// LTSeqTable: Holds DataFusion SessionContext and loaded data
@@ -31,7 +33,7 @@ pub struct LTSeqTable {
     session: Arc<SessionContext>,
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
-    sort_exprs: Vec<String>, // Column names used for sorting, for Phase 6 window functions
+    sort_specs: Vec<SortSpec>, // Declared row order (column + direction), drives window ORDER BY
     source_parquet_path: Option<String>, // Parquet file path for assume_sorted optimization
 }
 
@@ -50,7 +52,7 @@ impl LTSeqTable {
     pub(crate) fn from_df(
         session: Arc<SessionContext>,
         df: DataFrame,
-        sort_exprs: Vec<String>,
+        sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
     ) -> Self {
         let schema = Self::schema_from_df(df.schema());
@@ -58,7 +60,7 @@ impl LTSeqTable {
             session,
             dataframe: Some(Arc::new(df)),
             schema: Some(schema),
-            sort_exprs,
+            sort_specs,
             source_parquet_path,
         }
     }
@@ -69,14 +71,14 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         df: DataFrame,
         schema: Arc<ArrowSchema>,
-        sort_exprs: Vec<String>,
+        sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
     ) -> Self {
         LTSeqTable {
             session,
             dataframe: Some(Arc::new(df)),
             schema: Some(schema),
-            sort_exprs,
+            sort_specs,
             source_parquet_path,
         }
     }
@@ -86,7 +88,7 @@ impl LTSeqTable {
     pub(crate) fn from_batches(
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
-        sort_exprs: Vec<String>,
+        sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
     ) -> PyResult<Self> {
         if batches.is_empty() {
@@ -94,7 +96,7 @@ impl LTSeqTable {
                 session,
                 dataframe: None,
                 schema: None,
-                sort_exprs,
+                sort_specs,
                 source_parquet_path,
             });
         }
@@ -112,7 +114,7 @@ impl LTSeqTable {
             session,
             dataframe: Some(Arc::new(result_df)),
             schema: Some(result_schema),
-            sort_exprs,
+            sort_specs,
             source_parquet_path,
         })
     }
@@ -122,7 +124,7 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
         empty_schema: Arc<ArrowSchema>,
-        sort_exprs: Vec<String>,
+        sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
     ) -> PyResult<Self> {
         if batches.is_empty() {
@@ -130,7 +132,7 @@ impl LTSeqTable {
                 session,
                 dataframe: None,
                 schema: Some(empty_schema),
-                sort_exprs,
+                sort_specs,
                 source_parquet_path,
             });
         }
@@ -148,7 +150,7 @@ impl LTSeqTable {
             session,
             dataframe: Some(Arc::new(result_df)),
             schema: Some(result_schema),
-            sort_exprs,
+            sort_specs,
             source_parquet_path,
         })
     }
@@ -158,7 +160,7 @@ impl LTSeqTable {
     pub(crate) fn empty(
         session: Arc<SessionContext>,
         schema: Option<Arc<ArrowSchema>>,
-        sort_exprs: Vec<String>,
+        sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
     ) -> Self {
         // Explicit field initialization for clarity and future-proofing
@@ -166,7 +168,7 @@ impl LTSeqTable {
             session,
             dataframe: None,
             schema,
-            sort_exprs,
+            sort_specs,
             source_parquet_path,
         }
     }
@@ -203,7 +205,7 @@ impl LTSeqTable {
             session,
             dataframe: None,
             schema: None,
-            sort_exprs: Vec::with_capacity(0),
+            sort_specs: Vec::with_capacity(0),
             source_parquet_path: None,
         }
     }
@@ -305,7 +307,7 @@ impl LTSeqTable {
             session,
             dataframe: None,
             schema: None,
-            sort_exprs: Vec::new(),
+            sort_specs: Vec::new(),
             source_parquet_path: None,
         };
         table.read_csv(path, has_header)?;
@@ -330,7 +332,7 @@ impl LTSeqTable {
             session,
             dataframe: None,
             schema: None,
-            sort_exprs: Vec::new(),
+            sort_specs: Vec::new(),
             source_parquet_path: None,
         };
         table.read_parquet(path)?;
@@ -617,8 +619,9 @@ impl LTSeqTable {
     fn assume_sorted(
         &self,
         sort_exprs: Vec<Bound<'_, PyDict>>,
+        desc_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::sort::assume_sorted_impl(self, sort_exprs)
+        crate::ops::sort::assume_sorted_impl(self, sort_exprs, desc_flags)
     }
 
     /// Add __group_id__ column for consecutive identical grouping values
@@ -680,8 +683,8 @@ impl LTSeqTable {
             return Ok(LTSeqTable::empty(
                 Arc::clone(&self.session),
                 self.schema.as_ref().map(Arc::clone),
-                self.sort_exprs.clone(),
-                self.source_parquet_path.clone(),
+                self.sort_specs.clone(),
+                None,
             ));
         }
 
@@ -702,14 +705,16 @@ impl LTSeqTable {
             })
             .map_err(LtseqError::Runtime)?;
 
-        // Return new LTSeqTable with sliced data (schema unchanged)
+        // Return new LTSeqTable with sliced data (schema unchanged).
+        // Row subset preserves order → keep sort_specs; the raw file no
+        // longer matches the row set → drop the Parquet fast-path token.
         let schema = self.require_schema()?;
         Ok(LTSeqTable::from_df_with_schema(
             Arc::clone(&self.session),
             sliced_df,
             Arc::clone(schema),
-            self.sort_exprs.clone(),
-            self.source_parquet_path.clone(),
+            self.sort_specs.clone(),
+            None,
         ))
     }
 

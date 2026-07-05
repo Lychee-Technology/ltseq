@@ -164,6 +164,6 @@ pub fn align_impl(
         result_batches,
         Arc::clone(&batch_schema),
         Vec::new(),
-        table.source_parquet_path.clone(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }
