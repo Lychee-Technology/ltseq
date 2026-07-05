@@ -9,10 +9,9 @@ Phase 1 optimization, these paths now use Arrow directly (avoiding pandas
 round-trips) or delegate to Rust-native operations.
 
 Hotspots benchmarked:
-  1. NestedTable.__len__ — was len(to_pandas()), now len(LTSeq) -> Rust count()
-  2. SQLPartitionedTable._compute_keys — was to_pandas()+iterrows(), now to_arrow()+to_pylist()
-  3. PartitionedTable._materialize_partitions — was to_pandas()+_from_rows(), now to_arrow()+take()
-  4. contain() — was to_pandas(), now to_arrow()+to_pylist()
+   1. NestedTable.__len__ — was len(to_pandas()), now len(LTSeq) -> Rust count()
+   2. SQLPartitionedTable._compute_keys — was to_pandas()+iterrows(), now to_arrow()+to_pylist()
+   3. contain() — was to_pandas(), now to_arrow()+to_pylist()
 
 Each benchmark is measured at 3 scales (10K, 100K, 1M rows) with warmup +
 multiple iterations, matching the style of bench_core.py.
@@ -135,21 +134,7 @@ def bench_partition_keys(csv_path):
 
 
 # ---------------------------------------------------------------------------
-# Benchmark 3: PartitionedTable._materialize_partitions()
-# Previously: to_pandas() -> dict of rows -> _from_rows()
-# Now: to_arrow() -> group by indices -> take() -> from_arrow()
-# ---------------------------------------------------------------------------
-
-
-def bench_partition_materialize(csv_path):
-    t = LTSeq.read_csv(csv_path)
-    partitions = t.partition(by=lambda r: r.category)
-    keys = partitions.keys()
-    return len(keys)
-
-
-# ---------------------------------------------------------------------------
-# Benchmark 4: contain()
+# Benchmark 3: contain()
 # Previously: to_pandas() then set(df[col].tolist())
 # Now: to_arrow() then set(pa_table.column(col).to_pylist())
 # ---------------------------------------------------------------------------
@@ -164,7 +149,6 @@ def bench_contain(csv_path):
 BENCHMARKS = [
     ("nested_len", bench_nested_len),
     ("partition_keys_sql", bench_partition_keys),
-    ("partition_materialize", bench_partition_materialize),
     ("contain", bench_contain),
 ]
 
