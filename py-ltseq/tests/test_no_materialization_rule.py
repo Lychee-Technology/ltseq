@@ -165,7 +165,6 @@ RUST_GUARD_PARAMS = [
     pytest.param(
         "src/ops/window.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 3 of #91 (window SQL fallback)", strict=True),
         id="window",
     ),
     pytest.param(

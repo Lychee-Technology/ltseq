@@ -6,199 +6,28 @@
 //! - Cumulative sums with window frames
 //! - Difference calculations
 //!
-//! As of Phase 2 optimization, window functions are converted directly to
-//! DataFusion's native `Expr::WindowFunction` via the `window_native` transpiler,
-//! eliminating the previous collect→MemTable→SQL string round-trip.
+//! Window functions are converted directly to DataFusion's native
+//! `Expr::WindowFunction` via the `window_native` transpiler (issue #91):
+//! the plan stays lazy and there is no SQL fallback. Expression shapes the
+//! native transpiler cannot plan (currently: a window function applied to
+//! another window function's result) surface as errors that suggest the
+//! two-step derive workaround.
 
-use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::transpiler::pyexpr_to_sql;
 use crate::transpiler::pyexpr_to_window_expr;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
-use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-/// Apply OVER clause to all nested LAG/LEAD functions in an expression
-///
-/// This recursively finds all LAG(...) and LEAD(...) calls and adds the proper OVER clause.
-/// Used by window function operations to ensure proper SQL generation.
-///
-/// # Arguments
-/// * `expr` - SQL expression string potentially containing LAG/LEAD calls
-/// * `order_by` - ORDER BY clause for the OVER clause (empty string for no ordering)
-///
-/// # Returns
-/// The expression with OVER clauses added to all LAG/LEAD functions
-pub(crate) fn apply_over_to_window_functions(expr: &str, order_by: &str) -> String {
-    let mut result = String::new();
-    let mut i = 0;
-    let bytes = expr.as_bytes();
-
-    while i < bytes.len() {
-        // Look for LAG(
-        if i + 4 <= bytes.len() && &expr[i..i + 4] == "LAG(" {
-            result.push_str("LAG(");
-            i += 4;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                let ch = bytes[i] as char;
-                result.push(ch);
-                if ch == '(' {
-                    depth += 1;
-                } else if ch == ')' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            // Add OVER clause
-            if !order_by.is_empty() {
-                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
-            } else {
-                result.push_str(" OVER ()");
-            }
-        }
-        // Look for LEAD(
-        else if i + 5 <= bytes.len() && &expr[i..i + 5] == "LEAD(" {
-            result.push_str("LEAD(");
-            i += 5;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                let ch = bytes[i] as char;
-                result.push(ch);
-                if ch == '(' {
-                    depth += 1;
-                } else if ch == ')' {
-                    depth -= 1;
-                }
-                i += 1;
-            }
-            // Add OVER clause
-            if !order_by.is_empty() {
-                result.push_str(&format!(" OVER (ORDER BY {})", order_by));
-            } else {
-                result.push_str(" OVER ()");
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    result
-}
-
-/// Helper function to apply window function SQL transformations
-///
-/// Converts special window function markers (e.g., __ROLLING_SUM__(col)__size)
-/// into proper SQL window expressions with OVER clauses.
-fn apply_window_frame(expr_sql: &str, order_by: &str, is_rolling: bool, is_diff: bool) -> String {
-    if is_rolling {
-        // Handle rolling aggregations: replace marker with actual window frame
-        // Pattern: __ROLLING_FUNC__(col)__size
-        let window_size_start = expr_sql.rfind("__").unwrap_or(0) + 2;
-        let window_size_str =
-            expr_sql[window_size_start..].trim_end_matches(|c: char| !c.is_ascii_digit());
-        let window_size = window_size_str.parse::<i32>().unwrap_or(1);
-
-        let start = expr_sql.find("__ROLLING_").unwrap_or(0) + 10;
-        let end = expr_sql.find("__(").unwrap_or(start);
-        let func_part = &expr_sql[start..end];
-
-        let col_start = expr_sql.find("__(").unwrap_or(0) + 3;
-        let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
-        let col_part = &expr_sql[col_start..col_end];
-
-        if !order_by.is_empty() {
-            format!(
-                "{}({}) OVER (ORDER BY {} ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
-                func_part,
-                col_part,
-                order_by,
-                window_size - 1
-            )
-        } else {
-            format!(
-                "{}({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
-                func_part,
-                col_part,
-                window_size - 1
-            )
-        }
-    } else if is_diff {
-        // Handle diff: replace marker with actual calculation
-        // Pattern: __DIFF_periods__(col)__periods
-        let diff_start = expr_sql.find("__DIFF_").unwrap_or(0);
-        let periods_start = diff_start + 7;
-        let periods_end = expr_sql[periods_start..].find("__").unwrap_or(0) + periods_start;
-        let periods_str = &expr_sql[periods_start..periods_end];
-
-        let col_start = expr_sql.find("__(").unwrap_or(0) + 3;
-        let col_end = expr_sql.rfind(")__").unwrap_or(expr_sql.len());
-        let col_part = &expr_sql[col_start..col_end];
-
-        if !order_by.is_empty() {
-            format!(
-                "({} - LAG({}, {}) OVER (ORDER BY {}))",
-                col_part, col_part, periods_str, order_by
-            )
-        } else {
-            format!(
-                "({} - LAG({}, {}) OVER ())",
-                col_part, col_part, periods_str
-            )
-        }
-    } else if expr_sql.contains("LAG(") || expr_sql.contains("LEAD(") {
-        // Handle shift() window functions - apply OVER to LAG/LEAD
-        apply_over_to_window_functions(expr_sql, order_by)
-    } else {
-        expr_sql.to_string()
-    }
-}
-
-/// Build SELECT parts for derived window function columns
-async fn build_derived_select_parts(
-    schema: &ArrowSchema,
-    parsed_cols: &[(String, PyExpr)],
-    table: &LTSeqTable,
-) -> PyResult<Vec<String>> {
-    let mut select_parts = Vec::new();
-
-    // Add all existing columns
-    for field in schema.fields() {
-        select_parts.push(format!("\"{}\"", field.name()));
-    }
-
-    // Add derived columns
-    for (col_name_str, py_expr) in parsed_cols.iter() {
-        // Convert expression to SQL
-        let expr_sql = pyexpr_to_sql(py_expr, schema)
-            .map_err(LtseqError::Transpile)?;
-
-        // Check what type of window function this is
-        let is_rolling_agg = expr_sql.contains("__ROLLING_");
-        let is_diff = expr_sql.contains("__DIFF_");
-
-        // Build ORDER BY clause from sort specs (direction-aware)
-        let order_by = crate::metadata::sort_specs_to_sql_order_by(&table.sort_specs);
-
-        // Apply window frame transformation
-        let full_expr = apply_window_frame(&expr_sql, &order_by, is_rolling_agg, is_diff);
-        select_parts.push(format!("{} AS \"{}\"", full_expr, col_name_str));
-    }
-
-    Ok(select_parts)
-}
-
 /// Derive columns with window functions using native DataFusion expressions
 ///
 /// This converts PyExpr window function calls directly to DataFusion `Expr::WindowFunction`
 /// and uses `df.select()` to add derived columns — no materialization required.
-/// Falls back to SQL path only if native conversion fails.
 pub fn derive_with_window_functions_impl(
     table: &LTSeqTable,
     derived_cols: &Bound<'_, PyDict>,
@@ -232,12 +61,26 @@ pub(crate) fn derive_with_window_functions_from_parsed(
     // with many columns (e.g., 105-column ClickBench hits table: 0.28s native vs
     // 42s arrow shift due to eager collect of all columns).
 
-    // Try native path first
-    match try_native_window_derive(table, schema, df, parsed_cols) {
-        Ok(result) => Ok(result),
-        Err(_native_err) => {
-            derive_with_window_functions_sql_fallback(table, schema, df, parsed_cols)
-        }
+    native_window_derive(table, schema, df, parsed_cols).map_err(|e| {
+        nested_window_hint(e)
+    })
+}
+
+/// Enrich native-transpile errors about window-on-window shapes with the
+/// two-step derive workaround (tracked follow-up: native staged select, issue #101).
+fn nested_window_hint(err: PyErr) -> PyErr {
+    let msg = err.to_string();
+    if msg.contains("requires DataFrame context") {
+        LtseqError::Validation(format!(
+            "{}. Window functions cannot be applied to another window function's \
+             result in a single derive; split it into two steps, e.g. \
+             t.derive(mid=lambda r: r.x.rolling(3).mean())\
+             .derive(out=lambda r: r.mid.shift(1))",
+            msg.trim_end_matches('.')
+        ))
+        .into()
+    } else {
+        err
     }
 }
 
@@ -259,7 +102,7 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
 
 
 /// Native window derive: convert PyExpr window calls to DataFusion Expr and use df.select()
-fn try_native_window_derive(
+fn native_window_derive(
     table: &LTSeqTable,
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
@@ -298,142 +141,11 @@ fn try_native_window_derive(
     ))
 }
 
-/// SQL fallback for window functions (the old path, kept for edge cases)
-fn derive_with_window_functions_sql_fallback(
-    table: &LTSeqTable,
-    schema: &ArrowSchema,
-    df: &Arc<DataFrame>,
-    parsed_cols: &[(String, PyExpr)],
-) -> PyResult<LTSeqTable> {
-    RUNTIME.block_on(async {
-        // Get the data from the current DataFrame as record batches
-        let current_batches = (**df).clone().collect().await.map_err(|e| {
-            LtseqError::collect(e)
-        })?;
-
-        // Get schema from the actual batches
-        let batch_schema = if let Some(first_batch) = current_batches.first() {
-            first_batch.schema()
-        } else {
-            Arc::new(schema.clone())
-        };
-
-        // Use unique temp table name to avoid conflicts
-        let temp_table_name = format!("__ltseq_temp_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
-            })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        table
-            .session
-            .register_table(&temp_table_name, Arc::new(temp_table))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
-            })?;
-
-        let select_parts = build_derived_select_parts(&batch_schema, parsed_cols, table).await?;
-
-        let sql = format!(
-            "SELECT {} FROM \"{}\"",
-            select_parts.join(", "),
-            temp_table_name
-        );
-
-        let new_df = table.session.sql(&sql).await.map_err(|e| {
-            let _ = table.session.deregister_table(&temp_table_name);
-            LtseqError::Runtime(format!("Window function query failed: {}", e))
-        })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        Ok(LTSeqTable::from_df(
-            Arc::clone(&table.session),
-            new_df,
-            table.sort_specs.clone(),
-            None, // column set changed relative to the raw file: drop fast-path token
-        ))
-    })
-}
-
-/// Process cumulative sum expressions and build SELECT parts
-async fn build_cumsum_select_parts(
-    schema: &ArrowSchema,
-    cum_exprs: &[Bound<'_, PyDict>],
-    table: &LTSeqTable,
-) -> PyResult<Vec<String>> {
-    let mut select_parts = Vec::new();
-
-    // Add all existing columns
-    for field in schema.fields() {
-        select_parts.push(format!("\"{}\"", field.name()));
-    }
-
-    // Add cumulative sum columns for each input column
-    for (idx, expr_item) in cum_exprs.iter().enumerate() {
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            LtseqError::Validation("Expression must be dict".into())
-        })?;
-
-        let py_expr = dict_to_py_expr(expr_dict)?;
-
-        // Convert expression to SQL
-        let expr_sql = pyexpr_to_sql(&py_expr, schema)
-            .map_err(LtseqError::Transpile)?;
-
-        // Extract column name from expression
-        let col_name = if let PyExpr::Column(name) = &py_expr {
-            name.clone()
-        } else {
-            format!("cum_sum_{}", idx)
-        };
-
-        // Validate numeric column
-        if let PyExpr::Column(col_name_ref) = &py_expr {
-            if let Ok(field) = schema.field_with_name(col_name_ref) {
-                let field_type = field.data_type();
-                if !crate::transpiler::is_numeric_type(field_type) {
-                    return Err(PyErr::from(LtseqError::TypeMismatch(format!(
-                        "cum_sum() requires numeric columns. Column '{}' has type {:?}",
-                        col_name_ref, field_type
-                    ))));
-                }
-            }
-        }
-
-        // Build ORDER BY clause from sort specs (direction-aware)
-        let order_cols = crate::metadata::sort_specs_to_sql_order_by(&table.sort_specs);
-        let order_by = if !order_cols.is_empty() {
-            format!(" ORDER BY {}", order_cols)
-        } else {
-            "".to_string()
-        };
-
-        // Build cumulative sum expression
-        let cumsum_expr = if !order_by.is_empty() {
-            format!(
-                "SUM({}) OVER ({} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
-                expr_sql, order_by
-            )
-        } else {
-            format!(
-                "SUM({}) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
-                expr_sql
-            )
-        };
-
-        let cumsum_col_name = format!("{}_cumsum", col_name);
-        select_parts.push(format!("{} AS \"{}\"", cumsum_expr, cumsum_col_name));
-    }
-
-    Ok(select_parts)
-}
-
-/// Add cumulative sum columns with proper window functions
+/// Add cumulative sum columns with proper window functions (fully native).
 ///
-/// Uses native DataFusion expressions when possible, SQL fallback for edge cases.
+/// Empty inputs need no special casing: the window select over an empty
+/// DataFrame yields an empty result whose schema already carries the new
+/// cumsum columns.
 pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     // If no dataframe, return empty result (for unit tests)
     if table.dataframe.is_none() {
@@ -446,28 +158,18 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
     }
 
     let (df, schema) = table.require_df_and_schema()?;
-
-    // Try native path first
-    match try_native_cum_sum(table, schema, df, &cum_exprs) {
-        Ok(result) => Ok(result),
-        Err(_native_err) => {
-            // Fall back to SQL path
-            cum_sum_sql_fallback(table, schema, df, cum_exprs)
-        }
-    }
+    native_cum_sum(table, schema, df, &cum_exprs)
 }
 
 /// Native cum_sum implementation using DataFusion Expr
-fn try_native_cum_sum(
+fn native_cum_sum(
     table: &LTSeqTable,
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
     cum_exprs: &[Bound<'_, PyDict>],
 ) -> PyResult<LTSeqTable> {
     use datafusion::logical_expr::expr::Sort;
-    use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
-    use datafusion::logical_expr::expr::WindowFunctionParams;
-    use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition};
+    use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
     use datafusion::scalar::ScalarValue;
 
     let mut all_exprs: Vec<Expr> = Vec::new();
@@ -509,39 +211,37 @@ fn try_native_cum_sum(
         }
 
         // Build native cum_sum expression: SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
-        let col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+        let mut col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr.clone(), schema)
             .map_err(LtseqError::Transpile)?;
 
+        // A Null-typed column (e.g. inferred from a header-only CSV) is
+        // allowed by the numeric check but SUM(Null) has no return type.
+        // Cast to Float64 — matching the Float64 cumsum column the legacy
+        // empty-table path produced.
+        if let PyExpr::Column(col_name_ref) = &py_expr {
+            if let Ok(field) = schema.field_with_name(col_name_ref) {
+                if field.data_type() == &datafusion::arrow::datatypes::DataType::Null {
+                    col_expr = cast(col_expr, datafusion::arrow::datatypes::DataType::Float64);
+                }
+            }
+        }
+
+        // Reuse the window_native builder — the same aggregate→window
+        // conversion convert_cum_sum/convert_rolling_agg use, so there is a
+        // single cum_sum implementation (issue #91 PR 3 item 7).
         let sum_agg = datafusion::functions_aggregate::expr_fn::sum(col_expr);
         let frame = WindowFrame::new_bounds(
             WindowFrameUnits::Rows,
             WindowFrameBound::Preceding(ScalarValue::Null), // UNBOUNDED PRECEDING
             WindowFrameBound::CurrentRow,
         );
-
-        // Extract the AggregateUDF from the sum() expression and construct a WindowFunction directly.
-        // The builder API (ExprFunctionExt) does NOT convert aggregates to window functions.
-        let cumsum_expr = match sum_agg {
-            Expr::AggregateFunction(agg_func) => {
-                Expr::WindowFunction(Box::new(WindowFunctionExpr {
-                    fun: WindowFunctionDefinition::AggregateUDF(agg_func.func),
-                    params: WindowFunctionParams {
-                        args: agg_func.params.args,
-                        partition_by: vec![],
-                        order_by: order_by.clone(),
-                        window_frame: frame,
-                        filter: None,
-                        null_treatment: None,
-                        distinct: false,
-                    },
-                }))
-            }
-            _ => {
-                return Err(PyErr::from(LtseqError::Runtime(
-                    "Expected AggregateFunction from sum()".into(),
-                )));
-            }
-        };
+        let cumsum_expr = crate::transpiler::window_native::aggregate_to_window(
+            sum_agg,
+            vec![],
+            order_by.clone(),
+            frame,
+        )
+        .map_err(LtseqError::Transpile)?;
 
         let cumsum_col_name = format!("{}_cumsum", col_name);
         all_exprs.push(cumsum_expr.alias(&cumsum_col_name));
@@ -558,109 +258,6 @@ fn try_native_cum_sum(
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_specs.clone(),
-        None, // column set changed relative to the raw file: drop fast-path token
-    ))
-}
-
-/// SQL fallback for cum_sum (old path)
-fn cum_sum_sql_fallback(
-    table: &LTSeqTable,
-    schema: &ArrowSchema,
-    df: &Arc<DataFrame>,
-    cum_exprs: Vec<Bound<'_, PyDict>>,
-) -> PyResult<LTSeqTable> {
-    RUNTIME.block_on(async {
-        let current_batches = (**df).clone().collect().await.map_err(|e| {
-            LtseqError::collect(e)
-        })?;
-
-        let is_empty = current_batches.iter().all(|batch| batch.num_rows() == 0);
-        if is_empty {
-            return handle_empty_cum_sum(table, schema, &cum_exprs).await;
-        }
-
-        let batch_schema = if let Some(first_batch) = current_batches.first() {
-            first_batch.schema()
-        } else {
-            Arc::new(schema.clone())
-        };
-
-        let temp_table_name = format!("__ltseq_cumsum_{}", std::process::id());
-        let temp_table = MemTable::try_new(Arc::clone(&batch_schema), vec![current_batches])
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to create memory table: {}", e))
-            })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        table
-            .session
-            .register_table(&temp_table_name, Arc::new(temp_table))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to register temporary table: {}", e))
-            })?;
-
-        let select_parts = build_cumsum_select_parts(&batch_schema, &cum_exprs, table).await?;
-
-        let sql = format!(
-            "SELECT {} FROM \"{}\"",
-            select_parts.join(", "),
-            temp_table_name
-        );
-
-        let new_df = table.session.sql(&sql).await.map_err(|e| {
-            let _ = table.session.deregister_table(&temp_table_name);
-            LtseqError::Runtime(format!("cum_sum query failed: {}", e))
-        })?;
-
-        let _ = table.session.deregister_table(&temp_table_name);
-
-        Ok(LTSeqTable::from_df(
-            Arc::clone(&table.session),
-            new_df,
-            table.sort_specs.clone(),
-            None, // column set changed relative to the raw file: drop fast-path token
-        ))
-    })
-}
-
-/// Helper function to handle empty tables for cumulative sum
-async fn handle_empty_cum_sum(
-    table: &LTSeqTable,
-    schema: &ArrowSchema,
-    cum_exprs: &[Bound<'_, PyDict>],
-) -> PyResult<LTSeqTable> {
-    // Build schema with cumulative sum columns added
-    let mut new_fields = schema.fields().to_vec();
-    for (idx, expr_item) in cum_exprs.iter().enumerate() {
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            LtseqError::Validation("Expression must be dict".into())
-        })?;
-
-        let py_expr = dict_to_py_expr(expr_dict)?;
-
-        let col_name = if let PyExpr::Column(name) = &py_expr {
-            name.clone()
-        } else {
-            format!("cum_sum_{}", idx)
-        };
-
-        // Add cumsum column with float64 type
-        let cumsum_col_name = format!("{}_cumsum", col_name);
-        new_fields.push(Arc::new(Field::new(
-            cumsum_col_name,
-            DataType::Float64,
-            true,
-        )));
-    }
-
-    let new_arrow_schema = ArrowSchema::new(new_fields);
-
-    // Return table with expanded schema but no data
-    Ok(LTSeqTable::empty(
-        Arc::clone(&table.session),
-        Some(Arc::new(new_arrow_schema)),
         table.sort_specs.clone(),
         None, // column set changed relative to the raw file: drop fast-path token
     ))
