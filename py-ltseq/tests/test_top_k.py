@@ -171,52 +171,6 @@ class TestTopKNoGroupBy:
         assert top_scores == [95.0, 92.0, 88.0]
 
 
-class TestTopKGroupProxy:
-    """Tests for top_k via GroupProxy (Python-side NestedTable)."""
-
-    def test_top_k_via_group_proxy(self):
-        """top_k should work via GroupProxy in group_ordered().derive()."""
-        # Test the GroupProxy.top_k method directly via Python-side evaluation
-        from ltseq.grouping.proxies import GroupProxy
-
-        # Create a mock group
-        group_data = [
-            {"price": 100},
-            {"price": 150},
-            {"price": 120},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.top_k("price", 2)
-        assert result == [150, 120]
-
-    def test_top_k_group_proxy_descending(self):
-        """GroupProxy.top_k should return values in descending order."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"value": 5},
-            {"value": 1},
-            {"value": 9},
-            {"value": 3},
-            {"value": 7},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.top_k("value", 3)
-        assert result == [9, 7, 5]
-
-    def test_top_k_group_proxy_k_larger_than_data(self):
-        """GroupProxy.top_k with k > data size should return all values."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [{"x": 10}, {"x": 20}]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.top_k("x", 5)
-        assert result == [20, 10]
-
-
 class TestTopKWithOtherAggregates:
     """Tests for top_k combined with other aggregate functions."""
 

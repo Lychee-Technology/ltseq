@@ -138,7 +138,11 @@ class LinkedTable:
             # Predicate only uses source columns - fast path
             filtered_source = self._source.filter(predicate)
             return LinkedTable(
-                filtered_source, self._target, self._join_fn, self._alias
+                filtered_source,
+                self._target,
+                self._join_fn,
+                self._alias,
+                self._join_type,
             )
         except AttributeError:
             # Predicate references columns not in source
@@ -187,7 +191,9 @@ class LinkedTable:
     def derive(self, mapper: Callable) -> "LinkedTable":
         """Derive columns (delegates to source for MVP)."""
         derived_source = self._source.derive(mapper)
-        return LinkedTable(derived_source, self._target, self._join_fn, self._alias)
+        return LinkedTable(
+            derived_source, self._target, self._join_fn, self._alias, self._join_type
+        )
 
     def sort(self, *key_exprs) -> "LinkedTable":
         """
@@ -200,12 +206,16 @@ class LinkedTable:
             A new LinkedTable with sorted source data
         """
         sorted_source = self._source.sort(*key_exprs)
-        return LinkedTable(sorted_source, self._target, self._join_fn, self._alias)
+        return LinkedTable(
+            sorted_source, self._target, self._join_fn, self._alias, self._join_type
+        )
 
-    def slice(self, start: int, end: int) -> "LinkedTable":
-        """Slice rows."""
-        sliced_source = self._source.slice(start, end)
-        return LinkedTable(sliced_source, self._target, self._join_fn, self._alias)
+    def slice(self, offset: int, length: int) -> "LinkedTable":
+        """Slice rows (same semantics as LTSeq.slice: offset + length)."""
+        sliced_source = self._source.slice(offset, length)
+        return LinkedTable(
+            sliced_source, self._target, self._join_fn, self._alias, self._join_type
+        )
 
     def distinct(self, key_fn: Callable | None = None) -> "LinkedTable":
         """Get distinct rows."""
@@ -213,7 +223,9 @@ class LinkedTable:
             distinct_source = self._source.distinct()
         else:
             distinct_source = self._source.distinct(key_fn)
-        return LinkedTable(distinct_source, self._target, self._join_fn, self._alias)
+        return LinkedTable(
+            distinct_source, self._target, self._join_fn, self._alias, self._join_type
+        )
 
     def link(
         self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"

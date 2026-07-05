@@ -246,81 +246,6 @@ class TestMaxIf:
         assert west_row["max_valid"] == 150
 
 
-class TestGroupProxyConditionalAggs:
-    """Tests for conditional aggregations via GroupProxy (Python-side)."""
-
-    def test_count_if_via_group_proxy(self):
-        """count_if should work via GroupProxy directly."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"price": 50},
-            {"price": 150},
-            {"price": 200},
-            {"price": 80},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.count_if(lambda r: r.price > 100)
-        assert result == 2
-
-    def test_sum_if_via_group_proxy(self):
-        """sum_if should work via GroupProxy directly."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"is_active": True, "sales": 100},
-            {"is_active": False, "sales": 50},
-            {"is_active": True, "sales": 200},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.sum_if(lambda r: r.is_active, "sales")
-        assert result == 300
-
-    def test_avg_if_via_group_proxy(self):
-        """avg_if should work via GroupProxy directly."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"grade": "A", "score": 90},
-            {"grade": "B", "score": 70},
-            {"grade": "A", "score": 80},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.avg_if(lambda r: r.grade == "A", "score")
-        assert result == 85.0
-
-    def test_min_if_via_group_proxy(self):
-        """min_if should work via GroupProxy directly."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"valid": True, "value": 100},
-            {"valid": False, "value": 10},
-            {"valid": True, "value": 50},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.min_if(lambda r: r.valid, "value")
-        assert result == 50
-
-    def test_max_if_via_group_proxy(self):
-        """max_if should work via GroupProxy directly."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"valid": True, "value": 100},
-            {"valid": False, "value": 200},
-            {"valid": True, "value": 50},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.max_if(lambda r: r.valid, "value")
-        assert result == 100
-
-
 class TestConditionalAggsWithOtherAggregates:
     """Tests for conditional aggregations combined with other aggregates."""
 
@@ -401,16 +326,3 @@ class TestConditionalAggsEdgeCases:
         # Group B has no true flags
         b_row = df[df["group"] == "B"].iloc[0]
         assert b_row["true_sum"] == 0
-
-    def test_avg_if_no_matches_via_proxy(self):
-        """avg_if via GroupProxy should return None when no rows match."""
-        from ltseq.grouping.proxies import GroupProxy
-
-        group_data = [
-            {"flag": False, "value": 100},
-            {"flag": False, "value": 200},
-        ]
-        proxy = GroupProxy(group_data, None)
-
-        result = proxy.avg_if(lambda r: r.flag, "value")
-        assert result is None

@@ -22,14 +22,7 @@ mod types; // Streaming cursor for lazy iteration
 // Re-exports for internal use
 pub(crate) use error::LtseqError;
 pub(crate) use format::format_table;
-pub(crate) use types::{dict_to_py_expr, PyExpr};
-
 use crate::engine::{create_session_context, RUNTIME};
-
-/// Convert PyExpr to DataFusion Expr
-fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
-}
 
 /// LTSeqTable: Holds DataFusion SessionContext and loaded data
 /// This is the core Rust kernel backing LTSeq
@@ -513,47 +506,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with filtered data
     fn filter(&self, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        // 1. Deserialize expression
-        let py_expr = dict_to_py_expr(expr_dict)?;
-
-        // If no dataframe, return empty result (for unit tests)
-        if self.dataframe.is_none() {
-            return Ok(LTSeqTable::empty(
-                Arc::clone(&self.session),
-                self.schema.as_ref().map(Arc::clone),
-                self.sort_exprs.clone(),
-                self.source_parquet_path.clone(),
-            ));
-        }
-
-        // 2. Get schema (required for transpilation)
-        let schema = self.require_schema()?;
-
-        // 3. Transpile to DataFusion expr
-        let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(LtseqError::Transpile)?;
-
-        // 4. Get DataFrame
-        let df = self.require_df()?;
-
-        // 5. Apply filter (async operation)
-        let filtered_df = RUNTIME
-            .block_on(async {
-                (**df)
-                    .clone()
-                    .filter(df_expr)
-                    .map_err(|e| format!("Filter execution failed: {}", e))
-            })
-            .map_err(LtseqError::Runtime)?;
-
-        // 6. Return new LTSeqTable with filtered data (schema unchanged)
-        Ok(LTSeqTable::from_df_with_schema(
-            Arc::clone(&self.session),
-            filtered_df,
-            Arc::clone(schema),
-            self.sort_exprs.clone(),
-            self.source_parquet_path.clone(),
-        ))
+        crate::ops::basic::filter_impl(self, expr_dict)
     }
 
     /// Find the first row matching a predicate
@@ -612,53 +565,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with selected columns
     fn select(&self, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-        // If no dataframe, return empty result (for unit tests)
-        if self.dataframe.is_none() {
-            return Ok(LTSeqTable::empty(
-                Arc::clone(&self.session),
-                self.schema.as_ref().map(Arc::clone),
-                self.sort_exprs.clone(),
-                self.source_parquet_path.clone(),
-            ));
-        }
-
-        // 1. Get schema
-        let schema = self.require_schema()?;
-
-        // 2. Deserialize and transpile all expressions
-        let mut df_exprs = Vec::new();
-
-        for expr_dict in exprs {
-            // Deserialize
-            let py_expr = dict_to_py_expr(&expr_dict)?;
-
-            // Transpile
-            let df_expr = pyexpr_to_datafusion(py_expr, schema)
-                .map_err(LtseqError::Transpile)?;
-
-            df_exprs.push(df_expr);
-        }
-
-        // 3. Get DataFrame
-        let df = self.require_df()?;
-
-        // 4. Apply select (async operation)
-        let selected_df = RUNTIME
-            .block_on(async {
-                (**df)
-                    .clone()
-                    .select(df_exprs)
-                    .map_err(|e| format!("Select execution failed: {}", e))
-            })
-            .map_err(LtseqError::Runtime)?;
-
-        // 5. Return new LTSeqTable with recomputed schema
-        Ok(LTSeqTable::from_df(
-            Arc::clone(&self.session),
-            selected_df,
-            self.sort_exprs.clone(),
-            self.source_parquet_path.clone(),
-        ))
+        crate::ops::basic::select_impl(self, exprs)
     }
 
     /// Create derived columns based on expressions

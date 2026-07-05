@@ -376,23 +376,6 @@ class PartitionedTable:
         """
         return self.values()
 
-    def _materialize_partitions(self) -> None:
-        """
-        Compute the partitions (triggered on first access).
-
-        This method:
-        1. Gets data from the underlying table via Arrow
-        2. Evaluates partition function on each row
-        3. Groups rows by partition key
-        4. Creates LTSeq for each partition
-        5. Caches results
-        """
-        # Retained for backward compatibility with tests/internal calls.
-        # PartitionedTable now delegates to SQLPartitionedTable instead of
-        # materializing Arrow data in Python.
-        self._partitions_cache = {key: table for key, table in self._delegate.items()}
-
-
 def _partition_expr_to_columns(expr_dict: dict[str, Any]) -> tuple[str, ...] | None:
     """Convert a captured partition lambda into SQL partition columns.
 
@@ -446,7 +429,3 @@ class _PrecomputedPartitionedTable(PartitionedTable):
     def __len__(self) -> int:
         assert self._partitions_cache is not None
         return len(self._partitions_cache)
-
-    def _materialize_partitions(self) -> None:
-        """Override: partitions are already materialized."""
-        pass  # No-op since _partitions_cache is already set

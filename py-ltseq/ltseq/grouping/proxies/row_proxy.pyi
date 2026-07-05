@@ -1,6 +1,0 @@
-from typing import Any
-
-
-class RowProxy:
-    def __init__(self, row_data: Any) -> None: ...
-    def __getattr__(self, col_name: str) -> Any: ...

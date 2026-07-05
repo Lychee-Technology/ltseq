@@ -54,23 +54,6 @@ def ast_op_to_sql(op) -> str | None:
     return op_map.get(type(op))
 
 
-def ast_binop_to_sql(op) -> str | None:
-    """Convert AST BinOp to SQL operator."""
-    if isinstance(op, ast.Add):
-        return "+"
-    elif isinstance(op, ast.Sub):
-        return "-"
-    elif isinstance(op, ast.Mult):
-        return "*"
-    elif isinstance(op, ast.Div):
-        return "/"
-    elif isinstance(op, ast.FloorDiv):
-        return "/"
-    elif isinstance(op, ast.Mod):
-        return "%"
-    return ""
-
-
 class FilterSQLParser:
     """Parser for converting filter predicates to SQL WHERE clauses."""
 
@@ -292,109 +275,6 @@ class FilterSQLParser:
                     return f"LAST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
 
         return None
-
-
-class DeriveSQLParser:
-    """Parser for converting derive expressions to SQL window functions."""
-
-    def extract_derive_expressions(self, ast_tree, schema: dict[str, str]) -> dict[str, str]:
-        """
-        Extract derive expressions from lambda g: {dict} AST.
-
-        Returns dict mapping column_name -> SQL expression for window functions.
-        """
-        dict_node = None
-        for node in ast.walk(ast_tree):
-            if isinstance(node, ast.Lambda):
-                if isinstance(node.body, ast.Dict):
-                    dict_node = node.body
-                    break
-
-        if not dict_node:
-            return {}
-
-        result = {}
-
-        for key_node, value_node in zip(dict_node.keys, dict_node.values):
-            if not isinstance(key_node, ast.Constant) or not isinstance(
-                key_node.value, str
-            ):
-                return {}
-
-            col_name = key_node.value
-            sql_expr = self._process_derive_expr(value_node, schema)
-            if not sql_expr:
-                return {}
-
-            result[col_name] = sql_expr
-
-        return result
-
-    def _process_derive_expr(self, expr, schema: dict[str, str]) -> str:
-        """Process a derive expression and return SQL window function."""
-        if isinstance(expr, ast.Call):
-            return self._process_derive_call(expr, schema)
-        elif isinstance(expr, ast.BinOp):
-            return self._process_derive_binop(expr, schema)
-        elif isinstance(expr, ast.Attribute):
-            return self._process_derive_attribute(expr, schema)
-        return ""
-
-    def _process_derive_call(self, call_node, schema: dict[str, str]) -> str:
-        """Process function calls like g.count(), g.max('col'), etc."""
-        if not isinstance(call_node.func, ast.Attribute):
-            return ""
-
-        method_name = call_node.func.attr
-
-        if method_name == "count" and len(call_node.args) == 0:
-            return "COUNT(*) OVER (PARTITION BY __group_id__)"
-
-        if method_name in ("max", "min", "sum", "avg"):
-            if len(call_node.args) == 1 and isinstance(call_node.args[0], ast.Constant):
-                col_name = call_node.args[0].value
-                if isinstance(col_name, str):
-                    agg_func = method_name.upper()
-                    return f"{agg_func}({col_name}) OVER (PARTITION BY __group_id__)"
-
-        if method_name in ("first", "last") and len(call_node.args) == 0:
-            return ""
-
-        return ""
-
-    def _process_derive_attribute(self, attr_node, schema: dict[str, str]) -> str:
-        """Process attribute access chains like g.first().col or g.last().col."""
-        if not isinstance(attr_node.value, ast.Call):
-            return ""
-
-        inner_call = attr_node.value
-        col_name = attr_node.attr
-
-        if not isinstance(inner_call.func, ast.Attribute):
-            return ""
-
-        method_name = inner_call.func.attr
-
-        if method_name == "first" and len(inner_call.args) == 0:
-            return f"FIRST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__)"
-        elif method_name == "last" and len(inner_call.args) == 0:
-            return f"LAST_VALUE({col_name}) OVER (PARTITION BY __group_id__ ORDER BY __rn__ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
-
-        return ""
-
-    def _process_derive_binop(self, binop_node, schema: dict[str, str]) -> str:
-        """Process binary operations like (expr1) - (expr2), (expr1) / (expr2)."""
-        op_str = ast_binop_to_sql(binop_node.op)
-        if not op_str:
-            return ""
-
-        left_sql = self._process_derive_expr(binop_node.left, schema)
-        right_sql = self._process_derive_expr(binop_node.right, schema)
-
-        if not left_sql or not right_sql:
-            return ""
-
-        return f"({left_sql} {op_str} {right_sql})"
 
 
 def get_unsupported_derive_error(source: str) -> str:
