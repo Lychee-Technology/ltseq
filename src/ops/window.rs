@@ -116,6 +116,76 @@ struct StagedWindowPlan {
     final_cols: Vec<(String, PyExpr)>,
 }
 
+/// Recursive rewrite for `build_staged_plan`: hoists any window call's
+/// window-bearing input via `hoist`, recursing through plain combinators.
+/// Ranking (`PyExpr::Window`) nodes are deliberately not entered — nesting
+/// inside them stays out of scope and falls to `nested_window_hint`.
+fn rewrite_nested(
+    expr: PyExpr,
+    hoist: &mut dyn FnMut(PyExpr) -> PyExpr,
+) -> PyExpr {
+    match expr {
+        PyExpr::Call { func, on, args, kwargs } => {
+            if crate::transpiler::is_window_call(&func, &on) {
+                // The window's input: for rolling aggregates the input
+                // lives one level down (agg → rolling → input).
+                if func != "rolling" && matches!(&*on, PyExpr::Call { func: f, .. } if f == "rolling") {
+                    // agg over rolling: dig into the rolling call's input
+                    if let PyExpr::Call { func: rfunc, on: rin, args: rargs, kwargs: rkwargs } = *on {
+                        let new_rin = if crate::transpiler::contains_window_function(&rin) {
+                            hoist(*rin)
+                        } else {
+                            rewrite_nested(*rin, hoist)
+                        };
+                        return PyExpr::Call {
+                            func,
+                            on: Box::new(PyExpr::Call {
+                                func: rfunc,
+                                on: Box::new(new_rin),
+                                args: rargs,
+                                kwargs: rkwargs,
+                            }),
+                            args,
+                            kwargs,
+                        };
+                    }
+                    unreachable!("matched rolling above");
+                }
+                // shift/diff/cum_sum/rolling: input is `on`
+                let new_on = if crate::transpiler::contains_window_function(&on) {
+                    hoist(*on)
+                } else {
+                    rewrite_nested(*on, hoist)
+                };
+                return PyExpr::Call { func, on: Box::new(new_on), args, kwargs };
+            }
+            // Plain call: recurse into on and args
+            PyExpr::Call {
+                func,
+                on: Box::new(rewrite_nested(*on, hoist)),
+                args: args.into_iter().map(|a| rewrite_nested(a, hoist)).collect(),
+                kwargs,
+            }
+        }
+        PyExpr::BinOp { op, left, right } => PyExpr::BinOp {
+            op,
+            left: Box::new(rewrite_nested(*left, hoist)),
+            right: Box::new(rewrite_nested(*right, hoist)),
+        },
+        PyExpr::UnaryOp { op, operand } => PyExpr::UnaryOp {
+            op,
+            operand: Box::new(rewrite_nested(*operand, hoist)),
+        },
+        PyExpr::Alias { expr, alias } => PyExpr::Alias {
+            expr: Box::new(rewrite_nested(*expr, hoist)),
+            alias,
+        },
+        // Ranking windows: leave untouched — nesting inside them is out
+        // of scope and falls through to nested_window_hint.
+        other => other,
+    }
+}
+
 /// Split two-level nested windows into a staged plan.
 ///
 /// Whenever a window call's input subtree contains another window function
@@ -158,75 +228,9 @@ fn build_staged_plan(
         PyExpr::Column(name)
     };
 
-    fn rewrite(
-        expr: PyExpr,
-        hoist: &mut dyn FnMut(PyExpr) -> PyExpr,
-    ) -> PyExpr {
-        match expr {
-            PyExpr::Call { func, on, args, kwargs } => {
-                if crate::transpiler::is_window_call(&func, &on) {
-                    // The window's input: for rolling aggregates the input
-                    // lives one level down (agg → rolling → input).
-                    if func != "rolling" && matches!(&*on, PyExpr::Call { func: f, .. } if f == "rolling") {
-                        // agg over rolling: dig into the rolling call's input
-                        if let PyExpr::Call { func: rfunc, on: rin, args: rargs, kwargs: rkwargs } = *on {
-                            let new_rin = if crate::transpiler::contains_window_function(&rin) {
-                                hoist(*rin)
-                            } else {
-                                rewrite(*rin, hoist)
-                            };
-                            return PyExpr::Call {
-                                func,
-                                on: Box::new(PyExpr::Call {
-                                    func: rfunc,
-                                    on: Box::new(new_rin),
-                                    args: rargs,
-                                    kwargs: rkwargs,
-                                }),
-                                args,
-                                kwargs,
-                            };
-                        }
-                        unreachable!("matched rolling above");
-                    }
-                    // shift/diff/cum_sum/rolling: input is `on`
-                    let new_on = if crate::transpiler::contains_window_function(&on) {
-                        hoist(*on)
-                    } else {
-                        rewrite(*on, hoist)
-                    };
-                    return PyExpr::Call { func, on: Box::new(new_on), args, kwargs };
-                }
-                // Plain call: recurse into on and args
-                PyExpr::Call {
-                    func,
-                    on: Box::new(rewrite(*on, hoist)),
-                    args: args.into_iter().map(|a| rewrite(a, hoist)).collect(),
-                    kwargs,
-                }
-            }
-            PyExpr::BinOp { op, left, right } => PyExpr::BinOp {
-                op,
-                left: Box::new(rewrite(*left, hoist)),
-                right: Box::new(rewrite(*right, hoist)),
-            },
-            PyExpr::UnaryOp { op, operand } => PyExpr::UnaryOp {
-                op,
-                operand: Box::new(rewrite(*operand, hoist)),
-            },
-            PyExpr::Alias { expr, alias } => PyExpr::Alias {
-                expr: Box::new(rewrite(*expr, hoist)),
-                alias,
-            },
-            // Ranking windows: leave untouched — nesting inside them is out
-            // of scope and falls through to nested_window_hint.
-            other => other,
-        }
-    }
-
     let final_cols = parsed_cols
         .iter()
-        .map(|(name, expr)| (name.clone(), rewrite(expr.clone(), &mut hoist)))
+        .map(|(name, expr)| (name.clone(), rewrite_nested(expr.clone(), &mut hoist)))
         .collect();
 
     StagedWindowPlan { stage_cols, final_cols }

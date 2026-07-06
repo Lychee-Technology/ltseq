@@ -73,6 +73,9 @@ class TestSequenceChaining:
         assert one_step["prev_ma"].tolist() == pytest.approx(
             two_step["prev_ma"].tolist(), nan_ok=True
         )
+        # Direct row-order assertion on a stable key: derived values could
+        # coincide across rows, but the date sequence cannot.
+        assert one_step["date"].tolist() == two_step["date"].tolist()
         assert not any(c.startswith("__ltseq_stage_") for c in one_step.columns)
 
     def test_shift_then_rolling_sum_matches_two_step_derive(self, sample_csv):
@@ -92,6 +95,7 @@ class TestSequenceChaining:
         assert one_step["sum_prev"].tolist() == pytest.approx(
             two_step["sum_prev"].tolist(), nan_ok=True
         )
+        assert one_step["date"].tolist() == two_step["date"].tolist()
 
     def test_nested_window_mixed_with_plain_window_and_plain_expr(self, sample_csv):
         """Nested window, plain window and plain expression coexist in one
@@ -153,6 +157,34 @@ class TestSequenceChaining:
                     "x": r.price.rolling(3).mean().shift(1).rolling(2).sum(),
                 }
             )
+
+    def test_ranking_over_window_still_hints(self, sample_csv):
+        """Scope lock (issue #101 design review revision 2): the staged
+        planner deliberately does not enter PyExpr::Window (ranking) nodes.
+        A ranking ordered by a window result degrades to the actionable
+        hint — never to a silently wrong result."""
+        from ltseq import rank
+
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        with pytest.raises(Exception, match="split it into two steps"):
+            t.derive(
+                lambda r: {"rk": rank().over(order_by=r.price.rolling(3).mean())}
+            )
+
+    def test_ranking_over_window_two_step_workaround(self, sample_csv):
+        """The documented workaround for ranking-over-window: stage the
+        window column first, then rank over it."""
+        from ltseq import rank
+
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        df = (
+            t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()})
+            .derive(lambda r: {"rk": rank().over(order_by=r.ma_3)})
+            .to_pandas()
+        )
+        assert "rk" in df.columns
+        assert len(df) == 5
 
     def test_hidden_stage_name_collision_avoided(self):
         """A user column literally named __ltseq_stage_0 must not collide
