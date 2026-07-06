@@ -53,20 +53,32 @@ class TestSequenceChaining:
         except Exception as e:
             pytest.skip(f"Combining shift() and diff() not yet implemented: {e}")
 
-    def test_rolling_and_shift_together(self, sample_csv):
-        """Combine rolling() and shift() in same derive."""
+    def test_rolling_and_shift_together_rejected_with_hint(self, sample_csv):
+        """Window-on-window in one derive raises a clear error (issue #91:
+        the SQL fallback is gone; native staged select is a tracked
+        follow-up). The error must point at the two-step workaround."""
         t = LTSeq.read_csv(sample_csv).sort("date")
 
-        try:
-            result = t.derive(
+        with pytest.raises(Exception, match="split it into two steps"):
+            t.derive(
                 lambda r: {
-                    "ma_3": r.price.rolling(3).mean(),
                     "prev_ma": r.price.rolling(3).mean().shift(1),
                 }
             )
-            assert isinstance(result, LTSeq)
-        except Exception as e:
-            pytest.skip(f"Combining rolling() and shift() not yet implemented: {e}")
+
+    def test_rolling_and_shift_via_two_step_derive(self, sample_csv):
+        """The documented workaround: stage the inner window as a column,
+        then window over it. Values must equal the staged column shifted."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        result = t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()}).derive(
+            lambda r: {"prev_ma": r.ma_3.shift(1)}
+        )
+        df = result.to_pandas()
+        ma = df["ma_3"].tolist()
+        prev = df["prev_ma"].tolist()
+        assert prev[0] != prev[0] or prev[0] is None  # NaN first row
+        assert prev[1:] == pytest.approx(ma[:-1])
 
     def test_all_sequence_ops_together(self, sample_csv):
         """Use shift, rolling, and diff in one derive."""

@@ -415,12 +415,13 @@ class TestCumSumBasic:
             pytest.skip("cum_sum() not yet implemented")
 
     def test_cum_sum_empty_table(self, empty_table):
-        """cum_sum() on empty table."""
-        try:
-            result = empty_table.cum_sum("value")
-            assert isinstance(result, LTSeq)
-        except NotImplementedError:
-            pytest.skip("cum_sum() not yet implemented")
+        """cum_sum() on an empty (0-row) table stays native (#91 PR 3):
+        the window select over an empty DataFrame must produce an empty
+        result whose schema carries the new cumsum column."""
+        result = empty_table.cum_sum("value")
+        assert isinstance(result, LTSeq)
+        assert "value_cumsum" in result.columns
+        assert len(result) == 0
 
 
 class TestCumSumExpressions:
