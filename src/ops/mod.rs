@@ -13,7 +13,6 @@
 //! - **aggregation**: SQL GROUP BY and filtering
 //! - **pivot**: Long-to-wide table transformation
 //! - **align**: Row alignment to reference sequence
-//! - **derive_sql**: SQL-based derive operations
 //! - **advanced**: Re-exports for backward compatibility
 //!
 //! # Architecture: Helper Function Delegation Pattern

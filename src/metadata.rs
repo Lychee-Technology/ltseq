@@ -3,7 +3,7 @@
 //! `LTSeqTable.sort_specs` records the declared row order (column, direction,
 //! nulls placement). Every downstream consumer that rebuilds an ORDER BY —
 //! window functions, group boundary detection, linear scans, Parquet
-//! file_sort_order declarations, SQL fallbacks — must derive it from
+//! file_sort_order declarations — must derive it from
 //! `SortSpec` via the helpers below instead of assuming ascending order.
 //!
 //! Propagation rules (issue #95): ops that preserve row order (filter,
@@ -66,21 +66,4 @@ pub(crate) fn sort_specs_to_window_sorts(specs: &[SortSpec]) -> Vec<Sort> {
 /// `MemTable::with_sort_order`.
 pub(crate) fn sort_specs_to_file_sort_order(specs: &[SortSpec]) -> Vec<Vec<SortExpr>> {
     vec![sort_specs_to_df_sort_exprs(specs)]
-}
-
-/// Render an ORDER BY column list (without the `ORDER BY` keyword) for the
-/// SQL fallback paths. Empty string when there are no sort specs.
-pub(crate) fn sort_specs_to_sql_order_by(specs: &[SortSpec]) -> String {
-    if specs.is_empty() {
-        return String::new();
-    }
-    let parts: Vec<String> = specs
-        .iter()
-        .map(|s| {
-            let dir = if s.descending { "DESC" } else { "ASC" };
-            let nulls = if s.nulls_first { "NULLS FIRST" } else { "NULLS LAST" };
-            format!("\"{}\" {} {}", s.column, dir, nulls)
-        })
-        .collect();
-    parts.join(", ")
 }

@@ -12,7 +12,7 @@
 //! - Performance: Single table scan, no sorting required
 //!
 //! Window derivations:
-//! - Use SQL-based window functions with OVER clauses
+//! - Use native DataFusion window expressions
 //! - Examples: LAG/LEAD (shift), rolling aggregations, cumulative sums
 //! - Handled by: crate::ops::window module
 //! - This module detects window functions and delegates
@@ -113,7 +113,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
 
 /// Helper function to add cumulative sum columns
 ///
-/// Delegates to window module which handles the SQL-based cumulative sum.
+/// Delegates to the window module's native cumulative-sum builder.
 /// This is a delegation point for the cum_sum() method in lib.rs.
 pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
     crate::ops::window::cum_sum_impl(table, cum_exprs)

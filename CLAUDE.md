@@ -44,11 +44,11 @@ src/                           # Rust kernel
 │   ├── window.rs             # shift, rolling, diff
 │   ├── join.rs               # semi_join, anti_join
 │   ├── set_ops.rs            # union, intersect, diff, distinct
-│   ├── aggregation.rs        # SQL GROUP BY
+│   ├── aggregation.rs        # native GROUP BY aggregation
 │   └── ...
 ├── transpiler/               # PyExpr → DataFusion Expr conversion
 │   ├── mod.rs                # Main transpilation logic
-│   ├── sql_gen.rs            # SQL generation for window functions
+│   ├── window_native.rs      # Native window expression builders
 │   └── optimization.rs       # Expression optimizations
 └── cursor.rs                 # Streaming cursor for large datasets
 
