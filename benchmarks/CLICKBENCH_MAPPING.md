@@ -42,7 +42,7 @@ LTSeq 的 ClickBench 使用**完全相同的数据集**（`hits.parquet`，1 亿
 t.agg(by=lambda r: r.url, cnt=lambda g: g.url.count())
  .sort("cnt", desc=True)
  .slice(0, 10)
- .collect()
+ .to_dicts()
 ```
 
 **等价 SQL（DuckDB）：**

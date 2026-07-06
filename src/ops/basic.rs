@@ -15,11 +15,13 @@
 //! - **filter_impl**: Filter rows based on a predicate expression
 //! - **select_impl**: Select columns or derived expressions
 //! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
+//! - **materialize_impl**: Execute the lazy plan and snapshot the result into memory
 
 use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
+use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -257,4 +259,71 @@ pub fn search_first_impl(
         table.sort_specs.clone(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
+}
+
+/// Helper function to materialize the lazy plan into an in-memory table
+///
+/// Executes the pending DataFusion plan once and snapshots all batches into a
+/// single-partition MemTable-backed DataFrame, so downstream operations reuse
+/// the computed data instead of re-executing the plan. Rows, schema, and row
+/// order are unchanged, so sort metadata is carried over.
+///
+/// Args:
+///     table: Reference to LTSeqTable
+pub fn materialize_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+    // No dataframe loaded (fresh/empty table): materialization is a no-op
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::empty(
+            Arc::clone(&table.session),
+            table.schema.as_ref().map(Arc::clone),
+            table.sort_specs.clone(),
+            None,
+        ));
+    }
+
+    let df = table.require_df()?;
+    let batches = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("collect() materialization failed: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    // The data now lives in memory: drop source_parquet_path so downstream ops
+    // scan the snapshot instead of re-reading the original file.
+    match table.schema.as_ref() {
+        // A 0-row plan must still materialize to a scannable (empty) table,
+        // not a schema-only shell, so count/filter keep working downstream.
+        Some(schema) if batches.is_empty() => {
+            let mem_table = MemTable::try_new(Arc::clone(schema), vec![vec![]])
+                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
+            let empty_df = table
+                .session
+                .read_table(Arc::new(mem_table))
+                .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
+            Ok(LTSeqTable::from_df_with_schema(
+                Arc::clone(&table.session),
+                empty_df,
+                Arc::clone(schema),
+                table.sort_specs.clone(),
+                None,
+            ))
+        }
+        Some(schema) => LTSeqTable::from_batches_with_schema(
+            Arc::clone(&table.session),
+            batches,
+            Arc::clone(schema),
+            table.sort_specs.clone(),
+            None,
+        ),
+        None => LTSeqTable::from_batches(
+            Arc::clone(&table.session),
+            batches,
+            table.sort_specs.clone(),
+            None,
+        ),
+    }
 }

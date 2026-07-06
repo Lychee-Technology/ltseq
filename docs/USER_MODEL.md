@@ -125,7 +125,7 @@ Examples:
 
 ```python
 t.show()
-rows = t.collect()
+rows = t.to_dicts()
 ```
 
 This pattern is the intended use model for the library.

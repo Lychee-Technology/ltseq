@@ -44,7 +44,8 @@ This document describes the API **as currently implemented**. Every signature be
 | Stream large file | `LTSeq.scan()` | `for batch in LTSeq.scan("big.csv"): ...` |
 | From Python data | `LTSeq.from_dict()` | `t = LTSeq.from_dict({"id": [1, 2]})` |
 | View schema | `.columns` / `.schema` | `print(t.columns)` |
-| Collect rows | `.collect()` | `rows = t.collect()` |
+| Rows as dicts | `.to_dicts()` | `rows = t.to_dicts()` |
+| Materialize plan | `.collect()` | `result = t.collect()` |
 | To pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | Write file | `.write_csv()` / `.write_parquet()` | `t.write_csv("out.csv")` |
 | Row count | `.count()` / `len(t)` | `n = t.count()` |
@@ -266,13 +267,27 @@ print(t.dtypes)  # [("id", "Int64"), ("name", "Utf8"), ...]
 ```
 
 ### `LTSeq.collect`
-- **Signature**: `LTSeq.collect() -> list[dict[str, Any]]`
-- **Behavior**: Materialize all rows as a list of dictionaries. Note: unlike Polars' `collect()` (which returns a DataFrame), LTSeq's `collect()` returns row dicts — see `to_pandas()`/`to_arrow()` for table-shaped exports
+- **Signature**: `LTSeq.collect() -> LTSeq`
+- **Behavior**: Materialize the lazy plan and return a new in-memory `LTSeq` (same semantics as Polars/PySpark `collect()`). The pending pipeline executes once; downstream operations reuse the computed data instead of re-executing the plan. Row order, schema, and sort metadata are preserved, and the result remains chainable. To get rows as dictionaries, use `to_dicts()`.
+- **Parameters**: none
+- **Returns**: new `LTSeq` backed by the materialized in-memory data
+- **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
+- **Example**:
+```python
+result = t.filter(lambda r: r.age > 18).collect()  # runs the plan once
+result.count()
+rows = result.to_dicts()
+```
+
+### `LTSeq.to_dicts`
+- **Signature**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
+- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`)
+- **Parameters**: none
 - **Returns**: list of row dictionaries
 - **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
 - **Example**:
 ```python
-rows = t.filter(lambda r: r.age > 18).collect()
+rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
@@ -1663,7 +1678,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df['col'].isin([1, 2])` | `t.filter(lambda r: r.col.is_in([1, 2]))` | |
 | `df['col'].astype('float')` | `t.derive(col=lambda r: r.col.cast("float64"))` | |
 | `df.head(10)` / `df.tail(10)` | `t.head(10)` / `t.tail(10)` | |
-| `df.to_dict('records')` | `t.collect()` | |
+| `df.to_dict('records')` | `t.to_dicts()` | |
 | `len(df)` | `len(t)` or `t.count()` | |
 | `df.columns.tolist()` | `t.columns` | |
 | `df.isna()` | `t.filter(lambda r: r.col.is_null())` | Per-column |

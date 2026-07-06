@@ -59,7 +59,7 @@ class TestExceptAndDiff:
     def test_except_returns_difference(self):
         t1, t2 = self._make_tables()
         result = t1.except_(t2)
-        rows = result.collect()
+        rows = result.to_dicts()
         vals = sorted([r["x"] for r in rows])
         assert vals == [1]
 
@@ -171,7 +171,7 @@ class TestGroupConsecutiveAlias:
         groups = t.group_consecutive(lambda r: r.trend)
         # flatten() adds __group_id__ and __group_count__ columns
         flat = groups.flatten()
-        rows = flat.collect()
+        rows = flat.to_dicts()
         # Should get 3 groups: up(day 1-2), down(day 3-4), up(day 5)
         group_ids = sorted(set(r["__group_id__"] for r in rows))
         assert group_ids == [1, 2, 3]

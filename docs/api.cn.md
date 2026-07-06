@@ -44,7 +44,8 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 流式读取大文件 | `LTSeq.scan()` | `for batch in LTSeq.scan("big.csv"): ...` |
 | 从 Python 数据构造 | `LTSeq.from_dict()` | `t = LTSeq.from_dict({"id": [1, 2]})` |
 | 查看 schema | `.columns` / `.schema` | `print(t.columns)` |
-| 物化行字典 | `.collect()` | `rows = t.collect()` |
+| 行字典导出 | `.to_dicts()` | `rows = t.to_dicts()` |
+| 物化惰性计划 | `.collect()` | `result = t.collect()` |
 | 转 pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | 写文件 | `.write_csv()` / `.write_parquet()` | `t.write_csv("out.csv")` |
 | 行数统计 | `.count()` / `len(t)` | `n = t.count()` |
@@ -266,13 +267,27 @@ print(t.dtypes)  # [("id", "Int64"), ("name", "Utf8"), ...]
 ```
 
 ### `LTSeq.collect`
-- **签名**: `LTSeq.collect() -> list[dict[str, Any]]`
-- **行为**: 将所有行物化为字典列表。注意：与 Polars 的 `collect()`（返回 DataFrame）不同，LTSeq 的 `collect()` 返回行字典；表形态导出请用 `to_pandas()`/`to_arrow()`
+- **签名**: `LTSeq.collect() -> LTSeq`
+- **行为**: 物化惰性计划，返回新的内存 `LTSeq`（与 Polars/PySpark `collect()` 语义一致）。挂起的管道只执行一次，下游操作复用已计算的数据而非重新执行计划。行序、schema、排序元数据均保留，结果可继续链式调用。如需行字典，请用 `to_dicts()`。
+- **参数**: 无
+- **返回**: 由物化后内存数据支撑的新 `LTSeq`
+- **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
+- **示例**:
+```python
+result = t.filter(lambda r: r.age > 18).collect()  # 计划只执行一次
+result.count()
+rows = result.to_dicts()
+```
+
+### `LTSeq.to_dicts`
+- **签名**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
+- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）
+- **参数**: 无
 - **返回**: 行字典列表
 - **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
 - **示例**:
 ```python
-rows = t.filter(lambda r: r.age > 18).collect()
+rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
@@ -1663,7 +1678,7 @@ for batch in LTSeq.scan("huge.csv"):
 | `df['col'].isin([1, 2])` | `t.filter(lambda r: r.col.is_in([1, 2]))` | |
 | `df['col'].astype('float')` | `t.derive(col=lambda r: r.col.cast("float64"))` | |
 | `df.head(10)` / `df.tail(10)` | `t.head(10)` / `t.tail(10)` | |
-| `df.to_dict('records')` | `t.collect()` | |
+| `df.to_dict('records')` | `t.to_dicts()` | |
 | `len(df)` | `len(t)` 或 `t.count()` | |
 | `df.columns.tolist()` | `t.columns` | |
 | `df.isna()` | `t.filter(lambda r: r.col.is_null())` | 按列 |

@@ -499,6 +499,15 @@ impl LTSeqTable {
         Ok((logical_text, physical_text))
     }
 
+    /// Materialize the lazy plan into an in-memory table (single-partition
+    /// MemTable snapshot). Preserves row order, schema, and sort metadata.
+    ///
+    /// Returns:
+    ///     New LTSeqTable backed by the materialized data
+    fn materialize(&self) -> PyResult<LTSeqTable> {
+        crate::ops::basic::materialize_impl(self)
+    }
+
     /// Collect the DataFrame and return all record batches as Arrow IPC bytes.
     ///
     /// Returns:

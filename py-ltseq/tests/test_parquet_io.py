@@ -83,7 +83,7 @@ class TestReadParquet:
         """agg() works on parquet-loaded data."""
         t = LTSeq.read_parquet(sample_parquet)
         result = t.agg(total=lambda g: g.score.sum())
-        rows = result.collect()
+        rows = result.to_dicts()
         assert len(rows) == 1
         assert abs(rows[0]["total"] - (85.5 + 92.0 + 78.3 + 95.1 + 88.7)) < 0.01
 
@@ -94,12 +94,22 @@ class TestReadParquet:
         assert len(df) == 5
         assert "id" in df.columns
 
-    def test_read_parquet_collect(self, sample_parquet):
-        """collect() works on parquet-loaded data."""
+    def test_read_parquet_to_dicts(self, sample_parquet):
+        """to_dicts() works on parquet-loaded data."""
         t = LTSeq.read_parquet(sample_parquet)
-        rows = t.collect()
+        rows = t.to_dicts()
         assert len(rows) == 5
         assert all(isinstance(r, dict) for r in rows)
+
+    def test_read_parquet_collect_materializes(self, sample_parquet):
+        """collect() on parquet-loaded data returns a chainable in-memory LTSeq."""
+        t = LTSeq.read_parquet(sample_parquet)
+        result = t.collect()
+        assert isinstance(result, LTSeq)
+        assert result.count() == 5
+        # Downstream ops scan the in-memory snapshot, not the original file
+        filtered = result.filter(lambda r: r.id > 2)
+        assert filtered.count() == 3
 
     def test_read_parquet_name(self, sample_parquet):
         """Table name is derived from filename."""

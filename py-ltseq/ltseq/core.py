@@ -294,7 +294,34 @@ class LTSeq(
         """Return optimized logical and physical plans for debugging."""
         return self._inner.explain_plan()
 
-    def collect(self) -> list[dict[str, Any]]:
+    def collect(self) -> "LTSeq":
+        """
+        Materialize the lazy plan and return a new in-memory LTSeq.
+
+        Executes the pending pipeline once and snapshots the result into
+        memory, so downstream operations reuse the computed data instead of
+        re-executing the plan. Row order, schema, and sort metadata are
+        preserved; the result is a normal LTSeq and remains chainable.
+
+        This matches Polars/PySpark collect() semantics. To get rows as a
+        list of dictionaries (the old behavior of collect()), use to_dicts().
+
+        Returns:
+            A new LTSeq backed by the materialized in-memory data
+
+        Raises:
+            MemoryError: If the dataset is too large to fit in memory
+            RuntimeError: If execution fails
+
+        Example:
+            >>> result = t.filter(lambda r: r.age > 18).collect()
+            >>> result.count()
+            42
+            >>> rows = result.to_dicts()
+        """
+        return LTSeq._from_inner(self._inner.materialize())
+
+    def to_dicts(self) -> list[dict[str, Any]]:
         """
         Materialize all rows as a list of dictionaries.
 
@@ -307,7 +334,7 @@ class LTSeq(
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
-            >>> rows = t.filter(lambda r: r.age > 18).collect()
+            >>> rows = t.filter(lambda r: r.age > 18).to_dicts()
             >>> for row in rows:
             ...     print(row["name"])
         """
