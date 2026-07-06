@@ -155,6 +155,21 @@ class StringAccessor:
         """
         return self._make_call("str_split", (delimiter, index))
 
+    def split_part(self, delimiter: str, index: int) -> "CallExpr":
+        """Split string by delimiter and return the part at specified index.
+
+        Alias for split() with a name that matches SQL SPLIT_PART, avoiding
+        confusion with Python's str.split (which returns a list).
+
+        Args:
+            delimiter: String to split on
+            index: 1-based index of the part to return (1 = first part)
+
+        Example:
+            >>> t.derive(domain=lambda r: r.email.s.split_part("@", 2))
+        """
+        return self._make_call("str_split", (delimiter, index))
+
     def like(self, pattern: str) -> "CallExpr":
         """SQL LIKE pattern matching (% matches any sequence, _ matches one char).
 
@@ -208,6 +223,22 @@ class StringAccessor:
             >>> t.derive(at_pos=lambda r: r.email.s.pos("@"))
         """
         return self._make_call("str_pos", (sub,))
+
+    def find(self, sub: str) -> Expr:
+        """Find 0-based position of substring (-1 if not found). Matches Python str.find.
+
+        Args:
+            sub: Substring to search for
+
+        Returns:
+            Integer expression: 0-based position, or -1 if not found
+
+        Example:
+            >>> t.derive(at_idx=lambda r: r.email.s.find("@"))
+        """
+        # strpos is 1-based with 0 for not-found, so pos - 1 gives exactly
+        # Python find() semantics: 0-based position, -1 when absent.
+        return self._make_call("str_pos", (sub,)) - 1
 
     def left(self, n: int) -> "CallExpr":
         """Return the leftmost n characters of the string.
@@ -267,6 +298,17 @@ class StringAccessor:
 
         Example:
             >>> t.derive(code=lambda r: r.initial.s.asc())
+        """
+        return self._make_call("str_asc")
+
+    def ord(self) -> "CallExpr":
+        """Return the Unicode code point of the first character.
+
+        Alias for asc() named after Python's built-in ord(); asc() is easy
+        to misread as "ascending" in a sorting-heavy library.
+
+        Example:
+            >>> t.derive(code=lambda r: r.initial.s.ord())
         """
         return self._make_call("str_asc")
 

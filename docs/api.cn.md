@@ -98,14 +98,14 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 时序就近连接 | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | 半连接 | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | 反连接 | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| 指针关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")` |
+| 指针关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### 集合操作
 | 操作 | 方法 | 示例 |
 |------|------|------|
-| 纵向合并（保留重复）| `.union()` | `t1.union(t2)` |
+| 纵向合并（保留重复）| `.concat()` / `.union()` | `t1.concat(t2)` |
 | 交集 | `.intersect()` | `t1.intersect(t2)` |
-| 差集 | `.except_()` | `t1.except_(t2)` |
+| 差集 | `.subtract()` / `.except_()` | `t1.subtract(t2)` |
 | 对称差 | `.xunion()` | `t1.xunion(t2)` |
 
 ### 行变更（写时复制）
@@ -656,12 +656,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over`（窗口规格）
-- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False) -> WindowExpr`
+- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False, desc: bool | None = None) -> WindowExpr`
 - **行为**: 为排名函数应用窗口规格。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值
 - **参数**:
   - `partition_by` 分区列（可选）
   - `order_by` 排序列（排名函数必需）
   - `descending` order_by 的排序方向（默认 False）
+  - `desc` descending 的别名，与 sort() 对齐
 - **返回**: 可用于 derive() 的 `WindowExpr`
 - **异常**: `TypeError`（partition_by/order_by 类型无效）
 - **示例**:
@@ -878,15 +879,15 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ## 5. 集合运算
 
-### `LTSeq.union`
-- **签名**: `LTSeq.union(other: LTSeq) -> LTSeq`
-- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）
+### `LTSeq.concat` / `LTSeq.union`
+- **签名**: `LTSeq.concat(other: LTSeq) -> LTSeq`
+- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）。`union` 为兼容别名——注意它不像 SQL UNION 那样去重；推荐用 `concat`（Pandas/Polars 动词，天然无去重预期）
 - **参数**: `other` 另一个 schema 相同的 LTSeq
 - **返回**: 合并后的 `LTSeq`
 - **异常**: `TypeError`（other 非 LTSeq），`ValueError`（schema 不匹配）
 - **示例**:
 ```python
-combined = t1.union(t2)
+combined = t1.concat(t2)
 ```
 
 ### `LTSeq.intersect`
@@ -900,16 +901,16 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.except_`（差集）
-- **签名**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
-- **行为**: 左表中有而右表中没有的行（SQL EXCEPT 语义）
+### `LTSeq.subtract` / `LTSeq.except_`（差集）
+- **签名**: `LTSeq.subtract(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **行为**: 左表中有而右表中没有的行（SQL EXCEPT 语义）。`except_` 为兼容别名（尾下划线是躲 Python 关键字的妥协）；`subtract` 与 PySpark 同名
 - **参数**: `other` 另一个表；`on` 键选择器
 - **返回**: 差集 `LTSeq`
 - **SQL 等价**: `EXCEPT` / `MINUS`
 - **异常**: `TypeError`（other 非 LTSeq 或 on 无效），`ValueError`（schema 未初始化）
 - **示例**:
 ```python
-only_left = t1.except_(t2, on=lambda r: r.id)
+only_left = t1.subtract(t2, on=lambda r: r.id)
 ```
 
 > 注意：`Expr.diff()`（行级差分，第 3 节）与表级差集无关。表级差集请使用 `except_()`。
@@ -1003,14 +1004,14 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.link`
-- **签名**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str, join_type: str = "inner") -> LinkedTable`
+- **签名**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
 - **行为**: 指针式关联；按需物化；通过别名访问目标表的列
-- **参数**: `target_table` 目标表；`on` 连接条件；`as_` 别名；`join_type` 取值 {inner,left,right,full}
+- **参数**: `target_table` 目标表；`on` 连接条件；`alias` 关联引用的别名（`as_` 为其兼容别名，二者恰好传一个）；`join_type` 取值 {inner,left,right,full}
 - **返回**: `LinkedTable`
-- **异常**: `TypeError`（on 无效），`ValueError`（join_type 无效或 schema 未初始化）
+- **异常**: `TypeError`（on 无效），`ValueError`（join_type 无效、as_/alias 同时传或都不传、schema 未初始化）
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 ```
 
@@ -1261,6 +1262,8 @@ t.derive(
 
 ### 字符串操作（`r.col.s.*`）
 
+> `.str` 是 `.s` 的别名（Pandas/Polars 惯例）：`r.email.str.contains("@")` ≡ `r.email.s.contains("@")`。
+
 #### `contains`
 - **签名**: `r.col.s.contains(pattern: str) -> Expr`
 - **行为**: 子串包含判断
@@ -1354,19 +1357,27 @@ full = t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
 padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 ```
 
-#### `split`
-- **签名**: `r.col.s.split(delimiter: str, index: int) -> Expr`
-- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串
+#### `split_part` / `split`
+- **签名**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
+- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串。`split` 为兼容别名——推荐 `split_part`，避免与 Python 返回列表的 `str.split` 重名歧义
 - **异常**: `ValueError`（index <= 0）
 - **示例**:
 ```python
 # 从 "user@example.com" 取域名
-domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
+domain = t.derive(domain=lambda r: r.email.s.split_part("@", 2))
+```
+
+#### `find`
+- **签名**: `r.col.s.find(sub: str) -> Expr`
+- **行为**: 返回子串首次出现的 **0-based** 位置；未找到返回 -1（Python `str.find` 语义）
+- **示例**:
+```python
+at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4，未找到 → -1
 ```
 
 #### `pos`
 - **签名**: `r.col.s.pos(sub: str) -> Expr`
-- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0
+- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0。SQL 语义——需要 Python 语义请用 `find`
 - **SQL 等价**: `STRPOS(col, sub)`
 - **示例**:
 ```python
@@ -1383,13 +1394,13 @@ prefix = t.derive(pfx=lambda r: r.code.s.left(3))    # "ABC123" → "ABC"
 suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 ```
 
-#### `asc`
-- **签名**: `r.col.s.asc() -> Expr`
-- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）
+#### `ord` / `asc`
+- **签名**: `r.col.s.ord() -> Expr`
+- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）。`asc` 为兼容别名——推荐 `ord`，在排序遍地的库里 `asc` 易被读成 ascending
 - **SQL 等价**: `ASCII(col)`
 - **示例**:
 ```python
-code = t.derive(code=lambda r: r.ch.s.asc())  # "A" → 65, "a" → 97
+code = t.derive(code=lambda r: r.ch.s.ord())  # "A" → 65, "a" → 97
 ```
 
 #### `isalpha` / `isdigit` / `islower` / `isupper`
@@ -1402,15 +1413,15 @@ numeric_codes = t.filter(lambda r: r.code.s.isdigit())
 
 ### 字符串全局函数
 
-#### `str_char`
-- **签名**: `str_char(n: Expr) -> Expr`
-- **行为**: 将 Unicode 码点整数转换为单字符字符串（类似 Python 的 `chr()`）
+#### `char` / `str_char`
+- **签名**: `char(n: Expr) -> Expr`
+- **行为**: 将 Unicode 码点整数转换为单字符字符串（类似 Python 的 `chr()`）。`str_char` 为兼容别名
 - **SQL 等价**: `CHR(n)`
-- **导入**: `from ltseq.expr import str_char`
+- **导入**: `from ltseq.expr import char`
 - **示例**:
 ```python
-from ltseq.expr import str_char
-ch = t.derive(ch=lambda r: str_char(r.code))  # 65 → "A", 97 → "a"
+from ltseq.expr import char
+ch = t.derive(ch=lambda r: char(r.code))  # 65 → "A", 97 → "a"
 ```
 
 #### `concat_ws`
