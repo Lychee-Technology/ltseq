@@ -14,7 +14,7 @@ The original `click-bench-plan.md` contains several API errors that must be fixe
 | 1 | `TSeq.read_parquet(...)` | Class is `LTSeq`; **`read_parquet()` does not exist yet** | Implement `read_parquet()` in Rust + Python (Phase 0) |
 | 2 | `.str.starts_with(...)` | String accessor is `.s`, not `.str` | Use `r.URL.s.starts_with(...)` |
 | 3 | `.sort(lambda r: -r.count)` | `Expr` has no `__neg__`; no lambda-based descending sort | Use `.sort("cnt", desc=True)` |
-| 4 | `.to_list()` | Method is `.collect()` (returns list of dicts) | Use `.collect()` |
+| 4 | `.to_list()` | Method is `.to_dicts()` (returns list of dicts; `.collect()` now materializes to `LTSeq`) | Use `.to_dicts()` |
 | 5 | `group_ordered(cond).count()` | `.count()` on NestedTable returns a `CallExpr`, not int | Use `.flatten().select("__group_id__").distinct().count()` |
 | 6 | URL patterns `/`, `/product%`, `/cart` | ClickBench data is Yandex Metrica (Russian sites) | Must investigate real URL patterns |
 | 7 | `duckdb`, `psutil` not in deps | Only `pyarrow` is a runtime dep | Install manually or add to optional deps |
@@ -260,7 +260,7 @@ def ltseq_top_url():
         .agg(by=lambda r: r.URL, cnt=lambda g: g.count())
         .sort("cnt", desc=True)
         .slice(0, 10)
-        .collect()
+        .to_dicts()
     )
 ```
 
@@ -311,7 +311,7 @@ def ltseq_session_v2():
         "is_new": ((r.UserID != r.UserID.shift(1)) |
                    (r.EventTime - r.EventTime.shift(1) > 1800)).cast("int")
     })
-    return t.agg(total=lambda g: g.is_new.sum()).collect()[0]["total"]
+    return t.agg(total=lambda g: g.is_new.sum()).to_dicts()[0]["total"]
 ```
 
 **Expected**: LTSeq wins. DuckDB must materialize WINDOW intermediate columns; LTSeq's `shift` is zero-copy pointer offset.
