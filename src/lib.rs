@@ -805,23 +805,16 @@ impl LTSeqTable {
         crate::ops::aggregation::filter_where_impl(self, where_clause)
     }
 
-    /// Derive columns using raw SQL window expressions
-    ///
-    /// This method executes SQL window function expressions on a table that already
-    /// has __group_id__ and __rn__ columns. Used by NestedTable.derive() to execute
-    /// group aggregations via pure SQL.
-    ///
-    /// Args:
-    ///     derive_exprs: HashMap mapping column names to SQL expressions
-    ///                   e.g., {"span": "COUNT(*) OVER (PARTITION BY __group_id__)"}
-    ///
-    /// Returns:
-    ///     New LTSeqTable with derived columns added (and __group_id__, __rn__ removed)
-    fn derive_window_sql(
-        &self,
-        derive_exprs: std::collections::HashMap<String, String>,
-    ) -> PyResult<LTSeqTable> {
-        crate::ops::derive_sql::derive_window_sql_impl(self, derive_exprs)
+    /// NestedTable.derive(): add group-window derived columns natively
+    /// from serialized group-dialect dicts (issue #91 PR 4).
+    fn derive_group_window(&self, derived: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::derive_group_window_impl(self, derived)
+    }
+
+    /// NestedTable.filter(): staged native filter on a serialized
+    /// group-dialect predicate (issue #91 PR 4).
+    fn filter_group_window(&self, predicate: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::filter_group_window_impl(self, predicate)
     }
 
     /// Phase 8B: Join two tables using pointer-based foreign keys

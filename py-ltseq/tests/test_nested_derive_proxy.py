@@ -280,82 +280,87 @@ class TestGroupExprSerialization:
         expr = BinOpGroupExpr(left, "-", right)
         serialized = expr.serialize()
 
+        # Ops serialize under the row-dialect names so Rust shares one
+        # operator table across both dialects (issue #91 PR 4).
         assert serialized["type"] == "BinOp"
-        assert serialized["op"] == "-"
+        assert serialized["op"] == "Sub"
         assert serialized["left"]["type"] == "GroupRowColumn"
         assert serialized["right"]["type"] == "GroupRowColumn"
 
+    def test_binop_literal_carries_dtype(self):
+        """Scalar operands share the row dialect's Literal shape (with dtype)."""
+        from ltseq.grouping import GroupCountExpr, BinOpGroupExpr
 
-class TestGroupExprToSQL:
-    """Test SQL generation from GroupExpr."""
+        serialized = BinOpGroupExpr(GroupCountExpr(), "+", 1).serialize()
+        assert serialized["op"] == "Add"
+        assert serialized["right"] == {"type": "Literal", "value": 1, "dtype": "Int64"}
 
-    def test_count_to_sql(self):
-        """GroupCount should generate COUNT(*) OVER (...)."""
-        from ltseq.grouping import group_expr_to_sql
 
-        sql = group_expr_to_sql({"type": "GroupCount"})
-        assert "COUNT(*)" in sql
-        assert "PARTITION BY __group_id__" in sql
+class TestFilterExprSerialization:
+    """FilterExpr serializes comparisons/combinators/quantifiers to the
+    group dialect (replaces the deleted SQL-string generation tests)."""
 
-    def test_agg_to_sql(self):
-        """GroupAgg should generate AGG(col) OVER (...)."""
-        from ltseq.grouping import group_expr_to_sql
+    def test_comparison_serialization(self):
+        from ltseq.grouping.proxies.filter_proxy import FilterGroupProxy
 
-        sql = group_expr_to_sql(
-            {
-                "type": "GroupAgg",
-                "func": "max",
-                "column": "price",
-            }
-        )
-        assert "MAX" in sql
-        assert "price" in sql
-        assert "PARTITION BY __group_id__" in sql
+        g = FilterGroupProxy({})
+        expr = g.count() > 2
+        assert expr.serialize() == {
+            "type": "BinOp",
+            "op": "Gt",
+            "left": {"type": "GroupCount"},
+            "right": {"type": "Literal", "value": 2, "dtype": "Int64"},
+        }
 
-    def test_first_column_to_sql(self):
-        """GroupRowColumn (first) should generate FIRST_VALUE(...)."""
-        from ltseq.grouping import group_expr_to_sql
+    def test_and_or_not_serialization(self):
+        from ltseq.grouping.proxies.filter_proxy import FilterGroupProxy
 
-        sql = group_expr_to_sql(
-            {
-                "type": "GroupRowColumn",
-                "row": "first",
-                "column": "date",
-            }
-        )
-        assert "FIRST_VALUE" in sql
-        assert "date" in sql
+        g = FilterGroupProxy({})
+        combo = (g.count() > 1) & (g.max("price") < 10.5)
+        d = combo.serialize()
+        assert d["op"] == "And"
+        assert d["left"]["op"] == "Gt"
+        assert d["right"]["right"] == {
+            "type": "Literal",
+            "value": 10.5,
+            "dtype": "Float64",
+        }
 
-    def test_last_column_to_sql(self):
-        """GroupRowColumn (last) should generate LAST_VALUE(...)."""
-        from ltseq.grouping import group_expr_to_sql
-
-        sql = group_expr_to_sql(
-            {
-                "type": "GroupRowColumn",
-                "row": "last",
-                "column": "price",
-            }
-        )
-        assert "LAST_VALUE" in sql
-        assert "price" in sql
-        assert "UNBOUNDED" in sql  # Frame clause needed for LAST_VALUE
-
-    def test_binop_to_sql(self):
-        """BinOp should generate (left OP right)."""
-        from ltseq.grouping import group_expr_to_sql
-
-        sql = group_expr_to_sql(
-            {
+        negated = ~(g.count() > 1)
+        nd = negated.serialize()
+        assert nd == {
+            "type": "UnaryOp",
+            "op": "Not",
+            "operand": {
                 "type": "BinOp",
-                "left": {"type": "GroupRowColumn", "row": "last", "column": "price"},
-                "op": "-",
-                "right": {"type": "GroupRowColumn", "row": "first", "column": "price"},
-            }
-        )
-        assert "-" in sql
-        assert "LAST_VALUE" in sql
-        assert "FIRST_VALUE" in sql
+                "op": "Gt",
+                "left": {"type": "GroupCount"},
+                "right": {"type": "Literal", "value": 1, "dtype": "Int64"},
+            },
+        }
+
+    def test_quantifier_serialization_embeds_row_dialect(self):
+        from ltseq.grouping.proxies.filter_proxy import FilterGroupProxy
+
+        g = FilterGroupProxy({"amount": "int64"})
+        expr = g.all(lambda r: r.amount > 0)
+        d = expr.serialize()
+        assert d["type"] == "GroupQuantifier"
+        assert d["quant"] == "all"
+        # Inner predicate is a full row-dialect expression dict
+        assert d["pred"]["type"] == "BinOp"
+        assert d["pred"]["left"] == {"type": "Column", "name": "amount"}
+        assert d["pred"]["right"]["dtype"] == "Int64"
+
+    def test_window_vs_window_comparison(self):
+        from ltseq.grouping.proxies.filter_proxy import FilterGroupProxy
+
+        g = FilterGroupProxy({})
+        expr = g.first().price < g.last().price
+        d = expr.serialize()
+        assert d["op"] == "Lt"
+        assert d["left"] == {"type": "GroupRowColumn", "row": "first", "column": "price"}
+        assert d["right"] == {"type": "GroupRowColumn", "row": "last", "column": "price"}
 
 
 class TestDeriveInREPLContext:

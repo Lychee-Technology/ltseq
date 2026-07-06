@@ -22,7 +22,7 @@ FILES_TO_CHECK = {
         "PartitionedTable": {"map"},
     },
     "py-ltseq/ltseq/grouping/nested_table.py": {
-        "NestedTable": {"first", "last", "flatten", "filter", "_filter_via_sql", "derive", "_derive_via_sql"},
+        "NestedTable": {"first", "last", "flatten", "filter", "derive"},
     },
     "py-ltseq/ltseq/transforms.py": {
         "TransformMixin": {"filter", "select", "derive", "rename", "sort", "distinct", "slice"},
@@ -170,14 +170,12 @@ RUST_GUARD_PARAMS = [
     pytest.param(
         "src/ops/grouping.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 4 of #91 (group window)", strict=True),
         id="grouping",
     ),
     pytest.param(
-        "src/ops/derive_sql.rs",
+        "src/ops/group_window.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 4 of #91 (group window)", strict=True),
-        id="derive_sql",
+        id="group_window",
     ),
     pytest.param(
         "src/ops/align.rs",

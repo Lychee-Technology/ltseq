@@ -46,6 +46,7 @@ pub(crate) mod common;
 // Core modules
 pub(crate) mod basic;
 pub(crate) mod derive;
+pub(crate) mod group_window;
 pub(crate) mod io;
 pub(crate) mod linear_scan;
 pub(crate) mod parallel_scan;
@@ -57,7 +58,6 @@ pub(crate) mod window;
 pub(crate) mod aggregation;
 pub(crate) mod align;
 pub(crate) mod asof_join;
-pub(crate) mod derive_sql;
 pub(crate) mod grouping;
 pub(crate) mod join;
 pub(crate) mod mutation;
