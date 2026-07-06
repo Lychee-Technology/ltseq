@@ -45,7 +45,7 @@ class TestAsofJoinBasic:
         quotes = LTSeq.read_csv(QUOTES_CSV)
 
         result = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+            quotes, on=lambda t, q: t.time <= q.time
         )
         df = result.to_pandas()
 
@@ -250,7 +250,7 @@ class TestAsofJoinErrors:
         """asof_join() should raise error for invalid direction."""
         trades = LTSeq.read_csv(TRADES_CSV)
         quotes = LTSeq.read_csv(QUOTES_CSV)
-        with pytest.raises(ValueError, match="Invalid direction"):
+        with pytest.raises(ValueError, match="Invalid strategy|Invalid direction"):
             trades.asof_join(
                 quotes, on=lambda t, q: t.time >= q.time, direction="invalid"
             )
@@ -294,7 +294,7 @@ class TestAsofJoinRegression:
             quotes, on=lambda t, q: t.time >= q.time, direction="backward"
         )
         result2 = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+            quotes, on=lambda t, q: t.time <= q.time
         )
         result3 = trades.asof_join(
             quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
@@ -358,7 +358,7 @@ class TestAsofJoinDirectionSemantics:
             quotes = LTSeq.read_csv(quotes_path)
 
             result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+                quotes, on=lambda t, q: t.time <= q.time
             )
             df = result.to_pandas()
 
