@@ -211,3 +211,35 @@ class TestCumSumPartitionBy:
         assert df["cs"].iloc[3] == 160
         assert df["cs"].iloc[4] == 360
         assert df["cs"].iloc[5] == 660
+
+
+class TestPartitionedNestedWindows:
+    """Nested windows with partition_by through the staged planner (#101)."""
+
+    def test_partitioned_rolling_then_shift_matches_two_step(self, grouped_table):
+        """One-step nested must equal the manual two-step. Rows are sorted
+        before comparison, following this module's documented convention
+        (partition_by may cause DataFusion to reorder rows by partition)."""
+        one_step = grouped_table.derive(
+            lambda r: {
+                "prev_rsum": r.value.rolling(2, partition_by="grp")
+                .sum()
+                .shift(1, partition_by="grp")
+            }
+        ).to_pandas()
+
+        two_step = (
+            grouped_table.derive(
+                lambda r: {"rsum": r.value.rolling(2, partition_by="grp").sum()}
+            )
+            .derive(lambda r: {"prev_rsum": r.rsum.shift(1, partition_by="grp")})
+            .to_pandas()
+        )
+
+        one_step = one_step.sort_values(["grp", "value"]).reset_index(drop=True)
+        two_step = two_step.sort_values(["grp", "value"]).reset_index(drop=True)
+
+        assert one_step["prev_rsum"].tolist() == pytest.approx(
+            two_step["prev_rsum"].tolist(), nan_ok=True
+        )
+        assert not any(c.startswith("__ltseq_stage_") for c in one_step.columns)

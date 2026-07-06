@@ -53,18 +53,164 @@ class TestSequenceChaining:
         except Exception as e:
             pytest.skip(f"Combining shift() and diff() not yet implemented: {e}")
 
-    def test_rolling_and_shift_together_rejected_with_hint(self, sample_csv):
-        """Window-on-window in one derive raises a clear error (issue #91:
-        the SQL fallback is gone; native staged select is a tracked
-        follow-up). The error must point at the two-step workaround."""
+    def test_rolling_and_shift_together_matches_two_step_derive(self, sample_csv):
+        """Two-level nested windows plan natively via the staged select
+        (issue #101). The staged plan is LogicalPlan-isomorphic to the
+        manual two-step derive, so VALUES AND ROW ORDER must both match —
+        compared unsorted on purpose."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        one_step = t.derive(
+            lambda r: {"prev_ma": r.price.rolling(3).mean().shift(1)}
+        ).to_pandas()
+
+        two_step = (
+            t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()})
+            .derive(lambda r: {"prev_ma": r.ma_3.shift(1)})
+            .to_pandas()
+        )
+
+        assert one_step["prev_ma"].tolist() == pytest.approx(
+            two_step["prev_ma"].tolist(), nan_ok=True
+        )
+        # Direct row-order assertion on a stable key: derived values could
+        # coincide across rows, but the date sequence cannot.
+        assert one_step["date"].tolist() == two_step["date"].tolist()
+        assert not any(c.startswith("__ltseq_stage_") for c in one_step.columns)
+
+    def test_shift_then_rolling_sum_matches_two_step_derive(self, sample_csv):
+        """The reverse nesting direction: shift feeding a rolling sum."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        one_step = t.derive(
+            lambda r: {"sum_prev": r.price.shift(1).rolling(3).sum()}
+        ).to_pandas()
+
+        two_step = (
+            t.derive(lambda r: {"prev": r.price.shift(1)})
+            .derive(lambda r: {"sum_prev": r.prev.rolling(3).sum()})
+            .to_pandas()
+        )
+
+        assert one_step["sum_prev"].tolist() == pytest.approx(
+            two_step["sum_prev"].tolist(), nan_ok=True
+        )
+        assert one_step["date"].tolist() == two_step["date"].tolist()
+
+    def test_nested_window_mixed_with_plain_window_and_plain_expr(self, sample_csv):
+        """Nested window, plain window and plain expression coexist in one
+        derive; hidden stage columns never reach the result."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        df = t.derive(
+            lambda r: {
+                "prev_ma": r.price.rolling(3).mean().shift(1),
+                "prev_price": r.price.shift(1),
+                "double_volume": r.volume * 2,
+            }
+        ).to_pandas()
+
+        expected = (
+            t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()})
+            .derive(lambda r: {"prev_ma": r.ma_3.shift(1)})
+            .to_pandas()
+        )
+
+        assert df["prev_ma"].tolist() == pytest.approx(
+            expected["prev_ma"].tolist(), nan_ok=True
+        )
+        assert df["prev_price"].tolist()[1:] == pytest.approx(
+            df["price"].tolist()[:-1]
+        )
+        assert df["double_volume"].tolist() == pytest.approx(
+            [v * 2 for v in df["volume"].tolist()]
+        )
+        assert not any(c.startswith("__ltseq_stage_") for c in df.columns)
+
+    def test_nested_window_in_arithmetic(self, sample_csv):
+        """A nested window inside arithmetic with plain windows."""
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        df = t.derive(
+            lambda r: {
+                "momentum": r.price.rolling(3).mean().shift(1) - r.price.shift(1),
+            }
+        ).to_pandas()
+
+        expected = (
+            t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()})
+            .derive(lambda r: {"momentum": r.ma_3.shift(1) - r.price.shift(1)})
+            .to_pandas()
+        )
+        assert df["momentum"].tolist() == pytest.approx(
+            expected["momentum"].tolist(), nan_ok=True
+        )
+
+    def test_three_level_nesting_still_hints(self, sample_csv):
+        """Scope lock (issue #101): the staged planner covers exactly two
+        levels; three and deeper keep the actionable error."""
         t = LTSeq.read_csv(sample_csv).sort("date")
 
         with pytest.raises(Exception, match="split it into two steps"):
             t.derive(
                 lambda r: {
-                    "prev_ma": r.price.rolling(3).mean().shift(1),
+                    "x": r.price.rolling(3).mean().shift(1).rolling(2).sum(),
                 }
             )
+
+    def test_ranking_over_window_still_hints(self, sample_csv):
+        """Scope lock (issue #101 design review revision 2): the staged
+        planner deliberately does not enter PyExpr::Window (ranking) nodes.
+        A ranking ordered by a window result degrades to the actionable
+        hint — never to a silently wrong result."""
+        from ltseq import rank
+
+        t = LTSeq.read_csv(sample_csv).sort("date")
+
+        with pytest.raises(Exception, match="split it into two steps"):
+            t.derive(
+                lambda r: {"rk": rank().over(order_by=r.price.rolling(3).mean())}
+            )
+
+    def test_ranking_over_window_two_step_workaround(self, sample_csv):
+        """The documented workaround for ranking-over-window: stage the
+        window column first, then rank over it."""
+        from ltseq import rank
+
+        t = LTSeq.read_csv(sample_csv).sort("date")
+        df = (
+            t.derive(lambda r: {"ma_3": r.price.rolling(3).mean()})
+            .derive(lambda r: {"rk": rank().over(order_by=r.ma_3)})
+            .to_pandas()
+        )
+        assert "rk" in df.columns
+        assert len(df) == 5
+
+    def test_hidden_stage_name_collision_avoided(self):
+        """A user column literally named __ltseq_stage_0 must not collide
+        with the planner's hidden columns."""
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "k": [1, 2, 3, 4],
+                "price": [10.0, 20.0, 30.0, 40.0],
+                "__ltseq_stage_0": [7.0, 7.0, 7.0, 7.0],
+            }
+        )
+        t = LTSeq.from_pandas(df).sort("k")
+        out = t.derive(
+            lambda r: {"prev_ma": r.price.rolling(2).mean().shift(1)}
+        ).to_pandas()
+        assert out["__ltseq_stage_0"].tolist() == [7.0] * 4
+        expected = (
+            t.derive(lambda r: {"ma": r.price.rolling(2).mean()})
+            .derive(lambda r: {"prev_ma": r.ma.shift(1)})
+            .to_pandas()
+        )
+        assert out["prev_ma"].tolist() == pytest.approx(
+            expected["prev_ma"].tolist(), nan_ok=True
+        )
 
     def test_rolling_and_shift_via_two_step_derive(self, sample_csv):
         """The documented workaround: stage the inner window as a column,

@@ -998,30 +998,35 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
 }
 
 /// Helper function to detect if a PyExpr contains a window function call
+/// Is this Call node itself a window-function invocation?
+///
+/// The single source of truth for "what counts as a window call" — shared by
+/// `contains_window_function` and the staged nested-window rewriter in
+/// window.rs (issue #101). Do not duplicate this match.
+pub(crate) fn is_window_call(func: &str, on: &PyExpr) -> bool {
+    // Direct window functions
+    if matches!(func, "shift" | "rolling" | "diff" | "cum_sum") {
+        return true;
+    }
+    // Aggregation functions applied to rolling windows
+    if matches!(func, "mean" | "sum" | "min" | "max" | "count" | "std") {
+        if let PyExpr::Call { func: inner_func, .. } = on {
+            if inner_func == "rolling" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn contains_window_function(py_expr: &PyExpr) -> bool {
     match py_expr {
         // Window expressions always require window function handling
         PyExpr::Window { .. } => true,
 
         PyExpr::Call { func, on, args, .. } => {
-            // Direct window functions
-            if matches!(func.as_str(), "shift" | "rolling" | "diff" | "cum_sum") {
+            if is_window_call(func, on) {
                 return true;
-            }
-            // Aggregation functions applied to rolling windows
-            if matches!(
-                func.as_str(),
-                "mean" | "sum" | "min" | "max" | "count" | "std"
-            ) {
-                // Check if this is applied to a rolling() call
-                if let PyExpr::Call {
-                    func: inner_func, ..
-                } = &**on
-                {
-                    if matches!(inner_func.as_str(), "rolling") {
-                        return true;
-                    }
-                }
             }
             // Check recursively in the `on` field
             if contains_window_function(on) {
