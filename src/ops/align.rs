@@ -9,6 +9,7 @@ use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
+use datafusion::arrow::compute::CastOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::Column;
@@ -17,10 +18,16 @@ use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
 use std::sync::Arc;
 
-/// Build the `__ref_key__` array with the KEY COLUMN's Arrow type, so the
-/// join compares values natively instead of the legacy CAST-to-VARCHAR
-/// string equality. Reference values that don't convert to the key type are
-/// a validation error (the legacy behavior silently string-compared them).
+/// Build the `__ref_key__` array with the KEY COLUMN's exact Arrow type, so
+/// the join compares values natively instead of the legacy CAST-to-VARCHAR
+/// string equality.
+///
+/// Values are first collected into the widest array of the key's type family
+/// (i64 / u64 / f64 / utf8), then cast to the exact key type with
+/// `safe: false` so out-of-range values fail loudly instead of becoming
+/// NULLs. Reference values that don't convert are a validation error (the
+/// legacy behavior silently string-compared them); key column types outside
+/// the integer/float/string families are explicitly unsupported.
 fn build_ref_key_array(
     py: Python<'_>,
     ref_sequence: &[Py<PyAny>],
@@ -35,15 +42,8 @@ fn build_ref_key_array(
         )))
     };
 
-    Ok(match key_type {
-        DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64 => {
+    let wide: ArrayRef = match key_type {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
             let mut vals = Vec::with_capacity(ref_sequence.len());
             for (pos, obj) in ref_sequence.iter().enumerate() {
                 let bound = obj.bind(py);
@@ -53,6 +53,17 @@ fn build_ref_key_array(
                 vals.push(v);
             }
             Arc::new(Int64Array::from(vals))
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            let mut vals = Vec::with_capacity(ref_sequence.len());
+            for (pos, obj) in ref_sequence.iter().enumerate() {
+                let bound = obj.bind(py);
+                let v: u64 = bound
+                    .extract()
+                    .map_err(|_| type_err(pos, &bound.to_string()))?;
+                vals.push(v);
+            }
+            Arc::new(UInt64Array::from(vals))
         }
         DataType::Float16 | DataType::Float32 | DataType::Float64 => {
             let mut vals = Vec::with_capacity(ref_sequence.len());
@@ -65,9 +76,20 @@ fn build_ref_key_array(
             }
             Arc::new(Float64Array::from(vals))
         }
-        // Strings and everything else: stringify (matches the legacy VALUES
-        // construction, which quoted non-numeric values).
-        _ => {
+        // Strings — and temporal types, whose reference values arrive as
+        // strings (or stringifiable objects like datetime.date) and are
+        // parsed into the key type by the arrow cast below. This preserves
+        // the documented usage align(["2024-01-01"], key=lambda r: r.date)
+        // against a Date32 column, with real typed comparison instead of the
+        // legacy CAST-to-VARCHAR string equality.
+        DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Utf8View
+        | DataType::Date32
+        | DataType::Date64
+        | DataType::Timestamp(_, _)
+        | DataType::Time32(_)
+        | DataType::Time64(_) => {
             let mut vals = Vec::with_capacity(ref_sequence.len());
             for obj in ref_sequence.iter() {
                 let bound = obj.bind(py);
@@ -79,6 +101,37 @@ fn build_ref_key_array(
             }
             Arc::new(StringArray::from(vals))
         }
+        other => {
+            return Err(LtseqError::Validation(format!(
+                "align(): key column '{}' has unsupported type {:?}; \
+                 supported key types are integers, floats, strings and \
+                 dates/timestamps",
+                key_col, other
+            ))
+            .into())
+        }
+    };
+
+    // Narrow to the exact key type. safe=false: an out-of-range reference
+    // value is an error, never a silent NULL (which would corrupt the join).
+    if wide.data_type() == key_type {
+        return Ok(wide);
+    }
+    datafusion::arrow::compute::kernels::cast::cast_with_options(
+        &wide,
+        key_type,
+        &CastOptions {
+            safe: false,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| {
+        LtseqError::Validation(format!(
+            "align(): ref_sequence contains values outside key column '{}' \
+             type {:?}: {}",
+            key_col, key_type, e
+        ))
+        .into()
     })
 }
 

@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import pandas as pd
 import pytest
 from ltseq import LTSeq
 
@@ -255,3 +256,115 @@ class TestAlignChaining:
         assert len(df) == 2
         assert df.iloc[0]["doubled"] == 200
         assert df.iloc[1]["doubled"] == 400
+
+
+class TestAlignArrowKeyTypes:
+    """Arrow-type fidelity of the typed ref key (PR #104 review).
+
+    The legacy SQL path compared keys as strings (CAST AS VARCHAR); the
+    native path builds the ref key array in the key column's exact Arrow
+    type. These tests pin the type-family coverage, especially the UInt64
+    values above i64::MAX that a naive i64 path would reject.
+    """
+
+    def test_uint64_key_above_i64_max(self):
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        big = 2**63  # > i64::MAX
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([big, 1], type=pa.uint64()),
+                    "v": pa.array([10, 20], type=pa.int64()),
+                }
+            )
+        )
+        df = t.align([1, big], key=lambda r: r.k).to_pandas()
+        assert df["v"].tolist() == [20, 10]
+
+    def test_float32_key(self):
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([1.5, 2.5], type=pa.float32()),
+                    "v": pa.array([10, 20], type=pa.int64()),
+                }
+            )
+        )
+        df = t.align([2.5, 1.5], key=lambda r: r.k).to_pandas()
+        assert df["v"].tolist() == [20, 10]
+
+    def test_utf8_key(self):
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array(["b", "a"], type=pa.string()),
+                    "v": pa.array([10, 20], type=pa.int64()),
+                }
+            )
+        )
+        df = t.align(["a", "b", "c"], key=lambda r: r.k).to_pandas()
+        assert df["v"].tolist()[:2] == [20, 10]
+        assert pd.isna(df["v"].tolist()[2])
+
+    def test_narrow_int_key_out_of_range_ref_raises(self):
+        """safe=false cast: an out-of-range ref value errors instead of
+        silently becoming NULL (which would corrupt the join)."""
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([1, 2], type=pa.int8()),
+                    "v": pa.array([10, 20], type=pa.int64()),
+                }
+            )
+        )
+        with pytest.raises(Exception, match="outside key column"):
+            t.align([1, 300], key=lambda r: r.k)
+
+    def test_date32_key_string_refs(self):
+        """The documented usage: string refs against a Date32 column. The
+        native path parses the strings into Date32 via arrow cast (the
+        legacy path compared everything as VARCHAR)."""
+        import datetime
+
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array(
+                        [datetime.date(2024, 1, 2), datetime.date(2024, 1, 1)],
+                        type=pa.date32(),
+                    ),
+                    "v": pa.array([20, 10], type=pa.int64()),
+                }
+            )
+        )
+        df = t.align(["2024-01-01", "2024-01-02"], key=lambda r: r.k).to_pandas()
+        assert df["v"].tolist() == [10, 20]
+
+    def test_unsupported_key_type_raises(self):
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([[1, 2]], type=pa.list_(pa.int64())),
+                    "v": pa.array([1], type=pa.int64()),
+                }
+            )
+        )
+        with pytest.raises(Exception, match="unsupported type"):
+            t.align([[1, 2]], key=lambda r: r.k)
