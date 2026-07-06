@@ -73,6 +73,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 行差分 | `.diff(n)` | `r.price.diff(1)` |
 | 环比变化率 | `.pct_change()` | `r.close.pct_change()` |
 | 累计求和 | `.cum_sum()` | `t.cum_sum("volume")` 或 `r.volume.cum_sum()` |
+| 累计最大 / 最小 | `.cum_max()` / `.cum_min()` | `r.price.cum_max()` |
 
 ### 排名（使用 `.over()`）
 | 操作 | 方法 | 示例 |
@@ -558,13 +559,17 @@ changes = t.sort("date").derive(daily=lambda r: r.close.diff())
 returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 ```
 
-#### `r.col.cum_sum`（表达式形式）
-- **签名**: `r.col.cum_sum() -> Expr`
-- **行为**: 按当前顺序累计求和，可在 `derive()` 内使用，输出列名由用户掌控
+#### `r.col.cum_sum` / `cum_max` / `cum_min`（表达式形式）
+- **签名**: `r.col.cum_sum() -> Expr`（`cum_max`、`cum_min` 同）
+- **行为**: 按当前顺序的累计聚合（和 / 累计最大 / 累计最小），可在 `derive()` 内使用，输出列名由用户掌控。三者均接受 `partition_by=` 参数以按组重置累积
 - **异常**: `TypeError`（非数值），`RuntimeError`（未排序使用）
 - **示例**:
 ```python
-t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
+t.sort("date").derive(
+    cum_vol=lambda r: r.volume.cum_sum(),
+    peak=lambda r: r.price.cum_max(),
+    trough=lambda r: r.price.cum_min(partition_by="symbol"),
+)
 ```
 
 ### 3.2 表级累计操作
@@ -1192,6 +1197,21 @@ expr = (r.price * r.qty) > 100
 ```python
 from ltseq import if_else
 status = if_else(r.amount > 100, "VIP", "Normal")
+```
+
+### `when`（多分支链）
+- **签名**: `when(condition, value?) -> WhenChain`；`.when(condition, value?)`；`.then(value)`；`.otherwise(default) -> Expr`
+- **行为**: 多分支条件（SQL CASE WHEN），嵌套 `if_else` 的可读替代。按顺序检查分支、首个匹配胜出；`otherwise()` 必需，返回表达式。支持双参 `when(cond, value)` 与 Polars 风格 `when(cond).then(value)` 两种形态
+- **导入**: `from ltseq import when`
+- **异常**: `TypeError`（condition 非布尔）
+- **示例**:
+```python
+from ltseq import when
+tier = t.derive(tier=lambda r:
+    when(r.amount > 100, "VIP")
+    .when(r.amount > 50, "Gold")
+    .otherwise("Normal")
+)
 ```
 
 ### `ifa` / `nvl` / `coalesce`

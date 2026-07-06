@@ -37,6 +37,77 @@ def if_else(condition: "Expr", true_value: Any, false_value: Any) -> "CallExpr":
     )
 
 
+_WHEN_MISSING = object()
+
+
+class WhenChain:
+    """Builder for multi-branch conditional expressions (SQL CASE WHEN).
+
+    Branches are evaluated in order; the first matching condition wins.
+    Finish the chain with .otherwise() to get an expression. Internally the
+    chain folds into nested if_else calls, so it rides the existing native
+    CASE WHEN transpilation.
+    """
+
+    def __init__(self, branches: "list[tuple[Expr, Any]]"):
+        self._branches = branches
+
+    def when(self, condition: "Expr", value: Any = _WHEN_MISSING) -> "WhenChain | _WhenThen":
+        """Add another branch: .when(cond, value) or .when(cond).then(value)."""
+        if value is _WHEN_MISSING:
+            return _WhenThen(self._branches, condition)
+        return WhenChain(self._branches + [(condition, value)])
+
+    def then(self, value: Any) -> "WhenChain":
+        raise TypeError(
+            "then() only follows when(condition) without a value; "
+            "this when() already received its value"
+        )
+
+    def otherwise(self, default: Any) -> "CallExpr":
+        """Close the chain with a default value and return the expression."""
+        expr: Any = default
+        for condition, value in reversed(self._branches):
+            expr = if_else(condition, value, expr)
+        return expr
+
+
+class _WhenThen:
+    """Intermediate state of a Polars-style when(cond).then(value) step."""
+
+    def __init__(self, branches: "list[tuple[Expr, Any]]", pending_condition: "Expr"):
+        self._branches = branches
+        self._pending = pending_condition
+
+    def then(self, value: Any) -> WhenChain:
+        return WhenChain(self._branches + [(self._pending, value)])
+
+
+def when(condition: "Expr", value: Any = _WHEN_MISSING) -> "WhenChain | _WhenThen":
+    """
+    Start a multi-branch conditional chain (SQL CASE WHEN).
+
+    Both the two-argument form and the Polars-style then() form work:
+
+        when(cond, value).when(cond2, value2).otherwise(default)
+        when(cond).then(value).when(cond2).then(value2).otherwise(default)
+
+    Branches are checked in order; the first match wins. otherwise() is
+    required and returns the final expression.
+
+    Example:
+        >>> from ltseq import when
+        >>> t.derive(tier=lambda r:
+        ...     when(r.amount > 100, "VIP")
+        ...     .when(r.amount > 50, "Gold")
+        ...     .otherwise("Normal")
+        ... )
+    """
+    if value is _WHEN_MISSING:
+        return _WhenThen([], condition)
+    return WhenChain([(condition, value)])
+
+
 def count_if(predicate: "Expr") -> "CallExpr":
     """
     Count rows where predicate is True.
