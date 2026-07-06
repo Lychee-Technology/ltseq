@@ -13,7 +13,7 @@
 //! Uses a two-phase approach:
 //! 1. **Lazy phase**: Build boundary detection + cumulative sum → `__group_id__`
 //!    via native DataFusion Expr API (`df.select()` — no materialization)
-//! 2. **SQL phase**: Add `__group_count__` and `__rn__` via SQL partitioned by
+//! 2. **Window phase**: Add `__group_count__` and `__rn__` via native windows partitioned by
 //!    `__group_id__` (requires one materialization since these partition by a
 //!    window function result)
 //!

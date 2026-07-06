@@ -1,4 +1,4 @@
-//! Set operations: distinct, union, intersect, diff, is_subset
+//! Set operations: distinct, union, intersect, diff, is_subset, rvs, step
 //!
 //! This module contains helper functions for set-theoretic table operations.
 //! The actual methods are implemented in the #[pymethods] impl block in lib.rs
@@ -11,26 +11,29 @@
 //!
 //! ## Set Algebra
 //! - **union_impl**: Vertically concatenate two tables (UNION ALL)
-//! - **intersect_impl**: Return rows present in both tables (INTERSECT)
-//! - **diff_impl**: Return rows in first table but not in second (EXCEPT)
+//! - **intersect_impl**: Return rows present in both tables (deduplicated)
+//! - **diff_impl**: Return rows in first table but not in second
 //! - **is_subset_impl**: Check if first table is a subset of second
+//!
+//! ## Sequence
+//! - **rvs_impl**: Reverse row order
+//! - **step_impl**: Take every nth row
 //!
 //! # Implementation Pattern
 //!
-//! All operations return PyResult<T> for seamless Python exception handling.
-//! Set operations use SQL-based implementations via DataFusion for correctness
-//! and performance.
+//! Fully native DataFusion plans (issue #91 PR 6): semi/anti joins for the
+//! set algebra, row_number windows for keyed distinct / rvs / step. No SQL
+//! strings, no temp-table registration; the only materialization is the
+//! scalar `is_subset` count.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::common::{
-    build_equality_conditions, build_qualified_column_list, build_quoted_column_list,
-    MultiTempTableGuard,
-};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::SessionContext;
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+use datafusion::common::Column;
+use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::{Expr, ExprFunctionExt, JoinType, SortExpr};
+use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -63,17 +66,6 @@ fn get_compare_columns(
     Ok(compare_cols)
 }
 
-/// Collect DataFrame to RecordBatches
-async fn collect_batches(
-    df: &datafusion::dataframe::DataFrame,
-    table_name: &str,
-) -> Result<Vec<RecordBatch>, String> {
-    df.clone()
-        .collect()
-        .await
-        .map_err(|e| format!("Failed to collect {}: {}", table_name, e))
-}
-
 /// Create result LTSeqTable from DataFrame.
 ///
 /// Set operations (union/intersect/diff) and rvs merge or reorder rows, so
@@ -88,6 +80,61 @@ fn create_result_table(
         Vec::new(),
         None,
     )
+}
+
+/// All columns of the schema as unqualified column expressions.
+fn all_column_exprs(schema: &ArrowSchema) -> Vec<Expr> {
+    schema
+        .fields()
+        .iter()
+        .map(|f| Expr::Column(Column::new_unqualified(f.name())))
+        .collect()
+}
+
+/// A 0-based row-position column over the whole (single-partition) input.
+///
+/// `ROW_NUMBER() OVER ()` carries no ORDER BY, so it is only deterministic
+/// over a single in-order partition. The UInt64 output is cast to Int64 so
+/// downstream arithmetic stays in plain integer types (the legacy SQL's
+/// `% n = 0` comparison broke on Decimal128 type-inference — step(1) never
+/// worked before this migration).
+fn row_position_expr() -> Expr {
+    cast(row_number(), DataType::Int64) - lit(1i64)
+}
+
+/// Snapshot the table into a single in-order partition so a row-position
+/// window over it is deterministic.
+///
+/// rvs/step operate on PHYSICAL row positions: on a lazy multi-partition
+/// plan, the coalesce feeding an unordered window does not preserve order,
+/// so positions must be assigned over a materialized snapshot. The legacy
+/// SQL path did the same (collect → MemTable → re-scan); this is one scan
+/// fewer and registers nothing.
+fn snapshot_single_partition(
+    table: &LTSeqTable,
+    df: &Arc<datafusion::dataframe::DataFrame>,
+) -> PyResult<datafusion::dataframe::DataFrame> {
+    let batches = RUNTIME
+        .block_on(async {
+            (**df)
+                .clone()
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect for position snapshot: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    let schema = batches
+        .first()
+        .map(|b| b.schema())
+        .ok_or_else(|| LtseqError::NoData)?;
+    let combined = datafusion::arrow::compute::concat_batches(&schema, &batches)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to combine batches: {}", e)))?;
+
+    table
+        .session
+        .read_batch(combined)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read snapshot: {}", e)).into())
 }
 
 // ============================================================================
@@ -182,47 +229,48 @@ fn extract_key_cols_from_exprs(
     Ok(key_cols)
 }
 
-/// Distinct with specific key columns using ROW_NUMBER()
+/// Distinct with specific key columns: keep the FIRST occurrence of each key
+/// in the table's current row order (e.g. sort desc then distinct-by-id keeps
+/// each id's maximum). The legacy SQL got this via materialization plus the
+/// implicit tie-break of `ORDER BY <partition keys>`; natively we make the
+/// tie-break explicit — a row-position column over a single-partition
+/// snapshot — because a partitioned window over a lazy multi-partition plan
+/// does not preserve input order.
 fn distinct_with_keys(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
 ) -> PyResult<LTSeqTable> {
-    let all_cols_str = build_quoted_column_list(schema);
-
-    let partition_by = key_cols
+    let key_exprs: Vec<Expr> = key_cols
         .iter()
-        .map(|c| format!("\"{}\"", c))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .map(|c| Expr::Column(Column::new_unqualified(c)))
+        .collect();
 
-    let sql = format!(
-        "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY {} ORDER BY {}) as __rn FROM __distinct_source) WHERE __rn = 1",
-        all_cols_str, partition_by, partition_by
-    );
+    let mut stage = all_column_exprs(schema);
+    stage.push(row_position_expr().alias("__distinct_pos__"));
 
-    let distinct_df = RUNTIME
-        .block_on(async {
-            let batches = collect_batches(df, "data for distinct").await?;
+    let rn = row_number()
+        .partition_by(key_exprs)
+        .order_by(vec![SortExpr::new(col("__distinct_pos__"), true, false)])
+        .build()
+        .map_err(|e| LtseqError::Runtime(format!("Failed to build distinct window: {}", e)))?
+        .alias("__distinct_rn__");
 
-            // Use RAII guard for automatic cleanup
-            let _guard = crate::ops::common::TempTableGuard::register(
-                &table.session,
-                "__distinct_source",
-                Arc::clone(schema),
-                batches,
-            )?;
-
-            let result = table
-                .session
-                .sql(&sql)
-                .await
-                .map_err(|e| format!("Distinct SQL failed: {}", e))?;
-
-            Ok(result)
+    let distinct_df = snapshot_single_partition(table, df)?
+        .select(stage)
+        .and_then(|d| {
+            let mut with_rn = all_column_exprs(schema);
+            with_rn.push(col("__distinct_pos__"));
+            with_rn.push(rn);
+            d.select(with_rn)
         })
-        .map_err(|e: String| LtseqError::Runtime(e))?;
+        .and_then(|d| d.filter(col("__distinct_rn__").eq(lit(1i64))))
+        .and_then(|d| {
+            d.sort(vec![SortExpr::new(col("__distinct_pos__"), true, false)])
+        })
+        .and_then(|d| d.select(all_column_exprs(schema)))
+        .map_err(|e| LtseqError::Runtime(format!("Distinct execution failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -268,26 +316,34 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
 
 /// Intersect: Return rows present in both tables
 ///
-/// Returns rows that appear in both tables based on key columns.
+/// Returns rows that appear in both tables based on key columns, deduplicated
+/// (the legacy SQL used SELECT DISTINCT ... WHERE EXISTS).
 /// If no key expression provided, uses all columns.
 pub fn intersect_impl(
     table1: &LTSeqTable,
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
-    set_operation_impl(table1, table2, key_expr_dict, SetOperation::Intersect)
+    let joined = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftSemi)?;
+    // LeftSemi does not deduplicate the left side; the legacy semantics did.
+    let deduped = joined
+        .distinct()
+        .map_err(|e| LtseqError::Runtime(format!("Intersect distinct failed: {}", e)))?;
+    Ok(create_result_table(&table1.session, deduped))
 }
 
 /// Diff: Return rows in first table but not in second
 ///
-/// Returns rows from the left table that don't appear in the right table.
+/// Returns rows from the left table that don't appear in the right table,
+/// preserving left-side duplicates (the legacy SQL had no DISTINCT here).
 /// If no key expression provided, uses all columns.
 pub fn diff_impl(
     table1: &LTSeqTable,
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
-    set_operation_impl(table1, table2, key_expr_dict, SetOperation::Diff)
+    let joined = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftAnti)?;
+    Ok(create_result_table(&table1.session, joined))
 }
 
 /// Is Subset: Check if first table is a subset of second table
@@ -299,163 +355,52 @@ pub fn is_subset_impl(
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<bool> {
-    let (df1, schema1) = table1.require_df_and_schema()?;
-    let (df2, schema2) = table2.require_df_and_schema()?;
-    let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
-
-    // t1 is a subset of t2 if diff(t1, t2) is empty (count rows not in t2 = 0)
-    let is_subset = RUNTIME
-        .block_on(async {
-            let batches1 = collect_batches(df1, "left table").await?;
-            let batches2 = collect_batches(df2, "right table").await?;
-
-            let t1_name = "__subset_t1__";
-            let t2_name = "__subset_t2__";
-            
-            // Use RAII guard for automatic cleanup
-            let _guard = MultiTempTableGuard::register_two(
-                &table1.session,
-                t1_name,
-                Arc::clone(schema1),
-                batches1,
-                t2_name,
-                Arc::clone(schema2),
-                batches2,
-            )?;
-
-            let compare_pairs: Vec<(String, String)> = compare_cols.iter().map(|c| (c.clone(), c.clone())).collect();
-            let where_cond = build_equality_conditions("t1", "t2", &compare_pairs);
-            let sql = format!(
-                "SELECT COUNT(*) as cnt FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                t1_name, t2_name, where_cond
-            );
-
-            let result = table1.session.sql(&sql).await
-                .map_err(|e| format!("Subset query failed: {}", e))?;
-            let batches = result.collect().await
-                .map_err(|e| format!("Subset collect failed: {}", e))?;
-
-            // Empty table is subset of anything
-            if batches.is_empty() || batches[0].num_rows() == 0 {
-                return Ok::<_, String>(true);
-            }
-
-            use datafusion::arrow::array::Int64Array;
-            let cnt_array = batches[0]
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| "Failed to extract count".to_string())?;
-
-            Ok(cnt_array.value(0) == 0)
-        })
-        .map_err(LtseqError::Runtime)?;
-
-    Ok(is_subset)
+    // t1 ⊆ t2 iff anti-join(t1, t2) is empty. count() is a scalar terminal,
+    // so executing it here is within the no-materialization rule.
+    let anti = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftAnti)?;
+    let missing = RUNTIME
+        .block_on(async { anti.count().await })
+        .map_err(|e| LtseqError::Runtime(format!("Subset count failed: {}", e)))?;
+    Ok(missing == 0)
 }
 
-// ============================================================================
-// Internal Helper for Set Operations
-// ============================================================================
-
-/// Type of set operation
-enum SetOperation {
-    Intersect, // WHERE EXISTS
-    Diff,      // WHERE NOT EXISTS
-}
-
-/// Common implementation for intersect and diff operations
-fn set_operation_impl(
+/// Native LeftSemi / LeftAnti join of the two tables on the comparison
+/// columns. NULL keys never match (join equality), which is exactly the
+/// legacy EXISTS / NOT EXISTS behavior.
+fn semi_anti_on_keys(
     table1: &LTSeqTable,
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
-    op: SetOperation,
-) -> PyResult<LTSeqTable> {
+    join_type: JoinType,
+) -> PyResult<datafusion::dataframe::DataFrame> {
     let (df1, schema1) = table1.require_df_and_schema()?;
-    let (df2, schema2) = table2.require_df_and_schema()?;
+    let (df2, _schema2) = table2.require_df_and_schema()?;
     let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
-    let (t1_name, t2_name, op_name) = match op {
-        SetOperation::Intersect => ("__intersect_t1__", "__intersect_t2__", "Intersect"),
-        SetOperation::Diff => ("__diff_t1__", "__diff_t2__", "Diff"),
-    };
-
-    let result_df = RUNTIME
-        .block_on(async {
-            let batches1 = collect_batches(df1, "left table").await?;
-            let batches2 = collect_batches(df2, "right table").await?;
-
-            // Use RAII guard for automatic cleanup
-            let _guard = MultiTempTableGuard::register_two(
-                &table1.session,
-                t1_name,
-                Arc::clone(schema1),
-                batches1,
-                t2_name,
-                Arc::clone(schema2),
-                batches2,
-            )?;
-
-            let select_cols = build_qualified_column_list(schema1, "t1");
-            let compare_pairs: Vec<(String, String)> = compare_cols.iter().map(|c| (c.clone(), c.clone())).collect();
-            let where_cond = build_equality_conditions("t1", "t2", &compare_pairs);
-
-            let sql = match op {
-                SetOperation::Intersect => format!(
-                    "SELECT DISTINCT {} FROM \"{}\" t1 WHERE EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                    select_cols, t1_name, t2_name, where_cond
-                ),
-                SetOperation::Diff => format!(
-                    "SELECT {} FROM \"{}\" t1 WHERE NOT EXISTS (SELECT 1 FROM \"{}\" t2 WHERE {})",
-                    select_cols, t1_name, t2_name, where_cond
-                ),
-            };
-
-            let result = table1.session.sql(&sql).await
-                .map_err(|e| format!("{} query failed: {}", op_name, e))?;
-
-            Ok::<_, String>(result)
-        })
-        .map_err(LtseqError::Runtime)?;
-
-    Ok(create_result_table(&table1.session, result_df))
+    let keys: Vec<&str> = compare_cols.iter().map(|s| s.as_str()).collect();
+    (**df1)
+        .clone()
+        .join((**df2).clone(), join_type, &keys, &keys, None)
+        .map_err(|e| LtseqError::Runtime(format!("Set operation join failed: {}", e)).into())
 }
 
 /// Reverse: Return rows in reversed order
 ///
-/// Uses ROW_NUMBER() OVER () to assign a stable position, then ORDER BY DESC.
+/// Assigns a native row-position column, sorts by it descending, and projects
+/// it away. Determinism matches the legacy SQL: single in-order partition.
 pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = build_quoted_column_list(schema);
+    let mut stage = all_column_exprs(schema);
+    stage.push(row_position_expr().alias("__rvs_pos__"));
 
-    let result_df = RUNTIME
-        .block_on(async {
-            let batches = collect_batches(df, "rvs").await?;
-
-            let t_name = "__rvs_temp__";
-            // Use RAII guard for automatic cleanup
-            let _guard = crate::ops::common::TempTableGuard::register(
-                &table.session,
-                t_name,
-                Arc::clone(schema),
-                batches,
-            )?;
-
-            let sql = format!(
-                "SELECT {} FROM (SELECT *, ROW_NUMBER() OVER () as __rn FROM \"{}\") ORDER BY __rn DESC",
-                all_cols, t_name
-            );
-
-            let result = table
-                .session
-                .sql(&sql)
-                .await
-                .map_err(|e| format!("rvs SQL failed: {}", e))?;
-
-            Ok::<_, String>(result)
+    let result_df = snapshot_single_partition(table, df)?
+        .select(stage)
+        .and_then(|d| {
+            d.sort(vec![SortExpr::new(col("__rvs_pos__"), false, true)])
         })
-        .map_err(LtseqError::Runtime)?;
+        .and_then(|d| d.select(all_column_exprs(schema)))
+        .map_err(|e| LtseqError::Runtime(format!("rvs failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -467,9 +412,6 @@ pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 }
 
 /// Step: Take every nth row (0-based, rows 0, n, 2n, …)
-///
-/// Uses ROW_NUMBER() OVER () - 1 to get a 0-based row index, then filters
-/// rows where that index is divisible by n.
 pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
     if n == 0 {
         return Err(LtseqError::Validation("step() n must be >= 1".into()).into());
@@ -477,35 +419,16 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
 
     let (df, schema) = table.require_df_and_schema()?;
 
-    let all_cols = build_quoted_column_list(schema);
+    let mut stage = all_column_exprs(schema);
+    stage.push(row_position_expr().alias("__step_pos__"));
 
-    let result_df = RUNTIME
-        .block_on(async {
-            let batches = collect_batches(df, "step").await?;
-
-            let t_name = "__step_temp__";
-            // Use RAII guard for automatic cleanup
-            let _guard = crate::ops::common::TempTableGuard::register(
-                &table.session,
-                t_name,
-                Arc::clone(schema),
-                batches,
-            )?;
-
-            let sql = format!(
-                "SELECT {} FROM (SELECT *, (ROW_NUMBER() OVER () - 1) as __rn FROM \"{}\") WHERE __rn % {} = 0",
-                all_cols, t_name, n
-            );
-
-            let result = table
-                .session
-                .sql(&sql)
-                .await
-                .map_err(|e| format!("step SQL failed: {}", e))?;
-
-            Ok::<_, String>(result)
+    let result_df = snapshot_single_partition(table, df)?
+        .select(stage)
+        .and_then(|d| {
+            d.filter((col("__step_pos__") % lit(n as i64)).eq(lit(0i64)))
         })
-        .map_err(LtseqError::Runtime)?;
+        .and_then(|d| d.select(all_column_exprs(schema)))
+        .map_err(|e| LtseqError::Runtime(format!("step failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -531,7 +454,6 @@ fn extract_key_columns(
 
     let mut columns = Vec::new();
 
-    // Extract column name(s) from the expression
     match &py_expr {
         PyExpr::Column(name) => columns.push(name.clone()),
         _ => {
@@ -543,7 +465,6 @@ fn extract_key_columns(
         }
     }
 
-    // Validate columns exist in schema
     for col in &columns {
         if schema.field_with_name(col).is_err() {
             return Err(LtseqError::Validation(format!(

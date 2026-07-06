@@ -990,8 +990,9 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
             Ok(inner.alias(alias))
         }
         PyExpr::Window { .. } => {
-            // Window expressions should be handled via SQL path in derive_with_window_functions
-            Err("Window expressions must be handled via SQL transpilation".to_string())
+            // Window expressions are planned by derive_with_window_functions
+            // (window_native), not by the row-level transpiler.
+            Err("Window expressions must go through derive() / the window planner".to_string())
         }
     }
 }

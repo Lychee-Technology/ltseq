@@ -180,19 +180,16 @@ RUST_GUARD_PARAMS = [
     pytest.param(
         "src/ops/align.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 5 of #91 (native align join)", strict=True),
         id="align",
     ),
     pytest.param(
         "src/ops/set_ops.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 6 of #91 (native set ops)", strict=True),
         id="set_ops",
     ),
     pytest.param(
         "src/ops/common.rs",
         set(),
-        marks=pytest.mark.xfail(reason="pending PR 6/7 of #91 (SQL helper removal)", strict=True),
         id="common",
     ),
 ]

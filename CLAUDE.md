@@ -44,11 +44,11 @@ src/                           # Rust kernel
 │   ├── window.rs             # shift, rolling, diff
 │   ├── join.rs               # semi_join, anti_join
 │   ├── set_ops.rs            # union, intersect, diff, distinct
-│   ├── aggregation.rs        # SQL GROUP BY
+│   ├── aggregation.rs        # native GROUP BY aggregation
 │   └── ...
 ├── transpiler/               # PyExpr → DataFusion Expr conversion
 │   ├── mod.rs                # Main transpilation logic
-│   ├── sql_gen.rs            # SQL generation for window functions
+│   ├── window_native.rs      # Native window expression builders
 │   └── optimization.rs       # Expression optimizations
 └── cursor.rs                 # Streaming cursor for large datasets
 
@@ -75,7 +75,7 @@ py-ltseq/ltseq/               # Python package
 
 **Lazy Evaluation**: LinkedTable and NestedTable defer expensive operations (joins, grouping) until materialization is required.
 
-**No Materialization Rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `collect()`, `from_arrow()`, and `from_pandas()`.
+**No Materialization Rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `collect()`, `from_arrow()`, and `from_pandas()`. Documented exception: physical-position ops (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions — an unordered/partitioned window over a lazy multi-partition plan does not preserve input order, so the snapshot is required for correctness, not a shortcut (see `set_ops.rs::snapshot_single_partition`).
 
 ### Expression System
 
