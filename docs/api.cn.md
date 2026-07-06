@@ -781,7 +781,7 @@ last_rows = groups.last()
 
 #### `NestedTable.flatten`
 - **签名**: `nested.flatten() -> LTSeq`
-- **行为**: 返回带 `__group_id__` 列的底层行，该列标识每个连续分组
+- **行为**: 返回带 `__group_id__` 列的底层行，该列标识每个连续分组（另含内部辅助列 `__group_count__` 与 `__rn__`）
 - **返回**: 展平后的 `LTSeq`
 - **示例**:
 ```python
@@ -817,10 +817,11 @@ enriched = groups.derive(lambda g: {
 
 #### `len(nested)` / `NestedTable.to_pandas`
 - **签名**: `NestedTable.__len__() -> int`；`NestedTable.to_pandas()`
-- **行为**: `len()` 返回组数；`to_pandas()` 物化展平后的行
+- **行为**: `len()` 返回底层表的**行数**（不是组数）；`to_pandas()` 原样物化底层行，**不含** `__group_id__` 列（需要该列请用 `flatten().to_pandas()`）
 - **示例**:
 ```python
-n_groups = len(groups)
+n_rows = len(groups)                  # 行数，不是组数
+df = groups.flatten().to_pandas()     # 带 __group_id__ 的行
 ```
 
 ### 组代理（NestedTable filter/derive 中的 `g`）
@@ -1114,10 +1115,10 @@ result = t.group_by("region").agg(
 
 ### `LTSeq.partition`
 - **签名**: `LTSeq.partition(*cols: str) -> PartitionedTable` 或 `LTSeq.partition(by: Callable) -> PartitionedTable`
-- **行为**: 按键拆分为子表（不聚合）。字符串列走快速 SQL 路径；callable 走灵活的 Python 路径
+- **行为**: 按键拆分为子表（不聚合）。callable 键必须是**简单列表达式**（如 `lambda r: r.region`）；派生表达式（如 `lambda r: r.price + 1`）会抛 `ValueError`（会迫使内部物化，已不支持）
 - **参数**: 列名、单个 callable，或 `by=` callable
 - **返回**: `PartitionedTable`（字典式：键 → LTSeq）
-- **异常**: `TypeError`（参数无效），`AttributeError`（列不存在），`ValueError`（schema 未初始化）
+- **异常**: `TypeError`（参数无效），`AttributeError`（列不存在），`ValueError`（schema 未初始化，或 callable 不是简单列表达式）
 - **示例**:
 ```python
 parts = t.partition("region")

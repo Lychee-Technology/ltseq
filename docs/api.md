@@ -781,7 +781,7 @@ last_rows = groups.last()
 
 #### `NestedTable.flatten`
 - **Signature**: `nested.flatten() -> LTSeq`
-- **Behavior**: Return the underlying rows with a `__group_id__` column identifying each consecutive group
+- **Behavior**: Return the underlying rows with a `__group_id__` column identifying each consecutive group (plus internal `__group_count__` and `__rn__` helper columns)
 - **Returns**: flattened `LTSeq`
 - **Example**:
 ```python
@@ -817,10 +817,11 @@ enriched = groups.derive(lambda g: {
 
 #### `len(nested)` / `NestedTable.to_pandas`
 - **Signature**: `NestedTable.__len__() -> int`; `NestedTable.to_pandas()`
-- **Behavior**: `len()` returns the number of groups; `to_pandas()` materializes the flattened rows
+- **Behavior**: `len()` returns the number of **rows** in the underlying table (not the number of groups); `to_pandas()` materializes the underlying rows as-is, without the `__group_id__` column (use `flatten().to_pandas()` for that)
 - **Example**:
 ```python
-n_groups = len(groups)
+n_rows = len(groups)                  # row count, not group count
+df = groups.flatten().to_pandas()     # rows with __group_id__
 ```
 
 ### Group Proxy (`g` inside NestedTable filter/derive)
@@ -1114,10 +1115,10 @@ result = t.group_by("region").agg(
 
 ### `LTSeq.partition`
 - **Signature**: `LTSeq.partition(*cols: str) -> PartitionedTable` or `LTSeq.partition(by: Callable) -> PartitionedTable`
-- **Behavior**: Split into sub-tables by key (no aggregation). String columns use a fast SQL path; a callable uses the flexible Python path
+- **Behavior**: Split into sub-tables by key (no aggregation). A callable key must be a **simple column expression** (e.g. `lambda r: r.region`); derived expressions like `lambda r: r.price + 1` raise `ValueError` (they would force internal materialization)
 - **Parameters**: column name(s), a single callable, or `by=` callable
 - **Returns**: `PartitionedTable` (dict-like: key → LTSeq)
-- **Exceptions**: `TypeError` (invalid params), `AttributeError` (column not found), `ValueError` (schema not initialized)
+- **Exceptions**: `TypeError` (invalid params), `AttributeError` (column not found), `ValueError` (schema not initialized, or callable is not a simple column expression)
 - **Example**:
 ```python
 parts = t.partition("region")
