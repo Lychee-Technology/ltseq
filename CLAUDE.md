@@ -92,7 +92,7 @@ t.filter(lambda r: r.age > 18)
 col("age").gt(lit(18))
 ```
 
-Window functions require explicit `.sort()` before use. The sort order is tracked in `_sort_keys` and `sort_exprs`.
+Window functions require a prior `.sort()` — or `.assume_sorted()` for data that is already physically sorted — before use. The sort order is tracked in `_sort_keys` and `sort_exprs`.
 
 ## Testing
 
