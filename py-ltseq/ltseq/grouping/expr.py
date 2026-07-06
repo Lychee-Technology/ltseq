@@ -121,20 +121,25 @@ class BinOpGroupExpr(GroupExpr):
         self._op = op
         self._right = right
 
+    # Symbolic op (kept internally) → row-dialect op name at the boundary,
+    # so the Rust side shares one operator table across both dialects.
+    _OP_NAMES = {"+": "Add", "-": "Sub", "*": "Mul", "/": "Div"}
+
     def _serialize_operand(
         self, operand: "GroupExpr | int | float"
     ) -> dict[str, Any]:
         """Serialize an operand, handling both GroupExpr and literals."""
         if isinstance(operand, GroupExpr):
             return operand.serialize()
-        else:
-            # Literal value (int or float)
-            return {"type": "Literal", "value": operand}
+        # Literal: share the row dialect's dtype inference.
+        from ..expr.core_types import LiteralExpr
+
+        return LiteralExpr(operand).serialize()
 
     def serialize(self) -> dict[str, Any]:
         return {
             "type": "BinOp",
             "left": self._serialize_operand(self._left),
-            "op": self._op,
+            "op": self._OP_NAMES.get(self._op, self._op),
             "right": self._serialize_operand(self._right),
         }

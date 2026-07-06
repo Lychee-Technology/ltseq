@@ -144,7 +144,7 @@ class NestedTable:
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
         """
-        proxy = FilterGroupProxy()
+        proxy = FilterGroupProxy(self._ltseq._schema)
         result = group_predicate(proxy)
 
         if not isinstance(result, FilterExpr):
@@ -161,13 +161,15 @@ class NestedTable:
                 "using .flatten() and then .filter() on the flattened result."
             )
 
-        where_clause = result.to_sql()
-        if not where_clause:
-            raise ValueError(
-                "group_ordered().filter() could not convert the predicate to SQL."
-            )
+        # Serialized group dialect → native staged filter in Rust (issue #91):
+        # derive hidden __group_filter__ window column → filter → project
+        # the original columns. No SQL strings, plan stays lazy.
+        from ..core import LTSeq
 
-        return self._filter_via_sql(where_clause)
+        inner = self.flatten()._inner.filter_group_window(result.serialize())
+        return NestedTable(
+            LTSeq._from_inner(inner), self._grouping_lambda, is_sorted=self._is_sorted
+        )
 
     def _filter_via_sql(self, where_clause: str) -> "NestedTable":
         """Filter using SQL WHERE clause with window functions.
@@ -307,7 +309,9 @@ class NestedTable:
         """
         flattened = self.flatten()
         derive_exprs = self._capture_derive_via_proxy(group_mapper)
-        return self._derive_via_sql(flattened, derive_exprs)
+        from ..core import LTSeq
+
+        return LTSeq._from_inner(flattened._inner.derive_group_window(derive_exprs))
 
     def _capture_derive_via_proxy(self, group_mapper: Callable) -> dict[str, str]:
         """
@@ -340,7 +344,7 @@ class NestedTable:
                 raise ValueError(f"Column name must be a string, got {type(col_name)}")
 
             if isinstance(expr, GroupExpr):
-                derive_exprs[col_name] = group_expr_to_sql(expr.serialize())
+                derive_exprs[col_name] = expr.serialize()
             else:
                 raise ValueError(
                     f"Unsupported expression type for column '{col_name}': {type(expr)}. "

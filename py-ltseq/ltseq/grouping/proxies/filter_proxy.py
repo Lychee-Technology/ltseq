@@ -68,6 +68,37 @@ class FilterExpr:
         else:
             return str(operand)
 
+    # Comparison / combinator symbols → row-dialect op names (shared
+    # operator table on the Rust side).
+    _OP_NAMES = {
+        ">": "Gt", ">=": "Ge", "<": "Lt", "<=": "Le", "=": "Eq", "!=": "Ne",
+        "AND": "And", "OR": "Or",
+        "+": "Add", "-": "Sub", "*": "Mul", "/": "Div",
+    }
+
+    def serialize(self) -> dict:
+        """Serialize to the group dialect consumed by Rust filter_group_window."""
+        if self.op == "NOT":
+            return {
+                "type": "UnaryOp",
+                "op": "Not",
+                "operand": self._serialize_operand(self.left),
+            }
+        return {
+            "type": "BinOp",
+            "op": self._OP_NAMES.get(self.op, self.op),
+            "left": self._serialize_operand(self.left),
+            "right": self._serialize_operand(self.right),
+        }
+
+    @staticmethod
+    def _serialize_operand(operand) -> dict:
+        if isinstance(operand, (FilterExpr, GroupExpr)):
+            return operand.serialize()
+        from ...expr import LiteralExpr
+
+        return LiteralExpr(operand).serialize()
+
     def __and__(self, other: "FilterExpr") -> "FilterExpr":
         """Combine two filter expressions with AND."""
         return FilterExpr(self, "AND", other)
@@ -107,18 +138,40 @@ class _ComparableGroupExpr(GroupExpr):
         return FilterExpr(self, "!=", other)
 
 
+class QuantifierFilterExpr(FilterExpr):
+    """A captured quantifier: g.all/any/none(lambda r: <row predicate>).
+
+    The inner predicate is a full row-dialect expression dict (captured via
+    _lambda_to_expr with schema validation); Rust plans it as
+    MIN/MAX(CASE WHEN pred THEN 1 ELSE 0) OVER (PARTITION BY __group_id__).
+    """
+
+    def __init__(self, quant: str, pred_dict: dict):
+        super().__init__(None, "QUANT", None)
+        self._quant = quant
+        self._pred_dict = pred_dict
+
+    def serialize(self) -> dict:
+        return {"type": "GroupQuantifier", "quant": self._quant, "pred": self._pred_dict}
+
+
 class FilterGroupProxy:
     """Proxy for capturing filter predicates without executing them.
 
     When passed to a filter lambda, this proxy captures operations like
-    g.count() > 2 as FilterExpr objects that can be converted to SQL.
+    g.count() > 2 as FilterExpr objects that serialize to the group dialect.
 
     Example:
-        proxy = FilterGroupProxy()
+        proxy = FilterGroupProxy(schema)
         result = filter_lambda(proxy)
         # result is a FilterExpr
-        sql = result.to_sql()  # "COUNT(*) OVER (...) > 2"
+        expr_dict = result.serialize()
     """
+
+    def __init__(self, schema: "dict[str, str] | None" = None):
+        # Schema of the source table, used to validate and capture the inner
+        # row-level lambdas of quantifiers (g.all/any/none).
+        self._schema = schema
 
     def count(self) -> GroupCountExpr:
         """Capture g.count() expression."""
@@ -149,58 +202,32 @@ class FilterGroupProxy:
         return _FilterableGroupAggExpr("avg", column)
 
     def all(self, predicate: Callable) -> FilterExpr:
-        """Capture g.all(lambda r: r.col op val) expression.
-
-        Translates to MIN(CASE WHEN predicate THEN 1 ELSE 0 END) OVER (...) = 1
-        """
-        inner_sql = _capture_inner_predicate_proxy(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MIN(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 1)
-        inner_sql = _capture_inner_predicate_source(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MIN(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 1)
-        raise ValueError(
-            "g.all() predicate could not be captured. "
-            "Use simple column comparisons like g.all(lambda r: r.col > val)."
-        )
+        """Capture g.all(lambda r: ...) as a quantifier over a row-dialect
+        predicate. The lambda gets the full row expression surface (schema
+        validated at capture time)."""
+        return QuantifierFilterExpr("all", self._capture_inner(predicate, "all"))
 
     def any(self, predicate: Callable) -> FilterExpr:
-        """Capture g.any(lambda r: r.col op val) expression.
-
-        Translates to MAX(CASE WHEN predicate THEN 1 ELSE 0 END) OVER (...) = 1
-        """
-        inner_sql = _capture_inner_predicate_proxy(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MAX(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 1)
-        inner_sql = _capture_inner_predicate_source(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MAX(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 1)
-        raise ValueError(
-            "g.any() predicate could not be captured. "
-            "Use simple column comparisons like g.any(lambda r: r.col > val)."
-        )
+        """Capture g.any(lambda r: ...) as a quantifier over a row-dialect
+        predicate. The lambda gets the full row expression surface (schema
+        validated at capture time)."""
+        return QuantifierFilterExpr("any", self._capture_inner(predicate, "any"))
 
     def none(self, predicate: Callable) -> FilterExpr:
-        """Capture g.none(lambda r: r.col op val) expression.
+        """Capture g.none(lambda r: ...) as a quantifier over a row-dialect
+        predicate. The lambda gets the full row expression surface (schema
+        validated at capture time)."""
+        return QuantifierFilterExpr("none", self._capture_inner(predicate, "none"))
 
-        Translates to MAX(CASE WHEN predicate THEN 1 ELSE 0 END) OVER (...) = 0
-        """
-        inner_sql = _capture_inner_predicate_proxy(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MAX(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 0)
-        inner_sql = _capture_inner_predicate_source(predicate)
-        if inner_sql:
-            case_expr = _RawSQL(f"MAX(CASE WHEN {inner_sql} THEN 1 ELSE 0 END) OVER (PARTITION BY __group_id__)")
-            return FilterExpr(case_expr, "=", 0)
-        raise ValueError(
-            "g.none() predicate could not be captured. "
-            "Use simple column comparisons like g.none(lambda r: r.col > val)."
-        )
+    def _capture_inner(self, predicate: Callable, which: str) -> dict:
+        if self._schema is None:
+            raise ValueError(
+                f"g.{which}() requires the group proxy to know the table schema; "
+                "construct FilterGroupProxy(schema)"
+            )
+        from ...expr import _lambda_to_expr
+
+        return _lambda_to_expr(predicate, self._schema)
 
 
 class _InnerColumnProxy:
