@@ -73,6 +73,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 行差分 | `.diff(n)` | `r.price.diff(1)` |
 | 环比变化率 | `.pct_change()` | `r.close.pct_change()` |
 | 累计求和 | `.cum_sum()` | `t.cum_sum("volume")` 或 `r.volume.cum_sum()` |
+| 状态累积 | `.fold()` | `t.sort("date").fold(fn, init=1.0, into="cum")` |
 
 ### 排名（使用 `.over()`）
 | 操作 | 方法 | 示例 |
@@ -579,6 +580,23 @@ t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
 # → 新增 volume_cumsum、amount_cumsum
+```
+
+#### `LTSeq.fold`（有序状态累积）
+- **签名**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
+- **行为**: 按当前顺序遍历行，通过 `fn(state, row)` 传递运行中的 `state`，并把结果作为新列 `into` 追加。表达窗口函数无法表达的复利、余额滚动、小型状态机（SPL 风格能力）。`row` 是当前行列值的只读字典；返回值既存入 `into` 又传递给下一行。`partition_by` 在每个分区开头把 `state` 重置为 `init`（分区按首次出现顺序）
+- **⚠️ 执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式；仅在确实需要顺序状态时才用 `fold`。大表上是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
+- **要求**: 需前置 `.sort()` / `.assume_sorted()` 以确定累积顺序
+- **返回**: 新的内存 `LTSeq`——原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
+- **异常**: `ValueError`（无排序顺序、`into` 已存在、或 `partition_by` 无效），`TypeError`（`fn` 非可调用）
+- **示例**:
+```python
+# 复利计算
+t.sort("date").fold(
+    lambda s, r: s * (1 + r["rate"]),
+    init=1.0,
+    into="cum_return",
+)
 ```
 
 ### 3.3 排名函数
