@@ -824,6 +824,18 @@ impl LTSeqTable {
         crate::ops::derive_sql::derive_window_sql_impl(self, derive_exprs)
     }
 
+    /// NestedTable.derive(): add group-window derived columns natively
+    /// from serialized group-dialect dicts (issue #91 PR 4).
+    fn derive_group_window(&self, derived: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::derive_group_window_impl(self, derived)
+    }
+
+    /// NestedTable.filter(): staged native filter on a serialized
+    /// group-dialect predicate (issue #91 PR 4).
+    fn filter_group_window(&self, predicate: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::filter_group_window_impl(self, predicate)
+    }
+
     /// Phase 8B: Join two tables using pointer-based foreign keys
     ///
     /// This method implements an inner join between two tables based on specified join keys.

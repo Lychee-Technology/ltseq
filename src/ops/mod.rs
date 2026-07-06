@@ -46,6 +46,7 @@ pub(crate) mod common;
 // Core modules
 pub(crate) mod basic;
 pub(crate) mod derive;
+pub(crate) mod group_window;
 pub(crate) mod io;
 pub(crate) mod linear_scan;
 pub(crate) mod parallel_scan;

@@ -283,13 +283,14 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
     // Deserialize grouping expression
     let py_expr = dict_to_py_expr(&grouping_expr)?;
 
-    // ── Fast path: linear scan engine ─────────────────────────────────────
-    // For predicates containing shift(1) + comparisons + arithmetic + logic,
-    // evaluate the boundary condition in a single O(n) pass instead of
-    // multiple DataFusion window function passes.
-    if can_linear_scan(&py_expr) {
-        return linear_scan_group_id(table, &py_expr);
-    }
+    // NOTE: no linear-scan branch here. linear_scan_group_id returns a
+    // METADATA-ONLY table (__group_id__/__group_count__/__rn__ without the
+    // user columns) — sufficient for counting, so group_ordered_count_impl
+    // uses it as its fallback, but flatten()/derive()/filter()/first()/last()
+    // all need the original columns. Routing shift-based predicates through
+    // it silently dropped every user column from those operations
+    // (pre-existing hole surfaced by the native group-window migration,
+    // issue #91 PR 4). The window path below handles shift natively.
 
     let has_window = contains_window_function(&py_expr);
 

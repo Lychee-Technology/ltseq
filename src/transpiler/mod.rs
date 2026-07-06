@@ -98,17 +98,10 @@ fn parse_literal_expr(value: &str, dtype: &str) -> Result<Expr, String> {
     }
 }
 
-/// Parse a binary operation into a DataFusion expression
-fn parse_binop_expr(
-    op: &str,
-    left: PyExpr,
-    right: PyExpr,
-    schema: &ArrowSchema,
-) -> Result<Expr, String> {
-    let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
-    let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
-
-    let operator = match op {
+/// Map a serialized operator name (shared by the row and group dialects)
+/// to a DataFusion Operator.
+pub(crate) fn op_str_to_operator(op: &str) -> Result<Operator, String> {
+    Ok(match op {
         "Add" => Operator::Plus,
         "Sub" => Operator::Minus,
         "Mul" => Operator::Multiply,
@@ -123,7 +116,20 @@ fn parse_binop_expr(
         "And" => Operator::And,
         "Or" => Operator::Or,
         _ => return Err(format!("Unknown binary operator: {}", op)),
-    };
+    })
+}
+
+/// Parse a binary operation into a DataFusion expression
+fn parse_binop_expr(
+    op: &str,
+    left: PyExpr,
+    right: PyExpr,
+    schema: &ArrowSchema,
+) -> Result<Expr, String> {
+    let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
+    let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
+
+    let operator = op_str_to_operator(op)?;
 
     Ok(Expr::BinaryExpr(BinaryExpr::new(
         Box::new(left_expr),
