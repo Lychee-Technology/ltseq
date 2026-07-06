@@ -139,10 +139,12 @@ class JoinMixin(LTSeqLike):
         right_desc = other._get_sort_direction(right_key_col) if right_key_col else None
 
         # Validate sort order (using the actual direction from sort_keys)
+        from .exceptions import SortRequiredError
+
         if left_key_col:
             expected_desc = left_desc if left_desc is not None else False
             if not self.is_sorted_by(left_key_col, desc=expected_desc):
-                raise ValueError(
+                raise SortRequiredError(
                     f"Left table is not sorted by '{left_key_col}'. "
                     f"Use .sort('{left_key_col}') first or use join() without strategy instead."
                 )
@@ -150,7 +152,7 @@ class JoinMixin(LTSeqLike):
         if right_key_col:
             expected_desc = right_desc if right_desc is not None else False
             if not other.is_sorted_by(right_key_col, desc=expected_desc):
-                raise ValueError(
+                raise SortRequiredError(
                     f"Right table is not sorted by '{right_key_col}'. "
                     f"Use .sort('{right_key_col}') first or use join() without strategy instead."
                 )

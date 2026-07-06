@@ -295,7 +295,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
     let cols2: Vec<&str> = schema2.fields().iter().map(|f| f.name().as_str()).collect();
 
     if cols1 != cols2 {
-        return Err(LtseqError::Validation(format!(
+        return Err(LtseqError::SchemaMismatch(format!(
             "Schema mismatch: {:?} vs {:?}",
             cols1, cols2
         ))

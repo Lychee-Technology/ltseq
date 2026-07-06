@@ -57,6 +57,14 @@ from .expr import (
 # Re-export utility functions
 from .utils import seq
 
+# Exception hierarchy
+from .exceptions import (
+    LTSeqError,
+    SortRequiredError,
+    SchemaMismatchError,
+    ColumnNotFoundError,
+)
+
 __all__ = [
     "LTSeq",
     "NestedTable",
@@ -103,4 +111,8 @@ __all__ = [
     "covar",
     "concat_agg",
     "seq",
+    "LTSeqError",
+    "SortRequiredError",
+    "SchemaMismatchError",
+    "ColumnNotFoundError",
 ]

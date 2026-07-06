@@ -27,11 +27,32 @@ This document describes the API **as currently implemented**. Every signature be
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
-| `AttributeError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
-| `ValueError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
-| `ValueError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
+| `ColumnNotFoundError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
+| `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
+| `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
+
+### Exception Hierarchy
+
+All library errors derive from `LTSeqError`, so you can catch the whole family with one `except`. Each concrete error also subclasses the builtin it historically raised, so existing `except ValueError:` / `hasattr()` code keeps working:
+
+```python
+from ltseq import LTSeqError, SortRequiredError, SchemaMismatchError, ColumnNotFoundError
+
+try:
+    result = t.join(other, on="id", strategy="merge")
+except SortRequiredError as e:
+    print(e)          # message carries a fix hint
+
+# LTSeqError catches everything; builtins still work
+except LTSeqError: ...
+```
+
+- `LTSeqError(Exception)` — base of the hierarchy
+- `SortRequiredError(LTSeqError, ValueError)` — operation needs sorted input
+- `SchemaMismatchError(LTSeqError, ValueError)` — incompatible schemas
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — column not in schema (also an `AttributeError` so `hasattr()` probes still work)
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
 ## Quick Reference
@@ -291,6 +312,18 @@ rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
+
+### `iter(LTSeq)` / `__iter__`
+- **Signature**: `for row in t: ...`
+- **Behavior**: Iterate over rows as dictionaries. Materializes the whole table into memory (via `to_dicts()`), matching Pandas/Polars ergonomics for small tables. For large data prefer `to_cursor()` to stream batches without full materialization
+- **Example**:
+```python
+for row in t.filter(lambda r: r.active):
+    print(row["name"])
+```
+
+### `LTSeq._repr_html_`
+- **Behavior**: Jupyter/IPython rich display. Renders the first rows as a native ASCII table wrapped in `<pre>` (no pandas/pyarrow dependency), so a bare `t` in a notebook cell shows a formatted preview plus a dimensions caption
 
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **Signature**: `LTSeq.to_pandas() -> pandas.DataFrame`; `LTSeq.to_arrow() -> pyarrow.Table`

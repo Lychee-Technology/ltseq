@@ -1,5 +1,11 @@
 # py-ltseq/ltseq/__init__.pyi
-from typing import Any, Callable, overload
+from typing import Any, Callable, Literal, overload
+
+# Enum-like string parameters, surfaced as Literal for IDE completion and mypy.
+JoinHow = Literal["inner", "left", "right", "full"]
+JoinStrategy = Literal["hash", "merge"]
+AsofStrategy = Literal["backward", "forward", "nearest"]
+Compression = Literal["snappy", "gzip", "brotli", "lz4", "zstd", "none", "uncompressed"]
 
 from .expr import (
     Expr,
@@ -106,7 +112,7 @@ class LTSeq:
     @classmethod
     def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq": ...
     def write_csv(self, path: str) -> None: ...
-    def write_parquet(self, path: str, compression: str | None = ...) -> None: ...
+    def write_parquet(self, path: str, compression: Compression | None = ...) -> None: ...
     def to_pandas(self) -> Any: ...
     def to_arrow(self) -> Any: ...
     def collect(self) -> "LTSeq": ...
@@ -115,6 +121,8 @@ class LTSeq:
     # ------------------------------------------------------------------ display
     def show(self, n: int = ...) -> "LTSeq": ...
     def __repr__(self) -> str: ...
+    def _repr_html_(self, n: int = ...) -> str: ...
+    def __iter__(self) -> Any: ...
     def __len__(self) -> int: ...
     def count(self) -> int: ...
     def _capture_expr(self, fn: Callable[..., Any]) -> dict[str, Any]: ...
@@ -181,8 +189,8 @@ class LTSeq:
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        how: str = ...,
-        strategy: str | None = ...,
+        how: JoinHow = ...,
+        strategy: JoinStrategy | None = ...,
     ) -> "LTSeq": ...
     def semi_join(
         self,
@@ -198,7 +206,7 @@ class LTSeq:
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        direction: str = ...,
+        direction: AsofStrategy = ...,
         is_sorted: bool = ...,
     ) -> "LTSeq": ...
     def link(
@@ -206,7 +214,7 @@ class LTSeq:
         target_table: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
         as_: str,
-        join_type: str = ...,
+        join_type: JoinHow = ...,
     ) -> LinkedTable: ...
 
     # ------------------------------------------------------------------ aggregation

@@ -6,9 +6,42 @@
 //!
 //! Both implement `From<...> for PyErr` for automatic conversion in `#[pymethods]`.
 
-use pyo3::{exceptions, PyErr};
-use std::fmt;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::{PyAnyMethods, PyType};
+use pyo3::{exceptions, Bound, Py, PyErr, Python};
 use std::error::Error as StdError;
+use std::fmt;
+
+/// Cached handle to the `ltseq.exceptions` module (looked up once under the GIL).
+/// `None` means the import failed — e.g. `ltseq_core` used standalone before the
+/// Python package is importable — in which case callers fall back to builtins.
+static LTSEQ_EXCEPTIONS: GILOnceCell<Option<Py<pyo3::types::PyModule>>> = GILOnceCell::new();
+
+/// Fetch a custom exception class from `ltseq.exceptions` by name, if importable.
+fn ltseq_exc<'py>(py: Python<'py>, name: &str) -> Option<Bound<'py, PyType>> {
+    let module = LTSEQ_EXCEPTIONS
+        .get_or_init(py, || py.import("ltseq.exceptions").map(|m| m.unbind()).ok())
+        .as_ref()?;
+    module
+        .bind(py)
+        .getattr(name)
+        .ok()
+        .and_then(|obj| obj.downcast_into::<PyType>().ok())
+}
+
+/// Raise `message` as the custom exception `name`, or fall back to `Fallback`
+/// (a builtin) when the Python package is not importable. The fallback is
+/// behaviorally invisible because every custom class also subclasses its
+/// builtin counterpart.
+fn raise_custom<Fallback>(name: &str, message: String) -> PyErr
+where
+    Fallback: pyo3::PyTypeInfo,
+{
+    Python::attach(|py| match ltseq_exc(py, name) {
+        Some(exc_type) => PyErr::from_type(exc_type, message),
+        None => PyErr::new::<Fallback, _>(message),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // PyExprError — Expression parsing (types.rs)
@@ -64,6 +97,12 @@ pub enum LtseqError {
     /// Column not found in the table schema.
     ColumnNotFound(String),
 
+    /// Operation requires sorted input but the table is unsorted.
+    SortRequired(String),
+
+    /// Two tables have incompatible schemas for the operation.
+    SchemaMismatch(String),
+
     /// Validation error — invalid arguments, missing parameters, etc.
     Validation(String),
 
@@ -96,6 +135,8 @@ impl fmt::Display for LtseqError {
             LtseqError::NoData => write!(f, "No data loaded"),
             LtseqError::NoSchema => write!(f, "Schema not available"),
             LtseqError::ColumnNotFound(col) => write!(f, "Column '{}' not found in schema", col),
+            LtseqError::SortRequired(msg) => write!(f, "{}", msg),
+            LtseqError::SchemaMismatch(msg) => write!(f, "{}", msg),
             LtseqError::Validation(msg) => write!(f, "{}", msg),
             LtseqError::Transpile(msg) => write!(f, "Transpilation error: {}", msg),
             LtseqError::TypeMismatch(msg) => write!(f, "Type error: {}", msg),
@@ -121,9 +162,19 @@ impl StdError for LtseqError {
 impl From<LtseqError> for PyErr {
     fn from(err: LtseqError) -> Self {
         match &err {
+            // Custom exception hierarchy (ltseq.exceptions), falling back to the
+            // builtin each class subclasses when the package is not importable.
+            LtseqError::ColumnNotFound(_) => {
+                raise_custom::<exceptions::PyValueError>("ColumnNotFoundError", err.to_string())
+            }
+            LtseqError::SortRequired(_) => {
+                raise_custom::<exceptions::PyValueError>("SortRequiredError", err.to_string())
+            }
+            LtseqError::SchemaMismatch(_) => {
+                raise_custom::<exceptions::PyValueError>("SchemaMismatchError", err.to_string())
+            }
             // Map to PyValueError
             LtseqError::Validation(_)
-            | LtseqError::ColumnNotFound(_)
             | LtseqError::Transpile(_)
             | LtseqError::Context { .. } => {
                 PyErr::new::<exceptions::PyValueError, _>(err.to_string())

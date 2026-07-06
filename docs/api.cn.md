@@ -27,11 +27,29 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 错误 | 原因 | 解决方法 |
 |------|------|---------|
 | `RuntimeError: window function used without sort` | 未排序直接调用 `shift`/`rolling`/`diff` | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
-| `AttributeError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
-| `ValueError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
-| `ValueError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
+| `ColumnNotFoundError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
+| `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
+| `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
+
+### 异常层级
+
+所有库错误都派生自 `LTSeqError`，可用一个 `except` 捕获整个家族。每个具体异常同时继承它历史上抛出的内置异常，因此现有 `except ValueError:` / `hasattr()` 代码不受影响：
+
+```python
+from ltseq import LTSeqError, SortRequiredError, SchemaMismatchError, ColumnNotFoundError
+
+try:
+    result = t.join(other, on="id", strategy="merge")
+except SortRequiredError as e:
+    print(e)          # 错误信息自带修复建议
+```
+
+- `LTSeqError(Exception)` — 层级基类
+- `SortRequiredError(LTSeqError, ValueError)` — 操作需要有序输入
+- `SchemaMismatchError(LTSeqError, ValueError)` — schema 不兼容
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — 列不在 schema 中（同时是 `AttributeError`，故 `hasattr()` 探测仍有效）
 | `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
 ## 快速参考
@@ -291,6 +309,18 @@ rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
+
+### `iter(LTSeq)` / `__iter__`
+- **签名**: `for row in t: ...`
+- **行为**: 逐行以字典迭代。会把整表物化到内存（经 `to_dicts()`），符合 Pandas/Polars 对小表的直觉。大数据请优先用 `to_cursor()` 流式读取批次、避免全量物化
+- **示例**:
+```python
+for row in t.filter(lambda r: r.active):
+    print(row["name"])
+```
+
+### `LTSeq._repr_html_`
+- **行为**: Jupyter/IPython 富显示。把前若干行渲染为原生 ASCII 表并包在 `<pre>` 中（零 pandas/pyarrow 依赖），故在 notebook 单元格里裸写 `t` 会显示格式化预览与维度说明
 
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **签名**: `LTSeq.to_pandas() -> pandas.DataFrame`；`LTSeq.to_arrow() -> pyarrow.Table`
