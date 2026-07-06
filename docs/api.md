@@ -39,7 +39,8 @@ LTSeq is an ordered-sequence data processing library for Python backed by Rust/D
 | Load CSV | `LTSeq.read_csv()` | `t = LTSeq.read_csv("data.csv")` |
 | View schema | `.columns` | `print(t.columns)` |
 | Stream results | `.to_cursor()` | `for batch in t.to_cursor(): ...` |
-| Collect all | `.collect()` | `rows = t.collect()` |
+| Rows as dicts | `.to_dicts()` | `rows = t.to_dicts()` |
+| Materialize plan | `.collect()` | `result = t.collect()` |
 | To pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | Row count | `.count()` | `n = t.count()` |
 
@@ -148,14 +149,27 @@ for batch in t.to_cursor(chunk_size=5000):
 ```
 
 ### `LTSeq.collect`
-- **Signature**: `LTSeq.collect() -> List[Dict[str, Any]]`
-- **Behavior**: Materialize all rows as a list of dictionaries
+- **Signature**: `LTSeq.collect() -> LTSeq`
+- **Behavior**: Materialize the lazy plan and return a new in-memory `LTSeq` (same semantics as Polars/PySpark `collect()`). The pending pipeline executes once; downstream operations reuse the computed data instead of re-executing the plan. Row order, schema, and sort metadata are preserved, and the result remains chainable. To get rows as dictionaries, use `to_dicts()`.
+- **Parameters**: none
+- **Returns**: new `LTSeq` backed by the materialized in-memory data
+- **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
+- **Example**:
+```python
+result = t.filter(lambda r: r.age > 18).collect()  # runs the plan once
+result.count()
+rows = result.to_dicts()
+```
+
+### `LTSeq.to_dicts`
+- **Signature**: `LTSeq.to_dicts() -> List[Dict[str, Any]]`
+- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`)
 - **Parameters**: none
 - **Returns**: list of row dictionaries
 - **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
 - **Example**:
 ```python
-rows = t.filter(lambda r: r.age > 18).collect()
+rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
@@ -1606,7 +1620,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df['col'].cumsum()` | `t.sort(...).cum_sum("col")` | Requires sort |
 | `df.head(10)` | `t.head(10)` | |
 | `df.tail(10)` | `t.tail(10)` | |
-| `df.to_dict('records')` | `t.collect()` | |
+| `df.to_dict('records')` | `t.to_dicts()` | |
 | `len(df)` | `t.count()` | |
 | `df.columns.tolist()` | `t.columns` | |
 | `df.isna()` | `t.filter(lambda r: r.col.is_null())` | Per-column |

@@ -145,11 +145,11 @@ class TestWriteCSV:
     def test_write_csv_roundtrip(self, tmp_path):
         """Data survives a write → read round-trip."""
         t = LTSeq.read_csv(SAMPLE_CSV)
-        original = t.collect()
+        original = t.to_dicts()
         out = str(tmp_path / "roundtrip.csv")
         t.write_csv(out)
         t2 = LTSeq.read_csv(out)
-        reloaded = t2.collect()
+        reloaded = t2.to_dicts()
         assert len(reloaded) == len(original)
         # Column names should match
         assert set(reloaded[0].keys()) == set(original[0].keys())
@@ -173,13 +173,13 @@ class TestIOErrorHandling:
         t = LTSeq.read_csv("/nonexistent/path/to/file.csv")
         # The current behavior: no exception, empty schema, empty data
         assert t._schema == {}
-        assert t.collect() == []
+        assert t.to_dicts() == []
 
     def test_read_parquet_nonexistent_returns_empty(self):
         """Reading a non-existent parquet file returns empty table (lazy error)."""
         t = LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
         # The current behavior: no exception, empty data
-        assert t.collect() == []
+        assert t.to_dicts() == []
 
 
 if __name__ == "__main__":

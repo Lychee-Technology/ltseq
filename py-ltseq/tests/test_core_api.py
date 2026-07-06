@@ -125,54 +125,110 @@ class TestCountMethod:
         assert filtered.count() == 2  # Charlie (35) and Eve (32)
 
 
-class TestCollectMethod:
-    """Test collect() method."""
+class TestToDicts:
+    """Test to_dicts() method (row-dict export, old collect() behavior)."""
 
-    def test_collect_returns_list(self, sample_csv):
-        """collect() returns a list."""
+    def test_to_dicts_returns_list(self, sample_csv):
+        """to_dicts() returns a list."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.collect()
+        result = t.to_dicts()
         assert isinstance(result, list)
 
-    def test_collect_returns_dicts(self, sample_csv):
-        """collect() returns list of dictionaries."""
+    def test_to_dicts_returns_dicts(self, sample_csv):
+        """to_dicts() returns list of dictionaries."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.collect()
+        result = t.to_dicts()
         assert all(isinstance(row, dict) for row in result)
 
-    def test_collect_has_correct_count(self, sample_csv):
-        """collect() returns correct number of rows."""
+    def test_to_dicts_has_correct_count(self, sample_csv):
+        """to_dicts() returns correct number of rows."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.collect()
+        result = t.to_dicts()
         assert len(result) == 5
 
-    def test_collect_has_all_columns(self, sample_csv):
-        """collect() rows have all columns."""
+    def test_to_dicts_has_all_columns(self, sample_csv):
+        """to_dicts() rows have all columns."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.collect()
+        result = t.to_dicts()
         for row in result:
             assert "id" in row
             assert "name" in row
             assert "age" in row
             assert "score" in row
 
-    def test_collect_values_correct(self, sample_csv):
-        """collect() returns correct values."""
+    def test_to_dicts_values_correct(self, sample_csv):
+        """to_dicts() returns correct values."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.collect()
+        result = t.to_dicts()
         # Find Alice's row
         alice = next(row for row in result if row["name"] == "Alice")
         assert alice["id"] == 1
         assert alice["age"] == 30
         assert alice["score"] == 85.5
 
-    def test_collect_after_filter(self, sample_csv):
-        """collect() works after filter."""
+    def test_to_dicts_after_filter(self, sample_csv):
+        """to_dicts() works after filter."""
         t = LTSeq.read_csv(sample_csv)
         filtered = t.filter(lambda r: r.name == "Bob")
-        result = filtered.collect()
+        result = filtered.to_dicts()
         assert len(result) == 1
         assert result[0]["name"] == "Bob"
+
+
+class TestCollect:
+    """Test collect() method (materialize lazy plan, returns LTSeq)."""
+
+    def test_collect_returns_ltseq(self, sample_csv):
+        """collect() returns an LTSeq instance."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.collect()
+        assert isinstance(result, LTSeq)
+
+    def test_collect_preserves_count_and_schema(self, sample_csv):
+        """collect() preserves row count and column names."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.collect()
+        assert result.count() == t.count()
+        assert result.columns == t.columns
+
+    def test_collect_preserves_row_order(self, sample_csv):
+        """collect() preserves row order of the sorted plan."""
+        t = LTSeq.read_csv(sample_csv)
+        assert t.sort("age").collect().to_dicts() == t.sort("age").to_dicts()
+
+    def test_collect_is_chainable(self, sample_csv):
+        """collect() result supports further operations."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.filter(lambda r: r.age > 25).collect().filter(lambda r: r.score > 85)
+        rows = result.to_dicts()
+        names = {row["name"] for row in rows}
+        assert names == {"Alice", "Diana", "Eve"}
+
+    def test_collect_preserves_sort_metadata(self, sample_csv):
+        """collect() carries sort keys over to the materialized table."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.sort("age").collect()
+        assert result._sort_keys == [("age", False)]
+
+    def test_window_after_collect(self, sample_csv):
+        """Window functions work on a collected table (sort metadata intact)."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.sort("id").collect().derive(prev_age=lambda r: r.age.shift(1))
+        rows = result.to_dicts()
+        assert rows[1]["prev_age"] == 30
+        assert rows[2]["prev_age"] == 25
+
+    def test_collect_empty_result(self, sample_csv):
+        """collect() on an empty filter result keeps schema, count is 0."""
+        t = LTSeq.read_csv(sample_csv)
+        result = t.filter(lambda r: r.age > 1000).collect()
+        assert result.count() == 0
+        assert result.columns == ["id", "name", "age", "score"]
+
+    def test_collect_fresh_table_roundtrip(self, sample_csv):
+        """collect() on a freshly-read table round-trips all rows."""
+        t = LTSeq.read_csv(sample_csv)
+        assert t.collect().to_dicts() == t.to_dicts()
 
 
 class TestHeadMethod:
@@ -272,7 +328,7 @@ class TestTailMethod:
         """tail() returns the last rows, not first."""
         t = LTSeq.read_csv(small_csv)
         result = t.tail(2)
-        rows = result.collect()
+        rows = result.to_dicts()
         # Should get rows with id 2 and 3, not 1 and 2
         ids = [row["id"] for row in rows]
         assert 3 in ids
@@ -326,7 +382,7 @@ class TestEmptyTableHandling:
     def test_empty_collect(self):
         """collect() on empty LTSeq returns empty list."""
         t = LTSeq()
-        result = t.collect()
+        result = t.to_dicts()
         assert result == []
 
     def test_empty_to_pandas(self):
@@ -343,7 +399,7 @@ class TestEmptyTableHandling:
         t = LTSeq.read_csv(sample_csv)
         empty = t.filter(lambda r: r.age > 9999)
         assert len(empty) == 0
-        result = empty.collect()
+        result = empty.to_dicts()
         assert result == []
 
     def test_empty_count(self):
@@ -376,6 +432,6 @@ class TestHeadTailChaining:
     def test_head_then_collect(self, sample_csv):
         """head() followed by collect() works."""
         t = LTSeq.read_csv(sample_csv)
-        result = t.head(2).collect()
+        result = t.head(2).to_dicts()
         assert len(result) == 2
         assert all(isinstance(row, dict) for row in result)

@@ -365,7 +365,7 @@ class TestStringOpsEdgeCases:
         # Index 0 is invalid in SQL SPLIT_PART (1-based)
         result = t.derive(part=lambda r: r.name.s.split(" ", 0))
         with pytest.raises(Exception, match="field position must not be zero"):
-            result.collect()
+            result.to_dicts()
 
 
 class TestStringOpsTypeErrors:

@@ -125,7 +125,7 @@ t = t.derive(next_gap=lambda r: r.event_time.diff(1))
 
 ```python
 t.show()
-rows = t.collect()
+rows = t.to_dicts()
 ```
 
 这就是 LTSeq 期望的使用方式。

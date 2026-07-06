@@ -30,7 +30,8 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 加载 CSV | `LTSeq.read_csv()` | `t = LTSeq.read_csv("data.csv")` |
 | 查看列名 | `.columns` | `print(t.columns)` |
 | 流式输出 | `.to_cursor()` | `for batch in t.to_cursor(): ...` |
-| 物化所有行 | `.collect()` | `rows = t.collect()` |
+| 行字典导出 | `.to_dicts()` | `rows = t.to_dicts()` |
+| 物化惰性计划 | `.collect()` | `result = t.collect()` |
 | 转 pandas | `.to_pandas()` | `df = t.to_pandas()` |
 | 行数统计 | `.count()` | `n = t.count()` |
 
@@ -147,14 +148,27 @@ for batch in t.to_cursor(chunk_size=5000):
 ```
 
 ### `LTSeq.collect`
-- **签名**: `LTSeq.collect() -> List[Dict[str, Any]]`
-- **行为**: 将所有行物化为字典列表
+- **签名**: `LTSeq.collect() -> LTSeq`
+- **行为**: 物化惰性计划，返回新的内存 `LTSeq`（与 Polars/PySpark `collect()` 语义一致）。挂起的管道只执行一次，下游操作复用已计算的数据而非重新执行计划。行序、schema、排序元数据均保留，结果可继续链式调用。如需行字典，请用 `to_dicts()`。
+- **参数**: 无
+- **返回**: 由物化后内存数据支撑的新 `LTSeq`
+- **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
+- **示例**:
+```python
+result = t.filter(lambda r: r.age > 18).collect()  # 计划只执行一次
+result.count()
+rows = result.to_dicts()
+```
+
+### `LTSeq.to_dicts`
+- **签名**: `LTSeq.to_dicts() -> List[Dict[str, Any]]`
+- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）
 - **参数**: 无
 - **返回**: 行字典列表
 - **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
 - **示例**:
 ```python
-rows = t.filter(lambda r: r.age > 18).collect()
+rows = t.filter(lambda r: r.age > 18).to_dicts()
 for row in rows:
     print(row["name"])
 ```
@@ -1403,7 +1417,7 @@ summary = orders.agg(
 | `df['col'].cumsum()` | `t.sort(...).cum_sum("col")` | 需要先排序 |
 | `df.head(10)` | `t.head(10)` | |
 | `df.tail(10)` | `t.tail(10)` | |
-| `df.to_dict('records')` | `t.collect()` | |
+| `df.to_dict('records')` | `t.to_dicts()` | |
 | `len(df)` | `t.count()` | |
 | `df.columns.tolist()` | `t.columns` | |
 | `df.isna()` | `t.filter(lambda r: r.col.is_null())` | 逐列操作 |
