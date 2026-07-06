@@ -19,7 +19,9 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::common::{build_aliased_join_schema, JoinType};
+use crate::ops::common::{
+    build_prefixed_join_schema, build_suffixed_join_schema, right_rename_map, JoinType,
+};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -162,37 +164,46 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
-/// Rename columns in a DataFrame to avoid conflicts during join.
-///
-/// Returns a new DataFrame with columns renamed according to the alias prefix,
-/// plus a mapping of old->new column names for the join key adjustment.
+/// Rename right-table columns that collide with the left table by appending
+/// `suffix` (Polars semantics: only conflicting columns are renamed). Returns
+/// the renamed DataFrame, the `(old, new)` rename map, and the renamed names of
+/// the join key columns.
 fn rename_right_df_for_join(
     df: DataFrame,
+    left_schema: &ArrowSchema,
     right_schema: &ArrowSchema,
-    alias: &str,
+    suffix: &str,
     right_key_cols: &[String],
-) -> PyResult<(DataFrame, Vec<String>)> {
-    let mut new_key_cols = Vec::with_capacity(right_key_cols.len());
-    let mut select_exprs = Vec::with_capacity(right_schema.fields().len());
+) -> PyResult<(DataFrame, Vec<(String, String)>, Vec<String>)> {
+    let rename_map = right_rename_map(left_schema, right_schema, suffix)?;
 
-    for field in right_schema.fields() {
-        let old_name = field.name();
-        let new_name = format!("{}_{}", alias, old_name);
+    let select_exprs: Vec<Expr> = rename_map
+        .iter()
+        .map(|(old, new)| {
+            if old == new {
+                col(old)
+            } else {
+                col(old).alias(new)
+            }
+        })
+        .collect();
 
-        // If this is a join key column, track the mapping
-        if right_key_cols.contains(&old_name.to_string()) {
-            new_key_cols.push(new_name.clone());
-        }
-
-        // Create alias expression: col(old_name).alias(new_name)
-        select_exprs.push(col(old_name).alias(&new_name));
-    }
+    let new_key_cols: Vec<String> = right_key_cols
+        .iter()
+        .map(|k| {
+            rename_map
+                .iter()
+                .find(|(old, _)| old == k)
+                .map(|(_, new)| new.clone())
+                .unwrap_or_else(|| k.clone())
+        })
+        .collect();
 
     let renamed_df = df
         .select(select_exprs)
         .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
 
-    Ok((renamed_df, new_key_cols))
+    Ok((renamed_df, rename_map, new_key_cols))
 }
 
 /// Build result LTSeqTable from a DataFrame.
@@ -227,7 +238,7 @@ pub fn join_impl(
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
     join_type_str: &str,
-    alias: &str,
+    suffix: &str,
 ) -> PyResult<LTSeqTable> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
@@ -253,16 +264,17 @@ pub fn join_impl(
         JoinType::Full => datafusion::logical_expr::JoinType::Full,
     };
 
-    // Rename right columns to avoid conflicts
-    let (renamed_right_df, new_right_keys) = rename_right_df_for_join(
+    // Rename only the right columns that collide with the left table (suffix).
+    let (renamed_right_df, rename_map, new_right_keys) = rename_right_df_for_join(
         (**df_right).clone(),
+        stored_schema_left,
         stored_schema_right,
-        alias,
+        suffix,
         &right_col_names,
     )?;
 
     // Execute native join
-    let result_df = RUNTIME
+    let joined_df = RUNTIME
         .block_on(async {
             (**df_left)
                 .clone()
@@ -277,8 +289,109 @@ pub fn join_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
-    // Build expected schema for the result
-    let expected_schema = build_aliased_join_schema(stored_schema_left, stored_schema_right, alias);
+    // For inner/left joins the right equi-key duplicates the left key, so drop
+    // it (Polars coalesce default). Right/full keep both keys — the left key can
+    // be NULL there, so coalescing would need an explicit projection (deferred).
+    let drop_right: Vec<String> = match join_type {
+        JoinType::Inner | JoinType::Left => right_col_names.clone(),
+        JoinType::Right | JoinType::Full => Vec::new(),
+    };
+
+    // Project the joined frame down to the final column set (left cols as-is,
+    // then non-dropped right cols by their renamed names).
+    let mut proj: Vec<Expr> = stored_schema_left
+        .fields()
+        .iter()
+        .map(|f| col(f.name()))
+        .collect();
+    for (old, new) in &rename_map {
+        if drop_right.contains(old) {
+            continue;
+        }
+        proj.push(col(new));
+    }
+    let result_df = joined_df
+        .select(proj)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to project join result: {}", e)))?;
+
+    let expected_schema = build_suffixed_join_schema(
+        stored_schema_left,
+        stored_schema_right,
+        suffix,
+        &drop_right,
+    )?;
+
+    build_result_table_from_df(&table.session, result_df, expected_schema, Vec::new())
+}
+
+/// Prefix-aliased join used by the pointer-navigation `link()` path.
+///
+/// Unlike `join_impl` (Polars conflict-only suffix), this prefixes ALL right
+/// columns with `{alias}_` and keeps every column, so linked fields are reached
+/// as `alias_col`. Kept separate so `link()`'s naming contract is stable while
+/// `join()` follows Polars semantics.
+pub fn join_prefixed_impl(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_key_expr_dict: &Bound<'_, PyDict>,
+    right_key_expr_dict: &Bound<'_, PyDict>,
+    join_type_str: &str,
+    alias: &str,
+) -> PyResult<LTSeqTable> {
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
+
+    let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+        LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+    })?;
+
+    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
+        left_key_expr_dict,
+        right_key_expr_dict,
+        stored_schema_left,
+        stored_schema_right,
+    )?;
+
+    let df_join_type = match join_type {
+        JoinType::Inner => datafusion::logical_expr::JoinType::Inner,
+        JoinType::Left => datafusion::logical_expr::JoinType::Left,
+        JoinType::Right => datafusion::logical_expr::JoinType::Right,
+        JoinType::Full => datafusion::logical_expr::JoinType::Full,
+    };
+
+    // Prefix every right column with `{alias}_`.
+    let mut new_right_keys = Vec::with_capacity(right_col_names.len());
+    let mut select_exprs = Vec::with_capacity(stored_schema_right.fields().len());
+    for field in stored_schema_right.fields() {
+        let old_name = field.name();
+        let new_name = format!("{}_{}", alias, old_name);
+        if right_col_names.contains(&old_name.to_string()) {
+            new_right_keys.push(new_name.clone());
+        }
+        select_exprs.push(col(old_name).alias(&new_name));
+    }
+    let renamed_right_df = (**df_right)
+        .clone()
+        .select(select_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
+
+    let result_df = RUNTIME
+        .block_on(async {
+            (**df_left)
+                .clone()
+                .join(
+                    renamed_right_df,
+                    df_join_type,
+                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    None,
+                )
+                .map_err(|e| format!("Native join failed: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
+
+    let expected_schema =
+        build_prefixed_join_schema(stored_schema_left, stored_schema_right, alias);
 
     build_result_table_from_df(&table.session, result_df, expected_schema, Vec::new())
 }

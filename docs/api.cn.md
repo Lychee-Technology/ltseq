@@ -93,7 +93,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 ### 连接
 | 操作 | 方法 | 示例 |
 |------|------|------|
-| 哈希连接 | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
+| 哈希连接 | `.join()` | `a.join(b, on="id")` 或 `a.join(b, on=lambda a, b: a.id == b.id)` |
 | 归并连接 | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | 时序就近连接 | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | 半连接 | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
@@ -890,7 +890,7 @@ combined = t1.union(t2)
 ```
 
 ### `LTSeq.intersect`
-- **签名**: `LTSeq.intersect(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **签名**: `LTSeq.intersect(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **行为**: 两表交集
 - **参数**: `other` 另一个表；`on` 键选择器（None 表示全列）
 - **返回**: 交集 `LTSeq`
@@ -901,7 +901,7 @@ common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.except_`（差集）
-- **签名**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **签名**: `LTSeq.except_(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **行为**: 左表中有而右表中没有的行（SQL EXCEPT 语义）
 - **参数**: `other` 另一个表；`on` 键选择器
 - **返回**: 差集 `LTSeq`
@@ -915,7 +915,7 @@ only_left = t1.except_(t2, on=lambda r: r.id)
 > 注意：`Expr.diff()`（行级差分，第 3 节）与表级差集无关。表级差集请使用 `except_()`。
 
 ### `LTSeq.xunion`（对称差）
-- **签名**: `LTSeq.xunion(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **签名**: `LTSeq.xunion(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **行为**: 只在其中一个表中出现的行；等价于 `(a except b) union (b except a)`
 - **参数**: `other` 另一个表；`on` 键选择器（None 表示全列）
 - **返回**: 对称差 `LTSeq`
@@ -925,7 +925,7 @@ unique_to_either = t1.xunion(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.is_subset`
-- **签名**: `LTSeq.is_subset(other: LTSeq, on: Callable | None = None) -> bool`
+- **签名**: `LTSeq.is_subset(other: LTSeq, on: Callable | str | None = None) -> bool`
 - **行为**: 检查本表是否为另一个表的子集
 - **参数**: `other` 另一个表；`on` 键选择器
 - **返回**: `bool`
@@ -950,27 +950,30 @@ t.contain("id", 1, 2, 3)
 ## 6. 关联与连接
 
 ### `LTSeq.join`
-- **签名**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str | None = None) -> LTSeq`
-- **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。右表冲突列名会加 `_other_` **前缀**（如 `product` → `_other_product`）
-- **参数**: `other` 另一个表；`on` 连接条件 lambda（如 `lambda a, b: a.id == b.id`）；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}
+- **签名**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
+- **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。**列命名（Polars 语义）**：与左表冲突的右列保留原名并加 `suffix`（如 `val` → `val_right`），不冲突的右列保持原名。inner/left 连接会丢弃重复的右键列（合并），right/full 连接保留两侧键列（右键冲突时加后缀）
+- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda（如 `lambda a, b: a.id == b.id`）表达任意条件；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
 - **返回**: 连接后的 `LTSeq`
-- **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效，或 merge 输入未排序）
+- **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效、merge 输入未排序、列不存在或后缀冲突）
 - **示例**:
 ```python
-joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+# 字符串键捷径（同名列）
+users.join(orders, on="id", how="left")
 
-# 预排序表的归并连接
-result = t1.sort("id").join(
-    t2.sort("id"),
-    on=lambda a, b: a.id == b.id,
-    strategy="merge",
-)
+# 异名键 + 自定义后缀
+users.join(orders, left_on="id", right_on="user_id", suffix="_o")
+
+# 复合键
+a.join(b, on=["region", "year"])
+
+# 任意条件（逃生舱）
+users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False) -> LTSeq`
-- **行为**: 时序就近连接（as-of join）。`is_sorted=True` 时跳过排序校验（已知双方有序时更快）
-- **参数**: `other` 另一个表；`on` 连接条件（如 `lambda t, q: t.time >= q.time`）；`direction` 取值 {"backward","forward","nearest"}；`is_sorted` 跳过排序检查
+- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False, *, suffix: str = "_right") -> LTSeq`
+- **行为**: 时序就近连接（as-of join）。`is_sorted=True` 时跳过排序校验（已知双方有序时更快）。冲突右列加 `suffix`（Polars 语义）；与等值连接不同，右侧时间列会保留（as-of 是近似匹配，匹配到的时间戳是真实信息）
+- **参数**: `other` 另一个表；`on` 连接条件（如 `lambda t, q: t.time >= q.time`）；`direction` 取值 {"backward","forward","nearest"}；`is_sorted` 跳过排序检查；`suffix` 冲突右列的后缀
 - **返回**: as-of 连接后的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（direction 无效）
 - **示例**:
@@ -979,9 +982,9 @@ result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="b
 ```
 
 ### `LTSeq.semi_join`
-- **签名**: `LTSeq.semi_join(other: LTSeq, on: Callable) -> LTSeq`
+- **签名**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **行为**: 返回左表中键存在于右表的行。只返回左表列，多次匹配不产生重复
-- **参数**: `other` 用于匹配的右表；`on` 连接条件 lambda
+- **参数**: `other` 用于匹配的右表；`on` 等值连接的列名（列表）或双参 lambda 条件
 - **返回**: 左表匹配行组成的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（schema 未初始化）
 - **示例**:
@@ -991,9 +994,9 @@ active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.anti_join`
-- **签名**: `LTSeq.anti_join(other: LTSeq, on: Callable) -> LTSeq`
+- **签名**: `LTSeq.anti_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **行为**: 返回左表中键**不**存在于右表的行。只返回左表列
-- **参数**: `other` 用于匹配的右表；`on` 连接条件 lambda
+- **参数**: `other` 用于匹配的右表；`on` 等值连接的列名（列表）或双参 lambda 条件
 - **返回**: 左表未匹配行组成的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（schema 未初始化）
 - **示例**:
@@ -1667,8 +1670,9 @@ for batch in LTSeq.scan("huge.csv"):
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | 也接受 `descending=` |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
 | `df.groupby('region').agg({'sales': 'sum'})` | `t.group_by("region").agg(sales=lambda g: g.sales.sum())` | |
-| `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
-| `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
+| `df.merge(df2, on='id')` | `t.join(t2, on="id")` | |
+| `df.merge(df2, on='id', how='left')` | `t.join(t2, on="id", how="left")` | |
+| `df.merge(df2, left_on='a', right_on='b', suffixes=('','_r'))` | `t.join(t2, left_on="a", right_on="b", suffix="_r")` | |
 | `pd.merge_asof(t, q, on='time')` | `t.asof_join(q, on=lambda t, q: t.time >= q.time)` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | 需要排序 |
 | `df['col'].rolling(5).mean()` | `t.sort(...).derive(ma=lambda r: r.col.rolling(5).mean())` | 需要排序 |

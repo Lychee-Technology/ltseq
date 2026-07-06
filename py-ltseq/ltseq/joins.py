@@ -9,6 +9,78 @@ if TYPE_CHECKING:
 from .expr import SchemaProxy
 
 
+def _column_key_dict(name: str) -> dict[str, Any]:
+    """Serialized single-column key expression, matching ColumnExpr.serialize()."""
+    return {"type": "Column", "name": name}
+
+
+def _and_key_dict(names: list[str], other_names: list[str]) -> dict[str, Any]:
+    """Build the And-tree of Eq(col, col) that the Rust join path expects for
+    composite string keys (left_names[i] == right_names[i])."""
+    eqs = [
+        {"type": "BinOp", "op": "Eq",
+         "left": _column_key_dict(ln), "right": _column_key_dict(rn)}
+        for ln, rn in zip(names, other_names)
+    ]
+    tree = eqs[0]
+    for eq in eqs[1:]:
+        tree = {"type": "BinOp", "op": "And", "left": tree, "right": eq}
+    return tree
+
+
+def _resolve_join_keys(
+    on: "Callable | str | list[str] | None",
+    left_on: "str | list[str] | None",
+    right_on: "str | list[str] | None",
+    self_schema: dict[str, str],
+    other_schema: dict[str, str],
+    how: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Resolve join keys from the string/list shortcuts or the lambda form.
+
+    Returns (left_key_expr, right_key_expr, join_type) in the same serialized
+    shape the Rust join path consumes, so string keys and lambda keys converge.
+    """
+    # Column-name shortcuts (Pandas/Polars style) take precedence when given.
+    if left_on is not None or right_on is not None:
+        if on is not None:
+            raise ValueError("Pass either on= or left_on=/right_on=, not both")
+        if left_on is None or right_on is None:
+            raise ValueError("left_on= and right_on= must be given together")
+        left_cols = [left_on] if isinstance(left_on, str) else list(left_on)
+        right_cols = [right_on] if isinstance(right_on, str) else list(right_on)
+        if len(left_cols) != len(right_cols):
+            raise ValueError("left_on and right_on must have the same length")
+        _check_cols(left_cols, self_schema, "left")
+        _check_cols(right_cols, other_schema, "right")
+    elif isinstance(on, (str, list)):
+        cols = [on] if isinstance(on, str) else list(on)
+        _check_cols(cols, self_schema, "left")
+        _check_cols(cols, other_schema, "right")
+        left_cols = right_cols = cols
+    else:
+        # Lambda form (or None) — delegate to the existing extractor.
+        from .helpers import _extract_join_keys
+
+        if on is None:
+            raise ValueError("join() requires on=, or left_on=/right_on=")
+        return _extract_join_keys(on, self_schema, other_schema, how)
+
+    if len(left_cols) == 1:
+        return _column_key_dict(left_cols[0]), _column_key_dict(right_cols[0]), how
+    tree = _and_key_dict(left_cols, right_cols)
+    return tree, tree, how
+
+
+def _check_cols(cols: list[str], schema: dict[str, str], side: str) -> None:
+    for c in cols:
+        if c not in schema:
+            raise ValueError(
+                f"Join column '{c}' not found in {side} table. "
+                f"Available columns: {list(schema.keys())}"
+            )
+
+
 def _validate_join_inputs(self_table: Any, other: Any, how: str) -> None:
     """Validate join inputs and return error if invalid."""
     if not self_table._schema:
@@ -33,30 +105,20 @@ class JoinMixin(LTSeqLike):
     """Mixin class providing join operations for LTSeq."""
 
     def _execute_join(
-        self, other: "LTSeq", on: Callable, how: str, method_name: str = "join"
+        self,
+        other: "LTSeq",
+        left_key_expr: dict,
+        right_key_expr: dict,
+        jtype: str,
+        suffix: str,
+        method_name: str = "join",
     ) -> "LTSeq":
-        """Core join implementation."""
+        """Core join implementation (keys already resolved)."""
         from .core import LTSeq
-
-        _validate_join_inputs(self, other, how)
-
-        # Validate join condition
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            other_proxy = SchemaProxy(other._schema)
-            _ = on(self_proxy, other_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid join condition: {e}")
-
-        from .helpers import _extract_join_keys
-
-        left_key_expr, right_key_expr, jtype = _extract_join_keys(
-            on, self._schema, other._schema, how
-        )
 
         try:
             joined_inner = self._inner.join(
-                other._inner, left_key_expr, right_key_expr, jtype, "_other"
+                other._inner, left_key_expr, right_key_expr, jtype, suffix
             )
         except RuntimeError as e:
             raise RuntimeError(
@@ -70,22 +132,31 @@ class JoinMixin(LTSeqLike):
     def join(
         self,
         other: "LTSeq",
-        on: Callable,
+        on: "Callable | str | list[str] | None" = None,
         how: str = "inner",
         strategy: str | None = None,
+        *,
+        left_on: "str | list[str] | None" = None,
+        right_on: "str | list[str] | None" = None,
+        suffix: str = "_right",
     ) -> "LTSeq":
         """
         Join two tables with configurable strategy.
 
         Args:
             other: Another LTSeq table to join with
-            on: Lambda specifying join condition.
-                E.g., lambda a, b: a.user_id == b.user_id
+            on: Join key(s). A column name string or list of names for an
+                equi-join (Pandas/Polars style), or a two-arg lambda for
+                arbitrary conditions (e.g., lambda a, b: a.user_id == b.user_id)
             how: Join type: "inner", "left", "right", "full"
             strategy: Join strategy (optional):
                 - None: default hash join
                 - "hash": explicit hash join (same as None)
                 - "merge": merge join for pre-sorted tables (validates sort order)
+            left_on / right_on: Column name(s) for differently-named keys
+            suffix: Appended to right-table columns that collide with the left
+                table (Polars semantics; default "_right"). For inner/left joins
+                the duplicate right key column is dropped.
 
         Returns:
             Joined LTSeq with columns from both tables
@@ -94,9 +165,9 @@ class JoinMixin(LTSeqLike):
             ValueError: If strategy="merge" and tables are not sorted by join keys
 
         Example:
-            >>> result = users.join(orders, on=lambda u, o: u.id == o.user_id)
-            >>> result = t1.sort("id").join(t2.sort("id"),
-            ...     on=lambda a, b: a.id == b.id, strategy="merge")
+            >>> users.join(orders, on="id", how="left")
+            >>> users.join(orders, left_on="id", right_on="user_id", suffix="_o")
+            >>> users.join(orders, on=lambda u, o: u.id == o.user_id)
         """
         valid_strategies = {None, "hash", "merge"}
         if strategy not in valid_strategies:
@@ -104,31 +175,36 @@ class JoinMixin(LTSeqLike):
                 f"Invalid strategy '{strategy}'. Must be one of: None, 'hash', 'merge'"
             )
 
-        if strategy == "merge":
-            return self._join_with_sort_validation(other, on, how)
+        _validate_join_inputs(self, other, how)
+        if callable(on):
+            try:
+                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+            except Exception as e:
+                raise TypeError(f"Invalid join condition: {e}")
 
-        return self._execute_join(other, on, how, "join")
+        left_key_expr, right_key_expr, jtype = _resolve_join_keys(
+            on, left_on, right_on, self._schema, other._schema, how
+        )
+
+        if strategy == "merge":
+            return self._join_with_sort_validation(
+                other, left_key_expr, right_key_expr, jtype, suffix
+            )
+
+        return self._execute_join(
+            other, left_key_expr, right_key_expr, jtype, suffix, "join"
+        )
 
     def _join_with_sort_validation(
-        self, other: "LTSeq", on: Callable, how: str
+        self,
+        other: "LTSeq",
+        left_key_expr: dict,
+        right_key_expr: dict,
+        jtype: str,
+        suffix: str,
     ) -> "LTSeq":
         """Merge join with sort order validation (used by strategy='merge')."""
         from .core import LTSeq
-
-        _validate_join_inputs(self, other, how)
-
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            other_proxy = SchemaProxy(other._schema)
-            _ = on(self_proxy, other_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid join condition: {e}")
-
-        from .helpers import _extract_join_keys
-
-        left_key_expr, right_key_expr, jtype = _extract_join_keys(
-            on, self._schema, other._schema, how
-        )
 
         # Extract column names for validation
         left_key_col = left_key_expr.get("name") if left_key_expr else None
@@ -169,7 +245,7 @@ class JoinMixin(LTSeqLike):
         # Execute merge join
         try:
             joined_inner = self._inner.join(
-                other._inner, left_key_expr, right_key_expr, jtype, "_other"
+                other._inner, left_key_expr, right_key_expr, jtype, suffix
             )
         except RuntimeError as e:
             raise RuntimeError(
@@ -195,6 +271,8 @@ class JoinMixin(LTSeqLike):
         on: Callable,
         direction: str = "backward",
         is_sorted: bool = False,
+        *,
+        suffix: str = "_right",
     ) -> "LTSeq":
         """
         As-of join for time-series data.
@@ -206,6 +284,9 @@ class JoinMixin(LTSeqLike):
             on: Lambda specifying join condition (e.g., lambda t, q: t.time >= q.time)
             direction: "backward" (<=), "forward" (>=), or "nearest"
             is_sorted: If True, skip sort verification (faster)
+            suffix: Appended to right-table columns that collide with the left
+                table (Polars semantics; default "_right"). Unlike an equi-join,
+                the right time column is kept (the matched timestamp is real info)
 
         Returns:
             Joined LTSeq
@@ -267,20 +348,22 @@ class JoinMixin(LTSeqLike):
                 left_time_col,
                 right_time_col,
                 direction,
-                "_other",
+                suffix,
             )
         except RuntimeError as e:
             raise RuntimeError(f"Asof join failed: {e}")
 
         return LTSeq._from_inner(joined_inner)
 
-    def _filtering_join(self, other: "LTSeq", on: Callable, join_type: str) -> "LTSeq":
+    def _filtering_join(
+        self, other: "LTSeq", on: "Callable | str | list[str]", join_type: str
+    ) -> "LTSeq":
         """
         Shared implementation for semi-join and anti-join.
 
         Args:
             other: Right table to match against
-            on: Lambda specifying join condition
+            on: Column name(s) string/list for equi-keys, or a lambda condition
             join_type: "semi" or "anti"
 
         Returns:
@@ -303,18 +386,14 @@ class JoinMixin(LTSeqLike):
                 "Other table schema not initialized. Call read_csv() first."
             )
 
-        # Validate join condition
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            other_proxy = SchemaProxy(other._schema)
-            _ = on(self_proxy, other_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid join condition: {e}")
+        if callable(on):
+            try:
+                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+            except Exception as e:
+                raise TypeError(f"Invalid join condition: {e}")
 
-        from .helpers import _extract_join_keys
-
-        left_key_expr, right_key_expr, _ = _extract_join_keys(
-            on, self._schema, other._schema, "inner"
+        left_key_expr, right_key_expr, _ = _resolve_join_keys(
+            on, None, None, self._schema, other._schema, "inner"
         )
 
         try:
@@ -332,7 +411,7 @@ class JoinMixin(LTSeqLike):
         result = LTSeq._from_inner(joined_inner)
         return result
 
-    def semi_join(self, other: "LTSeq", on: Callable) -> "LTSeq":
+    def semi_join(self, other: "LTSeq", on: "Callable | str | list[str]") -> "LTSeq":
         """
         Semi-join: return rows from left table where keys exist in right table.
 
@@ -352,7 +431,7 @@ class JoinMixin(LTSeqLike):
         """
         return self._filtering_join(other, on, "semi")
 
-    def anti_join(self, other: "LTSeq", on: Callable) -> "LTSeq":
+    def anti_join(self, other: "LTSeq", on: "Callable | str | list[str]") -> "LTSeq":
         """
         Anti-join: return rows from left table where keys do NOT exist in right table.
 

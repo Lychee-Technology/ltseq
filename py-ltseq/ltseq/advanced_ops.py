@@ -8,6 +8,18 @@ if TYPE_CHECKING:
     from .core import LTSeq
 
 
+def _resolve_set_op_key(on: "Callable | str | None", capture_expr_fn: Callable) -> dict | None:
+    """Resolve a set-op key selector: None (all columns), a column-name string,
+    or a single-arg lambda. Strings and lambdas converge on the same dict shape."""
+    if on is None:
+        return None
+    if isinstance(on, str):
+        return {"type": "Column", "name": on}
+    if callable(on):
+        return capture_expr_fn(on)
+    raise TypeError(f"'on' must be a column name, callable, or None, got {type(on).__name__}")
+
+
 class SetOpsMixin(LTSeqLike):
     """Mixin class providing set operations for LTSeq."""
 
@@ -44,7 +56,7 @@ class SetOpsMixin(LTSeqLike):
         result = LTSeq._from_inner(result_inner)
         return result
 
-    def intersect(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
+    def intersect(self, other: "LTSeq", on: "Callable | str | None" = None) -> "LTSeq":
         """
         Intersection of two tables.
 
@@ -70,18 +82,14 @@ class SetOpsMixin(LTSeqLike):
                 f"intersect() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = None
-        if on is not None:
-            if not callable(on):
-                raise TypeError(f"'on' must be callable, got {type(on).__name__}")
-            on_expr = self._capture_expr(on)
+        on_expr = _resolve_set_op_key(on, self._capture_expr)
 
         result_inner = self._inner.intersect(other._inner, on_expr)
 
         result = LTSeq._from_inner(result_inner)
         return result
 
-    def except_(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
+    def except_(self, other: "LTSeq", on: "Callable | str | None" = None) -> "LTSeq":
         """
         Set difference: rows in left but not in right (SQL EXCEPT).
 
@@ -107,18 +115,14 @@ class SetOpsMixin(LTSeqLike):
                 f"except_() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = None
-        if on is not None:
-            if not callable(on):
-                raise TypeError(f"'on' must be callable, got {type(on).__name__}")
-            on_expr = self._capture_expr(on)
+        on_expr = _resolve_set_op_key(on, self._capture_expr)
 
         result_inner = self._inner.diff(other._inner, on_expr)
 
         result = LTSeq._from_inner(result_inner)
         return result
 
-    def xunion(self, other: "LTSeq", on: Callable | None = None) -> "LTSeq":
+    def xunion(self, other: "LTSeq", on: "Callable | str | None" = None) -> "LTSeq":
         """
         Symmetric difference: rows in either table but not in both.
 
@@ -217,7 +221,7 @@ class SetOpsMixin(LTSeqLike):
         col_values = set(pa_table.column(key_col).to_pylist())
         return all(v in col_values for v in values)
 
-    def is_subset(self, other: "LTSeq", on: Callable | None = None) -> bool:
+    def is_subset(self, other: "LTSeq", on: "Callable | str | None" = None) -> bool:
         """
         Check if this table is a subset of another.
 
@@ -243,11 +247,7 @@ class SetOpsMixin(LTSeqLike):
                 f"is_subset() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = None
-        if on is not None:
-            if not callable(on):
-                raise TypeError(f"'on' must be callable, got {type(on).__name__}")
-            on_expr = self._capture_expr(on)
+        on_expr = _resolve_set_op_key(on, self._capture_expr)
 
         return self._inner.is_subset(other._inner, on_expr)
 

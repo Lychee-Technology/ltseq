@@ -93,7 +93,7 @@ This document describes the API **as currently implemented**. Every signature be
 ### Joins
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Hash join | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
+| Hash join | `.join()` | `a.join(b, on="id")` or `a.join(b, on=lambda a, b: a.id == b.id)` |
 | Merge join | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | As-of join | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
@@ -890,7 +890,7 @@ combined = t1.union(t2)
 ```
 
 ### `LTSeq.intersect`
-- **Signature**: `LTSeq.intersect(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Signature**: `LTSeq.intersect(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **Behavior**: Intersection of two tables
 - **Parameters**: `other` another table; `on` key selector (None means all columns)
 - **Returns**: intersection `LTSeq`
@@ -901,7 +901,7 @@ common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.except_` (set difference)
-- **Signature**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Signature**: `LTSeq.except_(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics)
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
@@ -915,7 +915,7 @@ only_left = t1.except_(t2, on=lambda r: r.id)
 > Note: `Expr.diff()` (row-level differences, Section 3) is unrelated to table set difference. Use `except_()` for table set difference.
 
 ### `LTSeq.xunion` (symmetric difference)
-- **Signature**: `LTSeq.xunion(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Signature**: `LTSeq.xunion(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **Behavior**: Rows in either table but not in both; equivalent to `(a except b) union (b except a)`
 - **Parameters**: `other` another table; `on` key selector (None means all columns)
 - **Returns**: symmetric difference `LTSeq`
@@ -925,7 +925,7 @@ unique_to_either = t1.xunion(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.is_subset`
-- **Signature**: `LTSeq.is_subset(other: LTSeq, on: Callable | None = None) -> bool`
+- **Signature**: `LTSeq.is_subset(other: LTSeq, on: Callable | str | None = None) -> bool`
 - **Behavior**: Check if this table is a subset of another
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: `bool`
@@ -950,27 +950,30 @@ t.contain("id", 1, 2, 3)
 ## 6. Association and Joins
 
 ### `LTSeq.join`
-- **Signature**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str | None = None) -> LTSeq`
-- **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. Conflicting right-table column names are prefixed with `_other_` (e.g. `product` → `_other_product`)
-- **Parameters**: `other` other table; `on` join condition lambda (e.g. `lambda a, b: a.id == b.id`); `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}
+- **Signature**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
+- **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. **Column naming (Polars semantics)**: right-table columns that collide with the left keep their name plus `suffix` (e.g. `val` → `val_right`); non-conflicting right columns keep their names. For inner/left joins the duplicate right key column is dropped (coalesced); right/full joins keep both keys (right key suffixed if colliding)
+- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda (e.g. `lambda a, b: a.id == b.id`) for arbitrary conditions; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
 - **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, or unsorted inputs for merge)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, unsorted inputs for merge, missing column, or suffix collision)
 - **Example**:
 ```python
-joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+# String key shortcut (same-name column)
+users.join(orders, on="id", how="left")
 
-# Merge join on pre-sorted tables
-result = t1.sort("id").join(
-    t2.sort("id"),
-    on=lambda a, b: a.id == b.id,
-    strategy="merge",
-)
+# Differently-named keys + custom suffix
+users.join(orders, left_on="id", right_on="user_id", suffix="_o")
+
+# Composite key
+a.join(b, on=["region", "year"])
+
+# Arbitrary condition (escape hatch)
+users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False) -> LTSeq`
-- **Behavior**: As-of join for nearest time match. `is_sorted=True` skips sort verification when both inputs are known to be sorted (faster)
-- **Parameters**: `other` other table; `on` join condition (e.g. `lambda t, q: t.time >= q.time`); `direction` in {"backward","forward","nearest"}; `is_sorted` skip sort check
+- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False, *, suffix: str = "_right") -> LTSeq`
+- **Behavior**: As-of join for nearest time match. `is_sorted=True` skips sort verification when both inputs are known to be sorted (faster). Conflicting right columns take `suffix` (Polars semantics); unlike an equi-join, the right time column is kept (an asof match is approximate, so the matched timestamp is real information)
+- **Parameters**: `other` other table; `on` join condition (e.g. `lambda t, q: t.time >= q.time`); `direction` in {"backward","forward","nearest"}; `is_sorted` skip sort check; `suffix` for conflicting right columns
 - **Returns**: as-of joined `LTSeq`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid direction)
 - **Example**:
@@ -979,9 +982,9 @@ result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="b
 ```
 
 ### `LTSeq.semi_join`
-- **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **Behavior**: Return rows from left table where keys exist in right table. Returns only left table columns with no duplicates from multiple matches
-- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Parameters**: `other` right table to match against; `on` column name(s) for an equi-join or a two-arg lambda condition
 - **Returns**: `LTSeq` with matching rows from left table
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
@@ -991,9 +994,9 @@ active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.anti_join`
-- **Signature**: `LTSeq.anti_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Signature**: `LTSeq.anti_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **Behavior**: Return rows from left table where keys do NOT exist in right table. Returns only left table columns
-- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Parameters**: `other` right table to match against; `on` column name(s) for an equi-join or a two-arg lambda condition
 - **Returns**: `LTSeq` with non-matching rows from left table
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
@@ -1667,8 +1670,9 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | `descending=` also accepted |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
 | `df.groupby('region').agg({'sales': 'sum'})` | `t.group_by("region").agg(sales=lambda g: g.sales.sum())` | |
-| `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
-| `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
+| `df.merge(df2, on='id')` | `t.join(t2, on="id")` | |
+| `df.merge(df2, on='id', how='left')` | `t.join(t2, on="id", how="left")` | |
+| `df.merge(df2, left_on='a', right_on='b', suffixes=('','_r'))` | `t.join(t2, left_on="a", right_on="b", suffix="_r")` | |
 | `pd.merge_asof(t, q, on='time')` | `t.asof_join(q, on=lambda t, q: t.time >= q.time)` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | Requires sort |
 | `df['col'].rolling(5).mean()` | `t.sort(...).derive(ma=lambda r: r.col.rolling(5).mean())` | Requires sort |

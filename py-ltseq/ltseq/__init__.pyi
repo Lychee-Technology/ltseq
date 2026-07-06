@@ -180,19 +180,23 @@ class LTSeq:
     def join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str] | None = ...,
         how: str = ...,
         strategy: str | None = ...,
+        *,
+        left_on: str | list[str] | None = ...,
+        right_on: str | list[str] | None = ...,
+        suffix: str = ...,
     ) -> "LTSeq": ...
     def semi_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str],
     ) -> "LTSeq": ...
     def anti_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str],
     ) -> "LTSeq": ...
     def asof_join(
         self,
@@ -200,6 +204,8 @@ class LTSeq:
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
         direction: str = ...,
         is_sorted: bool = ...,
+        *,
+        suffix: str = ...,
     ) -> "LTSeq": ...
     def link(
         self,
@@ -237,22 +243,22 @@ class LTSeq:
     def intersect(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> "LTSeq": ...
     def except_(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> "LTSeq": ...
     def xunion(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> "LTSeq": ...
     def is_subset(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> bool: ...
     def contain(self, key_col: str, *values: Any) -> bool: ...
     def rvs(self) -> "LTSeq": ...

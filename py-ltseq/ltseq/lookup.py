@@ -215,11 +215,12 @@ class LookupMixin:
         """
         from .core import LTSeq
 
-        # Use Rust join implementation
+        # Use the prefix-aliased join path: lookup addresses target columns as
+        # `{alias}_{col}`, so it needs prefix-all naming (not join()'s suffix).
         left_key_expr = {"type": "Column", "name": on_column}
         right_key_expr = {"type": "Column", "name": join_key}
 
-        result_inner = self._inner.join(
+        result_inner = self._inner.join_prefixed(
             target_table._inner,
             left_key_expr,
             right_key_expr,
