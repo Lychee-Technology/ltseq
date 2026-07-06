@@ -816,7 +816,7 @@ big_groups = groups.filter(lambda g: g.count() > 3)
 
 #### `NestedTable.derive`
 - **Signature**: `nested.derive(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Compute group-level values and **broadcast them to every row of the group**. The result keeps all original rows and columns, plus the new columns. (To collapse to one row per group, follow with `distinct()` on the derived columns or use `first()`/`last()`; for hash-style one-row-per-group aggregation see `agg()`/`group_by()` in Section 7)
+- **Behavior**: Compute group-level values and **broadcast them to every row of the group** (SQL window semantics). The result keeps all original rows and columns, plus the new columns. To collapse to one row per group instead, use `NestedTable.agg()`
 - **Parameters**: `func` returns a dict of group expressions
 - **Returns**: `LTSeq` with original rows plus broadcast group-level columns
 - **Exceptions**: `ValueError` (lambda doesn't return a dict), `RuntimeError` (execution failure)
@@ -827,6 +827,22 @@ enriched = groups.derive(lambda g: {
     "group_size": g.count(),
     "start": g.first().date,
     "end": g.last().date,
+})
+```
+
+#### `NestedTable.agg`
+- **Signature**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
+- **Behavior**: Collapse each group to **one summary row** (SQL GROUP BY semantics) — the counterpart of `derive`'s broadcast. Groups appear in their original sequence order; the output contains only the mapped columns. Replaces the old `derive(...) + distinct(...)` idiom
+- **Parameters**: `func` returns a dict of plain group aggregates (`g.count()`, `g.first().col`, `g.last().col`, `g.sum('col')`, ...). Arithmetic combinations of aggregates are not supported yet — compute them after agg()
+- **Returns**: `LTSeq` with one row per group
+- **Exceptions**: `ValueError` (non-dict return or unsupported expression), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# One row per consecutive run
+spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+    "start": g.first().date,
+    "end": g.last().date,
+    "n": g.count(),
 })
 ```
 
@@ -843,13 +859,13 @@ df = groups.flatten().to_pandas()     # rows with __group_id__
 
 Group aggregations take the **column name as a string**; `first()`/`last()` return row proxies with attribute access.
 
-#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`, `g.min()`, `g.max()`
-- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`min`/`max`)
-- **Behavior**: Group size / aggregation over one column within each group
+#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`/`g.mean()`, `g.min()`, `g.max()`, `g.median()`, `g.std()`, `g.var()`, `g.percentile()`
+- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`mean`/`min`/`max`/`median`/`std`/`var`); `g.percentile(column: str, p: float) -> Expr`
+- **Behavior**: Group size / aggregation over one column within each group. `mean` is an alias for `avg` (Pandas/Polars verb); `std`/`var` are sample statistics; `percentile` is approximate with `p` in [0, 1]
 - **Example**:
 ```python
-groups.derive(lambda g: {"avg_price": g.avg("price"), "hi": g.max("price")})
-groups.filter(lambda g: g.sum("amount") > 1000)
+groups.derive(lambda g: {"avg_price": g.mean("price"), "med": g.median("price")})
+groups.filter(lambda g: g.std("amount") > 5)
 ```
 
 #### Row access: `g.first()`, `g.last()`
@@ -1087,8 +1103,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
-- **Signature**: `g.col.sum() / .avg() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **Behavior**: Column aggregations available in aggregation context. `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
+- **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
 - **Example**:
 ```python
 stats = t.group_by("region").agg(

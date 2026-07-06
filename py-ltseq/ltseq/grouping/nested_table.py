@@ -197,6 +197,87 @@ class NestedTable:
 
         return LTSeq._from_inner(flattened._inner.derive_group_window(derive_exprs))
 
+    def agg(self, group_mapper: Callable) -> "LTSeq":
+        """
+        Collapse each group to a single summary row.
+
+        The counterpart of derive(): derive broadcasts group values to every
+        row (SQL window semantics), agg returns one row per group (SQL
+        GROUP BY semantics). Groups appear in their original sequence order.
+
+        Args:
+            group_mapper: Lambda taking a group proxy (g) and returning a dict
+                         of output columns. Supports g.count(), g.first().col,
+                         g.last().col, and g.sum/avg/mean/min/max/median/std/
+                         var/percentile('col').
+
+        Returns:
+            LTSeq with one row per group, containing only the mapped columns
+
+        Example:
+            >>> spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+            ...     "start": g.first().date,
+            ...     "end": g.last().date,
+            ...     "n": g.count(),
+            ... })
+        """
+        from .proxies.derive_proxy import DeriveGroupProxy
+        from .expr import GroupExpr
+        from ..core import LTSeq
+
+        proxy = DeriveGroupProxy()
+        result = group_mapper(proxy)
+
+        if not isinstance(result, dict) or not result:
+            raise ValueError("agg lambda must return a non-empty dict of group expressions")
+
+        agg_exprs = {}
+        for col_name, expr in result.items():
+            if not isinstance(col_name, str):
+                raise ValueError(f"Column name must be a string, got {type(col_name)}")
+            if not isinstance(expr, GroupExpr):
+                raise ValueError(
+                    f"Unsupported expression type for column '{col_name}': {type(expr)}. "
+                    f"Expected a plain group aggregate (g.count(), g.first().col, "
+                    f"g.sum('col'), ...); arithmetic combinations are not supported "
+                    f"in agg() yet — use derive() + distinct or compute after agg()"
+                )
+            agg_exprs[col_name] = self._group_expr_to_agg_call(expr)
+
+        flattened = self.flatten()
+        inner = flattened._inner.agg(
+            {"type": "Column", "name": "__group_id__"}, agg_exprs
+        )
+        out = LTSeq._from_inner(inner)
+        # Aggregate output order is not guaranteed: restore sequence order via
+        # the group id, then project it away.
+        return out.sort("__group_id__").select(*result.keys())
+
+    @staticmethod
+    def _group_expr_to_agg_call(expr: "Any") -> dict:
+        """Translate a group-dialect expression into the row-dialect aggregate
+        Call dict that the native agg engine understands."""
+        from .expr import GroupAggExpr, GroupCountExpr, GroupRowColumnExpr
+        from ..expr.types import CallExpr, ColumnExpr
+
+        if isinstance(expr, GroupCountExpr):
+            return CallExpr("count", (), {}, on=ColumnExpr("__group_id__")).serialize()
+        if isinstance(expr, GroupRowColumnExpr):
+            # first/last row value, ordered by the in-group row number
+            return CallExpr(
+                expr._row_type,
+                (ColumnExpr("__rn__"),),
+                {},
+                on=ColumnExpr(expr._column),
+            ).serialize()
+        if isinstance(expr, GroupAggExpr):
+            args = () if expr._arg is None else (expr._arg,)
+            return CallExpr(expr._func, args, {}, on=ColumnExpr(expr._column)).serialize()
+        raise ValueError(
+            f"Unsupported group expression in agg(): {type(expr)}. "
+            f"Use g.count(), g.first().col, g.last().col, or g.<agg>('col')"
+        )
+
     def _capture_derive_via_proxy(self, group_mapper: Callable) -> dict[str, str]:
         """
         Capture derive expressions using proxy pattern.

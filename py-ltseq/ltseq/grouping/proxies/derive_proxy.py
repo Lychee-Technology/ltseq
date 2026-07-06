@@ -54,3 +54,23 @@ class DeriveGroupProxy:
     def avg(self, column: str) -> GroupAggExpr:
         """Capture g.avg('column') expression."""
         return GroupAggExpr("avg", column)
+
+    def mean(self, column: str) -> GroupAggExpr:
+        """Capture g.mean('column') expression (alias for avg, Pandas/Polars verb)."""
+        return GroupAggExpr("avg", column)
+
+    def median(self, column: str) -> GroupAggExpr:
+        """Capture g.median('column') expression."""
+        return GroupAggExpr("median", column)
+
+    def std(self, column: str) -> GroupAggExpr:
+        """Capture g.std('column') expression (sample standard deviation)."""
+        return GroupAggExpr("std", column)
+
+    def var(self, column: str) -> GroupAggExpr:
+        """Capture g.var('column') expression (sample variance)."""
+        return GroupAggExpr("var", column)
+
+    def percentile(self, column: str, p: float) -> GroupAggExpr:
+        """Capture g.percentile('column', p) expression (approximate, p in [0, 1])."""
+        return GroupAggExpr("percentile", column, arg=p)

@@ -52,18 +52,26 @@ class GroupCountExpr(GroupExpr):
 
 
 class GroupAggExpr(GroupExpr):
-    """Expression for group aggregations: g.max('col'), g.min('col'), g.sum('col'), g.avg('col')."""
+    """Expression for group aggregations: g.max('col'), g.median('col'), g.percentile('col', 0.9), ...
 
-    def __init__(self, func: str, column: str):
+    ``arg`` carries the numeric parameter of parameterized aggregates
+    (currently only percentile's p); plain aggregates leave it None.
+    """
+
+    def __init__(self, func: str, column: str, arg: "float | None" = None):
         self._func = func
         self._column = column
+        self._arg = arg
 
     def serialize(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "type": "GroupAgg",
             "func": self._func,
             "column": self._column,
         }
+        if self._arg is not None:
+            result["arg"] = self._arg
+        return result
 
 
 class GroupRowColumnExpr(GroupExpr):
