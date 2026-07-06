@@ -16,14 +16,6 @@ from ..expr import (
 )
 
 
-class _RawSQL:
-    """Wrapper for raw SQL that should not be quoted."""
-    __slots__ = ("sql",)
-
-    def __init__(self, sql: str):
-        self.sql = sql
-
-
 class FilterExpr:
     """A captured filter predicate (comparison expression).
 
@@ -35,38 +27,6 @@ class FilterExpr:
         self.left = left
         self.op = op
         self.right = right
-
-    def to_sql(self) -> str:
-        """Convert this filter expression to a SQL WHERE clause."""
-        left_sql = self._operand_to_sql(self.left)
-        if self.op == "NOT":
-            return f"NOT ({left_sql})"
-        right_sql = self._operand_to_sql(self.right)
-        if self.op == "AND":
-            return f"({left_sql}) AND ({right_sql})"
-        elif self.op == "OR":
-            return f"({left_sql}) OR ({right_sql})"
-        else:
-            return f"{left_sql} {self.op} {right_sql}"
-
-    def _operand_to_sql(self, operand) -> str:
-        if isinstance(operand, _RawSQL):
-            return operand.sql
-        elif isinstance(operand, GroupExpr):
-            from ..sql_parsing import group_expr_to_sql
-
-            return group_expr_to_sql(operand.serialize())
-        elif isinstance(operand, FilterExpr):
-            return operand.to_sql()
-        elif isinstance(operand, str):
-            escaped = operand.replace("'", "''")
-            return f"'{escaped}'"
-        elif isinstance(operand, bool):
-            return "TRUE" if operand else "FALSE"
-        elif operand is None:
-            return "NULL"
-        else:
-            return str(operand)
 
     # Comparison / combinator symbols → row-dialect op names (shared
     # operator table on the Rust side).
@@ -173,31 +133,31 @@ class FilterGroupProxy:
         # row-level lambdas of quantifiers (g.all/any/none).
         self._schema = schema
 
-    def count(self) -> GroupCountExpr:
+    def count(self) -> "_FilterableGroupCountExpr":
         """Capture g.count() expression."""
         return _FilterableGroupCountExpr()
 
-    def first(self) -> DeriveRowProxy:
+    def first(self) -> "_FilterableDeriveRowProxy":
         """Capture g.first() - returns proxy for column access."""
         return _FilterableDeriveRowProxy("first")
 
-    def last(self) -> DeriveRowProxy:
+    def last(self) -> "_FilterableDeriveRowProxy":
         """Capture g.last() - returns proxy for column access."""
         return _FilterableDeriveRowProxy("last")
 
-    def max(self, column: str) -> GroupAggExpr:
+    def max(self, column: str) -> "_FilterableGroupAggExpr":
         """Capture g.max('column') expression."""
         return _FilterableGroupAggExpr("max", column)
 
-    def min(self, column: str) -> GroupAggExpr:
+    def min(self, column: str) -> "_FilterableGroupAggExpr":
         """Capture g.min('column') expression."""
         return _FilterableGroupAggExpr("min", column)
 
-    def sum(self, column: str) -> GroupAggExpr:
+    def sum(self, column: str) -> "_FilterableGroupAggExpr":
         """Capture g.sum('column') expression."""
         return _FilterableGroupAggExpr("sum", column)
 
-    def avg(self, column: str) -> GroupAggExpr:
+    def avg(self, column: str) -> "_FilterableGroupAggExpr":
         """Capture g.avg('column') expression."""
         return _FilterableGroupAggExpr("avg", column)
 
@@ -228,139 +188,6 @@ class FilterGroupProxy:
         from ...expr import _lambda_to_expr
 
         return _lambda_to_expr(predicate, self._schema)
-
-
-class _InnerColumnProxy:
-    """Proxy for capturing column references in inner predicates.
-
-    When passed to a lambda like lambda r: r.value > 0, this proxy
-    captures r.value as a column name and the comparison as SQL.
-    """
-
-    def __getattr__(self, name: str):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        return _InnerColumnRef(name)
-
-    def __gt__(self, other):
-        raise TypeError("Compare column attributes, not the row proxy itself")
-
-    def __lt__(self, other):
-        raise TypeError("Compare column attributes, not the row proxy itself")
-
-
-class _InnerColumnRef:
-    """A reference to a column captured from the inner predicate proxy."""
-
-    def __init__(self, column: str):
-        self._column = column
-
-    def __gt__(self, other):
-        return _InnerPredicateExpr(self, ">", other)
-
-    def __ge__(self, other):
-        return _InnerPredicateExpr(self, ">=", other)
-
-    def __lt__(self, other):
-        return _InnerPredicateExpr(self, "<", other)
-
-    def __le__(self, other):
-        return _InnerPredicateExpr(self, "<=", other)
-
-    def __eq__(self, other) -> Any:
-        return _InnerPredicateExpr(self, "=", other)
-
-    def __ne__(self, other) -> Any:
-        return _InnerPredicateExpr(self, "!=", other)
-
-
-class _InnerPredicateExpr:
-    """A captured inner predicate expression like 'value > 0'."""
-
-    def __init__(self, left, op: str, right=None):
-        self.left = left
-        self.op = op
-        self.right = right
-
-    def to_sql(self) -> str:
-        left_sql = self._operand_to_sql(self.left)
-        right_sql = self._operand_to_sql(self.right) if self.right is not None else None
-        if self.op == "AND":
-            return f"({left_sql}) AND ({right_sql})"
-        elif self.op == "OR":
-            return f"({left_sql}) OR ({right_sql})"
-        else:
-            return f"{left_sql} {self.op} {right_sql}"
-
-    def _operand_to_sql(self, operand) -> str:
-        if isinstance(operand, _InnerPredicateExpr):
-            return operand.to_sql()
-        elif isinstance(operand, _InnerColumnRef):
-            return operand._column
-        elif isinstance(operand, str):
-            escaped = operand.replace("'", "''")
-            return f"'{escaped}'"
-        elif isinstance(operand, bool):
-            return "TRUE" if operand else "FALSE"
-        elif operand is None:
-            return "NULL"
-        else:
-            return str(operand)
-
-    def __and__(self, other: "_InnerPredicateExpr") -> "_InnerPredicateExpr":
-        return _InnerPredicateExpr(self, "AND", other)
-
-    def __or__(self, other: "_InnerPredicateExpr") -> "_InnerPredicateExpr":
-        return _InnerPredicateExpr(self, "OR", other)
-
-
-def _capture_inner_predicate_proxy(predicate: Callable) -> str | None:
-    """Try to capture an inner predicate using a proxy object.
-
-    Passes a _InnerColumnProxy to the predicate lambda, so that
-    lambda r: r.value > 0 becomes "value > 0" as SQL.
-    """
-    try:
-        proxy = _InnerColumnProxy()
-        result = predicate(proxy)
-        if isinstance(result, _InnerPredicateExpr):
-            return result.to_sql()
-    except Exception:
-        pass
-    return None
-
-
-def _capture_inner_predicate_source(predicate: Callable) -> str | None:
-    """Try to capture an inner predicate lambda (r.col op val) as SQL.
-
-    Uses source code inspection and the FilterSQLParser's inner predicate logic.
-    Falls back to this when proxy-based capture fails (e.g. for complex expressions).
-    """
-    import ast
-    from ..sql_parsing import FilterSQLParser, extract_lambda_from_chain
-
-    parser = FilterSQLParser()
-
-    try:
-        import inspect
-        source = inspect.getsource(predicate).strip()
-    except (OSError, TypeError):
-        return None
-
-    if "lambda" in source:
-        source = extract_lambda_from_chain(source)
-        colon_idx = source.index(":")
-        body = source[colon_idx + 1:].strip()
-    else:
-        body = source
-        if body.startswith("return "):
-            body = body[7:].strip()
-
-    try:
-        tree = ast.parse(body, mode="eval")
-        return parser._ast_inner_predicate_to_sql(tree.body)
-    except Exception:
-        return None
 
 
 # Filterable variants that support comparison operators

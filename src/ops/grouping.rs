@@ -31,8 +31,6 @@ use crate::transpiler::window_native::{finalize_window_expr, pyexpr_to_window_ex
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::datasource::MemTable;
 use datafusion::functions_window::expr_fn::lag;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::{Expr, Operator};
@@ -70,115 +68,10 @@ fn get_df_and_schema_or_empty(
     Ok((df, schema))
 }
 
-/// Collect DataFrame to batches and get schema
-fn collect_and_get_schema(
-    df: &datafusion::dataframe::DataFrame,
-    stored_schema: &Arc<ArrowSchema>,
-) -> PyResult<(Vec<RecordBatch>, Arc<ArrowSchema>)> {
-    let batches = RUNTIME
-        .block_on(async {
-            df.clone()
-                .collect()
-                .await
-                .map_err(LtseqError::collect)
-        })?;
 
-    let batch_schema = batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new((**stored_schema).clone()));
 
-    Ok((batches, batch_schema))
-}
 
-/// Register a temp table and return its name
-fn register_temp_table(
-    session: &SessionContext,
-    schema: &Arc<ArrowSchema>,
-    batches: Vec<RecordBatch>,
-    prefix: &str,
-) -> PyResult<String> {
-    let table_name = format!("__ltseq_{}_temp_{}", prefix, std::process::id());
-    let _ = session.deregister_table(&table_name);
 
-    let temp_table = MemTable::try_new(Arc::clone(schema), vec![batches]).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to create memory table: {}", e))
-    })?;
-
-    session
-        .register_table(&table_name, Arc::new(temp_table))
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to register temp table: {}", e))
-        })?;
-
-    Ok(table_name)
-}
-
-/// Execute SQL query and collect results
-fn execute_sql_query(
-    session: &SessionContext,
-    sql: &str,
-    op_name: &str,
-) -> PyResult<Vec<RecordBatch>> {
-    Ok(RUNTIME
-        .block_on(async {
-            let result_df = session
-                .sql(sql)
-                .await
-                .map_err(|e| format!("Failed to execute {} query: {}", op_name, e))?;
-
-            result_df
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect {} results: {}", op_name, e))
-        })
-        .map_err(LtseqError::Runtime)?)
-}
-
-/// Create result LTSeqTable from batches
-fn create_result_from_batches(
-    session: &Arc<SessionContext>,
-    result_batches: Vec<RecordBatch>,
-    fallback_schema: Option<&Arc<ArrowSchema>>,
-    _prefix: &str,
-) -> PyResult<LTSeqTable> {
-    match fallback_schema {
-        Some(schema) => LTSeqTable::from_batches_with_schema(
-            Arc::clone(session),
-            result_batches,
-            Arc::clone(schema),
-            Vec::new(),
-            None,
-        ),
-        None => LTSeqTable::from_batches(
-            Arc::clone(session),
-            result_batches,
-            Vec::new(),
-            None,
-        ),
-    }
-}
-
-/// Build column list string from schema, optionally filtering internal columns
-fn build_column_list(schema: &ArrowSchema, filter_internal: bool) -> String {
-    schema
-        .fields()
-        .iter()
-        .filter(|f| {
-            if filter_internal {
-                let name = f.name();
-                !name.starts_with("__rn")
-                    && !name.starts_with("__row_num")
-                    && !name.starts_with("__mask")
-                    && !name.starts_with("__cnt")
-            } else {
-                true
-            }
-        })
-        .map(|f| format!("\"{}\"", f.name()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
 
 // ============================================================================
 // Public API Functions
@@ -619,50 +512,14 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         ));
     }
 
-    // ── Fallback: SQL-based approach for legacy group_id paths ────────
-    // Collect data and register temp table
-    let (batches, batch_schema) = collect_and_get_schema(df, schema)?;
-    let op_name = if is_first { "first_row" } else { "last_row" };
-    let temp_table_name = register_temp_table(&table.session, &batch_schema, batches, op_name)?;
-    let columns_str = build_column_list(&batch_schema, true);
-
-    // Build SQL query
-    let rn_alias = format!("__rn_{}_{}", op_name, std::process::id());
-    let sql_query = if is_first {
-        format!(
-            r#"WITH ranked AS (
-              SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}" FROM "{table}"
-            )
-            SELECT {cols} FROM ranked WHERE "{rn}" = 1"#,
-            cols = columns_str,
-            table = temp_table_name,
-            rn = rn_alias
-        )
-    } else {
-        let cnt_alias = format!("__cnt_{}_{}", op_name, std::process::id());
-        format!(
-            r#"WITH ranked AS (
-              SELECT {cols}, 
-                      ROW_NUMBER() OVER (PARTITION BY "__group_id__") as "{rn}",
-                      COUNT(*) OVER (PARTITION BY "__group_id__") as "{cnt}"
-              FROM "{table}"
-            )
-            SELECT {cols} FROM ranked WHERE "{rn}" = "{cnt}""#,
-            cols = columns_str,
-            table = temp_table_name,
-            rn = rn_alias,
-            cnt = cnt_alias
-        )
-    };
-
-    let result_batches = execute_sql_query(&table.session, &sql_query, op_name)?;
-
-    // Cleanup and return result
-    let _ = table.session.deregister_table(&temp_table_name);
-    create_result_from_batches(
-        &table.session,
-        result_batches,
-        table.schema.as_ref(),
-        op_name,
+    // Both group_id producers (the native window path and the linear scan)
+    // emit __rn__ and __group_count__, so this point is unreachable for
+    // flatten() products. Guard against direct misuse instead of keeping the
+    // old collect → MemTable → SQL fallback alive (issue #91 PR 4).
+    Err(LtseqError::Validation(
+        "first_row/last_row require __rn__ and __group_count__ from flatten(); \
+         legacy group_id tables without them are no longer supported"
+            .into(),
     )
+    .into())
 }

@@ -272,6 +272,25 @@ fn original_column_exprs(schema: &ArrowSchema) -> Vec<Expr> {
         .collect()
 }
 
+/// Restore the original row order after window evaluation: DataFusion's
+/// window exec re-partitions rows by the PARTITION BY key, so the output
+/// order is otherwise unspecified. (__group_id__, __rn__) ascending is by
+/// construction the input order of the flattened table.
+fn original_order() -> Vec<datafusion::logical_expr::SortExpr> {
+    vec![
+        datafusion::logical_expr::SortExpr::new(
+            Expr::Column(Column::new_unqualified("__group_id__")),
+            true,
+            false,
+        ),
+        datafusion::logical_expr::SortExpr::new(
+            Expr::Column(Column::new_unqualified("__rn__")),
+            true,
+            false,
+        ),
+    ]
+}
+
 fn require_grouping_columns(schema: &ArrowSchema) -> PyResult<()> {
     for required in ["__group_id__", "__rn__"] {
         if schema.field_with_name(required).is_err() {
@@ -296,7 +315,14 @@ pub fn derive_group_window_impl(
     let (df, schema) = table.require_df_and_schema()?;
     require_grouping_columns(schema)?;
 
-    let mut select_exprs = original_column_exprs(schema);
+    // Stage A keeps every current column (the internals are needed to restore
+    // row order afterwards) and appends the derived window columns.
+    let mut stage_a: Vec<Expr> = schema
+        .fields()
+        .iter()
+        .map(|f| Expr::Column(Column::new_unqualified(f.name())))
+        .collect();
+    let mut final_names: Vec<String> = Vec::new();
     for (col_name, expr_item) in derived.iter() {
         let name: String = col_name
             .extract()
@@ -306,12 +332,22 @@ pub fn derive_group_window_impl(
             .map_err(|_| LtseqError::TypeMismatch("Group expression must be dict".into()))?;
         let node = dict_to_group_node(&expr_dict)?;
         let expr = group_node_to_expr(node, schema).map_err(LtseqError::Transpile)?;
-        select_exprs.push(expr.alias(&name));
+        stage_a.push(expr.alias(&name));
+        final_names.push(name);
     }
+
+    let mut final_exprs = original_column_exprs(schema);
+    final_exprs.extend(
+        final_names
+            .iter()
+            .map(|n| Expr::Column(Column::new_unqualified(n))),
+    );
 
     let result_df = (**df)
         .clone()
-        .select(select_exprs)
+        .select(stage_a)
+        .and_then(|df| df.sort(original_order()))
+        .and_then(|df| df.select(final_exprs))
         .map_err(|e| LtseqError::Runtime(format!("Group derive failed: {}", e)))?;
 
     // Row order is preserved by the projection, so the declared sort survives.
@@ -350,6 +386,7 @@ pub fn filter_group_window_impl(
         .clone()
         .select(stage_a)
         .and_then(|df| df.filter(col("__group_filter__")))
+        .and_then(|df| df.sort(original_order()))
         .and_then(|df| df.select(original_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("Group filter failed: {}", e)))?;
 

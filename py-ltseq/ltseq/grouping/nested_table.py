@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 from .proxies import FilterGroupProxy, FilterExpr
-from .sql_parsing import group_expr_to_sql
 
 if TYPE_CHECKING:
     from ..core import LTSeq
@@ -171,121 +170,6 @@ class NestedTable:
             LTSeq._from_inner(inner), self._grouping_lambda, is_sorted=self._is_sorted
         )
 
-    def _filter_via_sql(self, where_clause: str) -> "NestedTable":
-        """Filter using SQL WHERE clause with window functions.
-
-        Window functions cannot appear in SQL WHERE clauses. We extract all
-        window function expressions from the where_clause, add them as derived
-        columns via derive_window_sql, then filter on the simplified condition
-        using only column references.
-        """
-        import re
-
-        _FILTER_COL = "__filter_cond__"
-
-        # Find all window function expressions in the where_clause.
-        # Strategy: find each "OVER (PARTITION BY __group_id__...)" pattern,
-        # then scan backwards past any whitespace and matching parens to find
-        # the start of the window function expression (e.g. "COUNT(*)",
-        # "MIN(CASE WHEN ... END)", etc.)
-        window_exprs = []
-        simplified = where_clause
-
-        pattern = r'OVER\s*\(\s*PARTITION\s+BY\s+__group_id__'
-        pos = 0
-        while True:
-            m = re.search(pattern, simplified[pos:])
-            if not m:
-                break
-            over_start = pos + m.start()
-
-            # Find the closing paren of OVER(...)
-            # First find opening paren after OVER
-            rest = simplified[over_start + len("OVER"):]
-            paren_m = re.match(r'\s*\(', rest)
-            if not paren_m:
-                break
-            paren_open = over_start + len("OVER") + paren_m.end() - 1
-
-            # Find matching closing paren
-            depth = 1
-            i = paren_open + 1
-            while i < len(simplified) and depth > 0:
-                if simplified[i] == '(':
-                    depth += 1
-                elif simplified[i] == ')':
-                    depth -= 1
-                i += 1
-            window_end = i  # exclusive (character after closing paren)
-
-            # Scan backwards from OVER keyword to find expr start.
-            # Skip whitespace immediately before OVER, then walk backwards
-            # through any parenthesized expression and function name.
-            j = over_start - 1
-            # Skip whitespace before OVER
-            while j >= 0 and simplified[j] in (' ', '\t', '\n'):
-                j -= 1
-            # Now walk backwards through matching parens and identifier chars
-            paren_depth = 0
-            while j >= 0:
-                ch = simplified[j]
-                if ch == ')':
-                    paren_depth += 1
-                elif ch == '(':
-                    if paren_depth == 0:
-                        break
-                    paren_depth -= 1
-                elif paren_depth == 0 and not (ch.isalnum() or ch in ('_', '.', '*', '"', "'")):
-                    break
-                j -= 1
-            expr_start = j + 1
-
-            window_expr = simplified[expr_start:window_end]
-            col_name = f"{_FILTER_COL}_{len(window_exprs)}"
-            window_exprs.append((col_name, window_expr))
-
-            # Replace the window expression with the column reference
-            simplified = simplified[:expr_start] + f'"{col_name}"' + simplified[window_end:]
-            # Continue scanning after the replacement
-            pos = expr_start + len(f'"{col_name}"')
-
-        if not window_exprs:
-            raise ValueError(
-                f"No window functions found in filter condition: {where_clause}"
-            )
-
-        # Build the derive expressions dict
-        filter_exprs = {col_name: expr for col_name, expr in window_exprs}
-
-        flattened = self.flatten()
-
-        # Step 1: Add filter conditions as derived columns
-        derived_inner = flattened._inner.derive_window_sql(filter_exprs)
-
-        derived_ltseq = flattened.__class__()
-        derived_ltseq._inner = derived_inner
-        derived_schema = flattened._schema.copy()
-        for col_name in filter_exprs:
-            derived_schema[col_name] = "int64"
-        derived_ltseq._schema = derived_schema
-
-        # Step 2: Filter on the simplified condition
-        filter_condition = simplified
-        filtered_inner = derived_ltseq._inner.filter_where(filter_condition)
-
-        # Step 3: Remove filter and internal columns via select
-        original_cols = list(self._ltseq._schema.keys())
-        result_ltseq = derived_ltseq.__class__()
-        result_ltseq._inner = filtered_inner
-        result_ltseq._schema = derived_schema
-
-        result_ltseq = result_ltseq.select(*original_cols)
-
-        result_nested = NestedTable(
-            result_ltseq, self._grouping_lambda, is_sorted=self._is_sorted
-        )
-        return result_nested
-
     def derive(self, group_mapper: Callable) -> "LTSeq":
         """
         Derive new columns based on group properties.
@@ -352,24 +236,6 @@ class NestedTable:
                 )
 
         return derive_exprs
-
-    def _derive_via_sql(
-        self, flattened: "LTSeq", derive_exprs: dict[str, str]
-    ) -> "LTSeq":
-        """Apply derived column expressions via SQL SELECT with window functions."""
-        result = flattened.__class__()
-
-        result._schema = {}
-        for col_name, col_type in self._ltseq._schema.items():
-            if col_name not in ("__group_id__", "__rn__", "__group_count__"):
-                result._schema[col_name] = col_type
-        for col_name in derive_exprs.keys():
-            result._schema[col_name] = "Unknown"
-
-        result._inner = flattened._inner.derive_window_sql(derive_exprs)
-
-        return result
-
 
 class _LazyFirstLTSeq:
     """
