@@ -8,10 +8,12 @@
 //!
 //! Window functions are converted directly to DataFusion's native
 //! `Expr::WindowFunction` via the `window_native` transpiler (issue #91):
-//! the plan stays lazy and there is no SQL fallback. Expression shapes the
-//! native transpiler cannot plan (currently: a window function applied to
-//! another window function's result) surface as errors that suggest the
-//! two-step derive workaround.
+//! the plan stays lazy and there is no SQL fallback. Two-level nested
+//! windows (a window applied to another window's result, e.g.
+//! `rolling(3).mean().shift(1)`) are planned as a staged pair of lazy
+//! projections (issue #101) — plan-isomorphic to the manual two-step
+//! derive. Deeper nesting and ranking-over-window shapes surface as errors
+//! that suggest the two-step derive workaround.
 
 use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_window_expr;
@@ -67,7 +69,9 @@ pub(crate) fn derive_with_window_functions_from_parsed(
 }
 
 /// Enrich native-transpile errors about window-on-window shapes with the
-/// two-step derive workaround (tracked follow-up: native staged select, issue #101).
+/// two-step derive workaround. Two-level nesting is planned natively by the
+/// staged planner (issue #101); this hint now covers what remains — three
+/// and deeper levels, and ranking-over-window shapes.
 fn nested_window_hint(err: PyErr) -> PyErr {
     let msg = err.to_string();
     if msg.contains("requires DataFrame context") {
@@ -101,6 +105,133 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
 }
 
 
+/// A derive request split into two lazy projections (issue #101).
+///
+/// `stage_cols` are hidden intermediate window columns (the INPUT of an
+/// outer window that itself contains a window); `final_cols` are the user's
+/// requested columns with those inputs rewritten to hidden-column
+/// references. Empty `stage_cols` means no nesting — single-select path.
+struct StagedWindowPlan {
+    stage_cols: Vec<(String, PyExpr)>,
+    final_cols: Vec<(String, PyExpr)>,
+}
+
+/// Split two-level nested windows into a staged plan.
+///
+/// Whenever a window call's input subtree contains another window function
+/// (`contains_window_function`), the WHOLE input expression is hoisted into
+/// a hidden stage column (stage-1 can plan arbitrary window-bearing
+/// expressions) and replaced by a column reference. `PyExpr::Window`
+/// (ranking) nodes are deliberately left untouched: nesting inside them
+/// still falls through to the nested_window_hint error.
+fn build_staged_plan(
+    schema: &ArrowSchema,
+    parsed_cols: &[(String, PyExpr)],
+) -> StagedWindowPlan {
+    let mut used_names: std::collections::HashSet<String> = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    for (name, _) in parsed_cols {
+        used_names.insert(name.clone());
+    }
+
+    let mut stage_cols: Vec<(String, PyExpr)> = Vec::new();
+    let mut counter = 0usize;
+
+    let mut hoist = |input: PyExpr| -> PyExpr {
+        // Reuse an existing stage column for an identical input expression.
+        for (name, expr) in stage_cols.iter() {
+            if *expr == input {
+                return PyExpr::Column(name.clone());
+            }
+        }
+        let mut name = format!("__ltseq_stage_{}", counter);
+        while used_names.contains(&name) {
+            counter += 1;
+            name = format!("__ltseq_stage_{}", counter);
+        }
+        counter += 1;
+        used_names.insert(name.clone());
+        stage_cols.push((name.clone(), input));
+        PyExpr::Column(name)
+    };
+
+    fn rewrite(
+        expr: PyExpr,
+        hoist: &mut dyn FnMut(PyExpr) -> PyExpr,
+    ) -> PyExpr {
+        match expr {
+            PyExpr::Call { func, on, args, kwargs } => {
+                if crate::transpiler::is_window_call(&func, &on) {
+                    // The window's input: for rolling aggregates the input
+                    // lives one level down (agg → rolling → input).
+                    if func != "rolling" && matches!(&*on, PyExpr::Call { func: f, .. } if f == "rolling") {
+                        // agg over rolling: dig into the rolling call's input
+                        if let PyExpr::Call { func: rfunc, on: rin, args: rargs, kwargs: rkwargs } = *on {
+                            let new_rin = if crate::transpiler::contains_window_function(&rin) {
+                                hoist(*rin)
+                            } else {
+                                rewrite(*rin, hoist)
+                            };
+                            return PyExpr::Call {
+                                func,
+                                on: Box::new(PyExpr::Call {
+                                    func: rfunc,
+                                    on: Box::new(new_rin),
+                                    args: rargs,
+                                    kwargs: rkwargs,
+                                }),
+                                args,
+                                kwargs,
+                            };
+                        }
+                        unreachable!("matched rolling above");
+                    }
+                    // shift/diff/cum_sum/rolling: input is `on`
+                    let new_on = if crate::transpiler::contains_window_function(&on) {
+                        hoist(*on)
+                    } else {
+                        rewrite(*on, hoist)
+                    };
+                    return PyExpr::Call { func, on: Box::new(new_on), args, kwargs };
+                }
+                // Plain call: recurse into on and args
+                PyExpr::Call {
+                    func,
+                    on: Box::new(rewrite(*on, hoist)),
+                    args: args.into_iter().map(|a| rewrite(a, hoist)).collect(),
+                    kwargs,
+                }
+            }
+            PyExpr::BinOp { op, left, right } => PyExpr::BinOp {
+                op,
+                left: Box::new(rewrite(*left, hoist)),
+                right: Box::new(rewrite(*right, hoist)),
+            },
+            PyExpr::UnaryOp { op, operand } => PyExpr::UnaryOp {
+                op,
+                operand: Box::new(rewrite(*operand, hoist)),
+            },
+            PyExpr::Alias { expr, alias } => PyExpr::Alias {
+                expr: Box::new(rewrite(*expr, hoist)),
+                alias,
+            },
+            // Ranking windows: leave untouched — nesting inside them is out
+            // of scope and falls through to nested_window_hint.
+            other => other,
+        }
+    }
+
+    let final_cols = parsed_cols
+        .iter()
+        .map(|(name, expr)| (name.clone(), rewrite(expr.clone(), &mut hoist)))
+        .collect();
+
+    StagedWindowPlan { stage_cols, final_cols }
+}
+
 /// Native window derive: convert PyExpr window calls to DataFusion Expr and use df.select()
 fn native_window_derive(
     table: &LTSeqTable,
@@ -108,30 +239,59 @@ fn native_window_derive(
     df: &Arc<DataFrame>,
     parsed_cols: &[(String, PyExpr)],
 ) -> PyResult<LTSeqTable> {
-    // Build the list of select expressions: all existing columns + derived window columns
-    let mut all_exprs: Vec<Expr> = Vec::new();
+    let plan = build_staged_plan(schema, parsed_cols);
 
-    // Add all existing columns
-    for field in schema.fields() {
-        all_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
+    // Fast path: no nested windows — the existing single lazy projection.
+    if plan.stage_cols.is_empty() {
+        let mut all_exprs: Vec<Expr> = original_columns(schema);
+        for (col_name_str, py_expr) in parsed_cols.iter() {
+            let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
+                .map_err(LtseqError::Transpile)?;
+            all_exprs.push(window_expr.alias(col_name_str));
+        }
+        let result_df = (**df)
+            .clone()
+            .select(all_exprs)
+            .map_err(|e| {
+                LtseqError::Runtime(format!("Native window derive failed: {}", e))
+            })?;
+        return Ok(LTSeqTable::from_df(
+            Arc::clone(&table.session),
+            result_df,
+            table.sort_specs.clone(),
+            None, // column set changed relative to the raw file: drop fast-path token
+        ));
     }
 
-    // Convert each derived column's PyExpr to a native DataFusion window Expr
-    for (col_name_str, py_expr) in parsed_cols.iter() {
-        // Convert to native DataFusion window expression
+    // Staged path (issue #101): two lazy projections, plan-isomorphic to the
+    // manual two-step derive.
+    //
+    // Stage 1: original columns + hidden inner-window columns.
+    let mut stage1: Vec<Expr> = original_columns(schema);
+    for (hidden_name, py_expr) in plan.stage_cols.iter() {
         let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
             .map_err(LtseqError::Transpile)?;
-
-        all_exprs.push(window_expr.alias(col_name_str));
+        stage1.push(window_expr.alias(hidden_name));
     }
-
-    // Apply via df.select() — stays lazy, no materialization!
-    let result_df = (**df)
+    let stage_df = (**df)
         .clone()
-        .select(all_exprs)
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Native window derive failed: {}", e))
-        })?;
+        .select(stage1)
+        .map_err(|e| LtseqError::Runtime(format!("Nested window stage failed: {}", e)))?;
+
+    // Stage 2: original columns + the rewritten user expressions (hidden
+    // columns are consumed here and NOT selected — they never reach the
+    // result schema).
+    let stage_schema = LTSeqTable::schema_from_df(stage_df.schema());
+    let mut stage2: Vec<Expr> = original_columns(schema);
+    for (col_name_str, py_expr) in plan.final_cols.iter() {
+        let window_expr =
+            pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)
+                .map_err(LtseqError::Transpile)?;
+        stage2.push(window_expr.alias(col_name_str));
+    }
+    let result_df = stage_df
+        .select(stage2)
+        .map_err(|e| LtseqError::Runtime(format!("Native window derive failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
@@ -139,6 +299,15 @@ fn native_window_derive(
         table.sort_specs.clone(),
         None, // column set changed relative to the raw file: drop fast-path token
     ))
+}
+
+/// All schema fields as unqualified column expressions.
+fn original_columns(schema: &ArrowSchema) -> Vec<Expr> {
+    schema
+        .fields()
+        .iter()
+        .map(|f| Expr::Column(Column::new_unqualified(f.name())))
+        .collect()
 }
 
 /// Add cumulative sum columns with proper window functions (fully native).

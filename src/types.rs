@@ -6,7 +6,7 @@ use pyo3::types::PyDict;
 use std::collections::HashMap;
 
 /// Represents a serialized Python expression for transpilation to DataFusion
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PyExpr {
     /// Column reference: {"type": "Column", "name": "age"}
     Column(String),
