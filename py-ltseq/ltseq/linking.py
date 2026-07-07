@@ -75,8 +75,10 @@ class LinkedTable:
             self._join_type,
         )
 
-        # Call Rust join() method - it handles all schema conflicts and column renaming
-        joined_inner = self._source._inner.join(
+        # Use the prefix-aliased join path: link() namespaces the whole target
+        # table as `{alias}_col` for pointer navigation (distinct from join()'s
+        # Polars-style conflict-only suffix).
+        joined_inner = self._source._inner.join_prefixed(
             self._target._inner,
             left_key_expr,
             right_key_expr,

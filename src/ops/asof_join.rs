@@ -15,6 +15,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::common::right_rename_map;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::Array;
@@ -32,7 +33,7 @@ pub fn asof_join_impl(
     left_time_col: &str,
     right_time_col: &str,
     direction: &str,
-    alias: &str,
+    suffix: &str,
 ) -> PyResult<LTSeqTable> {
     // 1. Validate both tables have data
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
@@ -141,16 +142,20 @@ pub fn asof_join_impl(
         matched_right_indices.push(match_idx);
     }
 
-    // 8. Build result schema: left columns + aliased right columns
+    // 8. Build result schema: left columns + suffix-renamed right columns.
+    // Only right columns that collide with the left get the suffix (Polars
+    // semantics). Unlike an equi-join, we KEEP the right time column: an asof
+    // match is approximate, so the matched timestamp is real information.
+    let rename_map = right_rename_map(&left_schema, &right_schema, suffix)?;
     let mut result_fields: Vec<Field> = Vec::new();
 
     for field in left_schema.fields() {
         result_fields.push((**field).clone());
     }
 
-    for field in right_schema.fields() {
+    for (field, (_, new_name)) in right_schema.fields().iter().zip(rename_map.iter()) {
         result_fields.push(Field::new(
-            format!("{}_{}", alias, field.name()),
+            new_name,
             field.data_type().clone(),
             true, // Always nullable for asof join
         ));

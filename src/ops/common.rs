@@ -7,7 +7,9 @@
 //! The SQL temp-table guards and column-list builders that used to live here
 //! died with the SQL round-trip paths (issue #91).
 
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use crate::error::LtseqError;
+use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
@@ -66,39 +68,95 @@ impl fmt::Display for JoinType {
 // Schema Helpers
 // ============================================================================
 
-/// Build a combined schema by prefixing right schema columns with an alias.
+/// Build a combined schema by prefixing every right column with `{alias}_`.
 ///
-/// Used for join result schemas where right table columns need disambiguation.
-///
-/// # Arguments
-/// * `left_schema` - Left table schema (columns preserved as-is)
-/// * `right_schema` - Right table schema (columns prefixed)
-/// * `alias` - Prefix for right table columns
-///
-/// # Returns
-/// Combined schema with aliased right columns
-pub fn build_aliased_join_schema(
+/// Used by the pointer-navigation `link()` path (LinkedTable), where the alias
+/// deliberately namespaces the whole target table so linked columns are reached
+/// as `alias_col` (e.g. `prod_name`). This is distinct from `join()`'s
+/// Polars-style conflict-only suffix — do not conflate the two.
+pub fn build_prefixed_join_schema(
     left_schema: &ArrowSchema,
     right_schema: &ArrowSchema,
     alias: &str,
 ) -> Arc<ArrowSchema> {
-    let mut fields = Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
-
-    // Add left columns as-is
+    let mut fields =
+        Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
     for field in left_schema.fields() {
         fields.push((**field).clone());
     }
-
-    // Add right columns with alias prefix
     for field in right_schema.fields() {
-        fields.push(datafusion::arrow::datatypes::Field::new(
+        fields.push(Field::new(
             format!("{}_{}", alias, field.name()),
             field.data_type().clone(),
             true,
         ));
     }
-
     Arc::new(ArrowSchema::new(fields))
+}
+
+/// Compute the output name of every right column under Polars-style suffix rules.
+///
+/// A right column keeps its original name unless it collides with a left column
+/// name; on collision it becomes `{name}{suffix}`. Returns `(old_name, final_name)`
+/// pairs in right-schema order. Errors if a suffixed name still collides with a
+/// left column or an already-assigned right column (e.g. right has both `x` and
+/// `x_right` while left has `x`) — the caller should surface a "pick another
+/// suffix" message, matching Polars' behavior.
+pub fn right_rename_map(
+    left_schema: &ArrowSchema,
+    right_schema: &ArrowSchema,
+    suffix: &str,
+) -> Result<Vec<(String, String)>, LtseqError> {
+    let left_names: HashSet<&str> =
+        left_schema.fields().iter().map(|f| f.name().as_str()).collect();
+    let mut taken: HashSet<String> =
+        left_schema.fields().iter().map(|f| f.name().clone()).collect();
+
+    let mut map = Vec::with_capacity(right_schema.fields().len());
+    for field in right_schema.fields() {
+        let old = field.name().clone();
+        let new = if left_names.contains(old.as_str()) {
+            format!("{}{}", old, suffix)
+        } else {
+            old.clone()
+        };
+        if taken.contains(&new) {
+            return Err(LtseqError::Validation(format!(
+                "Join suffix collision: right column '{}' would become '{}', which already \
+                 exists in the result. Choose a different suffix=.",
+                old, new
+            )));
+        }
+        taken.insert(new.clone());
+        map.push((old, new));
+    }
+    Ok(map)
+}
+
+/// Build the joined result schema: all left fields as-is, then right fields
+/// renamed per `right_rename_map`, skipping any right column named in
+/// `drop_right_cols` (by original name — used to drop coalesced equi-join keys).
+pub fn build_suffixed_join_schema(
+    left_schema: &ArrowSchema,
+    right_schema: &ArrowSchema,
+    suffix: &str,
+    drop_right_cols: &[String],
+) -> Result<Arc<ArrowSchema>, LtseqError> {
+    let map = right_rename_map(left_schema, right_schema, suffix)?;
+    let mut fields =
+        Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
+
+    for field in left_schema.fields() {
+        fields.push((**field).clone());
+    }
+    for (field, (old, new)) in right_schema.fields().iter().zip(map.iter()) {
+        if drop_right_cols.contains(old) {
+            continue;
+        }
+        fields.push(Field::new(new, field.data_type().clone(), true));
+    }
+
+    Ok(Arc::new(ArrowSchema::new(fields)))
 }
 
 

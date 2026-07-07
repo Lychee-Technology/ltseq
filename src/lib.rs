@@ -423,17 +423,17 @@ impl LTSeqTable {
             .collect()
     }
 
-    /// Compute the schema a join with `other` under `alias` would produce,
-    /// without executing the join. Left columns keep their names; right
-    /// columns are prefixed `{alias}_`. Single source of truth: the same
-    /// `build_aliased_join_schema` the join execution path uses.
+    /// Compute the schema a link()-style prefixed join with `other` under
+    /// `alias` would produce, without executing it. Left columns keep their
+    /// names; right columns are prefixed `{alias}_`. Single source of truth:
+    /// the same `build_prefixed_join_schema` the `join_prefixed` path uses.
     ///
     /// Returns:
     ///     PyDict mapping column name (str) -> type string (str)
     fn preview_join_schema(&self, other: &LTSeqTable, alias: String) -> PyResult<Py<PyDict>> {
         let left = self.require_schema()?;
         let right = other.require_schema()?;
-        let joined = crate::ops::common::build_aliased_join_schema(left, right, &alias);
+        let joined = crate::ops::common::build_prefixed_join_schema(left, right, &alias);
 
         Python::attach(|py| {
             let dict = PyDict::new(py);
@@ -877,9 +877,29 @@ impl LTSeqTable {
         left_key_expr_dict: &Bound<'_, PyDict>,
         right_key_expr_dict: &Bound<'_, PyDict>,
         join_type: &str,
-        alias: &str,
+        suffix: &str,
     ) -> PyResult<LTSeqTable> {
         crate::ops::join::join_impl(
+            self,
+            other,
+            left_key_expr_dict,
+            right_key_expr_dict,
+            join_type,
+            suffix,
+        )
+    }
+
+    /// Prefix-aliased join for the pointer-navigation link() path.
+    /// Prefixes every right column with `{alias}_` and keeps all columns.
+    fn join_prefixed(
+        &self,
+        other: &LTSeqTable,
+        left_key_expr_dict: &Bound<'_, PyDict>,
+        right_key_expr_dict: &Bound<'_, PyDict>,
+        join_type: &str,
+        alias: &str,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::join::join_prefixed_impl(
             self,
             other,
             left_key_expr_dict,
@@ -924,7 +944,7 @@ impl LTSeqTable {
         left_time_col: &str,
         right_time_col: &str,
         direction: &str,
-        alias: &str,
+        suffix: &str,
     ) -> PyResult<LTSeqTable> {
         crate::ops::asof_join::asof_join_impl(
             self,
@@ -932,7 +952,7 @@ impl LTSeqTable {
             left_time_col,
             right_time_col,
             direction,
-            alias,
+            suffix,
         )
     }
 

@@ -102,10 +102,10 @@ class TestJoinSchema:
         result_df = result.to_pandas()
         # Check that we have columns from users
         assert "name" in result_df.columns
-        # Check that we have columns from orders (prefixed with _other_)
+        # Non-conflicting right columns keep their names (Polars suffix semantics)
         assert (
-            "_other_product" in result_df.columns
-            or "_other_amount" in result_df.columns
+            "product" in result_df.columns
+            or "amount" in result_df.columns
         )
 
     def test_join_result_is_chainable(self):
@@ -191,9 +191,9 @@ class TestJoinAsymmetricKeys:
 
         # All 4 order items match a product
         assert len(df) == 4
-        # Should have columns from both tables
+        # Should have columns from both tables (non-conflicting right cols keep names)
         assert "product_name" in df.columns
-        assert "_other_quantity" in df.columns
+        assert "quantity" in df.columns
         # Verify correct matching: product_id=1 appears in orders 101 and 103
         product_1_rows = df[df["id"] == 1]
         assert len(product_1_rows) == 2
