@@ -99,14 +99,14 @@ This document describes the API **as currently implemented**. Every signature be
 | As-of join | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")` |
+| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### Set Operations
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Union (all) | `.union()` | `t1.union(t2)` |
+| Concat (union all) | `.concat()` / `.union()` | `t1.concat(t2)` |
 | Intersect | `.intersect()` | `t1.intersect(t2)` |
-| Diff | `.except_()` | `t1.except_(t2)` |
+| Diff | `.subtract()` / `.except_()` | `t1.subtract(t2)` |
 | Symmetric diff | `.xunion()` | `t1.xunion(t2)` |
 
 ### Row Mutation (copy-on-write)
@@ -661,12 +661,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over` (Window Specification)
-- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False) -> WindowExpr`
+- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
 - **Behavior**: Apply a window specification to a ranking function. `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`
 - **Parameters**:
   - `partition_by` column to partition by (optional)
   - `order_by` column to order by (required for ranking functions)
   - `descending` sort direction for order_by (default False)
+  - `desc` alias for `descending`; when both are given, `descending` takes precedence, matching `sort()`'s resolution
 - **Returns**: `WindowExpr` ready for use in derive()
 - **Exceptions**: `TypeError` (invalid partition_by/order_by types)
 - **Example**:
@@ -821,7 +822,7 @@ big_groups = groups.filter(lambda g: g.count() > 3)
 
 #### `NestedTable.derive`
 - **Signature**: `nested.derive(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Compute group-level values and **broadcast them to every row of the group**. The result keeps all original rows and columns, plus the new columns. (To collapse to one row per group, follow with `distinct()` on the derived columns or use `first()`/`last()`; for hash-style one-row-per-group aggregation see `agg()`/`group_by()` in Section 7)
+- **Behavior**: Compute group-level values and **broadcast them to every row of the group** (SQL window semantics). The result keeps all original rows and columns, plus the new columns. To collapse to one row per group instead, use `NestedTable.agg()`
 - **Parameters**: `func` returns a dict of group expressions
 - **Returns**: `LTSeq` with original rows plus broadcast group-level columns
 - **Exceptions**: `ValueError` (lambda doesn't return a dict), `RuntimeError` (execution failure)
@@ -832,6 +833,22 @@ enriched = groups.derive(lambda g: {
     "group_size": g.count(),
     "start": g.first().date,
     "end": g.last().date,
+})
+```
+
+#### `NestedTable.agg`
+- **Signature**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
+- **Behavior**: Collapse each group to **one summary row** (SQL GROUP BY semantics) — the counterpart of `derive`'s broadcast. Groups appear in their original sequence order; the output contains only the mapped columns. Replaces the old `derive(...) + distinct(...)` idiom
+- **Parameters**: `func` returns a dict of plain group aggregates (`g.count()`, `g.first().col`, `g.last().col`, `g.sum('col')`, ...). Arithmetic combinations of aggregates are not supported yet — compute them after agg()
+- **Returns**: `LTSeq` with one row per group
+- **Exceptions**: `ValueError` (non-dict return or unsupported expression), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# One row per consecutive run
+spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+    "start": g.first().date,
+    "end": g.last().date,
+    "n": g.count(),
 })
 ```
 
@@ -848,13 +865,13 @@ df = groups.flatten().to_pandas()     # rows with __group_id__
 
 Group aggregations take the **column name as a string**; `first()`/`last()` return row proxies with attribute access.
 
-#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`, `g.min()`, `g.max()`
-- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`min`/`max`)
-- **Behavior**: Group size / aggregation over one column within each group
+#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`/`g.mean()`, `g.min()`, `g.max()`, `g.median()`, `g.std()`, `g.var()`, `g.percentile()`
+- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`mean`/`min`/`max`/`median`/`std`/`var`); `g.percentile(column: str, p: float) -> Expr`
+- **Behavior**: Group size / aggregation over one column within each group. `mean` is an alias for `avg` (Pandas/Polars verb); `std`/`var` are sample statistics; `percentile` is approximate with `p` in [0, 1]
 - **Example**:
 ```python
-groups.derive(lambda g: {"avg_price": g.avg("price"), "hi": g.max("price")})
-groups.filter(lambda g: g.sum("amount") > 1000)
+groups.derive(lambda g: {"avg_price": g.mean("price"), "med": g.median("price")})
+groups.filter(lambda g: g.std("amount") > 5)
 ```
 
 #### Row access: `g.first()`, `g.last()`
@@ -883,15 +900,15 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ## 5. Set Algebra
 
-### `LTSeq.union`
-- **Signature**: `LTSeq.union(other: LTSeq) -> LTSeq`
-- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics)
+### `LTSeq.concat` / `LTSeq.union`
+- **Signature**: `LTSeq.concat(other: LTSeq) -> LTSeq`
+- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics). `union` is a compatibility alias — note it does NOT deduplicate like SQL UNION; prefer `concat`, the Pandas/Polars verb that carries no dedup expectation
 - **Parameters**: `other` another LTSeq with same schema
 - **Returns**: combined `LTSeq`
 - **Exceptions**: `TypeError` (other is not LTSeq), `ValueError` (schema mismatch)
 - **Example**:
 ```python
-combined = t1.union(t2)
+combined = t1.concat(t2)
 ```
 
 ### `LTSeq.intersect`
@@ -905,16 +922,16 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.except_` (set difference)
-- **Signature**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
-- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics)
+### `LTSeq.subtract` / `LTSeq.except_` (set difference)
+- **Signature**: `LTSeq.subtract(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics). `except_` is a compatibility alias (the trailing underscore dodges the Python keyword); `subtract` matches PySpark
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
 - **SQL Equivalent**: `EXCEPT` / `MINUS`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
-only_left = t1.except_(t2, on=lambda r: r.id)
+only_left = t1.subtract(t2, on=lambda r: r.id)
 ```
 
 > Note: `Expr.diff()` (row-level differences, Section 3) is unrelated to table set difference. Use `except_()` for table set difference.
@@ -1008,14 +1025,14 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.link`
-- **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str, join_type: str = "inner") -> LinkedTable`
+- **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
 - **Behavior**: Pointer-style association; not materialized until needed; access target columns via the alias
-- **Parameters**: `target_table` target table; `on` join condition; `as_` alias; `join_type` in {inner,left,right,full}
+- **Parameters**: `target_table` target table; `on` join condition; `alias` alias for the linked reference (`as_` is a compatibility alias for it — pass exactly one); `join_type` in {inner,left,right,full}
 - **Returns**: `LinkedTable`
-- **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type or schema not initialized)
+- **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type, both/neither of as_ and alias, or schema not initialized)
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 ```
 
@@ -1023,9 +1040,9 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **Behavior**: Chainable view over a linked pair of tables. Supports `select`, `filter`, `derive`, `sort`, `slice`, `distinct`, `show`, and further `link` calls (multi-hop chains). Materializes via the underlying join only when required
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, as_="cat")
+chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
 ```
 
 See `docs/LINKING_GUIDE.md` for the full linking guide.
@@ -1092,8 +1109,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
-- **Signature**: `g.col.sum() / .avg() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **Behavior**: Column aggregations available in aggregation context. `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
+- **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
 - **Example**:
 ```python
 stats = t.group_by("region").agg(
@@ -1281,6 +1298,8 @@ t.derive(
 
 ### String Operations (`r.col.s.*`)
 
+> `.str` is an alias for `.s` (Pandas/Polars convention): `r.email.str.contains("@")` ≡ `r.email.s.contains("@")`.
+
 #### `contains`
 - **Signature**: `r.col.s.contains(pattern: str) -> Expr`
 - **Behavior**: substring containment
@@ -1374,19 +1393,27 @@ full = t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
 padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 ```
 
-#### `split`
-- **Signature**: `r.col.s.split(delimiter: str, index: int) -> Expr`
-- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range
+#### `split_part` / `split`
+- **Signature**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
+- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range. `split` is a compatibility alias — prefer `split_part`, which does not collide with Python's list-returning `str.split`
 - **Exceptions**: `ValueError` (index <= 0)
 - **Example**:
 ```python
 # Get domain from email "user@example.com"
-domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
+domain = t.derive(domain=lambda r: r.email.s.split_part("@", 2))
+```
+
+#### `find`
+- **Signature**: `r.col.s.find(sub: str) -> Expr`
+- **Behavior**: Returns the **0-based** position of the first occurrence of `sub`; returns -1 if not found (Python `str.find` semantics)
+- **Example**:
+```python
+at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4, absent → -1
 ```
 
 #### `pos`
 - **Signature**: `r.col.s.pos(sub: str) -> Expr`
-- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found
+- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found. SQL semantics — for Python semantics use `find`
 - **SQL Equivalent**: `STRPOS(col, sub)`
 - **Example**:
 ```python
@@ -1403,13 +1430,13 @@ prefix = t.derive(pfx=lambda r: r.code.s.left(3))    # "ABC123" → "ABC"
 suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 ```
 
-#### `asc`
-- **Signature**: `r.col.s.asc() -> Expr`
-- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`)
+#### `ord` / `asc`
+- **Signature**: `r.col.s.ord() -> Expr`
+- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`). `asc` is a compatibility alias — prefer `ord`, since `asc` reads as "ascending" in a sorting-heavy library
 - **SQL Equivalent**: `ASCII(col)`
 - **Example**:
 ```python
-code = t.derive(code=lambda r: r.ch.s.asc())  # "A" → 65, "a" → 97
+code = t.derive(code=lambda r: r.ch.s.ord())  # "A" → 65, "a" → 97
 ```
 
 #### `isalpha` / `isdigit` / `islower` / `isupper`
@@ -1422,15 +1449,15 @@ numeric_codes = t.filter(lambda r: r.code.s.isdigit())
 
 ### String Global Functions
 
-#### `str_char`
-- **Signature**: `str_char(n: Expr) -> Expr`
-- **Behavior**: Converts a Unicode code point integer to its single-character string representation (like Python `chr()`)
+#### `char` / `str_char`
+- **Signature**: `char(n: Expr) -> Expr`
+- **Behavior**: Converts a Unicode code point integer to its single-character string representation (like Python `chr()`). `str_char` is a compatibility alias
 - **SQL Equivalent**: `CHR(n)`
-- **Import**: `from ltseq.expr import str_char`
+- **Import**: `from ltseq.expr import char`
 - **Example**:
 ```python
-from ltseq.expr import str_char
-ch = t.derive(ch=lambda r: str_char(r.code))  # 65 → "A", 97 → "a"
+from ltseq.expr import char
+ch = t.derive(ch=lambda r: char(r.code))  # 65 → "A", 97 → "a"
 ```
 
 #### `concat_ws`
@@ -1658,12 +1685,12 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
 | `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
 | `r.col.s.left(n)` / `.right(n)` | `LEFT(col, n)` / `RIGHT(col, n)` |
-| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.ord()` | `ASCII(col)` |
 | `r.col.s.like(p)` | `col LIKE p` |
 | `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
 | `r.col.s.pad_left(n, c)` / `.pad_right(n, c)` | `LPAD(col, n, c)` / `RPAD(col, n, c)` |
-| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
-| `str_char(n)` | `CHR(n)` |
+| `r.col.s.split_part(d, i)` | `SPLIT_PART(col, d, i)` |
+| `char(n)` | `CHR(n)` |
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |

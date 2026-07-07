@@ -338,6 +338,17 @@ def str_char(n: "Expr") -> "CallExpr":
     return CallExpr("str_char", (Expr._coerce(n),), {}, on=None)
 
 
+def char(n: "Expr") -> "CallExpr":
+    """Convert a Unicode code point to a single-character string.
+
+    Alias for str_char() named after Python's built-in chr().
+
+    Example:
+        >>> t.derive(ch=lambda r: char(r.code_point))
+    """
+    return str_char(n)
+
+
 def concat_ws(delimiter: str, *cols: "Expr") -> "CallExpr":
     """Concatenate strings with a separator, ignoring NULLs. Equivalent to SQL CONCAT_WS.
 

@@ -59,6 +59,7 @@ from .base import (
     factorial,
     # String global functions
     str_char,
+    char,
     concat_ws,
     # Datetime global functions
     now,
@@ -125,6 +126,7 @@ __all__ = [
     "factorial",
     # String global
     "str_char",
+    "char",
     "concat_ws",
     # Datetime
     "now",

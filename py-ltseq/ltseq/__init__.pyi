@@ -43,6 +43,7 @@ from .expr import (
     lcm,
     factorial,
     str_char,
+    char,
     concat_ws,
     now,
     today,
@@ -206,8 +207,10 @@ class LTSeq:
         self,
         target_table: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        as_: str,
+        as_: str | None = ...,
         join_type: str = ...,
+        *,
+        alias: str | None = ...,
     ) -> LinkedTable: ...
 
     # ------------------------------------------------------------------ aggregation
@@ -235,12 +238,18 @@ class LTSeq:
 
     # ------------------------------------------------------------------ set ops
     def union(self, other: "LTSeq") -> "LTSeq": ...
+    def concat(self, other: "LTSeq") -> "LTSeq": ...
     def intersect(
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy], Expr] | None = ...,
     ) -> "LTSeq": ...
     def except_(
+        self,
+        other: "LTSeq",
+        on: Callable[[SchemaProxy], Expr] | None = ...,
+    ) -> "LTSeq": ...
+    def subtract(
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy], Expr] | None = ...,
@@ -320,6 +329,7 @@ __all__ = [
     "lcm",
     "factorial",
     "str_char",
+    "char",
     "concat_ws",
     "now",
     "today",
