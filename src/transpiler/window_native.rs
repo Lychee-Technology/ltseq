@@ -192,7 +192,9 @@ fn pyexpr_to_window_inner(
         PyExpr::Call { func, .. } => match func.as_str() {
             "shift" => convert_shift(&py_expr, schema, order_by),
             "diff" => convert_diff(&py_expr, schema, order_by),
-            "cum_sum" => convert_cum_sum(&py_expr, schema, order_by),
+            "cum_sum" | "cum_max" | "cum_min" => {
+                convert_cum_agg(func.clone(), &py_expr, schema, order_by)
+            }
             // Aggregation functions applied to rolling()
             "mean" | "sum" | "min" | "max" | "count" | "std" => {
                 // Check if this is rolling().agg()
@@ -313,10 +315,12 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
     }
 }
 
-/// Convert cum_sum to sum(col) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+/// Convert cum_sum/cum_max/cum_min to
+/// agg(col) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 ///
 /// Supports `partition_by` kwarg: `cum_sum(partition_by="col")`
-fn convert_cum_sum(
+fn convert_cum_agg(
+    func: String,
     py_expr: &PyExpr,
     schema: &ArrowSchema,
     order_by: &[Sort],
@@ -327,17 +331,21 @@ fn convert_cum_sum(
         // Extract partition_by from kwargs
         let partition_by_exprs = extract_partition_by(kwargs, schema)?;
 
-        // Build: sum(col) as aggregate, then convert to window function
-        let sum_expr = sum(col_expr);
+        let agg_expr = match func.as_str() {
+            "cum_sum" => sum(col_expr),
+            "cum_max" => max(col_expr),
+            "cum_min" => min(col_expr),
+            other => return Err(format!("Unknown cumulative aggregate: '{}'", other)),
+        };
         let frame = WindowFrame::new_bounds(
             WindowFrameUnits::Rows,
             WindowFrameBound::Preceding(ScalarValue::Null), // UNBOUNDED PRECEDING
             WindowFrameBound::CurrentRow,
         );
 
-        aggregate_to_window(sum_expr, partition_by_exprs, order_by.to_vec(), frame)
+        aggregate_to_window(agg_expr, partition_by_exprs, order_by.to_vec(), frame)
     } else {
-        Err("Expected Call expression for cum_sum".to_string())
+        Err(format!("Expected Call expression for {}", func))
     }
 }
 

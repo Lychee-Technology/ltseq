@@ -48,8 +48,8 @@ fn pyexpr_to_agg_plan(
 
     match func.as_str() {
         // Simple aggregations on a column
-        "sum" | "count" | "min" | "max" | "avg" | "median" | "variance" | "var" | "stddev"
-        | "std" => {
+        "sum" | "count" | "min" | "max" | "avg" | "mean" | "median" | "variance" | "var"
+        | "stddev" | "std" => {
             let col_expr = match on.as_ref() {
                 PyExpr::Column(col_name) => {
                     Expr::Column(Column::new_unqualified(col_name))
@@ -66,7 +66,7 @@ fn pyexpr_to_agg_plan(
                 "count" => agg_fn::count(col_expr),
                 "min" => agg_fn::min(col_expr),
                 "max" => agg_fn::max(col_expr),
-                "avg" => agg_fn::avg(col_expr),
+                "avg" | "mean" => agg_fn::avg(col_expr),
                 "median" => agg_fn::median(col_expr),
                 "variance" | "var" => agg_fn::var_sample(col_expr),
                 "stddev" | "std" => agg_fn::stddev(col_expr),
@@ -240,6 +240,31 @@ fn pyexpr_to_agg_plan(
                 parts: vec![(hidden, agg)],
                 post,
             })
+        }
+        // First/last row value within each group, ordered by an explicit order
+        // column passed in args[0] (NestedTable.agg passes __rn__). "last" is
+        // first_value over the reversed order.
+        "first" | "last" => {
+            let PyExpr::Column(col_name) = on.as_ref() else {
+                return Err(format!("{} requires a column reference", func));
+            };
+            let col_expr = Expr::Column(Column::new_unqualified(col_name));
+            let order_col = match args.first() {
+                Some(PyExpr::Column(name)) if !name.is_empty() => name.clone(),
+                _ => {
+                    return Err(format!(
+                        "{} requires an order column argument (in-group row order)",
+                        func
+                    ))
+                }
+            };
+            let asc = func == "first";
+            let sort = SortExpr::new(
+                Expr::Column(Column::new_unqualified(&order_col)),
+                asc,
+                false,
+            );
+            Ok(AggPlan::Plain(agg_fn::first_value(col_expr, vec![sort])))
         }
         // mode keeps the legacy behavior (FIRST_VALUE ordered ascending —
         // i.e. min, not a true statistical mode). Real mode semantics are

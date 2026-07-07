@@ -953,8 +953,8 @@ fn parse_call_expr(
         // Type / membership
         "cast" | "is_in" => parse_call_type_ops(func, on, args, schema),
         // Window functions (must be handled elsewhere)
-        "shift" | "rolling" | "diff" | "cum_sum" | "mean" | "sum" | "min" | "max" | "count"
-        | "std" => Err(format!(
+        "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min" | "mean" | "sum"
+        | "min" | "max" | "count" | "std" => Err(format!(
             "Window function '{}' requires DataFrame context - should be handled in derive()",
             func
         )),
@@ -1005,7 +1005,7 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
 /// window.rs (issue #101). Do not duplicate this match.
 pub(crate) fn is_window_call(func: &str, on: &PyExpr) -> bool {
     // Direct window functions
-    if matches!(func, "shift" | "rolling" | "diff" | "cum_sum") {
+    if matches!(func, "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min") {
         return true;
     }
     // Aggregation functions applied to rolling windows

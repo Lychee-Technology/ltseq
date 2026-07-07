@@ -56,6 +56,10 @@ class SetOpsMixin(LTSeqLike):
         result = LTSeq._from_inner(result_inner)
         return result
 
+    # Alias: Pandas/Polars verb for vertical concatenation. Unlike SQL UNION,
+    # concat carries no dedup expectation, which matches the UNION ALL semantics.
+    concat = union
+
     def intersect(self, other: "LTSeq", on: "Callable | str | None" = None) -> "LTSeq":
         """
         Intersection of two tables.
@@ -121,6 +125,9 @@ class SetOpsMixin(LTSeqLike):
 
         result = LTSeq._from_inner(result_inner)
         return result
+
+    # Alias: PySpark verb, avoids the trailing underscore of except_.
+    subtract = except_
 
     def xunion(self, other: "LTSeq", on: "Callable | str | None" = None) -> "LTSeq":
         """

@@ -18,6 +18,12 @@ from .accessors import StringAccessor, TemporalAccessor
 from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
 from .lookup_expr import LookupExpr
 
+# Window functions whose `.over()` clause is understood by the native window
+# planner. Sequence windows (shift/rolling/diff/cum_*) currently take partition
+# via the `partition_by=` kwarg instead; unifying them under `.over()` is
+# tracked in #117.
+_RANKING_FUNCS = frozenset({"row_number", "rank", "dense_rank", "ntile"})
+
 
 class ColumnExpr(Expr):
     """
@@ -57,6 +63,11 @@ class ColumnExpr(Expr):
     @property
     def s(self):
         """String accessor for string operations (r.col.s.contains, etc.)"""
+        return StringAccessor(self)
+
+    @property
+    def str(self):
+        """Alias for .s, matching the Pandas/Polars .str accessor convention."""
         return StringAccessor(self)
 
     @property
@@ -132,6 +143,11 @@ class CallExpr(Expr):
         return StringAccessor(self)
 
     @property
+    def str(self):
+        """Alias for .s, matching the Pandas/Polars .str accessor convention."""
+        return StringAccessor(self)
+
+    @property
     def dt(self):
         """Temporal accessor for chaining temporal operations on CallExpr results."""
         return TemporalAccessor(self)
@@ -140,7 +156,8 @@ class CallExpr(Expr):
         self,
         partition_by: "Expr | None" = None,
         order_by: "Expr | None" = None,
-        descending: bool = False,
+        descending: "bool | None" = None,
+        desc: "bool | None" = None,
     ) -> "WindowExpr":
         """
         Apply a window specification to this expression.
@@ -152,6 +169,9 @@ class CallExpr(Expr):
             partition_by: Column(s) to partition by (optional)
             order_by: Column(s) to order by (required for ranking functions)
             descending: If True, order in descending order (default False)
+            desc: Alias for descending. When both are given, ``descending``
+                takes precedence — matching sort()'s resolution so the same
+                call behaves identically in both APIs.
 
         Returns:
             WindowExpr with the window specification
@@ -159,10 +179,24 @@ class CallExpr(Expr):
         Example:
             >>> row_number().over(order_by=r.date)
             >>> rank().over(partition_by=r.group, order_by=r.score)
-            >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, descending=True)
+            >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, desc=True)
         """
+        if self.func not in _RANKING_FUNCS:
+            raise NotImplementedError(
+                f".over() 目前仅支持排名函数 (row_number/rank/dense_rank/ntile)；"
+                f"序列窗口 {self.func}() 的统一 .over() 入口尚未实现（见 #117）。"
+                f"当前请用 {self.func}(..., partition_by=...) kwarg 指定分区。"
+            )
+        # Mirror sort(): `descending` wins when both are supplied, so
+        # over(desc=X, descending=Y) and sort(desc=X, descending=Y) agree.
+        if descending is not None:
+            resolved = descending
+        elif desc is not None:
+            resolved = desc
+        else:
+            resolved = False
         return WindowExpr(
-            self, partition_by=partition_by, order_by=order_by, descending=descending
+            self, partition_by=partition_by, order_by=order_by, descending=resolved
         )
 
 
