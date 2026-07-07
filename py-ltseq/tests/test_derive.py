@@ -505,7 +505,7 @@ class TestNestedTableDeriveErrorHandling:
             t = LTSeq.read_csv(fname)
             with pytest.raises((ValueError, AttributeError)):
                 t.group_ordered(lambda r: r.group).derive(
-                    lambda g: {"median": g.median("val")}  # median not supported
+                    lambda g: {"m": g.mode("val")}  # mode not supported on group proxy
                 )
         finally:
             os.unlink(fname)

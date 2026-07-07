@@ -817,7 +817,7 @@ big_groups = groups.filter(lambda g: g.count() > 3)
 
 #### `NestedTable.derive`
 - **签名**: `nested.derive(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **行为**: 计算组级值并**广播到组内每一行**。结果保留所有原始行和列，外加新列。（若需坍缩为每组一行，可对派生列接 `distinct()`，或使用 `first()`/`last()`；哈希式的每组一行聚合见第 7 节 `agg()`/`group_by()`）
+- **行为**: 计算组级值并**广播到组内每一行**（SQL 窗口语义）。结果保留所有原始行和列，外加新列。若需坍缩为每组一行，请用 `NestedTable.agg()`
 - **参数**: `func` 返回组表达式字典
 - **返回**: 原始行 + 广播组级列的 `LTSeq`
 - **异常**: `ValueError`（lambda 未返回字典），`RuntimeError`（执行失败）
@@ -828,6 +828,22 @@ enriched = groups.derive(lambda g: {
     "group_size": g.count(),
     "start": g.first().date,
     "end": g.last().date,
+})
+```
+
+#### `NestedTable.agg`
+- **签名**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
+- **行为**: 把每组**坍缩为一行摘要**（SQL GROUP BY 语义）——与 `derive` 的广播语义互补。组按原序列顺序输出；结果只含映射的列。取代旧的 `derive(...) + distinct(...)` 拼法
+- **参数**: `func` 返回纯组聚合字典（`g.count()`、`g.first().col`、`g.last().col`、`g.sum('col')` 等）。暂不支持聚合间的算术组合——请在 agg() 之后再计算
+- **返回**: 每组一行的 `LTSeq`
+- **异常**: `ValueError`（未返回字典或表达式不支持），`RuntimeError`（执行失败）
+- **示例**:
+```python
+# 每个连续段一行
+spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+    "start": g.first().date,
+    "end": g.last().date,
+    "n": g.count(),
 })
 ```
 
@@ -844,13 +860,13 @@ df = groups.flatten().to_pandas()     # 带 __group_id__ 的行
 
 组聚合以**字符串列名**为参数；`first()`/`last()` 返回可属性访问的行代理。
 
-#### 聚合: `g.count()`、`g.sum()`、`g.avg()`、`g.min()`、`g.max()`
-- **签名**: `g.count() -> Expr`；`g.sum(column: str) -> Expr`（`avg`/`min`/`max` 同）
-- **行为**: 组内行数 / 对单列的组内聚合
+#### 聚合: `g.count()`、`g.sum()`、`g.avg()`/`g.mean()`、`g.min()`、`g.max()`、`g.median()`、`g.std()`、`g.var()`、`g.percentile()`
+- **签名**: `g.count() -> Expr`；`g.sum(column: str) -> Expr`（`avg`/`mean`/`min`/`max`/`median`/`std`/`var` 同）；`g.percentile(column: str, p: float) -> Expr`
+- **行为**: 组内行数 / 对单列的组内聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词）；`std`/`var` 为样本统计量；`percentile` 为近似分位数，`p` 取 [0, 1]
 - **示例**:
 ```python
-groups.derive(lambda g: {"avg_price": g.avg("price"), "hi": g.max("price")})
-groups.filter(lambda g: g.sum("amount") > 1000)
+groups.derive(lambda g: {"avg_price": g.mean("price"), "med": g.median("price")})
+groups.filter(lambda g: g.std("amount") > 5)
 ```
 
 #### 行访问: `g.first()`、`g.last()`
@@ -1088,8 +1104,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### 聚合列方法（`agg` / `group_by().agg()` 的 lambda 内）
-- **签名**: `g.col.sum() / .avg() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **行为**: 聚合上下文可用的列聚合。`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0–1（近似分位数）
+- **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
+- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0–1（近似分位数）
 - **示例**:
 ```python
 stats = t.group_by("region").agg(

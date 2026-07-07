@@ -9,7 +9,7 @@
 //!
 //! Group dialect nodes (BinOp/UnaryOp/Literal reuse the row-dialect shapes):
 //! - `{"type": "GroupCount"}`
-//! - `{"type": "GroupAgg", "func": "max|min|sum|avg", "column": c}`
+//! - `{"type": "GroupAgg", "func": "max|min|sum|avg|mean|median|std|var|percentile", "column": c, "arg": p?}`
 //! - `{"type": "GroupRowColumn", "row": "first|last", "column": c}`
 //! - `{"type": "GroupQuantifier", "quant": "all|any|none", "pred": <row-dialect dict>}`
 
@@ -48,7 +48,7 @@ enum Quant {
 /// One node of the serialized group dialect.
 enum GroupNode {
     Count,
-    Agg { func: String, column: String },
+    Agg { func: String, column: String, arg: Option<f64> },
     RowColumn { row: RowPick, column: String },
     Quantifier { quant: Quant, pred: PyExpr },
     BinOp { op: String, left: Box<GroupNode>, right: Box<GroupNode> },
@@ -102,6 +102,9 @@ fn dict_to_group_node(dict: &Bound<'_, PyDict>) -> PyResult<GroupNode> {
         "GroupAgg" => GroupNode::Agg {
             func: get_str("func")?,
             column: get_str("column")?,
+            arg: dict
+                .get_item("arg")?
+                .and_then(|v| v.extract::<f64>().ok()),
         },
         "GroupRowColumn" => GroupNode::RowColumn {
             row: match get_str("row")?.as_str() {
@@ -185,13 +188,21 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
             vec![],
             full_frame(),
         ),
-        GroupNode::Agg { func, column } => {
+        GroupNode::Agg { func, column, arg } => {
             let col_expr = Expr::Column(Column::new_unqualified(&column));
             let agg = match func.as_str() {
                 "max" => agg_fn::max(col_expr),
                 "min" => agg_fn::min(col_expr),
                 "sum" => agg_fn::sum(col_expr),
-                "avg" => agg_fn::avg(col_expr),
+                "avg" | "mean" => agg_fn::avg(col_expr),
+                "median" => agg_fn::median(col_expr),
+                "stddev" | "std" => agg_fn::stddev(col_expr),
+                "variance" | "var" => agg_fn::var_sample(col_expr),
+                "percentile" => {
+                    let p = arg.unwrap_or(0.5);
+                    let sort = Sort::new(col_expr, true, false);
+                    agg_fn::approx_percentile_cont(sort, lit(p), None)
+                }
                 other => return Err(format!("Unknown group aggregate: '{}'", other)),
             };
             aggregate_to_window(agg, group_partition(), vec![], full_frame())
