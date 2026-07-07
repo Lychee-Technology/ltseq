@@ -74,6 +74,7 @@ This document describes the API **as currently implemented**. Every signature be
 | Percent change | `.pct_change()` | `r.close.pct_change()` |
 | Cumulative sum | `.cum_sum()` | `t.cum_sum("volume")` or `r.volume.cum_sum()` |
 | Running max / min | `.cum_max()` / `.cum_min()` | `r.price.cum_max()` |
+| Stateful fold | `.fold()` | `t.sort("date").fold(fn, init=1.0, into="cum")` |
 
 ### Ranking (use `.over()`)
 | Operation | Method | Example |
@@ -584,6 +585,23 @@ t.sort("date").derive(
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
 # → adds volume_cumsum, amount_cumsum
+```
+
+#### `LTSeq.fold` (ordered stateful accumulation)
+- **Signature**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
+- **Behavior**: Walk rows in their current order, threading a running `state` through `fn(state, row)` and appending the result as column `into`. Expresses compounding, running balances, and small state machines that window functions cannot (the SPL-style capability). The first-match `row` is a read-only dict of the current row; the returned value is both stored in `into` and carried forward. `partition_by` resets `state` to `init` at the start of each partition (first-seen order)
+- **⚠️ Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms when they can express the computation; reach for `fold` only when genuinely sequential state is required. Slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
+- **Requires**: a prior `.sort()` / `.assume_sorted()` so the accumulation order is defined
+- **Returns**: a new in-memory `LTSeq` — original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
+- **Exceptions**: `ValueError` (no sort order, `into` already exists, or bad `partition_by`), `TypeError` (`fn` not callable)
+- **Example**:
+```python
+# Compounding return
+t.sort("date").fold(
+    lambda s, r: s * (1 + r["rate"]),
+    init=1.0,
+    into="cum_return",
+)
 ```
 
 ### 3.3 Ranking Functions

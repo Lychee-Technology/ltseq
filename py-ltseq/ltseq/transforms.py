@@ -115,6 +115,57 @@ def _collect_key_exprs(
     return result
 
 
+class _FoldRow:
+    """Read-only view of a row passed to ``fold``'s callback.
+
+    Supports both attribute access (``row.col``) — matching the expression DSL
+    idiom used elsewhere in LTSeq — and item access (``row["col"]``). Any
+    attempt to mutate the row raises, so a callback cannot leak changes into the
+    original columns of the output.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        object.__setattr__(self, "_data", data)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(
+                f"fold() row has no column '{name}'. "
+                f"Available columns: {list(self._data.keys())}"
+            ) from None
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        raise TypeError("fold() row is read-only; return the new state instead of mutating the row")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("fold() row is read-only; return the new state instead of mutating the row")
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def keys(self):
+        return self._data.keys()
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"FoldRow({self._data!r})"
+
+
 class TransformMixin(LookupMixin, LTSeqLike):
     """Mixin class providing transform operations for LTSeq."""
 
@@ -502,6 +553,124 @@ class TransformMixin(LookupMixin, LTSeqLike):
         result_inner = self._inner.assume_sorted(key_exprs, desc_list)
 
         return LTSeq._from_inner(result_inner)
+
+    def fold(
+        self,
+        fn: Callable[[Any, "_FoldRow"], Any],
+        *,
+        init: Any,
+        into: str,
+        partition_by: "str | None" = None,
+    ) -> "LTSeq":
+        """
+        Ordered stateful accumulation (fold / scan-left).
+
+        Walks the rows in their current order, threading a running ``state``
+        through ``fn(state, row)`` and appending the result as a new column
+        ``into``. This expresses compounding, running balances, and small
+        state machines that window functions cannot — the classic SPL-style
+        capability.
+
+        **Execution path**: unlike expressions (which push down to the Rust
+        engine), ``fold`` runs a Python callback per row, so it materializes
+        the whole table into Python and loses laziness. Prefer expression
+        forms (``cum_sum``, ``shift``, ``when``) when they can express the
+        computation; reach for ``fold`` only when genuinely sequential state
+        is required. On large tables this is the slow path.
+
+        The state is what ``fn`` returns each step; only the value written to
+        ``into`` is materialized (the state and the ``into`` value are the same
+        object here — return the value you want stored). Requires a prior
+        ``sort()``/``assume_sorted()`` so the accumulation order is defined.
+
+        Args:
+            fn: ``fn(state, row) -> new_state``. ``row`` is a read-only view of
+                the current row supporting both attribute (``row.rate``) and
+                item (``row["rate"]``) access; mutating it raises. ``new_state``
+                is stored in ``into`` and carried to the next row.
+            init: Initial state, used before the first row of each partition.
+            into: Name of the appended column holding the running state.
+            partition_by: Optional column name; the state resets to ``init`` at
+                the start of each partition (partitions follow first-seen order).
+
+        Returns:
+            A new in-memory LTSeq: the original rows in order, plus ``into``.
+
+        Example:
+            >>> # Compounding return
+            >>> t.sort("date").fold(
+            ...     lambda s, r: s * (1 + r.rate),
+            ...     init=1.0,
+            ...     into="cum_return",
+            ... )
+        """
+        from .core import LTSeq
+
+        if not self._schema:
+            raise ValueError(
+                "Schema not initialized. Call read_csv() first to populate the schema."
+            )
+        if not callable(fn):
+            raise TypeError(f"fold() fn must be callable, got {type(fn).__name__}")
+        if not isinstance(into, str) or not into:
+            raise ValueError("fold() requires a non-empty 'into' column name")
+        if into in self._schema:
+            raise ValueError(
+                f"fold() 'into' column '{into}' already exists in the schema"
+            )
+        if not self._sort_keys:
+            raise ValueError(
+                "fold() requires a defined row order. Call .sort(...) "
+                "(or .assume_sorted(...)) before fold()."
+            )
+        if partition_by is not None and partition_by not in self._schema:
+            raise ValueError(
+                f"fold() partition_by column '{partition_by}' not found in schema. "
+                f"Available columns: {list(self._schema.keys())}"
+            )
+
+        from .io_ops import _infer_schema_from_rows
+
+        import copy
+
+        rows = self.to_dicts()
+
+        if partition_by is None:
+            state = copy.deepcopy(init)
+            for row in rows:
+                state = fn(state, _FoldRow(row))
+                row[into] = state
+        else:
+            states: dict[Any, Any] = {}
+            for row in rows:
+                key = row.get(partition_by)
+                # Each partition gets its own fresh copy of ``init`` so mutable
+                # initial state (list/dict/object) is never shared across groups.
+                state = states[key] if key in states else copy.deepcopy(init)
+                state = fn(state, _FoldRow(row))
+                states[key] = state
+                row[into] = state
+
+        # Infer the new column's type from the produced values so the schema
+        # is complete; fall back to the existing schema for the other columns.
+        out_schema = dict(self._schema)
+        if rows:
+            sample = next((r[into] for r in rows if r[into] is not None), None)
+            if sample is not None:
+                out_schema[into] = _infer_schema_from_rows({into: sample})[into]
+            else:
+                out_schema[into] = "Float64"
+        else:
+            out_schema[into] = "Float64"
+
+        result = LTSeq._from_rows(rows, out_schema)
+        # The accumulation preserved input order; re-declare it so downstream
+        # window ops keep working without a redundant physical sort.
+        sort_cols = [c for c, _ in self._sort_keys]
+        sort_desc = [d for _, d in self._sort_keys]
+        if sort_cols:
+            return result.assume_sorted(*sort_cols, desc=sort_desc)
+        return result
 
     def distinct(self, *key_exprs: str | Callable) -> "LTSeq":
         """
