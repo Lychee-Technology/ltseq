@@ -383,6 +383,12 @@ class JoinMixin(LTSeqLike):
         # direction from the comparison operator.
         op_strategy = None
         if callable(on):
+            if left_on is not None or right_on is not None:
+                raise ValueError(
+                    "asof_join() got a lambda on= together with left_on=/right_on=; "
+                    "the lambda already names both time columns. Pass either a lambda "
+                    "on=, or left_on=/right_on= (or a string on=), not both."
+                )
             try:
                 _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
             except Exception as e:
@@ -394,7 +400,11 @@ class JoinMixin(LTSeqLike):
             )
             # Ge/Gt (t.time >= q.time) → backward; Le/Lt → forward.
             op_strategy = "backward" if operator in ("Ge", "Gt") else "forward"
-            if resolved is not None and resolved != op_strategy and resolved != "nearest":
+            # The lambda operator is authoritative for direction, so any explicit
+            # strategy/direction must agree with it — including "nearest", which a
+            # directional operator can contradict (a nearest match may land on the
+            # opposite side of the predicate). Use the string on= form for "nearest".
+            if resolved is not None and resolved != op_strategy:
                 raise ValueError(
                     f"asof_join() lambda operator implies strategy='{op_strategy}', "
                     f"but strategy='{resolved}' was passed. Remove one (use the "

@@ -58,9 +58,9 @@ class TestAsofJoinBasic:
         trades = LTSeq.read_csv(TRADES_CSV)
         quotes = LTSeq.read_csv(QUOTES_CSV)
 
-        result = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-        )
+        # "nearest" has no directional operator, so use the string on= form
+        # (a lambda's >=/<= would contradict a nearest match).
+        result = trades.asof_join(quotes, on="time", strategy="nearest")
         df = result.to_pandas()
 
         # Trade at time=1000 should match nearest quote
@@ -296,9 +296,7 @@ class TestAsofJoinRegression:
         result2 = trades.asof_join(
             quotes, on=lambda t, q: t.time <= q.time
         )
-        result3 = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-        )
+        result3 = trades.asof_join(quotes, on="time", strategy="nearest")
 
         assert isinstance(result1, LTSeq)
         assert isinstance(result2, LTSeq)
@@ -387,9 +385,7 @@ class TestAsofJoinDirectionSemantics:
             trades = LTSeq.read_csv(trades_path)
             quotes = LTSeq.read_csv(quotes_path)
 
-            result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-            )
+            result = trades.asof_join(quotes, on="time", strategy="nearest")
             df = result.to_pandas()
 
             # Both are 5 away, backward bias should pick 1000
@@ -416,9 +412,7 @@ class TestAsofJoinDirectionSemantics:
             trades = LTSeq.read_csv(trades_path)
             quotes = LTSeq.read_csv(quotes_path)
 
-            result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-            )
+            result = trades.asof_join(quotes, on="time", strategy="nearest")
             df = result.to_pandas()
 
             # 1006 is only 1 away, should be picked

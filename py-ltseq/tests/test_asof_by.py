@@ -125,6 +125,22 @@ class TestLambdaOperatorAuthoritative:
                 quotes, on=lambda t, q: t.time >= q.time, strategy="forward"
             )
 
+    def test_lambda_nearest_conflict(self, trades, quotes):
+        # A directional lambda operator contradicts "nearest": a nearest match
+        # can land on the opposite side of the predicate, so it must error.
+        with pytest.raises(ValueError, match="operator implies"):
+            trades.asof_join(
+                quotes, on=lambda t, q: t.time >= q.time, strategy="nearest"
+            )
+
+    def test_lambda_plus_left_right_on_rejected(self, trades, quotes):
+        # A lambda already names both time columns; combining it with
+        # left_on/right_on is ambiguous and must be rejected, not ignored.
+        with pytest.raises(ValueError, match="left_on"):
+            trades.asof_join(
+                quotes, on=lambda t, q: t.time >= q.time, left_on="time", right_on="time"
+            )
+
 
 class TestAsofErrors:
     def test_bad_by_column(self, trades, quotes):

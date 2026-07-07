@@ -220,9 +220,11 @@ pub fn asof_join_impl(
         let right_keys = extract_group_keys(&converter, &right_batches, &right_by_idx)?;
 
         // Bucket right rows by group: key -> (ascending times, original indices).
+        // Consume right_keys (unused afterward) so each OwnedRow moves into the
+        // map instead of being cloned per row.
         let mut groups: HashMap<OwnedRow, (Vec<i64>, Vec<usize>)> = HashMap::new();
-        for (idx, key) in right_keys.iter().enumerate() {
-            let entry = groups.entry(key.clone()).or_default();
+        for (idx, key) in right_keys.into_iter().enumerate() {
+            let entry = groups.entry(key).or_default();
             entry.0.push(right_times[idx]);
             entry.1.push(idx);
         }
