@@ -380,7 +380,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 return True
             if expr_type == "Call":
                 func = expr.get("func", "")
-                if func in ("shift", "diff", "rolling", "cum_sum"):
+                if func in ("shift", "diff", "rolling", "cum_sum", "cum_max", "cum_min"):
                     return True
                 if check_expr(expr.get("on") or {}):
                     return True

@@ -13,6 +13,8 @@ class ColumnExpr(Expr):
     @property
     def s(self) -> StringAccessor: ...
     @property
+    def str(self) -> StringAccessor: ...
+    @property
     def dt(self) -> TemporalAccessor: ...
 
     # Common window / sequence methods
@@ -54,6 +56,8 @@ class CallExpr(Expr):
     @property
     def s(self) -> StringAccessor: ...
     @property
+    def str(self) -> StringAccessor: ...
+    @property
     def dt(self) -> TemporalAccessor: ...
 
     # Rolling chain targets (e.g. r.col.rolling(3).mean())
@@ -73,7 +77,8 @@ class CallExpr(Expr):
         self,
         partition_by: Any | None = ...,
         order_by: Any | None = ...,
-        descending: bool = ...,
+        descending: bool | None = ...,
+        desc: bool | None = ...,
     ) -> WindowExpr: ...
 
     def __getattr__(self, name: str) -> Any: ...
