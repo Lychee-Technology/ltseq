@@ -115,6 +115,57 @@ def _collect_key_exprs(
     return result
 
 
+class _FoldRow:
+    """Read-only view of a row passed to ``fold``'s callback.
+
+    Supports both attribute access (``row.col``) — matching the expression DSL
+    idiom used elsewhere in LTSeq — and item access (``row["col"]``). Any
+    attempt to mutate the row raises, so a callback cannot leak changes into the
+    original columns of the output.
+    """
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        object.__setattr__(self, "_data", data)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(
+                f"fold() row has no column '{name}'. "
+                f"Available columns: {list(self._data.keys())}"
+            ) from None
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        raise TypeError("fold() row is read-only; return the new state instead of mutating the row")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise TypeError("fold() row is read-only; return the new state instead of mutating the row")
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def keys(self):
+        return self._data.keys()
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"FoldRow({self._data!r})"
+
+
 class TransformMixin(LookupMixin, LTSeqLike):
     """Mixin class providing transform operations for LTSeq."""
 
@@ -505,7 +556,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
     def fold(
         self,
-        fn: Callable[[Any, dict[str, Any]], Any],
+        fn: Callable[[Any, "_FoldRow"], Any],
         *,
         init: Any,
         into: str,
@@ -533,9 +584,10 @@ class TransformMixin(LookupMixin, LTSeqLike):
         ``sort()``/``assume_sorted()`` so the accumulation order is defined.
 
         Args:
-            fn: ``fn(state, row) -> new_state``. ``row`` is a read-only dict of
-                the current row's columns; ``new_state`` is stored in ``into``
-                and carried to the next row.
+            fn: ``fn(state, row) -> new_state``. ``row`` is a read-only view of
+                the current row supporting both attribute (``row.rate``) and
+                item (``row["rate"]``) access; mutating it raises. ``new_state``
+                is stored in ``into`` and carried to the next row.
             init: Initial state, used before the first row of each partition.
             into: Name of the appended column holding the running state.
             partition_by: Optional column name; the state resets to ``init`` at
@@ -547,7 +599,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         Example:
             >>> # Compounding return
             >>> t.sort("date").fold(
-            ...     lambda s, r: s * (1 + r["rate"]),
+            ...     lambda s, r: s * (1 + r.rate),
             ...     init=1.0,
             ...     into="cum_return",
             ... )
@@ -579,19 +631,23 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         from .io_ops import _infer_schema_from_rows
 
+        import copy
+
         rows = self.to_dicts()
 
         if partition_by is None:
-            state = init
+            state = copy.deepcopy(init)
             for row in rows:
-                state = fn(state, row)
+                state = fn(state, _FoldRow(row))
                 row[into] = state
         else:
             states: dict[Any, Any] = {}
             for row in rows:
                 key = row.get(partition_by)
-                state = states.get(key, init)
-                state = fn(state, row)
+                # Each partition gets its own fresh copy of ``init`` so mutable
+                # initial state (list/dict/object) is never shared across groups.
+                state = states[key] if key in states else copy.deepcopy(init)
+                state = fn(state, _FoldRow(row))
                 states[key] = state
                 row[into] = state
 

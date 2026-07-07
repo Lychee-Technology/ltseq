@@ -116,6 +116,97 @@ class TestFoldChaining:
         assert result[2]["prev"] == pytest.approx(0.15)
 
 
+class TestFoldRow:
+    """The callback receives a read-only row supporting attr + item access."""
+
+    def test_attribute_access(self, rates):
+        # The issue's proposed shape uses attribute access (r.rate).
+        rows = rates.sort("date").fold(
+            lambda s, r: s * (1 + r.rate), init=1.0, into="cum_return"
+        ).to_dicts()
+        assert rows[0]["cum_return"] == pytest.approx(1.10)
+        assert rows[1]["cum_return"] == pytest.approx(1.155)
+
+    def test_item_access_still_works(self, rates):
+        rows = rates.sort("date").fold(
+            lambda s, r: s * (1 + r["rate"]), init=1.0, into="cum_return"
+        ).to_dicts()
+        assert rows[0]["cum_return"] == pytest.approx(1.10)
+
+    def test_unknown_column_raises_attributeerror(self, rates):
+        with pytest.raises(AttributeError, match="nope"):
+            rates.sort("date").fold(lambda s, r: r.nope, init=0, into="x").to_dicts()
+
+    def test_row_is_read_only_setattr(self, rates):
+        def mutate(s, r):
+            r.rate = 999
+            return s
+        with pytest.raises(TypeError, match="read-only"):
+            rates.sort("date").fold(mutate, init=0, into="x").to_dicts()
+
+    def test_row_is_read_only_setitem(self, rates):
+        def mutate(s, r):
+            r["rate"] = 999
+            return s
+        with pytest.raises(TypeError, match="read-only"):
+            rates.sort("date").fold(mutate, init=0, into="x").to_dicts()
+
+    def test_original_columns_unchanged(self, rates):
+        # Even a read attempt on the row must not alter output columns.
+        rows = rates.sort("date").fold(
+            lambda s, r: s + r.rate, init=0.0, into="acc"
+        ).to_dicts()
+        assert [r["rate"] for r in rows] == pytest.approx([0.10, 0.05, -0.02])
+
+
+class TestFoldPartitionInit:
+    """Each partition gets its own fresh copy of a mutable init (issue #112)."""
+
+    def test_mutable_init_not_shared_across_partitions(self):
+        t = make_table(
+            [
+                {"sym": "A", "v": 1},
+                {"sym": "B", "v": 10},
+                {"sym": "A", "v": 2},
+                {"sym": "B", "v": 20},
+            ],
+            {"sym": "string", "v": "int64"},
+        )
+
+        def accumulate(state, r):
+            state = list(state)  # copy so we return a new list each step
+            state.append(r.v)
+            return state
+
+        rows = t.sort("v").fold(
+            accumulate, init=[], into="hist", partition_by="sym"
+        ).to_dicts()
+        by_sym = {(r["sym"], r["v"]): list(r["hist"]) for r in rows}
+        # A and B accumulate independently; no cross-contamination.
+        assert by_sym[("A", 1)] == [1]
+        assert by_sym[("A", 2)] == [1, 2]
+        assert by_sym[("B", 10)] == [10]
+        assert by_sym[("B", 20)] == [10, 20]
+
+    def test_init_object_not_mutated_by_caller_reference(self):
+        # Even if the callback mutates state in place, the caller's init object
+        # is not corrupted between partitions.
+        t = make_table(
+            [{"sym": "A", "v": 1}, {"sym": "B", "v": 2}],
+            {"sym": "string", "v": "int64"},
+        )
+        init = []
+
+        def accumulate(state, r):
+            state.append(r.v)
+            return state
+
+        t.sort("v").fold(
+            accumulate, init=init, into="hist", partition_by="sym"
+        ).to_dicts()
+        assert init == []  # untouched
+
+
 class TestFoldErrors:
     def test_requires_sort(self, rates):
         with pytest.raises(ValueError, match="sort"):

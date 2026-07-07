@@ -153,7 +153,7 @@ class LTSeq:
     def assume_sorted(self, *keys: str, desc: bool | list[bool] = ...) -> "LTSeq": ...
     def fold(
         self,
-        fn: Callable[[Any, dict[str, Any]], Any],
+        fn: Callable[[Any, Any], Any],
         *,
         init: Any,
         into: str,
