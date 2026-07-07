@@ -73,6 +73,7 @@ This document describes the API **as currently implemented**. Every signature be
 | Row difference | `.diff(n)` | `r.price.diff(1)` |
 | Percent change | `.pct_change()` | `r.close.pct_change()` |
 | Cumulative sum | `.cum_sum()` | `t.cum_sum("volume")` or `r.volume.cum_sum()` |
+| Running max / min | `.cum_max()` / `.cum_min()` | `r.price.cum_max()` |
 
 ### Ranking (use `.over()`)
 | Operation | Method | Example |
@@ -558,13 +559,17 @@ changes = t.sort("date").derive(daily=lambda r: r.close.diff())
 returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 ```
 
-#### `r.col.cum_sum` (expression form)
-- **Signature**: `r.col.cum_sum() -> Expr`
-- **Behavior**: Cumulative sum over the current order, usable inside `derive()` so the output column name is under your control
+#### `r.col.cum_sum` / `cum_max` / `cum_min` (expression form)
+- **Signature**: `r.col.cum_sum() -> Expr` (same for `cum_max`, `cum_min`)
+- **Behavior**: Running aggregate over the current order (sum / running maximum / running minimum), usable inside `derive()` so the output column name is under your control. All accept the `partition_by=` kwarg to reset the accumulation per group
 - **Exceptions**: `TypeError` (non-numeric), `RuntimeError` (used without sort)
 - **Example**:
 ```python
-t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
+t.sort("date").derive(
+    cum_vol=lambda r: r.volume.cum_sum(),
+    peak=lambda r: r.price.cum_max(),
+    trough=lambda r: r.price.cum_min(partition_by="symbol"),
+)
 ```
 
 ### 3.2 Table-Level Cumulative Operations
@@ -1209,6 +1214,21 @@ expr = (r.price * r.qty) > 100
 ```python
 from ltseq import if_else
 status = if_else(r.amount > 100, "VIP", "Normal")
+```
+
+### `when` (multi-branch chain)
+- **Signature**: `when(condition, value?) -> WhenChain`; `.when(condition, value?)`; `.then(value)`; `.otherwise(default) -> Expr`
+- **Behavior**: Multi-branch conditional (SQL CASE WHEN), the readable alternative to nested `if_else`. Branches are checked in order and the first match wins; `otherwise()` is required and returns the expression. Both the two-argument form `when(cond, value)` and the Polars-style `when(cond).then(value)` form work
+- **Import**: `from ltseq import when`
+- **Exceptions**: `TypeError` (condition not boolean)
+- **Example**:
+```python
+from ltseq import when
+tier = t.derive(tier=lambda r:
+    when(r.amount > 100, "VIP")
+    .when(r.amount > 50, "Gold")
+    .otherwise("Normal")
+)
 ```
 
 ### `ifa` / `nvl` / `coalesce`

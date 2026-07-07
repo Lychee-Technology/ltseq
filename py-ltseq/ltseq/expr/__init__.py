@@ -27,6 +27,8 @@ Example:
 from .base import (
     Expr,
     if_else,
+    when,
+    WhenChain,
     count_if,
     sum_if,
     avg_if,
@@ -92,6 +94,8 @@ __all__ = [
     "SchemaProxy",
     "NestedSchemaProxy",
     "if_else",
+    "when",
+    "WhenChain",
     "count_if",
     "sum_if",
     "avg_if",
