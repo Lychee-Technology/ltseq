@@ -243,3 +243,34 @@ class TestPartitionedNestedWindows:
             two_step["prev_rsum"].tolist(), nan_ok=True
         )
         assert not any(c.startswith("__ltseq_stage_") for c in one_step.columns)
+
+
+class TestSequenceWindowOverGuard:
+    """`.over()` on sequence windows is deferred to #117 — it must raise a clear
+    error pointing to the `partition_by=` kwarg, not a confusing Rust error."""
+
+    def test_shift_over_raises_not_implemented(self):
+        from ltseq.expr.types import ColumnExpr
+
+        with pytest.raises(NotImplementedError, match="#117"):
+            ColumnExpr("close").shift(1).over(partition_by=ColumnExpr("symbol"))
+
+    def test_rolling_over_raises_not_implemented(self):
+        from ltseq.expr.types import ColumnExpr
+
+        with pytest.raises(NotImplementedError, match="partition_by"):
+            ColumnExpr("close").rolling(5).mean().over(partition_by=ColumnExpr("symbol"))
+
+    def test_cum_max_over_raises_not_implemented(self):
+        from ltseq.expr.types import ColumnExpr
+
+        with pytest.raises(NotImplementedError, match="#117"):
+            ColumnExpr("price").cum_max().over(partition_by=ColumnExpr("symbol"))
+
+    def test_row_number_over_still_works(self):
+        from ltseq.expr import row_number
+        from ltseq.expr.types import ColumnExpr
+
+        # Ranking functions keep their .over() surface unchanged.
+        w = row_number().over(order_by=ColumnExpr("date"))
+        assert w.serialize()["type"] == "Window"

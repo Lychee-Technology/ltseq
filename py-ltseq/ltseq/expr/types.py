@@ -18,6 +18,12 @@ from .accessors import StringAccessor, TemporalAccessor
 from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
 from .lookup_expr import LookupExpr
 
+# Window functions whose `.over()` clause is understood by the native window
+# planner. Sequence windows (shift/rolling/diff/cum_*) currently take partition
+# via the `partition_by=` kwarg instead; unifying them under `.over()` is
+# tracked in #117.
+_RANKING_FUNCS = frozenset({"row_number", "rank", "dense_rank", "ntile"})
+
 
 class ColumnExpr(Expr):
     """
@@ -161,6 +167,12 @@ class CallExpr(Expr):
             >>> rank().over(partition_by=r.group, order_by=r.score)
             >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, descending=True)
         """
+        if self.func not in _RANKING_FUNCS:
+            raise NotImplementedError(
+                f".over() 目前仅支持排名函数 (row_number/rank/dense_rank/ntile)；"
+                f"序列窗口 {self.func}() 的统一 .over() 入口尚未实现（见 #117）。"
+                f"当前请用 {self.func}(..., partition_by=...) kwarg 指定分区。"
+            )
         return WindowExpr(
             self, partition_by=partition_by, order_by=order_by, descending=descending
         )
