@@ -28,6 +28,40 @@ def _and_key_dict(names: list[str], other_names: list[str]) -> dict[str, Any]:
     return tree
 
 
+def _collect_eq_pairs(node: dict[str, Any], out: list[tuple[str, str]]) -> bool:
+    """Walk an And-tree of Eq(column, column), appending (left, right) name pairs
+    in tree order. Returns False if any leaf isn't a plain column equality."""
+    if node.get("type") != "BinOp":
+        return False
+    op = node.get("op")
+    if op == "And":
+        return _collect_eq_pairs(node.get("left", {}), out) and _collect_eq_pairs(
+            node.get("right", {}), out
+        )
+    if op == "Eq":
+        left, right = node.get("left", {}), node.get("right", {})
+        if left.get("type") == "Column" and right.get("type") == "Column":
+            out.append((left["name"], right["name"]))
+            return True
+    return False
+
+
+def _key_col_pairs(
+    left_key_expr: dict[str, Any], right_key_expr: dict[str, Any]
+) -> "list[tuple[str, str]] | None":
+    """Ordered (left_col, right_col) join-key pairs from serialized key exprs, or
+    None if the shape isn't a plain column / And-of-column-equalities (e.g. a
+    non-equi or computed key). Single-column keys arrive as separate Column
+    dicts; composite keys arrive as one shared And-tree on both sides."""
+    if left_key_expr.get("type") == "Column" and right_key_expr.get("type") == "Column":
+        return [(left_key_expr["name"], right_key_expr["name"])]
+    if left_key_expr.get("type") == "BinOp" and left_key_expr.get("op") == "And":
+        pairs: list[tuple[str, str]] = []
+        if _collect_eq_pairs(left_key_expr, pairs):
+            return pairs
+    return None
+
+
 def _resolve_join_keys(
     on: "Callable | str | list[str] | None",
     left_on: "str | list[str] | None",
@@ -146,8 +180,12 @@ class JoinMixin(LTSeqLike):
         Args:
             other: Another LTSeq table to join with
             on: Join key(s). A column name string or list of names for an
-                equi-join (Pandas/Polars style), or a two-arg lambda for
-                arbitrary conditions (e.g., lambda a, b: a.user_id == b.user_id)
+                equi-join (Pandas/Polars style), or a two-arg lambda equating
+                columns — including differently-named or composite keys
+                (e.g. lambda a, b: a.user_id == b.id, or
+                lambda a, b: (a.region == b.region) & (a.year == b.year)).
+                Only equality conditions are supported; for inequality/range
+                matching use asof_join().
             how: Join type: "inner", "left", "right", "full"
             strategy: Join strategy (optional):
                 - None: default hash join
@@ -206,40 +244,46 @@ class JoinMixin(LTSeqLike):
         """Merge join with sort order validation (used by strategy='merge')."""
         from .core import LTSeq
 
-        # Extract column names for validation
-        left_key_col = left_key_expr.get("name") if left_key_expr else None
-        right_key_col = right_key_expr.get("name") if right_key_expr else None
+        # Extract every join-key column pair — single columns AND composite
+        # And-trees (from on=["a","b"] or a lambda `(a==x) & (b==y)`). Reading
+        # only a top-level "name" would miss composite keys and silently accept
+        # unsorted tables. (pairs is None only for shapes merge join can't
+        # consume, e.g. computed keys — leave those to the Rust path to reject.)
+        pairs = _key_col_pairs(left_key_expr, right_key_expr)
 
-        # Get sort directions from tables
-        left_desc = self._get_sort_direction(left_key_col) if left_key_col else None
-        right_desc = other._get_sort_direction(right_key_col) if right_key_col else None
+        if pairs:
+            left_cols = [lc for lc, _ in pairs]
+            right_cols = [rc for _, rc in pairs]
+            left_descs = [self._get_sort_direction(c) for c in left_cols]
+            right_descs = [other._get_sort_direction(c) for c in right_cols]
 
-        # Validate sort order (using the actual direction from sort_keys)
-        if left_key_col:
-            expected_desc = left_desc if left_desc is not None else False
-            if not self.is_sorted_by(left_key_col, desc=expected_desc):
+            # Merge join needs each table sorted by the FULL key tuple in key
+            # order (is_sorted_by does ordered prefix matching), not each column
+            # independently.
+            left_expected = [d if d is not None else False for d in left_descs]
+            if not self.is_sorted_by(*left_cols, desc=left_expected):
+                cols = "', '".join(left_cols)
                 raise ValueError(
-                    f"Left table is not sorted by '{left_key_col}'. "
-                    f"Use .sort('{left_key_col}') first or use join() without strategy instead."
+                    f"Left table is not sorted by '{cols}'. "
+                    f"Use .sort(...) first or use join() without strategy instead."
                 )
 
-        if right_key_col:
-            expected_desc = right_desc if right_desc is not None else False
-            if not other.is_sorted_by(right_key_col, desc=expected_desc):
+            right_expected = [d if d is not None else False for d in right_descs]
+            if not other.is_sorted_by(*right_cols, desc=right_expected):
+                cols = "', '".join(right_cols)
                 raise ValueError(
-                    f"Right table is not sorted by '{right_key_col}'. "
-                    f"Use .sort('{right_key_col}') first or use join() without strategy instead."
+                    f"Right table is not sorted by '{cols}'. "
+                    f"Use .sort(...) first or use join() without strategy instead."
                 )
 
-        # Check sort directions match
-        if left_key_col and right_key_col:
-            if left_desc is not None and right_desc is not None:
-                if left_desc != right_desc:
+            # Directions must match per key pair.
+            for (lc, rc), ld, rd in zip(pairs, left_descs, right_descs):
+                if ld is not None and rd is not None and ld != rd:
                     raise ValueError(
-                        f"Sort directions don't match: left '{left_key_col}' is "
-                        f"{'descending' if left_desc else 'ascending'}, "
-                        f"right '{right_key_col}' is "
-                        f"{'descending' if right_desc else 'ascending'}."
+                        f"Sort directions don't match: left '{lc}' is "
+                        f"{'descending' if ld else 'ascending'}, "
+                        f"right '{rc}' is "
+                        f"{'descending' if rd else 'ascending'}."
                     )
 
         # Execute merge join

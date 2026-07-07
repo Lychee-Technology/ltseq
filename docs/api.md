@@ -992,7 +992,7 @@ t.contain("id", 1, 2, 3)
 ### `LTSeq.join`
 - **Signature**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
 - **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. **Column naming (Polars semantics)**: right-table columns that collide with the left keep their name plus `suffix` (e.g. `val` → `val_right`); non-conflicting right columns keep their names. For inner/left joins the duplicate right key column is dropped (coalesced); right/full joins keep both keys (right key suffixed if colliding)
-- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda (e.g. `lambda a, b: a.id == b.id`) for arbitrary conditions; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
+- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda equating columns (e.g. `lambda a, b: a.id == b.id`, composite via `&`) — equality only, use `asof_join` for range/inequality matching; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
 - **Returns**: joined `LTSeq`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, unsorted inputs for merge, missing column, or suffix collision)
 - **Example**:

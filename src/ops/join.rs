@@ -360,16 +360,20 @@ pub fn join_prefixed_impl(
     };
 
     // Prefix every right column with `{alias}_`.
-    let mut new_right_keys = Vec::with_capacity(right_col_names.len());
     let mut select_exprs = Vec::with_capacity(stored_schema_right.fields().len());
     for field in stored_schema_right.fields() {
         let old_name = field.name();
         let new_name = format!("{}_{}", alias, old_name);
-        if right_col_names.contains(&old_name.to_string()) {
-            new_right_keys.push(new_name.clone());
-        }
         select_exprs.push(col(old_name).alias(&new_name));
     }
+    // Build join keys in `right_col_names` (pairing) order so they line up
+    // positionally with `left_col_names` — scanning schema-field order instead
+    // would silently swap composite key pairs when the right key order differs
+    // from the right schema order (see `join_impl`/`rename_right_df_for_join`).
+    let new_right_keys: Vec<String> = right_col_names
+        .iter()
+        .map(|name| format!("{}_{}", alias, name))
+        .collect();
     let renamed_right_df = (**df_right)
         .clone()
         .select(select_exprs)

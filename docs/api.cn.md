@@ -992,7 +992,7 @@ t.contain("id", 1, 2, 3)
 ### `LTSeq.join`
 - **签名**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
 - **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。**列命名（Polars 语义）**：与左表冲突的右列保留原名并加 `suffix`（如 `val` → `val_right`），不冲突的右列保持原名。inner/left 连接会丢弃重复的右键列（合并），right/full 连接保留两侧键列（右键冲突时加后缀）
-- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda（如 `lambda a, b: a.id == b.id`）表达任意条件；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
+- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda 等值连接列（如 `lambda a, b: a.id == b.id`，`&` 组合复合键）——仅支持等值，范围/不等匹配请用 `asof_join`；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
 - **返回**: 连接后的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效、merge 输入未排序、列不存在或后缀冲突）
 - **示例**:
@@ -1006,7 +1006,7 @@ users.join(orders, left_on="id", right_on="user_id", suffix="_o")
 # 复合键
 a.join(b, on=["region", "year"])
 
-# 任意条件（逃生舱）
+# lambda 等值连接（逃生舱，含异名/复合键）
 users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 

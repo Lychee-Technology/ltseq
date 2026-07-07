@@ -147,3 +147,47 @@ class TestErrors:
         right = make_table([{"k": 1, "x": 9}], {"k": "int64", "x": "int64"})
         with pytest.raises(Exception, match="collision|suffix"):
             left.join(right, on="k").to_dicts()
+
+
+class TestMergeStrategyValidation:
+    """strategy='merge' must validate sortedness for composite keys too, not
+    just single-column keys (otherwise unsorted tables are silently accepted)."""
+
+    def _tables(self):
+        left = make_table(
+            [{"a": 2, "b": 1, "v": "x"}, {"a": 1, "b": 1, "v": "y"}],
+            {"a": "int64", "b": "int64", "v": "string"},
+        )
+        right = make_table(
+            [{"a": 1, "b": 1, "w": "p"}, {"a": 2, "b": 1, "w": "q"}],
+            {"a": "int64", "b": "int64", "w": "string"},
+        )
+        return left, right
+
+    def test_composite_merge_rejects_unsorted_left(self):
+        left, right = self._tables()  # left is NOT sorted by (a, b)
+        with pytest.raises(ValueError, match="not sorted"):
+            left.join(right.sort("a", "b"), on=["a", "b"], strategy="merge")
+
+    def test_composite_merge_rejects_unsorted_right(self):
+        left, right = self._tables()
+        with pytest.raises(ValueError, match="not sorted"):
+            left.sort("a", "b").join(right, on=["a", "b"], strategy="merge")
+
+    def test_composite_merge_accepts_sorted(self):
+        left, right = self._tables()
+        out = (
+            left.sort("a", "b")
+            .join(right.sort("a", "b"), on=["a", "b"], strategy="merge")
+            .to_dicts()
+        )
+        assert len(out) == 2
+
+    def test_composite_lambda_merge_rejects_unsorted(self):
+        left, right = self._tables()
+        with pytest.raises(ValueError, match="not sorted"):
+            left.join(
+                right.sort("a", "b"),
+                on=lambda l, r: (l.a == r.a) & (l.b == r.b),
+                strategy="merge",
+            )
