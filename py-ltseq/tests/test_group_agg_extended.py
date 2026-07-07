@@ -165,3 +165,59 @@ class TestNestedTableAgg:
             lambda g: {"n": g.count()}
         )
         assert derived.count() == 6
+
+    @pytest.mark.parametrize("name", ["__group_id__", "__rn__"])
+    def test_agg_rejects_reserved_output_name(self, runs_table, name):
+        """An output named after an internal column would collide with the
+        group-by/sort key; reject it up front instead of aliasing silently."""
+        with pytest.raises(ValueError, match="reserved"):
+            runs_table.group_ordered(lambda r: r.is_up).agg(
+                lambda g: {name: g.count()}
+            )
+
+
+class TestPercentileValidation:
+    """percentile p must be a number in [0, 1] across derive/filter/agg."""
+
+    def test_derive_percentile_out_of_range(self, runs_table):
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            runs_table.group_ordered(lambda r: r.is_up).derive(
+                lambda g: {"p": g.percentile("price", 5.0)}
+            )
+
+    def test_derive_percentile_non_numeric(self, runs_table):
+        with pytest.raises(TypeError, match=r"\[0, 1\]"):
+            runs_table.group_ordered(lambda r: r.is_up).derive(
+                lambda g: {"p": g.percentile("price", "bad")}
+            )
+
+    def test_derive_percentile_bool_rejected(self, runs_table):
+        """bool is an int subclass — reject it rather than treating True as 1.0."""
+        with pytest.raises(TypeError, match=r"\[0, 1\]"):
+            runs_table.group_ordered(lambda r: r.is_up).derive(
+                lambda g: {"p": g.percentile("price", True)}
+            )
+
+    def test_filter_percentile_out_of_range(self, runs_table):
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            runs_table.group_ordered(lambda r: r.is_up).filter(
+                lambda g: g.percentile("price", -0.1) > 0
+            )
+
+    def test_agg_percentile_out_of_range(self, runs_table):
+        with pytest.raises(ValueError, match=r"\[0, 1\]"):
+            runs_table.group_ordered(lambda r: r.is_up).agg(
+                lambda g: {"p": g.percentile("price", 2.0)}
+            )
+
+    def test_percentile_boundaries_accepted(self, runs_table):
+        """p=0 and p=1 are valid (min/max of the group)."""
+        rows = (
+            runs_table.group_ordered(lambda r: r.is_up)
+            .agg(lambda g: {"lo": g.percentile("price", 0.0),
+                            "hi": g.percentile("price", 1.0)})
+            .to_dicts()
+        )
+        # Third run [11, 15, 13]: p0 -> 11, p100 -> 15
+        assert rows[2]["lo"] == pytest.approx(11.0)
+        assert rows[2]["hi"] == pytest.approx(15.0)

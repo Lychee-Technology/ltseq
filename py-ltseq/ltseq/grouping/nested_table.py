@@ -231,10 +231,20 @@ class NestedTable:
         if not isinstance(result, dict) or not result:
             raise ValueError("agg lambda must return a non-empty dict of group expressions")
 
+        # Internal columns injected by flatten()/agg for grouping and ordering.
+        # A user output named after one of these would collide with the
+        # group-by/sort key below, giving ambiguous results.
+        reserved = ("__group_id__", "__rn__")
+
         agg_exprs = {}
         for col_name, expr in result.items():
             if not isinstance(col_name, str):
                 raise ValueError(f"Column name must be a string, got {type(col_name)}")
+            if col_name in reserved:
+                raise ValueError(
+                    f"Output column name '{col_name}' is reserved for internal use; "
+                    f"choose a different name"
+                )
             if not isinstance(expr, GroupExpr):
                 raise ValueError(
                     f"Unsupported expression type for column '{col_name}': {type(expr)}. "
