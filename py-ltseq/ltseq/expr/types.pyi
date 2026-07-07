@@ -77,7 +77,7 @@ class CallExpr(Expr):
         self,
         partition_by: Any | None = ...,
         order_by: Any | None = ...,
-        descending: bool = ...,
+        descending: bool | None = ...,
         desc: bool | None = ...,
     ) -> WindowExpr: ...
 

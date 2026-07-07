@@ -150,7 +150,7 @@ class CallExpr(Expr):
         self,
         partition_by: "Expr | None" = None,
         order_by: "Expr | None" = None,
-        descending: bool = False,
+        descending: "bool | None" = None,
         desc: "bool | None" = None,
     ) -> "WindowExpr":
         """
@@ -163,7 +163,9 @@ class CallExpr(Expr):
             partition_by: Column(s) to partition by (optional)
             order_by: Column(s) to order by (required for ranking functions)
             descending: If True, order in descending order (default False)
-            desc: Alias for descending, matching sort()
+            desc: Alias for descending. When both are given, ``descending``
+                takes precedence — matching sort()'s resolution so the same
+                call behaves identically in both APIs.
 
         Returns:
             WindowExpr with the window specification
@@ -173,10 +175,16 @@ class CallExpr(Expr):
             >>> rank().over(partition_by=r.group, order_by=r.score)
             >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, desc=True)
         """
-        if desc is not None:
-            descending = desc
+        # Mirror sort(): `descending` wins when both are supplied, so
+        # over(desc=X, descending=Y) and sort(desc=X, descending=Y) agree.
+        if descending is not None:
+            resolved = descending
+        elif desc is not None:
+            resolved = desc
+        else:
+            resolved = False
         return WindowExpr(
-            self, partition_by=partition_by, order_by=order_by, descending=descending
+            self, partition_by=partition_by, order_by=order_by, descending=resolved
         )
 
 

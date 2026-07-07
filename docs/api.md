@@ -656,13 +656,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over` (Window Specification)
-- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False, desc: bool | None = None) -> WindowExpr`
+- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
 - **Behavior**: Apply a window specification to a ranking function. `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`
 - **Parameters**:
   - `partition_by` column to partition by (optional)
   - `order_by` column to order by (required for ranking functions)
   - `descending` sort direction for order_by (default False)
-  - `desc` alias for `descending`, matching `sort()`
+  - `desc` alias for `descending`; when both are given, `descending` takes precedence, matching `sort()`'s resolution
 - **Returns**: `WindowExpr` ready for use in derive()
 - **Exceptions**: `TypeError` (invalid partition_by/order_by types)
 - **Example**:
@@ -1019,9 +1019,9 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **Behavior**: Chainable view over a linked pair of tables. Supports `select`, `filter`, `derive`, `sort`, `slice`, `distinct`, `show`, and further `link` calls (multi-hop chains). Materializes via the underlying join only when required
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, as_="cat")
+chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
 ```
 
 See `docs/LINKING_GUIDE.md` for the full linking guide.
@@ -1649,12 +1649,12 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
 | `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
 | `r.col.s.left(n)` / `.right(n)` | `LEFT(col, n)` / `RIGHT(col, n)` |
-| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.ord()` | `ASCII(col)` |
 | `r.col.s.like(p)` | `col LIKE p` |
 | `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
 | `r.col.s.pad_left(n, c)` / `.pad_right(n, c)` | `LPAD(col, n, c)` / `RPAD(col, n, c)` |
-| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
-| `str_char(n)` | `CHR(n)` |
+| `r.col.s.split_part(d, i)` | `SPLIT_PART(col, d, i)` |
+| `char(n)` | `CHR(n)` |
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |

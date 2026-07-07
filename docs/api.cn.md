@@ -656,13 +656,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over`（窗口规格）
-- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False, desc: bool | None = None) -> WindowExpr`
+- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
 - **行为**: 为排名函数应用窗口规格。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值
 - **参数**:
   - `partition_by` 分区列（可选）
   - `order_by` 排序列（排名函数必需）
   - `descending` order_by 的排序方向（默认 False）
-  - `desc` descending 的别名，与 sort() 对齐
+  - `desc` descending 的别名；两者都传时以 `descending` 为准，与 sort() 的处理一致
 - **返回**: 可用于 derive() 的 `WindowExpr`
 - **异常**: `TypeError`（partition_by/order_by 类型无效）
 - **示例**:
@@ -1019,9 +1019,9 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **行为**: 关联表对上的可链式视图。支持 `select`、`filter`、`derive`、`sort`、`slice`、`distinct`、`show`，以及继续 `link`（多跳链式关联）。仅在需要时通过底层连接物化
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, as_="cat")
+chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
 ```
 
 完整说明见 `docs/LINKING_GUIDE.cn.md`。
@@ -1649,12 +1649,12 @@ for batch in LTSeq.scan("huge.csv"):
 | `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
 | `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
 | `r.col.s.left(n)` / `.right(n)` | `LEFT(col, n)` / `RIGHT(col, n)` |
-| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.ord()` | `ASCII(col)` |
 | `r.col.s.like(p)` | `col LIKE p` |
 | `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
 | `r.col.s.pad_left(n, c)` / `.pad_right(n, c)` | `LPAD(col, n, c)` / `RPAD(col, n, c)` |
-| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
-| `str_char(n)` | `CHR(n)` |
+| `r.col.s.split_part(d, i)` | `SPLIT_PART(col, d, i)` |
+| `char(n)` | `CHR(n)` |
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` 等 | `EXTRACT(YEAR FROM col)` 等 |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |

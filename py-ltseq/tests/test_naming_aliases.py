@@ -173,3 +173,22 @@ class TestOverDesc:
         assert via_desc == via_descending
         by_v = {row["v"]: row["rn"] for row in via_desc}
         assert by_v[3] == 1  # largest value ranks first when descending
+
+    def test_over_conflict_matches_sort(self):
+        """When both desc and descending are given, descending wins — matching sort()."""
+        from ltseq import row_number
+
+        t = make_table(
+            [{"v": 1}, {"v": 3}, {"v": 2}],
+            {"v": "int64"},
+        )
+        # descending=True should win over desc=False, same as sort() resolution.
+        over_rows = t.derive(
+            rn=lambda r: row_number().over(order_by=r.v, desc=False, descending=True)
+        ).to_dicts()
+        over_rank = {row["v"]: row["rn"] for row in over_rows}
+        assert over_rank[3] == 1  # descending won → largest ranks first
+
+        # sort() with the same conflicting args resolves the same way.
+        sort_order = [row["v"] for row in t.sort("v", desc=False, descending=True).to_dicts()]
+        assert sort_order == [3, 2, 1]  # descending won
