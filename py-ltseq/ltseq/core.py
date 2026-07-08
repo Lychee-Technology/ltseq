@@ -535,7 +535,13 @@ class LTSeq(
         return _lambda_to_expr(fn, self._schema)
 
     def link(
-        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+        self,
+        target_table: "LTSeq",
+        on: Callable,
+        as_: "str | None" = None,
+        join_type: str = "inner",
+        *,
+        alias: "str | None" = None,
     ) -> "LinkedTable":
         """
         Link this table to another table using pointer-based foreign keys.
@@ -552,6 +558,8 @@ class LTSeq(
                 E.g., as_="prod" allows accessing linked columns via r.prod.name
             join_type: Type of join to perform. One of: "inner", "left", "right", "full"
                 Default: "inner" (backward compatible)
+            alias: Alias for as_, without the trailing underscore.
+                Exactly one of as_/alias must be provided.
 
         Returns:
             A LinkedTable that supports accessing target columns via the alias
@@ -565,9 +573,16 @@ class LTSeq(
             >>> products = LTSeq.read_csv("products.csv")
             >>> linked = orders.link(products,
             ...     on=lambda o, p: o.product_id == p.id,
-            ...     as_="prod")
+            ...     alias="prod")
             >>> result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
         """
+        if alias is not None and as_ is not None:
+            raise ValueError("Pass either as_ or alias, not both")
+        if alias is not None:
+            as_ = alias
+        if as_ is None:
+            raise ValueError("link() requires an alias: pass alias='name' (or as_='name')")
+
         valid_join_types = {"inner", "left", "right", "full"}
         if join_type not in valid_join_types:
             raise ValueError(

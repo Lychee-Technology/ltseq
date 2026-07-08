@@ -213,3 +213,40 @@ class TestLinkedTableJoinTypes:
         )
 
         assert linked._join_type == "inner"
+
+
+class TestCompositeKeyPairingOrder:
+    """Regression for the linked-join key-swap bug (PR #120 review finding 1):
+    join keys were rebuilt in right-schema order but paired positionally against
+    left keys, so composite keys silently swapped when the right key order in the
+    lambda differed from the right table's schema column order."""
+
+    def test_composite_link_pairs_keys_by_lambda_order_not_schema_order(self):
+        # Left row has k1=1, k2=100.
+        left = LTSeq._from_rows(
+            [{"k1": 1, "k2": 100, "tag": "L"}],
+            {"k1": "int64", "k2": "int64", "tag": "string"},
+        )
+        # Right SCHEMA order puts k2 before k1 (deliberately != lambda order).
+        # Row "A" is the correct match for (k1==1 & k2==100); row "B" is what a
+        # swapped pairing (k1==k2 & k2==k1) would wrongly match.
+        right = LTSeq._from_rows(
+            [
+                {"k2": 100, "k1": 1, "label": "A"},
+                {"k2": 1, "k1": 100, "label": "B"},
+            ],
+            {"k2": "int64", "k1": "int64", "label": "string"},
+        )
+
+        rows = (
+            left.link(
+                right,
+                on=lambda l, r: (l.k1 == r.k1) & (l.k2 == r.k2),
+                as_="m",
+            )
+            ._materialize()
+            .to_dicts()
+        )
+
+        assert len(rows) == 1
+        assert rows[0]["m_label"] == "A"

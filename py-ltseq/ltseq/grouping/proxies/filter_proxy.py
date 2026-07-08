@@ -161,6 +161,26 @@ class FilterGroupProxy:
         """Capture g.avg('column') expression."""
         return _FilterableGroupAggExpr("avg", column)
 
+    def mean(self, column: str) -> "_FilterableGroupAggExpr":
+        """Capture g.mean('column') expression (alias for avg, Pandas/Polars verb)."""
+        return _FilterableGroupAggExpr("avg", column)
+
+    def median(self, column: str) -> "_FilterableGroupAggExpr":
+        """Capture g.median('column') expression."""
+        return _FilterableGroupAggExpr("median", column)
+
+    def std(self, column: str) -> "_FilterableGroupAggExpr":
+        """Capture g.std('column') expression (sample standard deviation)."""
+        return _FilterableGroupAggExpr("std", column)
+
+    def var(self, column: str) -> "_FilterableGroupAggExpr":
+        """Capture g.var('column') expression (sample variance)."""
+        return _FilterableGroupAggExpr("var", column)
+
+    def percentile(self, column: str, p: float) -> "_FilterableGroupAggExpr":
+        """Capture g.percentile('column', p) expression (approximate, p in [0, 1])."""
+        return _FilterableGroupAggExpr("percentile", column, arg=p)
+
     def all(self, predicate: Callable) -> FilterExpr:
         """Capture g.all(lambda r: ...) as a quantifier over a row-dialect
         predicate. The lambda gets the full row expression surface (schema
@@ -200,8 +220,8 @@ class _FilterableGroupCountExpr(GroupCountExpr, _ComparableGroupExpr):
 class _FilterableGroupAggExpr(GroupAggExpr, _ComparableGroupExpr):
     """GroupAggExpr that also supports comparison operators for filter capture."""
 
-    def __init__(self, func: str, column: str):
-        super().__init__(func, column)
+    def __init__(self, func: str, column: str, arg: "float | None" = None):
+        super().__init__(func, column, arg)
 
 
 class _FilterableGroupRowColumnExpr(GroupRowColumnExpr, _ComparableGroupExpr):

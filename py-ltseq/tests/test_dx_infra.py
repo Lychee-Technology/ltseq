@@ -8,6 +8,7 @@ from ltseq import (
     SortRequiredError,
     SchemaMismatchError,
     ColumnNotFoundError,
+    row_number,
 )
 from ltseq.expr import SchemaProxy
 
@@ -83,6 +84,55 @@ class TestExceptionHierarchy:
         linked = orders.link(products, on=lambda o, p: o.pid == p.id, as_="prod")
         with pytest.raises(ColumnNotFoundError):
             linked.select(lambda r: [r.prod.nonexistent])
+
+
+class TestSortRequiredWindow:
+    """Implicit-order window ops require a prior sort (#111 flagship case)."""
+
+    def _unsorted(self):
+        return make_table(
+            [{"id": 3, "x": 30}, {"id": 1, "x": 10}, {"id": 2, "x": 20}],
+            {"id": "int64", "x": "int64"},
+        )
+
+    def test_shift_without_sort_raises(self):
+        with pytest.raises(SortRequiredError):
+            self._unsorted().derive(prev=lambda r: r.x.shift(1))
+        # Backward compat: still a ValueError.
+        with pytest.raises(ValueError):
+            self._unsorted().derive(prev=lambda r: r.x.shift(1))
+
+    def test_rolling_and_diff_without_sort_raise(self):
+        with pytest.raises(SortRequiredError):
+            self._unsorted().derive(r=lambda r: r.x.rolling(2).sum())
+        with pytest.raises(SortRequiredError):
+            self._unsorted().derive(d=lambda r: r.x.diff())
+
+    def test_shift_after_sort_ok(self):
+        t = self._unsorted().sort("id")
+        # Assign outside the assert: pytest's assertion rewriting otherwise
+        # breaks name resolution inside capture lambdas.
+        result = t.derive(prev=lambda r: r.x.shift(1))
+        assert result is not None
+
+    def test_shift_after_assume_sorted_ok(self):
+        # Physically pre-sorted data can declare its order without re-sorting.
+        t = make_table(
+            [{"id": 1, "x": 10}, {"id": 2, "x": 20}], {"id": "int64", "x": "int64"}
+        ).assume_sorted("id")
+        result = t.derive(prev=lambda r: r.x.shift(1))
+        assert result is not None
+
+    def test_explicit_over_window_does_not_require_sort(self):
+        """An explicit .over(order_by=...) window carries its own ordering."""
+        t = self._unsorted()
+        # Must NOT raise — the window specifies its own order.
+        result = t.derive(rn=lambda r: row_number().over(order_by=r.id))
+        assert result is not None
+
+    def test_fold_without_sort_raises_sort_required(self):
+        with pytest.raises(SortRequiredError):
+            self._unsorted().fold(lambda state, row: state + row["x"], init=0, into="run")
 
 
 class TestReprHtml:

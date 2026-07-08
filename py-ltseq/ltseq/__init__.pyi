@@ -5,7 +5,12 @@ from typing import Any, Callable, Literal, overload
 JoinHow = Literal["inner", "left", "right", "full"]
 JoinStrategy = Literal["hash", "merge"]
 AsofStrategy = Literal["backward", "forward", "nearest"]
-Compression = Literal["snappy", "gzip", "brotli", "lz4", "zstd", "none", "uncompressed"]
+# Values accepted by src/ops/io.rs (canonical names + aliases). "brotli" and
+# "uncompressed" are NOT accepted by the Rust writer, so they are excluded.
+Compression = Literal[
+    "snappy", "zstd", "zstandard", "gzip", "gz", "lz4", "none"
+]
+PivotAggFn = Literal["sum", "mean", "count", "min", "max"]
 
 from .expr import (
     Expr,
@@ -18,6 +23,7 @@ from .expr import (
     SchemaProxy,
     NestedSchemaProxy,
     if_else,
+    when,
     count_if,
     sum_if,
     avg_if,
@@ -48,6 +54,7 @@ from .expr import (
     lcm,
     factorial,
     str_char,
+    char,
     concat_ws,
     now,
     today,
@@ -61,6 +68,12 @@ from .grouping.nested_table import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable, SQLPartitionedTable
 from .aggregation import GroupBy
+from .exceptions import (
+    LTSeqError as LTSeqError,
+    SortRequiredError as SortRequiredError,
+    SchemaMismatchError as SchemaMismatchError,
+    ColumnNotFoundError as ColumnNotFoundError,
+)
 
 
 def seq(
@@ -157,6 +170,14 @@ class LTSeq:
         descending: bool | list[bool] | None = ...,
     ) -> "LTSeq": ...
     def assume_sorted(self, *keys: str, desc: bool | list[bool] = ...) -> "LTSeq": ...
+    def fold(
+        self,
+        fn: Callable[[Any, Any], Any],
+        *,
+        init: Any,
+        into: str,
+        partition_by: str | None = ...,
+    ) -> "LTSeq": ...
     def distinct(self, *key_exprs: str | Callable[[SchemaProxy], Expr]) -> "LTSeq": ...
     def slice(self, offset: int = ..., length: int | None = ...) -> "LTSeq": ...
     def head(self, n: int = ...) -> "LTSeq": ...
@@ -188,33 +209,45 @@ class LTSeq:
     def join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str] | None = ...,
         how: JoinHow = ...,
         strategy: JoinStrategy | None = ...,
+        *,
+        left_on: str | list[str] | None = ...,
+        right_on: str | list[str] | None = ...,
+        suffix: str = ...,
     ) -> "LTSeq": ...
     def semi_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str],
     ) -> "LTSeq": ...
     def anti_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str],
     ) -> "LTSeq": ...
     def asof_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        direction: AsofStrategy = ...,
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | None = ...,
+        direction: AsofStrategy | None = ...,
         is_sorted: bool = ...,
+        *,
+        left_on: str | None = ...,
+        right_on: str | None = ...,
+        by: str | list[str] | None = ...,
+        strategy: AsofStrategy | None = ...,
+        suffix: str = ...,
     ) -> "LTSeq": ...
     def link(
         self,
         target_table: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        as_: str,
+        as_: str | None = ...,
         join_type: JoinHow = ...,
+        *,
+        alias: str | None = ...,
     ) -> LinkedTable: ...
 
     # ------------------------------------------------------------------ aggregation
@@ -237,17 +270,23 @@ class LTSeq:
         index: str | list[str],
         columns: str,
         values: str,
-        agg_fn: str = ...,
+        agg_fn: PivotAggFn = ...,
     ) -> "LTSeq": ...
 
     # ------------------------------------------------------------------ set ops
     def union(self, other: "LTSeq") -> "LTSeq": ...
+    def concat(self, other: "LTSeq") -> "LTSeq": ...
     def intersect(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> "LTSeq": ...
     def except_(
+        self,
+        other: "LTSeq",
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
+    ) -> "LTSeq": ...
+    def subtract(
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy], Expr] | None = ...,
@@ -255,12 +294,12 @@ class LTSeq:
     def xunion(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> "LTSeq": ...
     def is_subset(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy], Expr] | None = ...,
+        on: Callable[[SchemaProxy], Expr] | str | None = ...,
     ) -> bool: ...
     def contain(self, key_col: str, *values: Any) -> bool: ...
     def rvs(self) -> "LTSeq": ...
@@ -296,6 +335,7 @@ __all__ = [
     "CallExpr",
     "LookupExpr",
     "if_else",
+    "when",
     "count_if",
     "sum_if",
     "avg_if",
@@ -326,6 +366,7 @@ __all__ = [
     "lcm",
     "factorial",
     "str_char",
+    "char",
     "concat_ws",
     "now",
     "today",
@@ -334,4 +375,8 @@ __all__ = [
     "covar",
     "concat_agg",
     "seq",
+    "LTSeqError",
+    "SortRequiredError",
+    "SchemaMismatchError",
+    "ColumnNotFoundError",
 ]

@@ -1,7 +1,9 @@
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from .core import LTSeq
+
+JoinHow = Literal["inner", "left", "right", "full"]
 
 
 class LinkedTable:
@@ -13,7 +15,7 @@ class LinkedTable:
         target_table: LTSeq,
         join_fn: Callable,
         alias: str,
-        join_type: str = ...,
+        join_type: JoinHow = ...,
     ) -> None: ...
     def __len__(self) -> int: ...
     def show(self, n: int = ...) -> None: ...
@@ -28,5 +30,5 @@ class LinkedTable:
         target_table: LTSeq,
         on: Callable,
         as_: str,
-        join_type: str = ...,
+        join_type: JoinHow = ...,
     ) -> LinkedTable: ...

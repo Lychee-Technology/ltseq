@@ -19,14 +19,14 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 - r: 行代理（lambda 内部用于构造表达式，不在 Python 侧执行）
 - g: 组代理（NestedTable 的 filter/derive 中使用）；组聚合以字符串列名调用（`g.sum("amount")`），`g.first()`/`g.last()` 返回可属性访问的行代理（`g.first().date`）
 - 绝大多数操作返回新的 LTSeq；`LTSeq.scan()`/`scan_parquet()` 返回流式 `Cursor`；`is_subset`/`contain` 返回布尔值
-- 窗口/有序相关能力依赖已有排序（`sort` 或 `assume_sorted`），未排序使用会导致运行期错误或不正确结果；`shift`/`rolling`/`diff` 还支持 `partition_by=` 参数做分组窗口
+- 窗口/有序相关能力依赖已有排序（`sort` 或 `assume_sorted`）；`shift`/`rolling`/`diff`/累积等隐式按行序的窗口在未排序时会抛出 `SortRequiredError`（显式 `.over(order_by=...)` 窗口自带排序，不受此限）；`shift`/`rolling`/`diff` 还支持 `partition_by=` 参数做分组窗口
 - 表达式在 Python 侧被捕获为 AST 并在 Rust/DataFusion 层执行
 
 ## 常见错误与解决方案
 
 | 错误 | 原因 | 解决方法 |
 |------|------|---------|
-| `RuntimeError: window function used without sort` | 未排序直接调用 `shift`/`rolling`/`diff` | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
+| `SortRequiredError: Window functions ... require a defined row order` | 未排序直接调用 `shift`/`rolling`/`diff`/累积 | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
 | `ColumnNotFoundError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
 | `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
@@ -91,6 +91,8 @@ except SortRequiredError as e:
 | 行差分 | `.diff(n)` | `r.price.diff(1)` |
 | 环比变化率 | `.pct_change()` | `r.close.pct_change()` |
 | 累计求和 | `.cum_sum()` | `t.cum_sum("volume")` 或 `r.volume.cum_sum()` |
+| 累计最大 / 最小 | `.cum_max()` / `.cum_min()` | `r.price.cum_max()` |
+| 状态累积 | `.fold()` | `t.sort("date").fold(fn, init=1.0, into="cum")` |
 
 ### 排名（使用 `.over()`）
 | 操作 | 方法 | 示例 |
@@ -111,19 +113,19 @@ except SortRequiredError as e:
 ### 连接
 | 操作 | 方法 | 示例 |
 |------|------|------|
-| 哈希连接 | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
+| 哈希连接 | `.join()` | `a.join(b, on="id")` 或 `a.join(b, on=lambda a, b: a.id == b.id)` |
 | 归并连接 | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | 时序就近连接 | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | 半连接 | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | 反连接 | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| 指针关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")` |
+| 指针关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### 集合操作
 | 操作 | 方法 | 示例 |
 |------|------|------|
-| 纵向合并（保留重复）| `.union()` | `t1.union(t2)` |
+| 纵向合并（保留重复）| `.concat()` / `.union()` | `t1.concat(t2)` |
 | 交集 | `.intersect()` | `t1.intersect(t2)` |
-| 差集 | `.except_()` | `t1.except_(t2)` |
+| 差集 | `.subtract()` / `.except_()` | `t1.subtract(t2)` |
 | 对称差 | `.xunion()` | `t1.xunion(t2)` |
 
 ### 行变更（写时复制）
@@ -543,7 +545,7 @@ t.slice(offset=10, length=5)
 - **行为**: 访问相对行。正偏移向前看（前面的行），负偏移向后看（后面的行），与 pandas `Series.shift()` 一致。指定 `partition_by` 时窗口在分组边界处重置（LAG/LEAD OVER PARTITION BY）
 - **参数**: `offset` 行偏移（正=向前，负=向后）；`default` 边界填充值（默认 NULL）；`partition_by` 可选分区列
 - **返回**: 表达式（偏移超出可用行的边界处为 NULL 或 `default`）
-- **异常**: `TypeError`（offset 非整数），`RuntimeError`（未排序使用）
+- **异常**: `TypeError`（offset 非整数），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 with_prev = t.sort("date").derive(prev=lambda r: r.close.shift(1))
@@ -562,7 +564,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 - **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`
 - **参数**: `window_size` 窗口大小
 - **返回**: 窗口聚合表达式
-- **异常**: `ValueError`（window_size <= 0），`RuntimeError`（未排序使用）
+- **异常**: `ValueError`（window_size <= 0），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
@@ -573,7 +575,7 @@ ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
 - **行为**: 行差分，等价于 `r.col - r.col.shift(offset)`
 - **参数**: `offset` 行偏移
 - **返回**: 差分表达式
-- **异常**: `TypeError`（非数值或 offset 非整数），`RuntimeError`（未排序使用）
+- **异常**: `TypeError`（非数值或 offset 非整数），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 changes = t.sort("date").derive(daily=lambda r: r.close.diff())
@@ -588,13 +590,17 @@ changes = t.sort("date").derive(daily=lambda r: r.close.diff())
 returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 ```
 
-#### `r.col.cum_sum`（表达式形式）
-- **签名**: `r.col.cum_sum() -> Expr`
-- **行为**: 按当前顺序累计求和，可在 `derive()` 内使用，输出列名由用户掌控
-- **异常**: `TypeError`（非数值），`RuntimeError`（未排序使用）
+#### `r.col.cum_sum` / `cum_max` / `cum_min`（表达式形式）
+- **签名**: `r.col.cum_sum() -> Expr`（`cum_max`、`cum_min` 同）
+- **行为**: 按当前顺序的累计聚合（和 / 累计最大 / 累计最小），可在 `derive()` 内使用，输出列名由用户掌控。三者均接受 `partition_by=` 参数以按组重置累积
+- **异常**: `TypeError`（非数值），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
-t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
+t.sort("date").derive(
+    cum_vol=lambda r: r.volume.cum_sum(),
+    peak=lambda r: r.price.cum_max(),
+    trough=lambda r: r.price.cum_min(partition_by="symbol"),
+)
 ```
 
 ### 3.2 表级累计操作
@@ -609,6 +615,23 @@ t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
 # → 新增 volume_cumsum、amount_cumsum
+```
+
+#### `LTSeq.fold`（有序状态累积）
+- **签名**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
+- **行为**: 按当前顺序遍历行，通过 `fn(state, row)` 传递运行中的 `state`，并把结果作为新列 `into` 追加。表达窗口函数无法表达的复利、余额滚动、小型状态机（SPL 风格能力）。`row` 是当前行列值的只读字典；返回值既存入 `into` 又传递给下一行。`partition_by` 在每个分区开头把 `state` 重置为 `init`（分区按首次出现顺序）
+- **⚠️ 执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式；仅在确实需要顺序状态时才用 `fold`。大表上是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
+- **要求**: 需前置 `.sort()` / `.assume_sorted()` 以确定累积顺序
+- **返回**: 新的内存 `LTSeq`——原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
+- **异常**: `SortRequiredError`（无排序顺序），`ValueError`（`into` 已存在、或 `partition_by` 无效），`TypeError`（`fn` 非可调用）
+- **示例**:
+```python
+# 复利计算
+t.sort("date").fold(
+    lambda s, r: s * (1 + r["rate"]),
+    init=1.0,
+    into="cum_return",
+)
 ```
 
 ### 3.3 排名函数
@@ -686,12 +709,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over`（窗口规格）
-- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False) -> WindowExpr`
+- **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
 - **行为**: 为排名函数应用窗口规格。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值
 - **参数**:
   - `partition_by` 分区列（可选）
   - `order_by` 排序列（排名函数必需）
   - `descending` order_by 的排序方向（默认 False）
+  - `desc` descending 的别名；两者都传时以 `descending` 为准，与 sort() 的处理一致
 - **返回**: 可用于 derive() 的 `WindowExpr`
 - **异常**: `TypeError`（partition_by/order_by 类型无效）
 - **示例**:
@@ -846,7 +870,7 @@ big_groups = groups.filter(lambda g: g.count() > 3)
 
 #### `NestedTable.derive`
 - **签名**: `nested.derive(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **行为**: 计算组级值并**广播到组内每一行**。结果保留所有原始行和列，外加新列。（若需坍缩为每组一行，可对派生列接 `distinct()`，或使用 `first()`/`last()`；哈希式的每组一行聚合见第 7 节 `agg()`/`group_by()`）
+- **行为**: 计算组级值并**广播到组内每一行**（SQL 窗口语义）。结果保留所有原始行和列，外加新列。若需坍缩为每组一行，请用 `NestedTable.agg()`
 - **参数**: `func` 返回组表达式字典
 - **返回**: 原始行 + 广播组级列的 `LTSeq`
 - **异常**: `ValueError`（lambda 未返回字典），`RuntimeError`（执行失败）
@@ -857,6 +881,22 @@ enriched = groups.derive(lambda g: {
     "group_size": g.count(),
     "start": g.first().date,
     "end": g.last().date,
+})
+```
+
+#### `NestedTable.agg`
+- **签名**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
+- **行为**: 把每组**坍缩为一行摘要**（SQL GROUP BY 语义）——与 `derive` 的广播语义互补。组按原序列顺序输出；结果只含映射的列。取代旧的 `derive(...) + distinct(...)` 拼法
+- **参数**: `func` 返回纯组聚合字典（`g.count()`、`g.first().col`、`g.last().col`、`g.sum('col')` 等）。暂不支持聚合间的算术组合——请在 agg() 之后再计算
+- **返回**: 每组一行的 `LTSeq`
+- **异常**: `ValueError`（未返回字典或表达式不支持），`RuntimeError`（执行失败）
+- **示例**:
+```python
+# 每个连续段一行
+spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+    "start": g.first().date,
+    "end": g.last().date,
+    "n": g.count(),
 })
 ```
 
@@ -873,13 +913,13 @@ df = groups.flatten().to_pandas()     # 带 __group_id__ 的行
 
 组聚合以**字符串列名**为参数；`first()`/`last()` 返回可属性访问的行代理。
 
-#### 聚合: `g.count()`、`g.sum()`、`g.avg()`、`g.min()`、`g.max()`
-- **签名**: `g.count() -> Expr`；`g.sum(column: str) -> Expr`（`avg`/`min`/`max` 同）
-- **行为**: 组内行数 / 对单列的组内聚合
+#### 聚合: `g.count()`、`g.sum()`、`g.avg()`/`g.mean()`、`g.min()`、`g.max()`、`g.median()`、`g.std()`、`g.var()`、`g.percentile()`
+- **签名**: `g.count() -> Expr`；`g.sum(column: str) -> Expr`（`avg`/`mean`/`min`/`max`/`median`/`std`/`var` 同）；`g.percentile(column: str, p: float) -> Expr`
+- **行为**: 组内行数 / 对单列的组内聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词）；`std`/`var` 为样本统计量；`percentile` 为近似分位数，`p` 取 [0, 1]
 - **示例**:
 ```python
-groups.derive(lambda g: {"avg_price": g.avg("price"), "hi": g.max("price")})
-groups.filter(lambda g: g.sum("amount") > 1000)
+groups.derive(lambda g: {"avg_price": g.mean("price"), "med": g.median("price")})
+groups.filter(lambda g: g.std("amount") > 5)
 ```
 
 #### 行访问: `g.first()`、`g.last()`
@@ -908,19 +948,19 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ## 5. 集合运算
 
-### `LTSeq.union`
-- **签名**: `LTSeq.union(other: LTSeq) -> LTSeq`
-- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）
+### `LTSeq.concat` / `LTSeq.union`
+- **签名**: `LTSeq.concat(other: LTSeq) -> LTSeq`
+- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）。`union` 为兼容别名——注意它不像 SQL UNION 那样去重；推荐用 `concat`（Pandas/Polars 动词，天然无去重预期）
 - **参数**: `other` 另一个 schema 相同的 LTSeq
 - **返回**: 合并后的 `LTSeq`
 - **异常**: `TypeError`（other 非 LTSeq），`ValueError`（schema 不匹配）
 - **示例**:
 ```python
-combined = t1.union(t2)
+combined = t1.concat(t2)
 ```
 
 ### `LTSeq.intersect`
-- **签名**: `LTSeq.intersect(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **签名**: `LTSeq.intersect(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **行为**: 两表交集
 - **参数**: `other` 另一个表；`on` 键选择器（None 表示全列）
 - **返回**: 交集 `LTSeq`
@@ -930,22 +970,22 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.except_`（差集）
-- **签名**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
-- **行为**: 左表中有而右表中没有的行（SQL EXCEPT 语义）
+### `LTSeq.subtract` / `LTSeq.except_`（差集）
+- **签名**: `LTSeq.subtract(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
+- **行为**: 左表中有而右表中没有的行（SQL EXCEPT 语义）。`except_` 为兼容别名（尾下划线是躲 Python 关键字的妥协）；`subtract` 与 PySpark 同名
 - **参数**: `other` 另一个表；`on` 键选择器
 - **返回**: 差集 `LTSeq`
 - **SQL 等价**: `EXCEPT` / `MINUS`
 - **异常**: `TypeError`（other 非 LTSeq 或 on 无效），`ValueError`（schema 未初始化）
 - **示例**:
 ```python
-only_left = t1.except_(t2, on=lambda r: r.id)
+only_left = t1.subtract(t2, on=lambda r: r.id)
 ```
 
 > 注意：`Expr.diff()`（行级差分，第 3 节）与表级差集无关。表级差集请使用 `except_()`。
 
 ### `LTSeq.xunion`（对称差）
-- **签名**: `LTSeq.xunion(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **签名**: `LTSeq.xunion(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **行为**: 只在其中一个表中出现的行；等价于 `(a except b) union (b except a)`
 - **参数**: `other` 另一个表；`on` 键选择器（None 表示全列）
 - **返回**: 对称差 `LTSeq`
@@ -955,7 +995,7 @@ unique_to_either = t1.xunion(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.is_subset`
-- **签名**: `LTSeq.is_subset(other: LTSeq, on: Callable | None = None) -> bool`
+- **签名**: `LTSeq.is_subset(other: LTSeq, on: Callable | str | None = None) -> bool`
 - **行为**: 检查本表是否为另一个表的子集
 - **参数**: `other` 另一个表；`on` 键选择器
 - **返回**: `bool`
@@ -980,38 +1020,47 @@ t.contain("id", 1, 2, 3)
 ## 6. 关联与连接
 
 ### `LTSeq.join`
-- **签名**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str | None = None) -> LTSeq`
-- **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。右表冲突列名会加 `_other_` **前缀**（如 `product` → `_other_product`）
-- **参数**: `other` 另一个表；`on` 连接条件 lambda（如 `lambda a, b: a.id == b.id`）；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}
+- **签名**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
+- **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。**列命名（Polars 语义）**：与左表冲突的右列保留原名并加 `suffix`（如 `val` → `val_right`），不冲突的右列保持原名。inner/left 连接会丢弃重复的右键列（合并），right/full 连接保留两侧键列（右键冲突时加后缀）
+- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda 等值连接列（如 `lambda a, b: a.id == b.id`，`&` 组合复合键）——仅支持等值，范围/不等匹配请用 `asof_join`；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
 - **返回**: 连接后的 `LTSeq`
-- **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效，或 merge 输入未排序）
+- **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效、merge 输入未排序、列不存在或后缀冲突）
 - **示例**:
 ```python
-joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+# 字符串键捷径（同名列）
+users.join(orders, on="id", how="left")
 
-# 预排序表的归并连接
-result = t1.sort("id").join(
-    t2.sort("id"),
-    on=lambda a, b: a.id == b.id,
-    strategy="merge",
-)
+# 异名键 + 自定义后缀
+users.join(orders, left_on="id", right_on="user_id", suffix="_o")
+
+# 复合键
+a.join(b, on=["region", "year"])
+
+# lambda 等值连接（逃生舱，含异名/复合键）
+users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False) -> LTSeq`
-- **行为**: 时序就近连接（as-of join）。`is_sorted=True` 时跳过排序校验（已知双方有序时更快）
-- **参数**: `other` 另一个表；`on` 连接条件（如 `lambda t, q: t.time >= q.time`）；`direction` 取值 {"backward","forward","nearest"}；`is_sorted` 跳过排序检查
+- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable | str | None = None, direction: str | None = None, is_sorted: bool = False, *, left_on=None, right_on=None, by=None, strategy: str | None = None, suffix: str = "_right") -> LTSeq`
+- **行为**: 时序就近连接（对齐 Polars `join_asof`）。对每个左行按时间列找最近的右行。`by=` 将匹配限制在同组值的右行内（按 symbol 分组的 asof 等）。`is_sorted=True` 跳过排序校验。冲突右列加 `suffix`；与等值连接不同，右侧时间列会保留（as-of 是近似匹配，匹配到的时间戳是真实信息）
+- **参数**: `other` 另一个表；`on` 时间列名（双方同名）或双参 lambda（其比较算符**权威**决定方向：`>=`/`>` → backward，`<=`/`<` → forward）；`left_on`/`right_on` 异名时间列；`by` 分组列名；`strategy` 取值 {"backward","forward","nearest"}（默认 backward）；`direction` 为 `strategy` 的兼容别名；`is_sorted` 跳过排序检查；`suffix` 冲突右列的后缀
 - **返回**: as-of 连接后的 `LTSeq`
-- **异常**: `TypeError`（other/on 无效），`ValueError`（direction 无效）
+- **异常**: `TypeError`（other/on 无效），`ValueError`（strategy 无效/矛盾，或 lambda 算符与 strategy 冲突）
 - **示例**:
 ```python
-result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="backward")
+# 按 symbol 分组的 backward asof（字符串时间列 + by=）
+trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
+
+# lambda 形态：算符决定方向
+trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
 ```
 
+> **行为变化**：lambda 算符现在权威决定方向。此前 `on=lambda t, q: t.time <= q.time` 不带 direction 会静默走 backward，现在正确走 forward。传入与算符矛盾的 `strategy`/`direction` 会报错（`nearest` 请用字符串 `on=` 形态）。
+
 ### `LTSeq.semi_join`
-- **签名**: `LTSeq.semi_join(other: LTSeq, on: Callable) -> LTSeq`
+- **签名**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **行为**: 返回左表中键存在于右表的行。只返回左表列，多次匹配不产生重复
-- **参数**: `other` 用于匹配的右表；`on` 连接条件 lambda
+- **参数**: `other` 用于匹配的右表；`on` 等值连接的列名（列表）或双参 lambda 条件
 - **返回**: 左表匹配行组成的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（schema 未初始化）
 - **示例**:
@@ -1021,9 +1070,9 @@ active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.anti_join`
-- **签名**: `LTSeq.anti_join(other: LTSeq, on: Callable) -> LTSeq`
+- **签名**: `LTSeq.anti_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **行为**: 返回左表中键**不**存在于右表的行。只返回左表列
-- **参数**: `other` 用于匹配的右表；`on` 连接条件 lambda
+- **参数**: `other` 用于匹配的右表；`on` 等值连接的列名（列表）或双参 lambda 条件
 - **返回**: 左表未匹配行组成的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（schema 未初始化）
 - **示例**:
@@ -1033,14 +1082,14 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.link`
-- **签名**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str, join_type: str = "inner") -> LinkedTable`
+- **签名**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
 - **行为**: 指针式关联；按需物化；通过别名访问目标表的列
-- **参数**: `target_table` 目标表；`on` 连接条件；`as_` 别名；`join_type` 取值 {inner,left,right,full}
+- **参数**: `target_table` 目标表；`on` 连接条件；`alias` 关联引用的别名（`as_` 为其兼容别名，二者恰好传一个）；`join_type` 取值 {inner,left,right,full}
 - **返回**: `LinkedTable`
-- **异常**: `TypeError`（on 无效），`ValueError`（join_type 无效或 schema 未初始化）
+- **异常**: `TypeError`（on 无效），`ValueError`（join_type 无效、as_/alias 同时传或都不传、schema 未初始化）
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 ```
 
@@ -1048,9 +1097,9 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **行为**: 关联表对上的可链式视图。支持 `select`、`filter`、`derive`、`sort`、`slice`、`distinct`、`show`，以及继续 `link`（多跳链式关联）。仅在需要时通过底层连接物化
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, as_="cat")
+chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
 ```
 
 完整说明见 `docs/LINKING_GUIDE.cn.md`。
@@ -1117,8 +1166,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### 聚合列方法（`agg` / `group_by().agg()` 的 lambda 内）
-- **签名**: `g.col.sum() / .avg() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **行为**: 聚合上下文可用的列聚合。`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0–1（近似分位数）
+- **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
+- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0–1（近似分位数）
 - **示例**:
 ```python
 stats = t.group_by("region").agg(
@@ -1224,6 +1273,21 @@ from ltseq import if_else
 status = if_else(r.amount > 100, "VIP", "Normal")
 ```
 
+### `when`（多分支链）
+- **签名**: `when(condition, value?) -> WhenChain`；`.when(condition, value?)`；`.then(value)`；`.otherwise(default) -> Expr`
+- **行为**: 多分支条件（SQL CASE WHEN），嵌套 `if_else` 的可读替代。按顺序检查分支、首个匹配胜出；`otherwise()` 必需，返回表达式。支持双参 `when(cond, value)` 与 Polars 风格 `when(cond).then(value)` 两种形态
+- **导入**: `from ltseq import when`
+- **异常**: `TypeError`（condition 非布尔）
+- **示例**:
+```python
+from ltseq import when
+tier = t.derive(tier=lambda r:
+    when(r.amount > 100, "VIP")
+    .when(r.amount > 50, "Gold")
+    .otherwise("Normal")
+)
+```
+
 ### `ifa` / `nvl` / `coalesce`
 - **签名**: `ifa(cond: Expr, value: Expr) -> Expr`；`nvl(x: Expr, default: Expr) -> Expr`；`coalesce(*args: Expr) -> Expr`
 - **行为**: `ifa(cond, v)` = `if_else(cond, v, NULL)`；`nvl(x, d)` = `coalesce(x, d)`；`coalesce` 返回第一个非 NULL 参数
@@ -1290,6 +1354,8 @@ t.derive(
 ```
 
 ### 字符串操作（`r.col.s.*`）
+
+> `.str` 是 `.s` 的别名（Pandas/Polars 惯例）：`r.email.str.contains("@")` ≡ `r.email.s.contains("@")`。
 
 #### `contains`
 - **签名**: `r.col.s.contains(pattern: str) -> Expr`
@@ -1384,19 +1450,27 @@ full = t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
 padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 ```
 
-#### `split`
-- **签名**: `r.col.s.split(delimiter: str, index: int) -> Expr`
-- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串
+#### `split_part` / `split`
+- **签名**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
+- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串。`split` 为兼容别名——推荐 `split_part`，避免与 Python 返回列表的 `str.split` 重名歧义
 - **异常**: `ValueError`（index <= 0）
 - **示例**:
 ```python
 # 从 "user@example.com" 取域名
-domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
+domain = t.derive(domain=lambda r: r.email.s.split_part("@", 2))
+```
+
+#### `find`
+- **签名**: `r.col.s.find(sub: str) -> Expr`
+- **行为**: 返回子串首次出现的 **0-based** 位置；未找到返回 -1（Python `str.find` 语义）
+- **示例**:
+```python
+at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4，未找到 → -1
 ```
 
 #### `pos`
 - **签名**: `r.col.s.pos(sub: str) -> Expr`
-- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0
+- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0。SQL 语义——需要 Python 语义请用 `find`
 - **SQL 等价**: `STRPOS(col, sub)`
 - **示例**:
 ```python
@@ -1413,13 +1487,13 @@ prefix = t.derive(pfx=lambda r: r.code.s.left(3))    # "ABC123" → "ABC"
 suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 ```
 
-#### `asc`
-- **签名**: `r.col.s.asc() -> Expr`
-- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）
+#### `ord` / `asc`
+- **签名**: `r.col.s.ord() -> Expr`
+- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）。`asc` 为兼容别名——推荐 `ord`，在排序遍地的库里 `asc` 易被读成 ascending
 - **SQL 等价**: `ASCII(col)`
 - **示例**:
 ```python
-code = t.derive(code=lambda r: r.ch.s.asc())  # "A" → 65, "a" → 97
+code = t.derive(code=lambda r: r.ch.s.ord())  # "A" → 65, "a" → 97
 ```
 
 #### `isalpha` / `isdigit` / `islower` / `isupper`
@@ -1432,15 +1506,15 @@ numeric_codes = t.filter(lambda r: r.code.s.isdigit())
 
 ### 字符串全局函数
 
-#### `str_char`
-- **签名**: `str_char(n: Expr) -> Expr`
-- **行为**: 将 Unicode 码点整数转换为单字符字符串（类似 Python 的 `chr()`）
+#### `char` / `str_char`
+- **签名**: `char(n: Expr) -> Expr`
+- **行为**: 将 Unicode 码点整数转换为单字符字符串（类似 Python 的 `chr()`）。`str_char` 为兼容别名
 - **SQL 等价**: `CHR(n)`
-- **导入**: `from ltseq.expr import str_char`
+- **导入**: `from ltseq.expr import char`
 - **示例**:
 ```python
-from ltseq.expr import str_char
-ch = t.derive(ch=lambda r: str_char(r.code))  # 65 → "A", 97 → "a"
+from ltseq.expr import char
+ch = t.derive(ch=lambda r: char(r.code))  # 65 → "A", 97 → "a"
 ```
 
 #### `concat_ws`
@@ -1668,12 +1742,12 @@ for batch in LTSeq.scan("huge.csv"):
 | `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
 | `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
 | `r.col.s.left(n)` / `.right(n)` | `LEFT(col, n)` / `RIGHT(col, n)` |
-| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.ord()` | `ASCII(col)` |
 | `r.col.s.like(p)` | `col LIKE p` |
 | `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
 | `r.col.s.pad_left(n, c)` / `.pad_right(n, c)` | `LPAD(col, n, c)` / `RPAD(col, n, c)` |
-| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
-| `str_char(n)` | `CHR(n)` |
+| `r.col.s.split_part(d, i)` | `SPLIT_PART(col, d, i)` |
+| `char(n)` | `CHR(n)` |
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` 等 | `EXTRACT(YEAR FROM col)` 等 |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
@@ -1697,8 +1771,9 @@ for batch in LTSeq.scan("huge.csv"):
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | 也接受 `descending=` |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
 | `df.groupby('region').agg({'sales': 'sum'})` | `t.group_by("region").agg(sales=lambda g: g.sales.sum())` | |
-| `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
-| `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
+| `df.merge(df2, on='id')` | `t.join(t2, on="id")` | |
+| `df.merge(df2, on='id', how='left')` | `t.join(t2, on="id", how="left")` | |
+| `df.merge(df2, left_on='a', right_on='b', suffixes=('','_r'))` | `t.join(t2, left_on="a", right_on="b", suffix="_r")` | |
 | `pd.merge_asof(t, q, on='time')` | `t.asof_join(q, on=lambda t, q: t.time >= q.time)` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | 需要排序 |
 | `df['col'].rolling(5).mean()` | `t.sort(...).derive(ma=lambda r: r.col.rolling(5).mean())` | 需要排序 |

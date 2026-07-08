@@ -37,7 +37,7 @@ class TestAsofJoinBasic:
 
         # First trade (time=1000) should match quote at time=998
         first_trade = df[df["time"] == 1000].iloc[0]
-        assert first_trade["_other_time"] == 998
+        assert first_trade["time_right"] == 998
 
     def test_asof_join_forward_direction(self):
         """asof_join() should support forward direction."""
@@ -45,28 +45,28 @@ class TestAsofJoinBasic:
         quotes = LTSeq.read_csv(QUOTES_CSV)
 
         result = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+            quotes, on=lambda t, q: t.time <= q.time
         )
         df = result.to_pandas()
 
         # Trade at time=1000 should match quote at time=1002 (forward)
         first_trade = df[df["time"] == 1000].iloc[0]
-        assert first_trade["_other_time"] == 1002
+        assert first_trade["time_right"] == 1002
 
     def test_asof_join_nearest_direction(self):
         """asof_join() should support nearest direction."""
         trades = LTSeq.read_csv(TRADES_CSV)
         quotes = LTSeq.read_csv(QUOTES_CSV)
 
-        result = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-        )
+        # "nearest" has no directional operator, so use the string on= form
+        # (a lambda's >=/<= would contradict a nearest match).
+        result = trades.asof_join(quotes, on="time", strategy="nearest")
         df = result.to_pandas()
 
         # Trade at time=1000 should match nearest quote
         # quote at 998 is 2 away, quote at 1002 is 2 away -> backward bias picks 998
         first_trade = df[df["time"] == 1000].iloc[0]
-        assert first_trade["_other_time"] == 998
+        assert first_trade["time_right"] == 998
 
     def test_asof_join_preserves_all_left_rows(self):
         """asof_join() should preserve all rows from left table (LEFT JOIN semantics)."""
@@ -83,7 +83,7 @@ class TestAsofJoinSchema:
     """Tests for asof_join() schema handling."""
 
     def test_asof_join_result_has_prefixed_columns(self):
-        """asof_join() result should have right columns prefixed with _other_."""
+        """asof_join() suffixes only conflicting right columns; keeps the right time col."""
         trades = LTSeq.read_csv(TRADES_CSV)
         quotes = LTSeq.read_csv(QUOTES_CSV)
 
@@ -96,11 +96,11 @@ class TestAsofJoinSchema:
         assert "price" in df.columns
         assert "quantity" in df.columns
 
-        # Right columns should be prefixed with _other_
-        assert "_other_time" in df.columns
-        assert "_other_symbol" in df.columns
-        assert "_other_bid" in df.columns
-        assert "_other_ask" in df.columns
+        # Conflicting right columns get the _right suffix; others keep their names
+        assert "time_right" in df.columns
+        assert "symbol_right" in df.columns
+        assert "bid" in df.columns
+        assert "ask" in df.columns
 
     def test_asof_join_result_is_chainable(self):
         """asof_join() result should be chainable with other operations."""
@@ -110,11 +110,11 @@ class TestAsofJoinSchema:
         result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
 
         # Should be able to chain select
-        selected = result.select("time", "price", "_other_bid", "_other_ask")
+        selected = result.select("time", "price", "bid", "ask")
         assert isinstance(selected, LTSeq)
 
         df = selected.to_pandas()
-        assert list(df.columns) == ["time", "price", "_other_bid", "_other_ask"]
+        assert list(df.columns) == ["time", "price", "bid", "ask"]
 
 
 class TestAsofJoinEdgeCases:
@@ -148,8 +148,8 @@ class TestAsofJoinEdgeCases:
             df = result.to_pandas()
 
             # Should have NULL for right columns
-            assert pd.isna(df.iloc[0]["_other_time"])
-            assert pd.isna(df.iloc[0]["_other_bid"])
+            assert pd.isna(df.iloc[0]["time_right"])
+            assert pd.isna(df.iloc[0]["bid"])
 
     def test_asof_join_exact_match(self):
         """asof_join() should handle exact time matches."""
@@ -177,8 +177,8 @@ class TestAsofJoinEdgeCases:
             df = result.to_pandas()
 
             # Exact match at time=1000
-            assert df.iloc[0]["_other_time"] == 1000
-            assert df.iloc[0]["_other_bid"] == 99.0
+            assert df.iloc[0]["time_right"] == 1000
+            assert df.iloc[0]["bid"] == 99.0
 
     def test_asof_join_is_sorted_true(self):
         """asof_join() should skip sorting when is_sorted=True."""
@@ -250,7 +250,7 @@ class TestAsofJoinErrors:
         """asof_join() should raise error for invalid direction."""
         trades = LTSeq.read_csv(TRADES_CSV)
         quotes = LTSeq.read_csv(QUOTES_CSV)
-        with pytest.raises(ValueError, match="Invalid direction"):
+        with pytest.raises(ValueError, match="Invalid strategy|Invalid direction"):
             trades.asof_join(
                 quotes, on=lambda t, q: t.time >= q.time, direction="invalid"
             )
@@ -294,11 +294,9 @@ class TestAsofJoinRegression:
             quotes, on=lambda t, q: t.time >= q.time, direction="backward"
         )
         result2 = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+            quotes, on=lambda t, q: t.time <= q.time
         )
-        result3 = trades.asof_join(
-            quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-        )
+        result3 = trades.asof_join(quotes, on="time", strategy="nearest")
 
         assert isinstance(result1, LTSeq)
         assert isinstance(result2, LTSeq)
@@ -334,8 +332,8 @@ class TestAsofJoinDirectionSemantics:
             df = result.to_pandas()
 
             # Trade at 1005 should match quote at 1004 (largest <= 1005)
-            assert df.iloc[0]["_other_time"] == 1004
-            assert df.iloc[0]["_other_bid"] == 94.0
+            assert df.iloc[0]["time_right"] == 1004
+            assert df.iloc[0]["bid"] == 94.0
 
     def test_forward_finds_smallest_greater_or_equal(self):
         """forward direction should find smallest right.time >= left.time."""
@@ -358,13 +356,13 @@ class TestAsofJoinDirectionSemantics:
             quotes = LTSeq.read_csv(quotes_path)
 
             result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="forward"
+                quotes, on=lambda t, q: t.time <= q.time
             )
             df = result.to_pandas()
 
             # Trade at 1005 should match quote at 1010 (smallest >= 1005)
-            assert df.iloc[0]["_other_time"] == 1010
-            assert df.iloc[0]["_other_bid"] == 100.0
+            assert df.iloc[0]["time_right"] == 1010
+            assert df.iloc[0]["bid"] == 100.0
 
     def test_nearest_picks_closer_with_backward_bias(self):
         """nearest direction should pick closer match with backward bias on ties."""
@@ -387,14 +385,12 @@ class TestAsofJoinDirectionSemantics:
             trades = LTSeq.read_csv(trades_path)
             quotes = LTSeq.read_csv(quotes_path)
 
-            result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-            )
+            result = trades.asof_join(quotes, on="time", strategy="nearest")
             df = result.to_pandas()
 
             # Both are 5 away, backward bias should pick 1000
-            assert df.iloc[0]["_other_time"] == 1000
-            assert df.iloc[0]["_other_bid"] == 90.0
+            assert df.iloc[0]["time_right"] == 1000
+            assert df.iloc[0]["bid"] == 90.0
 
     def test_nearest_picks_actually_closer(self):
         """nearest direction should pick actually closer match regardless of direction."""
@@ -416,11 +412,9 @@ class TestAsofJoinDirectionSemantics:
             trades = LTSeq.read_csv(trades_path)
             quotes = LTSeq.read_csv(quotes_path)
 
-            result = trades.asof_join(
-                quotes, on=lambda t, q: t.time >= q.time, direction="nearest"
-            )
+            result = trades.asof_join(quotes, on="time", strategy="nearest")
             df = result.to_pandas()
 
             # 1006 is only 1 away, should be picked
-            assert df.iloc[0]["_other_time"] == 1006
-            assert df.iloc[0]["_other_bid"] == 96.0
+            assert df.iloc[0]["time_right"] == 1006
+            assert df.iloc[0]["bid"] == 96.0

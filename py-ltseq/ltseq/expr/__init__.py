@@ -27,6 +27,8 @@ Example:
 from .base import (
     Expr,
     if_else,
+    when,
+    WhenChain,
     count_if,
     sum_if,
     avg_if,
@@ -57,6 +59,7 @@ from .base import (
     factorial,
     # String global functions
     str_char,
+    char,
     concat_ws,
     # Datetime global functions
     now,
@@ -91,6 +94,8 @@ __all__ = [
     "SchemaProxy",
     "NestedSchemaProxy",
     "if_else",
+    "when",
+    "WhenChain",
     "count_if",
     "sum_if",
     "avg_if",
@@ -121,6 +126,7 @@ __all__ = [
     "factorial",
     # String global
     "str_char",
+    "char",
     "concat_ws",
     # Datetime
     "now",

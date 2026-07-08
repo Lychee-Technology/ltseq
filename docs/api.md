@@ -26,7 +26,7 @@ This document describes the API **as currently implemented**. Every signature be
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
+| `SortRequiredError: Window functions ... require a defined row order` | Called `shift`/`rolling`/`diff`/cumulative without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
 | `ColumnNotFoundError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
 | `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
@@ -94,6 +94,8 @@ except LTSeqError: ...
 | Row difference | `.diff(n)` | `r.price.diff(1)` |
 | Percent change | `.pct_change()` | `r.close.pct_change()` |
 | Cumulative sum | `.cum_sum()` | `t.cum_sum("volume")` or `r.volume.cum_sum()` |
+| Running max / min | `.cum_max()` / `.cum_min()` | `r.price.cum_max()` |
+| Stateful fold | `.fold()` | `t.sort("date").fold(fn, init=1.0, into="cum")` |
 
 ### Ranking (use `.over()`)
 | Operation | Method | Example |
@@ -114,19 +116,19 @@ except LTSeqError: ...
 ### Joins
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Hash join | `.join()` | `a.join(b, on=lambda a, b: a.id == b.id)` |
+| Hash join | `.join()` | `a.join(b, on="id")` or `a.join(b, on=lambda a, b: a.id == b.id)` |
 | Merge join | `.join(..., strategy="merge")` | `a.sort("id").join(b.sort("id"), on=lambda a, b: a.id == b.id, strategy="merge")` |
 | As-of join | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")` |
+| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### Set Operations
 | Operation | Method | Example |
 |-----------|--------|---------|
-| Union (all) | `.union()` | `t1.union(t2)` |
+| Concat (union all) | `.concat()` / `.union()` | `t1.concat(t2)` |
 | Intersect | `.intersect()` | `t1.intersect(t2)` |
-| Diff | `.except_()` | `t1.except_(t2)` |
+| Diff | `.subtract()` / `.except_()` | `t1.subtract(t2)` |
 | Symmetric diff | `.xunion()` | `t1.xunion(t2)` |
 
 ### Row Mutation (copy-on-write)
@@ -546,7 +548,7 @@ t.slice(offset=10, length=5)
 - **Behavior**: Access relative rows. Positive offset looks backward (previous rows), negative offset looks forward (future rows). Consistent with pandas `Series.shift()`. With `partition_by`, the window resets at group boundaries (LAG/LEAD OVER PARTITION BY)
 - **Parameters**: `offset` row offset (positive = backward, negative = forward); `default` fill value at boundaries (default NULL); `partition_by` optional partition column
 - **Returns**: expression (NULL — or `default` — at boundaries where offset exceeds available rows)
-- **Exceptions**: `TypeError` (offset not int), `RuntimeError` (used without sort)
+- **Exceptions**: `TypeError` (offset not int), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 with_prev = t.sort("date").derive(prev=lambda r: r.close.shift(1))
@@ -565,7 +567,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 - **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`
 - **Parameters**: `window_size` window size
 - **Returns**: window aggregation expression
-- **Exceptions**: `ValueError` (window_size <= 0), `RuntimeError` (used without sort)
+- **Exceptions**: `ValueError` (window_size <= 0), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
@@ -576,7 +578,7 @@ ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
 - **Behavior**: Row difference, equivalent to `r.col - r.col.shift(offset)`
 - **Parameters**: `offset` row offset
 - **Returns**: difference expression
-- **Exceptions**: `TypeError` (non-numeric or offset not int), `RuntimeError` (used without sort)
+- **Exceptions**: `TypeError` (non-numeric or offset not int), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 changes = t.sort("date").derive(daily=lambda r: r.close.diff())
@@ -591,13 +593,17 @@ changes = t.sort("date").derive(daily=lambda r: r.close.diff())
 returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 ```
 
-#### `r.col.cum_sum` (expression form)
-- **Signature**: `r.col.cum_sum() -> Expr`
-- **Behavior**: Cumulative sum over the current order, usable inside `derive()` so the output column name is under your control
-- **Exceptions**: `TypeError` (non-numeric), `RuntimeError` (used without sort)
+#### `r.col.cum_sum` / `cum_max` / `cum_min` (expression form)
+- **Signature**: `r.col.cum_sum() -> Expr` (same for `cum_max`, `cum_min`)
+- **Behavior**: Running aggregate over the current order (sum / running maximum / running minimum), usable inside `derive()` so the output column name is under your control. All accept the `partition_by=` kwarg to reset the accumulation per group
+- **Exceptions**: `TypeError` (non-numeric), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
-t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
+t.sort("date").derive(
+    cum_vol=lambda r: r.volume.cum_sum(),
+    peak=lambda r: r.price.cum_max(),
+    trough=lambda r: r.price.cum_min(partition_by="symbol"),
+)
 ```
 
 ### 3.2 Table-Level Cumulative Operations
@@ -612,6 +618,23 @@ t.sort("date").derive(cum_vol=lambda r: r.volume.cum_sum())
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
 # → adds volume_cumsum, amount_cumsum
+```
+
+#### `LTSeq.fold` (ordered stateful accumulation)
+- **Signature**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
+- **Behavior**: Walk rows in their current order, threading a running `state` through `fn(state, row)` and appending the result as column `into`. Expresses compounding, running balances, and small state machines that window functions cannot (the SPL-style capability). The first-match `row` is a read-only dict of the current row; the returned value is both stored in `into` and carried forward. `partition_by` resets `state` to `init` at the start of each partition (first-seen order)
+- **⚠️ Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms when they can express the computation; reach for `fold` only when genuinely sequential state is required. Slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
+- **Requires**: a prior `.sort()` / `.assume_sorted()` so the accumulation order is defined
+- **Returns**: a new in-memory `LTSeq` — original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
+- **Exceptions**: `SortRequiredError` (no sort order), `ValueError` (`into` already exists, or bad `partition_by`), `TypeError` (`fn` not callable)
+- **Example**:
+```python
+# Compounding return
+t.sort("date").fold(
+    lambda s, r: s * (1 + r["rate"]),
+    init=1.0,
+    into="cum_return",
+)
 ```
 
 ### 3.3 Ranking Functions
@@ -689,12 +712,13 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 ```
 
 #### `CallExpr.over` (Window Specification)
-- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool = False) -> WindowExpr`
+- **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
 - **Behavior**: Apply a window specification to a ranking function. `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`
 - **Parameters**:
   - `partition_by` column to partition by (optional)
   - `order_by` column to order by (required for ranking functions)
   - `descending` sort direction for order_by (default False)
+  - `desc` alias for `descending`; when both are given, `descending` takes precedence, matching `sort()`'s resolution
 - **Returns**: `WindowExpr` ready for use in derive()
 - **Exceptions**: `TypeError` (invalid partition_by/order_by types)
 - **Example**:
@@ -849,7 +873,7 @@ big_groups = groups.filter(lambda g: g.count() > 3)
 
 #### `NestedTable.derive`
 - **Signature**: `nested.derive(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Compute group-level values and **broadcast them to every row of the group**. The result keeps all original rows and columns, plus the new columns. (To collapse to one row per group, follow with `distinct()` on the derived columns or use `first()`/`last()`; for hash-style one-row-per-group aggregation see `agg()`/`group_by()` in Section 7)
+- **Behavior**: Compute group-level values and **broadcast them to every row of the group** (SQL window semantics). The result keeps all original rows and columns, plus the new columns. To collapse to one row per group instead, use `NestedTable.agg()`
 - **Parameters**: `func` returns a dict of group expressions
 - **Returns**: `LTSeq` with original rows plus broadcast group-level columns
 - **Exceptions**: `ValueError` (lambda doesn't return a dict), `RuntimeError` (execution failure)
@@ -860,6 +884,22 @@ enriched = groups.derive(lambda g: {
     "group_size": g.count(),
     "start": g.first().date,
     "end": g.last().date,
+})
+```
+
+#### `NestedTable.agg`
+- **Signature**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
+- **Behavior**: Collapse each group to **one summary row** (SQL GROUP BY semantics) — the counterpart of `derive`'s broadcast. Groups appear in their original sequence order; the output contains only the mapped columns. Replaces the old `derive(...) + distinct(...)` idiom
+- **Parameters**: `func` returns a dict of plain group aggregates (`g.count()`, `g.first().col`, `g.last().col`, `g.sum('col')`, ...). Arithmetic combinations of aggregates are not supported yet — compute them after agg()
+- **Returns**: `LTSeq` with one row per group
+- **Exceptions**: `ValueError` (non-dict return or unsupported expression), `RuntimeError` (execution failure)
+- **Example**:
+```python
+# One row per consecutive run
+spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+    "start": g.first().date,
+    "end": g.last().date,
+    "n": g.count(),
 })
 ```
 
@@ -876,13 +916,13 @@ df = groups.flatten().to_pandas()     # rows with __group_id__
 
 Group aggregations take the **column name as a string**; `first()`/`last()` return row proxies with attribute access.
 
-#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`, `g.min()`, `g.max()`
-- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`min`/`max`)
-- **Behavior**: Group size / aggregation over one column within each group
+#### Aggregations: `g.count()`, `g.sum()`, `g.avg()`/`g.mean()`, `g.min()`, `g.max()`, `g.median()`, `g.std()`, `g.var()`, `g.percentile()`
+- **Signature**: `g.count() -> Expr`; `g.sum(column: str) -> Expr` (same for `avg`/`mean`/`min`/`max`/`median`/`std`/`var`); `g.percentile(column: str, p: float) -> Expr`
+- **Behavior**: Group size / aggregation over one column within each group. `mean` is an alias for `avg` (Pandas/Polars verb); `std`/`var` are sample statistics; `percentile` is approximate with `p` in [0, 1]
 - **Example**:
 ```python
-groups.derive(lambda g: {"avg_price": g.avg("price"), "hi": g.max("price")})
-groups.filter(lambda g: g.sum("amount") > 1000)
+groups.derive(lambda g: {"avg_price": g.mean("price"), "med": g.median("price")})
+groups.filter(lambda g: g.std("amount") > 5)
 ```
 
 #### Row access: `g.first()`, `g.last()`
@@ -911,19 +951,19 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ## 5. Set Algebra
 
-### `LTSeq.union`
-- **Signature**: `LTSeq.union(other: LTSeq) -> LTSeq`
-- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics)
+### `LTSeq.concat` / `LTSeq.union`
+- **Signature**: `LTSeq.concat(other: LTSeq) -> LTSeq`
+- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics). `union` is a compatibility alias — note it does NOT deduplicate like SQL UNION; prefer `concat`, the Pandas/Polars verb that carries no dedup expectation
 - **Parameters**: `other` another LTSeq with same schema
 - **Returns**: combined `LTSeq`
 - **Exceptions**: `TypeError` (other is not LTSeq), `ValueError` (schema mismatch)
 - **Example**:
 ```python
-combined = t1.union(t2)
+combined = t1.concat(t2)
 ```
 
 ### `LTSeq.intersect`
-- **Signature**: `LTSeq.intersect(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Signature**: `LTSeq.intersect(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **Behavior**: Intersection of two tables
 - **Parameters**: `other` another table; `on` key selector (None means all columns)
 - **Returns**: intersection `LTSeq`
@@ -933,22 +973,22 @@ combined = t1.union(t2)
 common = t1.intersect(t2, on=lambda r: r.id)
 ```
 
-### `LTSeq.except_` (set difference)
-- **Signature**: `LTSeq.except_(other: LTSeq, on: Callable | None = None) -> LTSeq`
-- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics)
+### `LTSeq.subtract` / `LTSeq.except_` (set difference)
+- **Signature**: `LTSeq.subtract(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
+- **Behavior**: Rows in left table but not in right table (SQL EXCEPT semantics). `except_` is a compatibility alias (the trailing underscore dodges the Python keyword); `subtract` matches PySpark
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: difference `LTSeq`
 - **SQL Equivalent**: `EXCEPT` / `MINUS`
 - **Exceptions**: `TypeError` (other not LTSeq or invalid on), `ValueError` (schema not initialized)
 - **Example**:
 ```python
-only_left = t1.except_(t2, on=lambda r: r.id)
+only_left = t1.subtract(t2, on=lambda r: r.id)
 ```
 
 > Note: `Expr.diff()` (row-level differences, Section 3) is unrelated to table set difference. Use `except_()` for table set difference.
 
 ### `LTSeq.xunion` (symmetric difference)
-- **Signature**: `LTSeq.xunion(other: LTSeq, on: Callable | None = None) -> LTSeq`
+- **Signature**: `LTSeq.xunion(other: LTSeq, on: Callable | str | None = None) -> LTSeq`
 - **Behavior**: Rows in either table but not in both; equivalent to `(a except b) union (b except a)`
 - **Parameters**: `other` another table; `on` key selector (None means all columns)
 - **Returns**: symmetric difference `LTSeq`
@@ -958,7 +998,7 @@ unique_to_either = t1.xunion(t2, on=lambda r: r.id)
 ```
 
 ### `LTSeq.is_subset`
-- **Signature**: `LTSeq.is_subset(other: LTSeq, on: Callable | None = None) -> bool`
+- **Signature**: `LTSeq.is_subset(other: LTSeq, on: Callable | str | None = None) -> bool`
 - **Behavior**: Check if this table is a subset of another
 - **Parameters**: `other` another table; `on` key selector
 - **Returns**: `bool`
@@ -983,38 +1023,47 @@ t.contain("id", 1, 2, 3)
 ## 6. Association and Joins
 
 ### `LTSeq.join`
-- **Signature**: `LTSeq.join(other: LTSeq, on: Callable, how: str = "inner", strategy: str | None = None) -> LTSeq`
-- **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. Conflicting right-table column names are prefixed with `_other_` (e.g. `product` → `_other_product`)
-- **Parameters**: `other` other table; `on` join condition lambda (e.g. `lambda a, b: a.id == b.id`); `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}
+- **Signature**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
+- **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. **Column naming (Polars semantics)**: right-table columns that collide with the left keep their name plus `suffix` (e.g. `val` → `val_right`); non-conflicting right columns keep their names. For inner/left joins the duplicate right key column is dropped (coalesced); right/full joins keep both keys (right key suffixed if colliding)
+- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda equating columns (e.g. `lambda a, b: a.id == b.id`, composite via `&`) — equality only, use `asof_join` for range/inequality matching; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
 - **Returns**: joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, or unsorted inputs for merge)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, unsorted inputs for merge, missing column, or suffix collision)
 - **Example**:
 ```python
-joined = users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
+# String key shortcut (same-name column)
+users.join(orders, on="id", how="left")
 
-# Merge join on pre-sorted tables
-result = t1.sort("id").join(
-    t2.sort("id"),
-    on=lambda a, b: a.id == b.id,
-    strategy="merge",
-)
+# Differently-named keys + custom suffix
+users.join(orders, left_on="id", right_on="user_id", suffix="_o")
+
+# Composite key
+a.join(b, on=["region", "year"])
+
+# Arbitrary condition (escape hatch)
+users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False) -> LTSeq`
-- **Behavior**: As-of join for nearest time match. `is_sorted=True` skips sort verification when both inputs are known to be sorted (faster)
-- **Parameters**: `other` other table; `on` join condition (e.g. `lambda t, q: t.time >= q.time`); `direction` in {"backward","forward","nearest"}; `is_sorted` skip sort check
+- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable | str | None = None, direction: str | None = None, is_sorted: bool = False, *, left_on=None, right_on=None, by=None, strategy: str | None = None, suffix: str = "_right") -> LTSeq`
+- **Behavior**: As-of join for nearest time match (aligned with Polars `join_asof`). For each left row, finds the nearest right row by a time column. `by=` restricts matching to right rows sharing the same group value (per-symbol asof, etc.). `is_sorted=True` skips sort verification. Conflicting right columns take `suffix`; unlike an equi-join, the right time column is kept (an asof match is approximate, so the matched timestamp is real information)
+- **Parameters**: `other` other table; `on` a time-column name (same on both sides) or a two-arg lambda whose comparison operator is **authoritative** for the direction (`>=`/`>` → backward, `<=`/`<` → forward); `left_on`/`right_on` for differently-named time columns; `by` column name(s) to group by; `strategy` in {"backward","forward","nearest"} (default backward); `direction` deprecated alias for `strategy`; `is_sorted` skip sort check; `suffix` for conflicting right columns
 - **Returns**: as-of joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid direction)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid/conflicting strategy, or lambda operator contradicting `strategy`)
 - **Example**:
 ```python
-result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="backward")
+# Per-symbol backward asof (string time column + by=)
+trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
+
+# Lambda form: the operator decides the direction
+trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
 ```
 
+> **Behavior change**: the lambda operator is now authoritative for direction. Previously `on=lambda t, q: t.time <= q.time` with no direction ran backward (silent default); it now runs forward. Passing a `strategy`/`direction` that contradicts the operator raises (use the string `on=` form for `nearest`).
+
 ### `LTSeq.semi_join`
-- **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **Behavior**: Return rows from left table where keys exist in right table. Returns only left table columns with no duplicates from multiple matches
-- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Parameters**: `other` right table to match against; `on` column name(s) for an equi-join or a two-arg lambda condition
 - **Returns**: `LTSeq` with matching rows from left table
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
@@ -1024,9 +1073,9 @@ active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.anti_join`
-- **Signature**: `LTSeq.anti_join(other: LTSeq, on: Callable) -> LTSeq`
+- **Signature**: `LTSeq.anti_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`
 - **Behavior**: Return rows from left table where keys do NOT exist in right table. Returns only left table columns
-- **Parameters**: `other` right table to match against; `on` join condition lambda
+- **Parameters**: `other` right table to match against; `on` column name(s) for an equi-join or a two-arg lambda condition
 - **Returns**: `LTSeq` with non-matching rows from left table
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (schema not initialized)
 - **Example**:
@@ -1036,14 +1085,14 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 ```
 
 ### `LTSeq.link`
-- **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str, join_type: str = "inner") -> LinkedTable`
+- **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
 - **Behavior**: Pointer-style association; not materialized until needed; access target columns via the alias
-- **Parameters**: `target_table` target table; `on` join condition; `as_` alias; `join_type` in {inner,left,right,full}
+- **Parameters**: `target_table` target table; `on` join condition; `alias` alias for the linked reference (`as_` is a compatibility alias for it — pass exactly one); `join_type` in {inner,left,right,full}
 - **Returns**: `LinkedTable`
-- **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type or schema not initialized)
+- **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type, both/neither of as_ and alias, or schema not initialized)
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 ```
 
@@ -1051,9 +1100,9 @@ result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
 - **Behavior**: Chainable view over a linked pair of tables. Supports `select`, `filter`, `derive`, `sort`, `slice`, `distinct`, `show`, and further `link` calls (multi-hop chains). Materializes via the underlying join only when required
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, as_="prod")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
 cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, as_="cat")
+chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
 ```
 
 See `docs/LINKING_GUIDE.md` for the full linking guide.
@@ -1120,8 +1169,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
-- **Signature**: `g.col.sum() / .avg() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **Behavior**: Column aggregations available in aggregation context. `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
+- **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
 - **Example**:
 ```python
 stats = t.group_by("region").agg(
@@ -1227,6 +1276,21 @@ from ltseq import if_else
 status = if_else(r.amount > 100, "VIP", "Normal")
 ```
 
+### `when` (multi-branch chain)
+- **Signature**: `when(condition, value?) -> WhenChain`; `.when(condition, value?)`; `.then(value)`; `.otherwise(default) -> Expr`
+- **Behavior**: Multi-branch conditional (SQL CASE WHEN), the readable alternative to nested `if_else`. Branches are checked in order and the first match wins; `otherwise()` is required and returns the expression. Both the two-argument form `when(cond, value)` and the Polars-style `when(cond).then(value)` form work
+- **Import**: `from ltseq import when`
+- **Exceptions**: `TypeError` (condition not boolean)
+- **Example**:
+```python
+from ltseq import when
+tier = t.derive(tier=lambda r:
+    when(r.amount > 100, "VIP")
+    .when(r.amount > 50, "Gold")
+    .otherwise("Normal")
+)
+```
+
 ### `ifa` / `nvl` / `coalesce`
 - **Signature**: `ifa(cond: Expr, value: Expr) -> Expr`; `nvl(x: Expr, default: Expr) -> Expr`; `coalesce(*args: Expr) -> Expr`
 - **Behavior**: `ifa(cond, v)` = `if_else(cond, v, NULL)`; `nvl(x, d)` = `coalesce(x, d)`; `coalesce` returns the first non-NULL argument
@@ -1293,6 +1357,8 @@ t.derive(
 ```
 
 ### String Operations (`r.col.s.*`)
+
+> `.str` is an alias for `.s` (Pandas/Polars convention): `r.email.str.contains("@")` ≡ `r.email.s.contains("@")`.
 
 #### `contains`
 - **Signature**: `r.col.s.contains(pattern: str) -> Expr`
@@ -1387,19 +1453,27 @@ full = t.derive(full_name=lambda r: r.first.s.concat(" ", r.last))
 padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 ```
 
-#### `split`
-- **Signature**: `r.col.s.split(delimiter: str, index: int) -> Expr`
-- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range
+#### `split_part` / `split`
+- **Signature**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
+- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range. `split` is a compatibility alias — prefer `split_part`, which does not collide with Python's list-returning `str.split`
 - **Exceptions**: `ValueError` (index <= 0)
 - **Example**:
 ```python
 # Get domain from email "user@example.com"
-domain = t.derive(domain=lambda r: r.email.s.split("@", 2))
+domain = t.derive(domain=lambda r: r.email.s.split_part("@", 2))
+```
+
+#### `find`
+- **Signature**: `r.col.s.find(sub: str) -> Expr`
+- **Behavior**: Returns the **0-based** position of the first occurrence of `sub`; returns -1 if not found (Python `str.find` semantics)
+- **Example**:
+```python
+at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4, absent → -1
 ```
 
 #### `pos`
 - **Signature**: `r.col.s.pos(sub: str) -> Expr`
-- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found
+- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found. SQL semantics — for Python semantics use `find`
 - **SQL Equivalent**: `STRPOS(col, sub)`
 - **Example**:
 ```python
@@ -1416,13 +1490,13 @@ prefix = t.derive(pfx=lambda r: r.code.s.left(3))    # "ABC123" → "ABC"
 suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 ```
 
-#### `asc`
-- **Signature**: `r.col.s.asc() -> Expr`
-- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`)
+#### `ord` / `asc`
+- **Signature**: `r.col.s.ord() -> Expr`
+- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`). `asc` is a compatibility alias — prefer `ord`, since `asc` reads as "ascending" in a sorting-heavy library
 - **SQL Equivalent**: `ASCII(col)`
 - **Example**:
 ```python
-code = t.derive(code=lambda r: r.ch.s.asc())  # "A" → 65, "a" → 97
+code = t.derive(code=lambda r: r.ch.s.ord())  # "A" → 65, "a" → 97
 ```
 
 #### `isalpha` / `isdigit` / `islower` / `isupper`
@@ -1435,15 +1509,15 @@ numeric_codes = t.filter(lambda r: r.code.s.isdigit())
 
 ### String Global Functions
 
-#### `str_char`
-- **Signature**: `str_char(n: Expr) -> Expr`
-- **Behavior**: Converts a Unicode code point integer to its single-character string representation (like Python `chr()`)
+#### `char` / `str_char`
+- **Signature**: `char(n: Expr) -> Expr`
+- **Behavior**: Converts a Unicode code point integer to its single-character string representation (like Python `chr()`). `str_char` is a compatibility alias
 - **SQL Equivalent**: `CHR(n)`
-- **Import**: `from ltseq.expr import str_char`
+- **Import**: `from ltseq.expr import char`
 - **Example**:
 ```python
-from ltseq.expr import str_char
-ch = t.derive(ch=lambda r: str_char(r.code))  # 65 → "A", 97 → "a"
+from ltseq.expr import char
+ch = t.derive(ch=lambda r: char(r.code))  # 65 → "A", 97 → "a"
 ```
 
 #### `concat_ws`
@@ -1671,12 +1745,12 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `r.col.s.slice(s, n)` | `SUBSTRING(col, s+1, n)` |
 | `r.col.s.pos(sub)` | `STRPOS(col, sub)` |
 | `r.col.s.left(n)` / `.right(n)` | `LEFT(col, n)` / `RIGHT(col, n)` |
-| `r.col.s.asc()` | `ASCII(col)` |
+| `r.col.s.ord()` | `ASCII(col)` |
 | `r.col.s.like(p)` | `col LIKE p` |
 | `r.col.s.replace(old, new)` | `REPLACE(col, old, new)` |
 | `r.col.s.pad_left(n, c)` / `.pad_right(n, c)` | `LPAD(col, n, c)` / `RPAD(col, n, c)` |
-| `r.col.s.split(d, i)` | `SPLIT_PART(col, d, i)` |
-| `str_char(n)` | `CHR(n)` |
+| `r.col.s.split_part(d, i)` | `SPLIT_PART(col, d, i)` |
+| `char(n)` | `CHR(n)` |
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
@@ -1700,8 +1774,9 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `df.sort_values('date', ascending=False)` | `t.sort("date", desc=True)` | `descending=` also accepted |
 | `df.drop_duplicates('id')` | `t.distinct("id")` | |
 | `df.groupby('region').agg({'sales': 'sum'})` | `t.group_by("region").agg(sales=lambda g: g.sales.sum())` | |
-| `df.merge(df2, on='id')` | `t.join(t2, on=lambda a, b: a.id == b.id)` | |
-| `df.merge(df2, on='id', how='left')` | `t.join(t2, on=lambda a, b: a.id == b.id, how="left")` | |
+| `df.merge(df2, on='id')` | `t.join(t2, on="id")` | |
+| `df.merge(df2, on='id', how='left')` | `t.join(t2, on="id", how="left")` | |
+| `df.merge(df2, left_on='a', right_on='b', suffixes=('','_r'))` | `t.join(t2, left_on="a", right_on="b", suffix="_r")` | |
 | `pd.merge_asof(t, q, on='time')` | `t.asof_join(q, on=lambda t, q: t.time >= q.time)` | |
 | `df['col'].shift(1)` | `t.sort(...).derive(prev=lambda r: r.col.shift(1))` | Requires sort |
 | `df['col'].rolling(5).mean()` | `t.sort(...).derive(ma=lambda r: r.col.rolling(5).mean())` | Requires sort |

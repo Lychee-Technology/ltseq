@@ -52,18 +52,37 @@ class GroupCountExpr(GroupExpr):
 
 
 class GroupAggExpr(GroupExpr):
-    """Expression for group aggregations: g.max('col'), g.min('col'), g.sum('col'), g.avg('col')."""
+    """Expression for group aggregations: g.max('col'), g.median('col'), g.percentile('col', 0.9), ...
 
-    def __init__(self, func: str, column: str):
+    ``arg`` carries the numeric parameter of parameterized aggregates
+    (currently only percentile's p); plain aggregates leave it None.
+    """
+
+    def __init__(self, func: str, column: str, arg: "float | None" = None):
+        if func == "percentile":
+            # bool is a subclass of int — reject it explicitly so
+            # g.percentile('x', True) is a type error, not p=1.0.
+            if isinstance(arg, bool) or not isinstance(arg, (int, float)):
+                raise TypeError(
+                    f"percentile p must be a number in [0, 1], got {arg!r}"
+                )
+            if not (0.0 <= arg <= 1.0):
+                raise ValueError(
+                    f"percentile p must be in [0, 1], got {arg}"
+                )
         self._func = func
         self._column = column
+        self._arg = arg
 
     def serialize(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "type": "GroupAgg",
             "func": self._func,
             "column": self._column,
         }
+        if self._arg is not None:
+            result["arg"] = self._arg
+        return result
 
 
 class GroupRowColumnExpr(GroupExpr):
