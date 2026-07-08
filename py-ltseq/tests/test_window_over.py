@@ -154,6 +154,57 @@ class TestOverOrderByOverride:
         assert df["prev"].iloc[1] == 30  # value=20 -> prev is 30
         assert df["prev"].iloc[0] == 20  # value=10 -> prev is 20
 
+    def test_diff_order_by_desc_overrides_table_sort(self, single_group_asc):
+        # desc order 30,20,10; diff = col - lag: 30->NULL, 20->20-30=-10, 10->10-20=-10.
+        result = single_group_asc.derive(
+            lambda r: {
+                "default": r.value.diff(1),
+                "desc": r.value.diff(1).over(order_by=r.value, desc=True),
+            }
+        )
+        df = result.to_pandas().sort_values("value").reset_index(drop=True)
+        assert df["default"].tolist()[1:] == [10, 10]  # ascending diffs
+        assert df["desc"].isna().iloc[2]  # value=30 first in desc -> NULL
+        assert df["desc"].iloc[1] == -10  # value=20
+        assert df["desc"].iloc[0] == -10  # value=10
+
+    def test_cum_max_order_by_desc_overrides_table_sort(self, single_group_asc):
+        # desc running max: every row sees 30 as the max of the descending prefix.
+        result = single_group_asc.derive(
+            lambda r: {
+                "default": r.value.cum_max(),
+                "desc": r.value.cum_max().over(order_by=r.value, desc=True),
+            }
+        )
+        df = result.to_pandas().sort_values("value").reset_index(drop=True)
+        assert df["default"].tolist() == [10, 20, 30]
+        assert df["desc"].tolist() == [30, 30, 30]
+
+    def test_cum_min_order_by_desc_overrides_table_sort(self, single_group_asc):
+        # desc running min: 30->30, 20->20, 10->10 (min of descending prefix).
+        result = single_group_asc.derive(
+            lambda r: {
+                "default": r.value.cum_min(),
+                "desc": r.value.cum_min().over(order_by=r.value, desc=True),
+            }
+        )
+        df = result.to_pandas().sort_values("value").reset_index(drop=True)
+        assert df["default"].tolist() == [10, 10, 10]
+        assert df["desc"].tolist() == [10, 20, 30]
+
+    def test_rolling_mean_order_by_desc_overrides_table_sort(self, single_group_asc):
+        # desc rolling(2).mean() over 30,20,10: 30->30, 20->25, 10->15.
+        result = single_group_asc.derive(
+            lambda r: {
+                "default": r.value.rolling(2).mean(),
+                "desc": r.value.rolling(2).mean().over(order_by=r.value, desc=True),
+            }
+        )
+        df = result.to_pandas().sort_values("value").reset_index(drop=True)
+        assert df["desc"].iloc[2] == 30  # value=30
+        assert df["desc"].iloc[1] == 25  # value=20
+        assert df["desc"].iloc[0] == 15  # value=10
+
     def test_over_partition_and_order_by(self, grouped_table):
         # partition by grp, order by value desc: cum_sum within each group, largest first.
         result = grouped_table.derive(
@@ -202,8 +253,47 @@ class TestOverCoexistenceError:
 
 
 class TestOverNonWindowGuard:
-    """`.over()` on a non-window call still raises."""
+    """`.over()` on a non-window expression still raises ValueError."""
 
     def test_over_on_abs_raises(self, grouped_table):
         with pytest.raises(ValueError):
             grouped_table.derive(lambda r: {"x": r.value.abs().over(partition_by=r.grp)})
+
+    def test_over_on_bare_column_raises(self, grouped_table):
+        # A bare column (r.age.over(...)) is not a window expression; the guard
+        # lives on ColumnExpr.over so it raises instead of becoming a generic call.
+        with pytest.raises(ValueError):
+            grouped_table.derive(lambda r: {"x": r.value.over(partition_by=r.grp)})
+
+    def test_over_on_column_expr_direct_raises(self):
+        from ltseq.expr.types import ColumnExpr
+
+        with pytest.raises(ValueError):
+            ColumnExpr("age").over(partition_by=ColumnExpr("grp"))
+
+
+class TestOverSortGuard:
+    """A sequence `.over(partition_by=...)` with no explicit order_by still
+    depends on table order, so it must require a prior .sort()."""
+
+    @pytest.fixture
+    def unsorted(self):
+        csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
+        csv.write("grp,value\nA,10\nB,100\nA,20\nB,200\n")
+        csv.close()
+        t = LTSeq.read_csv(csv.name)  # deliberately NOT sorted
+        yield t
+        os.unlink(csv.name)
+
+    def test_over_partition_only_requires_sort(self, unsorted):
+        from ltseq.exceptions import SortRequiredError
+
+        with pytest.raises(SortRequiredError):
+            unsorted.derive(lambda r: {"prev": r.value.shift(1).over(partition_by=r.grp)})
+
+    def test_over_explicit_order_by_does_not_require_sort(self, unsorted):
+        # An explicit .over(order_by=...) carries its own ordering -> no sort needed.
+        result = unsorted.derive(
+            lambda r: {"prev": r.value.shift(1).over(partition_by=r.grp, order_by=r.value)}
+        )
+        assert len(result.to_pandas()) == 4

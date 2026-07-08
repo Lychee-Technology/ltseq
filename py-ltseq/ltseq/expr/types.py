@@ -64,6 +64,16 @@ class ColumnExpr(Expr):
         """Serialize to dict: {"type": "Column", "name": self.name}"""
         return {"type": "Column", "name": self.name}
 
+    def over(self, *args, **kwargs):
+        """A bare column is never a window expression — `.over()` needs a window
+        function first (ranking or sequence). Guard here so `r.age.over(...)`
+        raises a clear ValueError instead of being turned into a generic
+        ``CallExpr("over")`` by ``__getattr__``."""
+        raise ValueError(
+            f".over() 只用于窗口表达式（排名函数或序列窗口 shift/rolling/diff/cum_*）；"
+            f"列 {self.name!r} 不是窗口表达式，不能加 .over()。"
+        )
+
     def __getattr__(self, method_name: str):
         """
         Handle method calls like r.col.shift(1), r.col.rolling(3), etc.

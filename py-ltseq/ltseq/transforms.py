@@ -487,8 +487,14 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 return False
             expr_type = expr.get("type", "")
             if expr_type == "Window":
-                # Explicit .over(...) window — self-ordering, not row-order bound.
-                return False
+                # A .over() window is self-ordering only when it carries its own
+                # order_by. A sequence window with order_by=None — e.g.
+                # shift(1).over(partition_by=g) — still falls back to table order
+                # in the Rust planner (window_native.rs::convert_window_sequence),
+                # so it stays row-order bound and requires a prior .sort().
+                if expr.get("order_by") is not None:
+                    return False
+                return check_expr(expr.get("expr") or {})
             if expr_type == "Call":
                 func = expr.get("func", "")
                 if func in ("shift", "diff", "rolling", "cum_sum", "cum_max", "cum_min"):
