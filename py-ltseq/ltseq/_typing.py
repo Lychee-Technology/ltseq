@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 if TYPE_CHECKING:
     from .core import LTSeq
+
+# Enum-like string parameters, shared by runtime annotations and the .pyi stubs.
+JoinHow = Literal["inner", "left", "right", "full"]
 
 
 class LTSeqLike:

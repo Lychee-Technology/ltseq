@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .partitioning import PartitionedTable, SQLPartitionedTable
 
 from .expr import SchemaProxy, _lambda_to_expr
+from ._typing import JoinHow
 
 # Import mixin classes
 from .io_ops import IOMixin
@@ -539,7 +540,7 @@ class LTSeq(
         target_table: "LTSeq",
         on: Callable,
         as_: "str | None" = None,
-        join_type: str = "inner",
+        join_type: JoinHow = "inner",
         *,
         alias: "str | None" = None,
     ) -> "LinkedTable":
