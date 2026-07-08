@@ -1,5 +1,16 @@
 # py-ltseq/ltseq/__init__.pyi
-from typing import Any, Callable, overload
+from typing import Any, Callable, Literal, overload
+
+# Enum-like string parameters, surfaced as Literal for IDE completion and mypy.
+JoinHow = Literal["inner", "left", "right", "full"]
+JoinStrategy = Literal["hash", "merge"]
+AsofStrategy = Literal["backward", "forward", "nearest"]
+# Values accepted by src/ops/io.rs (canonical names + aliases). "brotli" and
+# "uncompressed" are NOT accepted by the Rust writer, so they are excluded.
+Compression = Literal[
+    "snappy", "zstd", "zstandard", "gzip", "gz", "lz4", "none"
+]
+PivotAggFn = Literal["sum", "mean", "count", "min", "max"]
 
 from .expr import (
     Expr,
@@ -57,6 +68,12 @@ from .grouping.nested_table import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable, SQLPartitionedTable
 from .aggregation import GroupBy
+from .exceptions import (
+    LTSeqError as LTSeqError,
+    SortRequiredError as SortRequiredError,
+    SchemaMismatchError as SchemaMismatchError,
+    ColumnNotFoundError as ColumnNotFoundError,
+)
 
 
 def seq(
@@ -108,7 +125,7 @@ class LTSeq:
     @classmethod
     def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq": ...
     def write_csv(self, path: str) -> None: ...
-    def write_parquet(self, path: str, compression: str | None = ...) -> None: ...
+    def write_parquet(self, path: str, compression: Compression | None = ...) -> None: ...
     def to_pandas(self) -> Any: ...
     def to_arrow(self) -> Any: ...
     def collect(self) -> "LTSeq": ...
@@ -117,6 +134,8 @@ class LTSeq:
     # ------------------------------------------------------------------ display
     def show(self, n: int = ...) -> "LTSeq": ...
     def __repr__(self) -> str: ...
+    def _repr_html_(self, n: int = ...) -> str: ...
+    def __iter__(self) -> Any: ...
     def __len__(self) -> int: ...
     def count(self) -> int: ...
     def _capture_expr(self, fn: Callable[..., Any]) -> dict[str, Any]: ...
@@ -191,8 +210,8 @@ class LTSeq:
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | list[str] | None = ...,
-        how: str = ...,
-        strategy: str | None = ...,
+        how: JoinHow = ...,
+        strategy: JoinStrategy | None = ...,
         *,
         left_on: str | list[str] | None = ...,
         right_on: str | list[str] | None = ...,
@@ -212,13 +231,13 @@ class LTSeq:
         self,
         other: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | None = ...,
-        direction: str | None = ...,
+        direction: AsofStrategy | None = ...,
         is_sorted: bool = ...,
         *,
         left_on: str | None = ...,
         right_on: str | None = ...,
         by: str | list[str] | None = ...,
-        strategy: str | None = ...,
+        strategy: AsofStrategy | None = ...,
         suffix: str = ...,
     ) -> "LTSeq": ...
     def link(
@@ -226,7 +245,7 @@ class LTSeq:
         target_table: "LTSeq",
         on: Callable[[SchemaProxy, SchemaProxy], Expr],
         as_: str | None = ...,
-        join_type: str = ...,
+        join_type: JoinHow = ...,
         *,
         alias: str | None = ...,
     ) -> LinkedTable: ...
@@ -251,7 +270,7 @@ class LTSeq:
         index: str | list[str],
         columns: str,
         values: str,
-        agg_fn: str = ...,
+        agg_fn: PivotAggFn = ...,
     ) -> "LTSeq": ...
 
     # ------------------------------------------------------------------ set ops
@@ -356,4 +375,8 @@ __all__ = [
     "covar",
     "concat_agg",
     "seq",
+    "LTSeqError",
+    "SortRequiredError",
+    "SchemaMismatchError",
+    "ColumnNotFoundError",
 ]

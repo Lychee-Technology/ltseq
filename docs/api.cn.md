@@ -19,19 +19,37 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 - r: 行代理（lambda 内部用于构造表达式，不在 Python 侧执行）
 - g: 组代理（NestedTable 的 filter/derive 中使用）；组聚合以字符串列名调用（`g.sum("amount")`），`g.first()`/`g.last()` 返回可属性访问的行代理（`g.first().date`）
 - 绝大多数操作返回新的 LTSeq；`LTSeq.scan()`/`scan_parquet()` 返回流式 `Cursor`；`is_subset`/`contain` 返回布尔值
-- 窗口/有序相关能力依赖已有排序（`sort` 或 `assume_sorted`），未排序使用会导致运行期错误或不正确结果；`shift`/`rolling`/`diff` 还支持 `partition_by=` 参数做分组窗口
+- 窗口/有序相关能力依赖已有排序（`sort` 或 `assume_sorted`）；`shift`/`rolling`/`diff`/累积等隐式按行序的窗口在未排序时会抛出 `SortRequiredError`（显式 `.over(order_by=...)` 窗口自带排序，不受此限）；`shift`/`rolling`/`diff` 还支持 `partition_by=` 参数做分组窗口
 - 表达式在 Python 侧被捕获为 AST 并在 Rust/DataFusion 层执行
 
 ## 常见错误与解决方案
 
 | 错误 | 原因 | 解决方法 |
 |------|------|---------|
-| `RuntimeError: window function used without sort` | 未排序直接调用 `shift`/`rolling`/`diff` | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
-| `AttributeError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
-| `ValueError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
-| `ValueError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
+| `SortRequiredError: Window functions ... require a defined row order` | 未排序直接调用 `shift`/`rolling`/`diff`/累积 | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
+| `ColumnNotFoundError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
+| `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
+| `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
+
+### 异常层级
+
+所有库错误都派生自 `LTSeqError`，可用一个 `except` 捕获整个家族。每个具体异常同时继承它历史上抛出的内置异常，因此现有 `except ValueError:` / `hasattr()` 代码不受影响：
+
+```python
+from ltseq import LTSeqError, SortRequiredError, SchemaMismatchError, ColumnNotFoundError
+
+try:
+    result = t.join(other, on="id", strategy="merge")
+except SortRequiredError as e:
+    print(e)          # 错误信息自带修复建议
+```
+
+- `LTSeqError(Exception)` — 层级基类
+- `SortRequiredError(LTSeqError, ValueError)` — 操作需要有序输入
+- `SchemaMismatchError(LTSeqError, ValueError)` — schema 不兼容
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — 列不在 schema 中（同时是 `AttributeError`，故 `hasattr()` 探测仍有效）
 | `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
 ## 快速参考
@@ -294,6 +312,18 @@ for row in rows:
     print(row["name"])
 ```
 
+### `iter(LTSeq)` / `__iter__`
+- **签名**: `for row in t: ...`
+- **行为**: 逐行以字典迭代。会把整表物化到内存（经 `to_dicts()`），符合 Pandas/Polars 对小表的直觉。大数据请优先用 `to_cursor()` 流式读取批次、避免全量物化
+- **示例**:
+```python
+for row in t.filter(lambda r: r.active):
+    print(row["name"])
+```
+
+### `LTSeq._repr_html_`
+- **行为**: Jupyter/IPython 富显示。把前若干行渲染为原生 ASCII 表并包在 `<pre>` 中（零 pandas/pyarrow 依赖），故在 notebook 单元格里裸写 `t` 会显示格式化预览与维度说明
+
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **签名**: `LTSeq.to_pandas() -> pandas.DataFrame`；`LTSeq.to_arrow() -> pyarrow.Table`
 - **行为**: 物化为 pandas DataFrame / PyArrow Table
@@ -515,7 +545,7 @@ t.slice(offset=10, length=5)
 - **行为**: 访问相对行。正偏移向前看（前面的行），负偏移向后看（后面的行），与 pandas `Series.shift()` 一致。指定 `partition_by` 时窗口在分组边界处重置（LAG/LEAD OVER PARTITION BY）
 - **参数**: `offset` 行偏移（正=向前，负=向后）；`default` 边界填充值（默认 NULL）；`partition_by` 可选分区列
 - **返回**: 表达式（偏移超出可用行的边界处为 NULL 或 `default`）
-- **异常**: `TypeError`（offset 非整数），`RuntimeError`（未排序使用）
+- **异常**: `TypeError`（offset 非整数），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 with_prev = t.sort("date").derive(prev=lambda r: r.close.shift(1))
@@ -534,7 +564,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 - **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`
 - **参数**: `window_size` 窗口大小
 - **返回**: 窗口聚合表达式
-- **异常**: `ValueError`（window_size <= 0），`RuntimeError`（未排序使用）
+- **异常**: `ValueError`（window_size <= 0），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
@@ -545,7 +575,7 @@ ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
 - **行为**: 行差分，等价于 `r.col - r.col.shift(offset)`
 - **参数**: `offset` 行偏移
 - **返回**: 差分表达式
-- **异常**: `TypeError`（非数值或 offset 非整数），`RuntimeError`（未排序使用）
+- **异常**: `TypeError`（非数值或 offset 非整数），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 changes = t.sort("date").derive(daily=lambda r: r.close.diff())
@@ -563,7 +593,7 @@ returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 #### `r.col.cum_sum` / `cum_max` / `cum_min`（表达式形式）
 - **签名**: `r.col.cum_sum() -> Expr`（`cum_max`、`cum_min` 同）
 - **行为**: 按当前顺序的累计聚合（和 / 累计最大 / 累计最小），可在 `derive()` 内使用，输出列名由用户掌控。三者均接受 `partition_by=` 参数以按组重置累积
-- **异常**: `TypeError`（非数值），`RuntimeError`（未排序使用）
+- **异常**: `TypeError`（非数值），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 t.sort("date").derive(
@@ -593,7 +623,7 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 - **⚠️ 执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式；仅在确实需要顺序状态时才用 `fold`。大表上是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
 - **要求**: 需前置 `.sort()` / `.assume_sorted()` 以确定累积顺序
 - **返回**: 新的内存 `LTSeq`——原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
-- **异常**: `ValueError`（无排序顺序、`into` 已存在、或 `partition_by` 无效），`TypeError`（`fn` 非可调用）
+- **异常**: `SortRequiredError`（无排序顺序），`ValueError`（`into` 已存在、或 `partition_by` 无效），`TypeError`（`fn` 非可调用）
 - **示例**:
 ```python
 # 复利计算

@@ -1,8 +1,11 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from .base import Expr
 
 if TYPE_CHECKING:
     from .types import CallExpr
+
+# Units accepted by dt_diff (src/transpiler/mod.rs).
+DateDiffUnit = Literal["day", "month", "year", "hour", "minute", "second"]
 
 
 class StringAccessor:
@@ -58,4 +61,4 @@ class TemporalAccessor:
         seconds: int = ...,
         weeks: int = ...,
     ) -> CallExpr: ...
-    def diff(self, other: Expr, unit: str = ...) -> CallExpr: ...
+    def diff(self, other: Expr, unit: DateDiffUnit = ...) -> CallExpr: ...

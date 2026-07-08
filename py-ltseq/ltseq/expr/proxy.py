@@ -60,7 +60,9 @@ class SchemaProxy:
             # Return NestedSchemaProxy for the linked table
             return NestedSchemaProxy(name, matching_cols)
 
-        raise AttributeError(
+        from ..exceptions import ColumnNotFoundError
+
+        raise ColumnNotFoundError(
             f"Column '{name}' not found in schema. "
             f"Available columns: {list(self._schema.keys())}"
         )
@@ -126,7 +128,9 @@ class NestedSchemaProxy:
             raise AttributeError(f"No attribute {name}")
 
         if name not in self._column_map:
-            raise AttributeError(
+            from ..exceptions import ColumnNotFoundError
+
+            raise ColumnNotFoundError(
                 f"Linked table '{self._alias}' has no column '{name}'. "
                 f"Available columns: {list(self._column_map.keys())}"
             )

@@ -260,10 +260,12 @@ class JoinMixin(LTSeqLike):
             # Merge join needs each table sorted by the FULL key tuple in key
             # order (is_sorted_by does ordered prefix matching), not each column
             # independently.
+            from .exceptions import SortRequiredError
+
             left_expected = [d if d is not None else False for d in left_descs]
             if not self.is_sorted_by(*left_cols, desc=left_expected):
                 cols = "', '".join(left_cols)
-                raise ValueError(
+                raise SortRequiredError(
                     f"Left table is not sorted by '{cols}'. "
                     f"Use .sort(...) first or use join() without strategy instead."
                 )
@@ -271,7 +273,7 @@ class JoinMixin(LTSeqLike):
             right_expected = [d if d is not None else False for d in right_descs]
             if not other.is_sorted_by(*right_cols, desc=right_expected):
                 cols = "', '".join(right_cols)
-                raise ValueError(
+                raise SortRequiredError(
                     f"Right table is not sorted by '{cols}'. "
                     f"Use .sort(...) first or use join() without strategy instead."
                 )

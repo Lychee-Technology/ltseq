@@ -26,12 +26,33 @@ This document describes the API **as currently implemented**. Every signature be
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `RuntimeError: window function used without sort` | Called `shift`/`rolling`/`diff` without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
-| `AttributeError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
-| `ValueError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
-| `ValueError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
+| `SortRequiredError: Window functions ... require a defined row order` | Called `shift`/`rolling`/`diff`/cumulative without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
+| `ColumnNotFoundError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
+| `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
+| `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
+
+### Exception Hierarchy
+
+All library errors derive from `LTSeqError`, so you can catch the whole family with one `except`. Each concrete error also subclasses the builtin it historically raised, so existing `except ValueError:` / `hasattr()` code keeps working:
+
+```python
+from ltseq import LTSeqError, SortRequiredError, SchemaMismatchError, ColumnNotFoundError
+
+try:
+    result = t.join(other, on="id", strategy="merge")
+except SortRequiredError as e:
+    print(e)          # message carries a fix hint
+
+# LTSeqError catches everything; builtins still work
+except LTSeqError: ...
+```
+
+- `LTSeqError(Exception)` — base of the hierarchy
+- `SortRequiredError(LTSeqError, ValueError)` — operation needs sorted input
+- `SchemaMismatchError(LTSeqError, ValueError)` — incompatible schemas
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — column not in schema (also an `AttributeError` so `hasattr()` probes still work)
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
 ## Quick Reference
@@ -294,6 +315,18 @@ for row in rows:
     print(row["name"])
 ```
 
+### `iter(LTSeq)` / `__iter__`
+- **Signature**: `for row in t: ...`
+- **Behavior**: Iterate over rows as dictionaries. Materializes the whole table into memory (via `to_dicts()`), matching Pandas/Polars ergonomics for small tables. For large data prefer `to_cursor()` to stream batches without full materialization
+- **Example**:
+```python
+for row in t.filter(lambda r: r.active):
+    print(row["name"])
+```
+
+### `LTSeq._repr_html_`
+- **Behavior**: Jupyter/IPython rich display. Renders the first rows as a native ASCII table wrapped in `<pre>` (no pandas/pyarrow dependency), so a bare `t` in a notebook cell shows a formatted preview plus a dimensions caption
+
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **Signature**: `LTSeq.to_pandas() -> pandas.DataFrame`; `LTSeq.to_arrow() -> pyarrow.Table`
 - **Behavior**: Materialize the table as a pandas DataFrame / PyArrow Table
@@ -515,7 +548,7 @@ t.slice(offset=10, length=5)
 - **Behavior**: Access relative rows. Positive offset looks backward (previous rows), negative offset looks forward (future rows). Consistent with pandas `Series.shift()`. With `partition_by`, the window resets at group boundaries (LAG/LEAD OVER PARTITION BY)
 - **Parameters**: `offset` row offset (positive = backward, negative = forward); `default` fill value at boundaries (default NULL); `partition_by` optional partition column
 - **Returns**: expression (NULL — or `default` — at boundaries where offset exceeds available rows)
-- **Exceptions**: `TypeError` (offset not int), `RuntimeError` (used without sort)
+- **Exceptions**: `TypeError` (offset not int), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 with_prev = t.sort("date").derive(prev=lambda r: r.close.shift(1))
@@ -534,7 +567,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 - **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`
 - **Parameters**: `window_size` window size
 - **Returns**: window aggregation expression
-- **Exceptions**: `ValueError` (window_size <= 0), `RuntimeError` (used without sort)
+- **Exceptions**: `ValueError` (window_size <= 0), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
@@ -545,7 +578,7 @@ ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())
 - **Behavior**: Row difference, equivalent to `r.col - r.col.shift(offset)`
 - **Parameters**: `offset` row offset
 - **Returns**: difference expression
-- **Exceptions**: `TypeError` (non-numeric or offset not int), `RuntimeError` (used without sort)
+- **Exceptions**: `TypeError` (non-numeric or offset not int), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 changes = t.sort("date").derive(daily=lambda r: r.close.diff())
@@ -563,7 +596,7 @@ returns = t.sort("date").derive(daily_return=lambda r: r.close.pct_change())
 #### `r.col.cum_sum` / `cum_max` / `cum_min` (expression form)
 - **Signature**: `r.col.cum_sum() -> Expr` (same for `cum_max`, `cum_min`)
 - **Behavior**: Running aggregate over the current order (sum / running maximum / running minimum), usable inside `derive()` so the output column name is under your control. All accept the `partition_by=` kwarg to reset the accumulation per group
-- **Exceptions**: `TypeError` (non-numeric), `RuntimeError` (used without sort)
+- **Exceptions**: `TypeError` (non-numeric), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 t.sort("date").derive(
@@ -593,7 +626,7 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 - **⚠️ Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms when they can express the computation; reach for `fold` only when genuinely sequential state is required. Slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
 - **Requires**: a prior `.sort()` / `.assume_sorted()` so the accumulation order is defined
 - **Returns**: a new in-memory `LTSeq` — original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
-- **Exceptions**: `ValueError` (no sort order, `into` already exists, or bad `partition_by`), `TypeError` (`fn` not callable)
+- **Exceptions**: `SortRequiredError` (no sort order), `ValueError` (`into` already exists, or bad `partition_by`), `TypeError` (`fn` not callable)
 - **Example**:
 ```python
 # Compounding return

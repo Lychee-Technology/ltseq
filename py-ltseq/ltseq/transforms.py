@@ -10,6 +10,19 @@ from .expr import SchemaProxy
 from .lookup import LookupMixin
 
 
+def _window_sort_required_error() -> Exception:
+    """Build the SortRequiredError raised when a window expression is used
+    on a table with no defined row order (neither ``.sort()`` nor
+    ``.assume_sorted()`` has been applied)."""
+    from .exceptions import SortRequiredError
+
+    return SortRequiredError(
+        "Window functions (shift/rolling/diff/rank/cumulative) require a "
+        "defined row order. Call .sort(...) or .assume_sorted(...) before "
+        "using them in derive()."
+    )
+
+
 def _process_select_col(col: str | Callable, schema: dict[str, str]) -> dict[str, Any] | list[dict[str, Any]]:
     """Process a single column argument for select()."""
     if isinstance(col, str):
@@ -285,7 +298,12 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
                 # Continue with derive on the joined table
                 has_window = resolved_table._has_window_functions(simplified_cols)
-                if has_window and resolved_table._sort_keys:
+                if (
+                    resolved_table._has_implicit_order_window(simplified_cols)
+                    and not resolved_table._sort_keys
+                ):
+                    raise _window_sort_required_error()
+                if has_window:
                     result_inner = resolved_table._inner.derive_with_window_functions(
                         simplified_cols
                     )
@@ -300,7 +318,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
         # Normal derive path (no lookups)
         has_window = self._has_window_functions(derived_cols)
 
-        if has_window and self._sort_keys:
+        if self._has_implicit_order_window(derived_cols) and not self._sort_keys:
+            raise _window_sort_required_error()
+        if has_window:
             result_inner = self._inner.derive_with_window_functions(
                 derived_cols
             )
@@ -429,6 +449,46 @@ class TransformMixin(LookupMixin, LTSeqLike):
             expr_type = expr.get("type", "")
             if expr_type == "Window":
                 return True
+            if expr_type == "Call":
+                func = expr.get("func", "")
+                if func in ("shift", "diff", "rolling", "cum_sum", "cum_max", "cum_min"):
+                    return True
+                if check_expr(expr.get("on") or {}):
+                    return True
+                for arg in expr.get("args", []):
+                    if check_expr(arg):
+                        return True
+            elif expr_type == "BinOp":
+                if check_expr(expr.get("left", {})):
+                    return True
+                if check_expr(expr.get("right", {})):
+                    return True
+            elif expr_type == "UnaryOp":
+                if check_expr(expr.get("operand", {})):
+                    return True
+            return False
+
+        for expr in derived_cols.values():
+            if check_expr(expr):
+                return True
+        return False
+
+    def _has_implicit_order_window(self, derived_cols: dict[str, Any]) -> bool:
+        """Check for window functions that depend on the table's row order.
+
+        These are shift/diff/rolling/cumulative expressions: unlike an explicit
+        ``.over(order_by=...)`` window (``type == "Window"``, which carries its
+        own ordering), they are only well-defined once the table has a defined
+        order, so they require a prior ``.sort()`` / ``.assume_sorted()``.
+        """
+
+        def check_expr(expr: dict[str, Any]) -> bool:
+            if not isinstance(expr, dict):
+                return False
+            expr_type = expr.get("type", "")
+            if expr_type == "Window":
+                # Explicit .over(...) window — self-ordering, not row-order bound.
+                return False
             if expr_type == "Call":
                 func = expr.get("func", "")
                 if func in ("shift", "diff", "rolling", "cum_sum", "cum_max", "cum_min"):
@@ -619,7 +679,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 f"fold() 'into' column '{into}' already exists in the schema"
             )
         if not self._sort_keys:
-            raise ValueError(
+            from .exceptions import SortRequiredError
+
+            raise SortRequiredError(
                 "fold() requires a defined row order. Call .sort(...) "
                 "(or .assume_sorted(...)) before fold()."
             )

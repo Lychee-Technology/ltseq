@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .partitioning import PartitionedTable, SQLPartitionedTable
 
 from .expr import SchemaProxy, _lambda_to_expr
+from ._typing import JoinHow
 
 # Import mixin classes
 from .io_ops import IOMixin
@@ -173,6 +174,37 @@ class LTSeq(
             preview = "(no data loaded)"
 
         return f"{header}\nColumns: [{col_info}]\n{preview}"
+
+    def _repr_html_(self, n: int = 10) -> str:
+        """Rich display for Jupyter/IPython.
+
+        Wraps the native ASCII table (``self._inner.show(n)``) in a <pre> block,
+        so it renders without a pandas/pyarrow dependency. Shows the first ``n``
+        rows plus a dimensions caption.
+        """
+        import html as _html
+
+        if not self._schema:
+            return "<pre>LTSeq(empty, no schema)</pre>"
+        try:
+            n_rows = self._inner.count()
+        except Exception:
+            n_rows = "?"
+        try:
+            preview = self._inner.show(n)
+        except Exception:
+            preview = "(no data loaded)"
+        caption = f"LTSeq({n_rows} rows &times; {len(self._schema)} cols)"
+        return f"<div><pre>{_html.escape(preview)}</pre><small>{caption}</small></div>"
+
+    def __iter__(self):
+        """Iterate over rows as dictionaries (``for row in t: row['col']``).
+
+        Materializes the whole table into memory (via ``to_dicts()``), matching
+        Pandas/Polars ergonomics for small tables. For large data prefer
+        ``to_cursor()`` to stream batches without full materialization.
+        """
+        return iter(self.to_dicts())
 
     def pipe(self, func: Callable[..., "LTSeq"], *args: Any, **kwargs: Any) -> "LTSeq":
         """
@@ -508,7 +540,7 @@ class LTSeq(
         target_table: "LTSeq",
         on: Callable,
         as_: "str | None" = None,
-        join_type: str = "inner",
+        join_type: JoinHow = "inner",
         *,
         alias: "str | None" = None,
     ) -> "LinkedTable":

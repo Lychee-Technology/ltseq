@@ -27,7 +27,8 @@ class TestShiftWithDefault:
         csv.write("4,400\n")
         csv.write("5,500\n")
         csv.close()
-        yield LTSeq.read_csv(csv.name)
+        # shift() is an implicit-order window; establish row order first.
+        yield LTSeq.read_csv(csv.name).sort("id")
         os.unlink(csv.name)
 
     def test_shift_positive_with_default_zero(self, sample_table):
@@ -105,7 +106,7 @@ class TestShiftWithDefault:
         csv.close()
 
         try:
-            t = LTSeq.read_csv(csv.name)
+            t = LTSeq.read_csv(csv.name).sort("id")
             # Note: Don't use "N/A", "NA", "NULL", "None", "NaN" as defaults
             # because pandas interprets these as missing values during CSV round-trip
             result = t.derive(
@@ -134,7 +135,8 @@ class TestShiftDefaultInExpressions:
         csv.write("2024-01-03,103.0\n")
         csv.write("2024-01-04,110.0\n")
         csv.close()
-        yield LTSeq.read_csv(csv.name)
+        # shift() is an implicit-order window; establish row order first.
+        yield LTSeq.read_csv(csv.name).sort("date")
         os.unlink(csv.name)
 
     def test_price_change_with_default(self, price_table):
@@ -200,7 +202,7 @@ class TestShiftDefaultEdgeCases:
         csv.close()
 
         try:
-            t = LTSeq.read_csv(csv.name)
+            t = LTSeq.read_csv(csv.name).sort("value")
             result = t.derive(lambda r: {"prev": r.value.shift(1, default=0)})
             df = result.to_pandas()
 
@@ -216,7 +218,7 @@ class TestShiftDefaultEdgeCases:
         csv.close()
 
         try:
-            t = LTSeq.read_csv(csv.name)
+            t = LTSeq.read_csv(csv.name).sort("value")
             result = t.derive(lambda r: {"prev": r.value.shift(1, default=0)})
             df = result.to_pandas()
 
@@ -233,7 +235,7 @@ class TestShiftDefaultEdgeCases:
         csv.close()
 
         try:
-            t = LTSeq.read_csv(csv.name)
+            t = LTSeq.read_csv(csv.name).sort("value")
             result = t.derive(lambda r: {"same": r.value.shift(0, default=999)})
             df = result.to_pandas()
 
@@ -252,7 +254,7 @@ class TestShiftDefaultEdgeCases:
         csv.close()
 
         try:
-            t = LTSeq.read_csv(csv.name)
+            t = LTSeq.read_csv(csv.name).sort("value")
             result = t.derive(lambda r: {"prev": r.value.shift(1, default=0.0)})
             df = result.to_pandas()
 
