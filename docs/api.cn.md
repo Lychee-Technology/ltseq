@@ -1011,15 +1011,21 @@ users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False, *, suffix: str = "_right") -> LTSeq`
-- **行为**: 时序就近连接（as-of join）。`is_sorted=True` 时跳过排序校验（已知双方有序时更快）。冲突右列加 `suffix`（Polars 语义）；与等值连接不同，右侧时间列会保留（as-of 是近似匹配，匹配到的时间戳是真实信息）
-- **参数**: `other` 另一个表；`on` 连接条件（如 `lambda t, q: t.time >= q.time`）；`direction` 取值 {"backward","forward","nearest"}；`is_sorted` 跳过排序检查；`suffix` 冲突右列的后缀
+- **签名**: `LTSeq.asof_join(other: LTSeq, on: Callable | str | None = None, direction: str | None = None, is_sorted: bool = False, *, left_on=None, right_on=None, by=None, strategy: str | None = None, suffix: str = "_right") -> LTSeq`
+- **行为**: 时序就近连接（对齐 Polars `join_asof`）。对每个左行按时间列找最近的右行。`by=` 将匹配限制在同组值的右行内（按 symbol 分组的 asof 等）。`is_sorted=True` 跳过排序校验。冲突右列加 `suffix`；与等值连接不同，右侧时间列会保留（as-of 是近似匹配，匹配到的时间戳是真实信息）
+- **参数**: `other` 另一个表；`on` 时间列名（双方同名）或双参 lambda（其比较算符**权威**决定方向：`>=`/`>` → backward，`<=`/`<` → forward）；`left_on`/`right_on` 异名时间列；`by` 分组列名；`strategy` 取值 {"backward","forward","nearest"}（默认 backward）；`direction` 为 `strategy` 的兼容别名；`is_sorted` 跳过排序检查；`suffix` 冲突右列的后缀
 - **返回**: as-of 连接后的 `LTSeq`
-- **异常**: `TypeError`（other/on 无效），`ValueError`（direction 无效）
+- **异常**: `TypeError`（other/on 无效），`ValueError`（strategy 无效/矛盾，或 lambda 算符与 strategy 冲突）
 - **示例**:
 ```python
-result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="backward")
+# 按 symbol 分组的 backward asof（字符串时间列 + by=）
+trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
+
+# lambda 形态：算符决定方向
+trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
 ```
+
+> **行为变化**：lambda 算符现在权威决定方向。此前 `on=lambda t, q: t.time <= q.time` 不带 direction 会静默走 backward，现在正确走 forward。传入与算符矛盾的 `strategy`/`direction` 会报错（`nearest` 请用字符串 `on=` 形态）。
 
 ### `LTSeq.semi_join`
 - **签名**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`

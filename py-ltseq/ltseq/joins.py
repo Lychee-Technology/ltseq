@@ -312,31 +312,43 @@ class JoinMixin(LTSeqLike):
     def asof_join(
         self,
         other: "LTSeq",
-        on: Callable,
-        direction: str = "backward",
+        on: "Callable | str | None" = None,
+        direction: str | None = None,
         is_sorted: bool = False,
         *,
+        left_on: str | None = None,
+        right_on: str | None = None,
+        by: "str | list[str] | None" = None,
+        strategy: str | None = None,
         suffix: str = "_right",
     ) -> "LTSeq":
         """
-        As-of join for time-series data.
+        As-of join for time-series data (Polars join_asof aligned).
 
-        Finds nearest match in other table based on time/key column.
+        For each left row, finds the nearest right row by a time column.
 
         Args:
             other: Another LTSeq table
-            on: Lambda specifying join condition (e.g., lambda t, q: t.time >= q.time)
-            direction: "backward" (<=), "forward" (>=), or "nearest"
+            on: Time column name (same name on both sides), or a two-arg lambda
+                condition (e.g., lambda t, q: t.time >= q.time). The lambda's
+                comparison operator is authoritative for the match direction
+            direction: Deprecated alias for strategy
             is_sorted: If True, skip sort verification (faster)
-            suffix: Appended to right-table columns that collide with the left
-                table (Polars semantics; default "_right"). Unlike an equi-join,
-                the right time column is kept (the matched timestamp is real info)
+            left_on / right_on: Time column names when they differ
+            by: Column name(s) to group by — each left row matches only right
+                rows sharing the same by-value (per-symbol asof, etc.)
+            strategy: "backward" (<=), "forward" (>=), or "nearest".
+                Default "backward". With a lambda on=, the operator decides and
+                strategy must agree if also given
+            suffix: Appended to conflicting right columns (Polars semantics).
+                The right time column is kept (matched timestamp is real info)
 
         Returns:
             Joined LTSeq
 
         Example:
-            >>> result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
+            >>> trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
+            >>> trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
         """
         from .core import LTSeq
 
@@ -344,46 +356,106 @@ class JoinMixin(LTSeqLike):
             raise ValueError(
                 "Schema not initialized. Call read_csv() first to populate the schema."
             )
-
         if not isinstance(other, LTSeq):
             raise TypeError(
                 f"asof_join() argument must be LTSeq, got {type(other).__name__}"
             )
-
         if not other._schema:
             raise ValueError(
                 "Other table schema not initialized. Call read_csv() first."
             )
 
-        valid_directions = {"backward", "forward", "nearest"}
-        if direction not in valid_directions:
+        # strategy is the primary name; direction is a back-compat alias.
+        if strategy is not None and direction is not None and strategy != direction:
             raise ValueError(
-                f"Invalid direction '{direction}'. Must be one of: {valid_directions}"
+                f"asof_join() got conflicting strategy='{strategy}' and "
+                f"direction='{direction}'; pass only one."
+            )
+        resolved = strategy if strategy is not None else direction
+
+        valid_strategies = {"backward", "forward", "nearest"}
+        if resolved is not None and resolved not in valid_strategies:
+            raise ValueError(
+                f"Invalid strategy '{resolved}'. Must be one of: {valid_strategies}"
             )
 
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            other_proxy = SchemaProxy(other._schema)
-            _ = on(self_proxy, other_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid asof join condition: {e}")
+        # Resolve the time columns and (for lambda form) the authoritative
+        # direction from the comparison operator.
+        op_strategy = None
+        if callable(on):
+            if left_on is not None or right_on is not None:
+                raise ValueError(
+                    "asof_join() got a lambda on= together with left_on=/right_on=; "
+                    "the lambda already names both time columns. Pass either a lambda "
+                    "on=, or left_on=/right_on= (or a string on=), not both."
+                )
+            try:
+                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+            except Exception as e:
+                raise TypeError(f"Invalid asof join condition: {e}")
+            from .helpers import _extract_asof_keys
 
-        from .helpers import _extract_asof_keys
+            left_time_col, right_time_col, operator = _extract_asof_keys(
+                on, self._schema, other._schema
+            )
+            # Ge/Gt (t.time >= q.time) → backward; Le/Lt → forward.
+            op_strategy = "backward" if operator in ("Ge", "Gt") else "forward"
+            # The lambda operator is authoritative for direction, so any explicit
+            # strategy/direction must agree with it — including "nearest", which a
+            # directional operator can contradict (a nearest match may land on the
+            # opposite side of the predicate). Use the string on= form for "nearest".
+            if resolved is not None and resolved != op_strategy:
+                raise ValueError(
+                    f"asof_join() lambda operator implies strategy='{op_strategy}', "
+                    f"but strategy='{resolved}' was passed. Remove one (use the "
+                    f"string on= form for 'nearest')."
+                )
+            resolved = resolved if resolved is not None else op_strategy
+        else:
+            if left_on is not None or right_on is not None:
+                if on is not None:
+                    raise ValueError("Pass either on= or left_on=/right_on=, not both")
+                if left_on is None or right_on is None:
+                    raise ValueError("left_on= and right_on= must be given together")
+                left_time_col, right_time_col = left_on, right_on
+            elif isinstance(on, str):
+                left_time_col = right_time_col = on
+            else:
+                raise ValueError(
+                    "asof_join() requires on= (a time column name or lambda), "
+                    "or left_on=/right_on="
+                )
+            resolved = resolved if resolved is not None else "backward"
 
-        left_time_col, right_time_col, operator = _extract_asof_keys(
-            on, self._schema, other._schema
-        )
+        for col_name, schema, side in (
+            (left_time_col, self._schema, "left"),
+            (right_time_col, other._schema, "right"),
+        ):
+            if col_name not in schema:
+                raise ValueError(
+                    f"asof_join time column '{col_name}' not found in {side} table. "
+                    f"Available columns: {list(schema.keys())}"
+                )
+
+        # Normalize by= to matched left/right column lists.
+        if by is None:
+            left_by: list[str] = []
+            right_by: list[str] = []
+        else:
+            by_cols = [by] if isinstance(by, str) else list(by)
+            for c in by_cols:
+                if c not in self._schema:
+                    raise ValueError(f"asof_join by= column '{c}' not found in left table")
+                if c not in other._schema:
+                    raise ValueError(f"asof_join by= column '{c}' not found in right table")
+            left_by = right_by = by_cols
 
         left_table = self
         right_table = other
-
         if not is_sorted:
-            left_needs_sort = not self.is_sorted_by(left_time_col)
-            right_needs_sort = not other.is_sorted_by(right_time_col)
-
-            if left_needs_sort:
+            if not self.is_sorted_by(left_time_col):
                 left_table = self.sort(left_time_col)
-            if right_needs_sort:
+            if not other.is_sorted_by(right_time_col):
                 right_table = other.sort(right_time_col)
 
         try:
@@ -391,8 +463,10 @@ class JoinMixin(LTSeqLike):
                 right_table._inner,
                 left_time_col,
                 right_time_col,
-                direction,
+                resolved,
                 suffix,
+                left_by,
+                right_by,
             )
         except RuntimeError as e:
             raise RuntimeError(f"Asof join failed: {e}")

@@ -938,6 +938,7 @@ impl LTSeqTable {
     ///
     /// Uses binary search for O(N log M) complexity where N = left rows, M = right rows.
     /// Both tables must be sorted by their respective time columns.
+    #[pyo3(signature = (other, left_time_col, right_time_col, direction, suffix, left_by_cols=Vec::new(), right_by_cols=Vec::new()))]
     fn asof_join(
         &self,
         other: &LTSeqTable,
@@ -945,6 +946,8 @@ impl LTSeqTable {
         right_time_col: &str,
         direction: &str,
         suffix: &str,
+        left_by_cols: Vec<String>,
+        right_by_cols: Vec<String>,
     ) -> PyResult<LTSeqTable> {
         crate::ops::asof_join::asof_join_impl(
             self,
@@ -953,6 +956,8 @@ impl LTSeqTable {
             right_time_col,
             direction,
             suffix,
+            left_by_cols,
+            right_by_cols,
         )
     }
 

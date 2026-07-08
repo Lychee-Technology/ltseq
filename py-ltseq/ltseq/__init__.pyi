@@ -211,10 +211,14 @@ class LTSeq:
     def asof_join(
         self,
         other: "LTSeq",
-        on: Callable[[SchemaProxy, SchemaProxy], Expr],
-        direction: str = ...,
+        on: Callable[[SchemaProxy, SchemaProxy], Expr] | str | None = ...,
+        direction: str | None = ...,
         is_sorted: bool = ...,
         *,
+        left_on: str | None = ...,
+        right_on: str | None = ...,
+        by: str | list[str] | None = ...,
+        strategy: str | None = ...,
         suffix: str = ...,
     ) -> "LTSeq": ...
     def link(

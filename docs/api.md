@@ -1011,15 +1011,21 @@ users.join(orders, on=lambda u, o: u.id == o.user_id, how="left")
 ```
 
 ### `LTSeq.asof_join`
-- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable, direction: str = "backward", is_sorted: bool = False, *, suffix: str = "_right") -> LTSeq`
-- **Behavior**: As-of join for nearest time match. `is_sorted=True` skips sort verification when both inputs are known to be sorted (faster). Conflicting right columns take `suffix` (Polars semantics); unlike an equi-join, the right time column is kept (an asof match is approximate, so the matched timestamp is real information)
-- **Parameters**: `other` other table; `on` join condition (e.g. `lambda t, q: t.time >= q.time`); `direction` in {"backward","forward","nearest"}; `is_sorted` skip sort check; `suffix` for conflicting right columns
+- **Signature**: `LTSeq.asof_join(other: LTSeq, on: Callable | str | None = None, direction: str | None = None, is_sorted: bool = False, *, left_on=None, right_on=None, by=None, strategy: str | None = None, suffix: str = "_right") -> LTSeq`
+- **Behavior**: As-of join for nearest time match (aligned with Polars `join_asof`). For each left row, finds the nearest right row by a time column. `by=` restricts matching to right rows sharing the same group value (per-symbol asof, etc.). `is_sorted=True` skips sort verification. Conflicting right columns take `suffix`; unlike an equi-join, the right time column is kept (an asof match is approximate, so the matched timestamp is real information)
+- **Parameters**: `other` other table; `on` a time-column name (same on both sides) or a two-arg lambda whose comparison operator is **authoritative** for the direction (`>=`/`>` → backward, `<=`/`<` → forward); `left_on`/`right_on` for differently-named time columns; `by` column name(s) to group by; `strategy` in {"backward","forward","nearest"} (default backward); `direction` deprecated alias for `strategy`; `is_sorted` skip sort check; `suffix` for conflicting right columns
 - **Returns**: as-of joined `LTSeq`
-- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid direction)
+- **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid/conflicting strategy, or lambda operator contradicting `strategy`)
 - **Example**:
 ```python
-result = trades.asof_join(quotes, on=lambda t, q: t.time >= q.time, direction="backward")
+# Per-symbol backward asof (string time column + by=)
+trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
+
+# Lambda form: the operator decides the direction
+trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
 ```
+
+> **Behavior change**: the lambda operator is now authoritative for direction. Previously `on=lambda t, q: t.time <= q.time` with no direction ran backward (silent default); it now runs forward. Passing a `strategy`/`direction` that contradicts the operator raises (use the string `on=` form for `nearest`).
 
 ### `LTSeq.semi_join`
 - **Signature**: `LTSeq.semi_join(other: LTSeq, on: Callable | str | list[str]) -> LTSeq`

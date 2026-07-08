@@ -18,10 +18,58 @@ use crate::error::LtseqError;
 use crate::ops::common::right_rename_map;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Encode the `by` grouping columns of every row into hashable owned keys via
+/// Arrow's RowConverter. One converter is shared between left and right so the
+/// encodings are comparable. Returns `None` when there are no `by` columns
+/// (the ungrouped fast path). `by_indices` are column positions in `batches`.
+fn extract_group_keys(
+    converter: &RowConverter,
+    batches: &[RecordBatch],
+    by_indices: &[usize],
+) -> PyResult<Vec<OwnedRow>> {
+    let mut keys: Vec<OwnedRow> = Vec::new();
+    for batch in batches {
+        let cols: Vec<ArrayRef> =
+            by_indices.iter().map(|&i| Arc::clone(batch.column(i))).collect();
+        let rows = converter
+            .convert_columns(&cols)
+            .map_err(|e| LtseqError::Runtime(format!("Failed to encode by= keys: {}", e)))?;
+        for i in 0..batch.num_rows() {
+            keys.push(rows.row(i).owned());
+        }
+    }
+    Ok(keys)
+}
+
+/// Resolve `by` column names to indices in `schema`, validating existence.
+fn by_col_indices(
+    schema: &ArrowSchema,
+    by_cols: &[String],
+    side: &str,
+) -> PyResult<Vec<usize>> {
+    by_cols
+        .iter()
+        .map(|name| {
+            schema
+                .fields()
+                .iter()
+                .position(|f| f.name() == name)
+                .ok_or_else(|| {
+                    PyErr::from(LtseqError::Validation(format!(
+                        "by= column '{}' not found in {} table",
+                        name, side
+                    )))
+                })
+        })
+        .collect()
+}
 
 /// As-of Join: Time-series join matching each left row with nearest right row
 ///
@@ -34,6 +82,8 @@ pub fn asof_join_impl(
     right_time_col: &str,
     direction: &str,
     suffix: &str,
+    left_by_cols: Vec<String>,
+    right_by_cols: Vec<String>,
 ) -> PyResult<LTSeqTable> {
     // 1. Validate both tables have data
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
@@ -129,17 +179,64 @@ pub fn asof_join_impl(
         right_times.extend(times);
     }
 
-    // 7. For each left row, find matching right row using binary search
+    // 7. For each left row, find the matching right row via binary search.
+    //
+    // Without `by=`, the search runs over the whole (time-sorted) right table.
+    // With `by=`, each left row only matches right rows sharing its group key:
+    // we bucket right row indices by group (times stay ascending because the
+    // table is time-sorted) and search within the left row's own bucket.
     let mut matched_right_indices: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
 
-    for &left_time in &left_times {
-        let match_idx = match direction {
-            "backward" => find_asof_backward(left_time, &right_times),
-            "forward" => find_asof_forward(left_time, &right_times),
-            "nearest" => find_asof_nearest(left_time, &right_times),
-            _ => unreachable!(),
-        };
-        matched_right_indices.push(match_idx);
+    let find = |target: i64, times: &[i64]| match direction {
+        "backward" => find_asof_backward(target, times),
+        "forward" => find_asof_forward(target, times),
+        "nearest" => find_asof_nearest(target, times),
+        _ => unreachable!(),
+    };
+
+    if left_by_cols.is_empty() && right_by_cols.is_empty() {
+        for &left_time in &left_times {
+            matched_right_indices.push(find(left_time, &right_times));
+        }
+    } else {
+        if left_by_cols.len() != right_by_cols.len() {
+            return Err(LtseqError::Validation(
+                "asof_join by= must name the same number of columns on both sides".into(),
+            )
+            .into());
+        }
+        let left_by_idx = by_col_indices(&left_schema, &left_by_cols, "left")?;
+        let right_by_idx = by_col_indices(&right_schema, &right_by_cols, "right")?;
+
+        // Build one shared RowConverter over the by-column types (must match).
+        let sort_fields: Vec<SortField> = right_by_idx
+            .iter()
+            .map(|&i| SortField::new(right_schema.field(i).data_type().clone()))
+            .collect();
+        let converter = RowConverter::new(sort_fields)
+            .map_err(|e| LtseqError::Runtime(format!("Failed to build by= encoder: {}", e)))?;
+
+        let left_keys = extract_group_keys(&converter, &left_batches, &left_by_idx)?;
+        let right_keys = extract_group_keys(&converter, &right_batches, &right_by_idx)?;
+
+        // Bucket right rows by group: key -> (ascending times, original indices).
+        // Consume right_keys (unused afterward) so each OwnedRow moves into the
+        // map instead of being cloned per row.
+        let mut groups: HashMap<OwnedRow, (Vec<i64>, Vec<usize>)> = HashMap::new();
+        for (idx, key) in right_keys.into_iter().enumerate() {
+            let entry = groups.entry(key).or_default();
+            entry.0.push(right_times[idx]);
+            entry.1.push(idx);
+        }
+
+        for (i, &left_time) in left_times.iter().enumerate() {
+            match groups.get(&left_keys[i]) {
+                Some((times, orig)) => {
+                    matched_right_indices.push(find(left_time, times).map(|g| orig[g]));
+                }
+                None => matched_right_indices.push(None),
+            }
+        }
     }
 
     // 8. Build result schema: left columns + suffix-renamed right columns.
