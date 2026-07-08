@@ -18,11 +18,29 @@ from .accessors import StringAccessor, TemporalAccessor
 from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
 from .lookup_expr import LookupExpr
 
-# Window functions whose `.over()` clause is understood by the native window
-# planner. Sequence windows (shift/rolling/diff/cum_*) currently take partition
-# via the `partition_by=` kwarg instead; unifying them under `.over()` is
-# tracked in #117.
+# Ranking window functions — order/partition come exclusively from `.over()`.
 _RANKING_FUNCS = frozenset({"row_number", "rank", "dense_rank", "ntile"})
+
+# Sequence windows accept `.over()` as a unified entry (issue #117) in addition
+# to the legacy `partition_by=` kwarg. `_is_sequence_window` mirrors the Rust
+# `is_window_call` (src/transpiler/mod.rs) so both sides agree on what counts as
+# a window. Rolling aggregates surface as e.g. `rolling(n).mean()`, so the
+# aggregate call's `.on` must be a `rolling(...)` call.
+_SEQ_WINDOW_FUNCS = frozenset({"shift", "diff", "cum_sum", "cum_max", "cum_min"})
+_ROLLING_AGG_FUNCS = frozenset({"mean", "sum", "min", "max", "count", "std"})
+
+
+def _is_sequence_window(call: "CallExpr") -> bool:
+    """True if `call` is a sequence window (shift/diff/cum_*, or rolling(n).agg())."""
+    if call.func in _SEQ_WINDOW_FUNCS:
+        return True
+    if (
+        call.func in _ROLLING_AGG_FUNCS
+        and isinstance(call.on, CallExpr)
+        and call.on.func == "rolling"
+    ):
+        return True
+    return False
 
 
 class ColumnExpr(Expr):
@@ -45,6 +63,16 @@ class ColumnExpr(Expr):
     def serialize(self) -> dict[str, Any]:
         """Serialize to dict: {"type": "Column", "name": self.name}"""
         return {"type": "Column", "name": self.name}
+
+    def over(self, *args, **kwargs):
+        """A bare column is never a window expression — `.over()` needs a window
+        function first (ranking or sequence). Guard here so `r.age.over(...)`
+        raises a clear ValueError instead of being turned into a generic
+        ``CallExpr("over")`` by ``__getattr__``."""
+        raise ValueError(
+            f".over() 只用于窗口表达式（排名函数或序列窗口 shift/rolling/diff/cum_*）；"
+            f"列 {self.name!r} 不是窗口表达式，不能加 .over()。"
+        )
 
     def __getattr__(self, method_name: str):
         """
@@ -162,12 +190,14 @@ class CallExpr(Expr):
         """
         Apply a window specification to this expression.
 
-        Used with ranking functions (row_number, rank, dense_rank, ntile)
-        to specify partitioning and ordering.
+        Works with both ranking functions (row_number, rank, dense_rank, ntile)
+        and sequence windows (shift, diff, cum_*, rolling(n).agg()). Window
+        expressions default to table order; ``.over()`` overrides partition/order.
 
         Args:
             partition_by: Column(s) to partition by (optional)
-            order_by: Column(s) to order by (required for ranking functions)
+            order_by: Column(s) to order by. Required for ranking functions;
+                optional for sequence windows (they fall back to the table sort).
             descending: If True, order in descending order (default False)
             desc: Alias for descending. When both are given, ``descending``
                 takes precedence — matching sort()'s resolution so the same
@@ -179,14 +209,33 @@ class CallExpr(Expr):
         Example:
             >>> row_number().over(order_by=r.date)
             >>> rank().over(partition_by=r.group, order_by=r.score)
-            >>> dense_rank().over(partition_by=r.dept, order_by=r.salary, desc=True)
+            >>> r.close.shift(1).over(partition_by=r.symbol)
+            >>> r.price.cum_max().over(partition_by=r.symbol, order_by=r.date)
+
+        Raises:
+            ValueError: if called on a non-window expression, or if
+                ``partition_by`` is supplied here while the sequence window also
+                carries a ``partition_by=`` kwarg (pick one).
         """
-        if self.func not in _RANKING_FUNCS:
-            raise NotImplementedError(
-                f".over() 目前仅支持排名函数 (row_number/rank/dense_rank/ntile)；"
-                f"序列窗口 {self.func}() 的统一 .over() 入口尚未实现（见 #117）。"
-                f"当前请用 {self.func}(..., partition_by=...) kwarg 指定分区。"
+        if self.func not in _RANKING_FUNCS and not _is_sequence_window(self):
+            raise ValueError(
+                f".over() 只用于窗口表达式（排名函数或序列窗口 shift/rolling/diff/cum_*）；"
+                f"{self.func}() 不是窗口表达式，不能加 .over()。"
             )
+        # Mutual exclusion: partition_by must not be given both here and via the
+        # sequence window's `partition_by=` kwarg. For rolling(n).agg() the kwarg
+        # lives on the inner rolling() call.
+        if partition_by is not None:
+            kwarg_host = (
+                self.on
+                if self.func in _ROLLING_AGG_FUNCS and isinstance(self.on, CallExpr)
+                else self
+            )
+            if "partition_by" in kwarg_host.kwargs:
+                raise ValueError(
+                    f"{self.func}() 同时收到 .over(partition_by=) 与 partition_by= kwarg；"
+                    f"二者互斥，请二选一。"
+                )
         # Mirror sort(): `descending` wins when both are supplied, so
         # over(desc=X, descending=Y) and sort(desc=X, descending=Y) agree.
         if descending is not None:

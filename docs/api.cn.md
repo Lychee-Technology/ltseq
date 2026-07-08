@@ -540,6 +540,16 @@ t.slice(offset=10, length=5)
 
 > 这些操作依赖先行的 `.sort()`（或 `.assume_sorted()`）建立顺序。`shift` 还支持 `partition_by=` 参数（列名字符串或表达式），在分组边界处重置窗口。
 
+> **统一 `.over()` 入口**：序列窗口（`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`）与排名函数共用同一套 `.over()`。规则一句话：**窗口表达式默认用表序，`.over()` 可覆盖分区/排序。** 因此 `r.close.shift(1).over(partition_by=r.symbol)` 等价于 `r.close.shift(1, partition_by="symbol")`；`.over(order_by=..., desc=...)` 则为该表达式覆盖表序。`partition_by` 可通过 `.over(partition_by=)` **或** `partition_by=` 参数指定，但二者互斥——同时给出会抛 `ValueError`。
+>
+> ```python
+> t.sort("date").derive(
+>     prev=lambda r: r.close.shift(1).over(partition_by=r.symbol),
+>     ma5=lambda r: r.close.rolling(5).mean().over(partition_by=r.symbol),
+>     peak=lambda r: r.price.cum_max().over(partition_by=r.symbol, order_by=r.date),
+> )
+> ```
+
 #### `r.col.shift`
 - **签名**: `r.col.shift(offset: int, default: Any = None, partition_by: str | Expr | None = None) -> Expr`
 - **行为**: 访问相对行。正偏移向前看（前面的行），负偏移向后看（后面的行），与 pandas `Series.shift()` 一致。指定 `partition_by` 时窗口在分组边界处重置（LAG/LEAD OVER PARTITION BY）
@@ -710,14 +720,14 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over`（窗口规格）
 - **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **行为**: 为排名函数应用窗口规格。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值
+- **行为**: 为窗口表达式应用窗口规格——既可用于排名函数（`row_number`/`rank`/`dense_rank`/`ntile`），也可用于序列窗口（`shift`/`rolling`/`diff`/`cum_*`）。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值。序列窗口的 `order_by` 可省略（退回表序），排名函数则必需
 - **参数**:
   - `partition_by` 分区列（可选）
-  - `order_by` 排序列（排名函数必需）
+  - `order_by` 排序列（排名函数必需；序列窗口可选）
   - `descending` order_by 的排序方向（默认 False）
   - `desc` descending 的别名；两者都传时以 `descending` 为准，与 sort() 的处理一致
 - **返回**: 可用于 derive() 的 `WindowExpr`
-- **异常**: `TypeError`（partition_by/order_by 类型无效）
+- **异常**: `ValueError`（在非窗口表达式上调用，或 `partition_by` 同时由 `.over()` 与序列窗口的 `partition_by=` 参数给出）
 - **示例**:
 ```python
 t.derive(rn=lambda r: row_number().over(

@@ -543,6 +543,16 @@ t.slice(offset=10, length=5)
 
 > These operations require a prior `.sort()` (or `.assume_sorted()`) to establish order. `shift` additionally accepts a `partition_by=` kwarg (column name string or expression) to restart the window at group boundaries.
 
+> **Unified `.over()` entry**: sequence windows (`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`) also accept the same `.over()` clause as the ranking functions. The rule is one line: **window expressions default to table order; `.over()` overrides partition/order.** So `r.close.shift(1).over(partition_by=r.symbol)` is equivalent to `r.close.shift(1, partition_by="symbol")`, and `.over(order_by=..., desc=...)` overrides the table sort for that expression. `partition_by` may be supplied via `.over(partition_by=)` **or** the `partition_by=` kwarg, but not both — passing both raises `ValueError`.
+>
+> ```python
+> t.sort("date").derive(
+>     prev=lambda r: r.close.shift(1).over(partition_by=r.symbol),
+>     ma5=lambda r: r.close.rolling(5).mean().over(partition_by=r.symbol),
+>     peak=lambda r: r.price.cum_max().over(partition_by=r.symbol, order_by=r.date),
+> )
+> ```
+
 #### `r.col.shift`
 - **Signature**: `r.col.shift(offset: int, default: Any = None, partition_by: str | Expr | None = None) -> Expr`
 - **Behavior**: Access relative rows. Positive offset looks backward (previous rows), negative offset looks forward (future rows). Consistent with pandas `Series.shift()`. With `partition_by`, the window resets at group boundaries (LAG/LEAD OVER PARTITION BY)
@@ -713,14 +723,14 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over` (Window Specification)
 - **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **Behavior**: Apply a window specification to a ranking function. `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`
+- **Behavior**: Apply a window specification to a window expression — either a ranking function (`row_number`/`rank`/`dense_rank`/`ntile`) or a sequence window (`shift`/`rolling`/`diff`/`cum_*`). `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`. For sequence windows `order_by` is optional (falls back to the table sort); for ranking functions it is required
 - **Parameters**:
   - `partition_by` column to partition by (optional)
-  - `order_by` column to order by (required for ranking functions)
+  - `order_by` column to order by (required for ranking functions; optional for sequence windows)
   - `descending` sort direction for order_by (default False)
   - `desc` alias for `descending`; when both are given, `descending` takes precedence, matching `sort()`'s resolution
 - **Returns**: `WindowExpr` ready for use in derive()
-- **Exceptions**: `TypeError` (invalid partition_by/order_by types)
+- **Exceptions**: `ValueError` (called on a non-window expression, or `partition_by` given both here and via the sequence window's `partition_by=` kwarg)
 - **Example**:
 ```python
 t.derive(rn=lambda r: row_number().over(
