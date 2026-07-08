@@ -245,27 +245,29 @@ class TestPartitionedNestedWindows:
         assert not any(c.startswith("__ltseq_stage_") for c in one_step.columns)
 
 
-class TestSequenceWindowOverGuard:
-    """`.over()` on sequence windows is deferred to #117 — it must raise a clear
-    error pointing to the `partition_by=` kwarg, not a confusing Rust error."""
+class TestSequenceWindowOverAccepted:
+    """`.over()` on sequence windows is now the unified window entry (#117):
+    it produces a WindowExpr rather than raising. End-to-end behavior and the
+    coexistence-error rule are covered in test_window_over.py."""
 
-    def test_shift_over_raises_not_implemented(self):
-        from ltseq.expr.types import ColumnExpr
+    def test_shift_over_produces_window(self):
+        from ltseq.expr.types import ColumnExpr, WindowExpr
 
-        with pytest.raises(NotImplementedError, match="#117"):
-            ColumnExpr("close").shift(1).over(partition_by=ColumnExpr("symbol"))
+        w = ColumnExpr("close").shift(1).over(partition_by=ColumnExpr("symbol"))
+        assert isinstance(w, WindowExpr)
+        assert w.serialize()["type"] == "Window"
 
-    def test_rolling_over_raises_not_implemented(self):
-        from ltseq.expr.types import ColumnExpr
+    def test_rolling_over_produces_window(self):
+        from ltseq.expr.types import ColumnExpr, WindowExpr
 
-        with pytest.raises(NotImplementedError, match="partition_by"):
-            ColumnExpr("close").rolling(5).mean().over(partition_by=ColumnExpr("symbol"))
+        w = ColumnExpr("close").rolling(5).mean().over(partition_by=ColumnExpr("symbol"))
+        assert isinstance(w, WindowExpr)
 
-    def test_cum_max_over_raises_not_implemented(self):
-        from ltseq.expr.types import ColumnExpr
+    def test_cum_max_over_produces_window(self):
+        from ltseq.expr.types import ColumnExpr, WindowExpr
 
-        with pytest.raises(NotImplementedError, match="#117"):
-            ColumnExpr("price").cum_max().over(partition_by=ColumnExpr("symbol"))
+        w = ColumnExpr("price").cum_max().over(partition_by=ColumnExpr("symbol"))
+        assert isinstance(w, WindowExpr)
 
     def test_row_number_over_still_works(self):
         from ltseq.expr import row_number

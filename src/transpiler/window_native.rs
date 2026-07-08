@@ -217,7 +217,22 @@ fn pyexpr_to_window_inner(
             // Non-window functions that might contain window sub-expressions
             _ => convert_expr_with_window_children(py_expr, schema, order_by),
         },
-        PyExpr::Window { .. } => convert_window_ranking(&py_expr, schema, order_by),
+        // `.over()` wraps either a ranking function or a sequence window.
+        // Ranking funcs keep the dedicated ranking path; sequence windows route
+        // through the shared sequence converters via convert_window_sequence.
+        PyExpr::Window { expr, .. } => match expr.as_ref() {
+            PyExpr::Call { func, .. }
+                if matches!(func.as_str(), "row_number" | "rank" | "dense_rank" | "ntile") =>
+            {
+                convert_window_ranking(&py_expr, schema, order_by)
+            }
+            PyExpr::Call { func, on, .. } if super::is_window_call(func, on.as_ref()) => {
+                convert_window_sequence(&py_expr, schema, order_by)
+            }
+            _ => Err(
+                ".over() must wrap a ranking or sequence window function".to_string(),
+            ),
+        },
         // BinOp, UnaryOp might contain window functions in their children
         PyExpr::BinOp { .. } | PyExpr::UnaryOp { .. } => {
             convert_expr_with_window_children(py_expr, schema, order_by)
@@ -485,6 +500,109 @@ fn convert_window_ranking(
             .map_err(|e| format!("Failed to build window ranking expr: {}", e))
     } else {
         Err("Expected Window expression".to_string())
+    }
+}
+
+/// Route a sequence-window `.over()` (shift/diff/cum_*/rolling.agg()) through the
+/// existing sequence converters (issue #117).
+///
+/// The `.over()` clause carries partition/order that the sequence converters
+/// otherwise read from the inner call's `partition_by=` kwarg and the table
+/// sort. We fold the wrapper's `partition_by` into the inner call's kwargs and
+/// compute the effective ORDER BY, then re-dispatch through the normal path —
+/// no changes needed in convert_shift/diff/cum_agg/rolling_agg.
+fn convert_window_sequence(
+    py_expr: &PyExpr,
+    schema: &ArrowSchema,
+    table_order_by: &[Sort],
+) -> Result<Expr, String> {
+    if let PyExpr::Window {
+        expr,
+        partition_by,
+        order_by,
+        descending,
+    } = py_expr
+    {
+        // Effective ORDER BY: the wrapper's own single order_by key if given,
+        // else fall back to the table sort. Mirrors convert_window_ranking.
+        let effective_order_by: Vec<Sort> = if let Some(ob) = order_by {
+            let ob_expr = pyexpr_to_datafusion(*ob.clone(), schema)?;
+            vec![Sort {
+                expr: ob_expr,
+                asc: !descending,
+                nulls_first: !descending, // ascending → nulls first, descending → nulls last
+            }]
+        } else {
+            table_order_by.to_vec()
+        };
+
+        // Fold the wrapper's partition_by into the inner call's kwargs so the
+        // existing converters pick it up via extract_partition_by.
+        let synthesized = synthesize_seq_call(expr.as_ref(), partition_by.as_deref())?;
+        pyexpr_to_window_inner(synthesized, schema, &effective_order_by)
+    } else {
+        Err("Expected Window expression for sequence window".to_string())
+    }
+}
+
+/// Clone a sequence-window call and inject `partition_by` into the kwargs the
+/// matching converter reads. For `rolling(n).agg()` the kwarg lives on the
+/// inner `rolling()` call (where convert_rolling_agg reads it), not the outer
+/// aggregate. With no partition_by the call is returned unchanged.
+fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<PyExpr, String> {
+    let pb = match partition_by {
+        Some(pb) => pb.clone(),
+        None => return Ok(inner.clone()),
+    };
+    if let PyExpr::Call {
+        func,
+        args,
+        kwargs,
+        on,
+    } = inner
+    {
+        let is_rolling_agg = matches!(
+            func.as_str(),
+            "mean" | "sum" | "min" | "max" | "count" | "std"
+        ) && matches!(on.as_ref(), PyExpr::Call { func: f, .. } if f == "rolling");
+
+        if is_rolling_agg {
+            if let PyExpr::Call {
+                func: rf,
+                args: rargs,
+                kwargs: rkwargs,
+                on: ron,
+            } = on.as_ref()
+            {
+                let mut new_kwargs = rkwargs.clone();
+                new_kwargs.insert("partition_by".to_string(), pb);
+                let new_rolling = PyExpr::Call {
+                    func: rf.clone(),
+                    args: rargs.clone(),
+                    kwargs: new_kwargs,
+                    on: ron.clone(),
+                };
+                Ok(PyExpr::Call {
+                    func: func.clone(),
+                    args: args.clone(),
+                    kwargs: kwargs.clone(),
+                    on: Box::new(new_rolling),
+                })
+            } else {
+                Err("Expected rolling() call in rolling aggregate".to_string())
+            }
+        } else {
+            let mut new_kwargs = kwargs.clone();
+            new_kwargs.insert("partition_by".to_string(), pb);
+            Ok(PyExpr::Call {
+                func: func.clone(),
+                args: args.clone(),
+                kwargs: new_kwargs,
+                on: on.clone(),
+            })
+        }
+    } else {
+        Err("Window must wrap a function call".to_string())
     }
 }
 
