@@ -393,6 +393,40 @@ fn convert_rolling_agg(
                 return Err("rolling() window size must be a literal integer".to_string());
             };
 
+            // A window size below 1 used to be silently clamped to a
+            // degenerate current-row-only frame (issue #125 finding 8).
+            if window_size < 1 {
+                return Err(format!(
+                    "rolling() window size must be >= 1, got {}",
+                    window_size
+                ));
+            }
+
+            // Validate kwargs: partition_by is the only supported one.
+            // Silently ignoring min_periods (or a typo) produces results
+            // that look right but aren't what the caller asked for.
+            for key in inner_kwargs.keys() {
+                match key.as_str() {
+                    "partition_by" => {}
+                    "min_periods" => {
+                        return Err(
+                            "rolling() does not support min_periods; LTSeq rolling \
+                             uses SQL partial-frame semantics (the window start is \
+                             clipped at the first row, so early rows aggregate over \
+                             fewer than window_size rows)"
+                                .to_string(),
+                        )
+                    }
+                    other => {
+                        return Err(format!(
+                            "rolling() got an unexpected keyword argument '{}'; \
+                             supported: partition_by",
+                            other
+                        ))
+                    }
+                }
+            }
+
             // Get the column being aggregated
             let col_expr = pyexpr_to_datafusion(*inner_on.clone(), schema)?;
 
@@ -411,10 +445,11 @@ fn convert_rolling_agg(
             };
 
             // Build window frame: ROWS BETWEEN (window_size-1) PRECEDING AND CURRENT ROW
+            // (window_size >= 1 validated above)
             let frame = WindowFrame::new_bounds(
                 WindowFrameUnits::Rows,
                 WindowFrameBound::Preceding(ScalarValue::UInt64(Some(
-                    (window_size - 1).max(0) as u64
+                    (window_size - 1) as u64
                 ))),
                 WindowFrameBound::CurrentRow,
             );

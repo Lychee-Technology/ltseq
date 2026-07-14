@@ -265,6 +265,20 @@ fn draw_header(schema: &ArrowSchema, col_widths: &[usize]) -> String {
 }
 
 /// Draw data rows from batches (up to limit)
+/// Truncate long cell values to at most 47 bytes + "...", cutting on a char
+/// boundary — a raw byte slice panics on multi-byte values (issue #125
+/// finding 9: CJK/emoji/combining characters in show()/repr).
+fn truncate_value(value_str: String) -> String {
+    if value_str.len() <= 50 {
+        return value_str;
+    }
+    let mut cut = 47;
+    while !value_str.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &value_str[..cut])
+}
+
 fn draw_rows(batches: &[RecordBatch], col_widths: &[usize], limit: usize) -> String {
     let mut rows = String::new();
     let mut row_count = 0;
@@ -285,12 +299,7 @@ fn draw_rows(batches: &[RecordBatch], col_widths: &[usize], limit: usize) -> Str
                 rows.push(' ');
                 let col = batch.column(col_idx);
                 let value_str = typed_col.format(row_idx, col);
-                // Truncate long values
-                let truncated = if value_str.len() > 50 {
-                    format!("{}...", &value_str[..47])
-                } else {
-                    value_str
-                };
+                let truncated = truncate_value(value_str);
                 rows.push_str(&format!(
                     "{:<width$}",
                     truncated,
@@ -338,4 +347,43 @@ pub fn format_table(
     output.push_str(&draw_border(&col_widths));
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_value;
+
+    #[test]
+    fn short_values_pass_through() {
+        assert_eq!(truncate_value("hello".to_string()), "hello");
+    }
+
+    #[test]
+    fn long_ascii_truncates_at_47() {
+        let out = truncate_value("x".repeat(80));
+        assert_eq!(out, format!("{}...", "x".repeat(47)));
+    }
+
+    #[test]
+    fn long_cjk_does_not_panic_and_cuts_on_char_boundary() {
+        // 3-byte chars: 47 is not a boundary (boundaries at multiples of 3)
+        let out = truncate_value("数据序列处理库".repeat(12));
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 50);
+    }
+
+    #[test]
+    fn long_emoji_does_not_panic() {
+        let out = truncate_value("🚀🎉🔥💡🌟".repeat(15));
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn combining_chars_do_not_panic() {
+        // "éàô" as e/a/o + U+0301/U+0300/U+0302 — byte 47 lands inside a
+        // combining mark (the original panic repro).
+        let e = "e\u{301}a\u{300}o\u{302}";
+        let out = truncate_value(e.repeat(20));
+        assert!(out.ends_with("..."));
+    }
 }

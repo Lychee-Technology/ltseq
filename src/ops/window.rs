@@ -245,14 +245,23 @@ fn native_window_derive(
 ) -> PyResult<LTSeqTable> {
     let plan = build_staged_plan(schema, parsed_cols);
 
+    // Overwriting a sort key invalidates the declared order from that key on
+    // (issue #125 finding 4).
+    let derived_names: std::collections::HashSet<String> =
+        parsed_cols.iter().map(|(name, _)| name.clone()).collect();
+    let result_specs =
+        crate::ops::common::truncate_specs_at_overwrite(&table.sort_specs, &derived_names);
+
     // Fast path: no nested windows — the existing single lazy projection.
+    // Replace-or-add: an existing name is replaced in place, new names append.
     if plan.stage_cols.is_empty() {
-        let mut all_exprs: Vec<Expr> = original_columns(schema);
+        let mut derived: Vec<(String, Expr)> = Vec::with_capacity(parsed_cols.len());
         for (col_name_str, py_expr) in parsed_cols.iter() {
             let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
                 .map_err(LtseqError::Transpile)?;
-            all_exprs.push(window_expr.alias(col_name_str));
+            derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
         }
+        let all_exprs = crate::ops::common::merge_derived_columns(schema, derived);
         let result_df = (**df)
             .clone()
             .select(all_exprs)
@@ -262,7 +271,7 @@ fn native_window_derive(
         return Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),
             result_df,
-            table.sort_specs.clone(),
+            result_specs,
             None, // column set changed relative to the raw file: drop fast-path token
         ));
     }
@@ -284,15 +293,17 @@ fn native_window_derive(
 
     // Stage 2: original columns + the rewritten user expressions (hidden
     // columns are consumed here and NOT selected — they never reach the
-    // result schema).
+    // result schema). Replace-or-add applies here too; the base column list
+    // comes from the ORIGINAL schema, so hidden stage-1 columns cannot leak.
     let stage_schema = LTSeqTable::schema_from_df(stage_df.schema());
-    let mut stage2: Vec<Expr> = original_columns(schema);
+    let mut derived: Vec<(String, Expr)> = Vec::with_capacity(plan.final_cols.len());
     for (col_name_str, py_expr) in plan.final_cols.iter() {
         let window_expr =
             pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)
                 .map_err(LtseqError::Transpile)?;
-        stage2.push(window_expr.alias(col_name_str));
+        derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
     }
+    let stage2 = crate::ops::common::merge_derived_columns(schema, derived);
     let result_df = stage_df
         .select(stage2)
         .map_err(|e| LtseqError::Runtime(format!("Native window derive failed: {}", e)))?;
@@ -300,7 +311,7 @@ fn native_window_derive(
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_specs.clone(),
+        result_specs,
         None, // column set changed relative to the raw file: drop fast-path token
     ))
 }

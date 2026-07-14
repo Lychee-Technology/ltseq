@@ -276,6 +276,12 @@ class TransformMixin(LookupMixin, LTSeqLike):
         """
         Add or overwrite columns.
 
+        Deriving an existing column name replaces that column in place
+        (stable column order, no duplicates — Polars ``with_columns``
+        semantics); the expression reads the ORIGINAL column values.
+        Overwriting a sort key invalidates the declared sort order from
+        that key onward (``sort_keys`` prefix-truncates).
+
         Args:
             *args: Single callable returning dict of {col_name: expr}
             **kwargs: Mapping of column name to lambda

@@ -422,7 +422,7 @@ t.select(lambda r: [r.id, r.name])
 
 ### `LTSeq.derive`（别名: `with_columns`）
 - **签名**: `LTSeq.derive(**new_cols: Callable) -> LTSeq` 或 `LTSeq.derive(func: Callable[[Row], dict[str, Expr]]) -> LTSeq`
-- **行为**: 新增或覆盖列，保留已有列。`with_columns` 是面向 Polars 用户的别名
+- **行为**: 新增或覆盖列，保留已有列。派生已存在的列名会**原位替换**该列（列序稳定、无重复列——Polars `with_columns` 语义），表达式读取的是**原始**列值。覆盖排序键会使声明排序从该键起失效（`sort_keys` 前缀截断）。`with_columns` 是面向 Polars 用户的别名
 - **参数**: `new_cols` 列名到 lambda 的映射；或返回字典的 lambda
 - **返回**: 带派生列的新 `LTSeq`
 - **异常**: `ValueError`（schema 未初始化），`TypeError`（返回类型无效），`AttributeError`（列不存在）
@@ -572,11 +572,11 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 ```
 
 #### `r.col.rolling`
-- **签名**: `r.col.rolling(window_size: int).agg_func() -> Expr`
-- **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`
-- **参数**: `window_size` 窗口大小
+- **签名**: `r.col.rolling(window_size: int, partition_by: str | Expr | None = None).agg_func() -> Expr`
+- **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`。**partial-frame 语义**（SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`）：窗口起点在首行截断，前几行在少于 `window_size` 行上聚合——没有 `min_periods`（传入会报错而不是 NULL 填充）
+- **参数**: `window_size` 窗口大小（>= 1）；`partition_by` 可选分组窗口。未知 kwarg 会点名报错
 - **返回**: 窗口聚合表达式
-- **异常**: `ValueError`（window_size <= 0），`SortRequiredError`（未排序使用）
+- **异常**: `ValueError`（window_size < 1、`min_periods` 或未知 kwarg），`SortRequiredError`（未排序使用）
 - **示例**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())

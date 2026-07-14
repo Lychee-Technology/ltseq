@@ -22,7 +22,6 @@ use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -69,32 +68,24 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     }
 
     // 4. Standard (non-window) derivation using already-parsed expressions
-    let mut df_exprs = Vec::new();
+    let mut derived_exprs = Vec::new();
+    let mut derived_names = std::collections::HashSet::new();
 
     for (col_name_str, py_expr) in parsed_cols {
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(LtseqError::Validation)?
             .alias(&col_name_str);
 
-        df_exprs.push(df_expr);
+        derived_names.insert(col_name_str.clone());
+        derived_exprs.push((col_name_str, df_expr));
     }
 
-    // 5. Apply derivation via select (adds columns to existing data)
+    // 5. Apply derivation via select with replace-or-add semantics (issue
+    // #125 finding 4): an existing name is replaced in place, new names
+    // append — never a duplicate column.
+    let all_exprs = crate::ops::common::merge_derived_columns(schema, derived_exprs);
     let result_df = RUNTIME
         .block_on(async {
-            // Select all existing columns + new derived columns
-            use datafusion::common::Column;
-            let mut all_exprs = Vec::new();
-
-            // Add all existing columns
-            for field in schema.fields() {
-                // Use Column::new_unqualified to preserve case
-                all_exprs.push(Expr::Column(Column::new_unqualified(field.name())));
-            }
-
-            // Add derived columns
-            all_exprs.extend(df_exprs);
-
             (**df)
                 .clone()
                 .select(all_exprs)
@@ -102,11 +93,14 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         })
         .map_err(LtseqError::Runtime)?;
 
-    // 6. Return new LTSeqTable with derived columns added (schema recomputed)
+    // 6. Return new LTSeqTable with derived columns added (schema recomputed).
+    // Overwriting a sort key invalidates the declared order from that key on.
+    let sort_specs =
+        crate::ops::common::truncate_specs_at_overwrite(&table.sort_specs, &derived_names);
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
-        table.sort_specs.clone(),
+        sort_specs,
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
 }
