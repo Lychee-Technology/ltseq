@@ -38,6 +38,7 @@ pub fn sort_impl(
 
     // Capture full sort specs (column + direction) for downstream window ops
     let mut captured_specs = Vec::new();
+    let mut metadata_truncated = false;
 
     // Deserialize and transpile each sort expression
     let mut df_sort_exprs = Vec::new();
@@ -47,9 +48,16 @@ pub fn sort_impl(
         // Get desc flag for this sort key
         let is_desc = desc_flags.get(i).copied().unwrap_or(false);
 
-        // Capture column name if this is a simple column reference
+        // Capture column name if this is a simple column reference. A
+        // computed key cannot be represented in sort metadata — TRUNCATE
+        // there (issue #125): capturing later columns would record a
+        // non-prefix of the true order, e.g. sort("a", expr, "c") → [a, c].
         if let PyExpr::Column(ref col_name) = py_expr {
-            captured_specs.push(SortSpec::new(col_name.clone(), is_desc));
+            if !metadata_truncated {
+                captured_specs.push(SortSpec::new(col_name.clone(), is_desc));
+            }
+        } else {
+            metadata_truncated = true;
         }
 
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
@@ -125,7 +133,8 @@ pub fn assume_sorted_impl(
 
     let (df, _schema) = table.require_df_and_schema()?;
 
-    // Capture sort specs (same logic as sort_impl, but skip the actual sort)
+    // Capture sort specs (same logic as sort_impl, but skip the actual
+    // sort). Truncate at the first computed key — see sort_impl.
     let mut captured_specs = Vec::new();
     for (i, expr_dict) in sort_exprs.iter().enumerate() {
         let py_expr = dict_to_py_expr(expr_dict)?;
@@ -133,6 +142,8 @@ pub fn assume_sorted_impl(
         if let PyExpr::Column(ref col_name) = py_expr {
             let is_desc = desc_flags.get(i).copied().unwrap_or(false);
             captured_specs.push(SortSpec::new(col_name.clone(), is_desc));
+        } else {
+            break;
         }
     }
 
@@ -176,18 +187,21 @@ pub fn assume_sorted_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
-    if batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            captured_specs,
-            None,
-        ));
-    }
-
-    let batch_schema = batches[0].schema();
+    // A filtered-to-empty table must stay queryable (PR #126 review):
+    // assume_sorted() is the one-line migration for the declared-order
+    // requirement, so it cannot degrade to a schema-only stub that raises
+    // "No data loaded" on len()/cum_sum(). Keep a zero-row MemTable.
+    let batch_schema = match batches.first() {
+        Some(batch) => batch.schema(),
+        None => LTSeqTable::schema_from_df(df.schema()),
+    };
+    let partitions = if batches.is_empty() {
+        vec![Vec::new()]
+    } else {
+        vec![batches]
+    };
     let mem_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![batches])
+        MemTable::try_new(Arc::clone(&batch_schema), partitions)
             .map_err(|e| {
                 LtseqError::Runtime(format!(
                     "Failed to create MemTable: {}",

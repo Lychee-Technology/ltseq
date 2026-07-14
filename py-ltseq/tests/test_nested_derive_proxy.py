@@ -371,7 +371,7 @@ class TestDeriveInREPLContext:
         result_holder = {}
         code = f"""
 from ltseq import LTSeq
-t = LTSeq.read_csv({repr(sample_csv)})
+t = LTSeq.read_csv({repr(sample_csv)}).assume_sorted("date")
 grouped = t.group_ordered(lambda r: r.is_up)
 result = grouped.derive(lambda g: {{"n": g.count()}})
 result_holder['result'] = result
@@ -386,7 +386,7 @@ result_holder['result'] = result
         result_holder = {}
         code = f"""
 from ltseq import LTSeq
-t = LTSeq.read_csv({repr(sample_csv)})
+t = LTSeq.read_csv({repr(sample_csv)}).assume_sorted("date")
 grouped = t.group_ordered(lambda r: r.is_up)
 result = grouped.derive(lambda g: {{"start": g.first().date}})
 result_holder['result'] = result
@@ -401,7 +401,7 @@ result_holder['result'] = result
         result_holder = {}
         code = f"""
 from ltseq import LTSeq
-t = LTSeq.read_csv({repr(sample_csv)})
+t = LTSeq.read_csv({repr(sample_csv)}).assume_sorted("date")
 grouped = t.group_ordered(lambda r: r.is_up)
 filtered = grouped.filter(lambda g: g.count() > 2)
 result = filtered.derive(lambda g: {{"n": g.count()}})

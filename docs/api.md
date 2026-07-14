@@ -27,6 +27,7 @@ This document describes the API **as currently implemented**. Every signature be
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `SortRequiredError: Window functions ... require a defined row order` | Called `shift`/`rolling`/`diff`/cumulative without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
+| `SortRequiredError: group_ordered() ... requires a declared row order` | Called `group_ordered`/`group_sorted`/`cum_sum` without prior `.sort()` | Add `.sort(...)` first, or `.assume_sorted(...)` if the data is already ordered. Computed sort keys don't count — derive them as a column first |
 | `ColumnNotFoundError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
 | `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
@@ -464,6 +465,7 @@ t.drop("tmp", "debug_flag")
 - **Parameters**: `keys` column names or expressions; `desc`/`descending` global or per-key descending flags
 - **Returns**: sorted `LTSeq` with tracked sort keys
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid key type), `AttributeError` (column not found)
+- **Computed keys**: a computed key (e.g. `lambda r: r.a * 2`) sorts the data physically but **cannot be tracked as declared order** — `sort_keys` truncates at the first computed key, so `sort("a", lambda r: r.b * 2, "c")` declares only `[a]`, and `sort(lambda r: r.a * 2)` alone declares nothing (ordered APIs like `cum_sum` will still raise `SortRequiredError`). To use a computed key as declared order, derive it as a column first: `.derive(k=...).sort("k")`. After truncation, the order of rows that tie on the declared prefix is **unspecified** — window execution may reorder ties
 - **Example**:
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
@@ -504,8 +506,8 @@ t_sorted.is_sorted_by("a", desc=True)  # False (direction mismatch)
 ```
 
 ### `LTSeq.assume_sorted`
-- **Signature**: `LTSeq.assume_sorted(*keys: str, desc: bool | list[bool] = False) -> LTSeq`
-- **Behavior**: Declare that data is already sorted by the given keys **without physically sorting**. Enables window functions and merge joins on pre-sorted data (e.g., pre-sorted Parquet) while skipping the sort. The caller is responsible for correctness — wrong metadata produces wrong results
+- **Signature**: `LTSeq.assume_sorted(*keys: str | Callable, desc: bool | list[bool] = False) -> LTSeq`
+- **Behavior**: Declare that data is already sorted by the given keys **without physically sorting**. Enables window functions and merge joins on pre-sorted data (e.g., pre-sorted Parquet) while skipping the sort. The caller is responsible for correctness — wrong metadata produces wrong results. Like `sort()`, the declared order truncates at the first computed key — only leading plain-column keys count
 - **Parameters**: `keys` column names declaring the sort order; `desc` descending flag(s)
 - **Returns**: `LTSeq` with sort metadata set (same underlying data)
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid desc type)
@@ -620,10 +622,10 @@ t.sort("date").derive(
 
 #### `LTSeq.cum_sum`
 - **Signature**: `LTSeq.cum_sum(*cols: str | Callable) -> LTSeq`
-- **Behavior**: Add cumulative sum columns with `*_cumsum` suffix. For custom output names use the expression form `r.col.cum_sum()` inside `derive()`
+- **Behavior**: Add cumulative sum columns with `*_cumsum` suffix. Requires a prior `.sort(...)` or `.assume_sorted(...)`. For custom output names use the expression form `r.col.cum_sum()` inside `derive()`
 - **Parameters**: `cols` column names or expressions
 - **Returns**: new `LTSeq` with cumulative columns
-- **Exceptions**: `ValueError` (no columns or schema not initialized), `TypeError` (non-numeric)
+- **Exceptions**: `SortRequiredError` (no declared row order), `ValueError` (no columns or schema not initialized), `TypeError` (non-numeric)
 - **Example**:
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
@@ -819,10 +821,10 @@ every_tenth = t.step(10)
 
 ### `LTSeq.group_ordered` (alias: `group_consecutive`)
 - **Signature**: `LTSeq.group_ordered(key: Callable[[Row], Expr]) -> NestedTable`
-- **Behavior**: Group only consecutive equal values; does not reorder. `group_consecutive` is a more descriptive alias for the same method
+- **Behavior**: Group only consecutive equal values in the table's declared row order; does not reorder. Requires a prior `.sort(...)` or `.assume_sorted(...)`. `group_consecutive` is a more descriptive alias for the same method
 - **Parameters**: `key` grouping key expression
 - **Returns**: `NestedTable` (group-level operations)
-- **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid key), `AttributeError` (column not found)
+- **Exceptions**: `SortRequiredError` (no declared row order), `ValueError` (schema not initialized), `TypeError` (invalid key), `AttributeError` (column not found)
 - **Example**:
 ```python
 groups = t.sort("date").group_ordered(lambda r: r.is_up)
@@ -832,10 +834,10 @@ groups = t.sort("date").group_consecutive(lambda r: r.is_up)
 
 ### `LTSeq.group_sorted`
 - **Signature**: `LTSeq.group_sorted(key: Callable[[Row], Expr]) -> NestedTable`
-- **Behavior**: Assumes global sort by key; one-pass grouping without hashing
+- **Behavior**: Assumes global sort by key; one-pass grouping without hashing. The grouping key must be a plain column that leads the declared sort order (`.sort(key)` or `.assume_sorted(key)` first); computed grouping keys cannot be verified against sort metadata and are rejected — derive them as a column first
 - **Parameters**: `key` grouping key expression
 - **Returns**: `NestedTable`
-- **Exceptions**: `ValueError` (unsorted or schema not initialized), `TypeError` (invalid key)
+- **Exceptions**: `SortRequiredError` (no declared order, key does not lead it, or computed key), `ValueError` (schema not initialized), `TypeError` (invalid key)
 - **Example**:
 ```python
 groups = t.sort("user_id").group_sorted(lambda r: r.user_id)
@@ -906,7 +908,7 @@ enriched = groups.derive(lambda g: {
 - **Example**:
 ```python
 # One row per consecutive run
-spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+spans = t.sort("date").group_ordered(lambda r: r.is_up).agg(lambda g: {
     "start": g.first().date,
     "end": g.last().date,
     "n": g.count(),

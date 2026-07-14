@@ -405,20 +405,25 @@ class TestCumSumBasic:
             pytest.skip("cum_sum() not yet implemented")
 
     def test_cum_sum_requires_sort(self, sample_csv):
-        """cum_sum() should ideally be used on sorted data."""
+        """cum_sum() on an undeclared row order raises (issue #125): a
+        running sum over unstable physical order is nondeterministic."""
+        from ltseq.exceptions import SortRequiredError
+
         t = LTSeq.read_csv(sample_csv)  # Not sorted
 
-        try:
-            result = t.cum_sum("volume")
-            assert isinstance(result, LTSeq)
-        except NotImplementedError:
-            pytest.skip("cum_sum() not yet implemented")
+        with pytest.raises(SortRequiredError):
+            t.cum_sum("volume")
 
     def test_cum_sum_empty_table(self, empty_table):
         """cum_sum() on an empty (0-row) table stays native (#91 PR 3):
         the window select over an empty DataFrame must produce an empty
         result whose schema carries the new cumsum column."""
-        result = empty_table.cum_sum("value")
+        # Build a 0-row table that still has a live dataframe and declared
+        # order (assume_sorted on a truly empty table degrades to a
+        # schema-only table, which short-circuits before the native path).
+        t = LTSeq._from_rows([{"value": 1.0}], {"value": "float64"})
+        empty = t.sort("value").filter(lambda r: r.value < 0)
+        result = empty.cum_sum("value")
         assert isinstance(result, LTSeq)
         assert "value_cumsum" in result.columns
         assert len(result) == 0

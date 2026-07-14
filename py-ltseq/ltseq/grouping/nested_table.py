@@ -18,7 +18,7 @@ class NestedTable:
     underlying row data.
 
     The difference between group_ordered and group_sorted is semantic:
-    - group_ordered: groups consecutive identical values (no assumption about sorting)
+    - group_ordered: groups consecutive identical values in the declared row order
     - group_sorted: assumes data is globally sorted by key (consecutive = all same key)
 
     Both use the same underlying algorithm (consecutive grouping), but group_sorted

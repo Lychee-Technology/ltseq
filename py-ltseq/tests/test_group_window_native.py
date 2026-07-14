@@ -111,7 +111,7 @@ class TestChains:
 class TestEdges:
     def test_empty_table(self):
         df = pd.DataFrame({"g": pd.Series([], dtype="int64"), "v": pd.Series([], dtype="float64")})
-        t = LTSeq.from_pandas(df)
+        t = LTSeq.from_pandas(df).sort("g")
         grouped = t.group_ordered(lambda r: r.g)
         result = grouped.derive(lambda g: {"n": g.count()})
         assert len(result) == 0

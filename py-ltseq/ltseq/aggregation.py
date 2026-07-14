@@ -95,6 +95,14 @@ class AggregationMixin(LTSeqLike):
         if not cols:
             raise ValueError("cum_sum() requires at least one column argument")
 
+        # Same ordering invariant as window expressions in derive() (issue
+        # #125): a running sum over an undeclared row order is nondeterministic
+        # on multi-partition plans.
+        if not self._sort_keys:
+            from .transforms import _window_sort_required_error
+
+            raise _window_sort_required_error()
+
         cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
 
         result_inner = self._inner.cum_sum(cum_exprs)
@@ -104,7 +112,10 @@ class AggregationMixin(LTSeqLike):
         """
         Group consecutive identical values based on a grouping function.
 
-        Groups only consecutive rows with identical values in the grouping column.
+        Groups only consecutive rows with identical values in the grouping
+        column, in the table's DECLARED row order: call .sort(...) first, or
+        .assume_sorted(...) if the data is already ordered (issue #125 —
+        undeclared physical order is not stable on multi-partition plans).
 
         Args:
             grouping_fn: Lambda that extracts the grouping key.
@@ -127,6 +138,21 @@ class AggregationMixin(LTSeqLike):
         if not callable(grouping_fn):
             raise TypeError(
                 f"grouping_fn must be callable, got {type(grouping_fn).__name__}"
+            )
+
+        # group_ordered() groups CONSECUTIVE rows, so its result is defined by
+        # row order. An undeclared physical order is not stable on
+        # multi-partition plans (issue #125): require .sort() or, for data
+        # already ordered on disk, .assume_sorted().
+        if not self._sort_keys:
+            from .exceptions import SortRequiredError
+            from .transforms import _COMPUTED_SORT_HINT
+
+            raise SortRequiredError(
+                "group_ordered() groups consecutive rows and therefore "
+                "requires a declared row order. Call .sort(...) first, or "
+                ".assume_sorted(...) if the data is already ordered."
+                + _COMPUTED_SORT_HINT
             )
 
         return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), grouping_fn, is_sorted=False)
@@ -161,6 +187,48 @@ class AggregationMixin(LTSeqLike):
 
         if not callable(key):
             raise TypeError(f"key must be callable, got {type(key).__name__}")
+
+        # Capture first so invalid columns raise ColumnNotFound-style errors
+        # before any sortedness complaint.
+        key_expr = self._capture_expr(key)
+
+        # Validate the sortedness the API name promises (issue #125): the
+        # grouping key must lead the declared sort order, or interleaved keys
+        # would be split into multiple consecutive runs instead of one group
+        # per key. .assume_sorted(key) is the trust-the-caller escape hatch.
+        if not self._sort_keys:
+            from .exceptions import SortRequiredError
+
+            raise SortRequiredError(
+                "group_sorted() requires the table to be sorted by the "
+                "grouping key. Call .sort(key) first, or .assume_sorted(key) "
+                "if the data is already ordered."
+            )
+        if key_expr.get("type") == "Column":
+            first_sort_col = self._sort_keys[0][0]
+            if key_expr.get("name") != first_sort_col:
+                from .exceptions import SortRequiredError
+
+                raise SortRequiredError(
+                    f"group_sorted() key '{key_expr.get('name')}' does not "
+                    f"lead the declared sort order (sorted by "
+                    f"'{first_sort_col}' first). Sort by the grouping key, "
+                    "or use .assume_sorted() to declare the actual order."
+                )
+        else:
+            # A computed grouping key cannot be checked against column-level
+            # sort metadata, and letting it through unchecked silently splits
+            # logical keys into multiple runs whenever the table is sorted by
+            # something else (PR #126 review P1). Sorted-by-g also does not
+            # prove sorted-by-f(g) for arbitrary f, so reject uniformly.
+            from .exceptions import SortRequiredError
+
+            raise SortRequiredError(
+                "group_sorted() cannot verify a computed grouping key "
+                "against the declared sort order. Derive the key as a "
+                "column and sort by it first, e.g. "
+                ".derive(k=...).sort('k').group_sorted(lambda r: r.k)."
+            )
 
         return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), key, is_sorted=True)
 

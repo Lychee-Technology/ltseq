@@ -271,7 +271,11 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
             params: WindowFunctionParams {
                 args: agg.params.args,
                 partition_by: vec![],
-                order_by: vec![],
+                // Accumulate in the DECLARED row order (issue #125): with an
+                // empty ORDER BY the running sum follows physical order,
+                // which is unstable on multi-partition plans. The Python
+                // entry guard guarantees sort_specs is non-empty here.
+                order_by: order_by.clone(),
                 window_frame: group_id_frame,
                 filter: None,
                 null_treatment: None,
@@ -328,9 +332,12 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         }
     };
 
-    // Build __rn__: ROW_NUMBER() OVER (PARTITION BY __group_id__)
+    // Build __rn__: ROW_NUMBER() OVER (PARTITION BY __group_id__ ORDER BY
+    // <declared sort>) — in-group numbering must follow the declared row
+    // order, not the physical partition order (issue #125).
     let rn_expr = row_number()
         .partition_by(vec![group_id_col])
+        .order_by(order_by.clone())
         .build()
         .map_err(|e| LtseqError::Runtime(format!("Failed to build row_number window: {}", e)))?;
 
