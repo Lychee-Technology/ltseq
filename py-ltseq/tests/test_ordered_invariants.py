@@ -105,3 +105,45 @@ class TestComputedSortMetadataPrefix:
         df = pd.DataFrame({"a": [1, 1, 2], "b": [1, 2, 3], "c": [9, 8, 7]})
         t = LTSeq.from_pandas(df).assume_sorted("a", lambda r: r.b * 2, "c")
         assert t._inner.get_sort_keys() == [("a", False)]
+
+    def test_window_after_mixed_sort_uses_prefix(self):
+        """Windows after a mixed computed sort run off the truncated prefix
+        metadata. The declared order is only the prefix — tie order among
+        rows equal on the prefix is unspecified — so the guarantee is
+        self-consistency: output sorted by the prefix, and shift(1) matching
+        the output's own row sequence."""
+        df = pd.DataFrame({"a": [1, 1, 2], "b": [3, 1, 2], "c": [9, 8, 7]})
+        t = LTSeq.from_pandas(df).sort("a", lambda r: r.b * 2, "c")
+        result = t.derive(prev_c=lambda r: r.c.shift(1)).to_pandas()
+        assert result["a"].tolist() == sorted(result["a"].tolist())
+        prev = result["prev_c"].tolist()
+        assert pd.isna(prev[0])
+        assert prev[1:] == [float(x) for x in result["c"].tolist()[:-1]]
+
+
+class TestMultiBatchRegression:
+    """Ordered ops must stay correct when data spans multiple record
+    batches (issue #125 finding 3: undeclared order is unstable on
+    multi-batch/multi-partition plans — declared order must not be)."""
+
+    def test_group_ordered_and_cum_sum_across_batches(self, tmp_path):
+        n = 50_000
+        run = 1_000
+        csv = tmp_path / "multibatch.csv"
+        with open(csv, "w") as f:
+            f.write("cat,v\n")
+            for i in range(n):
+                f.write(f"{i // run},1\n")
+
+        t = LTSeq.read_csv(str(csv)).assume_sorted("cat")
+
+        sized = t.group_ordered(lambda r: r.cat).derive(
+            lambda g: {"sz": g.count()}
+        )
+        df = sized.to_pandas()
+        assert len(df) == n
+        assert (df["sz"] == run).all()
+        assert df["cat"].tolist() == [i // run for i in range(n)]
+
+        cs = t.cum_sum("v").to_pandas()["v_cumsum"]
+        assert cs.tolist() == list(range(1, n + 1))
