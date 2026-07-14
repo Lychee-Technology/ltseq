@@ -29,7 +29,7 @@ cargo test
 LTSeq is a sequence-oriented data processing library with a Rust core and Python bindings. It treats data as ordered sequences (not unordered sets), enabling window functions, sequential grouping, and ordered searches.
 
 ### Technology Stack
-- **Rust Core**: DataFusion 51.0 (SQL engine), Apache Arrow (columnar format), PyO3 (Python bindings)
+- **Rust Core**: DataFusion 54.0 (SQL engine), Apache Arrow (columnar format), PyO3 (Python bindings)
 - **Python Layer**: Thin wrapper with expression DSL and mixin-based API organization
 - **Build System**: Maturin for Rust→Python extension compilation
 

@@ -20,7 +20,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Streaming**: Cursor-based iteration for large datasets
 
 ### Performance
-- Built on **DataFusion 51.0** - battle-tested SQL engine
+- Built on **DataFusion 54.0** - battle-tested SQL engine
 - Pure Rust kernel for zero-copy operations
 - Vectorized execution via Apache Arrow
 - Pushes filters down to the storage layer
@@ -425,7 +425,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 ### Technology Stack
 
 - **Python Bindings**: PyO3 27.2 for seamless Python/Rust integration
-- **SQL Engine**: Apache DataFusion 51.0 (powers Databricks, Apache Datafusion, etc.)
+- **SQL Engine**: Apache DataFusion 54.0 (powers Databricks, Apache Datafusion, etc.)
 - **Data Format**: Apache Arrow for zero-copy columnar operations
 - **Testing**: pytest with 999+ comprehensive tests
 
