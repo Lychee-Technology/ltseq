@@ -20,7 +20,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Streaming**: Cursor-based iteration for large datasets
 
 ### Performance
-- Built on **DataFusion 51.0** - battle-tested SQL engine
+- Built on **DataFusion 54.0** - battle-tested SQL engine
 - Pure Rust kernel for zero-copy operations
 - Vectorized execution via Apache Arrow
 - Pushes filters down to the storage layer

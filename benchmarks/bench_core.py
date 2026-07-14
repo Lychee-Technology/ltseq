@@ -377,7 +377,7 @@ class Benchmarks:
 
         def run():
             t = LTSeq.read_csv(csv_path)
-            result = t.insert(0, {"id": -1, "value": 0, "category": "X", "amount": "0.00", "name": "New"})
+            result = t.insert(0, {"id": -1, "value": 0, "category": "X", "amount": 0.0, "name": "New"})
             _ = len(result)
 
         return self.run_benchmark(f"mutation_insert_{num_rows}", num_rows, run)

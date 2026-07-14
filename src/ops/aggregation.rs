@@ -583,13 +583,13 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
                     Expr::Cast(cast) => {
                         Expr::Cast(datafusion::logical_expr::expr::Cast {
                             expr: Box::new(strip_table_qualifiers(*cast.expr)),
-                            data_type: cast.data_type,
+                            field: cast.field,
                         })
                     }
                     Expr::TryCast(try_cast) => {
                         Expr::TryCast(datafusion::logical_expr::expr::TryCast {
                             expr: Box::new(strip_table_qualifiers(*try_cast.expr)),
-                            data_type: try_cast.data_type,
+                            field: try_cast.field,
                         })
                     }
                     Expr::Not(not) => {

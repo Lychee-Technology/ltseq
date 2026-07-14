@@ -62,6 +62,13 @@ class IOMixin:
         from .core import LTSeq
         import os
 
+        # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
+        # historical lazy-empty behavior for file reads.
+        if not os.path.exists(path):
+            t = LTSeq()
+            t._name = os.path.splitext(os.path.basename(path))[0]
+            return t
+
         # Use Rust static constructor to load CSV directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_csv(path, has_header)
         
@@ -90,6 +97,15 @@ class IOMixin:
         """
         from .core import LTSeq
         import os
+
+        # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
+        # historical lazy-empty behavior for file reads.
+        if not os.path.exists(path):
+            import pyarrow as pa
+
+            t = LTSeq.from_arrow(pa.table({}))
+            t._name = os.path.splitext(os.path.basename(path))[0]
+            return t
 
         # Use Rust static constructor to load Parquet directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_parquet(path)

@@ -252,6 +252,15 @@ class TestEdgeCases:
         df = result.to_pandas()
         assert len(df) == 0
 
+    def test_semi_join_mixed_numeric_types_does_not_truncate(self):
+        """Mixed numeric keys compare without truncating fractional values."""
+        left = LTSeq.from_rows([{"id": 1}, {"id": 2}])
+        right = LTSeq.from_rows([{"id": 1.5}, {"id": 2.0}])
+
+        result = left.semi_join(right, on=lambda l, r: l.id == r.id)
+
+        assert result.to_dicts() == [{"id": 2}]
+
     def test_anti_join_all_match(self, users_csv, orders_csv):
         """Anti-join where all left rows have matches returns empty."""
         users = LTSeq.read_csv(users_csv)

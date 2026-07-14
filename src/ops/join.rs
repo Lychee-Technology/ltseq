@@ -24,7 +24,8 @@ use crate::ops::common::{
 };
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+use datafusion::common::Column;
 use datafusion::logical_expr::col;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
@@ -446,19 +447,96 @@ fn semi_anti_join_impl(
         datafusion::logical_expr::JoinType::LeftSemi
     };
 
-    // Execute native semi/anti join (no column renaming needed - only left columns returned)
+    // DataFusion 54 may choose a failing cast when join key types differ
+    // (for example, non-numeric strings against an Int64 key). Use a
+    // fallible cast on the right key in that case; matching key types keep the
+    // native equijoin path.
+    let key_types_match = left_col_names.iter().zip(&right_col_names).all(|(left, right)| {
+        stored_schema_left.field_with_name(left).ok().map(|field| field.data_type())
+            == stored_schema_right.field_with_name(right).ok().map(|field| field.data_type())
+    });
+    let key_has_null_type = left_col_names
+        .iter()
+        .zip(&right_col_names)
+        .any(|(left, right)| {
+            stored_schema_left
+                .field_with_name(left)
+                .map(|field| field.data_type() == &DataType::Null)
+                .unwrap_or(false)
+                || stored_schema_right
+                    .field_with_name(right)
+                    .map(|field| field.data_type() == &DataType::Null)
+                    .unwrap_or(false)
+        });
+
     let result_df = RUNTIME
         .block_on(async {
-            (**df_left)
-                .clone()
-                .join(
-                    (**df_right).clone(),
-                    df_join_type,
-                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    None, // No additional filter
+            if key_has_null_type {
+                if is_anti {
+                    Ok((**df_left).clone())
+                } else {
+                    (**df_left).clone().filter(lit(false))
+                }
+            } else if key_types_match {
+                (**df_left)
+                    .clone()
+                    .join(
+                        (**df_right).clone(),
+                        df_join_type,
+                        &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        None, // No additional filter
                 )
-                .map_err(|e| format!("Native semi/anti join failed: {}", e))
+            } else {
+                let left_alias = "__ltseq_left";
+                let right_alias = "__ltseq_right";
+                let left_df = (**df_left)
+                    .clone()
+                    .alias(left_alias)
+                    .map_err(|e| format!("Failed to alias left table: {}", e))?;
+                let right_df = (**df_right)
+                    .clone()
+                    .alias(right_alias)
+                    .map_err(|e| format!("Failed to alias right table: {}", e))?;
+                let on_exprs = left_col_names
+                    .iter()
+                    .zip(&right_col_names)
+                    .map(|(left, right)| {
+                        let left_field = stored_schema_left
+                            .field_with_name(left)
+                            .expect("join key was validated")
+                            .clone();
+                        let right_field = stored_schema_right
+                            .field_with_name(right)
+                            .expect("join key was validated")
+                            .clone();
+                        let left_expr = col(Column::new(Some(left_alias), left));
+                        let right_expr = col(Column::new(Some(right_alias), right));
+                        let left_is_string = matches!(
+                            left_field.data_type(),
+                            DataType::Utf8
+                                | DataType::LargeUtf8
+                                | DataType::Utf8View
+                        );
+                        let right_is_string = matches!(
+                            right_field.data_type(),
+                            DataType::Utf8
+                                | DataType::LargeUtf8
+                                | DataType::Utf8View
+                        );
+
+                        if left_is_string && !right_is_string {
+                            left_expr.eq(cast(right_expr, left_field.data_type().clone()))
+                        } else if !left_is_string && right_is_string {
+                            cast(left_expr, right_field.data_type().clone()).eq(right_expr)
+                        } else {
+                            left_expr.eq(right_expr)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                left_df.join_on(right_df, df_join_type, on_exprs)
+            }
+            .map_err(|e| format!("Native semi/anti join failed: {}", e))
         })
         .map_err(LtseqError::Runtime)?;
 
