@@ -187,18 +187,21 @@ pub fn assume_sorted_impl(
         })
         .map_err(LtseqError::Runtime)?;
 
-    if batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            captured_specs,
-            None,
-        ));
-    }
-
-    let batch_schema = batches[0].schema();
+    // A filtered-to-empty table must stay queryable (PR #126 review):
+    // assume_sorted() is the one-line migration for the declared-order
+    // requirement, so it cannot degrade to a schema-only stub that raises
+    // "No data loaded" on len()/cum_sum(). Keep a zero-row MemTable.
+    let batch_schema = match batches.first() {
+        Some(batch) => batch.schema(),
+        None => LTSeqTable::schema_from_df(df.schema()),
+    };
+    let partitions = if batches.is_empty() {
+        vec![Vec::new()]
+    } else {
+        vec![batches]
+    };
     let mem_table =
-        MemTable::try_new(Arc::clone(&batch_schema), vec![batches])
+        MemTable::try_new(Arc::clone(&batch_schema), partitions)
             .map_err(|e| {
                 LtseqError::Runtime(format!(
                     "Failed to create MemTable: {}",

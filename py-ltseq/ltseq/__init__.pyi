@@ -169,7 +169,12 @@ class LTSeq:
         desc: bool | list[bool] = ...,
         descending: bool | list[bool] | None = ...,
     ) -> "LTSeq": ...
-    def assume_sorted(self, *keys: str, desc: bool | list[bool] = ...) -> "LTSeq": ...
+    def assume_sorted(
+        self,
+        *keys: str | Callable[[SchemaProxy], Expr],
+        desc: bool | list[bool] = ...,
+    ) -> "LTSeq": ...
+    def explain_plan(self) -> tuple[str, str]: ...
     def fold(
         self,
         fn: Callable[[Any, Any], Any],

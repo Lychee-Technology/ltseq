@@ -27,6 +27,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 错误 | 原因 | 解决方法 |
 |------|------|---------|
 | `SortRequiredError: Window functions ... require a defined row order` | 未排序直接调用 `shift`/`rolling`/`diff`/累积 | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
+| `SortRequiredError: group_ordered() ... requires a declared row order` | 未排序直接调用 `group_ordered`/`group_sorted`/`cum_sum` | 先 `.sort(...)`，或对已有序数据用 `.assume_sorted(...)`。计算排序键不构成声明顺序——先派生为列 |
 | `ColumnNotFoundError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
 | `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
@@ -461,6 +462,7 @@ t.drop("tmp", "debug_flag")
 - **参数**: `keys` 列名或表达式；`desc`/`descending` 全局或逐键降序标志
 - **返回**: 排序后的 `LTSeq`（带排序键追踪）
 - **异常**: `ValueError`（schema 未初始化或 desc 长度不匹配），`TypeError`（键类型无效），`AttributeError`（列不存在）
+- **计算键**: 计算键（如 `lambda r: r.a * 2`）会物理排序数据，但**无法作为声明顺序被追踪**——`sort_keys` 在首个计算键处截断，因此 `sort("a", lambda r: r.b * 2, "c")` 只声明 `[a]`，而单独的 `sort(lambda r: r.a * 2)` 不声明任何顺序（`cum_sum` 等有序 API 仍会抛 `SortRequiredError`）。要把计算键用作声明顺序，先派生为列：`.derive(k=...).sort("k")`。截断后，声明前缀相等的行之间顺序**未定义**——窗口执行可能重排这些 tie 行
 - **示例**:
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
@@ -501,8 +503,8 @@ t_sorted.is_sorted_by("a", desc=True)  # False（方向不匹配）
 ```
 
 ### `LTSeq.assume_sorted`
-- **签名**: `LTSeq.assume_sorted(*keys: str, desc: bool | list[bool] = False) -> LTSeq`
-- **行为**: 声明数据已按给定键排序，**不做物理排序**。可对预排序数据（如预排序的 Parquet）跳过排序开销，同时启用窗口函数与归并连接。正确性由调用方负责——错误的声明会产生错误结果
+- **签名**: `LTSeq.assume_sorted(*keys: str | Callable, desc: bool | list[bool] = False) -> LTSeq`
+- **行为**: 声明数据已按给定键排序，**不做物理排序**。可对预排序数据（如预排序的 Parquet）跳过排序开销，同时启用窗口函数与归并连接。正确性由调用方负责——错误的声明会产生错误结果。与 `sort()` 相同，声明顺序在首个计算键处截断——只有前导的普通列键生效
 - **参数**: `keys` 声明排序顺序的列名；`desc` 降序标志
 - **返回**: 设置了排序元数据的 `LTSeq`（底层数据不变）
 - **异常**: `ValueError`（schema 未初始化或 desc 长度不匹配），`TypeError`（desc 类型无效）
@@ -617,10 +619,10 @@ t.sort("date").derive(
 
 #### `LTSeq.cum_sum`
 - **签名**: `LTSeq.cum_sum(*cols: str | Callable) -> LTSeq`
-- **行为**: 添加带 `*_cumsum` 后缀的累计求和列。若需自定义列名，请在 `derive()` 中使用表达式形式 `r.col.cum_sum()`
+- **行为**: 添加带 `*_cumsum` 后缀的累计求和列。要求先 `.sort(...)` 或 `.assume_sorted(...)`。若需自定义列名，请在 `derive()` 中使用表达式形式 `r.col.cum_sum()`
 - **参数**: `cols` 列名或表达式
 - **返回**: 带累计列的新 `LTSeq`
-- **异常**: `ValueError`（无列或 schema 未初始化），`TypeError`（非数值）
+- **异常**: `SortRequiredError`（无声明行序），`ValueError`（无列或 schema 未初始化），`TypeError`（非数值）
 - **示例**:
 ```python
 with_cum = t.sort("date").cum_sum("volume", "amount")
@@ -816,10 +818,10 @@ every_tenth = t.step(10)
 
 ### `LTSeq.group_ordered`（别名: `group_consecutive`）
 - **签名**: `LTSeq.group_ordered(key: Callable[[Row], Expr]) -> NestedTable`
-- **行为**: 只把连续相等的值归为一组；不重排数据。`group_consecutive` 是同一方法的更直白别名
+- **行为**: 按表的声明行序，只把连续相等的值归为一组；不重排数据。要求先 `.sort(...)` 或 `.assume_sorted(...)`。`group_consecutive` 是同一方法的更直白别名
 - **参数**: `key` 分组键表达式
 - **返回**: `NestedTable`（组级操作）
-- **异常**: `ValueError`（schema 未初始化），`TypeError`（键无效），`AttributeError`（列不存在）
+- **异常**: `SortRequiredError`（无声明行序），`ValueError`（schema 未初始化），`TypeError`（键无效），`AttributeError`（列不存在）
 - **示例**:
 ```python
 groups = t.sort("date").group_ordered(lambda r: r.is_up)
@@ -829,10 +831,10 @@ groups = t.sort("date").group_consecutive(lambda r: r.is_up)
 
 ### `LTSeq.group_sorted`
 - **签名**: `LTSeq.group_sorted(key: Callable[[Row], Expr]) -> NestedTable`
-- **行为**: 假定数据已按键全局排序；单遍分组，无需哈希
+- **行为**: 假定数据已按键全局排序；单遍分组，无需哈希。分组键必须是引领声明排序的普通列（先 `.sort(key)` 或 `.assume_sorted(key)`）；计算分组键无法对照排序元数据验证，会被拒绝——先派生为列
 - **参数**: `key` 分组键表达式
 - **返回**: `NestedTable`
-- **异常**: `ValueError`（未排序或 schema 未初始化），`TypeError`（键无效）
+- **异常**: `SortRequiredError`（无声明顺序、键不引领排序、或计算键），`ValueError`（schema 未初始化），`TypeError`（键无效）
 - **示例**:
 ```python
 groups = t.sort("user_id").group_sorted(lambda r: r.user_id)
@@ -903,7 +905,7 @@ enriched = groups.derive(lambda g: {
 - **示例**:
 ```python
 # 每个连续段一行
-spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
+spans = t.sort("date").group_ordered(lambda r: r.is_up).agg(lambda g: {
     "start": g.first().date,
     "end": g.last().date,
     "n": g.count(),

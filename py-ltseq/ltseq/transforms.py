@@ -10,6 +10,17 @@ from .expr import SchemaProxy
 from .lookup import LookupMixin
 
 
+# Computed sort keys cannot be represented in column-level sort metadata
+# (sort() truncates at the first computed key), so a table sorted ONLY by
+# computed keys still has no declared order. Guards append this hint so the
+# error is actionable for users who literally just called .sort(lambda ...).
+_COMPUTED_SORT_HINT = (
+    " Note: computed sort keys (e.g. sort(lambda r: r.a * 2)) do not "
+    "establish a declared order — derive the key as a column first, "
+    "e.g. .derive(k=...).sort('k')."
+)
+
+
 def _window_sort_required_error() -> Exception:
     """Build the SortRequiredError raised when a window expression is used
     on a table with no defined row order (neither ``.sort()`` nor
@@ -19,7 +30,7 @@ def _window_sort_required_error() -> Exception:
     return SortRequiredError(
         "Window functions (shift/rolling/diff/rank/cumulative) require a "
         "defined row order. Call .sort(...) or .assume_sorted(...) before "
-        "using them in derive()."
+        "using them in derive()." + _COMPUTED_SORT_HINT
     )
 
 
@@ -528,6 +539,15 @@ class TransformMixin(LookupMixin, LTSeqLike):
         """
         Sort by one or more keys.
 
+        Computed keys (e.g. ``lambda r: r.a * 2``) sort the data physically
+        but cannot be tracked as declared order: sort metadata truncates at
+        the first computed key, so a computed-only sort declares no order and
+        ordered APIs (``cum_sum``, ``group_ordered``, window expressions)
+        will still raise ``SortRequiredError``. Derive the key as a column
+        first (``.derive(k=...).sort("k")``) to use it as declared order.
+        After truncation, the order of rows tied on the declared prefix is
+        unspecified.
+
         Args:
             *keys: Column names or expressions to sort by
             desc: Descending flag(s) - single bool or list per key
@@ -583,6 +603,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
         The caller is responsible for ensuring the data is actually
         sorted in the declared order. Incorrect metadata will produce
         wrong results.
+
+        Like sort(), the declared order truncates at the first computed
+        key — only leading plain-column keys count.
 
         Args:
             *keys: Column names declaring the sort order

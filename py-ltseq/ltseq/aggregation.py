@@ -146,11 +146,13 @@ class AggregationMixin(LTSeqLike):
         # already ordered on disk, .assume_sorted().
         if not self._sort_keys:
             from .exceptions import SortRequiredError
+            from .transforms import _COMPUTED_SORT_HINT
 
             raise SortRequiredError(
                 "group_ordered() groups consecutive rows and therefore "
                 "requires a declared row order. Call .sort(...) first, or "
                 ".assume_sorted(...) if the data is already ordered."
+                + _COMPUTED_SORT_HINT
             )
 
         return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), grouping_fn, is_sorted=False)
@@ -213,8 +215,20 @@ class AggregationMixin(LTSeqLike):
                     f"'{first_sort_col}' first). Sort by the grouping key, "
                     "or use .assume_sorted() to declare the actual order."
                 )
-        # Computed grouping keys cannot be checked against sort metadata;
-        # the declared-order requirement above still applies.
+        else:
+            # A computed grouping key cannot be checked against column-level
+            # sort metadata, and letting it through unchecked silently splits
+            # logical keys into multiple runs whenever the table is sorted by
+            # something else (PR #126 review P1). Sorted-by-g also does not
+            # prove sorted-by-f(g) for arbitrary f, so reject uniformly.
+            from .exceptions import SortRequiredError
+
+            raise SortRequiredError(
+                "group_sorted() cannot verify a computed grouping key "
+                "against the declared sort order. Derive the key as a "
+                "column and sort by it first, e.g. "
+                ".derive(k=...).sort('k').group_sorted(lambda r: r.k)."
+            )
 
         return NestedTable(self if isinstance(self, LTSeq) else LTSeq._from_inner(self._inner), key, is_sorted=True)
 
