@@ -40,13 +40,13 @@ class TestGroupSortedBasic(unittest.TestCase):
 
     def test_group_sorted_returns_nested_table(self):
         """group_sorted() should return a NestedTable instance."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
         self.assertIsInstance(groups, NestedTable)
 
     def test_group_sorted_first_returns_ltseq(self):
         """group_sorted().first() should return an LTSeq-compatible object."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
         first_rows = groups.first()
         # _LazyFirstLTSeq duck-types as LTSeq: has count(), to_pandas(), etc.
@@ -55,14 +55,14 @@ class TestGroupSortedBasic(unittest.TestCase):
 
     def test_group_sorted_last_returns_ltseq(self):
         """group_sorted().last() should return an LTSeq instance."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
         last_rows = groups.last()
         self.assertIsInstance(last_rows, LTSeq)
 
     def test_group_sorted_first_row_per_group(self):
         """group_sorted().first() should return first row of each group."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
         first_rows = groups.first()
 
@@ -76,7 +76,7 @@ class TestGroupSortedBasic(unittest.TestCase):
 
     def test_group_sorted_last_row_per_group(self):
         """group_sorted().last() should return last row of each group."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
         last_rows = groups.last()
 
@@ -118,7 +118,7 @@ class TestGroupSortedFilter(unittest.TestCase):
 
     def test_group_sorted_filter_by_count(self):
         """group_sorted().filter() should filter groups by count."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
 
         # Filter to groups with more than 2 events
@@ -131,7 +131,7 @@ class TestGroupSortedFilter(unittest.TestCase):
 
     def test_group_sorted_filter_preserves_is_sorted(self):
         """group_sorted().filter() should preserve is_sorted flag."""
-        t = LTSeq.read_csv(self.events_csv.name)
+        t = LTSeq.read_csv(self.events_csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
 
         # Filter to groups with more than 2 events
@@ -178,7 +178,7 @@ class TestGroupSortedVsGroupOrdered(unittest.TestCase):
 
     def test_group_sorted_on_sorted_data(self):
         """group_sorted() on sorted data should group correctly."""
-        t = LTSeq.read_csv(self.sorted_csv.name)
+        t = LTSeq.read_csv(self.sorted_csv.name).assume_sorted("category")
         groups = t.group_sorted(lambda r: r.category)
         first_rows = groups.first()
 
@@ -187,7 +187,7 @@ class TestGroupSortedVsGroupOrdered(unittest.TestCase):
 
     def test_group_ordered_on_sorted_data(self):
         """group_ordered() on sorted data should behave same as group_sorted()."""
-        t = LTSeq.read_csv(self.sorted_csv.name)
+        t = LTSeq.read_csv(self.sorted_csv.name).assume_sorted("category")
 
         # Both should produce same results on sorted data
         sorted_groups = t.group_sorted(lambda r: r.category)
@@ -199,14 +199,20 @@ class TestGroupSortedVsGroupOrdered(unittest.TestCase):
         self.assertEqual(len(sorted_first), len(ordered_first))
 
     def test_group_sorted_vs_ordered_on_unsorted_data(self):
-        """group_ordered() on unsorted data groups consecutive only."""
+        """Undeclared row order now raises (issue #125); with the file order
+        declared, group_ordered groups consecutive runs; after sorting,
+        group_sorted yields one group per key."""
+        from ltseq.exceptions import SortRequiredError
+
         t = LTSeq.read_csv(self.unsorted_csv.name)
 
-        # group_ordered groups consecutive identical values
-        ordered_groups = t.group_ordered(lambda r: r.category)
-        ordered_first = ordered_groups.first()
+        with self.assertRaises(SortRequiredError):
+            t.group_ordered(lambda r: r.category)
 
-        # Data: A, B, A, B, A - so 5 consecutive groups
+        # Declaring the file order keeps the consecutive-run semantics:
+        # A, B, A, B, A → 5 consecutive groups
+        t_declared = t.assume_sorted("id") if "id" in t.columns else t.assume_sorted(t.columns[0])
+        ordered_first = t_declared.group_ordered(lambda r: r.category).first()
         self.assertEqual(len(ordered_first), 5)
 
         # If we sort first, then group_sorted works correctly
@@ -240,7 +246,7 @@ class TestGroupSortedDerive(unittest.TestCase):
 
     def test_group_sorted_derive_count(self):
         """group_sorted().derive() should add group count column."""
-        t = LTSeq.read_csv(self.sales_csv.name)
+        t = LTSeq.read_csv(self.sales_csv.name).assume_sorted("region")
         groups = t.group_sorted(lambda r: r.region)
 
         derived = groups.derive(lambda g: {"group_size": g.count()})
@@ -307,7 +313,7 @@ class TestGroupSortedChaining(unittest.TestCase):
 
     def test_group_sorted_filter_then_first(self):
         """Should be able to chain filter().first() on group_sorted()."""
-        t = LTSeq.read_csv(self.csv.name)
+        t = LTSeq.read_csv(self.csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
 
         # Filter to users with more than 1 action, then get first
@@ -318,7 +324,7 @@ class TestGroupSortedChaining(unittest.TestCase):
 
     def test_group_sorted_filter_then_derive(self):
         """Should be able to chain filter().derive() on group_sorted()."""
-        t = LTSeq.read_csv(self.csv.name)
+        t = LTSeq.read_csv(self.csv.name).assume_sorted("user_id")
         groups = t.group_sorted(lambda r: r.user_id)
 
         # Filter to users with more than 1 action, then derive

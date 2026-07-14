@@ -569,7 +569,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
     def assume_sorted(
         self,
-        *keys: str,
+        *keys: str | Callable,
         desc: bool | list[bool] = False,
     ) -> "LTSeq":
         """

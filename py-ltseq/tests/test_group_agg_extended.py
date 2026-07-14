@@ -8,7 +8,9 @@ from ltseq import LTSeq
 
 
 def make_table(rows, schema):
-    return LTSeq._from_rows(rows, schema)
+    # Row order of the literal data IS the intended sequence order; declare
+    # it (group_ordered now requires a declared row order, issue #125).
+    return LTSeq._from_rows(rows, schema).assume_sorted("date")
 
 
 @pytest.fixture

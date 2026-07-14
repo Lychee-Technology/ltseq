@@ -31,7 +31,7 @@ class TestNestedTableDeriveBasic:
     @pytest.fixture
     def basic_table(self):
         """Create basic test table."""
-        return LTSeq.read_csv("py-ltseq/tests/test_data/test_derive_basic.csv")
+        return LTSeq.read_csv("py-ltseq/tests/test_data/test_derive_basic.csv").assume_sorted("group")
 
     def test_derive_count(self, basic_table):
         """Test g.count() broadcasted to all rows in group."""
@@ -57,7 +57,7 @@ class TestNestedTableDeriveBasic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"first_val": g.first().val, "first_name": g.first().name}
             )
@@ -82,7 +82,7 @@ class TestNestedTableDeriveBasic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"last_val": g.last().val, "last_name": g.last().name}
             )
@@ -108,7 +108,7 @@ class TestNestedTableDeriveBasic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {
                     "start": g.first().val,
@@ -147,7 +147,7 @@ class TestNestedTableDeriveAggregates:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"max_val": g.max("val")}
             )
@@ -173,7 +173,7 @@ class TestNestedTableDeriveAggregates:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"min_val": g.min("val")}
             )
@@ -197,7 +197,7 @@ class TestNestedTableDeriveAggregates:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"total": g.sum("val")}
             )
@@ -222,7 +222,7 @@ class TestNestedTableDeriveAggregates:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"avg_val": g.avg("val")}
             )
@@ -245,7 +245,7 @@ class TestNestedTableDeriveAggregates:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {
                     "count": g.count(),
@@ -280,7 +280,7 @@ class TestNestedTableDeriveArithmetic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"range": g.max("val") - g.min("val")}
             )
@@ -304,7 +304,7 @@ class TestNestedTableDeriveArithmetic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"ratio": g.max("val") / g.min("val")}
             )
@@ -328,7 +328,7 @@ class TestNestedTableDeriveArithmetic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"sum_extremes": g.max("val") + g.min("val")}
             )
@@ -352,7 +352,7 @@ class TestNestedTableDeriveArithmetic:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"product": g.max("val") * g.min("val")}
             )
@@ -382,7 +382,7 @@ class TestNestedTableDeriveBroadcasting:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"group_sum": g.sum("val")}
             )
@@ -411,7 +411,7 @@ class TestNestedTableDeriveBroadcasting:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"count": g.count(), "value": g.first().val}
             )
@@ -441,7 +441,7 @@ class TestNestedTableDeriveMultipleColumns:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {
                     "count": g.count(),
@@ -473,7 +473,7 @@ class TestNestedTableDeriveMultipleColumns:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             result = t.group_ordered(lambda r: r.group).derive(
                 lambda g: {"count": g.count()}
             )
@@ -502,7 +502,7 @@ class TestNestedTableDeriveErrorHandling:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             with pytest.raises((ValueError, AttributeError)):
                 t.group_ordered(lambda r: r.group).derive(
                     lambda g: {"m": g.mode("val")}  # mode not supported on group proxy
@@ -518,7 +518,7 @@ class TestNestedTableDeriveErrorHandling:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
             with pytest.raises(ValueError):
                 t.group_ordered(lambda r: r.group).derive(
                     lambda g: g.count()  # Returns number, not dict
@@ -542,7 +542,7 @@ class TestNestedTableDeriveIntegration:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("group")
 
             # Test filter -> derive chain
             result = (
@@ -577,7 +577,7 @@ class TestNestedTableDeriveIntegration:
             fname = f.name
 
         try:
-            t = LTSeq.read_csv(fname)
+            t = LTSeq.read_csv(fname).assume_sorted("id")
 
             result = t.group_ordered(lambda r: r.id).derive(
                 lambda g: {
