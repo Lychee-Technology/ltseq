@@ -49,10 +49,10 @@ class IOMixin:
                        If False, columns are named column_0, column_1, etc.
 
         Returns:
-            New LTSeq instance with loaded data
+            New LTSeq instance with loaded data. A missing path returns an
+            empty table (LTSeq's historical lazy-empty behavior).
 
         Raises:
-            FileNotFoundError: If path does not exist
             ValueError: If CSV parsing fails
 
         Example:
@@ -63,9 +63,12 @@ class IOMixin:
         import os
 
         # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
-        # historical lazy-empty behavior for file reads.
+        # historical lazy-empty behavior for file reads. from_arrow (allowed in
+        # construction APIs) yields a real empty table, so count()/len() work.
         if not os.path.exists(path):
-            t = LTSeq()
+            import pyarrow as pa
+
+            t = LTSeq.from_arrow(pa.table({}))
             t._name = os.path.splitext(os.path.basename(path))[0]
             return t
 
@@ -86,10 +89,10 @@ class IOMixin:
             path: Path to the Parquet file
 
         Returns:
-            New LTSeq instance with loaded data
+            New LTSeq instance with loaded data. A missing path returns an
+            empty table (LTSeq's historical lazy-empty behavior).
 
         Raises:
-            FileNotFoundError: If path does not exist
             RuntimeError: If Parquet parsing fails
 
         Example:
@@ -99,7 +102,8 @@ class IOMixin:
         import os
 
         # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
-        # historical lazy-empty behavior for file reads.
+        # historical lazy-empty behavior for file reads. from_arrow (allowed in
+        # construction APIs) yields a real empty table, so count()/len() work.
         if not os.path.exists(path):
             import pyarrow as pa
 

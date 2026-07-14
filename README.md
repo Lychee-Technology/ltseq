@@ -425,7 +425,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 ### Technology Stack
 
 - **Python Bindings**: PyO3 27.2 for seamless Python/Rust integration
-- **SQL Engine**: Apache DataFusion 51.0 (powers Databricks, Apache Datafusion, etc.)
+- **SQL Engine**: Apache DataFusion 54.0 (powers Databricks, Apache Datafusion, etc.)
 - **Data Format**: Apache Arrow for zero-copy columnar operations
 - **Testing**: pytest with 999+ comprehensive tests
 

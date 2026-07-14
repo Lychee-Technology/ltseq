@@ -36,6 +36,11 @@ use std::sync::Arc;
 // Helper Functions
 // ============================================================================
 
+/// True if `dt` is any Arrow string type.
+fn is_string_type(dt: &DataType) -> bool {
+    matches!(dt, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
+}
+
 /// Extract join key column names from either a Column or And-expression
 ///
 /// For composite keys like: (o.id == p.id) & (o.year == p.year)
@@ -421,6 +426,56 @@ pub fn anti_join_impl(
     semi_anti_join_impl(table, other, left_key_expr_dict, right_key_expr_dict, true)
 }
 
+/// Semi/anti join for key pairs whose Arrow types differ.
+///
+/// DataFusion 54 plans a strict CAST when equijoin key types differ, which
+/// fails at runtime on values like "abc" vs Int64. Alias both sides and join
+/// on explicit expressions instead: the string side is `try_cast` to the
+/// non-string type, so unparseable strings become NULL (never match) instead
+/// of erroring — preserving the string→numeric comparison coercion DataFusion
+/// 51 applied when we passed bare key names to `.join()`.
+fn join_on_mismatched_keys(
+    left_df: DataFrame,
+    right_df: DataFrame,
+    df_join_type: datafusion::logical_expr::JoinType,
+    left_col_names: &[String],
+    right_col_names: &[String],
+    key_types: &[(DataType, DataType)],
+) -> Result<DataFrame, LtseqError> {
+    const LEFT_ALIAS: &str = "__ltseq_left";
+    const RIGHT_ALIAS: &str = "__ltseq_right";
+
+    let left_df = left_df
+        .alias(LEFT_ALIAS)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to alias left table: {}", e)))?;
+    let right_df = right_df
+        .alias(RIGHT_ALIAS)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to alias right table: {}", e)))?;
+
+    let on_exprs: Vec<Expr> = left_col_names
+        .iter()
+        .zip(right_col_names)
+        .zip(key_types)
+        .map(|((left, right), (left_type, right_type))| {
+            let left_expr = col(Column::new(Some(LEFT_ALIAS), left));
+            let right_expr = col(Column::new(Some(RIGHT_ALIAS), right));
+            match (is_string_type(left_type), is_string_type(right_type)) {
+                // try_cast the string side: unparseable values become NULL
+                // (= no match) instead of failing the whole join.
+                (true, false) => try_cast(left_expr, right_type.clone()).eq(right_expr),
+                (false, true) => left_expr.eq(try_cast(right_expr, left_type.clone())),
+                // string-vs-string or non-string pairs: DataFusion's own
+                // comparison coercion is lossless here.
+                _ => left_expr.eq(right_expr),
+            }
+        })
+        .collect();
+
+    left_df
+        .join_on(right_df, df_join_type, on_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))
+}
+
 /// Shared implementation for semi-join and anti-join
 fn semi_anti_join_impl(
     table: &LTSeqTable,
@@ -447,98 +502,65 @@ fn semi_anti_join_impl(
         datafusion::logical_expr::JoinType::LeftSemi
     };
 
-    // DataFusion 54 may choose a failing cast when join key types differ
-    // (for example, non-numeric strings against an Int64 key). Use a
-    // fallible cast on the right key in that case; matching key types keep the
-    // native equijoin path.
-    let key_types_match = left_col_names.iter().zip(&right_col_names).all(|(left, right)| {
-        stored_schema_left.field_with_name(left).ok().map(|field| field.data_type())
-            == stored_schema_right.field_with_name(right).ok().map(|field| field.data_type())
-    });
-    let key_has_null_type = left_col_names
+    // One field-lookup pass over the key pairs; drives all three join
+    // strategies below.
+    let key_types: Vec<(DataType, DataType)> = left_col_names
         .iter()
         .zip(&right_col_names)
-        .any(|(left, right)| {
-            stored_schema_left
+        .map(|(left, right)| {
+            let left_type = stored_schema_left
                 .field_with_name(left)
-                .map(|field| field.data_type() == &DataType::Null)
-                .unwrap_or(false)
-                || stored_schema_right
-                    .field_with_name(right)
-                    .map(|field| field.data_type() == &DataType::Null)
-                    .unwrap_or(false)
-        });
-
-    let result_df = RUNTIME
-        .block_on(async {
-            if key_has_null_type {
-                if is_anti {
-                    Ok((**df_left).clone())
-                } else {
-                    (**df_left).clone().filter(lit(false))
-                }
-            } else if key_types_match {
-                (**df_left)
-                    .clone()
-                    .join(
-                        (**df_right).clone(),
-                        df_join_type,
-                        &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        None, // No additional filter
-                )
-            } else {
-                let left_alias = "__ltseq_left";
-                let right_alias = "__ltseq_right";
-                let left_df = (**df_left)
-                    .clone()
-                    .alias(left_alias)
-                    .map_err(|e| format!("Failed to alias left table: {}", e))?;
-                let right_df = (**df_right)
-                    .clone()
-                    .alias(right_alias)
-                    .map_err(|e| format!("Failed to alias right table: {}", e))?;
-                let on_exprs = left_col_names
-                    .iter()
-                    .zip(&right_col_names)
-                    .map(|(left, right)| {
-                        let left_field = stored_schema_left
-                            .field_with_name(left)
-                            .expect("join key was validated")
-                            .clone();
-                        let right_field = stored_schema_right
-                            .field_with_name(right)
-                            .expect("join key was validated")
-                            .clone();
-                        let left_expr = col(Column::new(Some(left_alias), left));
-                        let right_expr = col(Column::new(Some(right_alias), right));
-                        let left_is_string = matches!(
-                            left_field.data_type(),
-                            DataType::Utf8
-                                | DataType::LargeUtf8
-                                | DataType::Utf8View
-                        );
-                        let right_is_string = matches!(
-                            right_field.data_type(),
-                            DataType::Utf8
-                                | DataType::LargeUtf8
-                                | DataType::Utf8View
-                        );
-
-                        if left_is_string && !right_is_string {
-                            left_expr.eq(cast(right_expr, left_field.data_type().clone()))
-                        } else if !left_is_string && right_is_string {
-                            cast(left_expr, right_field.data_type().clone()).eq(right_expr)
-                        } else {
-                            left_expr.eq(right_expr)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                left_df.join_on(right_df, df_join_type, on_exprs)
-            }
-            .map_err(|e| format!("Native semi/anti join failed: {}", e))
+                .map_err(|e| LtseqError::Runtime(format!("Left join key '{}' not found: {}", left, e)))?
+                .data_type()
+                .clone();
+            let right_type = stored_schema_right
+                .field_with_name(right)
+                .map_err(|e| LtseqError::Runtime(format!("Right join key '{}' not found: {}", right, e)))?
+                .data_type()
+                .clone();
+            Ok((left_type, right_type))
         })
-        .map_err(LtseqError::Runtime)?;
+        .collect::<Result<_, LtseqError>>()?;
+
+    let key_has_null_type = key_types
+        .iter()
+        .any(|(l, r)| *l == DataType::Null || *r == DataType::Null);
+    let key_types_match = key_types.iter().all(|(l, r)| l == r);
+
+    // No block_on needed: join/join_on/filter only build logical plans.
+    let result_df = if key_has_null_type {
+        // A Null-typed key column (e.g. inferred from a header-only or
+        // all-empty CSV column) contains only SQL NULLs, and `NULL = x` is
+        // never TRUE: a semi join matches nothing and an anti join keeps
+        // every left row. Short-circuit rather than asking DataFusion to
+        // plan a join on the Null type, which DF54 cannot cast.
+        if is_anti {
+            Ok((**df_left).clone())
+        } else {
+            (**df_left).clone().filter(lit(false))
+        }
+        .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))?
+    } else if key_types_match {
+        (**df_left)
+            .clone()
+            .join(
+                (**df_right).clone(),
+                df_join_type,
+                &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                None, // No additional filter
+            )
+            .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))?
+    } else {
+        join_on_mismatched_keys(
+            (**df_left).clone(),
+            (**df_right).clone(),
+            df_join_type,
+            &left_col_names,
+            &right_col_names,
+            &key_types,
+        )?
+    };
 
     // Semi/anti join = order-preserving filter on the left table
     build_result_table_from_df(

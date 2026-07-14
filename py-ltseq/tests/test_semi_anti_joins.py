@@ -435,6 +435,154 @@ C3,US,Charlie US
         assert names == {"Bob EU", "Charlie US"}
 
 
+class TestMismatchedKeyTypes:
+    """String-vs-numeric join keys must compare numerically (DF51 semantics)."""
+
+    @pytest.fixture
+    def string_ids_csv(self):
+        # "abc" forces Utf8 inference for sid; "01" keeps its leading zero.
+        content = """sid,label
+2,two
+01,one
+abc,junk
+5,five
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(content)
+        yield f.name
+        os.unlink(f.name)
+
+    @pytest.fixture
+    def numeric_ids_csv(self):
+        content = """nid,score
+1,10
+2,20
+3,30
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(content)
+        yield f.name
+        os.unlink(f.name)
+
+    def test_semi_join_string_left_numeric_right(self, string_ids_csv, numeric_ids_csv):
+        """String keys match numeric keys by numeric value, not display format."""
+        strings = LTSeq.read_csv(string_ids_csv)
+        numbers = LTSeq.read_csv(numeric_ids_csv)
+
+        result = strings.semi_join(numbers, on=lambda s, n: s.sid == n.nid)
+
+        df = result.to_pandas()
+        # "2" -> 2 and "01" -> 1 match; "abc" (unparseable) and "5" do not
+        assert len(df) == 2
+        assert set(df["sid"].tolist()) == {"2", "01"}
+
+    def test_anti_join_string_left_numeric_right(self, string_ids_csv, numeric_ids_csv):
+        """Unparseable string keys land on the anti side without erroring."""
+        strings = LTSeq.read_csv(string_ids_csv)
+        numbers = LTSeq.read_csv(numeric_ids_csv)
+
+        result = strings.anti_join(numbers, on=lambda s, n: s.sid == n.nid)
+
+        df = result.to_pandas()
+        assert len(df) == 2
+        assert set(df["sid"].tolist()) == {"abc", "5"}
+
+    def test_semi_join_numeric_left_string_right(self, string_ids_csv, numeric_ids_csv):
+        """Cast direction is symmetric: numeric left vs string right."""
+        strings = LTSeq.read_csv(string_ids_csv)
+        numbers = LTSeq.read_csv(numeric_ids_csv)
+
+        result = numbers.semi_join(strings, on=lambda n, s: n.nid == s.sid)
+
+        df = result.to_pandas()
+        assert len(df) == 2
+        assert set(df["nid"].tolist()) == {1, 2}
+
+    def test_anti_join_numeric_left_string_right(self, string_ids_csv, numeric_ids_csv):
+        strings = LTSeq.read_csv(string_ids_csv)
+        numbers = LTSeq.read_csv(numeric_ids_csv)
+
+        result = numbers.anti_join(strings, on=lambda n, s: n.nid == s.sid)
+
+        df = result.to_pandas()
+        assert len(df) == 1
+        assert set(df["nid"].tolist()) == {3}
+
+    def test_semi_join_string_key_matches_float_display_variants(self):
+        """Regression: "2" must match 2.0 numerically, not via string rendering."""
+        left = LTSeq.from_rows([{"k": "2"}, {"k": "2.0"}, {"k": "x"}])
+        right = LTSeq.from_rows([{"k": 2.0}, {"k": 3.0}])
+
+        result = left.semi_join(right, on=lambda l, r: l.k == r.k)
+
+        assert result.to_dicts() == [{"k": "2"}, {"k": "2.0"}]
+
+    def test_anti_join_unparseable_string_key_does_not_error(self):
+        left = LTSeq.from_rows([{"k": "2"}, {"k": "2.0"}, {"k": "x"}])
+        right = LTSeq.from_rows([{"k": 2.0}, {"k": 3.0}])
+
+        result = left.anti_join(right, on=lambda l, r: l.k == r.k)
+
+        assert result.to_dicts() == [{"k": "x"}]
+
+
+class TestNullTypeKeys:
+    """All-NULL (Arrow Null-typed) key columns: NULL never equals anything."""
+
+    @pytest.fixture
+    def null_key_csv(self):
+        # An all-empty column infers as the Arrow Null type (same inference
+        # path as the header-only CSV case).
+        content = """id,k
+1,
+2,
+3,
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(content)
+        yield f.name
+        os.unlink(f.name)
+
+    def test_null_key_column_is_null_typed(self, null_key_csv):
+        """Fixture guard: the all-empty column must exercise the Null-type path."""
+        t = LTSeq.read_csv(null_key_csv)
+        assert t._schema["k"].lower() == "null"
+
+    def test_semi_join_null_type_left_key_returns_empty(self, null_key_csv):
+        nulls = LTSeq.read_csv(null_key_csv)
+        right = LTSeq.from_rows([{"v": 1}, {"v": 2}])
+
+        result = nulls.semi_join(right, on=lambda l, r: l.k == r.v)
+
+        assert len(result.to_pandas()) == 0
+
+    def test_anti_join_null_type_left_key_returns_all_left(self, null_key_csv):
+        nulls = LTSeq.read_csv(null_key_csv)
+        right = LTSeq.from_rows([{"v": 1}, {"v": 2}])
+
+        result = nulls.anti_join(right, on=lambda l, r: l.k == r.v)
+
+        df = result.to_pandas()
+        assert len(df) == 3
+        assert set(df["id"].tolist()) == {1, 2, 3}
+
+    def test_semi_join_null_type_right_key_returns_empty(self, users_csv, null_key_csv):
+        users = LTSeq.read_csv(users_csv)
+        nulls = LTSeq.read_csv(null_key_csv)
+
+        result = users.semi_join(nulls, on=lambda u, n: u.id == n.k)
+
+        assert len(result.to_pandas()) == 0
+
+    def test_anti_join_null_type_right_key_returns_all_left(self, users_csv, null_key_csv):
+        users = LTSeq.read_csv(users_csv)
+        nulls = LTSeq.read_csv(null_key_csv)
+
+        result = users.anti_join(nulls, on=lambda u, n: u.id == n.k)
+
+        assert len(result.to_pandas()) == 5
+
+
 # Cleanup fixtures
 @pytest.fixture(autouse=True)
 def cleanup(request, users_csv, orders_csv, products_csv, reviews_csv, empty_csv):
