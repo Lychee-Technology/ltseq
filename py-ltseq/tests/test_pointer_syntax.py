@@ -73,7 +73,7 @@ class TestPointerSyntax:
     def test_pointer_in_derive(self, linked_tables):
         """Test using pointer syntax in derive expression."""
         linked, _, _ = linked_tables
-        materialized = linked._materialize()
+        materialized = linked._ensure_join_plan()
         result = materialized.derive(total=lambda r: r.quantity * r.prod.price)
         df = result.to_pandas()
         assert 'total' in df.columns

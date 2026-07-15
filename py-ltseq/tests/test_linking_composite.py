@@ -54,7 +54,7 @@ class TestLinkedTableCompositeKeys:
             as_="prod",
         )
 
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
         assert isinstance(result, LTSeq)
 
@@ -88,7 +88,7 @@ class TestLinkedTableCompositeKeys:
         )
 
         filtered = linked.filter(lambda r: r.quantity > 2)
-        assert isinstance(filtered, LinkedTable)
+        assert isinstance(filtered, LTSeq)
 
     def test_composite_key_data_integrity(self, orders_table, products_table):
         """Composite key join should not corrupt data"""
@@ -98,7 +98,7 @@ class TestLinkedTableCompositeKeys:
             as_="prod",
         )
 
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         result.show(3)
 
     def test_three_column_composite_key(self, orders_table, products_table):
@@ -139,7 +139,7 @@ class TestLinkedTableJoinTypes:
         )
 
         assert linked._join_type == "inner"
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
 
     def test_left_join_keeps_all_left_rows(self, orders_table, products_table):
@@ -152,7 +152,7 @@ class TestLinkedTableJoinTypes:
         )
 
         assert linked._join_type == "left"
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
 
     def test_left_join_filters_null_product(self, orders_table, products_table):
@@ -164,7 +164,7 @@ class TestLinkedTableJoinTypes:
             join_type="left",
         )
 
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         # Show to verify it works
         result.show(2)
 
@@ -178,7 +178,7 @@ class TestLinkedTableJoinTypes:
         )
 
         assert linked._join_type == "right"
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
 
     def test_full_join_keeps_all_rows(self, orders_table, products_table):
@@ -191,7 +191,7 @@ class TestLinkedTableJoinTypes:
         )
 
         assert linked._join_type == "full"
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
 
     def test_invalid_join_type_rejected(self, orders_table, products_table):
@@ -244,7 +244,7 @@ class TestCompositeKeyPairingOrder:
                 on=lambda l, r: (l.k1 == r.k1) & (l.k2 == r.k2),
                 as_="m",
             )
-            ._materialize()
+            ._ensure_join_plan()
             .to_dicts()
         )
 

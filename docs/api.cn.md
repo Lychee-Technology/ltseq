@@ -1095,23 +1095,24 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 
 ### `LTSeq.link`
 - **签名**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
-- **行为**: 指针式关联；按需物化；通过别名访问目标表的列
-- **参数**: `target_table` 目标表；`on` 连接条件；`alias` 关联引用的别名（`as_` 为其兼容别名，二者恰好传一个）；`join_type` 取值 {inner,left,right,full}
+- **行为**: 延迟的前缀别名等值连接。记录连接条件与别名但不执行；目标表的列以 `{alias}_{col}` 暴露，源表列保留原名。这是惰性 join，不是指针/take 结构
+- **参数**: `target_table` 目标表；`on` 连接条件；`alias` 给每个目标列加的前缀（`as_` 为其兼容别名，二者恰好传一个）；`join_type` 取值 {inner,left,right,full}
 - **返回**: `LinkedTable`
 - **异常**: `TypeError`（on 无效），`ValueError`（join_type 无效、as_/alias 同时传或都不传、schema 未初始化）
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
-result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
+linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
+result = linked.select("id", "prod_name", "prod_price")
 ```
 
 ### `LinkedTable`
-- **行为**: 关联表对上的可链式视图。支持 `select`、`filter`、`derive`、`sort`、`slice`、`distinct`、`show`，以及继续 `link`（多跳链式关联）。仅在需要时通过底层连接物化
+- **行为**: 延迟的前缀别名等值连接。每个变换（`select`/`filter`/`derive`/`sort`/`slice`/`distinct`）都会构建惰性 join 计划并返回**普通 `LTSeq`**——因此其行数遵循 join 语义（inner/right/full 会丢弃或新增不匹配行，一对多匹配会把一个源行扇出成多行；随后的 `slice`/`filter` 看到的是 join 后的行，而非源行）。`link()` 本身返回叠在当前 join 计划之上的新 `LinkedTable`（多跳链式；下一个条件可引用上一跳的 `{alias}_col` 列）。用 `to_ltseq()` 取惰性 joined `LTSeq`，或 `collect()` 执行它
 - **示例**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
-cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
+cheap = linked.filter(lambda r: r.prod_price < 10)          # -> LTSeq
+chained = linked.link(categories, on=lambda r, c: r.prod_category_id == c.id, alias="cat")
+joined = linked.to_ltseq()                                   # 惰性 joined LTSeq
 ```
 
 完整说明见 `docs/LINKING_GUIDE.cn.md`。
@@ -1140,7 +1141,7 @@ enriched = orders.derive(
 | `join(..., strategy="merge")` | 预排序的大表 | Merge Join | `JOIN`（优化）|
 | `semi_join` | 按键存在性过滤 | Hash Semi-Join | `WHERE EXISTS` |
 | `anti_join` | 按键不存在性过滤 | Hash Anti-Join | `WHERE NOT EXISTS` |
-| `link` | 事实表→维表指针访问 | Pointer | `LEFT JOIN`（惰性）|
+| `link` | 事实表→维表前缀别名连接 | 惰性等值连接 | `JOIN`（惰性、别名前缀）|
 | `r.col.lookup(...)` | 从维表取单列 | derive 中的连接 | `LEFT JOIN`（单列）|
 | `asof_join` | 金融时序 | 有序查找 | `LATERAL JOIN` |
 

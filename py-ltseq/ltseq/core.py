@@ -545,25 +545,30 @@ class LTSeq(
         alias: "str | None" = None,
     ) -> "LinkedTable":
         """
-        Link this table to another table using pointer-based foreign keys.
+        Link this table to another table as a deferred, prefix-aliased equi-join.
 
-        Creates a virtual pointer column that references rows in the target table
-        based on a join condition. Unlike join(), this uses index-based lookups
-        (pointer semantics) rather than expensive hash joins.
+        Records the join condition and the target's alias and returns a
+        :class:`LinkedTable` without executing anything. The joined schema is
+        computed up front: target columns are namespaced as ``{alias}_{col}``
+        and source columns keep their names. Any transform on the LinkedTable
+        (``filter``/``select``/``derive``/...) builds the lazy join plan and
+        returns a plain LTSeq — so row semantics follow the join (unmatched
+        rows and one-to-many fan-out are reflected). This is a lazy join, not
+        a pointer/take structure.
 
         Args:
             target_table: The table to link to (products, categories, etc.)
-            on: Lambda with two parameters that specifies the join condition.
+            on: Lambda with two parameters that specifies the equi-join condition.
                 E.g., lambda orders, products: orders.product_id == products.id
-            as_: Alias for the linked table reference.
-                E.g., as_="prod" allows accessing linked columns via r.prod.name
+            as_: Alias prefixing every target column (e.g., as_="prod" exposes
+                the target's ``name`` column as ``prod_name``).
             join_type: Type of join to perform. One of: "inner", "left", "right", "full"
                 Default: "inner" (backward compatible)
             alias: Alias for as_, without the trailing underscore.
                 Exactly one of as_/alias must be provided.
 
         Returns:
-            A LinkedTable that supports accessing target columns via the alias
+            A LinkedTable exposing target columns as ``{alias}_{col}``.
 
         Raises:
             ValueError: If schema is not initialized or join_type is invalid
@@ -573,9 +578,9 @@ class LTSeq(
             >>> orders = LTSeq.read_csv("orders.csv")
             >>> products = LTSeq.read_csv("products.csv")
             >>> linked = orders.link(products,
-            ...     on=lambda o, p: o.product_id == p.id,
+            ...     on=lambda o, p: o.product_id == p.product_id,
             ...     alias="prod")
-            >>> result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
+            >>> result = linked.select("id", "prod_name", "prod_price")
         """
         if alias is not None and as_ is not None:
             raise ValueError("Pass either as_ or alias, not both")

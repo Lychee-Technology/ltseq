@@ -294,9 +294,9 @@ class TestLinkedTableSelectLinkedColumns:
         )
 
         # Before select, join should not be materialized
-        assert linked._materialized is None
+        assert linked._plan is None
 
         # After select, join should be materialized
         result = linked.select("prod_name")
 
-        assert linked._materialized is not None
+        assert linked._plan is not None
