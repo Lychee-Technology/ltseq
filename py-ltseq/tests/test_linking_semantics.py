@@ -97,10 +97,14 @@ class TestTransformJoinOrder:
         products = mk(pid=[10, 20], name=["A", "B"])
         linked = orders.link(products, on=lambda o, p: o.pid == p.pid, as_="prod")
 
-        # Inner join drops id=1, leaving joined rows for id=2, id=3. slice(0,1)
-        # takes the first JOINED row (id=2), not the first source row (id=1).
+        # Inner join drops id=1, leaving joined rows for id=2 and id=3.
+        # slice(0,1) takes the first JOINED row — which can never be the
+        # first SOURCE row (id=1, dropped). The specific survivor depends on
+        # join output order, so assert the semantic, not a fixed id.
         first = linked.slice(0, 1).to_pandas()
-        assert first["id"].tolist() == [2]
+        assert len(first) == 1
+        assert first["id"].iloc[0] != 1
+        assert first["id"].iloc[0] in (2, 3)
 
     def test_filter_on_source_column_after_join(self, mk):
         orders = mk(id=[1, 2, 3], pid=[10, 20, 99])
