@@ -7,7 +7,7 @@ Related documents:
 - `docs/ARCHITECTURE.md`: system architecture and execution model
 - `docs/MODULE_GUIDE.md`: contributor-oriented codebase tour
 - `docs/DESIGN_SUMMARY.md`: current architecture summary and design archive
-- `docs/LINKING_GUIDE.md`: focused guide for pointer-based linking
+- `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
 
 LTSeq is an ordered-sequence data processing library for Python backed by Rust/DataFusion. Unlike traditional DataFrames, LTSeq emphasizes order semantics and provides SPL-style capabilities such as window functions, ordered grouping, and cursor-based streaming.
 

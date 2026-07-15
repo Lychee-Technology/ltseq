@@ -59,6 +59,19 @@ class LinkedTable:
         self._join_fn = join_fn
         self._alias = alias
         self._join_type = join_type
+        # Reject alias-prefix collisions up front. If a `{alias}_{col}` target
+        # name equals an existing source column, the join produces two columns
+        # with the same name — ambiguous. The preview-schema dict would
+        # silently dedupe it, so check the raw schemas before building it.
+        clashes = {
+            f"{alias}_{col}" for col in target_table._schema
+        } & set(source_table._schema)
+        if clashes:
+            raise ValueError(
+                f"link() alias '{alias}' would create column name(s) "
+                f"{sorted(clashes)} that already exist in the source table. "
+                f"Choose a different alias."
+            )
         # Ask Rust for the joined schema without executing the join — the same
         # build_prefixed_join_schema the join execution path uses, so the
         # {alias}_{col} naming convention has exactly one implementation.
@@ -66,6 +79,7 @@ class LinkedTable:
             target_table._inner, alias
         )
         self._plan: "LTSeq | None" = None  # cached lazy joined LTSeq
+        self._collected: "LTSeq | None" = None  # cached executed result
 
     def _ensure_join_plan(self) -> "LTSeq":
         """
@@ -107,8 +121,12 @@ class LinkedTable:
         return self._ensure_join_plan()
 
     def collect(self) -> "LTSeq":
-        """Execute the join and return an in-memory ``LTSeq`` (LTSeq.collect semantics)."""
-        return self._ensure_join_plan().collect()
+        """Execute the join and return an in-memory ``LTSeq`` (LTSeq.collect
+        semantics). The executed result is cached, so repeated calls return
+        the same materialized snapshot."""
+        if self._collected is None:
+            self._collected = self._ensure_join_plan().collect()
+        return self._collected
 
     def show(self, n: int = 10) -> None:
         """Display the joined table (materializes up to ``n`` rows)."""
@@ -132,9 +150,10 @@ class LinkedTable:
         """
         Select columns from the joined table.
 
-        Selecting source-only columns still executes the join, so unmatched
-        rows and one-to-many fan-out are reflected in the result (there is no
-        source-only shortcut). Returns a plain ``LTSeq``.
+        Selecting source-only columns still goes through the join plan, so
+        unmatched rows and one-to-many fan-out are reflected in the result
+        (there is no source-only shortcut). The plan stays lazy until a
+        terminal operation. Returns a plain ``LTSeq``.
         """
         return self._ensure_join_plan().select(*cols)
 
@@ -156,7 +175,13 @@ class LinkedTable:
         return plan.distinct() if key_fn is None else plan.distinct(key_fn)
 
     def link(
-        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+        self,
+        target_table: "LTSeq",
+        on: Callable,
+        as_: "str | None" = None,
+        join_type: str = "inner",
+        *,
+        alias: "str | None" = None,
     ) -> "LinkedTable":
         """
         Chain another link on top of this one.
@@ -170,9 +195,22 @@ class LinkedTable:
             on: Lambda specifying the equi-join condition
             as_: Prefix for the new target's columns
             join_type: One of "inner", "left", "right", "full". Default: "inner"
+            alias: Alias for as_ — pass exactly one of as_/alias (matches
+                ``LTSeq.link``).
 
         Returns:
             A new ``LinkedTable`` layered on the current join plan.
         """
+        if alias is not None and as_ is not None:
+            raise ValueError("Pass either as_ or alias, not both")
+        if alias is not None:
+            as_ = alias
+        if as_ is None:
+            raise ValueError("link() requires an alias: pass alias='name' (or as_='name')")
+        if join_type not in {"inner", "left", "right", "full"}:
+            raise ValueError(
+                f"Invalid join_type '{join_type}'. Must be one of: "
+                "{'inner', 'left', 'right', 'full'}"
+            )
         base = self._ensure_join_plan()
         return LinkedTable(base, target_table, on, as_, join_type)

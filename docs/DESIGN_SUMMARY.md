@@ -210,11 +210,11 @@ Sort metadata also enables optimized execution paths for specific workloads, esp
 
 ## 4. Linking, Joining, and Grouping
 
-### 4.1 Pointer-Based LinkedTable
+### 4.1 Prefix-Aliased LinkedTable
 
-`link()` returns a `LinkedTable`, a lazy relationship object rather than an immediately joined flat table.
+`link()` returns a `LinkedTable`, a deferred prefix-aliased equi-join rather than an immediately joined flat table.
 
-This allows source-only operations to remain cheap and delays join cost until linked-side columns are actually needed.
+Every transform builds the lazy join plan and returns a plain `LTSeq`, so its rows follow the join (unmatched rows and one-to-many fan-out included); the plan stays lazy until a terminal operation. This is a lazy join, not a pointer/take structure.
 
 ### 4.2 Join Column Conflict Strategy
 

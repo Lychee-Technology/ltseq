@@ -66,7 +66,7 @@ Start here:
 - `docs/DESIGN_SUMMARY.md`: current architecture summary and historical design archive
 - `docs/api.md`: full English API reference
 - `docs/api.cn.md`: full Chinese API reference
-- `docs/LINKING_GUIDE.md`: focused guide for pointer-based linking
+- `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
 
 ## 核心文档
 

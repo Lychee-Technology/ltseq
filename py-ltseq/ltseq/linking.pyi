@@ -35,6 +35,8 @@ class LinkedTable:
         self,
         target_table: LTSeq,
         on: Callable,
-        as_: str,
+        as_: str | None = ...,
         join_type: JoinHow = ...,
+        *,
+        alias: str | None = ...,
     ) -> LinkedTable: ...
