@@ -425,7 +425,7 @@ t.select(lambda r: [r.id, r.name])
 
 ### `LTSeq.derive` (alias: `with_columns`)
 - **Signature**: `LTSeq.derive(**new_cols: Callable) -> LTSeq` or `LTSeq.derive(func: Callable[[Row], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Add or overwrite columns; keeps existing columns. `with_columns` is an alias for Polars users
+- **Behavior**: Add or overwrite columns; keeps existing columns. Deriving an existing name **replaces that column in place** (stable column order, no duplicates — Polars `with_columns` semantics); the expression reads the ORIGINAL column values. Overwriting a sort key invalidates the declared sort order from that key onward (`sort_keys` prefix-truncates). `with_columns` is an alias for Polars users
 - **Parameters**: `new_cols` mapping of column name to lambda; or a lambda that returns a dict
 - **Returns**: new `LTSeq` with derived columns
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid return type), `AttributeError` (column not found)
@@ -575,11 +575,11 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 ```
 
 #### `r.col.rolling`
-- **Signature**: `r.col.rolling(window_size: int).agg_func() -> Expr`
-- **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`
-- **Parameters**: `window_size` window size
+- **Signature**: `r.col.rolling(window_size: int, partition_by: str | Expr | None = None).agg_func() -> Expr`
+- **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`. **Partial-frame semantics** (SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`): the window start is clipped at the first row, so early rows aggregate over fewer than `window_size` rows — there is no `min_periods` (pass it and you get an error, not NULL-padding)
+- **Parameters**: `window_size` window size (>= 1); `partition_by` optional per-group windows. Unknown kwargs are rejected by name
 - **Returns**: window aggregation expression
-- **Exceptions**: `ValueError` (window_size <= 0), `SortRequiredError` (used without sort)
+- **Exceptions**: `ValueError` (window_size < 1, `min_periods`, or unknown kwarg), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
 ma5 = t.sort("date").derive(ma_5=lambda r: r.close.rolling(5).mean())

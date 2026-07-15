@@ -8,7 +8,10 @@
 //! died with the SQL round-trip paths (issue #91).
 
 use crate::error::LtseqError;
+use crate::metadata::SortSpec;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::common::Column;
+use datafusion::logical_expr::Expr;
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -157,6 +160,58 @@ pub fn build_suffixed_join_schema(
     }
 
     Ok(Arc::new(ArrowSchema::new(fields)))
+}
+
+// ============================================================================
+// Derive replace-or-add (issue #125 finding 4)
+// ============================================================================
+
+/// Build a derive select list with replace-or-add semantics: schema columns
+/// keep their positions — a column whose name is being derived is replaced
+/// IN PLACE by its new expression — and genuinely new columns are appended
+/// in the order given. Expressions are evaluated against the INPUT table, so
+/// a replacement may reference the old value of the column it overwrites.
+///
+/// `derived` pairs are (output name, already-aliased expression).
+pub fn merge_derived_columns(
+    schema: &ArrowSchema,
+    derived: Vec<(String, Expr)>,
+) -> Vec<Expr> {
+    // Option slots let a matched expression be moved out at its schema
+    // position without cloning; the leftovers (genuinely new columns) drain
+    // in insertion order below.
+    let mut derived: Vec<Option<(String, Expr)>> = derived.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(schema.fields().len() + derived.len());
+    for field in schema.fields() {
+        // Python kwargs guarantee unique derived names, so first match wins.
+        let slot = derived
+            .iter_mut()
+            .find(|slot| matches!(slot, Some((name, _)) if name == field.name()));
+        match slot {
+            Some(slot) => {
+                let (_, expr) = slot.take().expect("find matched Some above");
+                out.push(expr);
+            }
+            None => out.push(Expr::Column(Column::new_unqualified(field.name()))),
+        }
+    }
+    out.extend(derived.into_iter().flatten().map(|(_, expr)| expr));
+    out
+}
+
+/// Truncate sort specs at the first overwritten sort key: a replaced column
+/// still exists in the output, but its values changed, so the declared order
+/// is invalid from that key onward (same prefix semantics as select()'s
+/// projection truncation in basic.rs).
+pub fn truncate_specs_at_overwrite(
+    specs: &[SortSpec],
+    derived_names: &HashSet<String>,
+) -> Vec<SortSpec> {
+    specs
+        .iter()
+        .take_while(|spec| !derived_names.contains(&spec.column))
+        .cloned()
+        .collect()
 }
 
 
