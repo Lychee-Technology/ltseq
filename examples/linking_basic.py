@@ -56,7 +56,7 @@ def main():
 
     # Materialize if needed for further processing
     print("\n7. Materializing the link for further processing...")
-    result = linked._materialize()
+    result = linked.to_ltseq()
     print(f"   Result type: {type(result).__name__}")
     print(f"   Row count: {len(result)}")
     print("\nMaterialized data (first 3 rows):")

@@ -32,7 +32,7 @@ FILES_TO_CHECK = {
         "AggregationMixin": {"cum_sum", "group_ordered", "group_sorted", "agg"},
     },
     "py-ltseq/ltseq/linking.py": {
-        "LinkedTable": {"_materialize", "filter", "select", "derive", "sort", "slice", "distinct", "link"},
+        "LinkedTable": {"_ensure_join_plan", "to_ltseq", "filter", "select", "derive", "sort", "slice", "distinct", "link"},
     },
 }
 

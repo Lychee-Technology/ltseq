@@ -85,7 +85,7 @@ class TestLinkedTableChaining:
             as_="prod",
         )
 
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
         assert result is not None
 
     def test_single_link_show(self, orders_table, products_table):
@@ -196,18 +196,18 @@ class TestPhase8KErrorHandling:
             assert linked._join_type == join_type
 
     def test_filter_on_filtered_linked_table(self, orders_table, products_table):
-        """Filtering a filtered linked table should work"""
+        """Filtering a linked table returns an LTSeq that keeps filtering."""
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
-        # Filter once
+        # Filter once — LinkedTable.filter runs on the joined plan → LTSeq
         filtered1 = linked.filter(lambda r: r.quantity > 2)
-        assert isinstance(filtered1, LinkedTable)
+        assert isinstance(filtered1, LTSeq)
 
-        # Filter again
+        # Filter again — plain LTSeq chaining
         filtered2 = filtered1.filter(lambda r: r.quantity > 3)
-        assert isinstance(filtered2, LinkedTable)
+        assert isinstance(filtered2, LTSeq)
 
     def test_composite_join_condition(self, orders_table, products_table):
         """Composite join conditions should work correctly"""
@@ -231,8 +231,8 @@ class TestPhase8KErrorHandling:
         )
 
         # Materialize multiple times
-        result1 = linked._materialize()
-        result2 = linked._materialize()
+        result1 = linked._ensure_join_plan()
+        result2 = linked._ensure_join_plan()
 
         # Should return the same cached object
         assert result1 is result2
@@ -251,7 +251,7 @@ class TestPhase8KErrorHandling:
 
             assert linked._join_type == join_type
             # Should be able to materialize
-            result = linked._materialize()
+            result = linked._ensure_join_plan()
             assert result is not None
 
     def test_linked_table_error_message_clarity(self, orders_table, products_table):
@@ -306,7 +306,7 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        result = linked._materialize()
+        result = linked._ensure_join_plan()
 
         assert result is not None
         assert isinstance(result, LTSeq)
@@ -323,7 +323,7 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         # Link the materialized result to categories
         linked2 = mat1.link(
@@ -346,7 +346,7 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         # Link to categories
         linked2 = mat1.link(
@@ -357,7 +357,7 @@ class TestChainedMaterialization:
         )
 
         # Now materialize the second link
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         assert mat2 is not None
         assert isinstance(mat2, LTSeq)
@@ -375,14 +375,14 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         linked2 = mat1.link(
             categories_table,
             on=lambda m, c: m.product_id == c.product_id,
             as_="cat",
         )
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         # At minimum, check that base columns are present
         schema_keys = set(mat2._schema.keys())
@@ -399,7 +399,7 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
         original_rows = len(mat1)
 
         linked2 = mat1.link(
@@ -407,7 +407,7 @@ class TestChainedMaterialization:
             on=lambda m, c: m.product_id == c.product_id,
             as_="cat",
         )
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         # Data should be preserved (inner join, so same or fewer rows)
         assert len(mat2) > 0
@@ -430,7 +430,7 @@ class TestChainedMaterialization:
         )
 
         # Now materialize the entire chain
-        result = linked2._materialize()
+        result = linked2._ensure_join_plan()
 
         assert result is not None
         assert isinstance(result, LTSeq)
@@ -447,7 +447,7 @@ class TestChainedMaterialization:
             as_="prod",
             join_type="left",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         linked2 = mat1.link(
             categories_table,
@@ -455,7 +455,7 @@ class TestChainedMaterialization:
             as_="cat",
             join_type="left",
         )
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         # Left joins should preserve all left rows
         assert len(mat2) > 0
@@ -469,14 +469,14 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         linked2 = mat1.link(
             categories_table,
             on=lambda m, c: m.product_id == c.product_id,
             as_="cat",
         )
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         # Filter on the chained materialized result
         filtered = mat2.filter(lambda r: r.quantity > 5)
@@ -491,14 +491,14 @@ class TestChainedMaterialization:
             on=lambda o, p: o.product_id == p.product_id,
             as_="prod",
         )
-        mat1 = linked1._materialize()
+        mat1 = linked1._ensure_join_plan()
 
         linked2 = mat1.link(
             categories_table,
             on=lambda m, c: m.product_id == c.product_id,
             as_="cat",
         )
-        mat2 = linked2._materialize()
+        mat2 = linked2._ensure_join_plan()
 
         # Check schema has expected columns
         schema_cols = set(mat2._schema.keys())

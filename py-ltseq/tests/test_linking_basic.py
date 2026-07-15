@@ -151,7 +151,7 @@ class TestLinkLenOperation:
 
     def test_link_len_matches_materialized_count(self, orders_table, products_table):
         """
-        len(linked) should equal len(linked._materialize()).
+        len(linked) should equal len(linked._ensure_join_plan()).
         """
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
@@ -159,7 +159,7 @@ class TestLinkLenOperation:
 
         # Compare len() with explicit materialization
         linked_len = len(linked)
-        materialized_len = len(linked._materialize())
+        materialized_len = len(linked._ensure_join_plan())
         assert linked_len == materialized_len
 
     def test_link_len_after_filter_source_columns(self, orders_table, products_table):
@@ -213,11 +213,11 @@ class TestLinkedTableSortSliceDistinct:
             as_="prod",
         )
 
-    def test_sort_returns_linked_table(self, orders_table, products_table):
-        """sort() on LinkedTable returns a LinkedTable."""
+    def test_sort_returns_ltseq(self, orders_table, products_table):
+        """sort() runs on the joined plan and returns a plain LTSeq (issue #125)."""
         linked = self._make_linked(orders_table, products_table)
         sorted_linked = linked.sort("quantity")
-        assert isinstance(sorted_linked, LinkedTable)
+        assert isinstance(sorted_linked, LTSeq)
 
     def test_sort_preserves_schema(self, orders_table, products_table):
         """sort() preserves schema including linked columns."""
@@ -233,11 +233,11 @@ class TestLinkedTableSortSliceDistinct:
         sorted_linked = linked.sort("quantity")
         assert len(sorted_linked) == original_len
 
-    def test_slice_returns_linked_table(self, orders_table, products_table):
-        """slice() on LinkedTable returns a LinkedTable."""
+    def test_slice_returns_ltseq(self, orders_table, products_table):
+        """slice() runs on the joined plan and returns a plain LTSeq (issue #125)."""
         linked = self._make_linked(orders_table, products_table)
         sliced = linked.slice(0, 2)
-        assert isinstance(sliced, LinkedTable)
+        assert isinstance(sliced, LTSeq)
 
     def test_slice_reduces_rows(self, orders_table, products_table):
         """slice(0, 2) returns at most 2 rows."""
@@ -245,11 +245,11 @@ class TestLinkedTableSortSliceDistinct:
         sliced = linked.slice(0, 2)
         assert len(sliced) <= 2
 
-    def test_distinct_returns_linked_table(self, orders_table, products_table):
-        """distinct() on LinkedTable returns a LinkedTable."""
+    def test_distinct_returns_ltseq(self, orders_table, products_table):
+        """distinct() runs on the joined plan and returns a plain LTSeq (issue #125)."""
         linked = self._make_linked(orders_table, products_table)
         distinct_linked = linked.distinct()
-        assert isinstance(distinct_linked, LinkedTable)
+        assert isinstance(distinct_linked, LTSeq)
 
     def test_distinct_preserves_schema(self, orders_table, products_table):
         """distinct() preserves schema including linked columns."""
@@ -259,10 +259,14 @@ class TestLinkedTableSortSliceDistinct:
 
 
 class TestLinkedTableJoinTypePropagation:
-    """Regression tests: transforms must preserve join_type (issue #92).
+    """Regression tests: transforms must honor join_type (issues #92, #125).
 
     Previously filter/derive/sort/slice/distinct rebuilt the LinkedTable
-    without passing join_type, silently downgrading left joins to inner.
+    without passing join_type, silently downgrading left joins to inner
+    (#92). After #125 the transforms run on the joined plan itself and
+    return a plain LTSeq, so the join type is baked into the plan — the
+    guarantee is now checked through the surviving unmatched row, not a
+    ``_join_type`` attribute on the result.
     """
 
     @pytest.fixture
@@ -289,19 +293,25 @@ class TestLinkedTableJoinTypePropagation:
             join_type="left",
         )
 
-    def test_transforms_preserve_join_type_attribute(
+    def test_transforms_return_ltseq_and_keep_left_semantics(
         self, orders_with_unmatched, products_table
     ):
         linked = self._make_left_linked(orders_with_unmatched, products_table)
         assert linked._join_type == "left"
 
-        assert linked.derive(lambda r: {"qty2": r.quantity * 2})._join_type == "left"
-        assert linked.sort("id")._join_type == "left"
-        assert linked.slice(0, 2)._join_type == "left"
-        assert linked.distinct()._join_type == "left"
+        # Each transform runs on the left-joined plan (3 rows, unmatched
+        # id=3 kept) and returns a plain LTSeq — never silently downgrading
+        # to an inner join that would drop id=3.
+        derived = linked.derive(qty2=lambda r: r.quantity * 2)
+        assert isinstance(derived, LTSeq)
+        assert len(derived) == 3
+
+        assert len(linked.sort("id")) == 3
+        assert len(linked.distinct()) == 3
+
         filtered = linked.filter(lambda r: r.quantity > 0)
-        assert isinstance(filtered, LinkedTable)
-        assert filtered._join_type == "left"
+        assert isinstance(filtered, LTSeq)
+        assert len(filtered) == 3
 
     def test_left_join_row_kept_after_transform(
         self, orders_with_unmatched, products_table

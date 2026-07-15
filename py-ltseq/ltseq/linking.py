@@ -1,8 +1,7 @@
-"""LinkedTable class for pointer-based join operations."""
+"""LinkedTable: a deferred, prefix-aliased equi-join created by LTSeq.link()."""
 
 from typing import TYPE_CHECKING, Callable
 
-from .expr import _lambda_to_expr
 from .helpers import _extract_join_keys
 
 if TYPE_CHECKING:
@@ -10,12 +9,30 @@ if TYPE_CHECKING:
 
 
 class LinkedTable:
-    """
-    Represents a table with pointer-based foreign key references.
+    """A deferred, prefix-aliased equi-join between a source and a target table.
 
-    Created by LTSeq.link(), this wrapper maintains pointers to rows in a target
-    table without materializing an expensive join. Accessing linked columns is
-    translated to index-based lookups (take operations) during execution.
+    Created by :meth:`LTSeq.link`. ``link()`` records the join condition and
+    the target's alias but executes nothing; it computes the joined schema up
+    front — target columns namespaced as ``{alias}_{col}``, source columns
+    kept as-is — so column references resolve without a round trip.
+
+    Every transform (``filter``/``select``/``derive``/``sort``/``slice``/
+    ``distinct``) builds the lazy join plan and runs on top of it, returning a
+    plain :class:`LTSeq`. Because a transform applies AFTER the join, its
+    row semantics follow the join: an inner/right/full join drops or adds
+    unmatched rows, and a one-to-many match fans a source row out to several
+    result rows — a following ``slice``/``filter`` sees the joined rows, not
+    the original source rows. Reach for :meth:`to_ltseq` to get the lazy
+    joined table explicitly, or :meth:`collect` to execute it.
+
+    ``link()`` itself returns a new ``LinkedTable`` layered on top of the
+    current join plan, so multi-hop links compose: the second link's
+    condition may reference the first link's ``{alias}_{col}`` columns, and
+    its schema is computed from the real joined plan (not a stitched preview).
+
+    This is a lazy equi-join, not a pointer/take structure: there is no cheap
+    per-row navigation, only a DataFusion join that stays lazy until
+    materialized.
     """
 
     def __init__(
@@ -30,44 +47,52 @@ class LinkedTable:
         Initialize a LinkedTable from source and target tables.
 
         Args:
-            source_table: The primary table (e.g., orders)
+            source_table: The primary table (e.g., orders). For a chained
+                link this is the previous link's joined plan.
             target_table: The table being linked (e.g., products)
-            join_fn: Lambda that specifies the join condition
-            alias: Alias used for the linked reference (e.g., "prod")
-            join_type: Type of join ("inner", "left", "right", "full"). Default: "inner"
+            join_fn: Lambda specifying the equi-join condition
+            alias: Prefix applied to every target column (e.g., "prod")
+            join_type: One of "inner", "left", "right", "full". Default: "inner"
         """
         self._source = source_table
         self._target = target_table
         self._join_fn = join_fn
         self._alias = alias
         self._join_type = join_type
-        # Ask Rust for the joined schema without executing the join — the
-        # same build_aliased_join_schema the join execution path uses, so the
+        # Reject alias-prefix collisions up front. If a `{alias}_{col}` target
+        # name equals an existing source column, the join produces two columns
+        # with the same name — ambiguous. The preview-schema dict would
+        # silently dedupe it, so check the raw schemas before building it.
+        clashes = {
+            f"{alias}_{col}" for col in target_table._schema
+        } & set(source_table._schema)
+        if clashes:
+            raise ValueError(
+                f"link() alias '{alias}' would create column name(s) "
+                f"{sorted(clashes)} that already exist in the source table. "
+                f"Choose a different alias."
+            )
+        # Ask Rust for the joined schema without executing the join — the same
+        # build_prefixed_join_schema the join execution path uses, so the
         # {alias}_{col} naming convention has exactly one implementation.
         self._schema = source_table._inner.preview_join_schema(
             target_table._inner, alias
         )
-        self._materialized: "LTSeq | None" = None  # Lazy materialization
+        self._plan: "LTSeq | None" = None  # cached lazy joined LTSeq
+        self._collected: "LTSeq | None" = None  # cached executed result
 
-    def _materialize(self) -> "LTSeq":
+    def _ensure_join_plan(self) -> "LTSeq":
         """
-        Materialize the join operation.
+        Build (once) and return the lazy joined ``LTSeq``.
 
-        This method performs the actual join only when data access is needed.
-        The result is cached to avoid re-joining on subsequent accesses.
-
-        Returns:
-            LTSeq instance with materialized joined data
-
-        Raises:
-            TypeError: If join condition cannot be parsed
-            ValueError: If join columns don't exist
+        No data is executed here: ``join_prefixed`` produces a DataFusion
+        join LogicalPlan that stays lazy until the caller materializes it
+        (collect / to_pandas / len / ...). The plan is cached so repeated
+        transforms reuse one join node.
         """
-        # Return cached result if already materialized
-        if self._materialized is not None:
-            return self._materialized
+        if self._plan is not None:
+            return self._plan
 
-        # Extract join keys
         left_key_expr, right_key_expr, join_type = _extract_join_keys(
             self._join_fn,
             self._source._schema,
@@ -75,9 +100,9 @@ class LinkedTable:
             self._join_type,
         )
 
-        # Use the prefix-aliased join path: link() namespaces the whole target
-        # table as `{alias}_col` for pointer navigation (distinct from join()'s
-        # Polars-style conflict-only suffix).
+        # Prefix-aliased join: link() namespaces the whole target table as
+        # `{alias}_col` (distinct from join()'s Polars-style conflict-only
+        # suffix). The executed plan's schema comes from the Rust kernel.
         joined_inner = self._source._inner.join_prefixed(
             self._target._inner,
             left_key_expr,
@@ -86,173 +111,106 @@ class LinkedTable:
             self._alias,
         )
 
-        # Create new LTSeq wrapping the joined result
         from .core import LTSeq
 
-        # The executed join's schema comes from the Rust kernel.
-        result = LTSeq._from_inner(joined_inner)
+        self._plan = LTSeq._from_inner(joined_inner)
+        return self._plan
 
-        # Cache the result
-        self._materialized = result
-        return result
+    def to_ltseq(self) -> "LTSeq":
+        """Return the lazy joined table as a plain ``LTSeq`` (no execution)."""
+        return self._ensure_join_plan()
+
+    def collect(self) -> "LTSeq":
+        """Execute the join and return an in-memory ``LTSeq`` (LTSeq.collect
+        semantics). The executed result is cached, so repeated calls return
+        the same materialized snapshot."""
+        if self._collected is None:
+            self._collected = self._ensure_join_plan().collect()
+        return self._collected
 
     def show(self, n: int = 10) -> None:
-        """Display linked table with materialized joined data."""
-        materialized = self._materialize()
-        materialized.show(n)
+        """Display the joined table (materializes up to ``n`` rows)."""
+        self._ensure_join_plan().show(n)
 
     def __len__(self) -> int:
+        """Row count of the joined result (materializes the join)."""
+        return len(self._ensure_join_plan())
+
+    def filter(self, predicate: Callable) -> "LTSeq":
         """
-        Get the number of rows in the linked table.
+        Filter the joined rows.
 
-        This triggers materialization of the join to count rows.
-
-        Returns:
-            The count of rows in the materialized result
-
-        Example:
-            >>> linked = orders.link(products, on=..., as_="prod")
-            >>> print(len(linked))  # Materializes and counts
+        The predicate resolves against the joined schema, so it may reference
+        source columns (original names) and linked columns (``{alias}_col``).
+        Returns a plain ``LTSeq``.
         """
-        materialized = self._materialize()
-        return len(materialized)
+        return self._ensure_join_plan().filter(predicate)
 
-    def filter(self, predicate: Callable) -> "LinkedTable | LTSeq":
+    def select(self, *cols: "str | Callable") -> "LTSeq":
         """
-        Filter rows with support for both source and linked columns.
+        Select columns from the joined table.
 
-        If predicate uses only source columns, returns a LinkedTable with filtered source.
-        If predicate uses linked columns, materializes the join and returns filtered LTSeq.
-
-        Args:
-            predicate: Lambda taking a row, returning boolean Expr
-                      Can reference source columns (id, quantity) OR linked columns (prod.name, prod.price)
-
-        Returns:
-            LinkedTable if filtering on source columns only
-            LTSeq if filtering on linked columns (join materialized)
-
-        Raises:
-            AttributeError: If predicate references non-existent columns
+        Selecting source-only columns still goes through the join plan, so
+        unmatched rows and one-to-many fan-out are reflected in the result
+        (there is no source-only shortcut). The plan stays lazy until a
+        terminal operation. Returns a plain ``LTSeq``.
         """
-        # Try to parse with source schema only
-        try:
-            _lambda_to_expr(predicate, self._source._schema)
-            # Predicate only uses source columns - fast path
-            filtered_source = self._source.filter(predicate)
-            return LinkedTable(
-                filtered_source,
-                self._target,
-                self._join_fn,
-                self._alias,
-                self._join_type,
-            )
-        except AttributeError:
-            # Predicate references columns not in source
-            # These must be linked columns - materialize and filter
-            materialized = self._materialize()
-            return materialized.filter(predicate)
+        return self._ensure_join_plan().select(*cols)
 
-    def select(self, *cols) -> "LTSeq":
-        """
-        Select columns from linked table.
+    def derive(self, *args, **kwargs) -> "LTSeq":
+        """Derive columns over the joined table; may reference linked columns."""
+        return self._ensure_join_plan().derive(*args, **kwargs)
 
-        Transparently materializes join if selecting linked columns.
-        Detects whether selected columns include linked columns (with alias prefix like 'prod_*')
-        and materializes the join automatically if needed.
+    def sort(self, *key_exprs, **kwargs) -> "LTSeq":
+        """Sort the joined table (after the join, not the source)."""
+        return self._ensure_join_plan().sort(*key_exprs, **kwargs)
 
-        Args:
-            *cols: Column names to select (e.g., "id", "quantity", "prod_name", "prod_price")
-                   Can mix source columns and linked columns in a single call
+    def slice(self, offset: int, length: int) -> "LTSeq":
+        """Slice the joined rows (offset + length, over the joined result)."""
+        return self._ensure_join_plan().slice(offset, length)
 
-        Returns:
-            LTSeq with selected columns (materialized if linked columns were selected)
-
-        Example:
-            >>> linked = orders.link(products, on=lambda o,p: o.product_id==p.product_id, as_="prod")
-            >>> result = linked.select("id", "quantity")  # Works: source columns only
-            >>> result = linked.select("prod_name")  # Works: linked column (materializes transparently)
-            >>> result = linked.select("id", "prod_price")  # Works: mixed source and linked
-        """
-        # Check if any selected columns are linked columns
-        # Linked columns have the format: "{alias}_{column_name}"
-        has_linked_columns = any(
-            col.startswith(f"{self._alias}_") for col in cols if isinstance(col, str)
-        )
-
-        # If a lambda is passed, we need to materialize to access linked columns
-        has_lambda = any(callable(col) for col in cols)
-
-        if has_linked_columns or has_lambda:
-            # Materialize the join and select from the materialized table
-            materialized = self._materialize()
-            return materialized.select(*cols)
-        else:
-            # Select only from source columns (don't materialize)
-            return self._source.select(*cols)
-
-    def derive(self, mapper: Callable) -> "LinkedTable":
-        """Derive columns (delegates to source for MVP)."""
-        derived_source = self._source.derive(mapper)
-        return LinkedTable(
-            derived_source, self._target, self._join_fn, self._alias, self._join_type
-        )
-
-    def sort(self, *key_exprs) -> "LinkedTable":
-        """
-        Sort linked table rows.
-
-        Args:
-            *key_exprs: Column names or lambda expressions to sort by
-
-        Returns:
-            A new LinkedTable with sorted source data
-        """
-        sorted_source = self._source.sort(*key_exprs)
-        return LinkedTable(
-            sorted_source, self._target, self._join_fn, self._alias, self._join_type
-        )
-
-    def slice(self, offset: int, length: int) -> "LinkedTable":
-        """Slice rows (same semantics as LTSeq.slice: offset + length)."""
-        sliced_source = self._source.slice(offset, length)
-        return LinkedTable(
-            sliced_source, self._target, self._join_fn, self._alias, self._join_type
-        )
-
-    def distinct(self, key_fn: Callable | None = None) -> "LinkedTable":
-        """Get distinct rows."""
-        if key_fn is None:
-            distinct_source = self._source.distinct()
-        else:
-            distinct_source = self._source.distinct(key_fn)
-        return LinkedTable(
-            distinct_source, self._target, self._join_fn, self._alias, self._join_type
-        )
+    def distinct(self, key_fn: Callable | None = None) -> "LTSeq":
+        """Deduplicate the joined rows."""
+        plan = self._ensure_join_plan()
+        return plan.distinct() if key_fn is None else plan.distinct(key_fn)
 
     def link(
-        self, target_table: "LTSeq", on: Callable, as_: str, join_type: str = "inner"
+        self,
+        target_table: "LTSeq",
+        on: Callable,
+        as_: "str | None" = None,
+        join_type: str = "inner",
+        *,
+        alias: "str | None" = None,
     ) -> "LinkedTable":
         """
-        Link this linked table to another table.
+        Chain another link on top of this one.
 
-        Allows chaining multiple links while preserving previous schemas.
+        The new link's source is this link's joined plan, so its ``on``
+        condition may reference this link's ``{alias}_col`` columns and its
+        schema is computed from the real joined plan.
 
         Args:
             target_table: The table to link to
-            on: Lambda with two parameters specifying the join condition
-            as_: Alias for the linked table reference
-            join_type: Type of join ("inner", "left", "right", "full"). Default: "inner"
+            on: Lambda specifying the equi-join condition
+            as_: Prefix for the new target's columns
+            join_type: One of "inner", "left", "right", "full". Default: "inner"
+            alias: Alias for as_ — pass exactly one of as_/alias (matches
+                ``LTSeq.link``).
 
         Returns:
-            A new LinkedTable with chained links
+            A new ``LinkedTable`` layered on the current join plan.
         """
-        # Create new LinkedTable that chains from the source
-        result = LinkedTable(self._source, target_table, on, as_, join_type)
-
-        # Merge with existing schema from this LinkedTable
-        for key, value in self._schema.items():
-            if key not in result._schema:
-                result._schema[key] = value
-
-        return result
+        if alias is not None and as_ is not None:
+            raise ValueError("Pass either as_ or alias, not both")
+        if alias is not None:
+            as_ = alias
+        if as_ is None:
+            raise ValueError("link() requires an alias: pass alias='name' (or as_='name')")
+        if join_type not in {"inner", "left", "right", "full"}:
+            raise ValueError(
+                f"Invalid join_type '{join_type}'. Must be one of: "
+                "{'inner', 'left', 'right', 'full'}"
+            )
+        base = self._ensure_join_plan()
+        return LinkedTable(base, target_table, on, as_, join_type)

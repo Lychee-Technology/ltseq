@@ -97,7 +97,7 @@ def most_official_language_countries_top_language(lang_table, t_country) -> any:
             on=lambda c, lang: c.CountryCode == lang.CountryCode,
             as_="lang",
         )
-        ._materialize()
+        .to_ltseq()
     )
 
     result = (

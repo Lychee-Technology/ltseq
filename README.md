@@ -11,7 +11,7 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 - **Ordered Computing**: group_ordered, search_first for processing sequences
 - **Set Operations**: union, intersect, except, subset checks
 - **Joins**: Standard SQL joins, merge joins, semi/anti joins, as-of joins, lookups
-- **Foreign Key Relationships**: Lightweight pointer-based linking
+- **Foreign Key Relationships**: Lazy prefix-aliased linking
 - **Aggregation**: group-by aggregation with statistical functions, partitioning, pivots
 - **String Operations**: contains, replace, concat, pad, split, regex matching
 - **Temporal Operations**: year, month, day, hour extraction, date arithmetic
@@ -97,9 +97,11 @@ t.distinct(lambda r: r.customer_id)
 t.slice(offset=10, length=5)
 ```
 
-### Pointer-Based Linking (Foreign Keys)
+### Prefix-Aliased Linking (Foreign Keys)
 
-Link tables via foreign key relationships without materializing expensive joins:
+Link tables via a deferred, prefix-aliased equi-join. Target columns are
+exposed as `{alias}_{col}`; every transform runs on the lazy join plan and
+returns a plain `LTSeq`:
 
 ```python
 # Create a link between orders and products
@@ -112,18 +114,18 @@ linked = orders.link(
     as_="prod"
 )
 
-# Filter on source columns (fast - no join yet)
+# Transforms run on the joined plan and return an LTSeq
 filtered = linked.filter(lambda r: r.quantity > 10)
 
-# Materialize when you need the joined data
-result = filtered._materialize()
-result.show()
+# Get the lazy joined table, or execute it
+joined = linked.to_ltseq()
+filtered.show()
 ```
 
 **Features:**
 - All four join types: `join_type="inner"` (default), `"left"`, `"right"`, `"full"`
 - Composite keys: `on=lambda o, p: (o.year == p.year) & (o.product_id == p.product_id)`
-- Lazy evaluation: Link created before join is executed
+- Lazy evaluation: the join plan stays lazy until a terminal operation
 - See [Linking Guide](docs/LINKING_GUIDE.md) for detailed documentation
 
 
@@ -572,7 +574,7 @@ A: CSV, JSON, and Parquet. Via to_csv(), to_json(), and to_parquet() methods.
 
 **Q: How do I join tables?**  
 A: LTSeq offers two approaches:
-1. **Linking**  - Lightweight pointer-based foreign keys with lazy evaluation
+1. **Linking**  - Lazy prefix-aliased foreign-key joins
    - `orders.link(products, on=lambda o, p: o.product_id == p.product_id, as_="prod")`
    - See [Linking Guide](docs/LINKING_GUIDE.md)
 2. **Traditional SQL joins** - Full data materialization

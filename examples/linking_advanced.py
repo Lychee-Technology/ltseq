@@ -122,7 +122,7 @@ def phase_9_chained_linking():
     print(f"   Created linked table with schema: {list(linked1._schema.keys())}")
 
     print("\n2. Materialize first link:")
-    mat1 = linked1._materialize()
+    mat1 = linked1.to_ltseq()
     print(f"   Materialized to LTSeq with {len(mat1)} rows")
     print(f"   Schema: {list(mat1._schema.keys())}")
 
@@ -135,7 +135,7 @@ def phase_9_chained_linking():
     linked2 = orders.link(
         products, on=lambda o, p: o.product_id == p.product_id, as_="prod"
     )
-    result = linked2._materialize()
+    result = linked2.to_ltseq()
     print(f"   Final result: {len(result)} rows")
     result.show(3)
 
@@ -162,21 +162,20 @@ def phase_13_aggregate_linked_data():
         products, on=lambda o, p: o.product_id == p.product_id, as_="prod"
     )
 
-    print("\n1. Basic aggregation patterns:")
-    print("   linked.aggregate({'total_orders': 'count'})")
-    print("   linked.aggregate({'avg_quantity': 'avg', 'max_quantity': 'max'})")
+    print("\n1. Basic aggregation patterns (transforms return LTSeq):")
+    print("   linked.to_ltseq().group_by('prod_name')")
+    print("          .agg(total_orders=lambda r: r.id.count())")
 
     print("\n2. Common analytical patterns:")
     print("   # Get summary statistics per product")
     print("   linked.filter(lambda r: r.prod_price > 100)")
-    print("          .select('prod_name', 'quantity')")
     print("          .group_by('prod_name')")
-    print("          .aggregate({'total_quantity': 'sum'})")
+    print("          .agg(total_quantity=lambda r: r.quantity.sum())")
 
     print("\n   # Count orders by product")
     print("   linked.select('prod_name')")
     print("         .group_by('prod_name')")
-    print("         .aggregate({'order_count': 'count'})")
+    print("         .agg(order_count=lambda r: r.prod_name.count())")
 
 
 def comparison_manual_vs_transparent():
@@ -194,13 +193,13 @@ def comparison_manual_vs_transparent():
     print("\n1. MANUAL materialization:")
     print("   Before Phase 10-11:")
     print("   linked = orders.link(..., as_='prod')")
-    print("   mat = linked._materialize()")
+    print("   mat = linked.to_ltseq()")
     print("   result = mat.filter(lambda r: r.prod_price > 100)")
 
     linked = orders.link(
         products, on=lambda o, p: o.product_id == p.product_id, as_="prod"
     )
-    mat = linked._materialize()
+    mat = linked.to_ltseq()
     result = mat.filter(lambda r: r.prod_price > 100)
     print(f"   Result: {len(result)} rows")
 

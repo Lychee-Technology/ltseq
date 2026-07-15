@@ -20,23 +20,23 @@ class TestLinkedTableFilter:
     def products_table(self):
         return LTSeq.read_csv("examples/products.csv")
 
-    def test_filter_returns_linked_table(self, orders_table, products_table):
+    def test_filter_returns_ltseq(self, orders_table, products_table):
         """
-        filter() on source columns should return a LinkedTable.
+        filter() runs on the joined plan and returns a plain LTSeq (issue #125).
         """
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
         result = linked.filter(lambda r: r.quantity > 2)
-        assert isinstance(result, LinkedTable)
+        assert isinstance(result, LTSeq)
 
-    def test_filter_preserves_linked_table_structure(
+    def test_filter_result_keeps_linked_schema(
         self, orders_table, products_table
     ):
         """
-        Filtering a linked table should preserve its structure for further operations.
-        The filtered linked table should still support access to linked columns.
+        The filtered LTSeq still carries the joined schema, so linked
+        columns remain accessible downstream.
         """
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
@@ -45,8 +45,8 @@ class TestLinkedTableFilter:
         # Filter on source column
         filtered = linked.filter(lambda r: r.quantity > 1)
 
-        # The result should still be a linked table with schema intact
-        assert isinstance(filtered, LinkedTable)
+        # The result is an LTSeq whose schema still includes linked columns
+        assert isinstance(filtered, LTSeq)
         assert "prod_name" in filtered._schema
         assert "prod_price" in filtered._schema
 
@@ -62,15 +62,15 @@ class TestLinkedTableFilter:
         result = linked.filter(lambda r: r.quantity > 1)
 
         assert result is not None
-        assert isinstance(result, LinkedTable)
+        assert isinstance(result, LTSeq)
         result.show(1)
 
     def test_filter_on_source_then_show_linked_columns(
         self, orders_table, products_table
     ):
         """
-        Filter on source, then materialize to access linked columns.
-        Tests that the filtering doesn't break the join capability.
+        Filter on source columns, then display — the filtered LTSeq carries
+        the joined columns, so linked columns are still reachable.
         """
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
@@ -79,26 +79,25 @@ class TestLinkedTableFilter:
         # Filter on source column
         filtered = linked.filter(lambda r: r.quantity > 2)
 
-        # Then materialize and display (this materializes the join after filtering)
-        if isinstance(filtered, LinkedTable):
-            filtered.show(2)
+        # Then display (the join was executed as part of the filter)
+        filtered.show(2)
 
     def test_filter_returns_correct_row_count(self, orders_table, products_table):
         """
-        Verify that filtering correctly reduces row count.
+        Verify that filtering correctly reduces the joined row count.
         """
         linked = orders_table.link(
             products_table, on=lambda o, p: o.product_id == p.product_id, as_="prod"
         )
 
-        # Get original count
-        original_count = len(linked._source)
+        # Baseline: the joined row count (inner join over matching keys)
+        original_count = len(linked)
 
         # Filter to only high-quantity orders
         filtered = linked.filter(lambda r: r.quantity > 3)
 
-        # Filtered count should be less than original
-        filtered_count = len(filtered._source)
+        # Filtered count should be less than the joined count
+        filtered_count = len(filtered)
         assert filtered_count < original_count
         assert filtered_count > 0
 

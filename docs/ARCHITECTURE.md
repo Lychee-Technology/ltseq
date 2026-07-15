@@ -113,7 +113,7 @@ Defined in `py-ltseq/ltseq/grouping/nested_table.py`, `NestedTable` represents g
 
 ### `LinkedTable`
 
-Defined in `py-ltseq/ltseq/linking.py`, `LinkedTable` models a lazy relationship between two tables. It delays materializing the join until the user actually needs right-side data.
+Defined in `py-ltseq/ltseq/linking.py`, `LinkedTable` models a deferred, prefix-aliased equi-join between two tables. Every transform builds the lazy join plan and returns a plain `LTSeq`; the plan stays lazy until a terminal operation.
 
 ### `PartitionedTable`
 
@@ -298,7 +298,7 @@ This is a deliberate hybrid design rather than an inconsistency.
 
 ### Linking
 
-`link()` returns `LinkedTable`, a lazy relationship object. Source-only operations may avoid join materialization entirely. Once linked-side columns are required, the join is materialized and the result becomes a regular `LTSeq`.
+`link()` returns `LinkedTable`, a deferred prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) runs on the joined plan and returns a regular `LTSeq` — there is no source-only shortcut, so unmatched rows and one-to-many fan-out are reflected. Chained `link()` layers on the previous join's real plan.
 
 ### Partitioning
 

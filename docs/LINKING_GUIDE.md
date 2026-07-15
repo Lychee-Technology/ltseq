@@ -1,4 +1,4 @@
-# Pointer-Based Linking - User Guide
+# Linking Guide (LTSeq.link)
 
 Related documents:
 
@@ -10,37 +10,41 @@ Related documents:
 
 ## Overview
 
-ltseq's **linking feature** provides a lightweight, pointer-based approach to foreign key relationships between tables. Instead of materializing expensive joins upfront, links create references that are evaluated only when needed.
+`LTSeq.link()` expresses a foreign-key relationship as a **deferred,
+prefix-aliased equi-join**. `link()` records the join condition and the
+target's alias and computes the joined schema up front, but executes
+nothing until you materialize the result. It is a lazy join — not a
+pointer/take structure and not a cheap per-row navigation.
 
-**Key Benefits**:
-- Lightweight: Links are lazy - no join execution until data access
-- Intuitive: Express relationships as lambda conditions
-- Flexible: All four join types supported (INNER, LEFT, RIGHT, FULL)
-- Safe: Original tables unmodified; schema tracked throughout
+**Key points**:
+- Lazy: no join execution until data access (collect / to_pandas / len / ...)
+- Prefix-aliased: target columns become `{alias}_{col}`; source columns keep their names
+- All four join types (INNER, LEFT, RIGHT, FULL)
+- Transforms return a plain `LTSeq`, and their rows follow the join
 
 ## Quick Start
-
-### Basic Join
 
 ```python
 from ltseq import LTSeq
 
-# Load tables
 orders = LTSeq.read_csv("orders.csv")          # id, product_id, quantity
 products = LTSeq.read_csv("products.csv")      # product_id, name, price
 
-# Create a link (no join yet - just a reference)
+# Create a link (no join yet — just the condition + schema)
 linked = orders.link(
     products,
     on=lambda o, p: o.product_id == p.product_id,
-    as_="prod"
+    as_="prod",
 )
 
-# View the linked data
+# View the joined data (executes the join for display)
 linked.show()
 
-# Materialize when you need the actual joined data
-result = linked._materialize()
+# Get the lazy joined table as a plain LTSeq
+joined = linked.to_ltseq()
+
+# Or execute and cache the result in memory
+result = linked.collect()
 ```
 
 **Output**:
@@ -49,408 +53,223 @@ result = linked._materialize()
 |----|------------|----------|-----------------|-----------|------------|
 | 1  | 101        | 5        | 101             | Widget    | 50         |
 | 2  | 102        | 3        | 102             | Gadget    | 75         |
-| ... | ...        | ...      | ...             | ...       | ...        |
 ```
 
-### Filtering Before Materialization
+### Transforms return an LTSeq
+
+Every transform on a `LinkedTable` builds the lazy join plan and runs on top
+of it, returning a plain `LTSeq`:
 
 ```python
-# Filter on source columns (fast - no join needed)
-high_qty = linked.filter(lambda r: r.quantity > 10)
-
-# Still a linked table - join happens on materialization
-high_qty.show()
+# Filter can reference source columns (original names) and linked
+# columns ({alias}_col) — both live in the joined schema.
+cheap = linked.filter(lambda r: r.prod_price < 10)   # -> LTSeq
+picked = linked.select("id", "quantity", "prod_name")  # -> LTSeq
 ```
+
+Because a transform applies **after** the join, its rows follow the join:
+an inner/right/full join drops or adds unmatched rows, and a one-to-many
+match fans a source row out to several result rows — a subsequent
+`slice`/`filter` sees the joined rows, not the original source rows.
 
 ### Using Different Join Types
 
 ```python
-# INNER join (default) - only matching rows
+# INNER (default) — only matching rows
 inner = orders.link(products, on=..., as_="prod", join_type="inner")
 
-# LEFT join - keep all orders, NULLs for unmatched products
+# LEFT — keep all orders, NULLs for unmatched products
 left = orders.link(products, on=..., as_="prod", join_type="left")
 
-# RIGHT join - keep all products, NULLs for unmatched orders
+# RIGHT — keep all products, NULLs for unmatched orders
 right = orders.link(products, on=..., as_="prod", join_type="right")
 
-# FULL join - keep all rows from both tables
+# FULL — keep all rows from both tables
 full = orders.link(products, on=..., as_="prod", join_type="full")
 ```
 
 ## Concepts
 
-### Linking vs. Joining
+### link() vs. join()
 
-**Link**:
-- Lazy evaluation
-- References stored, not data
-- Lightweight metadata
-- Ideal for exploration and filtering
+`link()` and `join()` build the same kind of lazy DataFusion join. They
+differ in the column-naming convention and ergonomics:
 
-**Join** (Traditional SQL):
-- Eager evaluation
-- All data materialized immediately
-- Can be expensive for large tables
+- **`link()`** namespaces the *whole* target table as `{alias}_col`, which
+  keeps chained multi-hop joins unambiguous, and exposes `LinkedTable`
+  chaining sugar. Use it for fact-to-dimension enrichment.
+- **`join()`** uses Polars-style conflict-only suffixes and returns an
+  `LTSeq` directly. Use it for a one-off relational join.
+
+Neither materializes until the result is consumed.
 
 ### Join Condition
 
-Express the join condition as a lambda:
+Express the join condition as a two-parameter lambda (equality only; use
+`&` for composite keys, `|` is not supported):
 
 ```python
-# Simple single-column join
 on=lambda o, p: o.product_id == p.product_id
-
-# Composite key (multiple columns)
 on=lambda o, p: (o.product_id == p.product_id) & (o.year == p.year)
-
-# Complex conditions
-on=lambda o, p: (o.id == p.order_id) & (o.status == "active")
 ```
 
 ### Column Naming
 
-When you link with alias `"prod"`, all columns from products get prefixed:
+Linking with alias `"prod"` prefixes every target column:
 
 ```python
-# Original orders columns: id, product_id, quantity
-# Products columns: product_id, name, price
-
-# After link with as_="prod":
-# Orders columns (unchanged): id, product_id, quantity
-# Products columns (prefixed): prod_product_id, prod_name, prod_price
+# orders:   id, product_id, quantity          (kept as-is)
+# products: product_id, name, price           (prefixed)
+# joined:   id, product_id, quantity,
+#           prod_product_id, prod_name, prod_price
 ```
 
-Access the prefixed columns in filters/selects:
-```python
-linked.filter(lambda r: r.prod_price > 100)  # Filter on linked column
-linked.select("id", "quantity", "prod_name")  # Select from both tables
-```
-
-### Materialization
-
-Materialization executes the join and returns a regular `LTSeq`:
+Reference the prefixed columns in transforms:
 
 ```python
-linked = orders.link(products, on=..., as_="prod")
-
-# Materialize on demand
-result = linked._materialize()  # Now it's a regular LTSeq with joined data
-result.show()
-result.filter(lambda r: r.prod_price > 50)  # Normal LTSeq operations
+linked.filter(lambda r: r.prod_price > 100)
+linked.select("id", "quantity", "prod_name")
 ```
 
-**Note**: Materialization is cached. Multiple calls return the same object:
-```python
-result1 = linked._materialize()
-result2 = linked._materialize()
-assert result1 is result2  # Same object
-```
+### to_ltseq() and collect()
+
+- `to_ltseq()` returns the **lazy** joined table as a plain `LTSeq` (no
+  execution) — use it to keep composing with the full `LTSeq` API.
+- `collect()` **executes** the join and returns an in-memory `LTSeq`
+  (same semantics as `LTSeq.collect`).
+
+The lazy plan is built once and cached, so repeated transforms reuse one
+join node.
 
 ## Use Cases
 
-### Use Case 1: Enriching Orders with Product Details
+### Enriching Orders with Product Details
 
 ```python
-orders = LTSeq.read_csv("orders.csv")
-products = LTSeq.read_csv("products.csv")
-
-# Link orders to product information
 linked = orders.link(
-    products,
-    on=lambda o, p: o.product_id == p.product_id,
-    as_="prod"
+    products, on=lambda o, p: o.product_id == p.product_id, as_="prod"
 )
-
-# Filter for expensive items
-expensive = linked.filter(lambda r: r.prod_price > 500)
-
-# Materialize and display
+expensive = linked.filter(lambda r: r.prod_price > 500)  # -> LTSeq
 expensive.show()
 ```
 
-### Use Case 2: Multiple Joins with Filtering
+### Multi-Hop Chaining
+
+A chained `link()` builds on the previous join's real plan, so the next
+condition may reference the previous alias's columns:
 
 ```python
-orders = LTSeq.read_csv("orders.csv")
-products = LTSeq.read_csv("products.csv")
-customers = LTSeq.read_csv("customers.csv")
-
-# First join: orders to products
-linked1 = orders.link(
-    products,
-    on=lambda o, p: o.product_id == p.product_id,
-    as_="prod"
+chained = (
+    orders.link(products, on=lambda o, p: o.product_id == p.product_id, as_="prod")
+          .link(customers, on=lambda r, c: r.prod_customer_id == c.id, as_="cust")
 )
-
-# Second join: linked result to customers
-linked2 = linked1.link(
-    customers,
-    on=lambda l, c: l.customer_id == c.id,
-    as_="cust"
-)
-
-# Filter and view
-high_value = linked2.filter(lambda r: r.prod_price > 100)
+high_value = chained.filter(lambda r: r.prod_price > 100)  # -> LTSeq
 high_value.show()
 ```
 
-### Use Case 3: LEFT Join for Missing Data
+### LEFT Join for Missing Data
 
 ```python
-orders = LTSeq.read_csv("orders.csv")
-products = LTSeq.read_csv("products.csv")
-
-# LEFT join keeps all orders, even if product not found
 linked = orders.link(
     products,
     on=lambda o, p: o.product_id == p.product_id,
     as_="prod",
-    join_type="left"  # Keep all orders
+    join_type="left",  # keep all orders
 )
-
-# Find orders with missing product info
-missing = linked.filter(lambda r: r.prod_name is None)
+missing = linked.filter(lambda r: r.prod_name.is_null())
 missing.show()
 ```
 
-### Use Case 4: Composite Key Join
+### Composite Key Join
 
 ```python
-sales = LTSeq.read_csv("sales.csv")      # year, month, product_id, qty
-pricing = LTSeq.read_csv("pricing.csv")  # year, month, product_id, price
-
-# Join on multiple columns (price valid for specific year/month)
 linked = sales.link(
     pricing,
     on=lambda s, p: (s.year == p.year) & (s.month == p.month) & (s.product_id == p.product_id),
-    as_="price"
+    as_="price",
 )
-
 linked.show()
 ```
 
 ## API Reference
 
-### `LTSeq.link()` Method
+### `LTSeq.link()`
 
 ```python
 linked = table.link(
-    target,              # Target table to link to (LTSeq)
-    on,                  # Join condition (lambda)
-    as_,                 # Alias for linked columns (str)
-    join_type="inner"    # Type of join: "inner", "left", "right", "full"
+    target,              # target table (LTSeq)
+    on,                  # join condition (two-param lambda, equality only)
+    as_,                 # alias prefixing every target column (str)
+    join_type="inner",   # "inner" | "left" | "right" | "full"
 )
 ```
 
-**Parameters**:
-- `target` (LTSeq): Table to join with
-- `on` (callable): Lambda expressing join condition
-  - Example: `lambda l, r: l.id == r.user_id`
-  - Can use `&` (AND) for composite keys
-  - Cannot use `|` (OR) in conditions
-- `as_` (str): Prefix for target columns in result
-  - Example: `as_="prod"` creates `prod_name`, `prod_price`, etc.
-- `join_type` (str): Type of join (default: "inner")
-  - `"inner"`: Only matching rows
-  - `"left"`: All left rows, NULLs from right
-  - `"right"`: All right rows, NULLs from left
-  - `"full"`: All rows from both tables
+**Returns**: `LinkedTable`.
 
-**Returns**: LinkedTable object
+### LinkedTable methods
 
-### LinkedTable Methods
-
-#### `_materialize()`
-Executes the join and returns an LTSeq with joined data.
-
-```python
-result = linked._materialize()
-# result is now an LTSeq with all columns (source + prefixed target)
-```
-
-#### `show(n=10)`
-Display joined data without materializing to a variable.
-
-```python
-linked.show(5)  # Show first 5 rows of joined result
-```
-
-#### `filter(predicate)`
-Filter rows on source columns or materialized linked columns.
-
-```python
-# Filter on source columns (fast - no join)
-filtered = linked.filter(lambda r: r.quantity > 10)
-
-# Still a LinkedTable
-assert isinstance(filtered, LinkedTable)
-```
-
-#### `select(*cols)`
-Select specific columns.
-
-```python
-result = linked.select("id", "quantity", "prod_name")
-# Returns LTSeq with only specified columns
-```
-
-#### `link(target, on, as_, join_type="inner")`
-Chain another link.
-
-```python
-linked1 = orders.link(products, on=..., as_="prod")
-linked2 = linked1.link(categories, on=..., as_="cat")
-```
+- `to_ltseq() -> LTSeq` — the lazy joined table (no execution).
+- `collect() -> LTSeq` — execute the join, return an in-memory LTSeq.
+- `show(n=10)` — display up to `n` joined rows.
+- `filter(predicate) -> LTSeq` — filter over the joined rows.
+- `select(*cols) -> LTSeq` — project columns from the joined table.
+- `derive(*args, **kwargs) -> LTSeq` — add columns (may reference linked columns).
+- `sort(*keys, **kwargs) -> LTSeq` — sort the joined rows.
+- `slice(offset, length) -> LTSeq` — slice the joined rows.
+- `distinct(key_fn=None) -> LTSeq` — deduplicate the joined rows.
+- `link(target, on, as_, join_type="inner") -> LinkedTable` — chain another link.
 
 ## Troubleshooting
 
-### Issue: "Column not found" Error
+### "Column not found" in the join condition
 
 ```
 TypeError: Invalid join condition: Column 'id' not found in schema
 ```
 
-**Cause**: Join condition references wrong column name
+The condition references a column absent from the respective table. Check
+`orders.columns` / `products.columns` and fix the lambda.
 
-**Fix**: Check column names in both tables:
-```python
-orders.show()    # See actual column names
-products.show()
+### "Invalid join_type"
 
-# Use correct names in lambda:
-linked = orders.link(
-    products,
-    on=lambda o, p: o.product_id == p.product_id,  # ✓ Correct
-    as_="prod"
-)
-```
+Use only `"inner"`, `"left"`, `"right"`, `"full"` (not `"outer"`).
 
-### Issue: "Invalid join_type" Error
+### Unexpected joined column names
 
-```
-ValueError: Invalid join_type: 'outer'
-```
-
-**Cause**: Used unsupported join type
-
-**Fix**: Use only: `"inner"`, `"left"`, `"right"`, `"full"`
+Target columns are prefixed with the alias. Inspect the joined schema:
 
 ```python
-# ❌ Wrong
-linked = orders.link(products, on=..., as_="prod", join_type="outer")
-
-# ✓ Correct
-linked = orders.link(products, on=..., as_="prod", join_type="full")
+print(linked.to_ltseq().columns)   # id, ..., prod_name, prod_price, ...
 ```
 
-### Issue: Schema Shows Unexpected Column Names
+### In-memory (`from_pandas`) source + column projection
 
-After materialization, column names might not be what you expect:
-
-```python
-linked = orders.link(products, on=..., as_="prod")
-result = linked._materialize()
-
-# Check what columns actually exist:
-print(result._schema.keys())
-
-# Use actual column names
-result.show()
-```
+Selecting a subset of columns after a join over an in-memory
+(`from_pandas` / `from_arrow`) source can hit a DataFusion
+ProjectionPushdown bug (a plain `join().select(...)` triggers it too). Read
+the source from CSV/Parquet, or select after `collect()`, if you encounter
+it.
 
 ## Best Practices
 
-1. **Filter Early**: Filter on source columns before materialization for better performance
-   ```python
-   linked = orders.link(products, on=..., as_="prod")
-   filtered = linked.filter(lambda r: r.quantity > 10)  # Fast
-   result = filtered._materialize()  # Join only on filtered rows
-   ```
-
-2. **Materialize Late**: Don't materialize until you need actual joined data
-   ```python
-   # Good: Lazy evaluation
-   linked = orders.link(products, on=..., as_="prod")
-   filtered = linked.filter(lambda r: r.quantity > 10)
-   
-   # Bad: Eager evaluation
-   result = orders.link(products, on=..., as_="prod")._materialize()
-   filtered = result.filter(lambda r: r.quantity > 10)
-   ```
-
-3. **Use Appropriate Join Type**: Choose the right join for your use case
-   ```python
-   # INNER if you only want matching rows
-   inner = orders.link(products, on=..., as_="prod", join_type="inner")
-   
-   # LEFT if you want all orders (even with missing products)
-   left = orders.link(products, on=..., as_="prod", join_type="left")
-   ```
-
-4. **Transparent Operations on Linked Columns**: Linked columns are handled automatically
-    ```python
-    # Filter on linked columns (automatic materialization)
-    linked = orders.link(products, on=..., as_="prod")
-    expensive = linked.filter(lambda r: r.prod_price > 100)  # Returns LTSeq
-    
-    # Select linked columns (automatic materialization)
-    selected = linked.select("id", "prod_name", "prod_price")  # Returns LTSeq
-    
-    # Aggregate linked columns (automatic materialization)
-    stats = linked.aggregate({"total_orders": "count", "avg_price": "avg"})  # Returns LTSeq
-    ```
-
-5. **Single-Level Links**: Chaining works, including with intermediate materialization
-    ```python
-    # ✓ Single link
-    linked1 = orders.link(products, on=..., as_="prod")
-    
-    # ✓ Multi-level chaining
-    linked2 = linked1.link(categories, on=..., as_="cat")
-    result = linked2._materialize()
-    
-    # ✓ With intermediate materialization
-    mat1 = linked1._materialize()
-    linked2 = mat1.link(categories, on=..., as_="cat")
-    result = linked2._materialize()
-    ```
-
-## Examples
-
-Complete, runnable examples are available in the `examples/` directory:
-
-- `linking_basic.py` - Basic order-product join
-- `linking_composite_keys.py` - Multi-column join keys
-- `linking_join_types.py` - All four join type examples
-- `linking_filtering.py` - Filtering patterns
-- `linking_advanced.py` - Advanced patterns (filtering/selecting linked columns, aggregation)
-
-See [Examples](#examples) section below for code snippets.
-
-## What's Next
-
-Possible future improvements:
-- Performance optimizations for multi-level chains
-- Additional aggregation patterns
+1. **Let the optimizer push down** — predicate and projection pushdown are
+   the query optimizer's job; write the transform you mean and it runs over
+   the joined plan. There is no "filter the source first for speed"
+   shortcut anymore (it produced wrong rows for unmatched/fan-out joins).
+2. **Materialize late** — keep composing on the lazy `LTSeq` from
+   `to_ltseq()`; call `collect()` only when you want the result cached in
+   memory.
+3. **Choose the right join type** — INNER for matches only, LEFT to keep
+   all source rows, etc. The join type is baked into the plan, so it
+   survives every downstream transform.
+4. **Reference linked columns by their prefix** — `r.prod_price`, not a
+   nested `r.prod.price`.
 
 ## Summary
 
-ltseq's linking feature provides:
-- ✅ Lightweight, lazy foreign key relationships
-- ✅ All four join types (INNER, LEFT, RIGHT, FULL)
-- ✅ Composite join keys
-- ✅ Intuitive lambda-based conditions
-- ✅ Safe operations (original tables unmodified)
-- ✅ Filtering on linked columns
-- ✅ Selecting from linked columns
-- ✅ Multi-level chaining with intermediate materialization
-- ✅ Aggregating linked columns
-
-Use linking when you need to:
-- Join tables on specific conditions
-- Explore relationships without materializing everything
-- Filter before joining for better performance
-- Work with foreign key references
-
-See [Troubleshooting](#troubleshooting) for edge cases.
+`LTSeq.link()` provides:
+- Lazy, prefix-aliased equi-joins
+- All four join types (INNER, LEFT, RIGHT, FULL) and composite keys
+- Transforms that return a plain `LTSeq`, with rows following the join
+- Multi-hop chaining, where each hop builds on the previous join's real plan
+- `to_ltseq()` (lazy) and `collect()` (execute) to leave the LinkedTable surface

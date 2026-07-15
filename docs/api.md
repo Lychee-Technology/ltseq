@@ -7,7 +7,7 @@ Related documents:
 - `docs/ARCHITECTURE.md`: system architecture and execution model
 - `docs/MODULE_GUIDE.md`: contributor-oriented codebase tour
 - `docs/DESIGN_SUMMARY.md`: current architecture summary and design archive
-- `docs/LINKING_GUIDE.md`: focused guide for pointer-based linking
+- `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
 
 LTSeq is an ordered-sequence data processing library for Python backed by Rust/DataFusion. Unlike traditional DataFrames, LTSeq emphasizes order semantics and provides SPL-style capabilities such as window functions, ordered grouping, and cursor-based streaming.
 
@@ -1098,23 +1098,24 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 
 ### `LTSeq.link`
 - **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
-- **Behavior**: Pointer-style association; not materialized until needed; access target columns via the alias
-- **Parameters**: `target_table` target table; `on` join condition; `alias` alias for the linked reference (`as_` is a compatibility alias for it — pass exactly one); `join_type` in {inner,left,right,full}
+- **Behavior**: Deferred, prefix-aliased equi-join. Records the condition and alias without executing; target columns are exposed as `{alias}_{col}`, source columns keep their names. This is a lazy join, not a pointer/take structure
+- **Parameters**: `target_table` target table; `on` join condition; `alias` alias prefixing every target column (`as_` is a compatibility alias for it — pass exactly one); `join_type` in {inner,left,right,full}
 - **Returns**: `LinkedTable`
 - **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type, both/neither of as_ and alias, or schema not initialized)
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
-result = linked.select(lambda r: [r.id, r.prod.name, r.prod.price])
+linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
+result = linked.select("id", "prod_name", "prod_price")
 ```
 
 ### `LinkedTable`
-- **Behavior**: Chainable view over a linked pair of tables. Supports `select`, `filter`, `derive`, `sort`, `slice`, `distinct`, `show`, and further `link` calls (multi-hop chains). Materializes via the underlying join only when required
+- **Behavior**: A deferred, prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) builds the lazy join plan and returns a **plain `LTSeq`** — so its rows follow the join (an inner/right/full join drops or adds unmatched rows, and a one-to-many match fans a source row out to several rows; a following `slice`/`filter` sees the joined rows, not the source rows). `link()` itself returns a new `LinkedTable` layered on the current join plan (multi-hop chains; the next condition may reference the previous `{alias}_col` columns). Use `to_ltseq()` for the lazy joined `LTSeq`, or `collect()` to execute it
 - **Example**:
 ```python
-linked = orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")
-cheap = linked.filter(lambda r: r.prod.price < 10)
-chained = linked.link(categories, on=lambda o, c: o.category_id == c.id, alias="cat")
+linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
+cheap = linked.filter(lambda r: r.prod_price < 10)          # -> LTSeq
+chained = linked.link(categories, on=lambda r, c: r.prod_category_id == c.id, alias="cat")
+joined = linked.to_ltseq()                                   # lazy joined LTSeq
 ```
 
 See `docs/LINKING_GUIDE.md` for the full linking guide.
@@ -1143,7 +1144,7 @@ enriched = orders.derive(
 | `join(..., strategy="merge")` | Pre-sorted large tables | Merge Join | `JOIN` (optimized) |
 | `semi_join` | Filter by key existence | Hash Semi-Join | `WHERE EXISTS` |
 | `anti_join` | Filter by key non-existence | Hash Anti-Join | `WHERE NOT EXISTS` |
-| `link` | Fact-to-dimension pointer access | Pointer | `LEFT JOIN` (lazy) |
+| `link` | Fact-to-dimension prefix-aliased join | Lazy equi-join | `JOIN` (lazy, alias-prefixed) |
 | `r.col.lookup(...)` | Fetch one column from a dimension table | Join during derive | `LEFT JOIN` (single column) |
 | `asof_join` | Financial time series | Ordered Search | `LATERAL JOIN` |
 

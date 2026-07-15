@@ -106,7 +106,7 @@ def main():
 
         # Calculate revenue (quantity * price)
         print("\n6. Operations on linked data:")
-        result = linked._materialize()
+        result = linked.to_ltseq()
         print(f"   Materialized result has {len(result)} rows")
         print(
             f"   All rows matched (sales.year, month, product_id match pricing exactly)"
