@@ -177,22 +177,25 @@ pub fn merge_derived_columns(
     schema: &ArrowSchema,
     derived: Vec<(String, Expr)>,
 ) -> Vec<Expr> {
-    let mut consumed = vec![false; derived.len()];
+    // Option slots let a matched expression be moved out at its schema
+    // position without cloning; the leftovers (genuinely new columns) drain
+    // in insertion order below.
+    let mut derived: Vec<Option<(String, Expr)>> = derived.into_iter().map(Some).collect();
     let mut out = Vec::with_capacity(schema.fields().len() + derived.len());
     for field in schema.fields() {
         // Python kwargs guarantee unique derived names, so first match wins.
-        if let Some(i) = derived.iter().position(|(name, _)| name == field.name()) {
-            out.push(derived[i].1.clone());
-            consumed[i] = true;
-        } else {
-            out.push(Expr::Column(Column::new_unqualified(field.name())));
+        let slot = derived
+            .iter_mut()
+            .find(|slot| matches!(slot, Some((name, _)) if name == field.name()));
+        match slot {
+            Some(slot) => {
+                let (_, expr) = slot.take().expect("find matched Some above");
+                out.push(expr);
+            }
+            None => out.push(Expr::Column(Column::new_unqualified(field.name()))),
         }
     }
-    for (i, (_, expr)) in derived.into_iter().enumerate() {
-        if !consumed[i] {
-            out.push(expr);
-        }
-    }
+    out.extend(derived.into_iter().flatten().map(|(_, expr)| expr));
     out
 }
 
