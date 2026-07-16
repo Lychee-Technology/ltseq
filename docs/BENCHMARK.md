@@ -20,6 +20,30 @@ maturin develop --release
 Rebuild the extension after changing Rust code or Rust dependencies. The
 benchmark commands import the extension from the current Python environment.
 
+## Run the Whole Suite
+
+For a one-shot run, `benchmarks/run_all.py` orchestrates the rebuild, the core
+operation benchmark, and the ClickBench comparison, then prints a consolidated
+PASS/SKIP/FAIL summary:
+
+```bash
+# Fast smoke test: rebuild + core benchmark + ClickBench on the 1M-row sample
+uv run python benchmarks/run_all.py --sample
+
+# Full ClickBench comparison on the sorted dataset
+uv run python benchmarks/run_all.py --full
+
+# Skip the rebuild, or run only one part
+uv run python benchmarks/run_all.py --skip-build
+uv run python benchmarks/run_all.py --only core
+uv run python benchmarks/run_all.py --only vs
+```
+
+`run_all.py` does not download the ~14 GB ClickBench dataset on its own. If the
+comparison data is missing, the `bench_vs` step is skipped with guidance; pass
+`--prepare` to run `prepare_data.py` first (this downloads the data if absent).
+The sections below document each underlying script directly.
+
 ## Prepare ClickBench Data
 
 The ClickBench dataset is large. The full download is approximately 14 GB and
