@@ -39,6 +39,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -47,6 +48,7 @@ BENCHMARKS_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BENCHMARKS_DIR, "data")
 HITS_SORTED = os.path.join(DATA_DIR, "hits_sorted.parquet")
 HITS_SAMPLE = os.path.join(DATA_DIR, "hits_sample.parquet")
+CLICKBENCH_RESULTS = os.path.join(BENCHMARKS_DIR, "clickbench_results.json")
 
 # Step outcome markers.
 PASS = "PASS"
@@ -60,10 +62,40 @@ def run_step(name, cmd, cwd=None):
     print(f"STEP: {name}")
     print("  $ " + " ".join(cmd))
     print("=" * 70)
-    result = subprocess.run(cmd, cwd=cwd, check=False)
+    try:
+        result = subprocess.run(cmd, cwd=cwd, check=False)
+    except FileNotFoundError as exc:
+        # e.g. maturin not on PATH; keep the runner self-contained by
+        # reporting this as a FAIL step rather than crashing before the summary.
+        print(f"\n  -> {name}: {FAIL} (command not found: {exc.filename or cmd[0]})")
+        return name, FAIL
     outcome = PASS if result.returncode == 0 else FAIL
     print(f"\n  -> {name}: {outcome} (exit {result.returncode})")
     return name, outcome
+
+
+def verify_clickbench_pass(name):
+    """Confirm the ClickBench comparison actually passed.
+
+    bench_vs.py returns exit code 0 even when a round fails validation or hits an
+    infrastructure failure; the authoritative signal is the top-level ``passed``
+    flag it writes to clickbench_results.json. Downgrade a zero-exit PASS to FAIL
+    when that flag is not true.
+    """
+    try:
+        with open(CLICKBENCH_RESULTS) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        print(f"  -> {name}: {FAIL} (cannot read {CLICKBENCH_RESULTS}: {exc})")
+        return name, FAIL
+    if data.get("passed") is True:
+        return name, PASS
+    detail = (
+        f"correctness_failures={data.get('correctness_failures', '?')}, "
+        f"infra_failures={data.get('infra_failures', '?')}"
+    )
+    print(f"  -> {name}: {FAIL} (benchmark reported passed=false; {detail})")
+    return name, FAIL
 
 
 def skip_step(name, reason):
@@ -109,12 +141,6 @@ def main():
         choices=["core", "vs"],
         help="Run only the core micro-benchmarks ('core') or the ClickBench comparison ('vs').",
     )
-    parser.add_argument(
-        "--warmup", type=int, default=None, help="Override warmup iterations for bench scripts."
-    )
-    parser.add_argument(
-        "--iterations", type=int, default=None, help="Override timed iterations for bench scripts."
-    )
     args = parser.parse_args()
 
     full = args.full
@@ -123,13 +149,6 @@ def main():
 
     run_core = args.only in (None, "core")
     run_vs = args.only in (None, "vs")
-
-    # Shared measurement overrides passed through to bench scripts.
-    meas_args = []
-    if args.warmup is not None:
-        meas_args += ["--warmup", str(args.warmup)]
-    if args.iterations is not None:
-        meas_args += ["--iterations", str(args.iterations)]
 
     outcomes = []
 
@@ -182,8 +201,10 @@ def main():
             vs_cmd = [sys.executable, os.path.join(BENCHMARKS_DIR, "bench_vs.py")]
             if not full:
                 vs_cmd.append("--sample")
-            vs_cmd += meas_args
-            outcomes.append(run_step(f"bench_vs ({dataset_label})", vs_cmd))
+            step = run_step(f"bench_vs ({dataset_label})", vs_cmd)
+            if step[1] == PASS:
+                step = verify_clickbench_pass(step[0])
+            outcomes.append(step)
     else:
         outcomes.append(skip_step("bench_vs", "--only core requested"))
 
