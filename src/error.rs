@@ -12,7 +12,7 @@ use pyo3::{exceptions, Bound, Py, PyErr, Python};
 use std::error::Error as StdError;
 use std::fmt;
 
-/// Cached handle to the `ltseq.exceptions` module (looked up once under the GIL).
+/// Cached handle to the `ltseq.exceptions` module (looked up once, cached for the process lifetime).
 /// `None` means the import failed — e.g. `ltseq_core` used standalone before the
 /// Python package is importable — in which case callers fall back to builtins.
 static LTSEQ_EXCEPTIONS: PyOnceLock<Option<Py<pyo3::types::PyModule>>> = PyOnceLock::new();
