@@ -28,8 +28,9 @@ Start here:
 Start here:
 
 1. `docs/DESIGN_SUMMARY.md`
-2. `docs/BENCHMARK_AUTORESEARCH.md`
-3. `benchmarks/`
+2. `docs/BENCHMARK.md`
+3. `docs/BENCHMARK_AUTORESEARCH.md`
+4. `benchmarks/` (see `benchmarks/README.md`)
 
 ## 推荐阅读路径
 
@@ -55,8 +56,9 @@ Start here:
 建议按以下顺序阅读：
 
 1. `docs/DESIGN_SUMMARY.md`
-2. `docs/BENCHMARK_AUTORESEARCH.md`
-3. `benchmarks/`
+2. `docs/BENCHMARK.md`
+3. `docs/BENCHMARK_AUTORESEARCH.md`
+4. `benchmarks/`（见 `benchmarks/README.md`）
 
 ## Core Documents
 
@@ -67,6 +69,8 @@ Start here:
 - `docs/api.md`: full English API reference
 - `docs/api.cn.md`: full Chinese API reference
 - `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
+- `docs/BENCHMARK.md`: how to run the core and ClickBench benchmarks (see also `benchmarks/README.md`)
+- `docs/BENCHMARK_AUTORESEARCH.md`: benchmark-gated autoresearch pilot workflow
 
 ## 核心文档
 
@@ -77,6 +81,8 @@ Start here:
 - `docs/DESIGN_SUMMARY.md`：当前架构摘要与设计归档
 - `docs/api.cn.md`：中文 API 文档
 - `docs/LINKING_GUIDE.cn.md`：中文 Linking 指南
+- `docs/BENCHMARK.md`：核心基准与 ClickBench 对比的运行说明（另见 `benchmarks/README.md`）
+- `docs/BENCHMARK_AUTORESEARCH.md`：基准门控的 autoresearch 试点工作流
 
 ## How These Documents Fit Together
 

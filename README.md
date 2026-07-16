@@ -35,8 +35,10 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 
 Benchmark and benchmark-gated autoresearch tooling live under `benchmarks/`.
 
+- Run the whole suite: `python benchmarks/run_all.py --sample`
 - ClickBench comparison harness: `python benchmarks/bench_vs.py --sample`
 - Core operation benchmark: `python benchmarks/bench_core.py`
+- Overview and file guide: `benchmarks/README.md`
 - Benchmark autoresearch pilot: `docs/BENCHMARK_AUTORESEARCH.md`
 
 ## Quick Start
