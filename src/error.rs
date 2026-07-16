@@ -6,7 +6,7 @@
 //!
 //! Both implement `From<...> for PyErr` for automatic conversion in `#[pymethods]`.
 
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyAnyMethods, PyType};
 use pyo3::{exceptions, Bound, Py, PyErr, Python};
 use std::error::Error as StdError;
@@ -15,7 +15,7 @@ use std::fmt;
 /// Cached handle to the `ltseq.exceptions` module (looked up once under the GIL).
 /// `None` means the import failed — e.g. `ltseq_core` used standalone before the
 /// Python package is importable — in which case callers fall back to builtins.
-static LTSEQ_EXCEPTIONS: GILOnceCell<Option<Py<pyo3::types::PyModule>>> = GILOnceCell::new();
+static LTSEQ_EXCEPTIONS: PyOnceLock<Option<Py<pyo3::types::PyModule>>> = PyOnceLock::new();
 
 /// Fetch a custom exception class from `ltseq.exceptions` by name, if importable.
 fn ltseq_exc<'py>(py: Python<'py>, name: &str) -> Option<Bound<'py, PyType>> {
@@ -26,7 +26,7 @@ fn ltseq_exc<'py>(py: Python<'py>, name: &str) -> Option<Bound<'py, PyType>> {
         .bind(py)
         .getattr(name)
         .ok()
-        .and_then(|obj| obj.downcast_into::<PyType>().ok())
+        .and_then(|obj| obj.cast_into::<PyType>().ok())
 }
 
 /// Raise `message` as the custom exception `name`, or fall back to `Fallback`
