@@ -20,22 +20,30 @@ its own: if the data is missing, the bench_vs step is SKIPPED with guidance.
 Pass --prepare to explicitly invoke prepare_data.py first (this WILL download
 the full dataset unless the files already exist).
 
+The ClickBench comparison (bench_vs.py) and data prep (prepare_data.py) import
+duckdb + psutil, which live in the optional ``bench`` dependency group. Activate
+it with ``uv run --group bench`` so those packages are synced into the venv the
+subprocess steps reuse; without it they are not installed and the vs/prepare
+steps fail on import. The core-only run does not need the group.
+
 Usage:
+    # Core-only smoke test (rebuild + core; no external deps needed)
+    uv run python benchmarks/run_all.py --only core
+
     # Fast smoke test (rebuild + core + sample ClickBench)
-    uv run python benchmarks/run_all.py
+    uv run --group bench python benchmarks/run_all.py
 
     # Full ClickBench comparison on the sorted dataset
-    uv run python benchmarks/run_all.py --full
+    uv run --group bench python benchmarks/run_all.py --full
 
     # Skip the rebuild (extension already up to date)
-    uv run python benchmarks/run_all.py --skip-build
+    uv run --group bench python benchmarks/run_all.py --skip-build
 
-    # Only the core micro-benchmarks, or only the ClickBench comparison
-    uv run python benchmarks/run_all.py --only core
-    uv run python benchmarks/run_all.py --only vs
+    # Only the ClickBench comparison
+    uv run --group bench python benchmarks/run_all.py --only vs
 
     # Explicitly prepare data first (downloads ClickBench data if absent)
-    uv run python benchmarks/run_all.py --full --prepare
+    uv run --group bench python benchmarks/run_all.py --full --prepare
 """
 
 import argparse
