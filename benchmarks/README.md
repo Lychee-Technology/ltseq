@@ -57,6 +57,9 @@ uv run --group bench python benchmarks/prepare_data.py
 # 仅采样（用于冒烟）
 uv run --group bench python benchmarks/prepare_data.py --sample-only
 
+# 覆盖内存上限（容器内存较小、排序被 OOM-kill 时）；默认取 cgroup/宿主内存的 60%
+uv run --group bench python benchmarks/prepare_data.py --mem-limit 8GB
+
 # 校验物理有序
 uv run --group bench python benchmarks/verify_parquet_order.py \
   benchmarks/data/hits_sorted.parquet userid eventtime watchid

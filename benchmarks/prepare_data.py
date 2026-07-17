@@ -6,7 +6,13 @@ Downloads the ClickBench hits.parquet dataset and creates a pre-sorted version
 optimized for LTSeq's ordered operations.
 
 Usage:
-    uv run --group bench python benchmarks/prepare_data.py [--skip-download] [--sample-only]
+    uv run --group bench python benchmarks/prepare_data.py \
+        [--skip-download] [--sample-only] [--mem-limit SIZE]
+
+    ``--mem-limit`` (e.g. ``8GB``) overrides the auto-detected DuckDB
+    ``memory_limit``; by default the sort is capped at 60% of the detected
+    cgroup/host memory ceiling and spills to ``benchmarks/data/.duckdb_spill``
+    so it does not get OOM-killed on the ~14GB dataset.
 
 Requirements:
     duckdb (in the optional ``bench`` dependency group; activate it with
@@ -57,6 +63,24 @@ def _memory_ceiling_bytes():
     return min(candidates) if candidates else None
 
 
+def _auto_memory_limit_mb(ceiling_bytes):
+    """Pick a DuckDB ``memory_limit`` (MiB) that stays safely below *ceiling*.
+
+    We target 60% of the detected ceiling so DuckDB spills to disk with headroom
+    for its own bookkeeping plus the Python process. A small floor keeps DuckDB
+    usable on mid-size boxes, but the floor is only applied when it is itself
+    below the ceiling — otherwise a tiny cgroup (e.g. 256 MiB) would be handed a
+    ``memory_limit`` at or above its own budget, reintroducing the very OOM this
+    cap exists to prevent (review finding P2).
+    """
+    ceiling_mb = ceiling_bytes // (1024**2)
+    limit_mb = max(1, int(ceiling_bytes * 0.6 / (1024**2)))
+    floor_mb = 256
+    if floor_mb < ceiling_mb:
+        limit_mb = max(limit_mb, floor_mb)
+    return limit_mb
+
+
 def _connect_duckdb(mem_limit=None):
     """Open a DuckDB connection tuned for out-of-core work on this box.
 
@@ -85,7 +109,7 @@ def _connect_duckdb(mem_limit=None):
     else:
         ceiling = _memory_ceiling_bytes()
         if ceiling:
-            limit_mb = max(512, int(ceiling * 0.6 / (1024**2)))
+            limit_mb = _auto_memory_limit_mb(ceiling)
             config["memory_limit"] = f"{limit_mb}MB"
             print(f"  DuckDB memory_limit={limit_mb}MB, spilling to {spill_dir}")
     return duckdb.connect(config=config)
@@ -112,6 +136,53 @@ def _is_complete_parquet(path):
             return False
         f.seek(-4, os.SEEK_END)
         return f.read(4) == b"PAR1"
+
+
+def _atomic_copy_parquet(con, select_sql, dest, what):
+    """Run ``COPY (select_sql) TO dest`` with crash-safe temp handling.
+
+    Writes to ``dest + '.tmp'`` and atomically renames on success. Two failure
+    modes are handled explicitly (review findings P1/P2):
+
+    * A prior run killed by SIGKILL (OOM) cannot run its own validation, so it
+      leaves a stale ``.tmp``. We *report that file's size before discarding it*
+      rather than silently deleting the primary evidence of the interrupted run.
+    * If the writer is killed mid-``COPY`` in this process DuckDB may return
+      without raising; we detect a 0-byte/incomplete ``.tmp``, capture its size
+      into the error message *before* removing it, and never rename an empty
+      file into place. Any failure (including from validation or ``os.replace``)
+      removes the ``.tmp`` so it cannot poison a later run.
+    """
+    tmp = dest + ".tmp"
+    if os.path.exists(tmp):
+        stale = os.path.getsize(tmp)
+        print(
+            f"  found leftover {os.path.basename(tmp)} ({stale} bytes) from a "
+            "prior interrupted/OOM-killed run; discarding and regenerating"
+        )
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    try:
+        con.execute(f"COPY ({select_sql}) TO '{tmp}' (FORMAT 'parquet')")
+        if not _is_complete_parquet(tmp):
+            size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            raise RuntimeError(
+                f"{what} produced an incomplete parquet at {tmp} ({size} bytes). "
+                "The DuckDB process was likely OOM-killed. Check "
+                "`dmesg | grep -i 'killed process'` and lower --mem-limit or free "
+                "disk on the spill volume."
+            )
+        os.replace(tmp, dest)
+    except BaseException:
+        # Includes KeyboardInterrupt: never leave a half-written tmp behind.
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
 
 
 def download_data():
@@ -179,16 +250,6 @@ def sort_data(mem_limit=None):
         )
         os.remove(HITS_SORTED)
 
-    # Remove 0-byte debris left by a previously killed sort so it never poisons
-    # the destination or masks a real result.
-    tmp = HITS_SORTED + ".tmp"
-    for junk in (tmp,):
-        try:
-            if os.path.exists(junk):
-                os.remove(junk)
-        except OSError:
-            pass
-
     print(
         "  Sorting hits.parquet by (userid, eventtime, watchid) with lowercase columns..."
     )
@@ -198,38 +259,11 @@ def sort_data(mem_limit=None):
     cols = con.execute(f"DESCRIBE SELECT * FROM '{HITS_RAW}'").fetchall()
     select_parts = [f'"{col[0]}" as {col[0].lower()}' for col in cols]
     select_str = ", ".join(select_parts)
-    # Write to a temp file and atomically rename on success, so an interrupted
-    # sort never leaves a truncated file at the canonical path.
-    try:
-        con.execute(f"""
-            COPY (
-                SELECT {select_str}
-                FROM '{HITS_RAW}'
-                ORDER BY userid, eventtime, watchid
-            ) TO '{tmp}' (FORMAT 'parquet')
-        """)
-    except Exception:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-    # If the writer was killed mid-sort (OOM), DuckDB leaves a 0-byte tmp and
-    # Python never gets an exception. Detect that explicitly instead of renaming
-    # an empty file into place.
-    if not _is_complete_parquet(tmp):
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"Sort produced an incomplete parquet at {tmp} (size "
-            f"{os.path.getsize(tmp) if os.path.exists(tmp) else 0} bytes). "
-            "The DuckDB process was likely OOM-killed during the sort. Check "
-            "`dmesg | grep -i 'killed process'` and lower memory_limit / free "
-            "disk on the spill volume."
-        )
-    os.replace(tmp, HITS_SORTED)
+    select_sql = (
+        f"SELECT {select_str} FROM '{HITS_RAW}' "
+        "ORDER BY userid, eventtime, watchid"
+    )
+    _atomic_copy_parquet(con, select_sql, HITS_SORTED, "Sort")
     elapsed = time.perf_counter() - t0
     size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
     print(f"  Sorted in {elapsed:.1f}s ({size_gb:.1f} GB)")
@@ -249,14 +283,9 @@ def create_sample(mem_limit=None):
     source = HITS_SORTED if _is_complete_parquet(HITS_SORTED) else HITS_RAW
     print(f"  Creating 1M-row sample from {os.path.basename(source)}...")
     con = _connect_duckdb(mem_limit)
-    # Temp file + atomic rename: an interrupted sample never poisons the path.
-    tmp = HITS_SAMPLE + ".tmp"
-    con.execute(f"""
-        COPY (
-            SELECT * FROM '{source}' LIMIT 1000000
-        ) TO '{tmp}' (FORMAT 'parquet')
-    """)
-    os.replace(tmp, HITS_SAMPLE)
+    _atomic_copy_parquet(
+        con, f"SELECT * FROM '{source}' LIMIT 1000000", HITS_SAMPLE, "Sample"
+    )
     size_mb = os.path.getsize(HITS_SAMPLE) / (1024**2)
     print(f"  Sample created: {size_mb:.1f} MB")
 
