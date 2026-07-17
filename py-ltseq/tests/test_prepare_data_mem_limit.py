@@ -41,23 +41,32 @@ def test_auto_limit_stays_below_ceiling(ceiling_mb):
     assert limit_mb >= 1
 
 
-def test_small_container_ignores_floor():
-    """A 256 MiB floor must not apply when it isn't below the ceiling."""
+def test_small_container_uses_sixty_percent():
+    """A small container is capped at 60% of its ceiling (no floor)."""
     prepare_data = load_prepare_data_module()
-    # 100 MiB ceiling: 256 MiB floor would exceed it, so we get 60% == 60 MiB.
     assert prepare_data._auto_memory_limit_mb(100 * MiB) == 60
 
 
-def test_floor_applied_when_safe():
-    """When the floor is below the ceiling, small 60% values are lifted to it."""
+def test_mid_size_box_is_not_lifted_to_a_floor():
+    """300 MiB ceiling -> 180 MiB (60%), never lifted to a 256 MiB floor.
+
+    The old 256 MiB floor handed a 300 MiB cgroup 85% of its budget and left a
+    257 MiB cgroup ~1 MiB of headroom, reintroducing the OOM the cap prevents.
+    """
     prepare_data = load_prepare_data_module()
-    # 300 MiB ceiling: 60% == 180 MiB, floor 256 MiB < 300, so limit == 256.
-    assert prepare_data._auto_memory_limit_mb(300 * MiB) == 256
+    assert prepare_data._auto_memory_limit_mb(300 * MiB) == 180
+
+
+def test_tight_container_keeps_real_headroom():
+    """A ~256 MiB cgroup must sit well below its ceiling, not at it."""
+    prepare_data = load_prepare_data_module()
+    limit = prepare_data._auto_memory_limit_mb(257 * MiB)
+    assert limit == int(257 * 0.6)  # 154 MiB
+    assert 257 - limit >= 64, "too little headroom for Python/DuckDB/FS overhead"
 
 
 def test_large_box_uses_sixty_percent():
     prepare_data = load_prepare_data_module()
-    # 32 GiB ceiling: 60% dominates the floor.
     assert prepare_data._auto_memory_limit_mb(32 * 1024 * MiB) == int(
         32 * 1024 * 0.6
     )
