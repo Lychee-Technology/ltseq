@@ -29,9 +29,25 @@ def load_prepare_data_module():
     return module
 
 
+def require_real_duckdb():
+    """Return a functional ``duckdb`` module, or skip the test.
+
+    ``test_bench_vs_summary.py`` registers a ``types.SimpleNamespace`` stub as
+    ``sys.modules['duckdb']`` (via ``setdefault``) and never removes it, so a
+    plain ``importorskip('duckdb')`` can return that stub — which has no
+    ``connect`` — instead of skipping. These tests drive real DuckDB I/O, so
+    require a callable ``connect`` and skip cleanly when only the stub or no
+    duckdb is present (e.g. CI without the ``bench`` dependency group).
+    """
+    duckdb = pytest.importorskip("duckdb")
+    if not callable(getattr(duckdb, "connect", None)):
+        pytest.skip("real duckdb not installed (stubbed module registered)")
+    return duckdb
+
+
 def test_create_sample_lowercases_pascalcase_columns(tmp_path, monkeypatch):
     """A sample taken from the raw PascalCase file must come out lowercase."""
-    pytest.importorskip("duckdb")
+    require_real_duckdb()
     pa = pytest.importorskip("pyarrow")
     import pyarrow.parquet as pq
 
@@ -65,7 +81,7 @@ def test_create_sample_lowercases_pascalcase_columns(tmp_path, monkeypatch):
 
 def test_create_sample_regenerates_stale_pascalcase_sample(tmp_path, monkeypatch):
     """A pre-fix PascalCase sample is regenerated in place (self-healing)."""
-    pytest.importorskip("duckdb")
+    require_real_duckdb()
     pa = pytest.importorskip("pyarrow")
     import pyarrow.parquet as pq
 
@@ -96,7 +112,7 @@ def test_create_sample_regenerates_stale_pascalcase_sample(tmp_path, monkeypatch
 
 def test_create_sample_keeps_valid_lowercase_sample(tmp_path, monkeypatch):
     """A valid lowercase sample is left untouched (no needless regeneration)."""
-    pytest.importorskip("duckdb")
+    require_real_duckdb()
     pa = pytest.importorskip("pyarrow")
     import pyarrow.parquet as pq
 
