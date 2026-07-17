@@ -5,11 +5,13 @@ ClickBench comparison benchmark.
 
 ## Prerequisites
 
-Install the benchmark dependencies from the repository root:
-
-```bash
-uv sync --group bench
-```
+The ClickBench comparison and data-preparation scripts import `duckdb` + `psutil`,
+which live in the optional `bench` dependency group. Activate the group on **each**
+run with `uv run --group bench` so those packages are synced into the venv. Do
+**not** run `uv sync --group bench` once and then use a plain `uv run` — the plain
+run re-syncs only the default groups and removes `duckdb`/`psutil` again, which is
+exactly the failure this guide is written to avoid. The core operation benchmark
+needs no external deps and can use a plain `uv run`.
 
 Build the Rust extension in release mode before running benchmarks:
 
@@ -28,15 +30,15 @@ PASS/SKIP/FAIL summary:
 
 ```bash
 # Fast smoke test: rebuild + core benchmark + ClickBench on the 1M-row sample
-uv run python benchmarks/run_all.py --sample
+uv run --group bench python benchmarks/run_all.py --sample
 
 # Full ClickBench comparison on the sorted dataset
-uv run python benchmarks/run_all.py --full
+uv run --group bench python benchmarks/run_all.py --full
 
 # Skip the rebuild, or run only one part
-uv run python benchmarks/run_all.py --skip-build
-uv run python benchmarks/run_all.py --only core
-uv run python benchmarks/run_all.py --only vs
+uv run --group bench python benchmarks/run_all.py --skip-build
+uv run python benchmarks/run_all.py --only core        # core only: no bench group needed
+uv run --group bench python benchmarks/run_all.py --only vs
 ```
 
 `run_all.py` does not download the ~14 GB ClickBench dataset on its own. If the
@@ -52,13 +54,13 @@ the sorted dataset requires additional disk space.
 Prepare the full dataset and a 1M-row sample:
 
 ```bash
-uv run python benchmarks/prepare_data.py
+uv run --group bench python benchmarks/prepare_data.py
 ```
 
 For a sample-only setup, skip the full sort:
 
 ```bash
-uv run python benchmarks/prepare_data.py --sample-only
+uv run --group bench python benchmarks/prepare_data.py --sample-only
 ```
 
 The preparation script creates these files when the required input data is
@@ -71,7 +73,7 @@ available:
 Verify the physical ordering before running ordered workloads:
 
 ```bash
-uv run python benchmarks/verify_parquet_order.py \
+uv run --group bench python benchmarks/verify_parquet_order.py \
   benchmarks/data/hits_sorted.parquet userid eventtime watchid
 ```
 
@@ -98,19 +100,19 @@ benchmarks/results.json
 Run all three ClickBench rounds against the full sorted dataset:
 
 ```bash
-uv run python benchmarks/bench_vs.py
+uv run --group bench python benchmarks/bench_vs.py
 ```
 
 Run a quick smoke test using the 1M-row sample:
 
 ```bash
-uv run python benchmarks/bench_vs.py --sample
+uv run --group bench python benchmarks/bench_vs.py --sample
 ```
 
 Run one round only:
 
 ```bash
-uv run python benchmarks/bench_vs.py --sample --round 2
+uv run --group bench python benchmarks/bench_vs.py --sample --round 2
 ```
 
 Available rounds:
@@ -123,10 +125,10 @@ Useful options:
 
 ```bash
 # Use a specific Parquet file
-uv run python benchmarks/bench_vs.py --data path/to/data.parquet
+uv run --group bench python benchmarks/bench_vs.py --data path/to/data.parquet
 
 # Change measurement counts
-uv run python benchmarks/bench_vs.py --sample --warmup 1 --iterations 5
+uv run --group bench python benchmarks/bench_vs.py --sample --warmup 1 --iterations 5
 ```
 
 The default configuration uses one warmup and three timed iterations. Each

@@ -199,7 +199,7 @@ def main():
                     (
                         f"{dataset_label} not found at {data_file}. "
                         "Prepare it first with: "
-                        f"uv run python benchmarks/prepare_data.py"
+                        f"uv run --group bench python benchmarks/prepare_data.py"
                         f"{' --sample-only' if not full else ''} "
                         "(or re-run this script with --prepare)."
                     ),
