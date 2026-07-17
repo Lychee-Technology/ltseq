@@ -10,18 +10,23 @@ the ClickBench hits.parquet dataset (~100M rows):
   Round 2: User sessionization (30-min gap detection)
   Round 3: Sequential pattern matching (URL funnel)
 
+This script imports duckdb + psutil, which live in the optional ``bench``
+dependency group; run it with ``uv run --group bench`` so they are synced into
+the venv (a plain ``uv run`` syncs only the default groups and removes them).
+
 Usage:
     # Full benchmark (requires hits_sorted.parquet)
-    uv run python benchmarks/bench_vs.py
+    uv run --group bench python benchmarks/bench_vs.py
 
     # Quick validation with sample data
-    uv run python benchmarks/bench_vs.py --sample
+    uv run --group bench python benchmarks/bench_vs.py --sample
 
     # Specific round only
-    uv run python benchmarks/bench_vs.py --round 2
+    uv run --group bench python benchmarks/bench_vs.py --round 2
 
 Requirements:
-    pip install duckdb psutil
+    duckdb + psutil (in the optional ``bench`` group; activate with
+    ``uv run --group bench``)
     maturin develop --release   # Build LTSeq with optimizations
 """
 
@@ -420,7 +425,8 @@ def main():
     if not os.path.exists(data_file):
         print(f"Error: Data file not found: {data_file}")
         print(
-            "Run 'python benchmarks/prepare_data.py' first to download and prepare data."
+            "Run 'uv run --group bench python benchmarks/prepare_data.py' first "
+            "to download and prepare data."
         )
         return 1
 

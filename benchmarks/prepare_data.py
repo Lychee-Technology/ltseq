@@ -6,10 +6,11 @@ Downloads the ClickBench hits.parquet dataset and creates a pre-sorted version
 optimized for LTSeq's ordered operations.
 
 Usage:
-    uv run python benchmarks/prepare_data.py [--skip-download] [--sample-only]
+    uv run --group bench python benchmarks/prepare_data.py [--skip-download] [--sample-only]
 
 Requirements:
-    pip install duckdb
+    duckdb (in the optional ``bench`` dependency group; activate it with
+    ``uv run --group bench`` so it is synced into the venv).
 """
 
 import os
@@ -22,6 +23,29 @@ HITS_URL = "https://datasets.clickhouse.com/hits_compatible/hits.parquet"
 HITS_RAW = os.path.join(DATA_DIR, "hits.parquet")
 HITS_SORTED = os.path.join(DATA_DIR, "hits_sorted.parquet")
 HITS_SAMPLE = os.path.join(DATA_DIR, "hits_sample.parquet")
+
+
+def _is_complete_parquet(path):
+    """Return True if *path* looks like a fully-written parquet file.
+
+    A parquet file both begins and ends with the 4-byte magic ``PAR1``; the
+    trailing magic is written last, so its presence means the writer ran to
+    completion. An interrupted DuckDB ``COPY ... TO`` (Ctrl-C, OOM, disk full)
+    leaves a truncated or empty file at the destination path. Callers use this
+    to regenerate such a file instead of skipping past it and failing later
+    with "too small to be a Parquet file".
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if size < 8:
+        return False
+    with open(path, "rb") as f:
+        if f.read(4) != b"PAR1":
+            return False
+        f.seek(-4, os.SEEK_END)
+        return f.read(4) == b"PAR1"
 
 
 def download_data():
@@ -77,9 +101,17 @@ def sort_data():
     ordering, ensuring both engines produce identical results.
     """
     if os.path.exists(HITS_SORTED):
-        size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
-        print(f"  hits_sorted.parquet already exists ({size_gb:.1f} GB), skipping sort")
-        return
+        if _is_complete_parquet(HITS_SORTED):
+            size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
+            print(
+                f"  hits_sorted.parquet already exists ({size_gb:.1f} GB), skipping sort"
+            )
+            return
+        print(
+            "  hits_sorted.parquet exists but is incomplete/corrupt "
+            "(likely an interrupted sort); regenerating..."
+        )
+        os.remove(HITS_SORTED)
 
     import duckdb
 
@@ -92,13 +124,17 @@ def sort_data():
     cols = con.execute(f"DESCRIBE SELECT * FROM '{HITS_RAW}'").fetchall()
     select_parts = [f'"{col[0]}" as {col[0].lower()}' for col in cols]
     select_str = ", ".join(select_parts)
+    # Write to a temp file and atomically rename on success, so an interrupted
+    # sort never leaves a truncated file at the canonical path.
+    tmp = HITS_SORTED + ".tmp"
     con.execute(f"""
         COPY (
             SELECT {select_str}
             FROM '{HITS_RAW}'
             ORDER BY userid, eventtime, watchid
-        ) TO '{HITS_SORTED}' (FORMAT 'parquet')
+        ) TO '{tmp}' (FORMAT 'parquet')
     """)
+    os.replace(tmp, HITS_SORTED)
     elapsed = time.perf_counter() - t0
     size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
     print(f"  Sorted in {elapsed:.1f}s ({size_gb:.1f} GB)")
@@ -107,19 +143,27 @@ def sort_data():
 def create_sample():
     """Create a 1M-row sample for quick validation."""
     if os.path.exists(HITS_SAMPLE):
-        print("  hits_sample.parquet already exists, skipping")
-        return
+        if _is_complete_parquet(HITS_SAMPLE):
+            print("  hits_sample.parquet already exists, skipping")
+            return
+        print(
+            "  hits_sample.parquet exists but is incomplete/corrupt; regenerating..."
+        )
+        os.remove(HITS_SAMPLE)
 
     import duckdb
 
-    source = HITS_SORTED if os.path.exists(HITS_SORTED) else HITS_RAW
+    source = HITS_SORTED if _is_complete_parquet(HITS_SORTED) else HITS_RAW
     print(f"  Creating 1M-row sample from {os.path.basename(source)}...")
     con = duckdb.connect()
+    # Temp file + atomic rename: an interrupted sample never poisons the path.
+    tmp = HITS_SAMPLE + ".tmp"
     con.execute(f"""
         COPY (
             SELECT * FROM '{source}' LIMIT 1000000
-        ) TO '{HITS_SAMPLE}' (FORMAT 'parquet')
+        ) TO '{tmp}' (FORMAT 'parquet')
     """)
+    os.replace(tmp, HITS_SAMPLE)
     size_mb = os.path.getsize(HITS_SAMPLE) / (1024**2)
     print(f"  Sample created: {size_mb:.1f} MB")
 
