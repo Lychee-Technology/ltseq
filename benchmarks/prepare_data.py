@@ -25,6 +25,72 @@ HITS_SORTED = os.path.join(DATA_DIR, "hits_sorted.parquet")
 HITS_SAMPLE = os.path.join(DATA_DIR, "hits_sample.parquet")
 
 
+def _memory_ceiling_bytes():
+    """Best-effort detection of the memory ceiling this process runs under.
+
+    Inside a container DuckDB's default ``memory_limit`` is 80% of the *host*
+    RAM, which ignores the cgroup limit and gets the process OOM-killed mid-sort.
+    Prefer the cgroup limit (v2 then v1) and fall back to physical RAM.
+    """
+    candidates = []
+    # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            v = f.read().strip()
+        if v != "max":
+            candidates.append(int(v))
+    except (OSError, ValueError):
+        pass
+    # cgroup v1
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+            v = int(f.read().strip())
+        if v < (1 << 62):  # v1 uses a ~2^63 sentinel when unlimited
+            candidates.append(v)
+    except (OSError, ValueError):
+        pass
+    # physical RAM
+    try:
+        candidates.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return min(candidates) if candidates else None
+
+
+def _connect_duckdb(mem_limit=None):
+    """Open a DuckDB connection tuned for out-of-core work on this box.
+
+    A bare ``duckdb.connect()`` is an in-memory database with no spill directory,
+    so a large ``ORDER BY`` tries to sort 14GB entirely in RAM and gets
+    OOM-killed. We (1) point ``temp_directory`` at the big data volume so the
+    sort can spill, (2) cap ``memory_limit`` below the cgroup/host ceiling so
+    DuckDB starts spilling instead of exceeding the container limit, and
+    (3) drop ``preserve_insertion_order`` (irrelevant once we impose ORDER BY)
+    to cut peak memory.
+
+    ``mem_limit`` (e.g. ``"8GB"``, from ``--mem-limit``) overrides the
+    auto-detected cap when the cgroup ceiling can't be read or needs tuning.
+    """
+    import duckdb
+
+    spill_dir = os.path.join(DATA_DIR, ".duckdb_spill")
+    os.makedirs(spill_dir, exist_ok=True)
+    config = {
+        "preserve_insertion_order": "false",
+        "temp_directory": spill_dir,
+    }
+    if mem_limit:
+        config["memory_limit"] = mem_limit
+        print(f"  DuckDB memory_limit={mem_limit} (override), spilling to {spill_dir}")
+    else:
+        ceiling = _memory_ceiling_bytes()
+        if ceiling:
+            limit_mb = max(512, int(ceiling * 0.6 / (1024**2)))
+            config["memory_limit"] = f"{limit_mb}MB"
+            print(f"  DuckDB memory_limit={limit_mb}MB, spilling to {spill_dir}")
+    return duckdb.connect(config=config)
+
+
 def _is_complete_parquet(path):
     """Return True if *path* looks like a fully-written parquet file.
 
@@ -89,7 +155,7 @@ def download_data():
     print(f"  Downloaded: {size_gb:.1f} GB")
 
 
-def sort_data():
+def sort_data(mem_limit=None):
     """Pre-sort the dataset by (userid, eventtime, watchid) using DuckDB.
 
     Sort key is (userid, eventtime, watchid).  watchid is used as a tiebreaker
@@ -113,34 +179,63 @@ def sort_data():
         )
         os.remove(HITS_SORTED)
 
-    import duckdb
+    # Remove 0-byte debris left by a previously killed sort so it never poisons
+    # the destination or masks a real result.
+    tmp = HITS_SORTED + ".tmp"
+    for junk in (tmp,):
+        try:
+            if os.path.exists(junk):
+                os.remove(junk)
+        except OSError:
+            pass
 
     print(
         "  Sorting hits.parquet by (userid, eventtime, watchid) with lowercase columns..."
     )
     t0 = time.perf_counter()
-    con = duckdb.connect()
+    con = _connect_duckdb(mem_limit)
     # Get all column names and build rename expressions
     cols = con.execute(f"DESCRIBE SELECT * FROM '{HITS_RAW}'").fetchall()
     select_parts = [f'"{col[0]}" as {col[0].lower()}' for col in cols]
     select_str = ", ".join(select_parts)
     # Write to a temp file and atomically rename on success, so an interrupted
     # sort never leaves a truncated file at the canonical path.
-    tmp = HITS_SORTED + ".tmp"
-    con.execute(f"""
-        COPY (
-            SELECT {select_str}
-            FROM '{HITS_RAW}'
-            ORDER BY userid, eventtime, watchid
-        ) TO '{tmp}' (FORMAT 'parquet')
-    """)
+    try:
+        con.execute(f"""
+            COPY (
+                SELECT {select_str}
+                FROM '{HITS_RAW}'
+                ORDER BY userid, eventtime, watchid
+            ) TO '{tmp}' (FORMAT 'parquet')
+        """)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    # If the writer was killed mid-sort (OOM), DuckDB leaves a 0-byte tmp and
+    # Python never gets an exception. Detect that explicitly instead of renaming
+    # an empty file into place.
+    if not _is_complete_parquet(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Sort produced an incomplete parquet at {tmp} (size "
+            f"{os.path.getsize(tmp) if os.path.exists(tmp) else 0} bytes). "
+            "The DuckDB process was likely OOM-killed during the sort. Check "
+            "`dmesg | grep -i 'killed process'` and lower memory_limit / free "
+            "disk on the spill volume."
+        )
     os.replace(tmp, HITS_SORTED)
     elapsed = time.perf_counter() - t0
     size_gb = os.path.getsize(HITS_SORTED) / (1024**3)
     print(f"  Sorted in {elapsed:.1f}s ({size_gb:.1f} GB)")
 
 
-def create_sample():
+def create_sample(mem_limit=None):
     """Create a 1M-row sample for quick validation."""
     if os.path.exists(HITS_SAMPLE):
         if _is_complete_parquet(HITS_SAMPLE):
@@ -151,11 +246,9 @@ def create_sample():
         )
         os.remove(HITS_SAMPLE)
 
-    import duckdb
-
     source = HITS_SORTED if _is_complete_parquet(HITS_SORTED) else HITS_RAW
     print(f"  Creating 1M-row sample from {os.path.basename(source)}...")
-    con = duckdb.connect()
+    con = _connect_duckdb(mem_limit)
     # Temp file + atomic rename: an interrupted sample never poisons the path.
     tmp = HITS_SAMPLE + ".tmp"
     con.execute(f"""
@@ -250,6 +343,16 @@ def main():
     parser.add_argument(
         "--investigate", action="store_true", help="Investigate URL patterns"
     )
+    parser.add_argument(
+        "--mem-limit",
+        default=None,
+        metavar="SIZE",
+        help=(
+            "Override DuckDB memory_limit (e.g. '8GB', '4000MB'). Defaults to "
+            "60%% of the detected cgroup/host memory ceiling so the sort spills "
+            "to disk instead of getting OOM-killed."
+        ),
+    )
     args = parser.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -262,12 +365,12 @@ def main():
 
     if not args.sample_only:
         print("[2/3] Pre-sorting dataset...")
-        sort_data()
+        sort_data(args.mem_limit)
     else:
         print("[2/3] Skipping sort")
 
     print("[3/3] Creating sample dataset...")
-    create_sample()
+    create_sample(args.mem_limit)
 
     if args.investigate:
         investigate_urls()
