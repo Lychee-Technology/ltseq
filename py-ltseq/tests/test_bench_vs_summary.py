@@ -11,24 +11,34 @@ def load_bench_vs_module():
     repo_root = Path(__file__).resolve().parents[2]
     bench_vs_path = repo_root / "benchmarks" / "bench_vs.py"
 
-    fake_duckdb = types.SimpleNamespace(sql=lambda *_args, **_kwargs: None)
-    fake_psutil = types.SimpleNamespace(
-        Process=lambda *_args, **_kwargs: None,
-        virtual_memory=lambda: types.SimpleNamespace(total=0),
-    )
-    fake_ltseq = types.SimpleNamespace(LTSeq=object)
+    fakes = {
+        "duckdb": types.SimpleNamespace(sql=lambda *_args, **_kwargs: None),
+        "psutil": types.SimpleNamespace(
+            Process=lambda *_args, **_kwargs: None,
+            virtual_memory=lambda: types.SimpleNamespace(total=0),
+        ),
+        "ltseq": types.SimpleNamespace(LTSeq=object),
+    }
 
-    sys.modules.setdefault("duckdb", fake_duckdb)
-    sys.modules.setdefault("psutil", fake_psutil)
-    sys.modules.setdefault("ltseq", fake_ltseq)
-
-    spec = importlib.util.spec_from_file_location("ltseq_bench_vs", bench_vs_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    # Only stand in for modules that aren't installed, and remove those stubs
+    # once bench_vs has captured its references. A leaked ``sys.modules['duckdb']``
+    # stub (the old ``setdefault`` never cleaned up) shadowed real duckdb for the
+    # rest of the session, making other tests' ``importorskip('duckdb')`` return
+    # a connect-less stub instead of skipping or running.
+    inserted = [name for name in fakes if name not in sys.modules]
+    for name in inserted:
+        sys.modules[name] = fakes[name]
+    try:
+        spec = importlib.util.spec_from_file_location("ltseq_bench_vs", bench_vs_path)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name in inserted:
+            sys.modules.pop(name, None)
 
 
 def test_mark_infra_failure_adds_machine_readable_validation():

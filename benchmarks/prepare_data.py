@@ -67,18 +67,17 @@ def _auto_memory_limit_mb(ceiling_bytes):
     """Pick a DuckDB ``memory_limit`` (MiB) that stays safely below *ceiling*.
 
     We target 60% of the detected ceiling so DuckDB spills to disk with headroom
-    for its own bookkeeping plus the Python process. A small floor keeps DuckDB
-    usable on mid-size boxes, but the floor is only applied when it is itself
-    below the ceiling — otherwise a tiny cgroup (e.g. 256 MiB) would be handed a
-    ``memory_limit`` at or above its own budget, reintroducing the very OOM this
-    cap exists to prevent (review finding P2).
+    for its own bookkeeping, the Python process, and filesystem buffers. 60% is
+    always strictly below the ceiling, so the cap can never itself reintroduce
+    the OOM it exists to prevent.
+
+    An earlier version lifted small values to a 256 MiB floor, but that defeated
+    the 60% budget on mid-size boxes: a 300 MiB cgroup was handed 256 MiB (85%),
+    and a 257 MiB cgroup was left with ~1 MiB of headroom for everything else —
+    exactly the OOM this cap guards against. When 60% is too tight for a given
+    box, use ``--mem-limit`` to tune it explicitly.
     """
-    ceiling_mb = ceiling_bytes // (1024**2)
-    limit_mb = max(1, int(ceiling_bytes * 0.6 / (1024**2)))
-    floor_mb = 256
-    if floor_mb < ceiling_mb:
-        limit_mb = max(limit_mb, floor_mb)
-    return limit_mb
+    return max(1, int(ceiling_bytes * 0.6 / (1024**2)))
 
 
 def _connect_duckdb(mem_limit=None):
@@ -113,6 +112,41 @@ def _connect_duckdb(mem_limit=None):
             config["memory_limit"] = f"{limit_mb}MB"
             print(f"  DuckDB memory_limit={limit_mb}MB, spilling to {spill_dir}")
     return duckdb.connect(config=config)
+
+
+def _lowercase_projection(con, source):
+    """Build a ``SELECT`` column list that renames every column to lowercase.
+
+    The raw ClickBench parquet uses PascalCase names (``URL``, ``UserID``,
+    ``EventTime``, ``WatchID``); both ``bench_vs.py`` and LTSeq's schema lookups
+    (DataFusion is case-sensitive) require lowercase.  ``sort_data`` applies this
+    rename, and any sample taken from the raw file must apply it too — otherwise
+    a fallback-to-raw sample keeps PascalCase and every LTSeq round fails with
+    "Column 'url' not found".  Re-applying it to an already-lowercase source
+    (``hits_sorted.parquet``) is a harmless no-op.
+    """
+    cols = con.execute(f"DESCRIBE SELECT * FROM '{source}'").fetchall()
+    return ", ".join(f'"{col[0]}" as {col[0].lower()}' for col in cols)
+
+
+def _has_lowercase_columns(path):
+    """Return True if every column name in *path* is already lowercase.
+
+    A sample generated before the lowercase fix keeps the raw ClickBench
+    PascalCase names (``URL``, ``UserID``, …) and fails every LTSeq round.
+    ``create_sample`` uses this to regenerate such a stale sample in place
+    instead of requiring a manual delete, so the fix is self-healing on the
+    next data-prep run. Unreadable → treated as not-lowercase so the caller
+    regenerates rather than trusting a suspect file.
+    """
+    import duckdb
+
+    try:
+        con = duckdb.connect()
+        cols = con.execute(f"DESCRIBE SELECT * FROM '{path}'").fetchall()
+    except Exception:
+        return False
+    return bool(cols) and all(col[0] == col[0].lower() for col in cols)
 
 
 def _is_complete_parquet(path):
@@ -255,10 +289,7 @@ def sort_data(mem_limit=None):
     )
     t0 = time.perf_counter()
     con = _connect_duckdb(mem_limit)
-    # Get all column names and build rename expressions
-    cols = con.execute(f"DESCRIBE SELECT * FROM '{HITS_RAW}'").fetchall()
-    select_parts = [f'"{col[0]}" as {col[0].lower()}' for col in cols]
-    select_str = ", ".join(select_parts)
+    select_str = _lowercase_projection(con, HITS_RAW)
     select_sql = (
         f"SELECT {select_str} FROM '{HITS_RAW}' "
         "ORDER BY userid, eventtime, watchid"
@@ -272,19 +303,34 @@ def sort_data(mem_limit=None):
 def create_sample(mem_limit=None):
     """Create a 1M-row sample for quick validation."""
     if os.path.exists(HITS_SAMPLE):
-        if _is_complete_parquet(HITS_SAMPLE):
+        if not _is_complete_parquet(HITS_SAMPLE):
+            print(
+                "  hits_sample.parquet exists but is incomplete/corrupt; regenerating..."
+            )
+            os.remove(HITS_SAMPLE)
+        elif _has_lowercase_columns(HITS_SAMPLE):
             print("  hits_sample.parquet already exists, skipping")
             return
-        print(
-            "  hits_sample.parquet exists but is incomplete/corrupt; regenerating..."
-        )
-        os.remove(HITS_SAMPLE)
+        else:
+            # Pre-fix sample built from the raw PascalCase file: it would fail
+            # every LTSeq round. Regenerate in place so the fix is self-healing.
+            print(
+                "  hits_sample.parquet exists but has non-lowercase (PascalCase) "
+                "columns from a pre-fix run; regenerating..."
+            )
+            os.remove(HITS_SAMPLE)
 
     source = HITS_SORTED if _is_complete_parquet(HITS_SORTED) else HITS_RAW
     print(f"  Creating 1M-row sample from {os.path.basename(source)}...")
     con = _connect_duckdb(mem_limit)
+    # Lowercase the columns so a sample taken from the raw PascalCase file still
+    # matches bench_vs.py / LTSeq's case-sensitive lowercase column names.
+    select_str = _lowercase_projection(con, source)
     _atomic_copy_parquet(
-        con, f"SELECT * FROM '{source}' LIMIT 1000000", HITS_SAMPLE, "Sample"
+        con,
+        f"SELECT {select_str} FROM '{source}' LIMIT 1000000",
+        HITS_SAMPLE,
+        "Sample",
     )
     size_mb = os.path.getsize(HITS_SAMPLE) / (1024**2)
     print(f"  Sample created: {size_mb:.1f} MB")
