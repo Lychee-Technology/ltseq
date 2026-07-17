@@ -115,6 +115,21 @@ def _connect_duckdb(mem_limit=None):
     return duckdb.connect(config=config)
 
 
+def _lowercase_projection(con, source):
+    """Build a ``SELECT`` column list that renames every column to lowercase.
+
+    The raw ClickBench parquet uses PascalCase names (``URL``, ``UserID``,
+    ``EventTime``, ``WatchID``); both ``bench_vs.py`` and LTSeq's schema lookups
+    (DataFusion is case-sensitive) require lowercase.  ``sort_data`` applies this
+    rename, and any sample taken from the raw file must apply it too — otherwise
+    a fallback-to-raw sample keeps PascalCase and every LTSeq round fails with
+    "Column 'url' not found".  Re-applying it to an already-lowercase source
+    (``hits_sorted.parquet``) is a harmless no-op.
+    """
+    cols = con.execute(f"DESCRIBE SELECT * FROM '{source}'").fetchall()
+    return ", ".join(f'"{col[0]}" as {col[0].lower()}' for col in cols)
+
+
 def _is_complete_parquet(path):
     """Return True if *path* looks like a fully-written parquet file.
 
@@ -255,10 +270,7 @@ def sort_data(mem_limit=None):
     )
     t0 = time.perf_counter()
     con = _connect_duckdb(mem_limit)
-    # Get all column names and build rename expressions
-    cols = con.execute(f"DESCRIBE SELECT * FROM '{HITS_RAW}'").fetchall()
-    select_parts = [f'"{col[0]}" as {col[0].lower()}' for col in cols]
-    select_str = ", ".join(select_parts)
+    select_str = _lowercase_projection(con, HITS_RAW)
     select_sql = (
         f"SELECT {select_str} FROM '{HITS_RAW}' "
         "ORDER BY userid, eventtime, watchid"
@@ -283,8 +295,14 @@ def create_sample(mem_limit=None):
     source = HITS_SORTED if _is_complete_parquet(HITS_SORTED) else HITS_RAW
     print(f"  Creating 1M-row sample from {os.path.basename(source)}...")
     con = _connect_duckdb(mem_limit)
+    # Lowercase the columns so a sample taken from the raw PascalCase file still
+    # matches bench_vs.py / LTSeq's case-sensitive lowercase column names.
+    select_str = _lowercase_projection(con, source)
     _atomic_copy_parquet(
-        con, f"SELECT * FROM '{source}' LIMIT 1000000", HITS_SAMPLE, "Sample"
+        con,
+        f"SELECT {select_str} FROM '{source}' LIMIT 1000000",
+        HITS_SAMPLE,
+        "Sample",
     )
     size_mb = os.path.getsize(HITS_SAMPLE) / (1024**2)
     print(f"  Sample created: {size_mb:.1f} MB")
