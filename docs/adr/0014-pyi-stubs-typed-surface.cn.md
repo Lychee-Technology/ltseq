@@ -1,7 +1,7 @@
 # ADR 0014: 为动态表面手写 `.pyi` Stubs + 移除废弃方法
 
 - 状态：已采纳（Accepted）
-- 日期：2026-04-05（设计规格日期）
+- 决策日期：2026-04-05（设计规格） · 记录日期：2026-07-26
 - Issue：[#8](https://github.com/Lychee-Technology/ltseq/issues/8)
 
 [English](0014-pyi-stubs-typed-surface.md)
@@ -14,11 +14,11 @@
 
 **1. 手写 `.pyi` stub 文件**，与 `.py` 模块并排分发——纯类型声明，零运行时改动。关键类型决策：
 
-- `SchemaProxy.__getattr__(name) -> ColumnExpr`：对任意属性静态承诺 `ColumnExpr`（运行时仍会校验列存在性）。
-- **`ColumnExpr`/`CallExpr` 上"显式声明 + 兜底"**：为可发现性显式声明最常用方法（窗口操作 `shift`/`rolling`/`diff`；聚合 `sum`/`mean`/`min`/`max`/`count`/`std`/`var`/`first`/`last`/`median`；rolling 链目标），再加 `def __getattr__(self, name: str) -> Callable[..., CallExpr]` 兜底。这是本规格的核心取舍：显式清单换来 IDE 可发现性，兜底保住动态运行时——代价是清单之外的任何名字都能通过类型检查。
+- `SchemaProxy.__getattr__` 对任意属性静态承诺一个表达式类型（运行时仍会校验列存在性）。规格写的是 `-> ColumnExpr`；当前 stub 返回 `_SchemaAttr(ColumnExpr)` 子类，同时类型化嵌套访问（`expr/proxy.pyi`）。
+- **`ColumnExpr`/`CallExpr` 上"显式声明 + 兜底"**：为可发现性显式声明最常用方法（窗口操作 `shift`/`rolling`/`diff`；聚合 `sum`/`mean`/`min`/`max`/`count`/`std`/`var`/`first`/`last`/`median`；rolling 链目标），再加 `__getattr__` 兜底。这是本规格的核心取舍：显式清单换来 IDE 可发现性，兜底保住动态运行时——代价是清单之外的任何名字都能通过类型检查。规格把兜底类型定为 `-> Callable[..., CallExpr]`；当前 stubs 用的是 `-> Any`（`expr/types.pyi`），进一步放宽。
 - `.s` / `.dt` 访问器声明为返回 `StringAccessor`/`TemporalAccessor` 的 `@property`；`TemporalAccessor.diff(other: Expr, unit)` 接受 `Expr` 而非 `int`。
 - **Stub 把 mixin 摊平**：运行时 `LTSeq` 由 mixin 组合（[ADR 0012](0012-rust-thin-shell-python-mixins.cn.md)），但 `__init__.pyi` 声明的是一个包含全部方法的扁平 `LTSeq` 类——声明结构与运行时结构的有意分叉，为 IDE 人体工学服务。lambda 参数类型为 `Callable[[SchemaProxy], Expr]`；别名（`with_columns`、`group_consecutive`）包含在内；工厂函数给出完整签名。
-- 私有方法与内部 helper 不做 stub。
+- 规格把私有方法与内部 helper 排除在 stub 之外；当前 stubs 实际声明了少数跨模块使用的私有成员（`__init__.pyi` 中的 `_inner`、`_schema`、`_sort_keys`、`_from_rows`、`_capture_expr`）。
 
 **2. 同一变更中移除三个废弃方法**（当前开发阶段接受 breaking change）：`join_merge()` 与 `join_sorted()`（由 `join(..., strategy="merge")` 取代）、集合差集别名 `diff()`（由 `except_()` 取代）。移除以 TDD 方式落地：`py-ltseq/tests/test_deprecated_removed.py`。
 
@@ -26,9 +26,8 @@
 
 - 范围从规格的 7 个 stub 文件在实施计划中扩至 14 个；当前包内实际有 **15 个**（新增 `cursor.pyi`、`linking.pyi`、`partitioning.pyi`、`aggregation.pyi`、`grouping/nested_table.pyi`、`expr/lookup_expr.pyi`、`exceptions.pyi`、`ltseq_core.pyi` 等）。
 - `Cursor` 最终**被** stub 了，尽管规格的"不做 stub"清单曾把它排除在外。
-- `SchemaProxy.__getattr__` 实际实现为 `-> ColumnExpr | NestedSchemaProxy`（规格写的是 `ColumnExpr`）。
 - Stubs 用 `TYPE_CHECKING` 守卫打破循环导入（仅在实施计划中说明）。
-- Stubs 没有单元测试——"测试"就是 `import ltseq` 成功且既有测试套件保持全绿；未在 CI 中加 mypy/pyright 门禁。
+- Stubs 自身没有单元测试，但 CI 现已把 **pyright 作为门禁**——分别检查库本身（`py-ltseq/ltseq`）与专门的类型检查测试（`py-ltseq/typecheck_tests`），见 `.github/workflows/ci.yml`（规格时期尚无类型检查门禁）。
 
 ### 相关的人体工学决策
 

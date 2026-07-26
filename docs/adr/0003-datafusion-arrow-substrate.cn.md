@@ -1,7 +1,7 @@
 # ADR 0003: 以 DataFusion + Apache Arrow 为执行底座
 
 - 状态：已采纳（Accepted）
-- 日期：2026-07-26（补记；决策早于本 ADR）
+- 决策日期：早于本记录 · 记录日期：2026-07-26
 
 [English](0003-datafusion-arrow-substrate.md)
 

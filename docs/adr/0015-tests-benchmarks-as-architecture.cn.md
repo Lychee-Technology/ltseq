@@ -1,7 +1,7 @@
 # ADR 0015: 测试与基准是架构层的一部分
 
 - 状态：已采纳（Accepted）
-- 日期：2026-07-26（补记；决策早于本 ADR）
+- 决策日期：早于本记录 · 记录日期：2026-07-26
 
 [English](0015-tests-benchmarks-as-architecture.md)
 
@@ -17,12 +17,12 @@
 
 - 测试**按产品能力/行为组织，而非按源码文件**——"这是一个架构选择"。测试套件兼作产品能力地图和重构护栏；`MODULE_GUIDE.md` 把它推为首要导航工具（"先找最具体的相关测试，再追进实现"）。
 - 架构不变量有专属测试，如 `test_no_materialization_rule.py`（[ADR 0005](0005-no-materialization-rule.cn.md)）。
-- 五条贡献者启发式被固化为约束：除非 API 明确是终端的，否则保持惰性执行；不要随意破坏排序元数据传播；返回表的 API 内部不做 Python 侧物化；保持 Python `_schema` 与 Rust schema 一致；优先小而局部的改动而非横切式重构。
+- 五条贡献者启发式被固化为约束：除非 API 明确是终端的，否则保持惰性执行；不要随意破坏排序元数据传播；返回表的 API 内部不做 Python 侧物化；保持 Python `_schema` 与 Rust schema 一致（#93 之后应读作：不要绕过 Rust 持有的元数据，见 [ADR 0009](0009-metadata-single-source-of-truth.cn.md)）；优先小而局部的改动而非横切式重构。
 
 ### 基准协议
 
-- 默认 1 次预热 + 3 轮计时，`time.perf_counter()`，报告**中位数**，记录 RSS 内存增量。LTSeq 的数据加载与 `assume_sorted` 声明发生在计时轮**之前**并单独报告。每个 ClickBench 轮次都**用 DuckDB 校验**正确性。结果输出为机器可读 JSON（样本、中位数、内存、校验状态、主机信息）。
-- 可复现规则：同机低负载、重建 `maturin develop --release`、记录 git commit 与工具链版本，并且"把抽样结果当作冒烟测试证据，而非全量数据集上的性能决策依据"。
+- 共同原则：计时前先预热（默认 1 + 3 轮）；LTSeq 的数据加载与 `assume_sorted` 声明发生在计时轮**之前**并单独报告；结果输出为机器可读 JSON；适用可复现规则（同机低负载、重建 `maturin develop --release`、"把抽样结果当作冒烟测试证据，而非全量数据集上的性能决策依据"）。
+- 当前实际是**两套协议**而非一套：**ClickBench 对比**（`bench_vs.py`）报告**中位数**、记录 RSS 内存增量、且**每轮用 DuckDB 校验**正确性；**核心套件**（`bench_core.py`）报告各轮**平均值**，不记录逐样本数据、RSS 或校验结果——而 commit/工具链版本记录在核心套件的 host info 中，ClickBench 的 system info 反而没有。操作性参数（轮次、阈值、结果 schema）以 `BENCHMARK.md` 为准。
 - 工作负载检验序列论题：Top-URL 聚合、用户会话切分、顺序 URL 漏斗匹配，外加 10K/100K/1M 行的核心套件。
 
 ### 基准门控的 autoresearch（受监督）

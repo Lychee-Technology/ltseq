@@ -1,7 +1,7 @@
 # ADR 0003: DataFusion + Apache Arrow as the Execution Substrate
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0003-datafusion-arrow-substrate.cn.md)
 

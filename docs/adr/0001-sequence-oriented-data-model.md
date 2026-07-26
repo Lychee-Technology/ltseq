@@ -1,7 +1,7 @@
 # ADR 0001: Sequence-Oriented Data Model — Row Order Is Part of the Data Model
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0001-sequence-oriented-data-model.cn.md)
 
@@ -15,7 +15,7 @@ Treat row order as a semantic input to computation — a first-class part of bot
 
 This single choice drives the rest of the architecture:
 
-- **API**: window functions that reference adjacent rows (`shift`, `diff`, `rolling`, cumulative ops), sequential grouping over consecutive runs (`group_ordered`), ordered search (`search_first` with binary search, `search_pattern` funnel matching), merge and as-of joins.
+- **API**: window functions that reference adjacent rows (`shift`, `diff`, `rolling`, cumulative ops), sequential grouping over consecutive runs (`group_ordered`), ordered search (`search_first` first-match early-exit, `search_pattern` funnel matching), merge and as-of joins. (Older docs describe `search_first` as binary search; the current implementation is a native lazy `filter(...).limit(1)` with no sort precondition — see [ADR 0006](0006-multi-path-execution-strategy.md).)
 - **Metadata**: sort state must be tracked and propagated through the query pipeline (see [ADR 0008](0008-explicit-sort-metadata.md)).
 - **Execution**: sorted inputs unlock specialized fast paths (see [ADR 0006](0006-multi-path-execution-strategy.md)).
 - **Testing**: ordered semantics are covered as product capabilities in their own right (see [ADR 0015](0015-tests-benchmarks-as-architecture.md)).

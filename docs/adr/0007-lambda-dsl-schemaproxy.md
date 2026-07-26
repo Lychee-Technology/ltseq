@@ -1,7 +1,7 @@
 # ADR 0007: Lambda Expression DSL — SchemaProxy Capture, Dict Serialization, Rust Transpilation
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0007-lambda-dsl-schemaproxy.cn.md)
 
@@ -15,7 +15,7 @@ Capture, serialize, transpile:
 
 1. **Capture.** A lambda is executed **once** against a `SchemaProxy` (`expr/proxy.py`) — not real rows. Attribute access and operator overloads build an expression tree (`ColumnExpr`, `BinOpExpr`, `CallExpr`, …).
 2. **Serialize.** The tree serializes to plain dicts, e.g. `{"type": "BinOp", "op": ">", "left": {"type": "Column", "name": "age"}, "right": {"type": "Literal", "value": 18}}`.
-3. **Transpile.** Rust deserializes into `PyExpr` (`src/types.rs`, `dict_to_py_expr()`) and converts to DataFusion `Expr` via one of **three paths**: native expressions (`transpiler/mod.rs`), native window construction (`transpiler/window_native.rs`), or SQL generation (`transpiler/sql_gen.rs`) for expressions awkward natively. `transpiler/optimization.rs` simplifies expressions before execution.
+3. **Transpile.** Rust deserializes into `PyExpr` (`src/types.rs`, `dict_to_py_expr()`) and converts to DataFusion `Expr` via one of **two paths**: native expressions (`transpiler/mod.rs`) or native window construction (`transpiler/window_native.rs`). `transpiler/optimization.rs` simplifies expressions before execution. (A third path, SQL generation via `transpiler/sql_gen.rs`, existed historically and has been removed — see the Evolution section of [ADR 0006](0006-multi-path-execution-strategy.md). The one surviving SQL use is the `filter_where` WHERE-clause parser helper.)
 
 **The DSL is intentionally constrained**: it supports Pythonic *column* expressions well but deliberately does not execute arbitrary Python row-by-row — "that tradeoff keeps the system serializable and Rust-executable." What Python cannot overload gets a limited AST transformation (`is None` / `is not None`, in `expr/transforms.py`). The escape hatch for genuinely arbitrary per-row logic is `fold()`, an explicitly-flagged slow path ([ADR 0005](0005-no-materialization-rule.md)).
 
@@ -23,7 +23,7 @@ Capture, serialize, transpile:
 
 - Expressions execute vectorized in Rust; the lambda itself never touches data.
 - `r` is not a real row object — a documented common user mistake; Python control flow (`if`, loops) inside lambdas does not do what users may expect.
-- Semantics of SQL-fallback expressions are defined by their SQL equivalents; `api.md` §11 maintains the translation reference table (e.g. `if_else` → `CASE WHEN`, `count_if` → `SUM(CASE WHEN …)`).
+- `api.md` §11 documents several expression semantics by their SQL equivalents (e.g. `if_else` → `CASE WHEN`, `count_if` → `SUM(CASE WHEN …)`) — a specification device; execution is native.
 - Static typing of the dynamic DSL surface needs hand-written stubs ([ADR 0014](0014-pyi-stubs-typed-surface.md)).
 
 ## Sources

@@ -1,7 +1,7 @@
 # ADR 0010: 四种高层表对象类型，用类型表达语义上下文
 
 - 状态：已采纳（Accepted）
-- 日期：2026-07-26（补记；决策早于本 ADR）
+- 决策日期：早于本记录 · 记录日期：2026-07-26
 
 [English](0010-four-table-object-types.md)
 
@@ -18,7 +18,7 @@ API 有意**用不同的包装类型来表达语义**，返回哪种对象是 Py
 - **`LinkedTable`** — "这张表在真正需要时能看到另一张表"（见 [ADR 0011](0011-link-lazy-prefix-aliased-join.cn.md)）。
 - **`PartitionedTable`** — 按键的 dict 式分组访问。`partition(*cols)` / `partition(by=callable)`；可调用键**必须是简单列表达式**（`lambda r: r.region`）——派生表达式（`lambda r: r.price + 1`）抛 `ValueError`，因为它们会被迫内部物化，违反 [ADR 0005](0005-no-materialization-rule.cn.md)。
 
-四种对象都保持惰性；延迟的分组/join 只在必需时物化（[ADR 0004](0004-lazy-execution-immutable-tables.cn.md)）。
+这四种是**语义角色**，不是惰性保证。`LTSeq`、`NestedTable`、`LinkedTable` 的计划在被消费前保持延迟（[ADR 0004](0004-lazy-execution-immutable-tables.cn.md)）；分区只是部分惰性：发现分区键要执行一次 distinct 查询（`partitioning.py` 中的 `to_arrow()`），字符串键分区背后的具体类是 `SQLPartitionedTable`（对单个分区的*访问*仍是惰性的 SQL 查询），而 `PartitionedTable.map()` 返回 `_PrecomputedPartitionedTable`——其文档明言无惰性求值。
 
 ## 影响与取舍
 

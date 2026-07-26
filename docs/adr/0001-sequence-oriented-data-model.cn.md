@@ -1,7 +1,7 @@
 # ADR 0001: 序列导向数据模型 —— 行序是数据模型的一等公民
 
 - 状态：已采纳（Accepted）
-- 日期：2026-07-26（补记；决策早于本 ADR）
+- 决策日期：早于本记录 · 记录日期：2026-07-26
 
 [English](0001-sequence-oriented-data-model.md)
 
@@ -15,7 +15,7 @@
 
 这一个选择驱动了后续整个架构：
 
-- **API**：引用相邻行的窗口函数（`shift`、`diff`、`rolling`、累计类操作）、按连续段分组的顺序分组（`group_ordered`）、有序搜索（可二分的 `search_first`、漏斗匹配的 `search_pattern`）、merge join 与 as-of join。
+- **API**：引用相邻行的窗口函数（`shift`、`diff`、`rolling`、累计类操作）、按连续段分组的顺序分组（`group_ordered`）、有序搜索（首个匹配即止的 `search_first`、漏斗匹配的 `search_pattern`）、merge join 与 as-of join。（旧文档把 `search_first` 描述为二分搜索；当前实现是原生惰性的 `filter(...).limit(1)`，无排序前置条件——见 [ADR 0006](0006-multi-path-execution-strategy.cn.md)。）
 - **元数据**：排序状态必须在查询管道中全程跟踪与传播（见 [ADR 0008](0008-explicit-sort-metadata.cn.md)）。
 - **执行**：已排序的输入可解锁专用快速路径（见 [ADR 0006](0006-multi-path-execution-strategy.cn.md)）。
 - **测试**：顺序语义本身作为产品能力被测试覆盖（见 [ADR 0015](0015-tests-benchmarks-as-architecture.cn.md)）。

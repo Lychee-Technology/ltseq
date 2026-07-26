@@ -1,7 +1,7 @@
 # ADR 0012: Code Organization — Rust Thin Shell + `src/ops/*`, Python Mixin Composition
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0012-rust-thin-shell-python-mixins.cn.md)
 
@@ -11,11 +11,11 @@ Both sides of the boundary risk monolith files: PyO3 allows only **one `#[pymeth
 
 ## Decision
 
-**Rust side — thin shell + helpers.** Expose the extension via a single `#[pymodule]`. All `LTSeqTable` Python-facing methods live in the one `#[pymethods]` block in `lib.rs` as thin 1–3 line delegation stubs that call helper functions in `src/ops/` (basic, derive, window, sort, grouping, join, asof_join, aggregation, set_ops, pattern_match, linear_scan, parallel_scan, align, pivot, mutation, io, common). This is "both a practical PyO3 constraint and a maintainability choice": signatures stay centralized, implementation stays modular, and `lib.rs` never becomes a multi-thousand-line execution file. Corollary for readers: *do not assume the logic lives in `lib.rs`*.
+**Rust side — thin shell + helpers.** Expose the extension via a single `#[pymodule]`. All `LTSeqTable` Python-facing methods live in the one `#[pymethods]` block in `lib.rs`; **most operations** are thin 1–3 line delegation stubs calling helper functions in `src/ops/` (basic, derive, window, sort, grouping, join, asof_join, aggregation, set_ops, pattern_match, linear_scan, parallel_scan, align, pivot, mutation, io, common), while constructors, IO/terminal methods, and some basics remain inline (e.g. `read_csv`, `to_arrow_ipc`, `slice`). This is "both a practical PyO3 constraint and a maintainability choice": signatures stay centralized, implementation stays modular, and `lib.rs` never becomes a multi-thousand-line execution file. Corollary for readers: *do not assume the logic lives in `lib.rs`*.
 
 **Python side — mixin composition.** `LTSeq` is assembled in `core.py` from category mixins (`io_ops.py`, `transforms.py`, `joins.py`, `aggregation.py`, `advanced_ops.py`, `mutation_mixin.py`, `lookup.py`), keeping the public API broad while avoiding a monolithic file and preserving a single user-facing class. The Python side calls `_inner`, receives a new Rust table back, and wraps it via `_from_inner()`.
 
-**Rust code quality standard** (`docs/rust-coding-std.md`): minimal public API; borrow over clone; `Result`/`Option` with custom error types (`thiserror`/`anyhow`), no `unwrap` in production; Clippy + rustfmt in CI; newtypes for domain concepts; prefer traits/enums/composition over classical OO patterns; refactor only behind a test safety net, in small compiler-checked steps; treat code smells as forward signals, not failures.
+**Rust code quality standard** (`docs/rust-coding-std.md`, a *normative* standard): minimal public API; borrow over clone; `Result`/`Option` with custom error types (`thiserror`/`anyhow`), no `unwrap` in production; newtypes for domain concepts; prefer traits/enums/composition over classical OO patterns; refactor only behind a test safety net, in small compiler-checked steps; treat code smells as forward signals, not failures. Verification gap: the standard calls for Clippy + rustfmt in CI, but the current workflow (`.github/workflows/ci.yml`) runs only build, pyright, and pytest — the lint gates are not yet wired up.
 
 ## Consequences
 

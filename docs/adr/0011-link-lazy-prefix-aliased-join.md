@@ -1,7 +1,8 @@
 # ADR 0011: `link()` Is a Lazy Prefix-Aliased Equi-Join — Not a Pointer/Take Structure
 
-- Status: Accepted (supersedes the earlier pointer/take design)
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Status: Accepted
+- Supersedes: the earlier pointer/take linking design (see Evolution)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0011-link-lazy-prefix-aliased-join.cn.md)
 
@@ -11,7 +12,7 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 
 ## Decision
 
-`link(target, on, as_/alias, join_type)` records the join condition and alias and computes the joined schema up front, but **executes nothing**. It builds one lazy DataFusion join plan, cached so repeated transforms reuse the same join node.
+`link(target, on, as_/alias, join_type)` records the join condition and alias and previews the joined schema up front (`preview_join_schema`, no execution). The lazy DataFusion join plan is built **on demand** at first consumption (`linking.py::_ensure_join_plan`) and cached, so repeated transforms reuse the same join node; no data is executed until a terminal call.
 
 - **Naming**: target columns are exposed as `{alias}_{col}`; source columns keep their names. Reference linked columns by prefix (`r.prod_price`, not `r.prod.price`).
 - **Join semantics**: all four join types (inner/left/right/full); equality-only conditions; composite keys via `&` (`|` unsupported).
@@ -22,7 +23,7 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 
 - An earlier design treated linking as a **pointer/take structure** (cheap per-row navigation). The current docs are explicit: "It is a lazy join — not a pointer/take structure and not a cheap per-row navigation."
 - A **source-only shortcut** ("filter the source first for speed") existed and was removed: "There is no 'filter the source first for speed' shortcut anymore (it produced wrong rows for unmatched/fan-out joins)." Correctness beat hand-rolled speed hacks; predicate/projection pushdown is delegated to the optimizer.
-- Residue of the old design still exists in prose: `CLAUDE.md` describes `linking.py` as "LinkedTable for pointer-based joins" (and tests as "Pointer-based join tests"), and the `README.md` FAQ contrasts linking with "full data materialization" joins. Those descriptions are outdated relative to `LINKING_GUIDE.md`/`api.md` and should be updated separately.
+- Residue of the old design still exists in prose: `CLAUDE.md` describes `linking.py` as "LinkedTable for pointer-based joins" (and tests as "Pointer-based join tests"); the `README.md` FAQ contrasts linking with "full data materialization" joins; and `USER_MODEL.md` (Linking vs Joining) still presents `join()` as producing a physical result and `link()` as making left-only operations cheaper. All three are stale relative to `LINKING_GUIDE.md`/`api.md` and this ADR, and should be updated separately.
 
 ### Related join-surface decisions
 

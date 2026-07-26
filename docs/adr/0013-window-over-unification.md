@@ -1,7 +1,7 @@
 # ADR 0013: Unified `.over()` Surface for All Window Expressions
 
 - Status: Accepted
-- Date: 2026-07-07 (design spec date)
+- Decision date: 2026-07-07 (design spec) · Recorded: 2026-07-26
 - Issue: [#117](https://github.com/Lychee-Technology/ltseq/issues/117)
 
 [中文版](0013-window-over-unification.cn.md)
@@ -13,7 +13,7 @@ LTSeq had two window paradigms users had to memorize separately:
 1. **Sequence windows** (`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`): depend on a prior `sort()` (table order), partitioning via the `partition_by=` kwarg.
 2. **Ranking windows** (`row_number`/`rank`/`dense_rank`/`ntile`): use `.over(partition_by=, order_by=, desc=)`.
 
-Calling `.over()` on a sequence window raised `NotImplementedError`. Crucially, the Rust window planner (`src/transpiler/window_native.rs`) had **already implemented** `partition_by` for all sequence windows (`extract_partition_by`/`finalize_window_expr`, covered by `tests/test_window_partition_by.py`) — so this was a pure API unification, adding **zero new compute capability**.
+Calling `.over()` on a sequence window raised `NotImplementedError`. Crucially, the Rust window planner (`src/transpiler/window_native.rs`) had **already implemented** `partition_by` for all sequence windows (`extract_partition_by`/`finalize_window_expr`, covered by `py-ltseq/tests/test_window_partition_by.py`) — so this was a pure API unification, adding **zero new compute capability**.
 
 ## Decision
 
@@ -23,6 +23,7 @@ Sequence window expressions also accept an optional `.over()`, sharing one windo
 
 - **Coexistence rule**: `.over(partition_by=...)` together with a `partition_by=` kwarg on the same expression → **`ValueError`** (pick one). No implicit precedence — avoiding the silent surprise of "I wrote the kwarg but it didn't take effect"; the restriction is easy to relax later.
 - **Supported dimensions**: sequence-window `.over()` supports `partition_by` **and** `order_by` (+`desc`); `order_by` overrides table order.
+- **Non-window guard**: `.over()` on a genuinely non-window expression (e.g. `r.age.over(...)`) still raises — now a plain `ValueError`, with the old "#117 not implemented" wording removed.
 - **Wire format unchanged**: the existing `{"type":"Window", expr, partition_by, order_by, descending}` serialization already carries everything — no cross-boundary protocol change.
 - Prior art: PySpark's `.over(Window.partitionBy(...).orderBy(...))` and Polars' `.over()`; this converges LTSeq's two paradigms into the same mental model.
 

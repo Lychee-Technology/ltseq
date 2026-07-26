@@ -1,7 +1,7 @@
 # ADR 0015: Tests and Benchmarks Are an Architectural Layer
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0015-tests-benchmarks-as-architecture.cn.md)
 
@@ -17,13 +17,13 @@ Model the system with a fourth layer — **validation & performance** (`py-ltseq
 
 - Tests are organized **by product capability/behavior, not by source file** — "that is an architectural choice." The suite doubles as a map of product capabilities and a guardrail for refactors; `MODULE_GUIDE.md` promotes it as the primary navigation tool ("find the most specific relevant test first, then trace into implementation").
 - Architectural invariants get their own tests, e.g. `test_no_materialization_rule.py` ([ADR 0005](0005-no-materialization-rule.md)).
-- Five contributor heuristics are codified as binding constraints: preserve lazy execution unless the API is explicitly terminal; don't break sort-metadata propagation casually; no Python-side materialization inside table-returning APIs; keep Python `_schema` and Rust schema aligned; prefer small local changes over cross-cutting refactors.
+- Five contributor heuristics are codified as binding constraints: preserve lazy execution unless the API is explicitly terminal; don't break sort-metadata propagation casually; no Python-side materialization inside table-returning APIs; keep Python `_schema` and Rust schema aligned (post-#93 this reads: don't bypass the Rust-owned metadata, [ADR 0009](0009-metadata-single-source-of-truth.md)); prefer small local changes over cross-cutting refactors.
 
 ### Benchmark protocol
 
-- Default 1 warmup + 3 timed iterations, `time.perf_counter()`, report the **median**, record RSS memory delta. LTSeq's data load and `assume_sorted` declaration happen **before** timed rounds and are reported separately. Every ClickBench round is **validated against DuckDB** for correctness. Results go to machine-readable JSON with samples, medians, memory, validation status, and host info.
-- Reproducibility rules: same machine/low load, rebuild `maturin develop --release`, record git commit and toolchain versions, and "treat sample results as smoke-test evidence, not as full-dataset performance decisions."
-- Workloads exercise the sequence thesis: top-URL aggregation, user sessionization, sequential URL funnel matching, plus a core suite over 10K/100K/1M rows.
+- Shared principles: warmup before timed iterations (default 1 + 3); LTSeq's data load and `assume_sorted` declaration happen **before** timed rounds and are reported separately; results go to machine-readable JSON; reproducibility rules apply (same machine/low load, rebuild `maturin develop --release`, "treat sample results as smoke-test evidence, not as full-dataset performance decisions").
+- There are currently **two protocols**, not one: the **ClickBench comparison** (`bench_vs.py`) reports the **median**, records RSS memory delta, and **validates every round against DuckDB**; the **core suite** (`bench_core.py`) reports the **mean** over iterations and records no per-sample data, RSS, or validation — while commit/toolchain versions are captured in the core suite's host info but not in the ClickBench system info. Operational parameters (iteration counts, thresholds, result schemas) are specified in `BENCHMARK.md`, which is authoritative for them.
+- Workloads exercise the sequence thesis: top-URL aggregation, user sessionization, sequential URL funnel matching, plus the core suite over 10K/100K/1M rows.
 
 ### Benchmark-gated autoresearch (supervised)
 

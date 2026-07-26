@@ -1,7 +1,7 @@
 # ADR 0010: Four High-Level Table Object Types Signal Semantic Context
 
 - Status: Accepted
-- Date: 2026-07-26 (recorded; decision predates the ADR)
+- Decision date: predates this record · Recorded: 2026-07-26
 
 [中文版](0010-four-table-object-types.cn.md)
 
@@ -18,7 +18,7 @@ The API deliberately returns **different wrapper types to signal semantics**, an
 - **`LinkedTable`** — "this table can see another table if and when I actually need it" (see [ADR 0011](0011-link-lazy-prefix-aliased-join.md)).
 - **`PartitionedTable`** — dict-like grouped access by key. `partition(*cols)` / `partition(by=callable)`; a callable key **must be a simple column expression** (`lambda r: r.region`) — derived expressions (`lambda r: r.price + 1`) raise `ValueError` because they would force internal materialization, violating [ADR 0005](0005-no-materialization-rule.md).
 
-All four stay lazy; deferred grouping/joining is materialized only when required ([ADR 0004](0004-lazy-execution-immutable-tables.md)).
+These are **semantic roles**, not a laziness guarantee. `LTSeq`, `NestedTable`, and `LinkedTable` defer their plans until consumed ([ADR 0004](0004-lazy-execution-immutable-tables.md)); partitioning is only partially lazy: discovering the partition keys executes a distinct query (`to_arrow()` in `partitioning.py`), the concrete class behind string-key partitioning is `SQLPartitionedTable` (per-partition *access* stays a lazy SQL-backed query), and `PartitionedTable.map()` returns a `_PrecomputedPartitionedTable`, explicitly documented as having no lazy evaluation.
 
 ## Consequences
 

@@ -1,7 +1,7 @@
 # ADR 0013: 全部窗口表达式统一 `.over()` 表面
 
 - 状态：已采纳（Accepted）
-- 日期：2026-07-07（设计规格日期）
+- 决策日期：2026-07-07（设计规格） · 记录日期：2026-07-26
 - Issue：[#117](https://github.com/Lychee-Technology/ltseq/issues/117)
 
 [English](0013-window-over-unification.md)
@@ -13,7 +13,7 @@ LTSeq 曾有两套窗口范式，用户要分别记两套规则：
 1. **序列窗口**（`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`）：依赖前置 `sort()`（表序），分区用 `partition_by=` kwarg。
 2. **排名窗口**（`row_number`/`rank`/`dense_rank`/`ntile`）：用 `.over(partition_by=, order_by=, desc=)`。
 
-对序列窗口调用 `.over()` 会抛 `NotImplementedError`。关键前提：Rust 窗口 planner（`src/transpiler/window_native.rs`）**早已**为全部序列窗口实现了 `partition_by`（`extract_partition_by`/`finalize_window_expr`，由 `tests/test_window_partition_by.py` 覆盖）——因此这是纯 API 统一，**不新增任何计算能力**。
+对序列窗口调用 `.over()` 会抛 `NotImplementedError`。关键前提：Rust 窗口 planner（`src/transpiler/window_native.rs`）**早已**为全部序列窗口实现了 `partition_by`（`extract_partition_by`/`finalize_window_expr`，由 `py-ltseq/tests/test_window_partition_by.py` 覆盖）——因此这是纯 API 统一，**不新增任何计算能力**。
 
 ## 决策
 
@@ -23,6 +23,7 @@ LTSeq 曾有两套窗口范式，用户要分别记两套规则：
 
 - **共存规则**：同一表达式上 `.over(partition_by=...)` 与 `partition_by=` kwarg 同时出现 → **`ValueError`**（二选一）。不做隐式优先级——避免"我明明写了 kwarg 却没生效"的静默惊喜；日后想放宽很容易。
 - **支持维度**：序列窗口的 `.over()` 支持 `partition_by` **和** `order_by`(+`desc`)；`order_by` 覆盖表序。
+- **非窗口守卫**：对真正的非窗口表达式（如 `r.age.over(...)`）调用 `.over()` 仍然报错——现改为普通 `ValueError`，并删去旧的「#117 未实现」话术。
 - **线格式不变**：现有 `{"type":"Window", expr, partition_by, order_by, descending}` 序列化已能携带全部信息——不涉及跨边界协议变更。
 - 业界对照：PySpark 的 `.over(Window.partitionBy(...).orderBy(...))` 与 Polars 的 `.over()`；本决策让 LTSeq 两套窗口收敛为一致的心智模型。
 
