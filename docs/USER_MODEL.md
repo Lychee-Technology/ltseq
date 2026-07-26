@@ -173,9 +173,9 @@ Think of it as: "this table now has grouped semantics attached to it."
 
 Returned by `link()`.
 
-Use it when you want a lazy relationship to another table without paying the cost of a join up front.
+Use it when you want to enrich a table from another table with prefix-aliased columns (`{alias}_{col}`), staying lazy until the result is consumed. The join plan is built lazily and every transform runs on the joined plan.
 
-Think of it as: "this table can see another table if and when I actually need it."
+Think of it as: "this table, enriched by another table, still lazy."
 
 ### `PartitionedTable`
 
@@ -281,8 +281,8 @@ Use:
 
 1. `read_*`
 2. left-side filtering first
-3. `link()` when right-side access is conditional or infrequent
-4. `join()` when flat physical results are definitely needed
+3. `link()` for dimension enrichment and multi-hop chains (whole-table `{alias}_{col}` prefixes)
+4. `join()` for one-off relational joins (conflict-only suffixes)
 
 ### For large pipelines
 
@@ -304,9 +304,9 @@ They do not. They build expressions.
 
 Calling `to_pandas()` too soon gives up the benefits of lazy planning and Rust-side execution.
 
-### Using `join()` when `link()` would be cheaper
+### Assuming `link()` and `join()` differ in cost
 
-If you only sometimes need right-side data, linking may be the better fit.
+They build the same kind of lazy DataFusion join and neither materializes until consumed. Choose by naming and ergonomics — prefix-aliased enrichment (`link`) vs a one-off flat join (`join`) — not by expected cost.
 
 ### Assuming all grouping means immediate aggregation
 
@@ -321,7 +321,7 @@ Use these as default habits:
 1. Sort explicitly before any order-dependent logic.
 2. Keep workflows lazy as long as possible.
 3. Use `show()` and focused tests to validate assumptions incrementally.
-4. Prefer `link()` for lazy relationship exploration and `join()` for definite flat-table work.
+4. Prefer `link()` for enrichment and multi-hop naming, and `join()` for one-off relational joins.
 5. Treat `NestedTable` as a grouped context object, not just another dataframe.
 
 ---

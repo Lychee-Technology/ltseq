@@ -58,7 +58,7 @@ LTSeq 是一个混合式 Python-Rust 库，用于面向顺序语义的数据处�
 
 LTSeq 主要由两层组成。
 
-- **Python 层** 位于 `py-ltseq/ltseq/`：负责公共 API、mixin 组织、schema 跟踪、排序元数据跟踪、lambda 捕获和高层对象包装
+- **Python 层** 位于 `py-ltseq/ltseq/`：负责公共 API、mixin 组织、lambda 捕获和高层对象包装；schema 与排序元数据从 Rust 内核读取（issue #93）
 - **Rust 层** 位于 `src/`：负责 PyO3 扩展模块、懒 DataFusion 计划处理、表达式转译、终结执行以及顺序相关的专用实现
 
 在当前代码中，主要的 Python 用户对象是 `LTSeq`，主要的 Rust 执行对象是 `LTSeqTable`。
@@ -244,7 +244,7 @@ Join 执行必须谨慎处理右表列名冲突或重复的问题。LTSeq 的 jo
 
 ### 5.2 SQL 回退（已退役）
 
-历史上，一些 group-heavy 或 window-heavy 的变换曾使用生成 SQL 和临时表的方式（`transpiler/sql_gen.rs`），因为那是当时更实际的实现路径。该路径已被移除——SQL 往返是物化黑洞，`test_no_materialization_rule.py` 现在专门防止其回归。SQL 仅存的用途是 `src/ops/aggregation.rs` 中 `filter_where` 的 WHERE 子句解析 helper（对空表解析，再应用原生惰性 filter）。
+历史上，一些 group-heavy 或 window-heavy 的变换曾使用生成 SQL 和临时表的方式（`src/transpiler/sql_gen.rs`，现已删除），因为那是当时更实际的实现路径。该路径已被移除——SQL 往返是物化黑洞，`test_no_materialization_rule.py` 现在专门防止其回归。SQL 仅存的用途是 `src/ops/aggregation.rs` 中 `filter_where` 的 WHERE 子句解析 helper（对空表解析，再应用原生惰性 filter）。
 
 ### 5.3 专用 Rust 路径
 

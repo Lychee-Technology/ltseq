@@ -58,7 +58,7 @@ For deeper reading:
 
 LTSeq is split into two primary layers.
 
-- **Python layer** in `py-ltseq/ltseq/`: public API, mixin organization, schema tracking, sort metadata tracking, lambda capture, and high-level wrapper objects
+- **Python layer** in `py-ltseq/ltseq/`: public API, mixin organization, lambda capture, and high-level wrapper objects; schema and sort metadata are read from the Rust kernel (issue #93)
 - **Rust layer** in `src/`: PyO3 extension module, lazy DataFusion plan handling, expression transpilation, terminal execution, and specialized sequence implementations
 
 In current code, the main user-facing Python object is `LTSeq`, and the main Rust execution object is `LTSeqTable`.
@@ -244,7 +244,7 @@ The preferred path is to keep work as native DataFusion logical plans and expres
 
 ### 5.2 SQL Fallback (retired)
 
-Historically, some grouped or window-heavy transformations used generated SQL and temporary tables (`transpiler/sql_gen.rs`) as the most practical implementation route. That path has been removed — SQL round-trips were a materialization sink, and `test_no_materialization_rule.py` guards against reintroducing them. The remaining SQL use is the `filter_where` WHERE-clause parser helper in `src/ops/aggregation.rs` (parses against an empty table, then applies a native lazy filter).
+Historically, some grouped or window-heavy transformations used generated SQL and temporary tables (`src/transpiler/sql_gen.rs`, since removed) as the most practical implementation route. That path has been removed — SQL round-trips were a materialization sink, and `test_no_materialization_rule.py` guards against reintroducing them. The remaining SQL use is the `filter_where` WHERE-clause parser helper in `src/ops/aggregation.rs` (parses against an empty table, then applies a native lazy filter).
 
 ### 5.3 Specialized Rust Paths
 

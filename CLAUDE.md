@@ -92,7 +92,7 @@ t.filter(lambda r: r.age > 18)
 col("age").gt(lit(18))
 ```
 
-Window functions require a prior `.sort()` — or `.assume_sorted()` for data that is already physically sorted — before use. The sort order is tracked in `_sort_keys` and `sort_exprs`.
+Sequence window functions default to table order and require a prior `.sort()` — or `.assume_sorted()` for data that is already physically sorted. Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort. The declared order is owned by the Rust kernel (`sort_specs`); Python's `_sort_keys` reads it over FFI.
 
 ## Testing
 

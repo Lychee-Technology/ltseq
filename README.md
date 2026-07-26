@@ -134,7 +134,7 @@ filtered.show()
 
 ### Window Functions (Ordered Computing)
 
-All window functions require a prior `.sort()` call.
+Sequence window functions (`shift`, `rolling`, cumulative ops) default to table order and require a prior `.sort()` (or `assume_sorted()`). Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort.
 
 ```python
 # Sort first!
@@ -540,7 +540,7 @@ durations = (
 
 ## Limitations
 
-- Window functions require an explicit `.sort()` call
+- Sequence window functions require an explicit `.sort()` (or `assume_sorted()`) unless the window carries its own `.over(order_by=...)`
 - Ordered grouping (`group_ordered`) groups only consecutive identical values, not all identical values
 - Large in-memory sorts are limited by available RAM
 - Some advanced DataFusion features not yet exposed
@@ -570,7 +570,7 @@ MIT License - See LICENSE file for details.
 A: Pandas treats data as an unordered set with optional indices. LTSeq treats data as sequences with built-in window functions and ordered computing. Better for time series, event logs, and state tracking.
 
 **Q: Do I need to sort before every window function?**  
-A: Windows default to the table order, so sequence windows (`shift`, `rolling`, cumulative ops) need a prior `.sort()` (or `assume_sorted()`) — the sort order is then preserved across subsequent operations. Windows that carry their own order are self-sufficient: ranking functions and any window with an explicit `.over(order_by=...)` run without a prior sort.
+A: Windows default to the table order, so sequence windows (`shift`, `rolling`, cumulative ops) need a prior `.sort()` (or `assume_sorted()`) — the declared sort order is preserved across operations that keep row order (reordering or structurally new tables invalidate it). Windows that carry their own order are self-sufficient: ranking functions and any window with an explicit `.over(order_by=...)` run without a prior sort.
 
 **Q: What file formats are supported?**  
 A: CSV, JSON, and Parquet. Via to_csv(), to_json(), and to_parquet() methods.

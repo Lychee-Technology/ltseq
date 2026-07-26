@@ -68,7 +68,7 @@ This layer should avoid doing heavy data processing itself.
 The Rust crate in `src/` exposes `LTSeqTable` through PyO3. It is responsible for:
 
 - constructing and transforming lazy DataFusion plans
-- converting serialized expressions into DataFusion expressions or SQL
+- converting serialized expressions into DataFusion expressions
 - tracking sort metadata needed for sequence semantics
 - executing terminal actions such as collect, count, display, and export
 - providing specialized implementations for sequence-heavy operations
@@ -102,7 +102,7 @@ Defined in `src/lib.rs`, `LTSeqTable` is the Rust kernel object exposed through 
 - `SessionContext`
 - an optional lazy `DataFrame`
 - an optional Arrow schema
-- `sort_exprs`
+- `sort_specs` (declared row order)
 - an optional source Parquet path for sorted-scan optimization
 
 It is the authoritative execution object behind most Python operations.
@@ -230,10 +230,7 @@ The project relies on DataFusion for plan optimization and execution, but preser
 
 ## Sort Metadata and Ordered Semantics
 
-Order is not inferred implicitly. LTSeq tracks sort state explicitly on both sides of the Python/Rust boundary.
-
-- Python side: `_sort_keys`
-- Rust side: `sort_exprs`
+Order is not inferred implicitly. LTSeq tracks sort state explicitly, with the Rust kernel as the single source of truth (issue #93): Rust owns the declared sort order (`sort_specs`), and Python's `_sort_keys` is an FFI read of `get_sort_keys()` rather than separately-maintained state.
 
 This metadata enables:
 
@@ -362,7 +359,7 @@ A typical request moves through the system like this:
 3. Python sends serialized expressions into Rust via `_inner`.
 4. Rust transforms the underlying lazy DataFusion plan or specialized query state.
 5. Rust returns a new `LTSeqTable` or related object state.
-6. Python wraps that result in the correct high-level object and updates metadata.
+6. Python wraps that result in the correct high-level object; schema/sort metadata is read from the Rust kernel on demand.
 7. Execution only occurs when the user calls a terminal operation.
 
 That separation is the backbone of the project.
