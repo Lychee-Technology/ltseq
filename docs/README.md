@@ -27,10 +27,11 @@ Start here:
 
 Start here:
 
-1. `docs/DESIGN_SUMMARY.md`
-2. `docs/BENCHMARK.md`
-3. `docs/BENCHMARK_AUTORESEARCH.md`
-4. `benchmarks/` (see `benchmarks/README.md`)
+1. `docs/adr/` (Architecture Decision Records, see `docs/adr/README.md`)
+2. `docs/DESIGN_SUMMARY.md`
+3. `docs/BENCHMARK.md`
+4. `docs/BENCHMARK_AUTORESEARCH.md`
+5. `benchmarks/` (see `benchmarks/README.md`)
 
 ## 推荐阅读路径
 
@@ -55,10 +56,11 @@ Start here:
 
 建议按以下顺序阅读：
 
-1. `docs/DESIGN_SUMMARY.md`
-2. `docs/BENCHMARK.md`
-3. `docs/BENCHMARK_AUTORESEARCH.md`
-4. `benchmarks/`（见 `benchmarks/README.md`）
+1. `docs/adr/`（架构决策记录，见 `docs/adr/README.md`）
+2. `docs/DESIGN_SUMMARY.cn.md`
+3. `docs/BENCHMARK.md`
+4. `docs/BENCHMARK_AUTORESEARCH.md`
+5. `benchmarks/`（见 `benchmarks/README.md`）
 
 ## Core Documents
 
