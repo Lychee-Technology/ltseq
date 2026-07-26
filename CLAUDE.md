@@ -60,7 +60,7 @@ py-ltseq/ltseq/               # Python package
 │   └── accessors.py          # .s (string) and .dt (datetime) accessors
 ├── grouping/                 # NestedTable for group_ordered()
 │   └── proxies/              # GroupProxy for group aggregations
-├── linking.py                # LinkedTable for pointer-based joins
+├── linking.py                # LinkedTable for lazy prefix-aliased joins
 ├── partitioning.py           # PartitionedTable for partition()
 └── [mixins].py               # IOMixin, TransformMixin, JoinMixin, etc.
 ```
@@ -92,13 +92,13 @@ t.filter(lambda r: r.age > 18)
 col("age").gt(lit(18))
 ```
 
-Window functions require a prior `.sort()` — or `.assume_sorted()` for data that is already physically sorted — before use. The sort order is tracked in `_sort_keys` and `sort_exprs`.
+Sequence window functions default to table order and require a prior `.sort()` — or `.assume_sorted()` for data that is already physically sorted. Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort. The declared order is owned by the Rust kernel (`sort_specs`); Python's `_sort_keys` reads it over FFI.
 
 ## Testing
 
 Tests are in `py-ltseq/tests/`. Key test files:
 - `test_filter.py`, `test_derive.py` - Basic operations
 - `test_window.py`, `test_ranking.py` - Window functions
-- `test_linking_*.py` - Pointer-based join tests
+- `test_linking_*.py` - Lazy prefix-aliased join (link) tests
 - `test_group_ordered.py` - Sequential grouping
 - `test_set_ops.py` - Union, intersect, diff

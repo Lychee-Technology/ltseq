@@ -68,7 +68,7 @@ This layer should avoid doing heavy data processing itself.
 The Rust crate in `src/` exposes `LTSeqTable` through PyO3. It is responsible for:
 
 - constructing and transforming lazy DataFusion plans
-- converting serialized expressions into DataFusion expressions or SQL
+- converting serialized expressions into DataFusion expressions
 - tracking sort metadata needed for sequence semantics
 - executing terminal actions such as collect, count, display, and export
 - providing specialized implementations for sequence-heavy operations
@@ -102,7 +102,7 @@ Defined in `src/lib.rs`, `LTSeqTable` is the Rust kernel object exposed through 
 - `SessionContext`
 - an optional lazy `DataFrame`
 - an optional Arrow schema
-- `sort_exprs`
+- `sort_specs` (declared row order)
 - an optional source Parquet path for sorted-scan optimization
 
 It is the authoritative execution object behind most Python operations.
@@ -191,17 +191,15 @@ Key files:
 
 ### Rust side
 
-The serialized dictionary is converted into `PyExpr` in `src/types.rs`, optionally optimized, then transpiled via one of three paths:
+The serialized dictionary is converted into `PyExpr` in `src/types.rs`, optionally optimized, then transpiled via one of two paths:
 
 - native DataFusion `Expr`
 - native window expression construction
-- SQL generation fallback
 
 Key files:
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/sql_gen.rs`
 - `src/transpiler/optimization.rs`
 
 This split is central to LTSeq's architecture: Python owns expressive syntax, Rust owns execution semantics.
@@ -232,10 +230,7 @@ The project relies on DataFusion for plan optimization and execution, but preser
 
 ## Sort Metadata and Ordered Semantics
 
-Order is not inferred implicitly. LTSeq tracks sort state explicitly on both sides of the Python/Rust boundary.
-
-- Python side: `_sort_keys`
-- Rust side: `sort_exprs`
+Order is not inferred implicitly. LTSeq tracks sort state explicitly, with the Rust kernel as the single source of truth (issue #93): Rust owns the declared sort order (`sort_specs`), and Python's `_sort_keys` is an FFI read of `get_sort_keys()` rather than separately-maintained state.
 
 This metadata enables:
 
@@ -271,9 +266,9 @@ LTSeq is not a pure wrapper around DataFusion. It uses multiple execution strate
 
 The default path is to express work as native DataFusion plans and expressions.
 
-### SQL fallback path
+### SQL parser helper (the retired SQL fallback path)
 
-Some grouped and window-style transformations are easier to express through generated SQL and temporary tables. This path exists as a compatibility and implementation convenience layer.
+A generated-SQL fallback path (`src/transpiler/sql_gen.rs` plus temporary tables) existed historically as a compatibility layer and has been removed: SQL round-trips (`collect → MemTable → session.sql() → collect`) were a materialization sink, and `test_no_materialization_rule.py` now guards against reintroducing the pattern. The one deliberate remnant is `filter_where` (`src/ops/aggregation.rs`), which uses `session.sql()` against an empty table purely to parse a WHERE clause, then applies the resulting native expression to the lazy `DataFrame::filter()`.
 
 ### Specialized sequence path
 
@@ -310,19 +305,13 @@ These abstractions are a major part of LTSeq's API differentiation.
 
 ## Schema Management
 
-Schema management spans both Python and Rust.
+The Rust kernel is the single source of truth for schema and sort metadata (issue #93).
 
-- Python tracks a user-facing `_schema` dictionary for fast validation and better error messages.
-- Rust tracks Arrow schema information tied to the current query plan.
+- Rust owns the authoritative Arrow schema and declared sort order (`sort_specs`), tied to the current query plan.
+- Python's `_schema` is a lazily-fetched per-instance cache of `get_schema_dict()`; `_sort_keys` is an uncached FFI read of `get_sort_keys()`.
+- The user-facing `schema` and `python_schema` properties are two views over the same fetched data.
 
-This dual model makes expression capture and user ergonomics easier, but it creates a hard requirement: schema synchronization must be maintained at every boundary where plans change shape.
-
-This is especially important for:
-
-- joins with conflicting column names
-- linked-table materialization
-- grouped transformations
-- selects and derives that change visible columns
+An earlier design maintained a hand-written Python-side `_schema` mirror alongside the Rust schema. It required re-synchronization at every boundary where plans change shape and proved fragile (stale columns after `select`, "Unknown" placeholder types, diverging sort keys after renames); `test_schema_source_of_truth.py` exists to prevent that dual tracking from coming back.
 
 ---
 
@@ -370,7 +359,7 @@ A typical request moves through the system like this:
 3. Python sends serialized expressions into Rust via `_inner`.
 4. Rust transforms the underlying lazy DataFusion plan or specialized query state.
 5. Rust returns a new `LTSeqTable` or related object state.
-6. Python wraps that result in the correct high-level object and updates metadata.
+6. Python wraps that result in the correct high-level object; schema/sort metadata is read from the Rust kernel on demand.
 7. Execution only occurs when the user calls a terminal operation.
 
 That separation is the backbone of the project.
@@ -381,9 +370,9 @@ That separation is the backbone of the project.
 
 The main long-term pressure points are:
 
-- keeping Python and Rust schema state synchronized
+- not bypassing the Rust-owned schema/sort metadata (Rust is the single source of truth; Python only caches)
 - preserving sort metadata correctly across many operations
-- preventing SQL fallback paths from becoming accidental materialization sinks
+- preventing SQL round-trip patterns from being reintroduced as accidental materialization sinks
 - maintaining consistency between lazy linked/grouped abstractions and flat table APIs
 - deciding when specialized execution is justified over DataFusion-native plans
 

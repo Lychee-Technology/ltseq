@@ -19,7 +19,7 @@ This document describes the API **as currently implemented**. Every signature be
 - r: row proxy used inside lambdas to build expressions (not executed in Python)
 - g: group proxy used in NestedTable filter/derive; group aggregations use string column names (`g.sum("amount")`), while `g.first()`/`g.last()` return row proxies with attribute access (`g.first().date`)
 - Most operations return a new LTSeq; `LTSeq.scan()`/`scan_parquet()` return a streaming `Cursor`; `is_subset`/`contain` return a bool
-- Window/ordered operations require a prior `sort` (or `assume_sorted`); otherwise runtime errors or incorrect results may occur. `shift`/`rolling`/`diff` also accept a `partition_by=` kwarg for per-group windows
+- Window/ordered operations that depend on table order require a prior `sort` (or `assume_sorted`); otherwise runtime errors or incorrect results may occur. Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort (§3.1). `shift`/`rolling`/`diff` also accept a `partition_by=` kwarg for per-group windows
 - Expressions are captured into AST on the Python side and executed in Rust/DataFusion
 
 ## Common Errors and Solutions
@@ -122,7 +122,7 @@ except LTSeqError: ...
 | As-of join | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
+| Prefix link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### Set Operations
 | Operation | Method | Example |
@@ -746,7 +746,7 @@ t.derive(rn=lambda r: row_number().over(
 
 #### `LTSeq.search_first`
 - **Signature**: `LTSeq.search_first(predicate: Callable[[Row], Expr]) -> LTSeq`
-- **Behavior**: Return the first matching row (single-row LTSeq); can do binary search on sorted data
+- **Behavior**: Return the first matching row (single-row LTSeq), implemented as a lazy filter with `LIMIT 1` early exit; no prior sort is required
 - **Parameters**: `predicate` row predicate
 - **Returns**: single-row `LTSeq` (empty if not found)
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid predicate), `RuntimeError` (predicate cannot be transpiled)

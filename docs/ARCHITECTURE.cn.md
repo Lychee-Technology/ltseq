@@ -102,7 +102,7 @@ LTSeq 的架构主要围绕五个目标展开：
 - `SessionContext`
 - 可选的懒 `DataFrame`
 - 可选的 Arrow schema
-- `sort_exprs`
+- `sort_specs`（声明的行序）
 - 用于排序扫描优化的可选 Parquet 源路径
 
 它是大多数 Python 操作背后的权威执行对象。
@@ -113,7 +113,7 @@ LTSeq 的架构主要围绕五个目标展开：
 
 ### `LinkedTable`
 
-定义于 `py-ltseq/ltseq/linking.py`。`LinkedTable` 表示两个表之间的惰性关系，只有在确实访问右表数据时才会物化 join。
+定义于 `py-ltseq/ltseq/linking.py`。`LinkedTable` 表示到另一张表的惰性前缀别名化 join：join 计划在首次消费时按需构建并缓存，所有变换都在 join 后的计划上运行并返回普通 `LTSeq`，在终端调用之前不物化。
 
 ### `PartitionedTable`
 
@@ -177,17 +177,15 @@ t.filter(lambda r: r.age > 18)
 
 ### Rust 侧
 
-序列化字典在 `src/types.rs` 中转换为 `PyExpr`，可选地经过优化，然后走以下三类路径之一：
+序列化字典在 `src/types.rs` 中转换为 `PyExpr`，可选地经过优化，然后走以下两类路径之一：
 
 - 原生 DataFusion `Expr`
 - 原生窗口表达式构造
-- SQL 生成回退路径
 
 关键文件：
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/sql_gen.rs`
 - `src/transpiler/optimization.rs`
 
 这个分工是 LTSeq 架构的核心：Python 负责表达语法，Rust 负责执行语义。
@@ -218,10 +216,7 @@ t.filter(lambda r: r.age > 18)
 
 ## 排序元数据与顺序语义
 
-LTSeq 不会隐式推断顺序，而是在 Python/Rust 两侧都显式维护排序状态：
-
-- Python 侧：`_sort_keys`
-- Rust 侧：`sort_exprs`
+LTSeq 不会隐式推断顺序，而是显式跟踪排序状态。声明排序由 Rust 内核持有（`sort_specs`，issue #93 后的唯一事实源）；Python 侧的 `_sort_keys` 是对 `get_sort_keys()` 的 FFI 读取，不单独维护状态。
 
 这些元数据支持：
 

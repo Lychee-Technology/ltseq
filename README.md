@@ -134,7 +134,7 @@ filtered.show()
 
 ### Window Functions (Ordered Computing)
 
-All window functions require a prior `.sort()` call.
+Sequence window functions (`shift`, `rolling`, cumulative ops) default to table order and require a prior `.sort()` (or `assume_sorted()`). Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort.
 
 ```python
 # Sort first!
@@ -422,7 +422,7 @@ LTSeq treats data as **sequences** rather than unordered sets. This distinction 
 
 1. **Window Functions** - Reference adjacent rows (shift, rolling aggregates)
 2. **Sequential Grouping** - Group only consecutive identical values
-3. **Ordered Searches** - Binary search on sorted data
+3. **Ordered Searches** - First-match early-exit search and sequential pattern matching
 4. **State Machines** - Model processes as state transitions
 
 Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awareness** for temporal data, event logs, and state tracking.
@@ -540,7 +540,7 @@ durations = (
 
 ## Limitations
 
-- Window functions require an explicit `.sort()` call
+- Sequence window functions require an explicit `.sort()` (or `assume_sorted()`) unless the window carries its own `.over(order_by=...)`
 - Ordered grouping (`group_ordered`) groups only consecutive identical values, not all identical values
 - Large in-memory sorts are limited by available RAM
 - Some advanced DataFusion features not yet exposed
@@ -570,17 +570,19 @@ MIT License - See LICENSE file for details.
 A: Pandas treats data as an unordered set with optional indices. LTSeq treats data as sequences with built-in window functions and ordered computing. Better for time series, event logs, and state tracking.
 
 **Q: Do I need to sort before every window function?**  
-A: Yes. Window functions require a `.sort()` call. The sort order is then preserved across subsequent operations.
+A: Windows default to the table order, so sequence windows (`shift`, `rolling`, cumulative ops) need a prior `.sort()` (or `assume_sorted()`) — the declared sort order is preserved across operations that keep row order (reordering or structurally new tables invalidate it). Windows that carry their own order are self-sufficient: ranking functions and any window with an explicit `.over(order_by=...)` run without a prior sort.
 
 **Q: What file formats are supported?**  
 A: CSV, JSON, and Parquet. Via to_csv(), to_json(), and to_parquet() methods.
 
 **Q: How do I join tables?**  
 A: LTSeq offers two approaches:
-1. **Linking**  - Lazy prefix-aliased foreign-key joins
+1. **Linking** - Lazy prefix-aliased foreign-key joins: the whole target table is exposed as `{alias}_{col}`, which keeps multi-hop chains unambiguous
    - `orders.link(products, on=lambda o, p: o.product_id == p.product_id, as_="prod")`
    - See [Linking Guide](docs/LINKING_GUIDE.md)
-2. **Traditional SQL joins** - Full data materialization
+2. **`join()`** - Polars-style relational joins with conflict-only suffixes
+
+Both build the same kind of lazy DataFusion join and neither materializes until consumed — the difference is naming convention and ergonomics.
 
 **Q: Is this production-ready?**  
 A: LTSeq is stable with 999+ passing tests covering all functionality. It's suitable for production use cases.

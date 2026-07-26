@@ -119,7 +119,7 @@ except SortRequiredError as e:
 | 时序就近连接 | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | 半连接 | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | 反连接 | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| 指针关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
+| 前缀关联 | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### 集合操作
 | 操作 | 方法 | 示例 |
@@ -743,7 +743,7 @@ t.derive(rn=lambda r: row_number().over(
 
 #### `LTSeq.search_first`
 - **签名**: `LTSeq.search_first(predicate: Callable[[Row], Expr]) -> LTSeq`
-- **行为**: 返回第一个匹配行（单行 LTSeq）；对已排序数据可做二分查找
+- **行为**: 返回第一个匹配行（单行 LTSeq），实现为惰性 filter 加 `LIMIT 1` 早停；无需前置排序
 - **参数**: `predicate` 行谓词
 - **返回**: 单行 `LTSeq`（未找到时为空）
 - **异常**: `ValueError`（schema 未初始化），`TypeError`（谓词无效），`RuntimeError`（谓词无法转译）

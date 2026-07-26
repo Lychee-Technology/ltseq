@@ -173,9 +173,9 @@ Think of it as: "this table now has grouped semantics attached to it."
 
 Returned by `link()`.
 
-Use it when you want a lazy relationship to another table without paying the cost of a join up front.
+Use it when you want to enrich a table from another table with prefix-aliased columns (`{alias}_{col}`), staying lazy until the result is consumed. The join plan is built lazily and every transform runs on the joined plan.
 
-Think of it as: "this table can see another table if and when I actually need it."
+Think of it as: "this table, enriched by another table, still lazy."
 
 ### `PartitionedTable`
 
@@ -189,26 +189,28 @@ Use it when you want grouped access by partition key rather than one global flat
 
 This is one of the most important user-facing distinctions in LTSeq.
 
+Both build the same kind of lazy DataFusion join, and neither materializes until the result is consumed. The difference is naming convention and ergonomics.
+
 ### Join
 
-`join()` creates a physical combined table result.
+`join()` returns a plain `LTSeq` with Polars-style naming: only conflicting right-side columns get a suffix (`suffix="_right"`); non-conflicting columns keep their names.
 
 Use it when:
 
-- you know you need both sides immediately
+- you want a one-off relational join
 - downstream steps treat the result like one flat table
 
 ### Link
 
-`link()` creates a lazy relationship object.
+`link()` returns a `LinkedTable` that namespaces the *whole* target table as `{alias}_{col}`.
 
 Use it when:
 
-- you want to defer join cost
-- many operations touch only the left table
+- you are enriching a fact table from dimension tables
+- you chain multiple hops and need unambiguous column names
 - you want a more relationship-oriented workflow
 
-The key idea is that linking lets you stay lazy longer.
+Every transform on a `LinkedTable` runs on the joined plan and returns a plain `LTSeq`, so rows follow the join (unmatched rows and one-to-many fan-out are reflected). See the Linking Guide for details.
 
 ---
 
@@ -279,8 +281,8 @@ Use:
 
 1. `read_*`
 2. left-side filtering first
-3. `link()` when right-side access is conditional or infrequent
-4. `join()` when flat physical results are definitely needed
+3. `link()` for dimension enrichment and multi-hop chains (whole-table `{alias}_{col}` prefixes)
+4. `join()` for one-off relational joins (conflict-only suffixes)
 
 ### For large pipelines
 
@@ -302,9 +304,9 @@ They do not. They build expressions.
 
 Calling `to_pandas()` too soon gives up the benefits of lazy planning and Rust-side execution.
 
-### Using `join()` when `link()` would be cheaper
+### Assuming `link()` and `join()` differ in cost
 
-If you only sometimes need right-side data, linking may be the better fit.
+They build the same kind of lazy DataFusion join and neither materializes until consumed. Choose by naming and ergonomics — prefix-aliased enrichment (`link`) vs a one-off flat join (`join`) — not by expected cost.
 
 ### Assuming all grouping means immediate aggregation
 
@@ -319,7 +321,7 @@ Use these as default habits:
 1. Sort explicitly before any order-dependent logic.
 2. Keep workflows lazy as long as possible.
 3. Use `show()` and focused tests to validate assumptions incrementally.
-4. Prefer `link()` for lazy relationship exploration and `join()` for definite flat-table work.
+4. Prefer `link()` for enrichment and multi-hop naming, and `join()` for one-off relational joins.
 5. Treat `NestedTable` as a grouped context object, not just another dataframe.
 
 ---
