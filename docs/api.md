@@ -122,7 +122,7 @@ except LTSeqError: ...
 | As-of join | `.asof_join()` | `trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)` |
 | Semi join | `.semi_join()` | `a.semi_join(b, on=lambda a, b: a.id == b.id)` |
 | Anti join | `.anti_join()` | `a.anti_join(b, on=lambda a, b: a.id == b.id)` |
-| Pointer link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
+| Prefix link | `.link()` | `orders.link(products, on=lambda o, p: o.product_id == p.id, alias="prod")` |
 
 ### Set Operations
 | Operation | Method | Example |
@@ -746,7 +746,7 @@ t.derive(rn=lambda r: row_number().over(
 
 #### `LTSeq.search_first`
 - **Signature**: `LTSeq.search_first(predicate: Callable[[Row], Expr]) -> LTSeq`
-- **Behavior**: Return the first matching row (single-row LTSeq); can do binary search on sorted data
+- **Behavior**: Return the first matching row (single-row LTSeq), implemented as a lazy filter with `LIMIT 1` early exit; no prior sort is required
 - **Parameters**: `predicate` row predicate
 - **Returns**: single-row `LTSeq` (empty if not found)
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid predicate), `RuntimeError` (predicate cannot be transpiled)

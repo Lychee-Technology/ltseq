@@ -124,12 +124,12 @@ Rust 通过 `src/lib.rs` 中单一的 `#[pymethods]` 暴露 `LTSeqTable`，再�
 
 ### 1.5 核心元数据模型
 
-有两套元数据系统是架构核心：
+有两类元数据是架构核心，且两者都以 Rust 内核为唯一事实源（issue #93）：
 
-- Python 侧 `_schema` / Rust 侧 Arrow schema
-- Python 侧 `_sort_keys` / Rust 侧 `sort_exprs`
+- schema：Rust 持有 Arrow schema；Python 的 `_schema` 是逐实例惰性缓存
+- 排序：Rust 持有 `sort_specs`；Python 的 `_sort_keys` 是不缓存的 FFI 读取
 
-前者用于保持用户可见验证与执行状态一致，后者用于让顺序相关操作显式且安全。
+前者在不手工维护镜像的前提下保持用户可见验证与执行状态一致，后者让顺序相关操作显式且安全。
 
 ---
 
@@ -166,13 +166,11 @@ t.filter(lambda r: r.age > 18)
 
 - 原生 DataFusion 表达式生成
 - 原生窗口表达式生成
-- SQL 生成回退路径
 
 关键文件：
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/sql_gen.rs`
 - `src/transpiler/optimization.rs`
 
 ### 2.4 实际边界
@@ -244,9 +242,9 @@ Join 执行必须谨慎处理右表列名冲突或重复的问题。LTSeq 的 jo
 
 首选路径是把工作表示为原生 DataFusion 逻辑计划和表达式。
 
-### 5.2 SQL 回退
+### 5.2 SQL 回退（已退役）
 
-一些操作，尤其是 group-heavy 或 window-heavy 的变换，在当前实现中仍然会使用生成 SQL 和临时表的方式，因为这是更实际的实现路径。
+历史上，一些 group-heavy 或 window-heavy 的变换曾使用生成 SQL 和临时表的方式（`transpiler/sql_gen.rs`），因为那是当时更实际的实现路径。该路径已被移除——SQL 往返是物化黑洞，`test_no_materialization_rule.py` 现在专门防止其回归。SQL 仅存的用途是 `src/ops/aggregation.rs` 中 `filter_where` 的 WHERE 子句解析 helper（对空表解析，再应用原生惰性 filter）。
 
 ### 5.3 专用 Rust 路径
 
@@ -280,7 +278,7 @@ LTSeq 还包含针对有序工作负载的专用实现，在这些场景下通�
 - sort tracking 和 windows
 - grouping 和 nested tables
 - joins 和 as-of joins
-- linking 和 pointer syntax
+- linking 和 link 前缀语法
 - partitioning 和 set operations
 - no accidental materialization 等架构保护项
 
@@ -298,7 +296,7 @@ Benchmark 被用来验证架构选择是否在真实有序工作负载下站得�
 
 ### 7.2 Schema 同步至关重要
 
-Python 侧 schema 跟踪和 Rust 侧 Arrow schema 跟踪的组合提升了易用性，但也要求在 join 和物化边界之后严格保持同步。
+最初 Python 侧 schema 跟踪和 Rust 侧 Arrow schema 跟踪的组合提升了易用性，但要求在 join 和物化边界之后严格保持同步——实践证明这很脆弱。这一教训促成了 issue #93：现在 Rust 内核是 schema 与排序元数据的唯一事实源，Python 侧只保留逐实例惰性缓存。
 
 ### 7.3 DataFusion 很强，但并不能解决一切
 

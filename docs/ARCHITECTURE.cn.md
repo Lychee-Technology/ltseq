@@ -181,13 +181,11 @@ t.filter(lambda r: r.age > 18)
 
 - 原生 DataFusion `Expr`
 - 原生窗口表达式构造
-- SQL 生成回退路径
 
 关键文件：
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/sql_gen.rs`
 - `src/transpiler/optimization.rs`
 
 这个分工是 LTSeq 架构的核心：Python 负责表达语法，Rust 负责执行语义。

@@ -189,26 +189,28 @@ Use it when you want grouped access by partition key rather than one global flat
 
 This is one of the most important user-facing distinctions in LTSeq.
 
+Both build the same kind of lazy DataFusion join, and neither materializes until the result is consumed. The difference is naming convention and ergonomics.
+
 ### Join
 
-`join()` creates a physical combined table result.
+`join()` returns a plain `LTSeq` with Polars-style naming: only conflicting right-side columns get a suffix (`suffix="_right"`); non-conflicting columns keep their names.
 
 Use it when:
 
-- you know you need both sides immediately
+- you want a one-off relational join
 - downstream steps treat the result like one flat table
 
 ### Link
 
-`link()` creates a lazy relationship object.
+`link()` returns a `LinkedTable` that namespaces the *whole* target table as `{alias}_{col}`.
 
 Use it when:
 
-- you want to defer join cost
-- many operations touch only the left table
+- you are enriching a fact table from dimension tables
+- you chain multiple hops and need unambiguous column names
 - you want a more relationship-oriented workflow
 
-The key idea is that linking lets you stay lazy longer.
+Every transform on a `LinkedTable` runs on the joined plan and returns a plain `LTSeq`, so rows follow the join (unmatched rows and one-to-many fan-out are reflected). See the Linking Guide for details.
 
 ---
 

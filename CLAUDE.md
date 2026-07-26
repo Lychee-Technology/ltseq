@@ -60,7 +60,7 @@ py-ltseq/ltseq/               # Python package
 │   └── accessors.py          # .s (string) and .dt (datetime) accessors
 ├── grouping/                 # NestedTable for group_ordered()
 │   └── proxies/              # GroupProxy for group aggregations
-├── linking.py                # LinkedTable for pointer-based joins
+├── linking.py                # LinkedTable for lazy prefix-aliased joins
 ├── partitioning.py           # PartitionedTable for partition()
 └── [mixins].py               # IOMixin, TransformMixin, JoinMixin, etc.
 ```
@@ -99,6 +99,6 @@ Window functions require a prior `.sort()` — or `.assume_sorted()` for data th
 Tests are in `py-ltseq/tests/`. Key test files:
 - `test_filter.py`, `test_derive.py` - Basic operations
 - `test_window.py`, `test_ranking.py` - Window functions
-- `test_linking_*.py` - Pointer-based join tests
+- `test_linking_*.py` - Lazy prefix-aliased join (link) tests
 - `test_group_ordered.py` - Sequential grouping
 - `test_set_ops.py` - Union, intersect, diff

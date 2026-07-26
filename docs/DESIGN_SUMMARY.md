@@ -124,12 +124,12 @@ Representative Rust modules:
 
 ### 1.5 Core Metadata Model
 
-Two metadata systems are central to the architecture:
+Two metadata concerns are central to the architecture, and for both the Rust kernel is the single source of truth (issue #93):
 
-- Python-side `_schema` / Rust-side Arrow schema
-- Python-side `_sort_keys` / Rust-side `sort_exprs`
+- schema: Rust owns the Arrow schema; Python's `_schema` is a lazy per-instance cache
+- sort order: Rust owns `sort_specs`; Python's `_sort_keys` is an uncached FFI read
 
-The first keeps user-visible validation and execution state aligned. The second makes ordered operations explicit and safe.
+The first keeps user-visible validation aligned with execution state without a hand-maintained mirror. The second makes ordered operations explicit and safe.
 
 ---
 
@@ -166,13 +166,11 @@ After deserialization, expressions may follow one of several paths:
 
 - native DataFusion expression generation
 - native window expression generation
-- SQL generation fallback
 
 Key files:
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/sql_gen.rs`
 - `src/transpiler/optimization.rs`
 
 ### 2.4 Practical Boundaries
@@ -244,9 +242,9 @@ This enables group-aware filtering, deriving, and first/last style analysis with
 
 The preferred path is to keep work as native DataFusion logical plans and expressions.
 
-### 5.2 SQL Fallback
+### 5.2 SQL Fallback (retired)
 
-Some operations, especially grouped or window-heavy transformations, still use generated SQL and temporary tables when that is the most practical implementation route.
+Historically, some grouped or window-heavy transformations used generated SQL and temporary tables (`transpiler/sql_gen.rs`) as the most practical implementation route. That path has been removed — SQL round-trips were a materialization sink, and `test_no_materialization_rule.py` guards against reintroducing them. The remaining SQL use is the `filter_where` WHERE-clause parser helper in `src/ops/aggregation.rs` (parses against an empty table, then applies a native lazy filter).
 
 ### 5.3 Specialized Rust Paths
 
@@ -280,7 +278,7 @@ Major categories include:
 - sort tracking and windows
 - grouping and nested tables
 - joins and as-of joins
-- linking and pointer syntax
+- linking and link-prefix syntax
 - partitioning and set operations
 - architecture guardrails such as no accidental materialization
 
@@ -298,7 +296,7 @@ Trying to make ordered semantics implicit leads to confusing results and fragile
 
 ### 7.2 Schema Synchronization Is Critical
 
-The combination of Python-side schema tracking and Rust-side Arrow schema tracking improves ergonomics but requires strict synchronization, especially after joins and materialization boundaries.
+The original combination of Python-side schema tracking and Rust-side Arrow schema tracking improved ergonomics but required strict synchronization, especially after joins and materialization boundaries — and it proved fragile in practice. This lesson led to issue #93: the Rust kernel is now the single source of truth for schema and sort metadata, with Python keeping only a lazy per-instance cache.
 
 ### 7.3 DataFusion Is Strong, but Not Sufficient for Everything
 
