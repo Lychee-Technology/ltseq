@@ -1,0 +1,4 @@
+# GitHub Linguist: hide non-core code from language statistics
+py-ltseq/tests/** linguist-vendored
+benchmarks/**   linguist-vendored
+examples/**     linguist-documentation
