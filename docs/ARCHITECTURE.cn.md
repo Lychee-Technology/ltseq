@@ -68,7 +68,7 @@ LTSeq 的架构主要围绕五个目标展开：
 `src/` 中的 Rust crate 通过 PyO3 暴露 `LTSeqTable`。它负责：
 
 - 构造并转换懒执行的 DataFusion 计划
-- 将序列化表达式转换为 DataFusion 表达式或 SQL
+- 将序列化表达式转换为 DataFusion 表达式
 - 维护序列语义所需的排序元数据
 - 执行 count、collect、display、export 等终结操作
 - 为序列密集型场景提供专门实现
