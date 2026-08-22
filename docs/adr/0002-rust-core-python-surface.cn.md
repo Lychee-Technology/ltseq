@@ -11,7 +11,7 @@
 
 ## 决策
 
-把系统切成两层，边界职责严格划分——"Python 负责表达语法，Rust 负责执行语义"：
+把系统切成两层，边界职责严格划分：Python 负责表达语法，Rust 负责执行语义。
 
 - **Python 层**（`py-ltseq/ltseq/`）：公开 API 表面。负责表达式捕获（见 [ADR 0007](0007-lambda-dsl-schemaproxy.cn.md)）以及决定返回哪种包装对象（见 [ADR 0010](0010-four-table-object-types.cn.md)）；schema/排序元数据从 Rust 内核读取（[ADR 0009](0009-metadata-single-source-of-truth.cn.md)）。这一层刻意保持"薄"，不得自己做重型数据处理。
 - **Rust 层**（`src/`）：负责计划构建、表达式转译、执行，以及专用序列算法。
@@ -28,8 +28,8 @@
 
 ## 来源
 
-- `docs/ARCHITECTURE.cn.md` — 分层架构、PyO3 边界设计
-- `docs/DESIGN_SUMMARY.cn.md` — §1.1
-- `docs/USER_MODEL.cn.md` — 一句话总结
-- `README.md` — Technology Stack
-- `Cargo.toml` — pyo3 0.27.2、datafusion 54.0.0
+- `docs/ARCHITECTURE.cn.md`: 分层架构、PyO3 边界设计
+- `docs/DESIGN_SUMMARY.cn.md`: §1.1
+- `docs/USER_MODEL.cn.md`: 一句话总结
+- `README.md`: Technology Stack
+- `Cargo.toml`: pyo3 0.27.2、datafusion 54.0.0

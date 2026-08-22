@@ -27,12 +27,13 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | 错误 | 原因 | 解决方法 |
 |------|------|---------|
 | `SortRequiredError: Window functions ... require a defined row order` | 未排序直接调用 `shift`/`rolling`/`diff`/累积 | 在窗口函数前添加 `.sort(order_column)`（或 `.assume_sorted(...)`）|
-| `SortRequiredError: group_ordered() ... requires a declared row order` | 未排序直接调用 `group_ordered`/`group_sorted`/`cum_sum` | 先 `.sort(...)`，或对已有序数据用 `.assume_sorted(...)`。计算排序键不构成声明顺序——先派生为列 |
+| `SortRequiredError: group_ordered() ... requires a declared row order` | 未排序直接调用 `group_ordered`/`group_sorted`/`cum_sum` | 先 `.sort(...)`，或对已有序数据用 `.assume_sorted(...)`。计算排序键不构成声明顺序，先派生为列 |
 | `ColumnNotFoundError: column 'xxx' not found` | 列名拼写错误或列不存在 | 通过 `t.columns` 查看可用列名 |
 | `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
+| `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
 ### 异常层级
 
@@ -47,11 +48,10 @@ except SortRequiredError as e:
     print(e)          # 错误信息自带修复建议
 ```
 
-- `LTSeqError(Exception)` — 层级基类
-- `SortRequiredError(LTSeqError, ValueError)` — 操作需要有序输入
-- `SchemaMismatchError(LTSeqError, ValueError)` — schema 不兼容
-- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — 列不在 schema 中（同时是 `AttributeError`，故 `hasattr()` 探测仍有效）
-| `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
+- `LTSeqError(Exception)`：层级基类
+- `SortRequiredError(LTSeqError, ValueError)`：操作需要有序输入
+- `SchemaMismatchError(LTSeqError, ValueError)`：schema 不兼容
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)`：列不在 schema 中（同时是 `AttributeError`，故 `hasattr()` 探测仍有效）
 
 ## 快速参考
 
@@ -422,7 +422,7 @@ t.select(lambda r: [r.id, r.name])
 
 ### `LTSeq.derive`（别名: `with_columns`）
 - **签名**: `LTSeq.derive(**new_cols: Callable) -> LTSeq` 或 `LTSeq.derive(func: Callable[[Row], dict[str, Expr]]) -> LTSeq`
-- **行为**: 新增或覆盖列，保留已有列。派生已存在的列名会**原位替换**该列（列序稳定、无重复列——Polars `with_columns` 语义），表达式读取的是**原始**列值。覆盖排序键会使声明排序从该键起失效（`sort_keys` 前缀截断）。`with_columns` 是面向 Polars 用户的别名
+- **行为**: 新增或覆盖列，保留已有列。派生已存在的列名会**原位替换**该列（列序稳定、无重复列，同 Polars `with_columns` 语义），表达式读取的是**原始**列值。覆盖排序键会使声明排序从该键起失效（`sort_keys` 前缀截断）。`with_columns` 是面向 Polars 用户的别名
 - **参数**: `new_cols` 列名到 lambda 的映射；或返回字典的 lambda
 - **返回**: 带派生列的新 `LTSeq`
 - **异常**: `ValueError`（schema 未初始化），`TypeError`（返回类型无效），`AttributeError`（列不存在）
@@ -462,7 +462,7 @@ t.drop("tmp", "debug_flag")
 - **参数**: `keys` 列名或表达式；`desc`/`descending` 全局或逐键降序标志
 - **返回**: 排序后的 `LTSeq`（带排序键追踪）
 - **异常**: `ValueError`（schema 未初始化或 desc 长度不匹配），`TypeError`（键类型无效），`AttributeError`（列不存在）
-- **计算键**: 计算键（如 `lambda r: r.a * 2`）会物理排序数据，但**无法作为声明顺序被追踪**——`sort_keys` 在首个计算键处截断，因此 `sort("a", lambda r: r.b * 2, "c")` 只声明 `[a]`，而单独的 `sort(lambda r: r.a * 2)` 不声明任何顺序（`cum_sum` 等有序 API 仍会抛 `SortRequiredError`）。要把计算键用作声明顺序，先派生为列：`.derive(k=...).sort("k")`。截断后，声明前缀相等的行之间顺序**未定义**——窗口执行可能重排这些 tie 行
+- **计算键**: 计算键（如 `lambda r: r.a * 2`）会物理排序数据，但**无法作为声明顺序被追踪**：`sort_keys` 在首个计算键处截断，因此 `sort("a", lambda r: r.b * 2, "c")` 只声明 `[a]`，而单独的 `sort(lambda r: r.a * 2)` 不声明任何顺序（`cum_sum` 等有序 API 仍会抛 `SortRequiredError`）。要把计算键用作声明顺序，先派生为列：`.derive(k=...).sort("k")`。截断后，声明前缀相等的行之间顺序**未定义**，窗口执行可能重排这些 tie 行
 - **示例**:
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
@@ -504,7 +504,7 @@ t_sorted.is_sorted_by("a", desc=True)  # False（方向不匹配）
 
 ### `LTSeq.assume_sorted`
 - **签名**: `LTSeq.assume_sorted(*keys: str | Callable, desc: bool | list[bool] = False) -> LTSeq`
-- **行为**: 声明数据已按给定键排序，**不做物理排序**。可对预排序数据（如预排序的 Parquet）跳过排序开销，同时启用窗口函数与归并连接。正确性由调用方负责——错误的声明会产生错误结果。与 `sort()` 相同，声明顺序在首个计算键处截断——只有前导的普通列键生效
+- **行为**: 声明数据已按给定键排序，**不做物理排序**。可对预排序数据（如预排序的 Parquet）跳过排序开销，同时启用窗口函数与归并连接。正确性由调用方负责，错误的声明会产生错误结果。与 `sort()` 相同，声明顺序在首个计算键处截断：只有前导的普通列键生效
 - **参数**: `keys` 声明排序顺序的列名；`desc` 降序标志
 - **返回**: 设置了排序元数据的 `LTSeq`（底层数据不变）
 - **异常**: `ValueError`（schema 未初始化或 desc 长度不匹配），`TypeError`（desc 类型无效）
@@ -542,7 +542,7 @@ t.slice(offset=10, length=5)
 
 > 这些操作依赖先行的 `.sort()`（或 `.assume_sorted()`）建立顺序。`shift` 还支持 `partition_by=` 参数（列名字符串或表达式），在分组边界处重置窗口。
 
-> **统一 `.over()` 入口**：序列窗口（`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`）与排名函数共用同一套 `.over()`。规则一句话：**窗口表达式默认用表序，`.over()` 可覆盖分区/排序。** 因此 `r.close.shift(1).over(partition_by=r.symbol)` 等价于 `r.close.shift(1, partition_by="symbol")`；`.over(order_by=..., desc=...)` 则为该表达式覆盖表序。`partition_by` 可通过 `.over(partition_by=)` **或** `partition_by=` 参数指定，但二者互斥——同时给出会抛 `ValueError`。
+> **统一 `.over()` 入口**：序列窗口（`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`）与排名函数共用同一套 `.over()`。规则一句话：**窗口表达式默认用表序，`.over()` 可覆盖分区/排序。** 因此 `r.close.shift(1).over(partition_by=r.symbol)` 等价于 `r.close.shift(1, partition_by="symbol")`；`.over(order_by=..., desc=...)` 则为该表达式覆盖表序。`partition_by` 可通过 `.over(partition_by=)` **或** `partition_by=` 参数指定，但二者互斥，同时给出会抛 `ValueError`。
 >
 > ```python
 > t.sort("date").derive(
@@ -573,7 +573,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 
 #### `r.col.rolling`
 - **签名**: `r.col.rolling(window_size: int, partition_by: str | Expr | None = None).agg_func() -> Expr`
-- **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`。**partial-frame 语义**（SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`）：窗口起点在首行截断，前几行在少于 `window_size` 行上聚合——没有 `min_periods`（传入会报错而不是 NULL 填充）
+- **行为**: 滑动窗口聚合；支持的聚合：`mean/sum/min/max/count/std`。**partial-frame 语义**（SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`）：窗口起点在首行截断，前几行在少于 `window_size` 行上聚合。没有 `min_periods`：传入会报错而不是 NULL 填充
 - **参数**: `window_size` 窗口大小（>= 1）；`partition_by` 可选分组窗口。未知 kwarg 会点名报错
 - **返回**: 窗口聚合表达式
 - **异常**: `ValueError`（window_size < 1、`min_periods` 或未知 kwarg），`SortRequiredError`（未排序使用）
@@ -632,9 +632,9 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 #### `LTSeq.fold`（有序状态累积）
 - **签名**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
 - **行为**: 按当前顺序遍历行，通过 `fn(state, row)` 传递运行中的 `state`，并把结果作为新列 `into` 追加。表达窗口函数无法表达的复利、余额滚动、小型状态机（SPL 风格能力）。`row` 是当前行列值的只读字典；返回值既存入 `into` 又传递给下一行。`partition_by` 在每个分区开头把 `state` 重置为 `init`（分区按首次出现顺序）
-- **⚠️ 执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式；仅在确实需要顺序状态时才用 `fold`。大表上是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
+- **执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式，仅在确实需要顺序状态时才用 `fold`。大表上这是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
 - **要求**: 需前置 `.sort()` / `.assume_sorted()` 以确定累积顺序
-- **返回**: 新的内存 `LTSeq`——原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
+- **返回**: 新的内存 `LTSeq`，原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
 - **异常**: `SortRequiredError`（无排序顺序），`ValueError`（`into` 已存在、或 `partition_by` 无效），`TypeError`（`fn` 非可调用）
 - **示例**:
 ```python
@@ -722,7 +722,7 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over`（窗口规格）
 - **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **行为**: 为窗口表达式应用窗口规格——既可用于排名函数（`row_number`/`rank`/`dense_rank`/`ntile`），也可用于序列窗口（`shift`/`rolling`/`diff`/`cum_*`）。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值。序列窗口的 `order_by` 可省略（退回表序），排名函数则必需
+- **行为**: 为窗口表达式应用窗口规格，既可用于排名函数（`row_number`/`rank`/`dense_rank`/`ntile`），也可用于序列窗口（`shift`/`rolling`/`diff`/`cum_*`）。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值。序列窗口的 `order_by` 可省略（退回表序），排名函数则必需
 - **参数**:
   - `partition_by` 分区列（可选）
   - `order_by` 排序列（排名函数必需；序列窗口可选）
@@ -831,7 +831,7 @@ groups = t.sort("date").group_consecutive(lambda r: r.is_up)
 
 ### `LTSeq.group_sorted`
 - **签名**: `LTSeq.group_sorted(key: Callable[[Row], Expr]) -> NestedTable`
-- **行为**: 假定数据已按键全局排序；单遍分组，无需哈希。分组键必须是引领声明排序的普通列（先 `.sort(key)` 或 `.assume_sorted(key)`）；计算分组键无法对照排序元数据验证，会被拒绝——先派生为列
+- **行为**: 假定数据已按键全局排序；单遍分组，无需哈希。分组键必须是引领声明排序的普通列（先 `.sort(key)` 或 `.assume_sorted(key)`）；计算分组键无法对照排序元数据验证，会被拒绝，先派生为列
 - **参数**: `key` 分组键表达式
 - **返回**: `NestedTable`
 - **异常**: `SortRequiredError`（无声明顺序、键不引领排序、或计算键），`ValueError`（schema 未初始化），`TypeError`（键无效）
@@ -898,8 +898,8 @@ enriched = groups.derive(lambda g: {
 
 #### `NestedTable.agg`
 - **签名**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **行为**: 把每组**坍缩为一行摘要**（SQL GROUP BY 语义）——与 `derive` 的广播语义互补。组按原序列顺序输出；结果只含映射的列。取代旧的 `derive(...) + distinct(...)` 拼法
-- **参数**: `func` 返回纯组聚合字典（`g.count()`、`g.first().col`、`g.last().col`、`g.sum('col')` 等）。暂不支持聚合间的算术组合——请在 agg() 之后再计算
+- **行为**: 把每组**坍缩为一行摘要**（SQL GROUP BY 语义），与 `derive` 的广播语义互补。组按原序列顺序输出；结果只含映射的列。取代旧的 `derive(...) + distinct(...)` 拼法
+- **参数**: `func` 返回纯组聚合字典（`g.count()`、`g.first().col`、`g.last().col`、`g.sum('col')` 等）。暂不支持聚合间的算术组合，请在 agg() 之后再计算
 - **返回**: 每组一行的 `LTSeq`
 - **异常**: `ValueError`（未返回字典或表达式不支持），`RuntimeError`（执行失败）
 - **示例**:
@@ -962,7 +962,7 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ### `LTSeq.concat` / `LTSeq.union`
 - **签名**: `LTSeq.concat(other: LTSeq) -> LTSeq`
-- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）。`union` 为兼容别名——注意它不像 SQL UNION 那样去重；推荐用 `concat`（Pandas/Polars 动词，天然无去重预期）
+- **行为**: 纵向拼接，**保留重复行**（SQL UNION ALL 语义）。`union` 为兼容别名，注意它不像 SQL UNION 那样去重；推荐用 `concat`（Pandas/Polars 动词，天然无去重预期）
 - **参数**: `other` 另一个 schema 相同的 LTSeq
 - **返回**: 合并后的 `LTSeq`
 - **异常**: `TypeError`（other 非 LTSeq），`ValueError`（schema 不匹配）
@@ -1034,7 +1034,7 @@ t.contain("id", 1, 2, 3)
 ### `LTSeq.join`
 - **签名**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
 - **行为**: 两表连接。默认哈希连接（无需排序）；`strategy="merge"` 对预排序输入做归并连接并校验排序状态。**列命名（Polars 语义）**：与左表冲突的右列保留原名并加 `suffix`（如 `val` → `val_right`），不冲突的右列保持原名。inner/left 连接会丢弃重复的右键列（合并），right/full 连接保留两侧键列（右键冲突时加后缀）
-- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda 等值连接列（如 `lambda a, b: a.id == b.id`，`&` 组合复合键）——仅支持等值，范围/不等匹配请用 `asof_join`；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
+- **参数**: `other` 另一个表；`on` 等值连接的列名 / 列名列表，或双参 lambda 等值连接列（如 `lambda a, b: a.id == b.id`，`&` 组合复合键），仅支持等值；范围/不等匹配请用 `asof_join`；`left_on`/`right_on` 异名键的列名；`how` 取值 {inner,left,right,full}；`strategy` 取值 {None,"hash","merge"}；`suffix` 冲突右列的后缀（默认 `"_right"`）
 - **返回**: 连接后的 `LTSeq`
 - **异常**: `TypeError`（other/on 无效），`ValueError`（how/strategy 无效、merge 输入未排序、列不存在或后缀冲突）
 - **示例**:
@@ -1106,7 +1106,7 @@ result = linked.select("id", "prod_name", "prod_price")
 ```
 
 ### `LinkedTable`
-- **行为**: 延迟的前缀别名等值连接。每个变换（`select`/`filter`/`derive`/`sort`/`slice`/`distinct`）都会构建惰性 join 计划并返回**普通 `LTSeq`**——因此其行数遵循 join 语义（inner/right/full 会丢弃或新增不匹配行，一对多匹配会把一个源行扇出成多行；随后的 `slice`/`filter` 看到的是 join 后的行，而非源行）。`link()` 本身返回叠在当前 join 计划之上的新 `LinkedTable`（多跳链式；下一个条件可引用上一跳的 `{alias}_col` 列）。用 `to_ltseq()` 取惰性 joined `LTSeq`，或 `collect()` 执行它
+- **行为**: 延迟的前缀别名等值连接。每个变换（`select`/`filter`/`derive`/`sort`/`slice`/`distinct`）都会构建惰性 join 计划并返回**普通 `LTSeq`**，因此其行数遵循 join 语义（inner/right/full 会丢弃或新增不匹配行，一对多匹配会把一个源行扇出成多行；随后的 `slice`/`filter` 看到的是 join 后的行，而非源行）。`link()` 本身返回叠在当前 join 计划之上的新 `LinkedTable`（多跳链式；下一个条件可引用上一跳的 `{alias}_col` 列）。用 `to_ltseq()` 取惰性 joined `LTSeq`，或 `collect()` 执行它
 - **示例**:
 ```python
 linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
@@ -1180,7 +1180,7 @@ total = t.agg(total=lambda g: g.sales.sum())
 
 ### 聚合列方法（`agg` / `group_by().agg()` 的 lambda 内）
 - **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0–1（近似分位数）
+- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0 到 1（近似分位数）
 - **示例**:
 ```python
 stats = t.group_by("region").agg(
@@ -1465,7 +1465,7 @@ padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 
 #### `split_part` / `split`
 - **签名**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
-- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串。`split` 为兼容别名——推荐 `split_part`，避免与 Python 返回列表的 `str.split` 重名歧义
+- **行为**: 按分隔符拆分并返回指定位置的部分。下标为 **1-based**（1 = 第一段），与 SQL SPLIT_PART 一致。越界返回空字符串。`split` 为兼容别名，推荐 `split_part`，避免与 Python 返回列表的 `str.split` 重名歧义
 - **异常**: `ValueError`（index <= 0）
 - **示例**:
 ```python
@@ -1483,7 +1483,7 @@ at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4，�
 
 #### `pos`
 - **签名**: `r.col.s.pos(sub: str) -> Expr`
-- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0。SQL 语义——需要 Python 语义请用 `find`
+- **行为**: 返回子串首次出现的 **1-based** 位置；未找到返回 0。这是 SQL 语义；需要 Python 语义请用 `find`
 - **SQL 等价**: `STRPOS(col, sub)`
 - **示例**:
 ```python
@@ -1502,7 +1502,7 @@ suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 
 #### `ord` / `asc`
 - **签名**: `r.col.s.ord() -> Expr`
-- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）。`asc` 为兼容别名——推荐 `ord`，在排序遍地的库里 `asc` 易被读成 ascending
+- **行为**: 返回字符串首字符的 ASCII/Unicode 码点（类似 Python 的 `ord()`）。`asc` 为兼容别名，推荐 `ord`，在排序遍地的库里 `asc` 易被读成 ascending
 - **SQL 等价**: `ASCII(col)`
 - **示例**:
 ```python
@@ -1553,7 +1553,7 @@ by_date = t.derive(year=lambda r: r.date.dt.year())
 
 #### `hour` / `minute` / `second` / `millisecond`
 - **签名**: `r.col.dt.hour() -> Expr`（minute/second/millisecond 同）
-- **行为**: 提取时间分量（`millisecond` 返回 0–999）
+- **行为**: 提取时间分量（`millisecond` 返回 0 到 999）
 - **示例**:
 ```python
 with_time = t.derive(hour=lambda r: r.ts.dt.hour())
@@ -1661,7 +1661,7 @@ t2 = t.delete(0)   # 删除第一行
 
 ### `LTSeq.update`
 - **签名**: `LTSeq.update(predicate: Callable, **updates: Any) -> LTSeq`
-- **行为**: 条件更新——谓词为 True 的行更新列值。每列变为 `if_else(predicate, 新值, 旧值)`
+- **行为**: 条件更新，谓词为 True 的行更新列值。每列变为 `if_else(predicate, 新值, 旧值)`
 - **示例**:
 ```python
 t2 = t.update(lambda r: r.age > 65, discount=0.2)

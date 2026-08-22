@@ -1,237 +1,210 @@
-# **Rust Project Development Standards**
+# Rust Project Development Standards
 
-A comprehensive guide to writing idiomatic, maintainable, and refactorable Rust, grounded in established software engineering principles, idiomatic Rust conventions, design pattern insights, and code smell/refactoring strategies.  
----
-
-## **1\. Project Structure**
-
-* Cargo workspaces for multi-crate systems.
-
-* Standard folders: src/, tests/, bench/, examples/.
-
-* Expose minimal public API; hide implementation details.
+How this project writes Rust: idiomatic, maintainable, and safe to refactor. The
+material draws on established software engineering principles, idiomatic Rust
+conventions, design pattern practice, and the code smell / refactoring
+literature.
 
 ---
 
-## **2\. Idiomatic Rust Practices**
+## 1. Project Structure
 
-* **Ownership & Borrowing:** Prefer borrowing over cloning for performance and clarity.
-
-* **Error Handling:** Use Result/Option, custom error types (thiserror, anyhow), avoid unwrap in production.
-
-* **Clippy & Rustfmt:** Enforce linting and style formatting via CI.
+- Cargo workspaces for multi-crate systems.
+- Standard folders: `src/`, `tests/`, `bench/`, `examples/`.
+- Expose a minimal public API; hide implementation details.
 
 ---
 
-## **3\. Code Quality & Code Smells in Rust**
+## 2. Idiomatic Rust Practices
 
-**What Are Code Smells?**
-
-*Code smells* are indicators of deeper design or structural issues in code that may slow down development, reduce maintainability, or accumulate technical debt. They usually don’t prevent correct execution but suggest the need for refactoring.
-
-Below are **Rust-relevant code smells** with detection hints and refactoring approaches:
-
----
-
-### **3.1 Excessive Ownership Transfer / Excessive Cloning**
-
-**Smell:** Frequent use of .clone(), Arc, Rc, or String on arguments that could be borrowed.
-
-**Impact:** Redundant heap allocations, hidden performance cost.
-
-**Solution:**
-
-* Prefer borrow (\&T), generic AsRef\<T\>, or Cow when possible.
-
-* Refactor API signatures to accept references rather than owned types.
-
-* Limit Arc/Rc usage to genuine shared ownership contexts.
+- Ownership and borrowing: prefer borrowing over cloning, for performance and
+  for clarity.
+- Error handling: use `Result`/`Option` and custom error types (`thiserror`,
+  `anyhow`). No `unwrap` in production code.
+- Clippy and rustfmt: enforce linting and formatting in CI.
 
 ---
 
-### **3.2 Lazy Default Initialization**
+## 3. Code Quality and Code Smells in Rust
 
-**Smell:** Using ..Default::default() without explicit field handling.
+A code smell is a sign of a deeper design or structural problem: something that
+slows development, hurts maintainability, or accumulates technical debt. Smells
+usually do not stop the code from running correctly. They mark where refactoring
+would pay off.
 
-**Impact:** Implicit assumptions about values; future bugs when fields are added.
-
-**Solution:**
-
-* Explicitly initialize all fields, or destructure the default to expose all fields at construction. This forces the compiler to catch missing handling paths.
-
----
-
-### **3.3 Long Functions / Modules**
-
-**Smell:** Functions or modules with many lines or responsibilities.
-
-**Impact:** Hard to read, test, and refactor.
-
-**Solution:**
-
-* Extract smaller helper functions.
-
-* Apply single-responsibility decomposition.
+The Rust-relevant smells below come with detection hints and a way out.
 
 ---
 
-### **3.4 Long Parameter Lists**
+### 3.1 Excessive ownership transfer / excessive cloning
 
-**Smell:** Functions taking many parameters.
+Smell: frequent `.clone()`, `Arc`, `Rc`, or `String` on arguments that could be
+borrowed.
 
-**Impact:** Hard to read and use; error-prone.
+Impact: redundant heap allocations and hidden performance cost.
 
-**Solution:**
+Fix:
 
-* Group related parameters into structs or use builders.
-
----
-
-### **3.5 Primitive Obsession**
-
-**Smell:** Overuse of primitive types (i32, String) for domain concepts.
-
-**Impact:** Reduced clarity and type safety.
-
-**Solution:**
-
-* Use newtype structs to model domain concepts with meaning.
+- Prefer a borrow (`&T`), a generic `AsRef<T>`, or `Cow` where possible.
+- Refactor API signatures to accept references rather than owned types.
+- Limit `Arc`/`Rc` to genuine shared-ownership contexts.
 
 ---
 
-### **3.6 Feature Envy / Over-Accessing Other Structs**
+### 3.2 Lazy default initialization
 
-**Smell:** A method in one type frequently reaches into another type’s internals.
+Smell: `..Default::default()` without explicit field handling.
 
-**Impact:** Tight coupling; brittle API usage.
+Impact: implicit assumptions about values, and future bugs when fields are
+added.
 
-**Solution:**
-
-* Move logic into the proper owner type.
-
-* Use traits to encapsulate shared behavior.
+Fix: initialize all fields explicitly, or destructure the default so every field
+is visible at construction. That way the compiler catches missing handling.
 
 ---
 
-### **3.7 Inappropriate Intimacy Between Types**
+### 3.3 Long functions / modules
 
-**Smell:** One struct tightly depends on another’s internal structure.
+Smell: functions or modules with many lines or many responsibilities.
 
-**Impact:** Violates encapsulation; changes ripple through system.
+Impact: hard to read, test, and refactor.
 
-**Solution:**
-
-* Provide proper accessor methods.
-
-* Use traits to reduce coupling.
+Fix: extract smaller helper functions; decompose along single responsibilities.
 
 ---
 
-### **3.8 Middle Man**
+### 3.4 Long parameter lists
 
-**Smell:** A struct that only delegates to another without meaningful behavior.
+Smell: functions taking many parameters.
 
-**Impact:** Redundant abstraction; unnecessary indirection.
+Impact: hard to read and use, and easy to get wrong at the call site.
 
-**Solution:**
-
-* Remove the intermediary; provide direct access.
-
-* If abstraction is required, make it purposeful.
+Fix: group related parameters into structs, or use a builder.
 
 ---
 
-### **3.9 Message Chains**
+### 3.5 Primitive obsession
 
-**Smell:** Extensive chains like a.b().c().d()….
+Smell: primitive types (`i32`, `String`) standing in for domain concepts.
 
-**Impact:** Fragile to refactoring; hides abstraction boundaries.
+Impact: less clarity and less type safety.
 
-**Solution:**
-
-* Collapse chains behind clear APIs.
+Fix: use newtype structs so the domain concept carries meaning.
 
 ---
 
-Classic code smell categories such as *Duplicated Code*, *Dead Code*, *Shotgun Surgery*, *Parallel Hierarchies*, *Speculative Generality*, and *Data Clumps* are also applicable in Rust when they correlate with maintenance burdens.  
----
+### 3.6 Feature envy / over-accessing other structs
 
-## **4\. Refactoring Strategies**
+Smell: a method in one type keeps reaching into another type's internals.
 
-* **Identify smells via code reviews or metrics** (long functions, complexity).
+Impact: tight coupling and brittle API usage.
 
-* **Protect behavior with tests** before refactoring.
-
-* **Refactor in small steps** ensuring compiler/type system safety.
-
-* **Verify maintenance implications** (readability, API changes).
+Fix: move the logic into the type that owns the data, or use a trait to
+encapsulate the shared behavior.
 
 ---
 
-## **5\. Design Patterns (Rust Interpretation)**
+### 3.7 Inappropriate intimacy between types
 
-Rust’s type system and patterns often make classical OO patterns unnecessary or reveal them as poor fits. Rust’s traits, enums, and composition handle many scenarios that patterns like Abstract Factory or Decorator address in other languages.
+Smell: one struct depends closely on another's internal structure.
 
-Examples of useful idiomatic patterns:
+Impact: broken encapsulation; changes ripple through the system.
 
-### **5.1 Creational**
-
-* **Builder** for complex settings.
-
-* **Trait-bound constructors** for controlled instantiation.
-
-### **5.2 Structural**
-
-* **Newtype wrappers** for type safety and behavior extension.
-
-* **Facade/Adapter** over low-level APIs.
-
-### **5.3 Behavioral**
-
-* **Strategy via Generics/Traits**.
-
-* **Iterator pattern with combinators**.
-
-* **State enums \+ pattern matching** instead of polymorphic classes.
+Fix: provide proper accessor methods, and use traits to reduce coupling.
 
 ---
 
-## **6\. Testing & Verification**
+### 3.8 Middle man
 
-* Unit tests within modules (\#\[cfg(test)\]).
+Smell: a struct that only delegates to another without behavior of its own.
 
-* Integration tests under tests/.
+Impact: redundant abstraction and unnecessary indirection.
 
-* Property testing (proptest) for invariants.
-
-* Refactor with **test safety nets** to ensure behavior preservation.
-
----
-
-## **7\. Documentation & API Stability**
-
-* Rustdoc for public APIs with examples.
-
-* Semantic versioning for crate releases.
-
-* Use cargo doc automation for docs generation.
+Fix: remove the intermediary and provide direct access. If the abstraction is
+needed, give it a purpose.
 
 ---
 
----
+### 3.9 Message chains
 
-## **9\. Performance Considerations**
+Smell: long chains like `a.b().c().d()`.
 
-* Prefer zero-cost abstractions.
+Impact: fragile under refactoring; hides abstraction boundaries.
 
-* Avoid redundant memory allocations.
-
-* Profile hotspots and optimize only where needed.
+Fix: collapse the chain behind a clear API.
 
 ---
 
-## **10\. Continuous Maintenance Culture**
+Classic smell categories apply in Rust too, whenever they correlate with
+maintenance burden: duplicated code, dead code, shotgun surgery, parallel
+hierarchies, speculative generality, and data clumps.
 
-* Treat code smells as **forward signals** for improvement, not failures. They are heuristics that guide where to refactor and improve clarity, modularity, and maintainability.
+---
 
-* Make code readability and maintainability a first-class metric in reviews and team practices.
+## 4. Refactoring Strategies
+
+- Identify smells through code review or metrics (function length, complexity).
+- Protect behavior with tests before refactoring.
+- Refactor in small steps, leaning on the compiler and the type system.
+- Check the maintenance implications: readability, API changes.
+
+---
+
+## 5. Design Patterns (Rust Interpretation)
+
+Rust's type system often makes classical OO patterns unnecessary, or shows them
+to be a poor fit. Traits, enums, and composition cover much of what Abstract
+Factory or Decorator address in other languages.
+
+Idiomatic patterns worth reaching for:
+
+### 5.1 Creational
+
+- Builder, for complex settings.
+- Trait-bound constructors, for controlled instantiation.
+
+### 5.2 Structural
+
+- Newtype wrappers, for type safety and behavior extension.
+- Facade/Adapter over low-level APIs.
+
+### 5.3 Behavioral
+
+- Strategy via generics and traits.
+- The iterator pattern with combinators.
+- State enums plus pattern matching, instead of polymorphic classes.
+
+---
+
+## 6. Testing and Verification
+
+- Unit tests within modules (`#[cfg(test)]`).
+- Integration tests under `tests/`.
+- Property testing (`proptest`) for invariants.
+- Refactor behind a test safety net so behavior is preserved.
+
+---
+
+## 7. Documentation and API Stability
+
+- Rustdoc for public APIs, with examples.
+- Semantic versioning for crate releases.
+- `cargo doc` automation for doc generation.
+
+---
+
+## 9. Performance Considerations
+
+- Prefer zero-cost abstractions.
+- Avoid redundant memory allocations.
+- Profile hotspots and optimize only where it matters.
+
+---
+
+## 10. Continuous Maintenance Culture
+
+- Treat code smells as forward signals for improvement, not as failures. They
+  are heuristics that point at where to refactor for clarity, modularity, and
+  maintainability.
+- Make readability and maintainability first-class metrics in reviews and team
+  practice.

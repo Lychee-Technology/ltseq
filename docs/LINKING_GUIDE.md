@@ -10,13 +10,13 @@ Related documents:
 
 ## Overview
 
-`LTSeq.link()` expresses a foreign-key relationship as a **deferred,
-prefix-aliased equi-join**. `link()` records the join condition and the
-target's alias and computes the joined schema up front, but executes
-nothing until you materialize the result. It is a lazy join — not a
-pointer/take structure and not a cheap per-row navigation.
+`LTSeq.link()` expresses a foreign-key relationship as a deferred,
+prefix-aliased equi-join. It records the join condition and the target's
+alias and computes the joined schema up front, but executes nothing until
+you materialize the result. This is a lazy join, not a pointer/take
+structure and not a cheap per-row navigation.
 
-**Key points**:
+In short:
 - Lazy: no join execution until data access (collect / to_pandas / len / ...)
 - Prefix-aliased: target columns become `{alias}_{col}`; source columns keep their names
 - All four join types (INNER, LEFT, RIGHT, FULL)
@@ -30,7 +30,7 @@ from ltseq import LTSeq
 orders = LTSeq.read_csv("orders.csv")          # id, product_id, quantity
 products = LTSeq.read_csv("products.csv")      # product_id, name, price
 
-# Create a link (no join yet — just the condition + schema)
+# Create a link (no join yet, just the condition + schema)
 linked = orders.link(
     products,
     on=lambda o, p: o.product_id == p.product_id,
@@ -62,29 +62,29 @@ of it, returning a plain `LTSeq`:
 
 ```python
 # Filter can reference source columns (original names) and linked
-# columns ({alias}_col) — both live in the joined schema.
+# columns ({alias}_col). Both live in the joined schema.
 cheap = linked.filter(lambda r: r.prod_price < 10)   # -> LTSeq
 picked = linked.select("id", "quantity", "prod_name")  # -> LTSeq
 ```
 
 Because a transform applies **after** the join, its rows follow the join:
 an inner/right/full join drops or adds unmatched rows, and a one-to-many
-match fans a source row out to several result rows — a subsequent
+match fans a source row out to several result rows. A subsequent
 `slice`/`filter` sees the joined rows, not the original source rows.
 
 ### Using Different Join Types
 
 ```python
-# INNER (default) — only matching rows
+# INNER (default): only matching rows
 inner = orders.link(products, on=..., as_="prod", join_type="inner")
 
-# LEFT — keep all orders, NULLs for unmatched products
+# LEFT: keep all orders, NULLs for unmatched products
 left = orders.link(products, on=..., as_="prod", join_type="left")
 
-# RIGHT — keep all products, NULLs for unmatched orders
+# RIGHT: keep all products, NULLs for unmatched orders
 right = orders.link(products, on=..., as_="prod", join_type="right")
 
-# FULL — keep all rows from both tables
+# FULL: keep all rows from both tables
 full = orders.link(products, on=..., as_="prod", join_type="full")
 ```
 
@@ -134,7 +134,7 @@ linked.select("id", "quantity", "prod_name")
 ### to_ltseq() and collect()
 
 - `to_ltseq()` returns the **lazy** joined table as a plain `LTSeq` (no
-  execution) — use it to keep composing with the full `LTSeq` API.
+  execution); use it to keep composing with the full `LTSeq` API.
 - `collect()` **executes** the join and returns an in-memory `LTSeq`
   (same semantics as `LTSeq.collect`).
 
@@ -208,16 +208,16 @@ linked = table.link(
 
 ### LinkedTable methods
 
-- `to_ltseq() -> LTSeq` — the lazy joined table (no execution).
-- `collect() -> LTSeq` — execute the join, return an in-memory LTSeq.
-- `show(n=10)` — display up to `n` joined rows.
-- `filter(predicate) -> LTSeq` — filter over the joined rows.
-- `select(*cols) -> LTSeq` — project columns from the joined table.
-- `derive(*args, **kwargs) -> LTSeq` — add columns (may reference linked columns).
-- `sort(*keys, **kwargs) -> LTSeq` — sort the joined rows.
-- `slice(offset, length) -> LTSeq` — slice the joined rows.
-- `distinct(key_fn=None) -> LTSeq` — deduplicate the joined rows.
-- `link(target, on, as_, join_type="inner") -> LinkedTable` — chain another link.
+- `to_ltseq() -> LTSeq`: the lazy joined table (no execution).
+- `collect() -> LTSeq`: execute the join, return an in-memory LTSeq.
+- `show(n=10)`: display up to `n` joined rows.
+- `filter(predicate) -> LTSeq`: filter over the joined rows.
+- `select(*cols) -> LTSeq`: project columns from the joined table.
+- `derive(*args, **kwargs) -> LTSeq`: add columns (may reference linked columns).
+- `sort(*keys, **kwargs) -> LTSeq`: sort the joined rows.
+- `slice(offset, length) -> LTSeq`: slice the joined rows.
+- `distinct(key_fn=None) -> LTSeq`: deduplicate the joined rows.
+- `link(target, on, as_, join_type="inner") -> LinkedTable`: chain another link.
 
 ## Troubleshooting
 
@@ -252,18 +252,17 @@ it.
 
 ## Best Practices
 
-1. **Let the optimizer push down** — predicate and projection pushdown are
-   the query optimizer's job; write the transform you mean and it runs over
-   the joined plan. There is no "filter the source first for speed"
-   shortcut anymore (it produced wrong rows for unmatched/fan-out joins).
-2. **Materialize late** — keep composing on the lazy `LTSeq` from
-   `to_ltseq()`; call `collect()` only when you want the result cached in
-   memory.
-3. **Choose the right join type** — INNER for matches only, LEFT to keep
-   all source rows, etc. The join type is baked into the plan, so it
+1. Let the optimizer push down. Predicate and projection pushdown are the
+   query optimizer's job: write the transform you mean and it runs over the
+   joined plan. There is no "filter the source first for speed" shortcut
+   anymore, because it produced wrong rows for unmatched/fan-out joins.
+2. Materialize late. Keep composing on the lazy `LTSeq` from `to_ltseq()`,
+   and call `collect()` only when you want the result cached in memory.
+3. Choose the right join type: INNER for matches only, LEFT to keep all
+   source rows, and so on. The join type is baked into the plan, so it
    survives every downstream transform.
-4. **Reference linked columns by their prefix** — `r.prod_price`, not a
-   nested `r.prod.price`.
+4. Reference linked columns by their prefix: `r.prod_price`, not a nested
+   `r.prod.price`.
 
 ## Summary
 

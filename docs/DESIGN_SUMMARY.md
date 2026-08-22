@@ -17,17 +17,9 @@ Related documents:
 
 LTSeq is a hybrid Python-Rust library for sequence-oriented data processing. It combines a Pythonic lambda-based DSL with a Rust/DataFusion execution engine and treats row order as part of the query model rather than as display-only metadata.
 
-The core philosophy is:
+The design rests on lazy evaluation, explicit ordering guarantees, fluent Python ergonomics, and Rust-side execution for performance and consistency.
 
-- lazy evaluation
-- explicit ordering guarantees
-- fluent Python ergonomics
-- Rust-side execution for performance and consistency
-
-This document now serves two roles:
-
-- a concise summary of the current architecture
-- a design archive for important implementation decisions and historical lessons
+This document has two jobs: summarize the current architecture, and archive the implementation decisions and lessons behind it.
 
 For deeper reading:
 
@@ -102,16 +94,13 @@ Key Python modules include:
 - `advanced_ops.py`
 - `mutation_mixin.py`
 
-This keeps the public surface broad while keeping responsibilities reasonably separated.
+The public surface stays broad, and responsibilities stay reasonably separated.
 
 ### 1.4 Rust Execution Shell + Modular Ops
 
 Rust exposes `LTSeqTable` through a single `#[pymethods]` block in `src/lib.rs`, then delegates most real work to `src/ops/*` helper modules.
 
-That pattern exists for two reasons:
-
-- PyO3 favors a centralized method exposure surface
-- the implementation stays maintainable only if execution logic is split by capability
+Two reasons for that pattern: PyO3 favors a centralized method exposure surface, and the implementation stays maintainable only if execution logic is split by capability.
 
 Representative Rust modules:
 
@@ -129,7 +118,7 @@ Two metadata concerns are central to the architecture, and for both the Rust ker
 - schema: Rust owns the Arrow schema; Python's `_schema` is a lazy per-instance cache
 - sort order: Rust owns `sort_specs`; Python's `_sort_keys` is an uncached FFI read
 
-The first keeps user-visible validation aligned with execution state without a hand-maintained mirror. The second makes ordered operations explicit and safe.
+The schema rule keeps user-visible validation aligned with execution state without a hand-maintained mirror. The sort rule makes ordered operations explicit and safe.
 
 ---
 
@@ -175,7 +164,7 @@ Key files:
 
 ### 2.4 Practical Boundaries
 
-LTSeq's expression system is intentionally constrained. It supports Pythonic column expressions well, but it does not attempt to execute arbitrary Python logic row-by-row. That tradeoff keeps the system serializable and Rust-executable.
+LTSeq's expression system is deliberately constrained. It handles Pythonic column expressions well, and it does not try to execute arbitrary Python logic row by row. That tradeoff keeps expressions serializable and Rust-executable.
 
 ---
 
@@ -183,7 +172,7 @@ LTSeq's expression system is intentionally constrained. It supports Pythonic col
 
 ### 3.1 Explicit Sort Requirement
 
-One of LTSeq's strongest design decisions is that sequence-dependent operations require explicit order.
+Sequence-dependent operations require an explicit order.
 
 - `shift()`
 - `diff()`
@@ -198,7 +187,7 @@ Some operations preserve sort metadata because they keep row order meaningful, i
 
 Other operations may invalidate sort metadata, including operations that reorder rows or produce structurally new tables.
 
-This propagation behavior is part of the core semantics, not just an optimization detail.
+Propagation is part of the core semantics, not an optimization detail.
 
 ### 3.3 Sorted Fast Paths
 
@@ -216,9 +205,7 @@ Every transform builds the lazy join plan and returns a plain `LTSeq`, so its ro
 
 ### 4.2 Join Column Conflict Strategy
 
-Join execution must handle duplicate or conflicting right-side column names carefully. LTSeq's join implementation aggressively renames right-side columns before joining, then aliases them back into the user-visible schema shape.
-
-This has proven necessary for correctness and predictability.
+Join execution has to handle duplicate or conflicting right-side column names. LTSeq's join implementation renames right-side columns aggressively before joining, then aliases them back into the user-visible schema shape. Correctness and predictability both depend on it.
 
 ### 4.3 Grouped Sequential Context
 
@@ -228,11 +215,11 @@ This has proven necessary for correctness and predictability.
 - `__group_count__`
 - `__rn__`
 
-This enables group-aware filtering, deriving, and first/last style analysis without immediately flattening the grouped structure.
+Group-aware filtering, deriving, and first/last analysis then work without flattening the grouped structure first.
 
 ### 4.4 Partitioning
 
-`partition()` exposes grouped access patterns while staying as close as possible to the lazy/query path. Callable partitioning is intentionally constrained to expressions that can still be captured and executed by the engine.
+`partition()` exposes grouped access patterns while staying as close to the lazy/query path as possible. Callable partitioning is restricted to expressions the engine can still capture and execute.
 
 ---
 
@@ -244,7 +231,7 @@ The preferred path is to keep work as native DataFusion logical plans and expres
 
 ### 5.2 SQL Fallback (retired)
 
-Historically, some grouped or window-heavy transformations used generated SQL and temporary tables (`src/transpiler/sql_gen.rs`, since removed) as the most practical implementation route. That path has been removed — SQL round-trips were a materialization sink, and `test_no_materialization_rule.py` guards against reintroducing them. The remaining SQL use is the `filter_where` WHERE-clause parser helper in `src/ops/aggregation.rs` (parses against an empty table, then applies a native lazy filter).
+Historically, some grouped or window-heavy transformations used generated SQL and temporary tables (`src/transpiler/sql_gen.rs`, since removed) as the most practical implementation route. That path has been removed: SQL round-trips were a materialization sink, and `test_no_materialization_rule.py` guards against reintroducing them. The remaining SQL use is the `filter_where` WHERE-clause parser helper in `src/ops/aggregation.rs` (parses against an empty table, then applies a native lazy filter).
 
 ### 5.3 Specialized Rust Paths
 
@@ -261,7 +248,7 @@ Examples include:
 
 Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` should stay on the lazy Rust/DataFusion path whenever possible. Materialization is reserved for explicit export or terminal APIs.
 
-This is a defining architectural rule and is enforced by tests.
+Tests enforce this one; it defines much of the architecture.
 
 ---
 
@@ -284,7 +271,7 @@ Major categories include:
 
 ### 6.2 Benchmarks as Architecture Feedback
 
-Benchmarks are used to validate whether architectural choices hold up under realistic ordered workloads. The project uses them to identify materialization bottlenecks and justify specialized native implementations where necessary.
+Benchmarks check whether architectural choices hold up under realistic ordered workloads. They locate materialization bottlenecks and decide when a specialized native implementation is worth its cost.
 
 ---
 
@@ -292,25 +279,25 @@ Benchmarks are used to validate whether architectural choices hold up under real
 
 ### 7.1 Order Must Be Explicit
 
-Trying to make ordered semantics implicit leads to confusing results and fragile APIs. Requiring explicit sort state has been a net improvement.
+Making ordered semantics implicit led to confusing results and fragile APIs. Requiring explicit sort state has been a net improvement.
 
 ### 7.2 Schema Synchronization Is Critical
 
-The original combination of Python-side schema tracking and Rust-side Arrow schema tracking improved ergonomics but required strict synchronization, especially after joins and materialization boundaries — and it proved fragile in practice. This lesson led to issue #93: the Rust kernel is now the single source of truth for schema and sort metadata, with Python keeping only a lazy per-instance cache.
+The original combination of Python-side schema tracking and Rust-side Arrow schema tracking improved ergonomics, but it required strict synchronization after joins and materialization boundaries, and it proved fragile in practice. That lesson led to issue #93: the Rust kernel is now the single source of truth for schema and sort metadata, with Python keeping only a lazy per-instance cache.
 
 ### 7.3 DataFusion Is Strong, but Not Sufficient for Everything
 
-DataFusion handles a large part of LTSeq's execution needs well, but sequence-specific workloads still justify dedicated logic in some paths.
+DataFusion handles most of LTSeq's execution needs well. Sequence-specific workloads still justify dedicated logic in some paths.
 
 ### 7.4 Materialization Is the Main Architectural Cost Center
 
-The most important performance problems tend not to be low-level compute kernels. They tend to come from collect/register/re-query patterns around complex operations.
+The performance problems that matter are rarely in low-level compute kernels. They come from collect/register/re-query patterns around complex operations.
 
 ---
 
 ## 8. Historical Notes
 
-The previous version of this document served as a comprehensive design archive. That historical role is still useful, but the repository now separates current architecture, contributor orientation, and user mental model into dedicated companion documents.
+An earlier version of this document was the project's single comprehensive design archive. That role is still useful, but current architecture, contributor orientation, and user mental model now live in dedicated companion documents.
 
 When updating this file in the future:
 

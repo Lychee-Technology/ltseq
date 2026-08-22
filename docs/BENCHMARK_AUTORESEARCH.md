@@ -105,14 +105,14 @@ Required checks:
 - Python benchmark modules `duckdb` and `psutil`
 - benchmark data file exists at `benchmarks/data/hits_sorted.parquet`, `benchmarks/data/hits_sample.parquet`, or the `--data` override
 
-If preflight fails, the controller exits early with actionable setup guidance instead of creating partial benchmark artifacts.
+If preflight fails, the controller exits early with setup guidance instead of creating partial benchmark artifacts.
 
 ---
 
 ## End-to-End Acceptance Checklist
 
-This checklist defines what a valid pilot run must produce. Use it to validate both dry-run
-verification and non-dry-run controller executions.
+What a valid pilot run must produce. Use it for both dry-run verification and
+non-dry-run controller executions.
 
 ### Dry-run verification
 
@@ -170,8 +170,8 @@ verification and non-dry-run controller executions.
 
 ## Reviewer Rubric
 
-This rubric defines how reviewers should judge archived autoresearch pilot runs.
-Apply the same criteria to every run to ensure consistent evaluation.
+How reviewers should judge archived autoresearch pilot runs. Apply the same
+criteria to every run so evaluations stay comparable.
 
 ### 1. Scope compliance
 
@@ -218,8 +218,8 @@ When a run does **not** produce a `keep` recommendation, distinguish:
 
 ## Standard Run Summary Format
 
-Each archived run should be reviewed using a compact summary that points to the
-relevant evidence without manually opening every artifact.
+Review each archived run through a compact summary that points at the relevant
+evidence, so you do not have to open every artifact by hand.
 
 ### Fields
 
@@ -268,36 +268,36 @@ relevant evidence without manually opening every artifact.
 
 ## Artifact Retention and Ignore Policy
 
-This section defines which autoresearch-generated artifacts belong in git history
-and which should remain local scratch data.
+Which autoresearch-generated artifacts belong in git history, and which stay
+local scratch data.
 
 ### Committed artifacts
 
 These artifacts are contractual, reviewable evidence and **should be committed**
 when a run is validated:
 
-- `results.tsv` — run ledger with one row per iteration
-- `issues.tsv` — recorded harness, environment, and performance issues
-- `reports/baseline/<target>/` — latest validated baseline for each target
-- `reports/runs/<target>/run-NNN/` — archived run directories for reviewed runs
+- `results.tsv`: run ledger with one row per iteration
+- `issues.tsv`: recorded harness, environment, and performance issues
+- `reports/baseline/<target>/`: latest validated baseline for each target
+- `reports/runs/<target>/run-NNN/`: archived run directories for reviewed runs
 
 ### Local-only artifacts
 
 These artifacts are disposable local state and **should not be committed**:
 
-- `.worktrees/` — git worktrees used by the controller; always local
-- `reports/candidates/<target>/` — overwritten each iteration; only the archived copy in `reports/runs/` matters
-- `reports/diff/<target>/` — overwritten each iteration; only the archived copy in `reports/runs/` matters
-- `reports/logs/` — controller loop logs; useful for debugging but not reviewable evidence
+- `.worktrees/`: git worktrees used by the controller; always local
+- `reports/candidates/<target>/`: overwritten each iteration; only the archived copy in `reports/runs/` matters
+- `reports/diff/<target>/`: overwritten each iteration; only the archived copy in `reports/runs/` matters
+- `reports/logs/`: controller loop logs; useful for debugging but not reviewable evidence
 
 ### Gitignore rules
 
 The following patterns are in `.gitignore` to prevent accidental commits of
 large or disposable artifacts:
 
-- `.worktrees/` — worktree directories
-- `benchmarks/autoresearch/results/` — flamegraphs and run summaries from the older autoresearch runner
-- `benchmarks/data/*.parquet` — large benchmark datasets
+- `.worktrees/`: worktree directories
+- `benchmarks/autoresearch/results/`: flamegraphs and run summaries from the older autoresearch runner
+- `benchmarks/data/*.parquet`: large benchmark datasets
 
 ### Placeholder files
 
@@ -317,8 +317,8 @@ These placeholders should be kept.
 
 ## Benchmark Environment Metadata
 
-Reproducibility requires capturing the environment behind each run.
-The following metadata should be available for every archived run.
+Reproducing a run means capturing the environment behind it. Every archived run
+should have the metadata below.
 
 ### Required metadata
 
@@ -358,8 +358,8 @@ To reproduce a specific archived run:
 
 ## Target Onboarding Checklist
 
-Before adding a new benchmark autoresearch target to the supervised controller,
-verify all items below.
+Verify every item below before adding a new benchmark autoresearch target to the
+supervised controller.
 
 ### Required inputs
 
@@ -406,9 +406,8 @@ verify all items below.
 
 ## Graduation Criteria: From Supervised Pilot to Broader Automation
 
-The current pilot is explicitly supervised and review-first.
-Before transitioning to broader automation (e.g., auto-commit, auto-merge),
-the following criteria must be met.
+The current pilot is supervised and review-first. Broader automation (auto-commit,
+auto-merge) requires meeting the criteria below first.
 
 ### Run reliability
 
@@ -449,7 +448,7 @@ the following criteria must be met.
 ## Readiness Criteria: Widening Editable Scope
 
 The current controller restricts candidate edits to a narrow set of target files.
-Before widening the editable scope, the following readiness gates must be met.
+Widening that scope requires clearing the readiness gates below.
 
 ### Evidence gates
 
@@ -484,8 +483,7 @@ Scope expansion should be incremental:
 
 ## Run Archive Completeness Validation
 
-This section documents the validation of run archive completeness across
-keep and discard paths.
+Validation of run archive completeness across the keep and discard paths.
 
 ### Validated paths
 

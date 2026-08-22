@@ -10,7 +10,7 @@ Related documents:
 
 ## Purpose
 
-This document is a contributor-oriented map of the codebase. It answers a practical question: if you need to change a feature, where should you start reading?
+A contributor-oriented map of the codebase, written to answer one question: if you need to change a feature, where do you start reading?
 
 Use this together with:
 
@@ -427,7 +427,7 @@ Read in this order:
 
 ## Test Suite as a Navigation Tool
 
-The tests are one of the best entrypoints into the codebase because they are organized by product capability.
+The tests are a good entrypoint into the codebase, because they are organized by product capability.
 
 Useful categories:
 
@@ -466,7 +466,7 @@ When making changes, keep these repository-specific rules in mind:
 - preserve lazy execution unless the API is explicitly terminal
 - do not break sort metadata propagation casually
 - avoid introducing Python-side materialization inside table-returning APIs
-- do not bypass the Rust-owned schema/sort metadata (Rust is the single source of truth; Python `_schema` is only a cache — issue #93)
+- do not bypass the Rust-owned schema/sort metadata (Rust is the single source of truth; Python `_schema` is only a cache, issue #93)
 - prefer small, local changes in the relevant module rather than cross-cutting refactors
 
-Those heuristics are more useful than memorizing every file.
+These are worth more than memorizing every file.

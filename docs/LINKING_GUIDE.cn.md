@@ -10,11 +10,11 @@
 
 ## 概览
 
-`LTSeq.link()` 把外键关系表达为一个**延迟的、前缀别名的等值连接**。`link()`
-记录连接条件与目标别名，并预先算出 joined schema，但在你物化结果之前不执行任何
-计算。它是惰性 join——不是指针/take 结构，也没有廉价的逐行导航。
+`LTSeq.link()` 把外键关系表达为一个延迟的、前缀别名的等值连接。它记录连接条件
+与目标别名，并预先算出 joined schema，但在你物化结果之前不执行任何计算。这是惰性
+join，不是指针/take 结构，也没有廉价的逐行导航。
 
-**要点**：
+简单说：
 
 - 惰性：访问数据（collect / to_pandas / len ...）前不执行 join
 - 前缀别名：目标列变为 `{alias}_{col}`，源表列保留原名
@@ -29,7 +29,7 @@ from ltseq import LTSeq
 orders = LTSeq.read_csv("orders.csv")          # id, product_id, quantity
 products = LTSeq.read_csv("products.csv")      # product_id, name, price
 
-# 建立 link（尚未 join——只记录条件 + schema）
+# 建立 link（尚未 join，只记录条件 + schema）
 linked = orders.link(
     products,
     on=lambda o, p: o.product_id == p.product_id,
@@ -59,13 +59,13 @@ result = linked.collect()
 `LinkedTable` 上的每个变换都会构建惰性 join 计划并在其上执行，返回普通 `LTSeq`：
 
 ```python
-# filter 可引用源列（原名）与 linked 列（{alias}_col）——两者都在 joined schema 中
+# filter 可引用源列（原名）与 linked 列（{alias}_col），两者都在 joined schema 中
 cheap = linked.filter(lambda r: r.prod_price < 10)     # -> LTSeq
 picked = linked.select("id", "quantity", "prod_name")  # -> LTSeq
 ```
 
 因为变换作用在 join **之后**，其行数遵循 join 语义：inner/right/full 会丢弃或
-新增不匹配行，一对多匹配会把一个源行扇出成多行——随后的 `slice`/`filter` 看到的
+新增不匹配行，一对多匹配会把一个源行扇出成多行。随后的 `slice`/`filter` 看到的
 是 join 后的行，而非原始源行。
 
 ### 使用不同的 join 类型
@@ -119,7 +119,7 @@ linked.select("id", "quantity", "prod_name")
 
 ### to_ltseq() 与 collect()
 
-- `to_ltseq()` 返回**惰性** joined 表（普通 `LTSeq`，不执行）——用它继续用完整的
+- `to_ltseq()` 返回**惰性** joined 表（普通 `LTSeq`，不执行），用它继续用完整的
   `LTSeq` API 组合。
 - `collect()` **执行** join 并返回内存中的 `LTSeq`（语义同 `LTSeq.collect`）。
 
@@ -191,16 +191,16 @@ linked = table.link(
 
 ### LinkedTable 方法
 
-- `to_ltseq() -> LTSeq` — 惰性 joined 表（不执行）。
-- `collect() -> LTSeq` — 执行 join，返回内存中的 LTSeq。
-- `show(n=10)` — 显示至多 `n` 行 joined 数据。
-- `filter(predicate) -> LTSeq` — 在 joined 行上过滤。
-- `select(*cols) -> LTSeq` — 从 joined 表投影列。
-- `derive(*args, **kwargs) -> LTSeq` — 新增列（可引用 linked 列）。
-- `sort(*keys, **kwargs) -> LTSeq` — 对 joined 行排序。
-- `slice(offset, length) -> LTSeq` — 对 joined 行切片。
-- `distinct(key_fn=None) -> LTSeq` — 对 joined 行去重。
-- `link(target, on, as_, join_type="inner") -> LinkedTable` — 继续链式 link。
+- `to_ltseq() -> LTSeq`：惰性 joined 表（不执行）。
+- `collect() -> LTSeq`：执行 join，返回内存中的 LTSeq。
+- `show(n=10)`：显示至多 `n` 行 joined 数据。
+- `filter(predicate) -> LTSeq`：在 joined 行上过滤。
+- `select(*cols) -> LTSeq`：从 joined 表投影列。
+- `derive(*args, **kwargs) -> LTSeq`：新增列（可引用 linked 列）。
+- `sort(*keys, **kwargs) -> LTSeq`：对 joined 行排序。
+- `slice(offset, length) -> LTSeq`：对 joined 行切片。
+- `distinct(key_fn=None) -> LTSeq`：对 joined 行去重。
+- `link(target, on, as_, join_type="inner") -> LinkedTable`：继续链式 link。
 
 ## 排错
 
@@ -233,14 +233,14 @@ DataFusion 的 ProjectionPushdown bug（普通 `join().select(...)` 同样会）
 
 ## 最佳实践
 
-1. **交给优化器下推**——谓词与投影下推是查询优化器的职责；写你真正想要的变换，它会
-   在 joined 计划上执行。不再有“先过滤源表提速”的捷径（它对不匹配/扇出 join 会给出
-   错误的行）。
-2. **晚物化**——在 `to_ltseq()` 的惰性 `LTSeq` 上继续组合，只在需要把结果缓存到内存
-   时才 `collect()`。
-3. **选对 join 类型**——只要匹配用 INNER，要保留全部源行用 LEFT 等。join 类型烧进
-   计划，会在所有下游变换中保留。
-4. **用前缀引用 linked 列**——`r.prod_price`，而不是嵌套的 `r.prod.price`。
+1. 交给优化器下推。谓词与投影下推是查询优化器的职责：写你真正想要的变换，它会在
+   joined 计划上执行。“先过滤源表提速”的捷径已经没有了，因为它对不匹配/扇出 join
+   会给出错误的行。
+2. 晚物化。在 `to_ltseq()` 的惰性 `LTSeq` 上继续组合，只在需要把结果缓存到内存时
+   才 `collect()`。
+3. 选对 join 类型：只要匹配用 INNER，要保留全部源行用 LEFT，依此类推。join 类型烧
+   进计划，会在所有下游变换中保留。
+4. 用前缀引用 linked 列：`r.prod_price`，而不是嵌套的 `r.prod.price`。
 
 ## 小结
 

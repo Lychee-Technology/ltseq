@@ -11,7 +11,7 @@ The project needs both a fluent, Pythonic API (lambdas, method chaining, good er
 
 ## Decision
 
-Split the system into two layers with a strict ownership boundary — "Python owns expressive syntax, Rust owns execution semantics":
+Split the system into two layers with a strict ownership boundary: Python owns the expressive syntax, Rust owns the execution semantics.
 
 - **Python layer** (`py-ltseq/ltseq/`): the public API surface. Owns expression capture (see [ADR 0007](0007-lambda-dsl-schemaproxy.md)) and the choice of which wrapper object to return (see [ADR 0010](0010-four-table-object-types.md)); schema/sort metadata is read from the Rust kernel ([ADR 0009](0009-metadata-single-source-of-truth.md)). It is intentionally thin and must not do heavy data processing itself.
 - **Rust layer** (`src/`): owns planning, expression transpilation, execution, and specialized sequence algorithms.
@@ -28,8 +28,8 @@ The docs call this split "the backbone of the project."
 
 ## Sources
 
-- `docs/ARCHITECTURE.md` — Layered Architecture §1–3, PyO3 Boundary Design, Typical End-to-End Flow
-- `docs/DESIGN_SUMMARY.md` — §1.1
-- `docs/USER_MODEL.md` — one-sentence summary
-- `README.md` — Technology Stack
-- `Cargo.toml` — pyo3 0.27.2, datafusion 54.0.0
+- `docs/ARCHITECTURE.md`: Layered Architecture §1–3, PyO3 Boundary Design, Typical End-to-End Flow
+- `docs/DESIGN_SUMMARY.md`: §1.1
+- `docs/USER_MODEL.md`: one-sentence summary
+- `README.md`: Technology Stack
+- `Cargo.toml`: pyo3 0.27.2, datafusion 54.0.0

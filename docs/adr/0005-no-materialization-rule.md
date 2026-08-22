@@ -19,7 +19,7 @@ The rule does not (and cannot) cover every table-returning API. The following op
 
 **Correctness-required exceptions** (documented in `CLAUDE.md`; not shortcuts):
 
-1. **Physical-position ops** (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions — an unordered/partitioned window over a lazy multi-partition plan does not preserve input order (`set_ops.rs::snapshot_single_partition`).
+1. **Physical-position ops** (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered/partitioned window over a lazy multi-partition plan does not preserve input order (`set_ops.rs::snapshot_single_partition`).
 2. **`fold()`** runs a user-supplied Python callback `fn(state, row)` per row; arbitrary Python cannot be a DataFusion plan, so the row-wise path (`to_dicts()` → accumulate → `_from_rows()`) is inherent. Its docstring flags it as a non-lazy slow path (compare Polars `cumulative_eval`).
 
 **Additional eager paths in the current implementation** (specialized algorithms or implementation state, as of this record):
@@ -27,7 +27,7 @@ The rule does not (and cannot) cover every table-returning API. The following op
 - **Non-Parquet `assume_sorted()`** collects batches and rebuilds a `MemTable` with `with_sort_order()` (`src/ops/sort.rs`); only the Parquet path is metadata-only.
 - **`asof_join()`** collects both inputs to run its specialized matching (`src/ops/asof_join.rs`).
 - **`pivot()`** collects the distinct pivot keys (and executes the aggregate) to construct the output schema (`src/ops/pivot.rs`).
-- **Mutation APIs** (`insert`/`delete`/`update`/`modify`) collect the table at call time (`src/ops/mutation.rs`) — see [ADR 0004](0004-lazy-execution-immutable-tables.md).
+- **Mutation APIs** (`insert`/`delete`/`update`/`modify`) collect the table at call time (`src/ops/mutation.rs`); see [ADR 0004](0004-lazy-execution-immutable-tables.md).
 - **`search_pattern`** collects to run its sequential matcher (`src/ops/pattern_match.rs`).
 
 These live on the Rust side (Arrow batches, no Python row round-trips), but they do end plan laziness; treating them as lazy when composing pipelines misestimates cost.
@@ -41,9 +41,9 @@ These live on the Rust side (Arrow batches, no Python row round-trips), but they
 
 ## Sources
 
-- `CLAUDE.md` — No Materialization Rule (the two correctness exceptions)
-- `docs/ARCHITECTURE.md` — No-Materialization Rule, Design Goals #4
-- `docs/DESIGN_SUMMARY.md` — §5.4, §7.4
-- `docs/USER_MODEL.md` — Materialization Model
-- `docs/api.md` — §3.2 `fold`
+- `CLAUDE.md`: No Materialization Rule (the two correctness exceptions)
+- `docs/ARCHITECTURE.md`: No-Materialization Rule, Design Goals #4
+- `docs/DESIGN_SUMMARY.md`: §5.4, §7.4
+- `docs/USER_MODEL.md`: Materialization Model
+- `docs/api.md`: §3.2 `fold`
 - Code: `src/ops/sort.rs`, `src/ops/asof_join.rs`, `src/ops/pivot.rs`, `src/ops/mutation.rs`, `src/ops/pattern_match.rs`, `py-ltseq/tests/test_no_materialization_rule.py`
