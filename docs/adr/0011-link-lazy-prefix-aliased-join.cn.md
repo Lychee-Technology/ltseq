@@ -22,7 +22,7 @@
 ### 演进：本决策取代了什么
 
 - 早期设计把 linking 当作 **pointer/take 结构**（廉价的逐行导航）。现行文档明确否定：这是惰性 join，不是 pointer/take 结构，也不是廉价的逐行导航。
-- 曾存在**只过滤源表的快捷路径**（"先过滤源表求快"），后被移除："不再有'先过滤源表求快'的快捷方式（它在未匹配/扇出 join 下产出了错误的行）。"正确性压倒手写的提速技巧；谓词/投影下推交给优化器。
+- 曾存在**只过滤源表的快捷路径**（"先过滤源表提速"），后被移除，因为它在未匹配/扇出 join 下产出了错误的行。正确性压倒手写的提速技巧；谓词/投影下推交给优化器。
 - 旧设计的措辞残留仍在：`CLAUDE.md` 把 `linking.py` 描述为 "LinkedTable for pointer-based joins"（测试也写作 "Pointer-based join tests"）；`README.md` FAQ 仍拿 linking 与"全量物化"的 join 对比；`USER_MODEL.md`（Linking 与 Joining）也仍把 `join()` 写成产出物理结果、把 `link()` 写成能让 left-only 操作更便宜。三处相对 `LINKING_GUIDE.cn.md`/`api.cn.md` 及本 ADR 均已过时，应另行更新。
 
 ### 相关的 join 表面决策

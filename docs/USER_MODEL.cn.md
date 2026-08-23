@@ -27,7 +27,7 @@ LTSeq 提供 Python API，但大多数真正的执行发生在 Rust/DataFusion �
 
 ## LTSeq 不是什么
 
-LTSeq 不是 pandas 或通用 SQL 表的替代品。
+LTSeq 无意做 pandas 或通用 SQL 表的完全替代品。
 
 区别在于：多数 DataFrame 系统默认把表看作无序集合，排序只在展示前考虑；LTSeq 把顺序当作计算的输入。
 

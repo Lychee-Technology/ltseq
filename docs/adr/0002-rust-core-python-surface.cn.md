@@ -17,7 +17,7 @@
 - **Rust 层**（`src/`）：负责计划构建、表达式转译、执行，以及专用序列算法。
 - **边界**：PyO3 0.27.2 绑定，maturin 构建（Rust 代码变更后需 `maturin develop`）。
 
-文档称这一分层为"项目的主干（the backbone of the project）"。
+这条分界贯穿整个架构。
 
 ## 影响与取舍
 

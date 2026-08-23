@@ -22,7 +22,7 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 ### Evolution: what this supersedes
 
 - An earlier design treated linking as a **pointer/take structure** (cheap per-row navigation). The current docs are explicit: this is a lazy join, not a pointer/take structure and not a cheap per-row navigation.
-- A **source-only shortcut** ("filter the source first for speed") existed and was removed: "There is no 'filter the source first for speed' shortcut anymore (it produced wrong rows for unmatched/fan-out joins)." Correctness beat hand-rolled speed hacks; predicate/projection pushdown is delegated to the optimizer.
+- A **source-only shortcut** ("filter the source first for speed") existed and was removed, because it produced wrong rows for unmatched/fan-out joins. Correctness beat hand-rolled speed hacks; predicate/projection pushdown is delegated to the optimizer.
 - Residue of the old design still exists in prose: `CLAUDE.md` describes `linking.py` as "LinkedTable for pointer-based joins" (and tests as "Pointer-based join tests"); the `README.md` FAQ contrasts linking with "full data materialization" joins; and `USER_MODEL.md` (Linking vs Joining) still presents `join()` as producing a physical result and `link()` as making left-only operations cheaper. All three are stale relative to `LINKING_GUIDE.md`/`api.md` and this ADR, and should be updated separately.
 
 ### Related join-surface decisions

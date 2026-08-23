@@ -17,7 +17,7 @@ Split the system into two layers with a strict ownership boundary: Python owns t
 - **Rust layer** (`src/`): owns planning, expression transpilation, execution, and specialized sequence algorithms.
 - **Boundary**: PyO3 0.27.2 bindings, compiled with maturin (`maturin develop` after any Rust change).
 
-The docs call this split "the backbone of the project."
+That split runs through the whole architecture.
 
 ## Consequences
 

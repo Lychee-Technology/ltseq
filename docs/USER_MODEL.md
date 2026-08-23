@@ -27,7 +27,7 @@ LTSeq uses a Python API, but most execution happens in a Rust/DataFusion engine.
 
 ## What LTSeq Is Not
 
-LTSeq is not a drop-in clone of pandas or of generic SQL tables.
+LTSeq does not aim to be a drop-in clone of pandas or of generic SQL tables.
 
 The difference: most dataframe systems assume tables are unordered unless you sort right before display. LTSeq treats order as an input to the computation.
 
@@ -226,7 +226,7 @@ The lambda should describe a computation in terms of columns and expressions. It
 
 ## Materialization Model
 
-LTSeq avoids materializing data during table-to-table workflows. For a user, that means chaining table operations stays efficient longer, and exporting to pandas or Arrow is an explicit boundary. `show()` is cheap enough for inspection, but it is still a terminal action.
+LTSeq avoids materializing data accidentally during table-to-table workflows. For a user, that means chaining table operations stays efficient longer, and exporting to pandas or Arrow is an explicit boundary. `show()` is cheap enough for inspection, but it is still a terminal action.
 
 Calling `to_pandas()` or `collect()` asks LTSeq to leave the lazy query world and produce concrete data. That is often what you want, but it changes the cost model.
 
