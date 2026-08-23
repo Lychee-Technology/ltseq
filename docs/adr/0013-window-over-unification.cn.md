@@ -21,7 +21,7 @@ LTSeq 曾有两套窗口范式，用户要分别记两套规则：
 
 > **窗口表达式默认用表序，`.over()` 可覆盖分区/排序。**
 
-- **共存规则**：同一表达式上 `.over(partition_by=...)` 与 `partition_by=` kwarg 同时出现 → **`ValueError`**（二选一）。不做隐式优先级，避免"我明明写了 kwarg 却没生效"的静默惊喜；日后想放宽很容易。
+- **共存规则**：同一表达式上 `.over(partition_by=...)` 与 `partition_by=` kwarg 同时出现 → **`ValueError`**（二选一）。不做隐式优先级，避免“我明明写了 kwarg 却没生效”的静默惊喜；日后想放宽很容易。
 - **支持维度**：序列窗口的 `.over()` 支持 `partition_by` **和** `order_by`(+`desc`)；`order_by` 覆盖表序。
 - **非窗口守卫**：对真正的非窗口表达式（如 `r.age.over(...)`）调用 `.over()` 仍然报错，现改为普通 `ValueError`，并删去旧的「#117 未实现」话术。
 - **线格式不变**：现有 `{"type":"Window", expr, partition_by, order_by, descending}` 序列化已能携带全部信息，不涉及跨边界协议变更。

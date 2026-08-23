@@ -9,7 +9,7 @@
 - `docs/DESIGN_SUMMARY.cn.md`：中文设计摘要与设计归档
 - `docs/LINKING_GUIDE.cn.md`：中文 Linking 专题文档
 
-LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusion 执行。与传统 DataFrame 不同，LTSeq 强调"顺序"语义，支持窗口、连续分组、游标式流处理等 SPL 风格能力。
+LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusion 执行。与传统 DataFrame 不同，LTSeq 强调“顺序”语义，支持窗口、连续分组、游标式流处理等 SPL 风格能力。
 
 本文档描述的是**当前已实现**的 API，所有签名均与 `py-ltseq/ltseq/` 源码逐一核对。
 

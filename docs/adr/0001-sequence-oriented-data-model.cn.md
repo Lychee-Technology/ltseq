@@ -7,7 +7,7 @@
 
 ## 背景
 
-传统的 dataframe 与 SQL 系统（pandas、关系数据库）把表视为无序的行集合，行序至多是展示层的元数据。而 LTSeq 面向的工作负载（时间序列、事件流、连续段 streak/run 检测、漏斗分析、状态机式计算）本质上是关于*有序*数据的："上一行"、"一段连续相等的值"、"此行之后第一个满足条件的行"都是一等问题。
+传统的 dataframe 与 SQL 系统（pandas、关系数据库）把表视为无序的行集合，行序至多是展示层的元数据。而 LTSeq 面向的工作负载（时间序列、事件流、连续段 streak/run 检测、漏斗分析、状态机式计算）本质上是关于*有序*数据的：“上一行”、“一段连续相等的值”、“此行之后第一个满足条件的行”都是一等问题。
 
 ## 决策
 
@@ -33,7 +33,7 @@ pandas/SQL 式的集合语义被否决为核心模型。`README.md` 的 FAQ 明�
 ## 来源
 
 - `docs/ARCHITECTURE.cn.md`: 概览、设计目标
-- `docs/USER_MODEL.cn.md`: "LTSeq 不是什么"
+- `docs/USER_MODEL.cn.md`: “LTSeq 不是什么”
 - `docs/DESIGN_SUMMARY.cn.md`: 概览
 - `README.md`: Design Philosophy、FAQ
 - `CLAUDE.md`: Architecture Overview

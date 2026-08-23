@@ -7,7 +7,7 @@
 
 ## 背景
 
-序列操作（`shift`、`diff`、`rolling`、`pct_change`、累计类操作、`group_ordered`、merge join）在行序未知时没有定义。早期让顺序语义隐式化的尝试"导致了令人困惑的结果和脆弱的 API"（设计教训 §7.1）。
+序列操作（`shift`、`diff`、`rolling`、`pct_change`、累计类操作、`group_ordered`、merge join）在行序未知时没有定义。早期让顺序语义隐式化的尝试“导致了令人困惑的结果和脆弱的 API”（设计教训 §7.1）。
 
 ## 决策
 

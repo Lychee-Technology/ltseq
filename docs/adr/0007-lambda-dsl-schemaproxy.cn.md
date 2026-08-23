@@ -15,7 +15,7 @@ API 应当读起来像 Python（`t.filter(lambda r: r.age > 18)`），又不付�
 
 1. **捕获。** lambda 对 `SchemaProxy`（`expr/proxy.py`）**只执行一次**，而不是对真实行。属性访问与运算符重载构建出表达式树（`ColumnExpr`、`BinOpExpr`、`CallExpr` 等）。
 2. **序列化。** 表达式树序列化为普通 dict，例如 `{"type": "BinOp", "op": ">", "left": {"type": "Column", "name": "age"}, "right": {"type": "Literal", "value": 18}}`。
-3. **转译。** Rust 反序列化为 `PyExpr`（`src/types.rs`、`dict_to_py_expr()`），再经**两条路径**之一转成 DataFusion `Expr`：原生表达式（`transpiler/mod.rs`）或原生窗口构建（`transpiler/window_native.rs`）。`transpiler/optimization.rs` 在执行前做表达式化简。（历史上曾有第三条路径，经 `transpiler/sql_gen.rs` 生成 SQL，现已移除，见 [ADR 0006](0006-multi-path-execution-strategy.cn.md) 的"演进"小节。SQL 仅存的用途是 `filter_where` 的 WHERE 子句解析 helper。）
+3. **转译。** Rust 反序列化为 `PyExpr`（`src/types.rs`、`dict_to_py_expr()`），再经**两条路径**之一转成 DataFusion `Expr`：原生表达式（`transpiler/mod.rs`）或原生窗口构建（`transpiler/window_native.rs`）。`transpiler/optimization.rs` 在执行前做表达式化简。（历史上曾有第三条路径，经 `transpiler/sql_gen.rs` 生成 SQL，现已移除，见 [ADR 0006](0006-multi-path-execution-strategy.cn.md) 的“演进”小节。SQL 仅存的用途是 `filter_where` 的 WHERE 子句解析 helper。）
 
 **DSL 刻意受限**：它很好地支持 Pythonic 的*列*表达式，但有意不逐行执行任意 Python，这个取舍让表达式保持可序列化、可在 Rust 执行。Python 无法重载的语法用有限的 AST 变换处理（`is None` / `is not None`，见 `expr/transforms.py`）。真正需要任意逐行逻辑时的逃生口是 `fold()`，一条被显式标记的慢路径（[ADR 0005](0005-no-materialization-rule.cn.md)）。
 

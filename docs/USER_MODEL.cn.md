@@ -192,7 +192,7 @@ window function used without sort
 
 - 从维表补全事实表
 - 多跳链式关联、需要无歧义列名
-- 你想要一种更接近"关系导航"的工作流
+- 你想要一种更接近“关系导航”的工作流
 
 `LinkedTable` 上的每个变换都在 join 后的计划上运行并返回普通 `LTSeq`，因此行数跟随 join（未匹配行与一对多扇出都会体现）。详见 Linking 指南。
 
