@@ -9,20 +9,20 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python co-op
-pyo3 = { version = "0.27.2", features = ["extension-module", "macros"] }
+pyo3 = { version = "0.29.2", features = ["extension-module", "macros"] }
 
-datafusion = "54.0.0"
+datafusion = "55.0.0"
 
 # async executor utilities
-futures-util = "0.3"
+futures-util = "0.3.34"
 
 # Parallel iteration for sequence engine
-rayon = "1.10"
+rayon = "1.12.0"
 
 # Direct Parquet reading (must match datafusion's arrow version)
-parquet = { version = "58.3.0", default-features = false, features = ["arrow"] }
+parquet = { version = "59.2.0", default-features = false, features = ["arrow"] }
 
-tokio = { version = "1.49", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 
 [profile.release]
 lto = "fat"
