@@ -27,12 +27,13 @@ This document describes the API **as currently implemented**. Every signature be
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `SortRequiredError: Window functions ... require a defined row order` | Called `shift`/`rolling`/`diff`/cumulative without prior `.sort()` | Add `.sort(order_column)` (or `.assume_sorted(...)`) before window operations |
-| `SortRequiredError: group_ordered() ... requires a declared row order` | Called `group_ordered`/`group_sorted`/`cum_sum` without prior `.sort()` | Add `.sort(...)` first, or `.assume_sorted(...)` if the data is already ordered. Computed sort keys don't count — derive them as a column first |
+| `SortRequiredError: group_ordered() ... requires a declared row order` | Called `group_ordered`/`group_sorted`/`cum_sum` without prior `.sort()` | Add `.sort(...)` first, or `.assume_sorted(...)` if the data is already ordered. Computed sort keys don't count; derive them as a column first |
 | `ColumnNotFoundError: column 'xxx' not found` | Typo in column name or column doesn't exist | Check `t.columns` for available column names |
 | `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
+| `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
 ### Exception Hierarchy
 
@@ -50,11 +51,10 @@ except SortRequiredError as e:
 except LTSeqError: ...
 ```
 
-- `LTSeqError(Exception)` — base of the hierarchy
-- `SortRequiredError(LTSeqError, ValueError)` — operation needs sorted input
-- `SchemaMismatchError(LTSeqError, ValueError)` — incompatible schemas
-- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)` — column not in schema (also an `AttributeError` so `hasattr()` probes still work)
-| `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
+- `LTSeqError(Exception)`: base of the hierarchy
+- `SortRequiredError(LTSeqError, ValueError)`: operation needs sorted input
+- `SchemaMismatchError(LTSeqError, ValueError)`: incompatible schemas
+- `ColumnNotFoundError(LTSeqError, ValueError, AttributeError)`: column not in schema (also an `AttributeError` so `hasattr()` probes still work)
 
 ## Quick Reference
 
@@ -425,7 +425,7 @@ t.select(lambda r: [r.id, r.name])
 
 ### `LTSeq.derive` (alias: `with_columns`)
 - **Signature**: `LTSeq.derive(**new_cols: Callable) -> LTSeq` or `LTSeq.derive(func: Callable[[Row], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Add or overwrite columns; keeps existing columns. Deriving an existing name **replaces that column in place** (stable column order, no duplicates — Polars `with_columns` semantics); the expression reads the ORIGINAL column values. Overwriting a sort key invalidates the declared sort order from that key onward (`sort_keys` prefix-truncates). `with_columns` is an alias for Polars users
+- **Behavior**: Add or overwrite columns; keeps existing columns. Deriving an existing name **replaces that column in place** (stable column order, no duplicates, matching Polars `with_columns` semantics); the expression reads the ORIGINAL column values. Overwriting a sort key invalidates the declared sort order from that key onward (`sort_keys` prefix-truncates). `with_columns` is an alias for Polars users
 - **Parameters**: `new_cols` mapping of column name to lambda; or a lambda that returns a dict
 - **Returns**: new `LTSeq` with derived columns
 - **Exceptions**: `ValueError` (schema not initialized), `TypeError` (invalid return type), `AttributeError` (column not found)
@@ -465,7 +465,7 @@ t.drop("tmp", "debug_flag")
 - **Parameters**: `keys` column names or expressions; `desc`/`descending` global or per-key descending flags
 - **Returns**: sorted `LTSeq` with tracked sort keys
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid key type), `AttributeError` (column not found)
-- **Computed keys**: a computed key (e.g. `lambda r: r.a * 2`) sorts the data physically but **cannot be tracked as declared order** — `sort_keys` truncates at the first computed key, so `sort("a", lambda r: r.b * 2, "c")` declares only `[a]`, and `sort(lambda r: r.a * 2)` alone declares nothing (ordered APIs like `cum_sum` will still raise `SortRequiredError`). To use a computed key as declared order, derive it as a column first: `.derive(k=...).sort("k")`. After truncation, the order of rows that tie on the declared prefix is **unspecified** — window execution may reorder ties
+- **Computed keys**: a computed key (e.g. `lambda r: r.a * 2`) sorts the data physically but **cannot be tracked as declared order**: `sort_keys` truncates at the first computed key, so `sort("a", lambda r: r.b * 2, "c")` declares only `[a]`, and `sort(lambda r: r.a * 2)` alone declares nothing (ordered APIs like `cum_sum` will still raise `SortRequiredError`). To use a computed key as declared order, derive it as a column first: `.derive(k=...).sort("k")`. After truncation, the order of rows that tie on the declared prefix is **unspecified**, and window execution may reorder ties
 - **Example**:
 ```python
 t_sorted = t.sort("date", "id", desc=[False, True])
@@ -507,7 +507,7 @@ t_sorted.is_sorted_by("a", desc=True)  # False (direction mismatch)
 
 ### `LTSeq.assume_sorted`
 - **Signature**: `LTSeq.assume_sorted(*keys: str | Callable, desc: bool | list[bool] = False) -> LTSeq`
-- **Behavior**: Declare that data is already sorted by the given keys **without physically sorting**. Enables window functions and merge joins on pre-sorted data (e.g., pre-sorted Parquet) while skipping the sort. The caller is responsible for correctness — wrong metadata produces wrong results. Like `sort()`, the declared order truncates at the first computed key — only leading plain-column keys count
+- **Behavior**: Declare that data is already sorted by the given keys **without physically sorting**. Enables window functions and merge joins on pre-sorted data (e.g., pre-sorted Parquet) while skipping the sort. The caller is responsible for correctness, and wrong metadata produces wrong results. Like `sort()`, the declared order truncates at the first computed key: only leading plain-column keys count
 - **Parameters**: `keys` column names declaring the sort order; `desc` descending flag(s)
 - **Returns**: `LTSeq` with sort metadata set (same underlying data)
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid desc type)
@@ -545,7 +545,7 @@ t.slice(offset=10, length=5)
 
 > These operations require a prior `.sort()` (or `.assume_sorted()`) to establish order. `shift` additionally accepts a `partition_by=` kwarg (column name string or expression) to restart the window at group boundaries.
 
-> **Unified `.over()` entry**: sequence windows (`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`) also accept the same `.over()` clause as the ranking functions. The rule is one line: **window expressions default to table order; `.over()` overrides partition/order.** So `r.close.shift(1).over(partition_by=r.symbol)` is equivalent to `r.close.shift(1, partition_by="symbol")`, and `.over(order_by=..., desc=...)` overrides the table sort for that expression. `partition_by` may be supplied via `.over(partition_by=)` **or** the `partition_by=` kwarg, but not both — passing both raises `ValueError`.
+> **Unified `.over()` entry**: sequence windows (`shift`/`rolling`/`diff`/`cum_sum`/`cum_max`/`cum_min`) also accept the same `.over()` clause as the ranking functions. The rule is one line: **window expressions default to table order; `.over()` overrides partition/order.** So `r.close.shift(1).over(partition_by=r.symbol)` is equivalent to `r.close.shift(1, partition_by="symbol")`, and `.over(order_by=..., desc=...)` overrides the table sort for that expression. `partition_by` may be supplied via `.over(partition_by=)` **or** the `partition_by=` kwarg, but not both; passing both raises `ValueError`.
 >
 > ```python
 > t.sort("date").derive(
@@ -559,7 +559,7 @@ t.slice(offset=10, length=5)
 - **Signature**: `r.col.shift(offset: int, default: Any = None, partition_by: str | Expr | None = None) -> Expr`
 - **Behavior**: Access relative rows. Positive offset looks backward (previous rows), negative offset looks forward (future rows). Consistent with pandas `Series.shift()`. With `partition_by`, the window resets at group boundaries (LAG/LEAD OVER PARTITION BY)
 - **Parameters**: `offset` row offset (positive = backward, negative = forward); `default` fill value at boundaries (default NULL); `partition_by` optional partition column
-- **Returns**: expression (NULL — or `default` — at boundaries where offset exceeds available rows)
+- **Returns**: expression (NULL, or `default`, at boundaries where offset exceeds available rows)
 - **Exceptions**: `TypeError` (offset not int), `SortRequiredError` (used without sort)
 - **Example**:
 ```python
@@ -576,7 +576,7 @@ t.sort("date").derive(prev=lambda r: r.value.shift(1, default=0))
 
 #### `r.col.rolling`
 - **Signature**: `r.col.rolling(window_size: int, partition_by: str | Expr | None = None).agg_func() -> Expr`
-- **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`. **Partial-frame semantics** (SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`): the window start is clipped at the first row, so early rows aggregate over fewer than `window_size` rows — there is no `min_periods` (pass it and you get an error, not NULL-padding)
+- **Behavior**: Sliding window aggregation; supported aggs: `mean/sum/min/max/count/std`. **Partial-frame semantics** (SQL `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW`): the window start is clipped at the first row, so early rows aggregate over fewer than `window_size` rows. There is no `min_periods`: pass it and you get an error, not NULL-padding
 - **Parameters**: `window_size` window size (>= 1); `partition_by` optional per-group windows. Unknown kwargs are rejected by name
 - **Returns**: window aggregation expression
 - **Exceptions**: `ValueError` (window_size < 1, `min_periods`, or unknown kwarg), `SortRequiredError` (used without sort)
@@ -635,9 +635,9 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 #### `LTSeq.fold` (ordered stateful accumulation)
 - **Signature**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
 - **Behavior**: Walk rows in their current order, threading a running `state` through `fn(state, row)` and appending the result as column `into`. Expresses compounding, running balances, and small state machines that window functions cannot (the SPL-style capability). The first-match `row` is a read-only dict of the current row; the returned value is both stored in `into` and carried forward. `partition_by` resets `state` to `init` at the start of each partition (first-seen order)
-- **⚠️ Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms when they can express the computation; reach for `fold` only when genuinely sequential state is required. Slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
+- **Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms where they can express the computation, and reach for `fold` only when genuinely sequential state is required. It is a slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
 - **Requires**: a prior `.sort()` / `.assume_sorted()` so the accumulation order is defined
-- **Returns**: a new in-memory `LTSeq` — original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
+- **Returns**: a new in-memory `LTSeq` with the original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
 - **Exceptions**: `SortRequiredError` (no sort order), `ValueError` (`into` already exists, or bad `partition_by`), `TypeError` (`fn` not callable)
 - **Example**:
 ```python
@@ -725,7 +725,7 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over` (Window Specification)
 - **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **Behavior**: Apply a window specification to a window expression — either a ranking function (`row_number`/`rank`/`dense_rank`/`ntile`) or a sequence window (`shift`/`rolling`/`diff`/`cum_*`). `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`. For sequence windows `order_by` is optional (falls back to the table sort); for ranking functions it is required
+- **Behavior**: Apply a window specification to a window expression, either a ranking function (`row_number`/`rank`/`dense_rank`/`ntile`) or a sequence window (`shift`/`rolling`/`diff`/`cum_*`). `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`. For sequence windows `order_by` is optional (falls back to the table sort); for ranking functions it is required
 - **Parameters**:
   - `partition_by` column to partition by (optional)
   - `order_by` column to order by (required for ranking functions; optional for sequence windows)
@@ -834,7 +834,7 @@ groups = t.sort("date").group_consecutive(lambda r: r.is_up)
 
 ### `LTSeq.group_sorted`
 - **Signature**: `LTSeq.group_sorted(key: Callable[[Row], Expr]) -> NestedTable`
-- **Behavior**: Assumes global sort by key; one-pass grouping without hashing. The grouping key must be a plain column that leads the declared sort order (`.sort(key)` or `.assume_sorted(key)` first); computed grouping keys cannot be verified against sort metadata and are rejected — derive them as a column first
+- **Behavior**: Assumes global sort by key; one-pass grouping without hashing. The grouping key must be a plain column that leads the declared sort order (`.sort(key)` or `.assume_sorted(key)` first); computed grouping keys cannot be verified against sort metadata and are rejected; derive them as a column first
 - **Parameters**: `key` grouping key expression
 - **Returns**: `NestedTable`
 - **Exceptions**: `SortRequiredError` (no declared order, key does not lead it, or computed key), `ValueError` (schema not initialized), `TypeError` (invalid key)
@@ -901,8 +901,8 @@ enriched = groups.derive(lambda g: {
 
 #### `NestedTable.agg`
 - **Signature**: `nested.agg(func: Callable[[GroupProxy], dict[str, Expr]]) -> LTSeq`
-- **Behavior**: Collapse each group to **one summary row** (SQL GROUP BY semantics) — the counterpart of `derive`'s broadcast. Groups appear in their original sequence order; the output contains only the mapped columns. Replaces the old `derive(...) + distinct(...)` idiom
-- **Parameters**: `func` returns a dict of plain group aggregates (`g.count()`, `g.first().col`, `g.last().col`, `g.sum('col')`, ...). Arithmetic combinations of aggregates are not supported yet — compute them after agg()
+- **Behavior**: Collapse each group to **one summary row** (SQL GROUP BY semantics), the counterpart of `derive`'s broadcast. Groups appear in their original sequence order; the output contains only the mapped columns. Replaces the old `derive(...) + distinct(...)` idiom
+- **Parameters**: `func` returns a dict of plain group aggregates (`g.count()`, `g.first().col`, `g.last().col`, `g.sum('col')`, ...). Arithmetic combinations of aggregates are not supported yet; compute them after agg()
 - **Returns**: `LTSeq` with one row per group
 - **Exceptions**: `ValueError` (non-dict return or unsupported expression), `RuntimeError` (execution failure)
 - **Example**:
@@ -965,7 +965,7 @@ groups.filter(lambda g: g.none(lambda r: r.is_deleted == True))
 
 ### `LTSeq.concat` / `LTSeq.union`
 - **Signature**: `LTSeq.concat(other: LTSeq) -> LTSeq`
-- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics). `union` is a compatibility alias — note it does NOT deduplicate like SQL UNION; prefer `concat`, the Pandas/Polars verb that carries no dedup expectation
+- **Behavior**: Vertical concatenation, **keeping duplicates** (SQL UNION ALL semantics). `union` is a compatibility alias, and note it does NOT deduplicate like SQL UNION; prefer `concat`, the Pandas/Polars verb that carries no dedup expectation
 - **Parameters**: `other` another LTSeq with same schema
 - **Returns**: combined `LTSeq`
 - **Exceptions**: `TypeError` (other is not LTSeq), `ValueError` (schema mismatch)
@@ -1037,7 +1037,7 @@ t.contain("id", 1, 2, 3)
 ### `LTSeq.join`
 - **Signature**: `LTSeq.join(other: LTSeq, on: Callable | str | list[str] | None = None, how: str = "inner", strategy: str | None = None, *, left_on=None, right_on=None, suffix: str = "_right") -> LTSeq`
 - **Behavior**: Join two tables. Default is a hash join (no sorting required); `strategy="merge"` performs a merge join on pre-sorted inputs and validates sort order. **Column naming (Polars semantics)**: right-table columns that collide with the left keep their name plus `suffix` (e.g. `val` → `val_right`); non-conflicting right columns keep their names. For inner/left joins the duplicate right key column is dropped (coalesced); right/full joins keep both keys (right key suffixed if colliding)
-- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda equating columns (e.g. `lambda a, b: a.id == b.id`, composite via `&`) — equality only, use `asof_join` for range/inequality matching; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
+- **Parameters**: `other` other table; `on` a column name / list of names for an equi-join, or a two-arg lambda equating columns (e.g. `lambda a, b: a.id == b.id`, composite via `&`), equality only; use `asof_join` for range/inequality matching; `left_on`/`right_on` column name(s) for differently-named keys; `how` in {inner,left,right,full}; `strategy` in {None,"hash","merge"}; `suffix` appended to conflicting right columns (default `"_right"`)
 - **Returns**: joined `LTSeq`
 - **Exceptions**: `TypeError` (invalid other/on), `ValueError` (invalid how/strategy, unsorted inputs for merge, missing column, or suffix collision)
 - **Example**:
@@ -1099,7 +1099,7 @@ inactive_users = users.anti_join(orders, on=lambda u, o: u.id == o.user_id)
 ### `LTSeq.link`
 - **Signature**: `LTSeq.link(target_table: LTSeq, on: Callable, as_: str | None = None, join_type: str = "inner", *, alias: str | None = None) -> LinkedTable`
 - **Behavior**: Deferred, prefix-aliased equi-join. Records the condition and alias without executing; target columns are exposed as `{alias}_{col}`, source columns keep their names. This is a lazy join, not a pointer/take structure
-- **Parameters**: `target_table` target table; `on` join condition; `alias` alias prefixing every target column (`as_` is a compatibility alias for it — pass exactly one); `join_type` in {inner,left,right,full}
+- **Parameters**: `target_table` target table; `on` join condition; `alias` alias prefixing every target column (`as_` is a compatibility alias for it, so pass exactly one); `join_type` in {inner,left,right,full}
 - **Returns**: `LinkedTable`
 - **Exceptions**: `TypeError` (invalid on), `ValueError` (invalid join_type, both/neither of as_ and alias, or schema not initialized)
 - **Example**:
@@ -1109,7 +1109,7 @@ result = linked.select("id", "prod_name", "prod_price")
 ```
 
 ### `LinkedTable`
-- **Behavior**: A deferred, prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) builds the lazy join plan and returns a **plain `LTSeq`** — so its rows follow the join (an inner/right/full join drops or adds unmatched rows, and a one-to-many match fans a source row out to several rows; a following `slice`/`filter` sees the joined rows, not the source rows). `link()` itself returns a new `LinkedTable` layered on the current join plan (multi-hop chains; the next condition may reference the previous `{alias}_col` columns). Use `to_ltseq()` for the lazy joined `LTSeq`, or `collect()` to execute it
+- **Behavior**: A deferred, prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) builds the lazy join plan and returns a **plain `LTSeq`**, so its rows follow the join (an inner/right/full join drops or adds unmatched rows, and a one-to-many match fans a source row out to several rows; a following `slice`/`filter` sees the joined rows, not the source rows). `link()` itself returns a new `LinkedTable` layered on the current join plan (multi-hop chains; the next condition may reference the previous `{alias}_col` columns). Use `to_ltseq()` for the lazy joined `LTSeq`, or `collect()` to execute it
 - **Example**:
 ```python
 linked = orders.link(products, on=lambda o, p: o.product_id == p.product_id, alias="prod")
@@ -1183,7 +1183,7 @@ total = t.agg(total=lambda g: g.sales.sum())
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
 - **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0–1 (approximate percentile)
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0 to 1 (approximate percentile)
 - **Example**:
 ```python
 stats = t.group_by("region").agg(
@@ -1468,7 +1468,7 @@ padded = t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
 
 #### `split_part` / `split`
 - **Signature**: `r.col.s.split_part(delimiter: str, index: int) -> Expr`
-- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range. `split` is a compatibility alias — prefer `split_part`, which does not collide with Python's list-returning `str.split`
+- **Behavior**: Split string by delimiter and return the part at the specified index. Index is **1-based** (1 = first part) to match SQL SPLIT_PART. Returns empty string if index is out of range. `split` is a compatibility alias; prefer `split_part`, which does not collide with Python's list-returning `str.split`
 - **Exceptions**: `ValueError` (index <= 0)
 - **Example**:
 ```python
@@ -1486,7 +1486,7 @@ at_idx = t.derive(idx=lambda r: r.email.s.find("@"))  # "user@example" → 4, ab
 
 #### `pos`
 - **Signature**: `r.col.s.pos(sub: str) -> Expr`
-- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found. SQL semantics — for Python semantics use `find`
+- **Behavior**: Returns the **1-based** position of the first occurrence of `sub`; returns 0 if not found. Those are SQL semantics; for Python semantics use `find`
 - **SQL Equivalent**: `STRPOS(col, sub)`
 - **Example**:
 ```python
@@ -1505,7 +1505,7 @@ suffix = t.derive(sfx=lambda r: r.code.s.right(3))   # "ABC123" → "123"
 
 #### `ord` / `asc`
 - **Signature**: `r.col.s.ord() -> Expr`
-- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`). `asc` is a compatibility alias — prefer `ord`, since `asc` reads as "ascending" in a sorting-heavy library
+- **Behavior**: Returns the ASCII/Unicode code point of the first character of the string (like Python `ord()`). `asc` is a compatibility alias; prefer `ord`, since `asc` reads as "ascending" in a sorting-heavy library
 - **SQL Equivalent**: `ASCII(col)`
 - **Example**:
 ```python
@@ -1556,7 +1556,7 @@ by_date = t.derive(year=lambda r: r.date.dt.year())
 
 #### `hour` / `minute` / `second` / `millisecond`
 - **Signature**: `r.col.dt.hour() -> Expr` (same for minute/second/millisecond)
-- **Behavior**: extract time components (`millisecond` returns 0–999)
+- **Behavior**: extract time components (`millisecond` returns 0 to 999)
 - **Example**:
 ```python
 with_time = t.derive(hour=lambda r: r.ts.dt.hour())

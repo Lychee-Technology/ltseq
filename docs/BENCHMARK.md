@@ -8,7 +8,7 @@ ClickBench comparison benchmark.
 The ClickBench comparison and data-preparation scripts import `duckdb` + `psutil`,
 which live in the optional `bench` dependency group. Activate the group on **each**
 run with `uv run --group bench` so those packages are synced into the venv. Do
-**not** run `uv sync --group bench` once and then use a plain `uv run` — the plain
+**not** run `uv sync --group bench` once and then use a plain `uv run`: the plain
 run re-syncs only the default groups and removes `duckdb`/`psutil` again, which is
 exactly the failure this guide is written to avoid. The core operation benchmark
 needs no external deps and can use a plain `uv run`.

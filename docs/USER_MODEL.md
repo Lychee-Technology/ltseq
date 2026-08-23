@@ -10,7 +10,7 @@ Related documents:
 
 ## What LTSeq Is
 
-LTSeq is a Python data processing library for ordered data. It is built for workflows where row order is part of the meaning of the dataset, not just a presentation detail.
+LTSeq is a Python data processing library for ordered data. It is built for workflows where row order carries meaning, rather than being a presentation detail.
 
 Examples:
 
@@ -27,12 +27,9 @@ LTSeq uses a Python API, but most execution happens in a Rust/DataFusion engine.
 
 ## What LTSeq Is Not
 
-LTSeq is not trying to be a drop-in clone of pandas or generic SQL tables.
+LTSeq does not aim to be a drop-in clone of pandas or of generic SQL tables.
 
-The biggest difference is this:
-
-- many dataframe systems assume tables are unordered unless you sort right before display
-- LTSeq treats order as a semantic input to computation
+The difference: most dataframe systems assume tables are unordered unless you sort right before display. LTSeq treats order as an input to the computation.
 
 That is why some APIs ask you to sort first, why sort metadata is tracked, and why certain operations fail when order is unknown.
 
@@ -40,7 +37,7 @@ That is why some APIs ask you to sort first, why sort metadata is tracked, and w
 
 ## Core Mental Model
 
-The easiest way to use LTSeq correctly is to think in four ideas.
+Four ideas cover most of it.
 
 ### 1. Tables are immutable query objects
 
@@ -128,8 +125,6 @@ t.show()
 rows = t.to_dicts()
 ```
 
-This pattern is the intended use model for the library.
-
 ---
 
 ## Why Sort Is Explicit
@@ -142,12 +137,7 @@ window function used without sort
 
 That error is deliberate.
 
-In LTSeq, sequence operations such as `shift`, `diff`, `rolling`, and many ranking patterns are undefined without a known order. Rather than guessing, LTSeq forces the query to state the ordering assumption.
-
-This has two benefits:
-
-- results are more trustworthy
-- the query is easier to read and review later
+Sequence operations such as `shift`, `diff`, `rolling`, and many ranking patterns are undefined without a known order. Rather than guessing, LTSeq makes the query state its ordering assumption. The results are then trustworthy, and the next person to read the query can see what it assumed.
 
 If a result depends on sequence, the sequence should appear in the code.
 
@@ -165,17 +155,13 @@ Use `LTSeq` for ordinary table transforms, joins, sequence expressions, and expo
 
 Returned by `group_ordered()` or `group_sorted()`.
 
-Use it when you want to operate on groups while preserving grouped row context instead of collapsing immediately to one row per group.
-
-Think of it as: "this table now has grouped semantics attached to it."
+Use it when you want to operate on groups while keeping the rows inside each group, instead of collapsing immediately to one row per group.
 
 ### `LinkedTable`
 
 Returned by `link()`.
 
-Use it when you want to enrich a table from another table with prefix-aliased columns (`{alias}_{col}`), staying lazy until the result is consumed. The join plan is built lazily and every transform runs on the joined plan.
-
-Think of it as: "this table, enriched by another table, still lazy."
+Use it when you want to enrich a table from another table with prefix-aliased columns (`{alias}_{col}`), staying lazy until the result is consumed. The join plan is built lazily and every transform runs on the joined plan. Read it as "this table, enriched by another table, still lazy".
 
 ### `PartitionedTable`
 
@@ -186,8 +172,6 @@ Use it when you want grouped access by partition key rather than one global flat
 ---
 
 ## Linking vs Joining
-
-This is one of the most important user-facing distinctions in LTSeq.
 
 Both build the same kind of lazy DataFusion join, and neither materializes until the result is consumed. The difference is naming convention and ergonomics.
 
@@ -216,19 +200,11 @@ Every transform on a `LinkedTable` runs on the joined plan and returns a plain `
 
 ## Grouping Model
 
-Traditional SQL grouping usually collapses rows. LTSeq has that style too, but it also supports grouped sequential context.
+Traditional SQL grouping collapses rows. LTSeq has that style too, and it also keeps grouped sequential context.
 
-With `group_ordered()`, the important question is often not just:
+With `group_ordered()`, the question is often not "what is the aggregate for this key?" but something about the rows inside each consecutive group: what they are, which one comes first or last in the run, or whether the group's internal sequence satisfies some condition.
 
-- "what is the aggregate for this key?"
-
-but also:
-
-- "what are the rows inside each consecutive group?"
-- "what is the first/last row in each run?"
-- "which groups satisfy a condition based on their internal sequence?"
-
-That is why LTSeq returns `NestedTable` for these workflows instead of forcing an immediate flat aggregation result.
+That is why these workflows return `NestedTable` rather than an immediate flat aggregation.
 
 ---
 
@@ -244,23 +220,15 @@ t.derive(total=lambda r: r.price * r.quantity)
 t.select(lambda r: [r.id, r.total])
 ```
 
-The main thing to remember is that the lambda should describe a computation in terms of columns and expressions. It should not contain arbitrary Python control flow that expects real row values.
+The lambda should describe a computation in terms of columns and expressions. It should not contain Python control flow that expects real row values.
 
 ---
 
 ## Materialization Model
 
-LTSeq tries hard not to materialize data accidentally during table-to-table workflows.
+LTSeq avoids materializing data accidentally during table-to-table workflows. For a user, that means chaining table operations stays efficient longer, and exporting to pandas or Arrow is an explicit boundary. `show()` is cheap enough for inspection, but it is still a terminal action.
 
-From a user perspective, that means:
-
-- chaining table operations stays efficient longer
-- exporting to pandas or Arrow is an explicit boundary
-- `show()` is cheap enough for inspection but still a terminal action
-
-If you call `to_pandas()` or `collect()`, you are asking LTSeq to leave the lazy query world and produce concrete data.
-
-That is useful, but it changes the cost model.
+Calling `to_pandas()` or `collect()` asks LTSeq to leave the lazy query world and produce concrete data. That is often what you want, but it changes the cost model.
 
 ---
 
@@ -306,7 +274,7 @@ Calling `to_pandas()` too soon gives up the benefits of lazy planning and Rust-s
 
 ### Assuming `link()` and `join()` differ in cost
 
-They build the same kind of lazy DataFusion join and neither materializes until consumed. Choose by naming and ergonomics — prefix-aliased enrichment (`link`) vs a one-off flat join (`join`) — not by expected cost.
+They build the same kind of lazy DataFusion join, and neither materializes until consumed. Choose by naming and ergonomics (prefix-aliased enrichment for `link`, a one-off flat join for `join`), not by expected cost.
 
 ### Assuming all grouping means immediate aggregation
 
@@ -328,4 +296,4 @@ Use these as default habits:
 
 ## One-Sentence Summary
 
-The best mental model for LTSeq is: a lazy, immutable, sequence-aware query system where Python describes the work and Rust executes it.
+LTSeq is a lazy, immutable, sequence-aware query system: Python describes the work, Rust executes it.

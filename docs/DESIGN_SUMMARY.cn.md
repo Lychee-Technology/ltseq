@@ -17,17 +17,9 @@
 
 LTSeq 是一个混合式 Python-Rust 库，用于面向顺序语义的数据处理。它把 Python 风格的 lambda DSL 与 Rust/DataFusion 执行引擎结合起来，并把行顺序视为查询模型的一部分，而不是仅用于展示的元数据。
 
-它的核心理念包括：
+设计建立在几点之上：懒执行、显式顺序保证、流畅的 Python 使用体验，以及由 Rust 侧执行带来的性能与一致性。
 
-- 懒执行
-- 显式顺序保证
-- 流畅的 Python 使用体验
-- Rust 侧执行带来的性能和一致性
-
-这份文档现在承担两类角色：
-
-- 当前架构的精简摘要
-- 重要实现决策与历史经验的设计归档
+这份文档承担两件事：概括当前架构，归档背后的实现决策与经验教训。
 
 如果需要更深入阅读：
 
@@ -183,7 +175,7 @@ LTSeq 的表达式系统是有意受约束的。它非常擅长支持 Python 风
 
 ### 3.1 显式排序要求
 
-LTSeq 最强的设计决定之一是：依赖顺序的操作必须建立在显式顺序之上。
+依赖顺序的操作必须建立在显式顺序之上。
 
 - `shift()`
 - `diff()`
@@ -216,9 +208,7 @@ LTSeq 最强的设计决定之一是：依赖顺序的操作必须建立在显�
 
 ### 4.2 Join 列冲突处理策略
 
-Join 执行必须谨慎处理右表列名冲突或重复的问题。LTSeq 的 join 实现会在 join 前积极地重命名右表列，再把它们别名恢复为用户可见的 schema 形状。
-
-实践证明，这对正确性和可预测性都是必要的。
+Join 执行要处理右表列名冲突或重复。LTSeq 的 join 实现在 join 前积极重命名右表列，再把它们别名恢复为用户可见的 schema 形状。正确性和可预测性都依赖这一步。
 
 ### 4.3 顺序分组上下文
 
@@ -228,11 +218,11 @@ Join 执行必须谨慎处理右表列名冲突或重复的问题。LTSeq 的 jo
 - `__group_count__`
 - `__rn__`
 
-这样就可以在不立即 flatten 的前提下做 group-aware filter、derive 和 first/last 风格分析。
+group-aware 的 filter、derive 和 first/last 分析因此不必先 flatten。
 
 ### 4.4 Partitioning
 
-`partition()` 提供按组访问模式，同时尽可能停留在懒执行查询路径上。callable partition 会被有意限制在仍可被捕获并交由引擎执行的表达式范围内。
+`partition()` 提供按组访问模式，同时尽可能停留在懒执行查询路径上。callable partition 被限制在引擎仍能捕获并执行的表达式范围内。
 
 ---
 
@@ -244,7 +234,7 @@ Join 执行必须谨慎处理右表列名冲突或重复的问题。LTSeq 的 jo
 
 ### 5.2 SQL 回退（已退役）
 
-历史上，一些 group-heavy 或 window-heavy 的变换曾使用生成 SQL 和临时表的方式（`src/transpiler/sql_gen.rs`，现已删除），因为那是当时更实际的实现路径。该路径已被移除——SQL 往返是物化黑洞，`test_no_materialization_rule.py` 现在专门防止其回归。SQL 仅存的用途是 `src/ops/aggregation.rs` 中 `filter_where` 的 WHERE 子句解析 helper（对空表解析，再应用原生惰性 filter）。
+历史上，一些 group-heavy 或 window-heavy 的变换曾使用生成 SQL 和临时表的方式（`src/transpiler/sql_gen.rs`，现已删除），因为那是当时更实际的实现路径。该路径已被移除：SQL 往返是物化黑洞，`test_no_materialization_rule.py` 现在专门防止其回归。SQL 仅存的用途是 `src/ops/aggregation.rs` 中 `filter_where` 的 WHERE 子句解析 helper（对空表解析，再应用原生惰性 filter）。
 
 ### 5.3 专用 Rust 路径
 
@@ -261,7 +251,7 @@ LTSeq 还包含针对有序工作负载的专用实现，在这些场景下通�
 
 任何返回 `LTSeq`、`NestedTable`、`LinkedTable` 或 `PartitionedTable` 的 API，都应尽可能停留在惰性的 Rust/DataFusion 路径上。物化应仅发生在显式导出或终结 API 中。
 
-这是 LTSeq 最有代表性的架构约束之一，并且由测试保护。
+这条约束由测试保护，架构的很多形态都由它决定。
 
 ---
 
@@ -284,7 +274,7 @@ LTSeq 还包含针对有序工作负载的专用实现，在这些场景下通�
 
 ### 6.2 Benchmark 作为架构反馈
 
-Benchmark 被用来验证架构选择是否在真实有序工作负载下站得住脚。项目通过它们定位 materialization 瓶颈，并判断哪些专用原生实现值得保留或引入。
+Benchmark 用来验证架构选择在真实有序工作负载下是否站得住脚：定位 materialization 瓶颈，判断哪些专用原生实现值得它的成本。
 
 ---
 
@@ -292,25 +282,25 @@ Benchmark 被用来验证架构选择是否在真实有序工作负载下站得�
 
 ### 7.1 顺序必须显式表达
 
-如果试图让顺序语义隐式存在，最终会得到令人困惑的结果和脆弱的 API。强制要求显式排序状态，整体上是更好的设计。
+让顺序语义隐式存在的做法，带来的是令人困惑的结果和脆弱的 API。强制要求显式排序状态，整体上是更好的设计。
 
 ### 7.2 Schema 同步至关重要
 
-最初 Python 侧 schema 跟踪和 Rust 侧 Arrow schema 跟踪的组合提升了易用性，但要求在 join 和物化边界之后严格保持同步——实践证明这很脆弱。这一教训促成了 issue #93：现在 Rust 内核是 schema 与排序元数据的唯一事实源，Python 侧只保留逐实例惰性缓存。
+最初 Python 侧 schema 跟踪和 Rust 侧 Arrow schema 跟踪的组合提升了易用性，但要求在 join 和物化边界之后严格保持同步，实践证明这很脆弱。这一教训促成了 issue #93：现在 Rust 内核是 schema 与排序元数据的唯一事实源，Python 侧只保留逐实例惰性缓存。
 
 ### 7.3 DataFusion 很强，但并不能解决一切
 
-DataFusion 已经覆盖了 LTSeq 大量执行需求，但对于某些序列型工作负载，专用逻辑仍然是合理的。
+DataFusion 已经覆盖了 LTSeq 大部分执行需求。某些序列型工作负载，专用逻辑仍然是合理的。
 
 ### 7.4 Materialization 是最主要的架构成本中心
 
-最重要的性能问题通常不在底层计算内核，而在复杂操作周围的 collect / register / re-query 模式。
+真正要紧的性能问题很少出在底层计算内核，而是出在复杂操作周围的 collect / register / re-query 模式。
 
 ---
 
 ## 8. 历史说明
 
-这个文档的旧版本曾经承担“大而全设计归档”的角色。这个历史角色仍然有价值，但现在仓库已经把“当前架构”“贡献者导览”和“用户心智模型”拆分到了独立文档中。
+这份文档的早期版本曾是项目唯一的大而全设计归档。这个角色仍然有价值，但当前架构、贡献者导览和用户心智模型现在各有独立文档。
 
 未来更新这份文档时，建议遵循以下原则：
 

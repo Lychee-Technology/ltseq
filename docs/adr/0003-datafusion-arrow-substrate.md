@@ -19,14 +19,14 @@ DataFusion is a "battle-tested SQL engine." Staying on its lazy plan path yields
 
 ## Consequences
 
-- LTSeq inherits DataFusion's behavior — including its bugs. Documented example: a ProjectionPushdown bug affecting in-memory sources (`from_pandas`/`from_arrow`) after a join; the documented workaround is to read from CSV/Parquet instead, or select columns after `collect()` (see `LINKING_GUIDE.md` Troubleshooting).
+- LTSeq inherits DataFusion's behavior, bugs included. Documented example: a ProjectionPushdown bug affecting in-memory sources (`from_pandas`/`from_arrow`) after a join; the documented workaround is to read from CSV/Parquet instead, or select columns after `collect()` (see `LINKING_GUIDE.md` Troubleshooting).
 - DataFusion alone is explicitly *not* sufficient for every sequence workload; that gap is what justifies the multi-path execution strategy ([ADR 0006](0006-multi-path-execution-strategy.md)) and is recorded as design lesson §7.3 ("DataFusion Is Strong, but Not Sufficient for Everything").
 - Engine upgrades (DataFusion/Arrow major versions) are a recurring maintenance cost pinned in `Cargo.toml` (the direct `parquet` dependency must match DataFusion's Arrow version).
 
 ## Sources
 
-- `docs/ARCHITECTURE.md` — Overview, Lazy Execution Model
-- `docs/DESIGN_SUMMARY.md` — §5.1, §7.3
-- `docs/LINKING_GUIDE.md` — Troubleshooting (ProjectionPushdown caveat)
-- `README.md` — Performance, Technology Stack
+- `docs/ARCHITECTURE.md`: Overview, Lazy Execution Model
+- `docs/DESIGN_SUMMARY.md`: §5.1, §7.3
+- `docs/LINKING_GUIDE.md`: Troubleshooting (ProjectionPushdown caveat)
+- `README.md`: Performance, Technology Stack
 - `Cargo.toml`

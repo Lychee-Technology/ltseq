@@ -1,4 +1,4 @@
-# ADR 0011: `link()` Is a Lazy Prefix-Aliased Equi-Join — Not a Pointer/Take Structure
+# ADR 0011: `link()` Is a Lazy Prefix-Aliased Equi-Join (Not a Pointer/Take Structure)
 
 - Status: Accepted
 - Supersedes: the earlier pointer/take linking design (see Evolution)
@@ -21,15 +21,15 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 
 ### Evolution: what this supersedes
 
-- An earlier design treated linking as a **pointer/take structure** (cheap per-row navigation). The current docs are explicit: "It is a lazy join — not a pointer/take structure and not a cheap per-row navigation."
-- A **source-only shortcut** ("filter the source first for speed") existed and was removed: "There is no 'filter the source first for speed' shortcut anymore (it produced wrong rows for unmatched/fan-out joins)." Correctness beat hand-rolled speed hacks; predicate/projection pushdown is delegated to the optimizer.
+- An earlier design treated linking as a **pointer/take structure** (cheap per-row navigation). The current docs are explicit: this is a lazy join, not a pointer/take structure and not a cheap per-row navigation.
+- A **source-only shortcut** ("filter the source first for speed") existed and was removed, because it produced wrong rows for unmatched/fan-out joins. Correctness beat hand-rolled speed hacks; predicate/projection pushdown is delegated to the optimizer.
 - Residue of the old design still exists in prose: `CLAUDE.md` describes `linking.py` as "LinkedTable for pointer-based joins" (and tests as "Pointer-based join tests"); the `README.md` FAQ contrasts linking with "full data materialization" joins; and `USER_MODEL.md` (Linking vs Joining) still presents `join()` as producing a physical result and `link()` as making left-only operations cheaper. All three are stale relative to `LINKING_GUIDE.md`/`api.md` and this ADR, and should be updated separately.
 
 ### Related join-surface decisions
 
-- **Two coexisting surfaces**: `link()` namespaces the *whole* target as `{alias}_col` (keeps multi-hop chains unambiguous) and offers `LinkedTable` chaining sugar — use for enrichment. `join()` uses Polars-style **conflict-only** suffixes (`suffix="_right"`) and returns `LTSeq` directly — use for one-off relational joins. Neither materializes until consumed.
-- **Conflict strategy**: the join implementation renames right-side columns aggressively before joining, then aliases them back into the user-visible shape (`src/ops/join.rs`) — "proven necessary for correctness and predictability." Inner/left joins coalesce the duplicate right key column; right/full joins keep both keys.
-- **Strategy matrix**: `join` (hash, default); `join(strategy="merge")` for pre-sorted inputs — *validates* sort order and raises `SortRequiredError` otherwise; `semi_join`/`anti_join` (`WHERE EXISTS` / `NOT EXISTS`); `asof_join` (ordered/binary search, `src/ops/asof_join.rs`, API aligned with Polars `join_asof`; the right time column is deliberately kept because "an asof match is approximate, so the matched timestamp is real information"); expression-level `r.col.lookup(target, column, join_key)` resolves a single-column left join during `derive()` (`lookup.py`) — join-like enrichment without a user-level join step.
+- **Two coexisting surfaces**: `link()` namespaces the *whole* target as `{alias}_col` (keeps multi-hop chains unambiguous) and offers `LinkedTable` chaining sugar; use it for enrichment. `join()` uses Polars-style **conflict-only** suffixes (`suffix="_right"`) and returns `LTSeq` directly; use it for one-off relational joins. Neither materializes until consumed.
+- **Conflict strategy**: the join implementation renames right-side columns aggressively before joining, then aliases them back into the user-visible shape (`src/ops/join.rs`); correctness and predictability both depend on it. Inner/left joins coalesce the duplicate right key column; right/full joins keep both keys.
+- **Strategy matrix**: `join` (hash, default); `join(strategy="merge")` for pre-sorted inputs, which *validates* sort order and raises `SortRequiredError` otherwise; `semi_join`/`anti_join` (`WHERE EXISTS` / `NOT EXISTS`); `asof_join` (ordered/binary search, `src/ops/asof_join.rs`, API aligned with Polars `join_asof`; the right time column is deliberately kept because "an asof match is approximate, so the matched timestamp is real information"); expression-level `r.col.lookup(target, column, join_key)` resolves a single-column left join during `derive()` (`lookup.py`), giving join-like enrichment without a user-level join step.
 
 ## Consequences
 
@@ -39,9 +39,9 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 
 ## Sources
 
-- `docs/LINKING_GUIDE.md` — entire document (incl. "link() vs join()", the removed shortcut, ProjectionPushdown caveat)
-- `docs/DESIGN_SUMMARY.md` — §4.1, §4.2
-- `docs/USER_MODEL.md` — Linking vs Joining
-- `docs/api.md` — `LTSeq.link`, `LTSeq.join`, `asof_join`, Join Strategy Summary
-- `docs/MODULE_GUIDE.md` — `src/ops/join.rs`, `lookup.py`
-- `CLAUDE.md`, `README.md` — outdated "pointer-based" wording (see Evolution)
+- `docs/LINKING_GUIDE.md`: entire document (incl. "link() vs join()", the removed shortcut, ProjectionPushdown caveat)
+- `docs/DESIGN_SUMMARY.md`: §4.1, §4.2
+- `docs/USER_MODEL.md`: Linking vs Joining
+- `docs/api.md`: `LTSeq.link`, `LTSeq.join`, `asof_join`, Join Strategy Summary
+- `docs/MODULE_GUIDE.md`: `src/ops/join.rs`, `lookup.py`
+- `CLAUDE.md`, `README.md`: outdated "pointer-based" wording (see Evolution)

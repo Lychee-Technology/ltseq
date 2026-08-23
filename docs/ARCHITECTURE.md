@@ -11,7 +11,7 @@ Related documents:
 
 ## Overview
 
-LTSeq is a sequence-oriented data processing library with a Python user surface and a Rust execution core. Unlike traditional dataframe systems that treat tables as unordered sets, LTSeq treats row order as part of the data model. That design choice drives the API, metadata model, execution strategy, and testing strategy.
+LTSeq is a sequence-oriented data processing library with a Python user surface and a Rust execution core. Traditional dataframe systems treat tables as unordered sets; LTSeq treats row order as part of the data model. That one choice shapes the API, the metadata model, the execution strategy, and the tests.
 
 At a high level:
 
@@ -32,7 +32,7 @@ LTSeq is designed around five goals:
 4. Avoid accidental materialization in table-returning APIs.
 5. Allow specialized fast paths where generic query planning is not enough.
 
-These goals explain most of the structure in the repository.
+Most of the structure in the repository follows from these.
 
 ---
 
@@ -75,7 +75,7 @@ The Rust crate in `src/` exposes `LTSeqTable` through PyO3. It is responsible fo
 
 ### 4. Validation and Performance Layer
 
-The repository treats tests and benchmarks as architectural components, not just project hygiene.
+The repository treats tests and benchmarks as architectural components rather than project hygiene.
 
 - `py-ltseq/tests/` validates capability behavior and invariants
 - `benchmarks/` measures performance on representative ordered workloads
@@ -158,9 +158,9 @@ The most important structural pattern is that `lib.rs` remains a thin shell, whi
 
 Rust exposes the Python extension module through a single `#[pymodule]` in `src/lib.rs`. `LTSeqTable` uses one `#[pymethods]` block and delegates most behavior to helpers in `src/ops/*`.
 
-This is both a practical PyO3 constraint and a maintainability choice:
+This is both a PyO3 constraint and a maintainability choice:
 
-- Python-facing signatures stay centralized.
+- Python-facing signatures stay centralized
 - implementation details remain modular
 - operation logic can evolve without turning `lib.rs` into a multi-thousand-line execution file
 
@@ -170,7 +170,7 @@ The Python side generally calls methods on `_inner`, receives a new Rust table o
 
 ## Expression Pipeline
 
-One of the defining architectural features is the lambda capture pipeline.
+The lambda capture pipeline is one of the pieces that defines the architecture.
 
 ### Python side
 
@@ -202,7 +202,7 @@ Key files:
 - `src/transpiler/window_native.rs`
 - `src/transpiler/optimization.rs`
 
-This split is central to LTSeq's architecture: Python owns expressive syntax, Rust owns execution semantics.
+Python owns the expressive syntax, Rust owns the execution semantics. That split runs through the whole architecture.
 
 ---
 
@@ -239,28 +239,21 @@ This metadata enables:
 - sort-preserving behavior across safe transforms
 - sorted Parquet optimizations and direct scan fast paths
 
-The core rule is simple: ordered operators require known order. If order is unknown, LTSeq prefers to fail rather than silently produce misleading results.
+The rule: ordered operators require known order. If order is unknown, LTSeq fails rather than silently producing misleading results.
 
 ---
 
 ## No-Materialization Rule
 
-One of the strongest architectural constraints in the project is the no-materialization rule.
-
 Table-returning query APIs should remain on the lazy Rust/DataFusion path and must not quietly materialize through pandas, Arrow round-trips, or row-by-row Python logic. Materialization is reserved for explicit export or terminal APIs.
 
-This rule exists for two reasons:
-
-- performance predictability
-- semantic consistency across `LTSeq`, `NestedTable`, `LinkedTable`, and `PartitionedTable`
-
-The repository enforces this not just by convention, but through dedicated tests.
+The rule exists for performance predictability and for semantic consistency across `LTSeq`, `NestedTable`, `LinkedTable`, and `PartitionedTable`. Dedicated tests enforce it, so it is not left to convention.
 
 ---
 
 ## Multi-Path Execution Strategy
 
-LTSeq is not a pure wrapper around DataFusion. It uses multiple execution strategies depending on the problem.
+LTSeq is not a pure wrapper around DataFusion. It uses several execution strategies depending on the problem.
 
 ### DataFusion-first path
 
@@ -281,8 +274,6 @@ Examples include:
 - as-of join binary search logic
 - pattern matching/funnel-style operations
 
-This is a deliberate hybrid design rather than an inconsistency.
-
 ---
 
 ## Grouping, Linking, and Partitioning
@@ -293,13 +284,11 @@ This is a deliberate hybrid design rather than an inconsistency.
 
 ### Linking
 
-`link()` returns `LinkedTable`, a deferred prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) runs on the joined plan and returns a regular `LTSeq` — there is no source-only shortcut, so unmatched rows and one-to-many fan-out are reflected. Chained `link()` layers on the previous join's real plan.
+`link()` returns `LinkedTable`, a deferred prefix-aliased equi-join. Every transform (`select`/`filter`/`derive`/`sort`/`slice`/`distinct`) runs on the joined plan and returns a regular `LTSeq`. There is no source-only shortcut, so unmatched rows and one-to-many fan-out are reflected. Chained `link()` layers on the previous join's real plan.
 
 ### Partitioning
 
 `partition()` exposes logical partition access. The implementation favors capturable expressions and SQL-backed behavior over arbitrary Python execution so the system can stay on the query path.
-
-These abstractions are a major part of LTSeq's API differentiation.
 
 ---
 
@@ -317,7 +306,7 @@ An earlier design maintained a hand-written Python-side `_schema` mirror alongsi
 
 ## Testing Strategy
 
-Tests are organized primarily by capability, not by implementation file. That is an architectural choice.
+Tests are organized by capability rather than by implementation file. That is an architectural choice.
 
 The test suite covers:
 
@@ -331,13 +320,13 @@ The test suite covers:
 - integration flows
 - explicit architectural invariants such as no accidental materialization
 
-This makes the test suite a map of product capabilities and a guardrail for future refactors.
+The suite doubles as a map of product capabilities and a guardrail for future refactors.
 
 ---
 
 ## Benchmarks and Performance Research
 
-The `benchmarks/` directory is not incidental. It reflects an explicit product belief: LTSeq's value depends on both semantics and performance.
+The `benchmarks/` directory carries an explicit product claim: LTSeq's value depends on performance as much as on semantics.
 
 Benchmarks help answer:
 
@@ -346,7 +335,7 @@ Benchmarks help answer:
 - where specialized Rust implementations are worthwhile
 - whether architectural changes improve real workloads
 
-The autoresearch benchmark workflow turns performance investigation into a repeatable engineering practice.
+The autoresearch benchmark workflow makes performance investigation repeatable.
 
 ---
 
@@ -361,8 +350,6 @@ A typical request moves through the system like this:
 5. Rust returns a new `LTSeqTable` or related object state.
 6. Python wraps that result in the correct high-level object; schema/sort metadata is read from the Rust kernel on demand.
 7. Execution only occurs when the user calls a terminal operation.
-
-That separation is the backbone of the project.
 
 ---
 

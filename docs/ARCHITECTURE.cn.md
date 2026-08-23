@@ -11,7 +11,7 @@
 
 ## 概览
 
-LTSeq 是一个面向有序序列的数据处理库，采用 Python 用户接口层与 Rust 执行内核的双层设计。与把表视为无序集合的传统 DataFrame 系统不同，LTSeq 把行顺序视为数据模型的一部分。这一设计选择影响了 API 设计、元数据维护、执行策略和测试策略。
+LTSeq 是一个面向有序序列的数据处理库，采用 Python 用户接口层与 Rust 执行内核的双层设计。传统 DataFrame 系统把表视为无序集合，LTSeq 则把行顺序视为数据模型的一部分。这一个选择决定了 API 设计、元数据维护、执行策略和测试策略。
 
 从整体上看：
 
@@ -32,7 +32,7 @@ LTSeq 的架构主要围绕五个目标展开：
 4. 避免在返回表对象的 API 中发生意外物化
 5. 在通用查询规划不足时允许专用快速路径
 
-这些目标解释了仓库中大部分结构设计。
+仓库里大部分结构设计都由此而来。
 
 ---
 
@@ -68,14 +68,14 @@ LTSeq 的架构主要围绕五个目标展开：
 `src/` 中的 Rust crate 通过 PyO3 暴露 `LTSeqTable`。它负责：
 
 - 构造并转换懒执行的 DataFusion 计划
-- 将序列化表达式转换为 DataFusion 表达式或 SQL
+- 将序列化表达式转换为 DataFusion 表达式
 - 维护序列语义所需的排序元数据
 - 执行 count、collect、display、export 等终结操作
 - 为序列密集型场景提供专门实现
 
 ### 4. 验证与性能层
 
-仓库把测试和 benchmark 视作架构的一部分，而不只是工程卫生。
+仓库把测试和 benchmark 视作架构的一部分，而非工程卫生。
 
 - `py-ltseq/tests/`：验证能力行为与架构约束
 - `benchmarks/`：评估典型有序工作负载下的性能
@@ -150,13 +150,13 @@ Rust crate 采用明确拆分：
 - `src/transpiler/`：表达式转换与优化
 - `src/ops/`：按能力拆分的操作实现
 
-最重要的结构模式是：`lib.rs` 保持为薄外壳，而 `src/ops/*` 持有真正的执行逻辑。
+结构上最要紧的一点：`lib.rs` 保持薄外壳，`src/ops/*` 持有真正的执行逻辑。
 
 ---
 
 ## 表达式链路
 
-LTSeq 的关键架构特征之一是 lambda 捕获链路。
+lambda 捕获链路是决定 LTSeq 架构形态的部件之一。
 
 ### Python 侧
 
@@ -188,7 +188,7 @@ t.filter(lambda r: r.age > 18)
 - `src/transpiler/window_native.rs`
 - `src/transpiler/optimization.rs`
 
-这个分工是 LTSeq 架构的核心：Python 负责表达语法，Rust 负责执行语义。
+Python 负责表达语法，Rust 负责执行语义。这条分界贯穿整个架构。
 
 ---
 
@@ -225,19 +225,12 @@ LTSeq 不会隐式推断顺序，而是显式跟踪排序状态。声明排序�
 - 在安全变换中保留排序状态
 - 基于排序 Parquet 的优化和直接扫描快速路径
 
-核心规则很简单：依赖顺序的操作必须建立在已知顺序之上。如果顺序未知，LTSeq 倾向于报错，而不是悄悄给出误导性结果。
+规则是：依赖顺序的操作必须建立在已知顺序之上。顺序未知时 LTSeq 直接报错，而不是悄悄给出误导性结果。
 
 ---
 
 ## No-Materialization Rule
 
-项目最强的架构约束之一，是 no-materialization rule。
-
 凡是返回 `LTSeq`、`NestedTable`、`LinkedTable`、`PartitionedTable` 的查询 API，都应尽量停留在懒执行的 Rust/DataFusion 路径上，不应偷偷通过 pandas、Arrow 往返或 Python 逐行逻辑完成计算。物化应只发生在显式导出或终结 API 中。
 
-这一规则存在的原因包括：
-
-- 性能可预测性
-- `LTSeq`、`NestedTable`、`LinkedTable`、`PartitionedTable` 之间的语义一致性
-
-仓库通过专门测试来保护这一约束，而不是只依赖约定。
+这条规则一是为了性能可预测，二是为了 `LTSeq`、`NestedTable`、`LinkedTable`、`PartitionedTable` 之间的语义一致。仓库用专门的测试保护它，不只依赖约定。
