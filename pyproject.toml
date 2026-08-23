@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.11.2,<2.0"]
+requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -10,35 +10,35 @@ authors = [{name = "LTBase Team", email = "info@ltbase.dev"}]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "pyarrow>=22.0.0",
+    "pyarrow>=25.0.1",
 ]
 
 [tool.maturin]
-# 关键设置：将 Rust 编译产物放在 ltseq 文件夹下，名字叫 ltseq_core
+# Key setting: place the Rust build artifact under the ltseq package as ltseq_core
 module-name = "ltseq.ltseq_core"
 features = ["pyo3/extension-module"]
-# [重要] 告诉 pyo3/maturin 这是一个混合项目
-# 如果不加这行，maturin 有时会找不到 Python 源码包
+# [Important] Tell pyo3/maturin this is a mixed Python/Rust project
+# Without this, maturin may fail to locate the Python source package
 python-source = "./py-ltseq"
 
 [dependency-groups]
 dev = [
-    "maturin>=1.11.2",
-    "pytest>=7.0",
-    "pandas>=2.0",
-    "ipdb>=0.13",  # 调试好帮手
-    "pyright>=1.1.409",
+    "maturin>=1.14.1",
+    "pytest>=9.1.1",
+    "pandas>=3.0.5",
+    "ipdb>=0.13.13",  # Helpful for debugging
+    "pyright>=1.1.411",
 ]
 bench = [
-    "duckdb>=1.4",
-    "psutil>=7.0",
+    "duckdb>=1.5.5",
+    "psutil>=7.2.2",
 ]
 autoresearch = [
-    "duckdb>=1.4",
-    "psutil>=7.0",
-    "py-spy>=0.4.1",
+    "duckdb>=1.5.5",
+    "psutil>=7.2.2",
+    "py-spy>=0.4.2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["py-ltseq/tests"]
-pythonpath = ["."] # 确保测试时能找到当前目录
+pythonpath = ["."] # Ensure tests can find the current directory

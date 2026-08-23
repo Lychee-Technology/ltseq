@@ -70,8 +70,8 @@ class ColumnExpr(Expr):
         raises a clear ValueError instead of being turned into a generic
         ``CallExpr("over")`` by ``__getattr__``."""
         raise ValueError(
-            f".over() 只用于窗口表达式（排名函数或序列窗口 shift/rolling/diff/cum_*）；"
-            f"列 {self.name!r} 不是窗口表达式，不能加 .over()。"
+            f".over() is only for window expressions (ranking functions or sequence windows shift/rolling/diff/cum_*); "
+            f"column {self.name!r} is not a window expression and cannot use .over()."
         )
 
     def __getattr__(self, method_name: str):
@@ -219,8 +219,8 @@ class CallExpr(Expr):
         """
         if self.func not in _RANKING_FUNCS and not _is_sequence_window(self):
             raise ValueError(
-                f".over() 只用于窗口表达式（排名函数或序列窗口 shift/rolling/diff/cum_*）；"
-                f"{self.func}() 不是窗口表达式，不能加 .over()。"
+                f".over() is only for window expressions (ranking functions or sequence windows shift/rolling/diff/cum_*); "
+                f"{self.func}() is not a window expression and cannot use .over()."
             )
         # Mutual exclusion: partition_by must not be given both here and via the
         # sequence window's `partition_by=` kwarg. For rolling(n).agg() the kwarg
@@ -233,8 +233,8 @@ class CallExpr(Expr):
             )
             if "partition_by" in kwarg_host.kwargs:
                 raise ValueError(
-                    f"{self.func}() 同时收到 .over(partition_by=) 与 partition_by= kwarg；"
-                    f"二者互斥，请二选一。"
+                    f"{self.func}() received both .over(partition_by=) and partition_by= kwarg; "
+                    f"they are mutually exclusive — use one or the other."
                 )
         # Mirror sort(): `descending` wins when both are supplied, so
         # over(desc=X, descending=Y) and sort(desc=X, descending=Y) agree.
