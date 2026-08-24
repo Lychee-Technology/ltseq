@@ -1,7 +1,7 @@
 """Base expression class for LTSeq."""
 
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, NoReturn, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .types import CallExpr
@@ -651,7 +651,7 @@ class Expr(ABC):
 
         return UnaryOpExpr("Not", cast(Any, self))
 
-    def __bool__(self) -> bool:
+    def __bool__(self) -> NoReturn:
         """Refuse truthiness: Python's `and`/`or`/`not`/`in`/ternary/chained
         comparisons call bool() and would silently drop conditions otherwise."""
         raise TypeError(
