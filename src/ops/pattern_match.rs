@@ -284,6 +284,59 @@ fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
     }
 }
 
+pub(crate) struct StartsWithFastPathPlan {
+    pub(crate) column: String,
+    pub(crate) prefixes: Vec<String>,
+}
+
+/// Detect the fast-path shape: every predicate is `col.starts_with("lit")`
+/// on the SAME string column. Returns `None` for any other shape (mixed
+/// columns, non-literal arguments, other functions).
+pub(crate) fn same_string_column_starts_with_plan(
+    step_predicates: &[PyExpr],
+) -> Option<StartsWithFastPathPlan> {
+    if step_predicates.is_empty() {
+        return None;
+    }
+
+    let mut column_name: Option<String> = None;
+    let mut prefixes = Vec::with_capacity(step_predicates.len());
+
+    for expr in step_predicates {
+        let PyExpr::Call { func, args, on, kwargs } = expr else {
+            return None;
+        };
+        if !kwargs.is_empty() || args.len() != 1 {
+            return None;
+        }
+        if func != "starts_with" && func != "str_starts_with" {
+            return None;
+        }
+        let PyExpr::Column(name) = on.as_ref() else {
+            return None;
+        };
+        let PyExpr::Literal { value, dtype } = &args[0] else {
+            return None;
+        };
+        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
+            return None;
+        }
+        let prefix = value.clone();
+
+        match &column_name {
+            Some(existing) if existing != name => return None,
+            Some(_) => {}
+            None => column_name = Some(name.clone()),
+        }
+        prefixes.push(prefix);
+    }
+
+    Some(StartsWithFastPathPlan {
+        column: column_name?,
+        prefixes,
+    })
+}
+
 /// Count sequential prefix matches on a string column, dispatching on the
 /// concrete Arrow string array type. Returns `None` if the column is not a
 /// supported string array — callers must then fall back to vectorized
@@ -942,9 +995,7 @@ pub fn search_pattern_count_impl(
         // The lazy path applies only when steps 2..N are all `starts_with`
         // on the SAME string column — the prefixes are checked against that
         // column, whichever it is (never a hardcoded name).
-        let fast_plan = crate::ops::parallel_scan::same_string_column_starts_with_plan(
-            &py_exprs[1..],
-        );
+        let fast_plan = same_string_column_starts_with_plan(&py_exprs[1..]);
         let same_partition = |i: usize| {
             partition_ids
                 .as_ref()

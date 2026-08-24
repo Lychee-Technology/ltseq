@@ -17,7 +17,10 @@ use crate::error::LtseqError;
 use crate::ops::linear_scan::{
     build_metadata_table, extract_referenced_columns, streaming_fuse_eval, StreamState,
 };
-use crate::ops::pattern_match::{count_prefix_matches_on, eval_predicate};
+use crate::ops::pattern_match::{
+    count_prefix_matches_on, eval_predicate, same_string_column_starts_with_plan,
+    StartsWithFastPathPlan,
+};
 use crate::types::PyExpr;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
@@ -32,59 +35,6 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::Arc;
-
-pub(crate) struct StartsWithFastPathPlan {
-    pub(crate) column: String,
-    pub(crate) prefixes: Vec<String>,
-}
-
-/// Detect the fast-path shape: every predicate is `col.starts_with("lit")`
-/// on the SAME string column. Returns `None` for any other shape (mixed
-/// columns, non-literal arguments, other functions).
-pub(crate) fn same_string_column_starts_with_plan(
-    step_predicates: &[PyExpr],
-) -> Option<StartsWithFastPathPlan> {
-    if step_predicates.is_empty() {
-        return None;
-    }
-
-    let mut column_name: Option<String> = None;
-    let mut prefixes = Vec::with_capacity(step_predicates.len());
-
-    for expr in step_predicates {
-        let PyExpr::Call { func, args, on, kwargs } = expr else {
-            return None;
-        };
-        if !kwargs.is_empty() || args.len() != 1 {
-            return None;
-        }
-        if func != "starts_with" && func != "str_starts_with" {
-            return None;
-        }
-        let PyExpr::Column(name) = on.as_ref() else {
-            return None;
-        };
-        let PyExpr::Literal { value, dtype } = &args[0] else {
-            return None;
-        };
-        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
-            return None;
-        }
-        let prefix = value.clone();
-
-        match &column_name {
-            Some(existing) if existing != name => return None,
-            Some(_) => {}
-            None => column_name = Some(name.clone()),
-        }
-        prefixes.push(prefix);
-    }
-
-    Some(StartsWithFastPathPlan {
-        column: column_name?,
-        prefixes,
-    })
-}
 
 // ============================================================================
 // Strategy 1: Sequential Streaming for R2 (group_ordered)
@@ -872,7 +822,6 @@ fn count_cross_rg_boundary_patterns_from_info(
                         &combined,
                         pending_batch.num_rows(),
                         step_predicates,
-                        num_steps,
                         name_to_idx,
                     )?;
                 }
@@ -918,9 +867,9 @@ fn count_seam_matches(
     combined: &RecordBatch,
     pending_len: usize,
     step_predicates: &[PyExpr],
-    num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
 ) -> Result<usize, String> {
+    let num_steps = step_predicates.len();
     let n = combined.num_rows();
     let max_start = n.saturating_sub(num_steps - 1);
 
