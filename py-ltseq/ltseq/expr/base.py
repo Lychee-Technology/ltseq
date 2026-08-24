@@ -651,20 +651,20 @@ class Expr(ABC):
 
         return UnaryOpExpr("Not", cast(Any, self))
 
-    def __abs__(self) -> "CallExpr":
-        """Absolute value operator: abs(expr)"""
-        from .types import CallExpr
-
-        return CallExpr("abs", (self,), {}, on=None)
-
     def __bool__(self) -> bool:
         """Refuse truthiness: Python's `and`/`or`/`not`/`in`/ternary/chained
         comparisons call bool() and would silently drop conditions otherwise."""
         raise TypeError(
             "LTSeq expressions cannot be used in a boolean context "
-            "(and/or/not/if/in/chained comparison). "
+            "(and/or/not/if/in/ternary/chained comparison). "
             "Use & | ~ to combine conditions, e.g. (r.a > 2) & (r.b < 1.5)"
         )
+
+    def __abs__(self) -> "CallExpr":
+        """Absolute value operator: abs(expr)"""
+        from .types import CallExpr
+
+        return CallExpr("abs", (self,), {}, on=None)
 
     # Right-hand operators (for reversed operations like 5 + r.col)
     def __radd__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]

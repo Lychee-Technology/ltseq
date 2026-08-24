@@ -579,9 +579,10 @@ class TestExprBoolContext:
     """
 
     def test_bool_raises_type_error_with_guidance(self):
-        """bool(expr) raises TypeError mentioning & | ~ operators."""
-        with pytest.raises(TypeError, match=r"&"):
+        """bool(expr) raises TypeError mentioning & | ~ operators and misuse forms."""
+        with pytest.raises(TypeError, match=r"ternary") as exc_info:
             bool(ColumnExpr("a") > 2)
+        assert "&" in str(exc_info.value)
 
     def test_and_raises(self):
         """`expr1 and expr2` raises instead of silently dropping the left side."""
