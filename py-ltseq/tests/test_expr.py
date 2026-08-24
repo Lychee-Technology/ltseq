@@ -569,3 +569,60 @@ class TestFillNullEndToEnd:
         vals = df["safe_val"].tolist()
         assert vals[0] == "hello"
         assert vals[2] == "world"
+
+
+class TestExprBoolContext:
+    """Expr must raise in boolean contexts instead of silently degrading (issue #140).
+
+    Without __bool__, Python's default truthiness (always True) silently drops
+    conditions in `and`/`or`/`not`/`in`/ternary/chained comparisons.
+    """
+
+    def test_bool_raises_type_error_with_guidance(self):
+        """bool(expr) raises TypeError mentioning & | ~ operators."""
+        with pytest.raises(TypeError, match=r"&"):
+            bool(ColumnExpr("a") > 2)
+
+    def test_and_raises(self):
+        """`expr1 and expr2` raises instead of silently dropping the left side."""
+        with pytest.raises(TypeError):
+            (ColumnExpr("a") > 2) and (ColumnExpr("b") < 1.5)
+
+    def test_or_raises(self):
+        """`expr1 or expr2` raises instead of silently returning the left side."""
+        with pytest.raises(TypeError):
+            (ColumnExpr("a") > 2) or (ColumnExpr("b") < 1.5)
+
+    def test_not_raises(self):
+        """`not expr` raises instead of returning a Python bool."""
+        with pytest.raises(TypeError):
+            not (ColumnExpr("a") > 2)
+
+    def test_in_raises(self):
+        """`expr in [...]` raises instead of returning a Python bool."""
+        with pytest.raises(TypeError):
+            ColumnExpr("a") in [1, 2, 3]
+
+    def test_ternary_raises(self):
+        """`x if expr else y` raises instead of swallowing the condition."""
+        with pytest.raises(TypeError):
+            ColumnExpr("x") if ColumnExpr("a") > 2 else ColumnExpr("y")
+
+    def test_chained_comparison_raises(self):
+        """`1 < expr < 5` raises instead of dropping the first comparison."""
+        with pytest.raises(TypeError):
+            1 < ColumnExpr("a") < 5
+
+    def test_if_expr_raises(self):
+        """`if expr:` raises instead of always taking the branch."""
+        with pytest.raises(TypeError):
+            if ColumnExpr("a") == 1:
+                pass
+
+    def test_filter_with_and_raises_with_guidance(self, tmp_path):
+        """t.filter(lambda r: cond1 and cond2) surfaces a TypeError with & guidance."""
+        csv = tmp_path / "t.csv"
+        csv.write_text("a,b\n1,1.0\n3,1.2\n4,2.0\n")
+        t = LTSeq.read_csv(str(csv))
+        with pytest.raises(TypeError, match=r"&"):
+            t.filter(lambda r: (r.a > 2) and (r.b < 1.5))
