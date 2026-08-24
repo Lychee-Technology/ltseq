@@ -17,12 +17,15 @@ use crate::error::LtseqError;
 use crate::ops::linear_scan::{
     build_metadata_table, extract_referenced_columns, streaming_fuse_eval, StreamState,
 };
-use crate::ops::pattern_match::eval_predicate;
+use crate::ops::pattern_match::{
+    count_prefix_matches_on, eval_predicate, same_string_column_starts_with_plan,
+    StartsWithFastPathPlan,
+};
 use crate::types::PyExpr;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch, StringArray,
-    StringViewArray, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch, UInt32Array,
+    UInt64Array,
 };
 use datafusion::arrow::compute::concat_batches;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -32,56 +35,6 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::Arc;
-
-struct StartsWithFastPathPlan {
-    column: String,
-    prefixes: Vec<String>,
-}
-
-fn same_string_column_starts_with_plan(
-    step_predicates: &[PyExpr],
-) -> Option<StartsWithFastPathPlan> {
-    if step_predicates.is_empty() {
-        return None;
-    }
-
-    let mut column_name: Option<String> = None;
-    let mut prefixes = Vec::with_capacity(step_predicates.len());
-
-    for expr in step_predicates {
-        let PyExpr::Call { func, args, on, kwargs } = expr else {
-            return None;
-        };
-        if !kwargs.is_empty() || args.len() != 1 {
-            return None;
-        }
-        if func != "starts_with" && func != "str_starts_with" {
-            return None;
-        }
-        let PyExpr::Column(name) = on.as_ref() else {
-            return None;
-        };
-        let PyExpr::Literal { value, dtype } = &args[0] else {
-            return None;
-        };
-        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
-            return None;
-        }
-        let prefix = value.clone();
-
-        match &column_name {
-            Some(existing) if existing != name => return None,
-            Some(_) => {}
-            None => column_name = Some(name.clone()),
-        }
-        prefixes.push(prefix);
-    }
-
-    Some(StartsWithFastPathPlan {
-        column: column_name?,
-        prefixes,
-    })
-}
 
 // ============================================================================
 // Strategy 1: Sequential Streaming for R2 (group_ordered)
@@ -511,21 +464,36 @@ pub fn parallel_streaming_group_count(
     // 5. Sum internal boundary counts.
     let total_internal: usize = chunk_results.iter().map(|r| r.count).sum();
 
-    // 6. Sequential seam pass: N-1 checks between adjacent chunks.
+    // 6. Sequential seam pass between non-empty chunks. Empty chunks are
+    //    skipped: each non-empty chunk's first row is checked against the
+    //    last row of the nearest preceding non-empty chunk.
     let mut seam_count = 0usize;
-    for i in 0..chunk_results.len().saturating_sub(1) {
-        let Some(ref last_state) = chunk_results[i].last_row_state else {
-            continue; // chunk_i was entirely empty
-        };
-        let Some(ref first_batch) = chunk_results[i + 1].first_row_batch else {
-            continue; // chunk_{i+1} was entirely empty
-        };
-
-        let mut result = vec![false; 1];
-        if streaming_fuse_eval(predicate, first_batch, &name_to_idx, last_state, &mut result)
-            && result[0]
-        {
-            seam_count += 1;
+    let mut prev_state: Option<&StreamState> = None;
+    for (idx, chunk) in chunk_results.iter().enumerate() {
+        if let Some(first_batch) = &chunk.first_row_batch {
+            match prev_state {
+                Some(last_state) => {
+                    let mut result = vec![false; 1];
+                    if streaming_fuse_eval(
+                        predicate,
+                        first_batch,
+                        &name_to_idx,
+                        last_state,
+                        &mut result,
+                    ) && result[0]
+                    {
+                        seam_count += 1;
+                    }
+                }
+                // Every earlier chunk was empty, so this chunk's first row is
+                // the first row of the whole stream — always a session start.
+                // (Chunk 0 counts its own first row internally.)
+                None if idx > 0 => seam_count += 1,
+                None => {}
+            }
+        }
+        if let Some(state) = &chunk.last_row_state {
+            prev_state = Some(state);
         }
     }
 
@@ -655,10 +623,10 @@ pub fn parallel_pattern_match_count(
     let boundary_count = count_cross_rg_boundary_patterns_from_info(
         &rg_results,
         step_predicates,
-        fast_path_plan.as_ref(),
         num_steps,
         &name_to_idx,
-    );
+    )
+    .map_err(LtseqError::Runtime)?;
 
     let total_count = intra_rg_count + boundary_count;
 
@@ -749,7 +717,7 @@ fn read_match_and_extract_boundary(
         fast_path_plan,
         num_steps,
         name_to_idx,
-    );
+    )?;
 
     // Extract boundary info for cross-RG matching
     let first_key = part_values.value(0);
@@ -813,214 +781,125 @@ fn coerce_partition_to_i64(col: &ArrayRef) -> Option<Int64Array> {
 
 /// Count cross-RG boundary patterns using pre-extracted boundary info.
 ///
-/// Each RgMatchResult has a small RgBoundaryInfo with the last few rows of
-/// the last partition and the first few rows of the first partition.
-/// We check adjacent RGs: if RG[i].last_key == RG[i+1].first_key, we
-/// concatenate the tail+head and check for cross-boundary matches.
+/// Walks the row groups in order, carrying a "pending tail" — the last
+/// `num_steps - 1` rows of the stream's trailing partition. The tail can
+/// accumulate across several short row groups, so matches spanning three or
+/// more row groups (and empty row groups in between) are counted correctly.
+///
+/// At each non-empty RG whose first partition continues the pending one, the
+/// tail is concatenated with the RG's head and only matches that actually
+/// cross the seam (start in the tail, end in the head) are counted — matches
+/// fully inside either side were already counted intra-RG or at an earlier
+/// seam.
 fn count_cross_rg_boundary_patterns_from_info(
     rg_results: &[RgMatchResult],
     step_predicates: &[PyExpr],
-    fast_path_plan: Option<&StartsWithFastPathPlan>,
     num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
-) -> usize {
-    if rg_results.len() < 2 || num_steps < 2 {
-        return 0;
+) -> Result<usize, String> {
+    if num_steps < 2 {
+        return Ok(0);
     }
 
+    let keep = num_steps - 1;
     let mut boundary_count: usize = 0;
+    let mut pending: Option<(i64, RecordBatch)> = None;
 
-    for i in 0..rg_results.len() - 1 {
-        let curr_boundary = match &rg_results[i].boundary {
-            Some(b) => b,
-            None => continue,
-        };
-        let next_boundary = match &rg_results[i + 1].boundary {
-            Some(b) => b,
-            None => continue,
-        };
-
-        if curr_boundary.last_key != next_boundary.first_key {
-            continue; // Different users — no cross-boundary match possible
-        }
-
-        let tail_slice = &curr_boundary.last_tail;
-        let head_slice = &next_boundary.first_head;
-
-        // Concatenate tail + head into a small batch
-        let schema = tail_slice.schema();
-        let combined = match concat_batches(&schema, &[tail_slice.clone(), head_slice.clone()]) {
-            Ok(b) => b,
-            Err(_) => {
-                let small = vec![tail_slice.clone(), head_slice.clone()];
-                match unify_and_concat_batches(&small) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                }
-            }
-        };
-
-        let n = combined.num_rows();
-        if n < num_steps {
+    for result in rg_results {
+        let Some(b) = &result.boundary else {
+            // Empty row group: contributes no rows, the pending tail carries over.
             continue;
+        };
+
+        if let Some((pending_key, pending_batch)) = &pending {
+            if *pending_key == b.first_key
+                && pending_batch.num_rows() > 0
+                && b.first_head.num_rows() > 0
+            {
+                let combined = concat_boundary_pair(pending_batch, &b.first_head)?;
+                if combined.num_rows() >= num_steps {
+                    boundary_count += count_seam_matches(
+                        &combined,
+                        pending_batch.num_rows(),
+                        step_predicates,
+                        name_to_idx,
+                    )?;
+                }
+            }
         }
 
-        // Pattern match on this small boundary batch
-        // Only count matches that actually cross the boundary (start in tail, end in head)
-        let tail_len = tail_slice.num_rows();
-
-        let fast_path = fast_path_plan.and_then(|plan| {
-            name_to_idx
-                .get(plan.column.as_str())
-                .copied()
-                .map(|col_idx| (col_idx, plan))
+        pending = Some(match pending.take() {
+            Some((pending_key, pending_batch))
+                if pending_key == b.first_key && b.first_key == b.last_key =>
+            {
+                // The whole row group belongs to the pending partition:
+                // extend the tail and keep only the last `keep` rows.
+                let merged = concat_boundary_pair(&pending_batch, &b.last_tail)?;
+                let rows = merged.num_rows();
+                let start = rows.saturating_sub(keep);
+                (b.last_key, merged.slice(start, rows - start))
+            }
+            _ => (b.last_key, b.last_tail.clone()),
         });
-
-        let max_start = n.saturating_sub(num_steps - 1);
-
-        if let Some((fast_col_idx, plan)) = fast_path {
-            let url_col = combined.column(fast_col_idx);
-            let prefixes = &plan.prefixes;
-            let step1_prefix = prefixes[0].as_str();
-            let remaining_prefixes: Vec<&str> = prefixes[1..].iter().map(|p| p.as_str()).collect();
-
-            if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-                if prefixes.len() == 3 {
-                    let step2_prefix = prefixes[1].as_str();
-                    let step3_prefix = prefixes[2].as_str();
-                    for i in 0..max_start {
-                        if i >= tail_len {
-                            break;
-                        }
-                        let row1 = i + 1;
-                        let row2 = i + 2;
-                        if row2 < tail_len {
-                            continue;
-                        }
-                        if str_arr.is_null(i)
-                            || str_arr.is_null(row1)
-                            || str_arr.is_null(row2)
-                            || !str_arr.value(i).starts_with(step1_prefix)
-                            || !str_arr.value(row1).starts_with(step2_prefix)
-                            || !str_arr.value(row2).starts_with(step3_prefix)
-                        {
-                            continue;
-                        }
-                        boundary_count += 1;
-                    }
-                } else {
-                    for i in 0..max_start {
-                        if i >= tail_len {
-                            break;
-                        }
-                        let last_row = i + num_steps - 1;
-                        if last_row < tail_len {
-                            continue;
-                        }
-                        if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
-                            continue;
-                        }
-                        let mut all_match = true;
-                        for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
-                            let row = i + step_offset + 1;
-                            if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                                all_match = false;
-                                break;
-                            }
-                        }
-                        if all_match {
-                            boundary_count += 1;
-                        }
-                    }
-                }
-            } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-                if prefixes.len() == 3 {
-                    let step2_prefix = prefixes[1].as_str();
-                    let step3_prefix = prefixes[2].as_str();
-                    for i in 0..max_start {
-                        if i >= tail_len {
-                            break;
-                        }
-                        let row1 = i + 1;
-                        let row2 = i + 2;
-                        if row2 < tail_len {
-                            continue;
-                        }
-                        if str_arr.is_null(i)
-                            || str_arr.is_null(row1)
-                            || str_arr.is_null(row2)
-                            || !str_arr.value(i).starts_with(step1_prefix)
-                            || !str_arr.value(row1).starts_with(step2_prefix)
-                            || !str_arr.value(row2).starts_with(step3_prefix)
-                        {
-                            continue;
-                        }
-                        boundary_count += 1;
-                    }
-                } else {
-                    for i in 0..max_start {
-                        if i >= tail_len {
-                            break;
-                        }
-                        let last_row = i + num_steps - 1;
-                        if last_row < tail_len {
-                            continue;
-                        }
-                        if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
-                            continue;
-                        }
-                        let mut all_match = true;
-                        for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
-                            let row = i + step_offset + 1;
-                            if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                                all_match = false;
-                                break;
-                            }
-                        }
-                        if all_match {
-                            boundary_count += 1;
-                        }
-                    }
-                }
-            }
-        } else {
-            // General fallback for cross-boundary
-            let step_masks: Vec<BooleanArray> = step_predicates
-                .iter()
-                .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
-                .collect();
-
-            if step_masks.len() != step_predicates.len() {
-                continue;
-            }
-
-            for i in 0..max_start {
-                if i >= tail_len {
-                    break;
-                }
-                let last_row = i + num_steps - 1;
-                if last_row < tail_len {
-                    continue;
-                }
-                if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-                    continue;
-                }
-                let mut all_match = true;
-                for (step_offset, mask) in step_masks[1..].iter().enumerate() {
-                    let row = i + step_offset + 1;
-                    if !mask.is_valid(row) || !mask.value(row) {
-                        all_match = false;
-                        break;
-                    }
-                }
-                if all_match {
-                    boundary_count += 1;
-                }
-            }
-        }
     }
 
-    boundary_count
+    Ok(boundary_count)
+}
+
+/// Concatenate two boundary slices, unifying schemas if the row groups
+/// produced different Arrow string encodings.
+fn concat_boundary_pair(a: &RecordBatch, b: &RecordBatch) -> Result<RecordBatch, String> {
+    let schema = a.schema();
+    match concat_batches(&schema, &[a.clone(), b.clone()]) {
+        Ok(batch) => Ok(batch),
+        Err(_) => unify_and_concat_batches(&[a.clone(), b.clone()])
+            .map_err(|e| format!("PARALLEL_FALLBACK: boundary concat failed: {}", e)),
+    }
+}
+
+/// Count matches in a seam batch that start in the pending tail
+/// (`i < pending_len`) and end in the head (`i + num_steps - 1 >= pending_len`).
+///
+/// The batch is tiny (at most `2 * (num_steps - 1)` rows), so predicates are
+/// evaluated uniformly via `eval_predicate`; failures propagate as
+/// `PARALLEL_FALLBACK` instead of being treated as "no match".
+fn count_seam_matches(
+    combined: &RecordBatch,
+    pending_len: usize,
+    step_predicates: &[PyExpr],
+    name_to_idx: &HashMap<String, usize>,
+) -> Result<usize, String> {
+    let num_steps = step_predicates.len();
+    let n = combined.num_rows();
+    let max_start = n.saturating_sub(num_steps - 1);
+
+    let step_masks: Vec<BooleanArray> = step_predicates
+        .iter()
+        .map(|expr| {
+            eval_predicate(expr, combined, name_to_idx).map_err(|e| {
+                format!("PARALLEL_FALLBACK: predicate evaluation failed: {}", e)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut count = 0;
+    for i in 0..max_start.min(pending_len) {
+        if i + num_steps - 1 < pending_len {
+            continue; // fully inside the tail — counted before this seam
+        }
+        let mut all_match = true;
+        for (step_offset, mask) in step_masks.iter().enumerate() {
+            let row = i + step_offset;
+            if !mask.is_valid(row) || !mask.value(row) {
+                all_match = false;
+                break;
+            }
+        }
+        if all_match {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Unify schemas across batches and concatenate.
@@ -1128,6 +1007,10 @@ fn unify_data_type(
 }
 
 /// Count pattern matches within a single row group batch.
+///
+/// Evaluation failures propagate as `Err("PARALLEL_FALLBACK: …")` so the
+/// caller degrades to the general path — a failure must never be reported
+/// as a zero count.
 fn count_patterns_in_rg_batch(
     combined: &RecordBatch,
     partition_boundaries: &[bool],
@@ -1135,168 +1018,65 @@ fn count_patterns_in_rg_batch(
     fast_path_plan: Option<&StartsWithFastPathPlan>,
     num_steps: usize,
     name_to_idx: &HashMap<String, usize>,
-) -> usize {
+) -> Result<usize, String> {
     let n = combined.num_rows();
     if n < num_steps {
-        return 0;
+        return Ok(0);
     }
 
     // Pattern match: skip matches that span partition boundaries
     let max_start = n.saturating_sub(num_steps - 1);
-    let mut count: usize = 0;
+    let same_partition =
+        |i: usize| (1..num_steps).all(|offset| !partition_boundaries[i + offset]);
 
-    // Try fast path: all remaining predicates are starts_with on same column
-    let fast_path = fast_path_plan.and_then(|plan| {
-        name_to_idx
-            .get(plan.column.as_str())
-            .copied()
-            .map(|col_idx| (col_idx, plan))
-    });
-
-    if let Some((fast_col_idx, plan)) = fast_path {
-        let url_col = combined.column(fast_col_idx);
-        let prefixes = &plan.prefixes;
-        let step1_prefix = prefixes[0].as_str();
-        let remaining_prefixes: Vec<&str> = prefixes[1..].iter().map(|p| p.as_str()).collect();
-
-        if let Some(str_arr) = url_col.as_any().downcast_ref::<StringViewArray>() {
-            if prefixes.len() == 3 {
-                let step2_prefix = prefixes[1].as_str();
-                let step3_prefix = prefixes[2].as_str();
-                for i in 0..max_start {
-                    let row1 = i + 1;
-                    let row2 = i + 2;
-                    if partition_boundaries[row1] || partition_boundaries[row2] {
-                        continue;
-                    }
-                    if str_arr.is_null(i)
-                        || str_arr.is_null(row1)
-                        || str_arr.is_null(row2)
-                        || !str_arr.value(i).starts_with(step1_prefix)
-                        || !str_arr.value(row1).starts_with(step2_prefix)
-                        || !str_arr.value(row2).starts_with(step3_prefix)
-                    {
-                        continue;
-                    }
-                    count += 1;
-                }
-            } else {
-                for i in 0..max_start {
-                    if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
-                        continue;
-                    }
-                    // Check that all rows i..i+num_steps are in the same partition
-                    let mut crosses_boundary = false;
-                    for offset in 1..num_steps {
-                        if partition_boundaries[i + offset] {
-                            crosses_boundary = true;
-                            break;
-                        }
-                    }
-                    if crosses_boundary {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        count += 1;
-                    }
-                }
-            }
-        } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-            if prefixes.len() == 3 {
-                let step2_prefix = prefixes[1].as_str();
-                let step3_prefix = prefixes[2].as_str();
-                for i in 0..max_start {
-                    let row1 = i + 1;
-                    let row2 = i + 2;
-                    if partition_boundaries[row1] || partition_boundaries[row2] {
-                        continue;
-                    }
-                    if str_arr.is_null(i)
-                        || str_arr.is_null(row1)
-                        || str_arr.is_null(row2)
-                        || !str_arr.value(i).starts_with(step1_prefix)
-                        || !str_arr.value(row1).starts_with(step2_prefix)
-                        || !str_arr.value(row2).starts_with(step3_prefix)
-                    {
-                        continue;
-                    }
-                    count += 1;
-                }
-            } else {
-                for i in 0..max_start {
-                    if str_arr.is_null(i) || !str_arr.value(i).starts_with(step1_prefix) {
-                        continue;
-                    }
-                    let mut crosses_boundary = false;
-                    for offset in 1..num_steps {
-                        if partition_boundaries[i + offset] {
-                            crosses_boundary = true;
-                            break;
-                        }
-                    }
-                    if crosses_boundary {
-                        continue;
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in remaining_prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        count += 1;
-                    }
-                }
-            }
-        }
-    } else {
-        // General fallback
-        let step_masks: Vec<BooleanArray> = step_predicates
-            .iter()
-            .filter_map(|expr| eval_predicate(expr, &combined, name_to_idx).ok())
-            .collect();
-
-        if step_masks.len() != step_predicates.len() {
-            return 0;
-        }
-
-        for i in 0..max_start {
-            if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
-                continue;
-            }
-            let mut crosses_boundary = false;
-            for offset in 1..num_steps {
-                if partition_boundaries[i + offset] {
-                    crosses_boundary = true;
-                    break;
-                }
-            }
-            if crosses_boundary {
-                continue;
-            }
-            let mut all_match = true;
-            for (step_offset, mask) in step_masks[1..].iter().enumerate() {
-                let row = i + step_offset + 1;
-                if !mask.is_valid(row) || !mask.value(row) {
-                    all_match = false;
-                    break;
-                }
-            }
-            if all_match {
-                count += 1;
+    // Fast path: all predicates are starts_with on the same string column.
+    // If the column's array type is unsupported, fall through to the general
+    // path (which handles it or errors explicitly) instead of returning 0.
+    if let Some(plan) = fast_path_plan {
+        if let Some(col_idx) = name_to_idx.get(plan.column.as_str()) {
+            let prefixes: Vec<&str> = plan.prefixes.iter().map(|p| p.as_str()).collect();
+            if let Some(count) = count_prefix_matches_on(
+                combined.column(*col_idx),
+                None,
+                &prefixes,
+                max_start,
+                same_partition,
+            ) {
+                return Ok(count);
             }
         }
     }
 
-    count
+    // General path: vectorized predicate evaluation.
+    let step_masks: Vec<BooleanArray> = step_predicates
+        .iter()
+        .map(|expr| {
+            eval_predicate(expr, combined, name_to_idx).map_err(|e| {
+                format!("PARALLEL_FALLBACK: predicate evaluation failed: {}", e)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut count: usize = 0;
+    for i in 0..max_start {
+        if !step_masks[0].is_valid(i) || !step_masks[0].value(i) {
+            continue;
+        }
+        if !same_partition(i) {
+            continue;
+        }
+        let mut all_match = true;
+        for (step_offset, mask) in step_masks[1..].iter().enumerate() {
+            let row = i + step_offset + 1;
+            if !mask.is_valid(row) || !mask.value(row) {
+                all_match = false;
+                break;
+            }
+        }
+        if all_match {
+            count += 1;
+        }
+    }
+
+    Ok(count)
 }

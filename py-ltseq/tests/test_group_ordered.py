@@ -189,3 +189,36 @@ class TestNestedTableLenAndToPandas:
         assert "date" in df.columns
         assert "price" in df.columns
         assert "is_up" in df.columns
+
+
+class TestGroupCountEmptyRowGroupSeam:
+    """Regression for issue #139 (follow-up): the parallel group-count seam
+    pass skipped the boundary check entirely when an adjacent chunk was empty,
+    undercounting groups."""
+
+    def test_group_count_across_empty_row_group(self, tmp_path):
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
+
+        path = tmp_path / "empty_rg_groups.parquet"
+        schema = pa.schema([("ts", pa.int64()), ("session", pa.int64())])
+
+        writer = pq.ParquetWriter(path, schema)
+        writer.write_table(pa.table({"ts": [1], "session": [1]}, schema=schema))
+        writer.write_table(
+            pa.table({"ts": [], "session": []}, schema=schema)
+        )
+        writer.write_table(
+            pa.table({"ts": [2, 3], "session": [2, 2]}, schema=schema)
+        )
+        writer.close()
+
+        t = LTSeq.read_parquet(str(path)).assume_sorted("ts")
+        count = (
+            t.group_ordered(lambda r: r.session != r.session.shift(1))
+            .first()
+            .count()
+        )
+
+        # Sessions 1 and 2 → two groups, even with an empty row group between.
+        assert count == 2

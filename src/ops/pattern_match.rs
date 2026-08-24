@@ -150,30 +150,42 @@ fn eval_expr(
 }
 
 /// Evaluate a binary operation on two arrays.
+///
+/// Operator names are parsed by the transpiler's `op_str_to_operator` — the
+/// single source of truth shared with the DataFusion path — so the serializer
+/// (expr/base.py), the transpiler, and this evaluator can never drift apart.
 fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use datafusion::arrow::compute::kernels::boolean;
     use datafusion::arrow::compute::kernels::cmp;
+    use datafusion::arrow::compute::kernels::numeric;
+    use datafusion::logical_expr::Operator;
 
-    match op {
-        "Eq" => Ok(Arc::new(
+    let operator = crate::transpiler::op_str_to_operator(op)?;
+
+    match operator {
+        Operator::Eq => Ok(Arc::new(
             cmp::eq(left, right).map_err(|e| format!("Eq failed: {}", e))?,
         )),
-        "NotEq" => Ok(Arc::new(
-            cmp::neq(left, right).map_err(|e| format!("NotEq failed: {}", e))?,
+        Operator::NotEq => Ok(Arc::new(
+            cmp::neq(left, right).map_err(|e| format!("Ne failed: {}", e))?,
         )),
-        "Lt" => Ok(Arc::new(
+        Operator::Lt => Ok(Arc::new(
             cmp::lt(left, right).map_err(|e| format!("Lt failed: {}", e))?,
         )),
-        "LtE" => Ok(Arc::new(
-            cmp::lt_eq(left, right).map_err(|e| format!("LtE failed: {}", e))?,
+        Operator::LtEq => Ok(Arc::new(
+            cmp::lt_eq(left, right).map_err(|e| format!("Le failed: {}", e))?,
         )),
-        "Gt" => Ok(Arc::new(
+        Operator::Gt => Ok(Arc::new(
             cmp::gt(left, right).map_err(|e| format!("Gt failed: {}", e))?,
         )),
-        "GtE" => Ok(Arc::new(
-            cmp::gt_eq(left, right).map_err(|e| format!("GtE failed: {}", e))?,
+        Operator::GtEq => Ok(Arc::new(
+            cmp::gt_eq(left, right).map_err(|e| format!("Ge failed: {}", e))?,
         )),
-        "And" => {
+        Operator::Plus => numeric::add(left, right).map_err(|e| format!("Add failed: {}", e)),
+        Operator::Minus => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
+        Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
+        Operator::Divide => numeric::div(left, right).map_err(|e| format!("Div failed: {}", e)),
+        Operator::And => {
             let l = left
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -186,7 +198,7 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 boolean::and(l, r).map_err(|e| format!("AND failed: {}", e))?,
             ))
         }
-        "Or" => {
+        Operator::Or => {
             let l = left
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -199,7 +211,12 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 boolean::or(l, r).map_err(|e| format!("OR failed: {}", e))?,
             ))
         }
-        _ => Err(format!("Unsupported binary op in pattern_match: {}", op)),
+        // Known to the transpiler but not implemented here (e.g. Modulo):
+        // error explicitly so the parallel path falls back and never counts 0.
+        other => Err(format!(
+            "Unsupported binary operator in search_pattern predicate: {:?}",
+            other
+        )),
     }
 }
 
@@ -267,20 +284,119 @@ fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
     }
 }
 
-/// Try to extract a starts_with prefix from a predicate expression.
-/// Returns Some(prefix) if the expression is `column.starts_with("prefix")`,
-/// None otherwise.
-pub(crate) fn extract_starts_with_prefix(expr: &PyExpr) -> Option<String> {
-    match expr {
-        PyExpr::Call { func, args, on: _, kwargs: _ } => {
-            if (func == "starts_with" || func == "str_starts_with") && args.len() == 1 {
-                extract_literal_string(&args[0]).ok()
-            } else {
-                None
+pub(crate) struct StartsWithFastPathPlan {
+    pub(crate) column: String,
+    pub(crate) prefixes: Vec<String>,
+}
+
+/// Detect the fast-path shape: every predicate is `col.starts_with("lit")`
+/// on the SAME string column. Returns `None` for any other shape (mixed
+/// columns, non-literal arguments, other functions).
+pub(crate) fn same_string_column_starts_with_plan(
+    step_predicates: &[PyExpr],
+) -> Option<StartsWithFastPathPlan> {
+    if step_predicates.is_empty() {
+        return None;
+    }
+
+    let mut column_name: Option<String> = None;
+    let mut prefixes = Vec::with_capacity(step_predicates.len());
+
+    for expr in step_predicates {
+        let PyExpr::Call { func, args, on, kwargs } = expr else {
+            return None;
+        };
+        if !kwargs.is_empty() || args.len() != 1 {
+            return None;
+        }
+        if func != "starts_with" && func != "str_starts_with" {
+            return None;
+        }
+        let PyExpr::Column(name) = on.as_ref() else {
+            return None;
+        };
+        let PyExpr::Literal { value, dtype } = &args[0] else {
+            return None;
+        };
+        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
+            return None;
+        }
+        let prefix = value.clone();
+
+        match &column_name {
+            Some(existing) if existing != name => return None,
+            Some(_) => {}
+            None => column_name = Some(name.clone()),
+        }
+        prefixes.push(prefix);
+    }
+
+    Some(StartsWithFastPathPlan {
+        column: column_name?,
+        prefixes,
+    })
+}
+
+/// Count sequential prefix matches on a string column, dispatching on the
+/// concrete Arrow string array type. Returns `None` if the column is not a
+/// supported string array — callers must then fall back to vectorized
+/// predicate evaluation instead of assuming a zero count.
+///
+/// When `step1_mask` is `Some`, `prefixes` covers steps 2..N and is checked
+/// starting at row `i + 1`; when `None`, `prefixes` covers all steps starting
+/// at row `i`.
+pub(crate) fn count_prefix_matches_on(
+    col: &ArrayRef,
+    step1_mask: Option<&BooleanArray>,
+    prefixes: &[&str],
+    max_start: usize,
+    same_partition: impl Fn(usize) -> bool + Copy,
+) -> Option<usize> {
+    let any = col.as_any();
+    if let Some(arr) = any.downcast_ref::<datafusion::arrow::array::StringViewArray>() {
+        Some(count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
+    } else if let Some(arr) = any.downcast_ref::<StringArray>() {
+        Some(count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
+    } else {
+        any.downcast_ref::<datafusion::arrow::array::LargeStringArray>()
+            .map(|arr| count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
+    }
+}
+
+fn count_prefix_matches<'a, A>(
+    arr: A,
+    step1_mask: Option<&BooleanArray>,
+    prefixes: &[&str],
+    max_start: usize,
+    same_partition: impl Fn(usize) -> bool,
+) -> usize
+where
+    A: datafusion::arrow::array::ArrayAccessor<Item = &'a str> + Copy,
+{
+    let offset = if step1_mask.is_some() { 1 } else { 0 };
+    let mut count = 0;
+    for i in 0..max_start {
+        if let Some(mask) = step1_mask {
+            if !mask.is_valid(i) || !mask.value(i) {
+                continue;
             }
         }
-        _ => None,
+        if !same_partition(i) {
+            continue;
+        }
+        let mut all_match = true;
+        for (k, prefix) in prefixes.iter().enumerate() {
+            let row = i + k + offset;
+            if arr.is_null(row) || !arr.value(row).starts_with(prefix) {
+                all_match = false;
+                break;
+            }
+        }
+        if all_match {
+            count += 1;
+        }
     }
+    count
 }
 
 /// Evaluate starts_with on a string array.
@@ -876,93 +992,29 @@ pub fn search_pattern_count_impl(
         // instead of vectorized on all 1M rows. Step 1 matches are rare (~0.1%),
         // so we only check steps 2..N on ~1600 rows instead of 1M.
         //
-        // Extract the URL column for per-row starts_with checks
-        // (optimized path for the common case of string predicates)
-        let url_idx = name_to_idx.get("url");
+        // The lazy path applies only when steps 2..N are all `starts_with`
+        // on the SAME string column — the prefixes are checked against that
+        // column, whichever it is (never a hardcoded name).
+        let fast_plan = same_string_column_starts_with_plan(&py_exprs[1..]);
+        let same_partition = |i: usize| {
+            partition_ids
+                .as_ref()
+                .is_none_or(|pids| pids[i] == pids[i + num_steps - 1])
+        };
+        let fast_counted = fast_plan.as_ref().and_then(|plan| {
+            let col_idx = *name_to_idx.get(plan.column.as_str())?;
+            let prefixes: Vec<&str> = plan.prefixes.iter().map(|p| p.as_str()).collect();
+            count_prefix_matches_on(
+                combined.column(col_idx),
+                Some(&step1_mask),
+                &prefixes,
+                max_start,
+                same_partition,
+            )
+        });
 
-        // Build per-row evaluators for remaining steps
-        // For simple starts_with predicates, extract the prefix for direct comparison
-        let step_prefixes: Vec<Option<String>> = py_exprs[1..]
-            .iter()
-            .map(extract_starts_with_prefix)
-            .collect();
-
-        let all_simple = step_prefixes.iter().all(|p| p.is_some()) && url_idx.is_some();
-
-        if all_simple {
-            // Fast path: all remaining predicates are starts_with on the same column
-            // SAFETY: all_simple requires url_idx.is_some() and all prefixes Some
-            let url_col = combined.column(*url_idx.expect("all_simple guarantees url_idx"));
-            let prefixes: Vec<&str> = step_prefixes.iter().map(|p| p.as_ref().expect("all_simple guarantees prefix").as_str()).collect();
-
-            // Try StringViewArray first (common for Parquet), then StringArray, then LargeStringArray
-            if let Some(str_arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::StringViewArray>() {
-                for i in 0..max_start {
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    if let Some(ref pids) = partition_ids {
-                        if pids[i] != pids[i + num_steps - 1] {
-                            continue;
-                        }
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        count += 1;
-                    }
-                }
-            } else if let Some(str_arr) = url_col.as_any().downcast_ref::<StringArray>() {
-                for i in 0..max_start {
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    if let Some(ref pids) = partition_ids {
-                        if pids[i] != pids[i + num_steps - 1] {
-                            continue;
-                        }
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        count += 1;
-                    }
-                }
-            } else if let Some(str_arr) = url_col.as_any().downcast_ref::<datafusion::arrow::array::LargeStringArray>() {
-                for i in 0..max_start {
-                    if !step1_mask.is_valid(i) || !step1_mask.value(i) {
-                        continue;
-                    }
-                    if let Some(ref pids) = partition_ids {
-                        if pids[i] != pids[i + num_steps - 1] {
-                            continue;
-                        }
-                    }
-                    let mut all_match = true;
-                    for (step_offset, prefix) in prefixes.iter().enumerate() {
-                        let row = i + step_offset + 1;
-                        if str_arr.is_null(row) || !str_arr.value(row).starts_with(prefix) {
-                            all_match = false;
-                            break;
-                        }
-                    }
-                    if all_match {
-                        count += 1;
-                    }
-                }
-            }
+        if let Some(fast_count) = fast_counted {
+            count = fast_count;
         } else {
             // Fallback: evaluate all predicates vectorized (original approach)
             let step_masks: Vec<BooleanArray> = py_exprs
