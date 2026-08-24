@@ -150,37 +150,42 @@ fn eval_expr(
 }
 
 /// Evaluate a binary operation on two arrays.
+///
+/// Operator names are parsed by the transpiler's `op_str_to_operator` — the
+/// single source of truth shared with the DataFusion path — so the serializer
+/// (expr/base.py), the transpiler, and this evaluator can never drift apart.
 fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use datafusion::arrow::compute::kernels::boolean;
     use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::numeric;
+    use datafusion::logical_expr::Operator;
 
-    match op {
-        // Operator names must match the Python serializer (expr/base.py) and
-        // the transpiler (transpiler/mod.rs): Eq/Ne/Lt/Le/Gt/Ge.
-        "Eq" => Ok(Arc::new(
+    let operator = crate::transpiler::op_str_to_operator(op)?;
+
+    match operator {
+        Operator::Eq => Ok(Arc::new(
             cmp::eq(left, right).map_err(|e| format!("Eq failed: {}", e))?,
         )),
-        "Ne" => Ok(Arc::new(
+        Operator::NotEq => Ok(Arc::new(
             cmp::neq(left, right).map_err(|e| format!("Ne failed: {}", e))?,
         )),
-        "Lt" => Ok(Arc::new(
+        Operator::Lt => Ok(Arc::new(
             cmp::lt(left, right).map_err(|e| format!("Lt failed: {}", e))?,
         )),
-        "Le" => Ok(Arc::new(
+        Operator::LtEq => Ok(Arc::new(
             cmp::lt_eq(left, right).map_err(|e| format!("Le failed: {}", e))?,
         )),
-        "Gt" => Ok(Arc::new(
+        Operator::Gt => Ok(Arc::new(
             cmp::gt(left, right).map_err(|e| format!("Gt failed: {}", e))?,
         )),
-        "Ge" => Ok(Arc::new(
+        Operator::GtEq => Ok(Arc::new(
             cmp::gt_eq(left, right).map_err(|e| format!("Ge failed: {}", e))?,
         )),
-        "Add" => numeric::add(left, right).map_err(|e| format!("Add failed: {}", e)),
-        "Sub" => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
-        "Mul" => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
-        "Div" => numeric::div(left, right).map_err(|e| format!("Div failed: {}", e)),
-        "And" => {
+        Operator::Plus => numeric::add(left, right).map_err(|e| format!("Add failed: {}", e)),
+        Operator::Minus => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
+        Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
+        Operator::Divide => numeric::div(left, right).map_err(|e| format!("Div failed: {}", e)),
+        Operator::And => {
             let l = left
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -193,7 +198,7 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 boolean::and(l, r).map_err(|e| format!("AND failed: {}", e))?,
             ))
         }
-        "Or" => {
+        Operator::Or => {
             let l = left
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -206,7 +211,12 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 boolean::or(l, r).map_err(|e| format!("OR failed: {}", e))?,
             ))
         }
-        _ => Err(format!("Unsupported binary op in pattern_match: {}", op)),
+        // Known to the transpiler but not implemented here (e.g. Modulo):
+        // error explicitly so the parallel path falls back and never counts 0.
+        other => Err(format!(
+            "Unsupported binary operator in search_pattern predicate: {:?}",
+            other
+        )),
     }
 }
 
