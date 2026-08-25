@@ -938,8 +938,10 @@ impl LTSeqTable {
     ///
     /// Uses binary search for O(N log M) complexity where N = left rows, M = right rows.
     /// Both tables must be sorted by their respective time columns.
-    // Arg count is dictated by the exposed Python signature below (see #150).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "arg count is dictated by the exposed Python signature below (see #150)"
+    )]
     #[pyo3(signature = (other, left_time_col, right_time_col, direction, suffix, left_by_cols=Vec::new(), right_by_cols=Vec::new()))]
     fn asof_join(
         &self,

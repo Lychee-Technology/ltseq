@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn literal_dtype_table() {
-        let table: Vec<(&str, &str, Expr)> = vec![
+        let table = [
             ("42", "Int64", lit(42_i64)),
             ("-7", "Int32", lit(-7_i32)),
             ("2.5", "Float64", lit(2.5_f64)),
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn unaryop_not_and_unknown() {
+    fn unaryop_not_negates_operand() {
         let schema = test_schema();
         let ok = pyexpr_to_datafusion(
             PyExpr::UnaryOp {
@@ -1314,7 +1314,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ok, Expr::Column(Column::new_unqualified("a")).not());
+    }
 
+    #[test]
+    fn unaryop_unknown_is_error() {
+        let schema = test_schema();
         let err = pyexpr_to_datafusion(
             PyExpr::UnaryOp {
                 op: "Neg".to_string(),
