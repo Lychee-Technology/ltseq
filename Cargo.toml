@@ -9,7 +9,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Python co-op
-pyo3 = { version = "0.29.2", features = ["extension-module", "macros"] }
+# extension-module is injected by maturin via pyproject.toml [tool.maturin] features;
+# keeping it out of the cargo features lets `cargo test` link on Linux (pyo3 FAQ).
+pyo3 = { version = "0.29.2", features = ["macros"] }
 
 datafusion = "55.0.0"
 
