@@ -222,3 +222,81 @@ class TestGroupCountEmptyRowGroupSeam:
 
         # Sessions 1 and 2 → two groups, even with an empty row group between.
         assert count == 2
+
+
+class TestLinearScanFullSortOrder:
+    """Regression for issue #141: the non-Parquet linear-scan path re-sorted
+    the projection by only the predicate-referenced subset of sort keys,
+    rewriting the declared order and miscounting groups."""
+
+    @staticmethod
+    def _reference_group_count(eventtime, gap):
+        count = 1
+        for prev, cur in zip(eventtime, eventtime[1:]):
+            if cur - prev > gap:
+                count += 1
+        return count
+
+    def test_count_with_predicate_on_secondary_sort_key(self):
+        pa = pytest.importorskip("pyarrow")
+
+        # Physically ordered by (userid, eventtime); eventtime alone is NOT
+        # globally sorted, so a re-sort by [eventtime] rewrites the sequence.
+        userid = [1, 1, 2, 2]
+        eventtime = [100, 101, 1, 2]
+        t = LTSeq.from_arrow(
+            pa.table({"userid": userid, "eventtime": eventtime})
+        ).assume_sorted("userid", "eventtime")
+
+        count = (
+            t.group_ordered(lambda r: (r.eventtime - r.eventtime.shift(1)) > 10)
+            .first()
+            .count()
+        )
+
+        # In declared order the diffs are [1, -99, 1]: no gap > 10 → 1 group.
+        assert count == self._reference_group_count(eventtime, 10)
+        assert count == 1
+
+    def test_count_after_sort_with_predicate_on_secondary_key(self):
+        pa = pytest.importorskip("pyarrow")
+
+        t = (
+            LTSeq.from_arrow(
+                pa.table(
+                    {"userid": [2, 1, 2, 1], "eventtime": [1, 101, 2, 100]}
+                )
+            )
+            .sort("userid", "eventtime")
+        )
+
+        count = (
+            t.group_ordered(lambda r: (r.eventtime - r.eventtime.shift(1)) > 10)
+            .first()
+            .count()
+        )
+
+        # Sorted order: (1,100),(1,101),(2,1),(2,2) → diffs [1,-99,1] → 1 group.
+        assert count == self._reference_group_count([100, 101, 1, 2], 10)
+        assert count == 1
+
+    def test_redundant_sort_is_eliminated_when_order_declared(self):
+        """Guard the enforce_sorting assumption the fix relies on: re-sorting
+        by the full declared sort keys must not add a SortExec when the plan
+        already carries that ordering (MemTable.with_sort_order). If a
+        DataFusion upgrade stops eliminating the redundant Sort, the linear
+        scan general path silently regresses to O(n log n)."""
+        pa = pytest.importorskip("pyarrow")
+
+        arrow = pa.table({"userid": [1, 1, 2, 2], "eventtime": [100, 101, 1, 2]})
+
+        declared = LTSeq.from_arrow(arrow).assume_sorted("userid", "eventtime")
+        _, physical = declared.sort("userid", "eventtime").explain_plan()
+        assert "SortExec" not in physical
+
+        # Control: without a declared ordering the Sort must survive — this
+        # also proves "SortExec" is still the token DataFusion prints, so the
+        # assertion above cannot pass vacuously.
+        undeclared = LTSeq.from_arrow(arrow)
+        _, physical_ctl = undeclared.sort("userid", "eventtime").explain_plan()
+        assert "SortExec" in physical_ctl

@@ -1071,112 +1071,7 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<
     }
 
     // ── General path (non-Parquet or unsorted data) ─────────────────────
-    let df = table
-        .dataframe
-        .as_ref()
-        .ok_or(LtseqError::NoData)?;
-
-    // ── Phase A: Lightweight boundary detection ──────────────────────────
-
-    // Step 1: Extract columns needed by the predicate
-    let mut needed_cols: HashSet<String> = HashSet::new();
-    extract_referenced_columns(predicate, &mut needed_cols);
-
-    // Only include sort keys that are referenced by the predicate.
-    // Non-referenced sort keys don't affect boundary detection and reading
-    // them from Parquet is wasteful (e.g., watchid adds ~30% I/O overhead).
-    let relevant_sort_exprs: Vec<SortExpr> = table
-        .sort_specs
-        .iter()
-        .filter(|spec| needed_cols.contains(spec.column.as_str()))
-        .map(|spec| spec.to_df_sort_expr())
-        .collect();
-
-    // Step 2: Project to only needed columns + sort
-    let col_exprs: Vec<Expr> = needed_cols
-        .iter()
-        .map(|name| Expr::Column(Column::new_unqualified(name)))
-        .collect();
-
-    let projected_df = if col_exprs.is_empty() {
-        (**df).clone()
-    } else {
-        (**df).clone().select(col_exprs).map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Failed to project columns for linear scan: {}",
-                e
-            ))
-        })?
-    };
-
-    let sorted_projected = if relevant_sort_exprs.is_empty() {
-        projected_df
-    } else {
-        projected_df.sort(relevant_sort_exprs).map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Failed to sort projected data: {}",
-                e
-            ))
-        })?
-    };
-
-    // Step 3: Collect the small projection
-    let proj_batches = RUNTIME
-        .block_on(async {
-            sorted_projected
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect projected data: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
-
-    if proj_batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-
-    let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
-
-    if total_rows == 0 {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-
-    // Step 4: Boundary detection — concat batches then use vectorized SIMD evaluation.
-    // concat_batches is cheap for small projections (2-3 columns) and the vectorized
-    // path using Arrow compute kernels is ~2x faster than per-row evaluation.
-    let schema = proj_batches[0].schema();
-    let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
-        LtseqError::Runtime(format!(
-            "Failed to concatenate projected batches: {}",
-            e
-        ))
-    })?;
-
-    // Build column name → index mapping
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    for (i, field) in concat_batch.schema().fields().iter().enumerate() {
-        name_to_idx.insert(field.name().clone(), i);
-    }
-
-    // Vectorized boundary detection using Arrow compute kernels (SIMD-accelerated)
-    let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Vectorized boundary evaluation failed: {}",
-                e
-            ))
-        })?;
-
-    build_group_metadata_from_boundaries(&boundaries, total_rows, table)
+    general_linear_scan_group_id(table, predicate)
 }
 
 /// Streaming fast path: read pre-sorted Parquet with single partition,
@@ -1323,24 +1218,34 @@ fn streaming_linear_scan_group_id(
     build_metadata_table(group_ids, count_values, rn_values, table)
 }
 
-/// Fallback: general path for when streaming can't handle the expression.
-/// This is identical to the non-streaming path in linear_scan_group_id.
-fn general_linear_scan_group_id(
-    table: &LTSeqTable,
+/// Build the projected + re-sorted DataFrame the general linear-scan path
+/// collects for boundary detection: predicate-referenced columns plus every
+/// declared sort key, ordered by the FULL sort_specs.
+///
+/// Boundary detection depends on the physical adjacency of rows, which is
+/// defined by the FULL declared sort order — sorting by only the
+/// predicate-referenced subset of sort keys would globally re-order the
+/// sequence and move the boundaries (issue #141). Carry every sort key in
+/// the projection and re-sort by the complete sort_specs; when the plan
+/// already satisfies that ordering, DataFusion's enforce_sorting removes
+/// the Sort node, so an already-sorted prefix costs nothing.
+///
+/// Split from `general_linear_scan_group_id` so tests can assert on the
+/// exact plan this path executes (see `tests` module below).
+fn build_boundary_scan_df(
+    df: &datafusion::dataframe::DataFrame,
+    sort_specs: &[crate::metadata::SortSpec],
     predicate: &PyExpr,
-) -> PyResult<LTSeqTable> {
-    let df = table
-        .dataframe
-        .as_ref()
-        .ok_or(LtseqError::NoData)?;
-
+) -> Result<datafusion::dataframe::DataFrame, LtseqError> {
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
 
-    let relevant_sort_exprs: Vec<SortExpr> = table
-        .sort_specs
+    for spec in sort_specs {
+        needed_cols.insert(spec.column.clone());
+    }
+
+    let sort_exprs: Vec<SortExpr> = sort_specs
         .iter()
-        .filter(|spec| needed_cols.contains(spec.column.as_str()))
         .map(|spec| spec.to_df_sort_expr())
         .collect();
 
@@ -1350,9 +1255,9 @@ fn general_linear_scan_group_id(
         .collect();
 
     let projected_df = if col_exprs.is_empty() {
-        (**df).clone()
+        df.clone()
     } else {
-        (**df).clone().select(col_exprs).map_err(|e| {
+        df.clone().select(col_exprs).map_err(|e| {
             LtseqError::Runtime(format!(
                 "Failed to project columns for linear scan: {}",
                 e
@@ -1360,16 +1265,30 @@ fn general_linear_scan_group_id(
         })?
     };
 
-    let sorted_projected = if relevant_sort_exprs.is_empty() {
-        projected_df
+    if sort_exprs.is_empty() {
+        Ok(projected_df)
     } else {
-        projected_df.sort(relevant_sort_exprs).map_err(|e| {
+        projected_df.sort(sort_exprs).map_err(|e| {
             LtseqError::Runtime(format!(
                 "Failed to sort projected data: {}",
                 e
             ))
-        })?
-    };
+        })
+    }
+}
+
+/// Fallback: general path for when streaming can't handle the expression
+/// (also the whole non-Parquet path of linear_scan_group_id).
+fn general_linear_scan_group_id(
+    table: &LTSeqTable,
+    predicate: &PyExpr,
+) -> PyResult<LTSeqTable> {
+    let df = table
+        .dataframe
+        .as_ref()
+        .ok_or(LtseqError::NoData)?;
+
+    let sorted_projected = build_boundary_scan_df(df, &table.sort_specs, predicate)?;
 
     let proj_batches = RUNTIME
         .block_on(async {
@@ -1503,4 +1422,110 @@ pub(crate) fn build_metadata_table(
         Vec::new(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{sort_specs_to_file_sort_order, SortSpec};
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::datasource::MemTable;
+    use datafusion::physical_plan::displayable;
+    use datafusion::prelude::SessionContext;
+
+    /// The issue #141 trigger predicate shape: references only the SECONDARY
+    /// sort key — `(eventtime - eventtime.shift(1)) > 10`.
+    fn secondary_key_predicate() -> PyExpr {
+        PyExpr::BinOp {
+            op: "Gt".to_string(),
+            left: Box::new(PyExpr::BinOp {
+                op: "Sub".to_string(),
+                left: Box::new(PyExpr::Column("eventtime".to_string())),
+                right: Box::new(PyExpr::Call {
+                    func: "shift".to_string(),
+                    args: vec![PyExpr::Literal {
+                        value: "1".to_string(),
+                        dtype: "Int64".to_string(),
+                    }],
+                    kwargs: HashMap::new(),
+                    on: Box::new(PyExpr::Column("eventtime".to_string())),
+                }),
+            }),
+            right: Box::new(PyExpr::Literal {
+                value: "10".to_string(),
+                dtype: "Int64".to_string(),
+            }),
+        }
+    }
+
+    fn sample_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("userid", DataType::Int64, false),
+            Field::new("eventtime", DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 2, 2])),
+                Arc::new(Int64Array::from(vec![100, 101, 1, 2])),
+            ],
+        )
+        .expect("valid test batch")
+    }
+
+    /// Render the optimized physical plan of the exact DataFrame the general
+    /// linear-scan path collects.
+    fn physical_plan_string(declare_order: bool) -> String {
+        let specs = vec![
+            SortSpec::new("userid".to_string(), false),
+            SortSpec::new("eventtime".to_string(), false),
+        ];
+
+        let batch = sample_batch();
+        let mut mem_table = MemTable::try_new(batch.schema(), vec![vec![batch]])
+            .expect("valid MemTable");
+        if declare_order {
+            mem_table = mem_table.with_sort_order(sort_specs_to_file_sort_order(&specs));
+        }
+
+        let ctx = SessionContext::new();
+        let df = ctx
+            .read_table(Arc::new(mem_table))
+            .expect("read MemTable");
+
+        let scan_df = build_boundary_scan_df(&df, &specs, &secondary_key_predicate())
+            .expect("build boundary scan plan");
+
+        let plan = RUNTIME
+            .block_on(scan_df.create_physical_plan())
+            .expect("create physical plan");
+        let rendered = displayable(plan.as_ref()).indent(false).to_string();
+        rendered
+    }
+
+    /// Issue #141 acceptance: when the input already carries the full
+    /// declared ordering, the general path must not introduce an extra
+    /// global Sort — enforce_sorting elides the redundant full-key sort.
+    #[test]
+    fn boundary_scan_plan_has_no_sort_when_order_declared() {
+        let plan = physical_plan_string(true);
+        assert!(
+            !plan.contains("SortExec"),
+            "general linear-scan plan re-sorts declared-order input:\n{}",
+            plan
+        );
+    }
+
+    /// Control: without a declared ordering the full-key Sort must survive.
+    /// Also proves "SortExec" is the token DataFusion prints, so the
+    /// assertion above cannot pass vacuously.
+    #[test]
+    fn boundary_scan_plan_sorts_when_order_unknown() {
+        let plan = physical_plan_string(false);
+        assert!(
+            plan.contains("SortExec"),
+            "expected a Sort for undeclared-order input:\n{}",
+            plan
+        );
+    }
 }
