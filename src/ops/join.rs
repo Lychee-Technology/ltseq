@@ -174,6 +174,8 @@ fn extract_and_validate_join_keys(
 /// `suffix` (Polars semantics: only conflicting columns are renamed). Returns
 /// the renamed DataFrame, the `(old, new)` rename map, and the renamed names of
 /// the join key columns.
+// Returns (renamed df, old→new rename pairs, right key cols after rename);
+// a named struct for one internal call site is out of scope for #150.
 #[allow(clippy::type_complexity)]
 fn rename_right_df_for_join(
     df: DataFrame,

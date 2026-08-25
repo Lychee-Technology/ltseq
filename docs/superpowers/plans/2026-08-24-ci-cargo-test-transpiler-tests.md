@@ -1,5 +1,7 @@
 # CI 补 cargo test/clippy + transpiler 表驱动单测 实现计划（issue #150）
 
+> **状态：已完成（2026-08-25，PR #166）。** 本文档为归档的过程记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** CI gate 加入 `cargo test` 与 `cargo clippy --all-targets -- -D warnings`，并为 transpiler 纯函数（运算符映射、字面量解析、错误分类）补表驱动 Rust 单测。
@@ -31,7 +33,7 @@
 **Interfaces:**
 - Produces: `cargo test` / `cargo clippy` 在无 Python 链接需求下可独立运行；`maturin develop` 行为不变（feature 由 pyproject 注入）。
 
-- [ ] **Step 1: 修改 Cargo.toml**
+- [x] **Step 1: 修改 Cargo.toml**
 
 ```toml
 # 将
@@ -40,17 +42,17 @@ pyo3 = { version = "0.29.2", features = ["extension-module", "macros"] }
 pyo3 = { version = "0.29.2", features = ["macros"] }
 ```
 
-- [ ] **Step 2: 验证 cargo test 仍通过**
+- [x] **Step 2: 验证 cargo test 仍通过**
 
 Run: `cargo test`
 Expected: 7 passed（format 5 + linear_scan 2）
 
-- [ ] **Step 3: 验证 maturin 构建与 Python 测试不回归**
+- [x] **Step 3: 验证 maturin 构建与 Python 测试不回归**
 
 Run: `uv run maturin develop && uv run pytest py-ltseq/tests/ -q`
 Expected: 全部通过（当前 main 基线全绿）
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Cargo.toml
@@ -71,7 +73,7 @@ git commit -m "build: pyo3 extension-module 改由 maturin 注入，解除 cargo
 **Interfaces:**
 - Produces: `cargo clippy --all-targets -- -D warnings` 零告警，Task 4 的 CI gate 才能落地。
 
-- [ ] **Step 1: 应用机械修复（4 条 clippy 建议）**
+- [x] **Step 1: 应用机械修复（4 条 clippy 建议）**
 
 ```rust
 // linear_scan.rs:700 — 删除 `args: _,`（`..` 已覆盖）
@@ -91,7 +93,7 @@ let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
 可先 `cargo clippy --fix --lib -p ltseq_core --allow-dirty` 自动应用，再人工核对 diff。
 
-- [ ] **Step 2: needless_range_loop（parallel_scan.rs:706）**
+- [x] **Step 2: needless_range_loop（parallel_scan.rs:706）**
 
 优先真实重构（按 clippy 建议改为 `partition_boundaries.iter_mut().enumerate().take(n).skip(1)` 形态）；若循环体同时索引多个数组导致改写明显变难读，则在循环前一行加：
 
@@ -99,7 +101,7 @@ let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 #[allow(clippy::needless_range_loop)] // 循环体按 i 同步索引多个数组，改 iterator 反而难读
 ```
 
-- [ ] **Step 3: 结构性告警加定点 allow（3 处 too_many_arguments + 1 处 type_complexity）**
+- [x] **Step 3: 结构性告警加定点 allow（3 处 too_many_arguments + 1 处 type_complexity）**
 
 ```rust
 // parallel_scan.rs:647、asof_join.rs:78、lib.rs:942 各函数定义上方：
@@ -111,17 +113,17 @@ let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
 不做签名重构——参数打包成 struct 属于行为无关的大改，超出本 issue「守住零告警线」的范围。
 
-- [ ] **Step 4: 验证零告警且测试通过**
+- [x] **Step 4: 验证零告警且测试通过**
 
 Run: `cargo clippy --all-targets -- -D warnings && cargo test`
 Expected: clippy 无输出退出码 0；7 passed
 
-- [ ] **Step 5: 验证 Python 端不回归**
+- [x] **Step 5: 验证 Python 端不回归**
 
 Run: `uv run maturin develop && uv run pytest py-ltseq/tests/ -q`
 Expected: 全部通过
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/
@@ -137,7 +139,7 @@ git commit -m "chore: 清零 clippy 1.98 存量告警，为 CI -D warnings 铺�
 - Consumes: 同模块私有函数 `op_str_to_operator`、`parse_literal_expr`，公开函数 `pyexpr_to_datafusion`，`crate::types::PyExpr`。
 - Produces: 运算符映射表 13 行逐行断言 + 未知运算符错误；字面量每个 dtype 分支 + 解析失败 + 未知 dtype；错误分类（列不存在 / 未知一元运算符 / Window 拒绝 / 未知方法 / 窗口函数进行级上下文 / 字符串·时间列类型校验）。
 
-- [ ] **Step 1: 写测试（先写全表，预期直接通过——被测函数已存在，这是补盲区不是 TDD 新功能；重点是每行断言与实现逐一对得上）**
+- [x] **Step 1: 写测试（先写全表，预期直接通过——被测函数已存在，这是补盲区不是 TDD 新功能；重点是每行断言与实现逐一对得上）**
 
 在 `src/transpiler/mod.rs` 末尾追加：
 
@@ -408,17 +410,17 @@ mod tests {
 - `pyexpr_to_datafusion` 会先跑 `optimize_expr`（常量折叠）——上述用例都含列引用或单字面量，不会被折叠改形；如有断言因折叠失败，改为直接调 `pyexpr_to_datafusion_inner`（同模块可见）。
 - `kwargs: Default::default()` 即空 `HashMap<String, PyExpr>`。
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 Run: `cargo test transpiler`
 Expected: 上述 13 个测试全部 PASS（若有断言与实现细节不符——如错误文案、`lit` 的 ScalarValue 形态——以实现为准修断言，但「表逐行覆盖」不得缩水）
 
-- [ ] **Step 3: clippy 含 test target 复验**
+- [x] **Step 3: clippy 含 test target 复验**
 
 Run: `cargo clippy --all-targets -- -D warnings && cargo test`
 Expected: 零告警；全部测试通过（7 + 13 = 20 个）
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/transpiler/mod.rs
@@ -433,7 +435,7 @@ git commit -m "test: transpiler 运算符/字面量/错误分类表驱动单测 
 **Interfaces:**
 - Consumes: Task 1 的可链接 `cargo test`、Task 2 的零告警基线。
 
-- [ ] **Step 1: 修改 workflow**
+- [x] **Step 1: 修改 workflow**
 
 在 `Install Rust toolchain` step 加 clippy 组件，并在 `Cache Cargo` 之后、`Set up Python 3.13` 之前插入两个 step（Rust gate 不依赖 Python 环境，前置可快速失败）：
 
@@ -452,12 +454,12 @@ git commit -m "test: transpiler 运算符/字面量/错误分类表驱动单测 
         run: cargo test
 ```
 
-- [ ] **Step 2: 本地等价验证**
+- [x] **Step 2: 本地等价验证**
 
 Run: `cargo clippy --all-targets -- -D warnings && cargo test`
 Expected: 零告警、20 个测试通过
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -466,7 +468,7 @@ git commit -m "ci: gate 加入 cargo test 与 clippy -D warnings (#150)"
 
 ### Task 5: 全量验收 + PR
 
-- [ ] **Step 1: 全量验证**
+- [x] **Step 1: 全量验证**
 
 Run:
 ```bash
@@ -475,7 +477,7 @@ uv run maturin develop && uv run pytest py-ltseq/tests/ -q
 ```
 Expected: 全绿
 
-- [ ] **Step 2: 推分支开 PR**
+- [x] **Step 2: 推分支开 PR**
 
 ```bash
 git push -u origin <branch>
@@ -484,7 +486,7 @@ gh pr create --title "ci: 补 cargo test/clippy gate；transpiler 补表驱动�
 
 PR body 需说明：pyo3 feature 门控的动机（Linux 链接）、clippy 清零策略（机械修复 vs 定点 allow 的划分）、单测覆盖面与 #147 的边界、rustfmt 未纳入的原因。
 
-- [ ] **Step 3: 确认 CI 两个新 step 真实执行且通过**
+- [x] **Step 3: 确认 CI 两个新 step 真实执行且通过**
 
 Run: `gh pr checks --watch`
 Expected: CI 通过，日志中可见 clippy 与 cargo test step 运行（防止 step 被 YAML 错误静默跳过）

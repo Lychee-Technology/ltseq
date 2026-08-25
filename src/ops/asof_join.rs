@@ -75,6 +75,8 @@ fn by_col_indices(
 ///
 /// For each row in the left table, finds the "nearest" matching row in the right table
 /// based on a time/key column. This is commonly used in financial applications.
+// Mirrors the flat parameter list of the PyO3 `asof_join` binding in lib.rs;
+// packing into a struct is a behavior-neutral refactor out of scope for #150.
 #[allow(clippy::too_many_arguments)]
 pub fn asof_join_impl(
     table: &LTSeqTable,

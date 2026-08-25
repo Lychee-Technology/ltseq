@@ -644,6 +644,7 @@ pub fn parallel_pattern_match_count(
 /// RG data. This means each RG's ~20MB of data is freed immediately after
 /// processing, eliminating the 1.4s dealloc overhead from holding all 814 RGs
 /// (~2.7GB) in memory simultaneously.
+// Packing the args into a struct is a behavior-neutral refactor out of scope for #150.
 #[allow(clippy::too_many_arguments)]
 fn read_match_and_extract_boundary(
     parquet_path: &str,
