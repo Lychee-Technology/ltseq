@@ -222,3 +222,60 @@ class TestGroupCountEmptyRowGroupSeam:
 
         # Sessions 1 and 2 → two groups, even with an empty row group between.
         assert count == 2
+
+
+class TestLinearScanFullSortOrder:
+    """Regression for issue #141: the non-Parquet linear-scan path re-sorted
+    the projection by only the predicate-referenced subset of sort keys,
+    rewriting the declared order and miscounting groups."""
+
+    @staticmethod
+    def _reference_group_count(eventtime, gap):
+        count = 1
+        for prev, cur in zip(eventtime, eventtime[1:]):
+            if cur - prev > gap:
+                count += 1
+        return count
+
+    def test_count_with_predicate_on_secondary_sort_key(self):
+        pa = pytest.importorskip("pyarrow")
+
+        # Physically ordered by (userid, eventtime); eventtime alone is NOT
+        # globally sorted, so a re-sort by [eventtime] rewrites the sequence.
+        userid = [1, 1, 2, 2]
+        eventtime = [100, 101, 1, 2]
+        t = LTSeq.from_arrow(
+            pa.table({"userid": userid, "eventtime": eventtime})
+        ).assume_sorted("userid", "eventtime")
+
+        count = (
+            t.group_ordered(lambda r: (r.eventtime - r.eventtime.shift(1)) > 10)
+            .first()
+            .count()
+        )
+
+        # In declared order the diffs are [1, -99, 1]: no gap > 10 → 1 group.
+        assert count == self._reference_group_count(eventtime, 10)
+        assert count == 1
+
+    def test_count_after_sort_with_predicate_on_secondary_key(self):
+        pa = pytest.importorskip("pyarrow")
+
+        t = (
+            LTSeq.from_arrow(
+                pa.table(
+                    {"userid": [2, 1, 2, 1], "eventtime": [1, 101, 2, 100]}
+                )
+            )
+            .sort("userid", "eventtime")
+        )
+
+        count = (
+            t.group_ordered(lambda r: (r.eventtime - r.eventtime.shift(1)) > 10)
+            .first()
+            .count()
+        )
+
+        # Sorted order: (1,100),(1,101),(2,1),(2,2) → diffs [1,-99,1] → 1 group.
+        assert count == self._reference_group_count([100, 101, 1, 2], 10)
+        assert count == 1
