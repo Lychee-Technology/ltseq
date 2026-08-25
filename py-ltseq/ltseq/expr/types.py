@@ -148,7 +148,7 @@ class CallExpr(Expr):
             "func": self.func,
             "args": [serialize_value(arg) for arg in self.args],
             "kwargs": {k: serialize_value(v) for k, v in self.kwargs.items()},
-            "on": self.on.serialize() if self.on else None,
+            "on": self.on.serialize() if self.on is not None else None,
         }
 
     def __getattr__(self, method_name: str):
@@ -286,9 +286,9 @@ class WindowExpr(Expr):
             "type": "Window",
             "expr": self.expr.serialize(),
             "partition_by": self.partition_by.serialize()
-            if self.partition_by
+            if self.partition_by is not None
             else None,
-            "order_by": self.order_by.serialize() if self.order_by else None,
+            "order_by": self.order_by.serialize() if self.order_by is not None else None,
             "descending": self.descending,
         }
 

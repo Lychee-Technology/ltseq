@@ -1,7 +1,7 @@
 """Base expression class for LTSeq."""
 
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING, cast
+from typing import Any, NoReturn, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .types import CallExpr
@@ -650,6 +650,15 @@ class Expr(ABC):
         from .types import UnaryOpExpr
 
         return UnaryOpExpr("Not", cast(Any, self))
+
+    def __bool__(self) -> NoReturn:
+        """Refuse truthiness: Python's `and`/`or`/`not`/`in`/ternary/chained
+        comparisons call bool() and would silently drop conditions otherwise."""
+        raise TypeError(
+            "LTSeq expressions cannot be used in a boolean context "
+            "(and/or/not/if/in/ternary/chained comparison). "
+            "Use & | ~ to combine conditions, e.g. (r.a > 2) & (r.b < 1.5)"
+        )
 
     def __abs__(self) -> "CallExpr":
         """Absolute value operator: abs(expr)"""
