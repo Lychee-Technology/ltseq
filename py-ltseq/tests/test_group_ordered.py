@@ -279,3 +279,24 @@ class TestLinearScanFullSortOrder:
         # Sorted order: (1,100),(1,101),(2,1),(2,2) → diffs [1,-99,1] → 1 group.
         assert count == self._reference_group_count([100, 101, 1, 2], 10)
         assert count == 1
+
+    def test_redundant_sort_is_eliminated_when_order_declared(self):
+        """Guard the enforce_sorting assumption the fix relies on: re-sorting
+        by the full declared sort keys must not add a SortExec when the plan
+        already carries that ordering (MemTable.with_sort_order). If a
+        DataFusion upgrade stops eliminating the redundant Sort, the linear
+        scan general path silently regresses to O(n log n)."""
+        pa = pytest.importorskip("pyarrow")
+
+        arrow = pa.table({"userid": [1, 1, 2, 2], "eventtime": [100, 101, 1, 2]})
+
+        declared = LTSeq.from_arrow(arrow).assume_sorted("userid", "eventtime")
+        _, physical = declared.sort("userid", "eventtime").explain_plan()
+        assert "SortExec" not in physical
+
+        # Control: without a declared ordering the Sort must survive — this
+        # also proves "SortExec" is still the token DataFusion prints, so the
+        # assertion above cannot pass vacuously.
+        undeclared = LTSeq.from_arrow(arrow)
+        _, physical_ctl = undeclared.sort("userid", "eventtime").explain_plan()
+        assert "SortExec" in physical_ctl
