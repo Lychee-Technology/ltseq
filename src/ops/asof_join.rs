@@ -75,6 +75,7 @@ fn by_col_indices(
 ///
 /// For each row in the left table, finds the "nearest" matching row in the right table
 /// based on a time/key column. This is commonly used in financial applications.
+#[allow(clippy::too_many_arguments)]
 pub fn asof_join_impl(
     table: &LTSeqTable,
     other: &LTSeqTable,

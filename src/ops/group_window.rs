@@ -341,7 +341,7 @@ pub fn derive_group_window_impl(
         let expr_dict = expr_item
             .cast::<PyDict>()
             .map_err(|_| LtseqError::TypeMismatch("Group expression must be dict".into()))?;
-        let node = dict_to_group_node(&expr_dict)?;
+        let node = dict_to_group_node(expr_dict)?;
         let expr = group_node_to_expr(node, schema).map_err(LtseqError::Transpile)?;
         stage_a.push(expr.alias(&name));
         final_names.push(name);
