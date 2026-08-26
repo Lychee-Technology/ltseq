@@ -666,22 +666,7 @@ fn convert_expr_with_window_children(
                 pyexpr_to_datafusion(*right, schema)?
             };
 
-            let operator = match op.as_str() {
-                "Add" => datafusion::logical_expr::Operator::Plus,
-                "Sub" => datafusion::logical_expr::Operator::Minus,
-                "Mul" => datafusion::logical_expr::Operator::Multiply,
-                "Div" => datafusion::logical_expr::Operator::Divide,
-                "Mod" => datafusion::logical_expr::Operator::Modulo,
-                "Eq" => datafusion::logical_expr::Operator::Eq,
-                "Ne" => datafusion::logical_expr::Operator::NotEq,
-                "Lt" => datafusion::logical_expr::Operator::Lt,
-                "Le" => datafusion::logical_expr::Operator::LtEq,
-                "Gt" => datafusion::logical_expr::Operator::Gt,
-                "Ge" => datafusion::logical_expr::Operator::GtEq,
-                "And" => datafusion::logical_expr::Operator::And,
-                "Or" => datafusion::logical_expr::Operator::Or,
-                _ => return Err(format!("Unknown binary operator: {}", op)),
-            };
+            let operator = crate::transpiler::op_str_to_operator(&op)?;
 
             Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
                 Box::new(left_expr),
