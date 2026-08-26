@@ -118,7 +118,7 @@ pub fn pivot_impl(
         .map_err(|e| LtseqError::Runtime(format!("Failed to discover pivot values: {}", e)))?;
 
     // Build group-by expressions for index columns
-    let group_exprs: Vec<Expr> = index_cols.iter().map(|c| col(c)).collect();
+    let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
     // Build aggregate expressions with conditional logic:
     // For each pivot value, create: AGG(CASE WHEN pivot_col = value THEN value_col ELSE NULL END)
@@ -155,7 +155,7 @@ pub fn pivot_impl(
         let mut fields: Vec<ArrowField> = index_cols
             .iter()
             .filter_map(|c| schema.field_with_name(c).ok())
-            .map(|f| f.clone())
+            .cloned()
             .collect();
         for val in &pivot_values {
             fields.push(ArrowField::new(val, DataType::Float64, true));

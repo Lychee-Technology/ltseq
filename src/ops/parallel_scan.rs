@@ -644,6 +644,10 @@ pub fn parallel_pattern_match_count(
 /// RG data. This means each RG's ~20MB of data is freed immediately after
 /// processing, eliminating the 1.4s dealloc overhead from holding all 814 RGs
 /// (~2.7GB) in memory simultaneously.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "packing the args into a struct is a behavior-neutral refactor out of scope for #150"
+)]
 fn read_match_and_extract_boundary(
     parquet_path: &str,
     row_group_idx: usize,
@@ -703,9 +707,9 @@ fn read_match_and_extract_boundary(
     let n = combined.num_rows();
     let mut partition_boundaries = vec![false; n];
     partition_boundaries[0] = true;
-    for i in 1..n {
+    for (i, boundary) in partition_boundaries.iter_mut().enumerate().skip(1) {
         if part_values.value(i) != part_values.value(i - 1) {
-            partition_boundaries[i] = true;
+            *boundary = true;
         }
     }
 

@@ -15,7 +15,7 @@
 
 **Python 侧：mixin 组合。** `LTSeq` 在 `core.py` 中由分类 mixin 组装（`io_ops.py`、`transforms.py`、`joins.py`、`aggregation.py`、`advanced_ops.py`、`mutation_mixin.py`、`lookup.py`），既保持公开 API 的广度，又避免单体文件，同时对用户仍是单一类。Python 侧调用 `_inner`，拿回新的 Rust 表，经 `_from_inner()` 包装。
 
-**Rust 代码质量标准**（`docs/rust-coding-std.md`，属*规范性*标准）：最小公开 API；优先借用而非 clone；`Result`/`Option` 配自定义错误类型（`thiserror`/`anyhow`），生产代码不 `unwrap`；领域概念用 newtype；优先 trait/enum/组合而非经典 OO 模式；重构必须有测试安全网、以编译器检查的小步进行；把代码坏味道当作改进的前瞻信号而非失败。校验缺口：标准要求 CI 强制 Clippy + rustfmt，但当前工作流（`.github/workflows/ci.yml`）只跑 build、pyright、pytest，lint 门禁尚未接入。
+**Rust 代码质量标准**（`docs/rust-coding-std.md`，属*规范性*标准）：最小公开 API；优先借用而非 clone；`Result`/`Option` 配自定义错误类型（`thiserror`/`anyhow`），生产代码不 `unwrap`；领域概念用 newtype；优先 trait/enum/组合而非经典 OO 模式；重构必须有测试安全网、以编译器检查的小步进行；把代码坏味道当作改进的前瞻信号而非失败。校验缺口：标准要求 CI 强制 Clippy + rustfmt，但当前工作流（`.github/workflows/ci.yml`）只跑 build、pyright、pytest，lint 门禁尚未接入。*（更新 2026-08-26：PR #166 已将 `cargo clippy --all-targets -- -D warnings` 与 `cargo test` 接入 CI（#150）；rustfmt 门禁仍未接入，由 #167 跟踪。）*
 
 ## 影响与取舍
 

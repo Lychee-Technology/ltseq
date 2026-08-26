@@ -1136,3 +1136,267 @@ fn validate_temporal_column(
     }
     Ok(())
 }
+
+// Table-driven unit tests for the pure serialization→Expr mapping layer
+// (issue #150). End-to-end DSL coverage lives in py-ltseq/tests/; the
+// Python-side deserializer (dict_to_py_expr) needs an interpreter and is
+// covered there too.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::Field;
+    use datafusion::common::Column;
+
+    fn test_schema() -> ArrowSchema {
+        ArrowSchema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+            Field::new("s", DataType::Utf8, false),
+            Field::new("d", DataType::Date32, false),
+        ])
+    }
+
+    fn col_expr(name: &str) -> PyExpr {
+        PyExpr::Column(name.to_string())
+    }
+
+    fn lit_expr(value: &str, dtype: &str) -> PyExpr {
+        PyExpr::Literal {
+            value: value.to_string(),
+            dtype: dtype.to_string(),
+        }
+    }
+
+    fn call_expr(func: &str, on: PyExpr, args: Vec<PyExpr>) -> PyExpr {
+        PyExpr::Call {
+            func: func.to_string(),
+            args,
+            kwargs: Default::default(),
+            on: Box::new(on),
+        }
+    }
+
+    // ---- op_str_to_operator: every row of the mapping table ----
+
+    #[test]
+    fn operator_mapping_table() {
+        let table = [
+            ("Add", Operator::Plus),
+            ("Sub", Operator::Minus),
+            ("Mul", Operator::Multiply),
+            ("Div", Operator::Divide),
+            ("Mod", Operator::Modulo),
+            ("Eq", Operator::Eq),
+            ("Ne", Operator::NotEq),
+            ("Lt", Operator::Lt),
+            ("Le", Operator::LtEq),
+            ("Gt", Operator::Gt),
+            ("Ge", Operator::GtEq),
+            ("And", Operator::And),
+            ("Or", Operator::Or),
+        ];
+        for (name, expected) in table {
+            assert_eq!(op_str_to_operator(name), Ok(expected), "op {name}");
+        }
+    }
+
+    #[test]
+    fn operator_unknown_is_error() {
+        // FloorDiv serializes on the Python side but has no kernel mapping
+        // (#147 tracks the end-to-end behavior) — it must hit the error path,
+        // never a silent fallback.
+        for bad in ["FloorDiv", "Pow", "BitXor", ""] {
+            let err = op_str_to_operator(bad).unwrap_err();
+            assert!(err.contains("Unknown binary operator"), "op {bad}: {err}");
+        }
+    }
+
+    // ---- parse_literal_expr: every dtype branch ----
+
+    #[test]
+    fn literal_dtype_table() {
+        let table = [
+            ("42", "Int64", lit(42_i64)),
+            ("-7", "Int32", lit(-7_i32)),
+            ("2.5", "Float64", lit(2.5_f64)),
+            ("1.5", "Float32", lit(1.5_f32)),
+            ("hello", "String", lit("hello")),
+            ("hello", "Utf8", lit("hello")),
+            ("True", "Boolean", lit(true)),
+            ("False", "Boolean", lit(false)),
+            ("true", "Bool", lit(true)),
+            ("false", "Bool", lit(false)),
+            ("", "Null", lit(ScalarValue::Null)),
+        ];
+        for (value, dtype, expected) in table {
+            assert_eq!(
+                parse_literal_expr(value, dtype),
+                Ok(expected),
+                "literal {value}:{dtype}"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_parse_failures() {
+        let table = [
+            ("abc", "Int64", "Failed to parse"),
+            ("1.5", "Int64", "Failed to parse"),
+            ("abc", "Int32", "Failed to parse"),
+            ("abc", "Float64", "Failed to parse"),
+            ("abc", "Float32", "Failed to parse"),
+            ("maybe", "Boolean", "Failed to parse"),
+            ("1", "Decimal128", "Unknown dtype"),
+            ("x", "", "Unknown dtype"),
+        ];
+        for (value, dtype, expected_msg) in table {
+            let err = parse_literal_expr(value, dtype).unwrap_err();
+            assert!(err.contains(expected_msg), "literal {value}:{dtype}: {err}");
+        }
+    }
+
+    // ---- pyexpr_to_datafusion: structure and error classification ----
+
+    #[test]
+    fn column_resolves_case_sensitive_unqualified() {
+        let schema = test_schema();
+        let expr = pyexpr_to_datafusion(col_expr("a"), &schema).unwrap();
+        assert_eq!(expr, Expr::Column(Column::new_unqualified("a")));
+    }
+
+    #[test]
+    fn column_missing_is_error() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(col_expr("nope"), &schema).unwrap_err();
+        assert!(err.contains("Column 'nope' not found in schema"), "{err}");
+    }
+
+    #[test]
+    fn binop_builds_binary_expr() {
+        let schema = test_schema();
+        let expr = pyexpr_to_datafusion(
+            PyExpr::BinOp {
+                op: "Gt".to_string(),
+                left: Box::new(col_expr("a")),
+                right: Box::new(lit_expr("5", "Int64")),
+            },
+            &schema,
+        )
+        .unwrap();
+        let expected = Expr::Column(Column::new_unqualified("a")).gt(lit(5_i64));
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn binop_unknown_operator_is_error() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(
+            PyExpr::BinOp {
+                op: "FloorDiv".to_string(),
+                left: Box::new(col_expr("a")),
+                right: Box::new(col_expr("b")),
+            },
+            &schema,
+        )
+        .unwrap_err();
+        assert!(err.contains("Unknown binary operator: FloorDiv"), "{err}");
+    }
+
+    #[test]
+    fn unaryop_not_negates_operand() {
+        let schema = test_schema();
+        let ok = pyexpr_to_datafusion(
+            PyExpr::UnaryOp {
+                op: "Not".to_string(),
+                operand: Box::new(col_expr("a")),
+            },
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(ok, Expr::Column(Column::new_unqualified("a")).not());
+    }
+
+    #[test]
+    fn unaryop_unknown_is_error() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(
+            PyExpr::UnaryOp {
+                op: "Neg".to_string(),
+                operand: Box::new(col_expr("a")),
+            },
+            &schema,
+        )
+        .unwrap_err();
+        assert!(err.contains("Unknown unary operator: Neg"), "{err}");
+    }
+
+    #[test]
+    fn alias_wraps_inner_expr() {
+        let schema = test_schema();
+        let expr = pyexpr_to_datafusion(
+            PyExpr::Alias {
+                expr: Box::new(col_expr("a")),
+                alias: "renamed".to_string(),
+            },
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(
+            expr,
+            Expr::Column(Column::new_unqualified("a")).alias("renamed")
+        );
+    }
+
+    #[test]
+    fn window_variant_rejected_in_row_context() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(
+            PyExpr::Window {
+                expr: Box::new(col_expr("a")),
+                partition_by: None,
+                order_by: None,
+                descending: false,
+            },
+            &schema,
+        )
+        .unwrap_err();
+        assert!(err.contains("window planner"), "{err}");
+    }
+
+    #[test]
+    fn window_function_call_rejected_in_row_context() {
+        let schema = test_schema();
+        for func in ["shift", "rolling", "diff", "cum_sum", "cum_max", "cum_min"] {
+            let err = pyexpr_to_datafusion(call_expr(func, col_expr("a"), vec![]), &schema)
+                .unwrap_err();
+            assert!(
+                err.contains("requires DataFrame context"),
+                "func {func}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_method_is_error() {
+        let schema = test_schema();
+        let err =
+            pyexpr_to_datafusion(call_expr("made_up", col_expr("a"), vec![]), &schema).unwrap_err();
+        assert!(err.contains("Method 'made_up' not yet supported"), "{err}");
+    }
+
+    #[test]
+    fn string_function_on_non_string_column_is_error() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(call_expr("str_lower", col_expr("a"), vec![]), &schema)
+            .unwrap_err();
+        assert!(err.contains("requires a string column"), "{err}");
+    }
+
+    #[test]
+    fn temporal_function_on_non_temporal_column_is_error() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(call_expr("dt_year", col_expr("a"), vec![]), &schema)
+            .unwrap_err();
+        assert!(err.contains("requires a date/datetime column"), "{err}");
+    }
+}

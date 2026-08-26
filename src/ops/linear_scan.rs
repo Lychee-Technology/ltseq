@@ -697,7 +697,7 @@ fn vectorized_eval_expr(
             }
         }
         
-        PyExpr::Call { func, on, args: _, .. } => {
+        PyExpr::Call { func, on, .. } => {
             match func.as_str() {
                 "shift" => {
                     // shift(1): prepend null, drop last element
