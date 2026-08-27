@@ -66,7 +66,7 @@ py-ltseq/ltseq/               # Python package
 │   ├── accessors.py          # .s (string) and .dt (datetime) accessors
 │   └── lookup_expr.py        # cross-table lookup expressions
 ├── grouping/                 # NestedTable for group_ordered()
-│   └── proxies/              # GroupProxy for group aggregations
+│   └── proxies/              # DeriveGroupProxy / FilterGroupProxy for group aggregations
 ├── linking.py                # LinkedTable for lazy prefix-aliased joins
 ├── partitioning.py           # PartitionedTable for partition()
 ├── io_ops.py                 # IOMixin
@@ -80,7 +80,7 @@ py-ltseq/ltseq/               # Python package
 
 ### Key design patterns
 
-**PyO3 single #[pymethods] constraint**: Rust only allows one `#[pymethods]` block per struct. All methods are defined in `lib.rs` as thin delegation stubs (1-3 lines) that call helper functions in `src/ops/`.
+**PyO3 single #[pymethods] constraint**: Rust only allows one `#[pymethods]` block per struct. Most methods are defined in `lib.rs` as thin delegation stubs (1-3 lines) that call helper functions in `src/ops/`; constructors, IO/terminal methods, and a few basics remain inline (see ADR 0012). Don't assume the logic lives in `lib.rs`.
 
 **Expression transpilation**: Python lambdas → SchemaProxy captures → serialized dict → Rust deserializes → DataFusion Expr. The `_capture_expr()` method in Python and `dict_to_py_expr()` in Rust handle this pipeline.
 
@@ -88,7 +88,7 @@ py-ltseq/ltseq/               # Python package
 
 **Lazy evaluation**: LinkedTable and NestedTable defer expensive operations (joins, grouping) until materialization is required.
 
-**No materialization rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `to_dicts()`, `collect()`, `from_arrow()`, and `from_pandas()`. There are two documented exceptions. First, physical-position ops (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered or partitioned window over a lazy multi-partition plan does not preserve input order; the snapshot is required for correctness, not a shortcut (see `set_ops.rs::snapshot_single_partition`). Second, `fold()` runs a user-supplied Python callback `fn(state, row)` per row to thread sequential state; arbitrary Python cannot be expressed as a DataFusion plan, so the row-wise Python path (`to_dicts()` → accumulate → `_from_rows()`) is inherent to the operation, not a shortcut. Its docstring flags it as a non-lazy slow path (compare Polars `cumulative_eval`).
+**No materialization rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `to_dicts()`, `collect()`, `from_arrow()`, and `from_pandas()`. There are two documented exceptions. First, physical-position ops (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered or partitioned window over a lazy multi-partition plan does not preserve input order; the snapshot is required for correctness, not a shortcut (see `set_ops.rs::snapshot_single_partition`). Second, `fold()` runs a user-supplied Python callback `fn(state, row)` per row to thread sequential state; arbitrary Python cannot be expressed as a DataFusion plan, so the row-wise Python path (`to_dicts()` → accumulate → `_from_rows()`) is inherent to the operation, not a shortcut. Its docstring flags it as a non-lazy slow path (compare Polars `cumulative_eval`). These are the two correctness exceptions; ADR 0005 is the authoritative inventory of all documented eager boundaries, including implementation-status ones such as non-Parquet `assume_sorted`, `asof_join`, `pivot`, the mutation APIs, `search_pattern`, and the general `linear_scan` path.
 
 ### Expression system
 
@@ -120,7 +120,7 @@ Tests are in `py-ltseq/tests/`. Key test files:
 
 ## Non-code artifacts
 
-Anything produced while working an issue that is not code must end up on GitHub, not just on disk. This covers design drafts, specs, implementation plans, research notes, investigation and verification notes, assessments, and rulings made mid-execution. Post each one as a comment on the relevant issue, never into the repo (`docs/superpowers/` is gitignored). If the work has no issue yet, create one first; if the artifact is about changes already under review, post it to the PR instead.
+Anything produced while working an issue that is not code must end up on GitHub, not just on disk. This covers design drafts, specs, implementation plans, research notes, investigation and verification notes, assessments, and rulings made mid-execution. Post each one as a comment on the relevant issue, not as files committed to the repo. If the work has no issue yet, create one first; if the artifact is about changes already under review, post it to the PR instead.
 
 - Write non-code artifacts in English by default.
 - Post the full content, not a summary or a file path, and post it when it is produced: a design draft goes up as a draft (say so), a plan goes up when written, a mid-execution decision goes up the moment it is taken. The issue is the complete decision record; nothing load-bearing may live only in a chat transcript or a local file.
