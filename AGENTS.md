@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for Claude Code (claude.ai/code) when working in this repository.
+Guidance for Claude Code (claude.ai/code) and other coding agents working in this repository.
 
 ## Build and development commands
 
@@ -88,7 +88,7 @@ py-ltseq/ltseq/               # Python package
 
 **Lazy evaluation**: LinkedTable and NestedTable defer expensive operations (joins, grouping) until materialization is required.
 
-**No materialization rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `to_dicts()`, `collect()`, `from_arrow()`, and `from_pandas()`. There are two documented exceptions. First, physical-position ops (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered or partitioned window over a lazy multi-partition plan does not preserve input order; the snapshot is required for correctness, not a shortcut (see `set_ops.rs::snapshot_single_partition`). Second, `fold()` runs a user-supplied Python callback `fn(state, row)` per row to thread sequential state; arbitrary Python cannot be expressed as a DataFusion plan, so the row-wise Python path (`to_dicts()` → accumulate → `_from_rows()`) is inherent to the operation, not a shortcut. Its docstring flags it as a non-lazy slow path (compare Polars `cumulative_eval`). These are the two correctness exceptions; ADR 0005 is the authoritative inventory of all documented eager boundaries, including implementation-status ones such as non-Parquet `assume_sorted`, `asof_join`, `pivot`, the mutation APIs, `search_pattern`, and the general `linear_scan` path.
+**No materialization rule**: Any API that returns `LTSeq`, `NestedTable`, `LinkedTable`, or `PartitionedTable` must stay on the Rust/DataFusion query path. Do not call `to_pandas()`, `to_arrow()`, `from_arrow()`, `from_pandas()`, or `_from_rows()` inside table-returning query APIs. Internal materialization is only allowed in explicit export or construction APIs such as `to_pandas()`, `to_arrow()`, `to_dicts()`, `collect()`, `from_arrow()`, and `from_pandas()`. There are two documented exceptions. First, physical-position ops (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered or partitioned window over a lazy multi-partition plan does not preserve input order; the snapshot is required for correctness, not a shortcut (see `set_ops.rs::snapshot_single_partition`). Second, `fold()` runs a user-supplied Python callback `fn(state, row)` per row to thread sequential state; arbitrary Python cannot be expressed as a DataFusion plan, so the row-wise Python path (`to_dicts()` → accumulate → `_from_rows()`) is inherent to the operation, not a shortcut. Its docstring flags it as a non-lazy slow path; `docs/api.md` and ADR 0005 compare it to Polars `cumulative_eval`. These are the two correctness exceptions; ADR 0005 is the authoritative inventory of all documented eager boundaries, including implementation-status ones such as non-Parquet `assume_sorted`, `asof_join`, `pivot`, the mutation APIs, `search_pattern`, and the general `linear_scan` path.
 
 ### Expression system
 
@@ -127,7 +127,7 @@ Anything produced while working an issue that is not code must end up on GitHub,
 - A local working copy is fine, but it is invisible to everyone else and does not survive the branch. Several child repos keep planning notes in gitignored local directories (for example `__ref__/plan/` in `ltbase.api`, see #497). Do not force-add gitignored planning files to make them shareable; the issue comment is the sharing mechanism.
 - Say in the comment which artifact it is and where the working copy lives, so a later reader knows whether they are looking at a plan, a spec, or a review.
 
-Scope: per-issue artifacts only. Reference documentation of the system itself (e.g. `docs/federated-query/design.md`) lives in `docs/` and is committed as before. Anything that must become a durable repository convention also belongs in `docs/` (an ADR, runbook, or reference page): the issue comment records the thinking, and `docs/` records the decision. Review artifacts belong on the PR; see PR rules.
+Scope: per-issue artifacts only. Reference documentation of the system itself (e.g. `docs/ARCHITECTURE.md`, `docs/MODULE_GUIDE.md`) lives in `docs/` and is committed as before. Anything that must become a durable repository convention also belongs in `docs/` (an ADR, runbook, or reference page): the issue comment records the thinking, and `docs/` records the decision. Review artifacts belong on the PR; see PR rules.
 
 ## PR rules
 
