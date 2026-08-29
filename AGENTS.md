@@ -66,7 +66,7 @@ py-ltseq/ltseq/               # Python package
 │   ├── accessors.py          # .s (string) and .dt (datetime) accessors
 │   └── lookup_expr.py        # cross-table lookup expressions
 ├── grouping/                 # NestedTable for group_ordered()
-│   └── proxies/              # DeriveGroupProxy / FilterGroupProxy for group aggregations
+│   └── proxies/              # DeriveGroupProxy (derive exprs) / FilterGroupProxy (group predicates)
 ├── linking.py                # LinkedTable for lazy prefix-aliased joins
 ├── partitioning.py           # PartitionedTable for partition()
 ├── io_ops.py                 # IOMixin
