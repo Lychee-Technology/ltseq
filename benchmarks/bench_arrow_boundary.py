@@ -51,7 +51,11 @@ def rows_for_target(target_mb: int) -> int:
 
 
 def build_table(num_rows: int):
-    """Build a chunked pyarrow.Table of ``num_rows`` rows (chunks of 250K)."""
+    """Build a chunked pyarrow.Table of exactly ``num_rows`` rows.
+
+    Chunks hold 250K rows each; the last chunk is shorter when ``num_rows``
+    is not a multiple, so the reported row count matches the input.
+    """
     import numpy as np
     import pyarrow as pa
 
@@ -66,8 +70,11 @@ def build_table(num_rows: int):
             "category": pa.array(cats[rng.integers(0, len(cats), n)]),
         }
     )
-    reps = max(1, num_rows // n)
-    return pa.concat_tables([chunk] * reps)
+    full, tail = divmod(num_rows, n)
+    parts = [chunk] * full
+    if tail:
+        parts.append(chunk.slice(0, tail))
+    return pa.concat_tables(parts)
 
 
 def _maxrss_mb() -> float:

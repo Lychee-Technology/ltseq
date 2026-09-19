@@ -526,7 +526,10 @@ impl LTSeqTable {
     ///   plan anew and leaves this table untouched.
     /// - The capsule (or the consumer that imported it) owns the execution
     ///   stream; dropping it cancels execution.
-    /// - `requested_schema` is accepted and ignored, as the protocol allows.
+    /// - `requested_schema` (an `arrow_schema` capsule) is validated: a request
+    ///   for different fields raises `ValueError`; a request for another
+    ///   representation of the same fields is not honored, and the stream
+    ///   carries the table's own schema as the protocol allows.
     /// - Execution errors surface through the C interface as the consumer's
     ///   Arrow error type (`pyarrow.ArrowInvalid`), not as `RuntimeError`.
     #[pyo3(signature = (requested_schema=None))]
@@ -535,8 +538,13 @@ impl LTSeqTable {
         py: Python<'py>,
         requested_schema: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, pyo3::types::PyCapsule>> {
-        let _ = requested_schema;
-        let reader = detached(py, || crate::ops::io::arrow_stream_impl(self))?;
+        // The capsule is read under the GIL; planning and validation run detached.
+        let requested = requested_schema
+            .map(crate::arrow_ffi::schema_from_capsule)
+            .transpose()?;
+        let reader = detached(py, || {
+            crate::ops::io::arrow_stream_impl(self, requested.as_ref())
+        })?;
         crate::arrow_ffi::stream_capsule(py, reader)
     }
 

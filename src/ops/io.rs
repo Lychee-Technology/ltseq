@@ -17,7 +17,8 @@ use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
 
 use crate::arrow_ffi::{
-    collect_imported, collected_reader, BoxedBatchReader, DataFrameBatchReader,
+    check_requested_schema, collect_imported, collected_reader, BoxedBatchReader,
+    DataFrameBatchReader,
 };
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -198,9 +199,22 @@ pub fn collect_arrow_reader_impl(table: &LTSeqTable) -> Result<BoxedBatchReader,
 /// errors surface to the caller); batches are pulled by the consumer through
 /// `DataFrameBatchReader`. Each call executes the plan anew and leaves the
 /// table untouched.
-pub fn arrow_stream_impl(table: &LTSeqTable) -> Result<BoxedBatchReader, LtseqError> {
+///
+/// `requested_schema` is the consumer's schema request, already imported
+/// from its capsule. The stream always carries the table's own schema, which
+/// the protocol allows for representation requests the producer does not
+/// support; a request for different fields is rejected against the logical
+/// schema before the plan is executed (see `arrow_ffi::check_requested_schema`).
+pub fn arrow_stream_impl(
+    table: &LTSeqTable,
+    requested_schema: Option<&Schema>,
+) -> Result<BoxedBatchReader, LtseqError> {
+    let schema = schema_or_empty(table);
+    if let Some(requested) = requested_schema {
+        check_requested_schema(&schema, requested)?;
+    }
     let Some(df) = table.dataframe.as_ref() else {
-        return Ok(collected_reader(schema_or_empty(table), Vec::new()));
+        return Ok(collected_reader(schema, Vec::new()));
     };
     let stream = RUNTIME
         .block_on((**df).clone().execute_stream())

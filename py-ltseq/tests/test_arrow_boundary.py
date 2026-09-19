@@ -9,7 +9,7 @@ Interface / PyCapsule protocol), not as IPC bytes. These tests pin down:
 - buffer lifetime: results outlive the objects they were exported from;
 - the ``__arrow_c_stream__`` protocol on ``LTSeq`` (``pa.table(t)`` etc.) and
   its documented semantics (lazy, repeatable, cancellable, requested_schema
-  ignored, execution errors surface as exceptions);
+  validated but not honored, execution errors surface as exceptions);
 - the cursor yielding ``pyarrow.RecordBatch`` objects, with early stop;
 - a source guard so the IPC tunnel cannot come back silently.
 """
@@ -246,11 +246,52 @@ class TestArrowStreamProtocol:
         assert t.count() == 5000
         assert pa.table(t).num_rows == 5000
 
-    def test_requested_schema_is_ignored(self):
+    def test_requested_schema_for_same_fields_returns_native_schema(self):
+        # A request for another representation of the same fields (other
+        # integer width, other string encoding) is not honored: the stream
+        # carries the table's own schema, as the protocol allows, and a
+        # consumer such as pyarrow casts downstream if it insists.
         t = LTSeq.from_arrow(pa.table({"x": [1, 2], "y": ["a", "b"]}))
-        requested = pa.schema([("x", pa.int64())])
+        native = pa.schema([("x", pa.int64()), ("y", pa.string())])
+        requested = pa.schema([("x", pa.int32()), ("y", pa.large_string())])
         reader = pa.RecordBatchReader.from_stream(t, schema=requested)
-        assert reader.schema.names == ["x", "y"]
+        assert reader.schema == native
+        assert reader.read_all()["x"].to_pylist() == [1, 2]
+        cast = pa.table(t, schema=requested)
+        assert cast.schema == requested
+        assert cast["x"].to_pylist() == [1, 2]
+
+    @pytest.mark.parametrize(
+        "requested",
+        [
+            pa.schema([("x", pa.int64())]),
+            pa.schema([("x", pa.int64()), ("y", pa.string()), ("z", pa.int64())]),
+            pa.schema([("x", pa.int64()), ("q", pa.string())]),
+            pa.schema([("y", pa.string()), ("x", pa.int64())]),
+        ],
+        ids=["fewer_fields", "more_fields", "renamed_field", "reordered_fields"],
+    )
+    def test_requested_schema_for_different_fields_raises(self, requested):
+        # The protocol says a producer should raise on a request that is not a
+        # representation of its data, rather than return a stream the consumer
+        # did not ask for and let it fail (or not) downstream.
+        t = LTSeq.from_arrow(pa.table({"x": [1, 2], "y": ["a", "b"]}))
+        with pytest.raises(ValueError, match="requested_schema is not compatible"):
+            pa.RecordBatchReader.from_stream(t, schema=requested)
+        with pytest.raises(ValueError, match="requested_schema is not compatible"):
+            pa.table(t, schema=requested)
+        with pytest.raises(ValueError, match="requested_schema is not compatible"):
+            t.__arrow_c_stream__(requested.__arrow_c_schema__())
+        # A rejected request leaves the table untouched.
+        assert pa.table(t).num_rows == 2
+
+    def test_requested_schema_must_be_a_schema_capsule(self):
+        t = LTSeq.from_arrow(pa.table({"x": [1]}))
+        with pytest.raises(TypeError, match="arrow_schema"):
+            t.__arrow_c_stream__(pa.schema([("x", pa.int64())]))
+        with pytest.raises(ValueError):
+            # A capsule with the wrong name (an arrow_array_stream capsule).
+            t.__arrow_c_stream__(t.__arrow_c_stream__())
 
     def test_execution_error_surfaces_as_exception(self):
         t = LTSeq.from_arrow(pa.table({"x": [1, 2], "zero": [0, 0]}))

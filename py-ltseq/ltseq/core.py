@@ -291,12 +291,21 @@ class LTSeq(
         batches are pulled lazily by the consumer, each call executes the
         plan anew and leaves this table untouched, and the consumer owns the
         execution stream (dropping it cancels execution). ``requested_schema``
-        is accepted and ignored, as the protocol allows. Execution errors are
-        reported through the stream as the consumer's Arrow error type
-        (``pyarrow.ArrowInvalid`` for pyarrow), not as ``RuntimeError``.
+        is validated: a request for different fields (another count, other
+        names, another order) raises ``ValueError``; a request for another
+        representation of the same fields (other types or encodings) is not
+        honored and the stream carries the table's own schema, as the
+        protocol allows. Execution errors are reported through the stream as
+        the consumer's Arrow error type (``pyarrow.ArrowInvalid`` for
+        pyarrow), not as ``RuntimeError``.
 
         Args:
-            requested_schema: Optional ``arrow_schema`` capsule (ignored)
+            requested_schema: Optional ``arrow_schema`` capsule; must describe
+                the table's own fields
+
+        Raises:
+            ValueError: If ``requested_schema`` names different fields
+            TypeError: If ``requested_schema`` is not an ``arrow_schema`` capsule
 
         Returns:
             A PyCapsule named ``arrow_array_stream``

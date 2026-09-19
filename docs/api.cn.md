@@ -343,7 +343,7 @@ arrow_table = t.to_arrow()
 ### `LTSeq.__arrow_c_stream__`（Arrow PyCapsule 协议）
 - **签名**: `LTSeq.__arrow_c_stream__(requested_schema=None) -> PyCapsule`
 - **行为**: 以 Arrow C stream 导出表，任何 Arrow 消费者都可直接读取 `LTSeq`：`pa.table(t)`、`pa.RecordBatchReader.from_stream(t)`、`pl.from_arrow(t)`、`duckdb.sql("SELECT ... FROM t")`。调用时准备计划，批次由消费者按需拉取
-- **语义**: 每次调用重新执行计划，`LTSeq` 本身不变；消费者持有执行流，丢弃它（例如只读了第一批）即取消执行；`requested_schema` 接受但忽略（协议允许）；执行期间 GIL 是否释放取决于消费者（pyarrow 的 `read_all()` / `read_next_batch()` 会释放）
+- **语义**: 每次调用重新执行计划，`LTSeq` 本身不变；消费者持有执行流，丢弃它（例如只读了第一批）即取消执行；`requested_schema` 只校验、不满足：请求的字段与表不同（数量、名称或顺序不同）抛 `ValueError`，请求同一组字段的另一种表示（其他类型或编码）则按表自身的 schema 返回（协议允许）；执行期间 GIL 是否释放取决于消费者（pyarrow 的 `read_all()` / `read_next_batch()` 会释放）
 - **异常**: 计划无法准备时抛 `RuntimeError`；执行错误经流以消费者的 Arrow 错误类型（pyarrow 为 `pyarrow.ArrowInvalid`）抛出，而非 `RuntimeError`
 - **示例**:
 ```python

@@ -346,7 +346,7 @@ arrow_table = t.to_arrow()
 ### `LTSeq.__arrow_c_stream__` (Arrow PyCapsule Interface)
 - **Signature**: `LTSeq.__arrow_c_stream__(requested_schema=None) -> PyCapsule`
 - **Behavior**: Export the table as an Arrow C stream so any Arrow consumer can read an `LTSeq` directly: `pa.table(t)`, `pa.RecordBatchReader.from_stream(t)`, `pl.from_arrow(t)`, `duckdb.sql("SELECT ... FROM t")`. The plan is prepared when the method is called; batches are pulled lazily by the consumer
-- **Semantics**: each call executes the plan anew and leaves the `LTSeq` untouched; the consumer owns the execution stream and dropping it (for example after reading only the first batch) cancels execution; `requested_schema` is accepted and ignored, as the protocol allows; whether the GIL is free during execution depends on the consumer (pyarrow's `read_all()` / `read_next_batch()` release it)
+- **Semantics**: each call executes the plan anew and leaves the `LTSeq` untouched; the consumer owns the execution stream and dropping it (for example after reading only the first batch) cancels execution; `requested_schema` is validated but not honored: a request for different fields (another count, other names, another order) raises `ValueError`, while a request for another representation of the same fields (other types or encodings) returns the table's own schema, as the protocol allows; whether the GIL is free during execution depends on the consumer (pyarrow's `read_all()` / `read_next_batch()` release it)
 - **Exceptions**: `RuntimeError` if the plan cannot be prepared; execution errors surface through the stream as the consumer's Arrow error type (`pyarrow.ArrowInvalid` for pyarrow), not as `RuntimeError`
 - **Example**:
 ```python

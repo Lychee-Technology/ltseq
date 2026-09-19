@@ -18,7 +18,7 @@ issue 的评审意见为决策划定了两条边界："零拷贝"指 Rust/Python
 三种形态跨越边界（`src/arrow_ffi.rs`、`src/ops/io.rs`、`src/cursor.rs`）：
 
 1. **导出·已收集（`to_arrow()`）。** `LTSeqTable.to_arrow_reader` 在 detach 下执行计划（ADR 0016），把批次包成 `RecordBatchReader`，以 `pyarrow.RecordBatchReader` 交给 pyarrow；Python 调 `read_all()`。reader 的 schema 取第一个批次的 schema（没有批次时才用逻辑 schema），使 nullability 与 metadata 与 pyarrow 逐批看到的一致。错误仍映射为 `RuntimeError`。未加载的表导出带自身 schema 的空 reader，`LTSeq().to_arrow()` 不再依赖 Python 侧产生无类型列的兜底逻辑。
-2. **导出·惰性（`__arrow_c_stream__`）。** `LTSeqTable.__arrow_c_stream__` 在 detach 下运行 `execute_stream`，用 `DataFrameBatchReader` 包住 DataFusion 流，返回 `arrow_array_stream` capsule。语义：计划在调用时准备，规划错误立即抛出；批次由消费者在其 `get_next` 回调中拉取；每次调用重新执行计划，表本身不变；capsule（或导入它的消费者）持有执行流，丢弃即取消执行；`requested_schema` 接受但忽略（协议允许生产者按自己的 schema 返回）；执行错误经 C 接口报告，以消费者的 Arrow 错误类型（`pyarrow.ArrowInvalid`）抛出；DataFusion 内部的 panic 被捕获并作为错误报告，不会跨 C ABI 展开。导出方既不获取也不释放 GIL，执行期间解释器是否空闲取决于消费者（pyarrow 的 `read_all` / `read_next_batch` 会释放）。
+2. **导出·惰性（`__arrow_c_stream__`）。** `LTSeqTable.__arrow_c_stream__` 在 detach 下运行 `execute_stream`，用 `DataFrameBatchReader` 包住 DataFusion 流，返回 `arrow_array_stream` capsule。语义：计划在调用时准备，规划错误立即抛出；批次由消费者在其 `get_next` 回调中拉取；每次调用重新执行计划，表本身不变；capsule（或导入它的消费者）持有执行流，丢弃即取消执行；`requested_schema` 只校验、不满足：协议允许无法提供所请求表示的生产者按自己的 schema 返回（本生产者一律如此），但要求对并非同一数据之表示的请求抛出异常，因此请求的字段与表不同（数量、名称或顺序不同）时在执行开始前即抛 `ValueError`；执行错误经 C 接口报告，以消费者的 Arrow 错误类型（`pyarrow.ArrowInvalid`）抛出；DataFusion 内部的 panic 被捕获并作为错误报告，不会跨 C ABI 展开。导出方既不获取也不释放 GIL，执行期间解释器是否空闲取决于消费者（pyarrow 的 `read_all` / `read_next_batch` 会释放）。
 3. **导入（`from_arrow`）。** `LTSeqTable.from_arrow` 接收 `PyArrowType<ArrowArrayStreamReader>`：参数提取阶段持 GIL 调用源对象的 `__arrow_c_stream__`；拉取流与构建 `MemTable` 在 detach 下运行（reader 是 `Send`；pyarrow 导出的流不需要 GIL，Python 实现的 reader 会自行重新获取）。任何实现该协议的对象都可接受（`pyarrow.Table`、`RecordBatch`、`RecordBatchReader`、polars、duckdb 等），其余由 Python 抛 `TypeError`。有 schema 但零批次的流变成一个空批次，使表保有真实计划与带类型的 schema，与 IPC 路径在 Python 侧合成空批次的效果一致。
 
 cursor 的 `next_batch` 把拉到的 `RecordBatch` 以 `pyarrow.RecordBatch`（`PyArrowType<RecordBatch>`）返回，仍在 detach 下拉取、在 detach 段内取锁（ADR 0016）。导入与导出的 buffer 由接口的 release 回调跨边界引用计数，两个方向的结果都比其来源对象活得更久。
@@ -34,7 +34,7 @@ cursor 的 `next_batch` 把拉到的 `RecordBatch` 以 `pyarrow.RecordBatch`（`
 
 ## 影响
 
-- 任何 Python↔Rust 数据路径都不再序列化或解析，边界成本是每批一次指针交接。同一台机器上的实测（2680 万行、约 1 GB、107 个 chunk；`benchmarks/bench_arrow_boundary.py`，改动前后均为 release 构建）：
+- 任何 Python↔Rust 数据路径都不再序列化或解析，边界成本是每批一次指针交接。同一台机器上的实测（2675 万行、约 1 GB、107 个 25 万行的 chunk；`benchmarks/bench_arrow_boundary.py`，改动前后均为 release 构建）：
 
   | 路径 | 改动前 (s) | 改动后 (s) | 加速 | 改动前峰值 RSS 增量 (MB) | 改动后峰值 RSS 增量 (MB) |
   |---|---|---|---|---|---|
