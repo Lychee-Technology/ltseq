@@ -123,11 +123,15 @@ pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> Result<LTSeqTable, Ltse
 
     for batch in &batches {
         let batch_len = batch.num_rows();
-        let delete_pos_in_batch = pos.saturating_sub(row_offset);
+        let row_end = row_offset + batch_len;
 
-        if delete_pos_in_batch >= batch_len {
+        // Only the batch that contains `pos` is spliced. (`saturating_sub`
+        // here used to yield 0 for every batch *after* the target, deleting
+        // their first rows too; only visible on multi-batch tables.)
+        if pos < row_offset || pos >= row_end {
             result_batches.push(batch.clone());
         } else {
+            let delete_pos_in_batch = pos - row_offset;
             if delete_pos_in_batch > 0 {
                 result_batches.push(batch.slice(0, delete_pos_in_batch));
             }
