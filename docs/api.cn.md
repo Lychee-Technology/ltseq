@@ -1347,6 +1347,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
+- **说明**: lambda 中的 `r.col is None` / `r.col is not None` 会被改写为同样的表达式（`IS NULL` / `IS NOT NULL`，而不是 `= NULL`），并保留 lambda 的模块全局变量与闭包变量。改写依赖 lambda 源码，因此在 REPL、`exec`/`eval` 字符串以及普通 `def` 函数中请使用上述方法；否则会抛出说明写法的 `TypeError`。`r.col == None` 不会被改写，它与 SQL `NULL` 做比较。
 
 #### `r.col.is_in`
 - **签名**: `r.col.is_in(values: list[Any]) -> Expr`

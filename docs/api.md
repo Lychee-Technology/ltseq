@@ -1350,6 +1350,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
+- **Note**: inside a lambda, `r.col is None` / `r.col is not None` are rewritten to the same expressions (`IS NULL` / `IS NOT NULL`, never `= NULL`), and the lambda keeps its module globals and closure variables. The rewrite needs the lambda's source, so in a REPL, in `exec`/`eval` strings, and in plain `def` functions use the methods; otherwise a `TypeError` explains the spelling. `r.col == None` is not rewritten and compares against SQL `NULL`.
 
 #### `r.col.is_in`
 - **Signature**: `r.col.is_in(values: list[Any]) -> Expr`

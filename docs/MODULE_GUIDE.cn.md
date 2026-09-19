@@ -176,7 +176,7 @@ lookup 表达式重写逻辑。它让 derive 表达式内部可以触发 join �
 
 核心的 lambda 到表达式转换逻辑。如果你想理解 `lambda r: r.a > 1` 是如何变成可序列化树的，应先读这里。
 
-这里也包含针对 `is None` / `is not None` 的有限 AST 改写逻辑。
+这里也包含针对 lambda 中 `is None` / `is not None` 的有限 AST 改写逻辑。Python 无法重载 `is`，所以 `_transform_lambda_for_none_checks` 会在所属模块的 AST 中定位该 lambda（把同一行上的每个 lambda 用相同的自由变量编译后与函数的 code object 比较，因此同一行多个 lambda、f-string、跨行 lambda 都不会产生歧义），把每个 `x is None` / `x is not None` 改写为一个调用：操作数是表达式时得到 `x.is_null()` / `x.is_not_null()`，否则保持普通的身份判断；然后基于原始 `__globals__` 与闭包 cell 重建函数。源码不可用（REPL、`exec`/`eval` 字符串）或传入的是普通 `def` 函数时，lambda 原样执行，`_lambda_to_expr` 抛出指向 `.is_null()` / `.is_not_null()` 的 `TypeError`。
 
 ---
 
