@@ -32,7 +32,7 @@ This document describes the API **as currently implemented**. Every signature be
 | `SchemaMismatchError: schema mismatch` | Union/intersect with incompatible tables | Ensure both tables have same column names and types |
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
-| `TypeError: LTSeq expressions cannot be used in a boolean context` | Used `and`/`or`/`not`/`in`/ternary/chained comparison on a row expression or a group predicate, e.g. `(r.a > 2) and (r.b < 1.5)` or `(g.count() > 2) and (g.sum("x") > 0)` | Combine conditions with `&` `\|` `~`, e.g. `(r.a > 2) & (r.b < 1.5)`; use `.is_in([...])` instead of `in` |
+| `TypeError: LTSeq expressions cannot be used in a boolean context` | Used `and`/`or`/`not`/`in`/ternary/chained comparison on a row expression or a group predicate, e.g. `(r.a > 2) and (r.b < 1.5)` or `(g.count() > 2) and (g.sum("x") > 0)` | Combine conditions with `&` `\|` `~`, e.g. `(r.a > 2) & (r.b < 1.5)` or `(g.count() > 2) & (g.sum("x") > 0)`. Instead of `in`: row expressions use `.is_in([...])`; group predicates have no `is_in`, so combine `==` comparisons with `\|`, e.g. `(g.count() == 1) \| (g.count() == 2)` |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 

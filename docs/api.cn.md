@@ -32,7 +32,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | `SchemaMismatchError: schema mismatch` | union/intersect 的表 schema 不匹配 | 确保两表列名和类型相同 |
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
-| `TypeError: LTSeq expressions cannot be used in a boolean context` | 对行表达式或组谓词使用了 `and`/`or`/`not`/`in`/三元/链式比较，如 `(r.a > 2) and (r.b < 1.5)` 或 `(g.count() > 2) and (g.sum("x") > 0)` | 用 `&` `\|` `~` 组合条件，如 `(r.a > 2) & (r.b < 1.5)`；`in` 改用 `.is_in([...])` |
+| `TypeError: LTSeq expressions cannot be used in a boolean context` | 对行表达式或组谓词使用了 `and`/`or`/`not`/`in`/三元/链式比较，如 `(r.a > 2) and (r.b < 1.5)` 或 `(g.count() > 2) and (g.sum("x") > 0)` | 用 `&` `\|` `~` 组合条件，如 `(r.a > 2) & (r.b < 1.5)` 或 `(g.count() > 2) & (g.sum("x") > 0)`。`in` 的替代：行表达式改用 `.is_in([...])`；组谓词没有 `is_in`，用 `\|` 组合多个 `==` 比较，如 `(g.count() == 1) \| (g.count() == 2)` |
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
 | `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
