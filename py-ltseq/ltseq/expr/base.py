@@ -539,6 +539,20 @@ def ntile(n: int) -> "CallExpr":
     return CallExpr("ntile", (n,), {}, on=None)
 
 
+def bool_context_error(example: str) -> TypeError:
+    """Build the TypeError raised when an expression is used in a boolean context.
+
+    Shared by the row dialect (`Expr`) and the group dialect (`GroupExpr`,
+    `FilterExpr`) so the guidance stays identical; only the usage example
+    differs. `docs/api.md` documents this error by its message prefix.
+    """
+    return TypeError(
+        "LTSeq expressions cannot be used in a boolean context "
+        "(and/or/not/if/in/ternary/chained comparison). "
+        f"Use & | ~ to combine conditions, e.g. {example}"
+    )
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.
@@ -654,11 +668,7 @@ class Expr(ABC):
     def __bool__(self) -> NoReturn:
         """Refuse truthiness: Python's `and`/`or`/`not`/`in`/ternary/chained
         comparisons call bool() and would silently drop conditions otherwise."""
-        raise TypeError(
-            "LTSeq expressions cannot be used in a boolean context "
-            "(and/or/not/if/in/ternary/chained comparison). "
-            "Use & | ~ to combine conditions, e.g. (r.a > 2) & (r.b < 1.5)"
-        )
+        raise bool_context_error("(r.a > 2) & (r.b < 1.5)")
 
     def __abs__(self) -> "CallExpr":
         """Absolute value operator: abs(expr)"""

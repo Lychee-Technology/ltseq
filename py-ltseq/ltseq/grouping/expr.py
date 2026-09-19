@@ -7,7 +7,12 @@ that works in all contexts (pytest, REPL, exec).
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, NoReturn
+
+from ..expr.base import bool_context_error
+
+# Usage example shown in the boolean-context TypeError for the group dialect.
+GROUP_BOOL_CONTEXT_EXAMPLE = "(g.count() > 2) & (g.sum('x') > 0)"
 
 
 class GroupExpr(ABC):
@@ -17,6 +22,12 @@ class GroupExpr(ABC):
     def serialize(self) -> dict[str, Any]:
         """Serialize this expression to a dictionary."""
         pass
+
+    def __bool__(self) -> NoReturn:
+        """Refuse truthiness (issue #163, same class of bug as Expr / #140):
+        `and`/`or`/`not`/`in`/ternary/chained comparisons call bool() and
+        would silently drop conditions otherwise."""
+        raise bool_context_error(GROUP_BOOL_CONTEXT_EXAMPLE)
 
     # Arithmetic operations - return BinOpGroupExpr
     def __add__(self, other: "GroupExpr") -> "BinOpGroupExpr":
