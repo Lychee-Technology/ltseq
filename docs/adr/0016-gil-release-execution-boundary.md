@@ -24,7 +24,7 @@ The layering is fixed per API:
 2. **Execute detached.** `src/gil.rs::detached(py, || ...)` releases the GIL for a closure that sees only plain Rust values. `F: Send` keeps `Bound`/`Py` references out at compile time.
 3. **Convert after.** The closure returns `Result<T, LtseqError>`; `detached` builds the `PyErr` once the GIL is held again. The execution halves of `src/ops/*` (`parallel_scan`, `linear_scan`, `pattern_match`, `asof_join`, `io`, `pivot`, the `*_exec` halves of `mutation`, the snapshot paths of `set_ops`, `grouping::group_ordered_count_impl`) return `LtseqError`, not `PyResult`, so a `PyErr` cannot be built inside them. `LTSeqTable::require_df/require_schema/from_batches*` return `LtseqError` for the same reason.
 
-Two op shapes follow from this. When the whole impl is pure Rust (`materialize`, `rvs`, `step`, `asof_join`, `pivot`, `write_*`, `load_arrow_ipc`, `delete_rows`, the pattern-match and group-count impls after parsing), the `lib.rs` stub wraps the call. When parsing and execution are interleaved (`distinct`, `is_subset`, `insert_row`, `modify_row`, `assume_sorted`), the impl takes `py: Python<'_>` and wraps only its execution part.
+Two op shapes follow from this. When the whole impl is pure Rust (`materialize`, `rvs`, `step`, `asof_join`, `pivot`, `write_*`, `from_arrow`, `delete_rows`, the pattern-match and group-count impls after parsing), the `lib.rs` stub wraps the call. When parsing and execution are interleaved (`distinct`, `is_subset`, `insert_row`, `modify_row`, `assume_sorted`), the impl takes `py: Python<'_>` and wraps only its execution part.
 
 **The streaming cursor takes its mutex inside the detached section.** `next_batch` and `is_exhausted` never wait on the stream mutex while holding the GIL: a thread blocked in `lock()` with the GIL would prevent the thread mid-`stream.next()` from ever re-attaching, a lock-order deadlock between the GIL and the mutex. Contending threads wait without the GIL and take the following batch.
 
@@ -37,7 +37,7 @@ Two op shapes follow from this. When the whole impl is pure Rust (`materialize`,
 
 - A heavy call on one thread no longer stalls the interpreter for other threads. `py-ltseq/tests/test_gil_release.py` measures this with a heartbeat thread across every detached path.
 - Adding an execution path means writing its pure-Rust half with `Result<_, LtseqError>` and wrapping it in `detached`; adding a plan-only transform needs no `block_on` at all.
-- `format_table` is infallible and returns `String`; `LTSeqCursor::serialize_batch_to_ipc` is shared with `to_arrow_ipc`, whose IPC encoding now also runs detached.
+- `format_table` is infallible and returns `String`. The Arrow boundary paths (`to_arrow_reader`, `from_arrow`, `__arrow_c_stream__`, the cursor's `next_batch`) follow the same shape: execution or stream draining runs detached, only the pyarrow hand-off happens under the GIL ([ADR 0017](0017-arrow-c-data-interface-boundary.md) replaced the IPC encoding this ADR originally listed).
 - Not changed: `filter_where` awaits `session.sql()` only to parse a WHERE clause (planning, no execution) and stays under the GIL; `get_schema_dict`/`preview_join_schema` call `Python::attach` from an already-attached pymethod, which is harmless.
 
 ## Sources

@@ -10,6 +10,7 @@ This directory holds LTSeq's performance benchmarks: core-operation micro-benchm
 |---|---|---|
 | `run_all.py` | 一键编排：按序运行 build → 核心基准 → ClickBench 对比，并打印 PASS/SKIP/FAIL 摘要 | 否（自带门控）/ No (gated) |
 | `bench_core.py` | LTSeq 单引擎核心算子微基准（filter / derive / join / window / group / sort / mutation / I/O），10K/100K/1M 三档 | 否（内部生成临时数据）/ No |
+| `bench_arrow_boundary.py` | Python↔Rust Arrow 边界：`from_arrow` / `to_arrow` / `pa.table(t)` / cursor 的耗时与峰值 RSS 增量，每项在独立子进程中测量（#143） / Arrow boundary transfer time and peak-RSS growth, one subprocess per op | 否（内部生成）/ No |
 | `bench_vs.py` | LTSeq vs DuckDB 的 ClickBench 三轮对比（Top URLs / Sessionization / Funnel） | 是 / Yes |
 | `prepare_data.py` | 下载 ClickBench `hits.parquet`（约 14GB）并生成预排序数据集与 1M 采样 | — |
 | `verify_parquet_order.py` | 校验 parquet 文件是否按指定列物理有序 | 传入的 parquet |

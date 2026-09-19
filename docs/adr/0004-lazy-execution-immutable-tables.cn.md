@@ -11,7 +11,7 @@
 
 ## 决策
 
-1. **默认惰性。** 绝大多数操作（`filter`、`select`、`derive`、`sort`、`slice`、`join`、`group_ordered` 等）返回新的惰性查询对象。只有在显式终端边界才真正执行：`show()`、`count()`/`len()`、`collect()`、`to_arrow()`/`to_arrow_ipc()`、`to_pandas()`、`to_dicts()` 以及文件写出。
+1. **默认惰性。** 绝大多数操作（`filter`、`select`、`derive`、`sort`、`slice`、`join`、`group_ordered` 等）返回新的惰性查询对象。只有在显式终端边界才真正执行：`show()`、`count()`/`len()`、`collect()`、`to_arrow()`/`__arrow_c_stream__()`、`to_pandas()`、`to_dicts()` 以及文件写出。
 2. **表不可变。** 变换返回新对象（通常是 `LTSeq`，有时是其他包装类型：`NestedTable`、`LinkedTable`、`PartitionedTable`，见 [ADR 0010](0010-four-table-object-types.cn.md)），原表不变。*看起来*像修改的 API（`insert`、`delete`、`update`、`modify`，位于 `mutation_mixin.py`）同样返回新表，但注意它们当前是**急切**实现：Rust 侧在调用时即收集全表（`src/ops/mutation.rs`），属于 [ADR 0005](0005-no-materialization-rule.cn.md) 已记录的 eager 边界之一。
 3. **流式是独立对象。** 内存装不下的数据集用 `LTSeq.scan()` / `scan_parquet()` 返回流式 `Cursor`（迭代 Arrow `RecordBatch`，实现于 `src/cursor.rs`），而非 `LTSeq`；`cursor.count()` 无需加载全量数据即可计数。
 

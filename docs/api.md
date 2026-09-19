@@ -190,6 +190,7 @@ cursor = LTSeq.scan_parquet("large.parquet")
   - `schema -> dict[str, str]` (property), `columns -> list[str]` (property)
   - `source -> str` (property): source file path; `exhausted -> bool` (property)
   - `to_pandas()`, `to_arrow()`: materialize the remaining stream
+  - each yielded batch is a `pyarrow.RecordBatch` handed over through the Arrow C Data Interface; it stays valid after the cursor is dropped, and dropping a partly consumed cursor releases the underlying stream
   - `count() -> int`: consume the stream and count rows
 - **Example**:
 ```python
@@ -224,13 +225,14 @@ t = LTSeq.from_dict({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
 
 ### `LTSeq.from_pandas` / `LTSeq.from_arrow`
 - **Signature**: `LTSeq.from_pandas(df) -> LTSeq`; `LTSeq.from_arrow(arrow_table) -> LTSeq`
-- **Behavior**: Build a table from a pandas DataFrame / PyArrow Table
+- **Behavior**: Build a table from a pandas DataFrame, or from any object implementing the Arrow PyCapsule Interface (`__arrow_c_stream__`): `pyarrow.Table`, `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`, polars DataFrame, duckdb relation, .... The Arrow buffers are shared over the C Data Interface, not copied, and remain valid after the source object is released. An empty input keeps its typed schema
 - **Returns**: new `LTSeq`
-- **Exceptions**: `ImportError` (pandas/pyarrow not installed), `TypeError` (wrong input type)
+- **Exceptions**: `ImportError` (pandas not installed), `TypeError` (object does not implement `__arrow_c_stream__`)
 - **Example**:
 ```python
 t = LTSeq.from_pandas(df)
 t = LTSeq.from_arrow(arrow_table)
+t = LTSeq.from_arrow(pa.RecordBatchReader.from_batches(schema, batches))
 ```
 
 ### `seq` (integer sequence constructor)
@@ -331,14 +333,27 @@ for row in t.filter(lambda r: r.active):
 
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **Signature**: `LTSeq.to_pandas() -> pandas.DataFrame`; `LTSeq.to_arrow() -> pyarrow.Table`
-- **Behavior**: Materialize the table as a pandas DataFrame / PyArrow Table
-- **Exceptions**: `ImportError` (pandas/pyarrow not installed), `MemoryError` (dataset too large)
+- **Behavior**: Execute the plan and materialize the table as a pandas DataFrame / PyArrow Table. The result batches cross the Rust/Python boundary over the Arrow C Data Interface (shared buffers, no IPC serialization); the result stays valid after the `LTSeq` is released. An empty result keeps the typed schema
+- **Exceptions**: `ImportError` (pandas/pyarrow not installed), `RuntimeError` (execution failure), `MemoryError` (dataset too large)
 - **Example**:
 ```python
 df = t.to_pandas()
 df.plot(x="date", y="price")
 
 arrow_table = t.to_arrow()
+```
+
+### `LTSeq.__arrow_c_stream__` (Arrow PyCapsule Interface)
+- **Signature**: `LTSeq.__arrow_c_stream__(requested_schema=None) -> PyCapsule`
+- **Behavior**: Export the table as an Arrow C stream so any Arrow consumer can read an `LTSeq` directly: `pa.table(t)`, `pa.RecordBatchReader.from_stream(t)`, `pl.from_arrow(t)`, `duckdb.sql("SELECT ... FROM t")`. The plan is prepared when the method is called; batches are pulled lazily by the consumer
+- **Semantics**: each call executes the plan anew and leaves the `LTSeq` untouched; the consumer owns the execution stream and dropping it (for example after reading only the first batch) cancels execution; `requested_schema` is validated but not honored: a request for different fields (another count, other names, another order) raises `ValueError`, while a request for another representation of the same fields (other types or encodings) returns the table's own schema, as the protocol allows; whether the GIL is free during execution depends on the consumer (pyarrow's `read_all()` / `read_next_batch()` release it)
+- **Exceptions**: `RuntimeError` if the plan cannot be prepared; execution errors surface through the stream as the consumer's Arrow error type (`pyarrow.ArrowInvalid` for pyarrow), not as `RuntimeError`
+- **Example**:
+```python
+import pyarrow as pa
+table = pa.table(t)                       # same rows as t.to_arrow()
+for batch in pa.RecordBatchReader.from_stream(t):
+    ...
 ```
 
 ### `LTSeq.count` / `len(t)`

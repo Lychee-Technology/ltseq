@@ -205,7 +205,7 @@ Python 负责表达语法，Rust 负责执行语义。这条分界贯穿整个�
 
 - `show()`
 - `count()`
-- `to_arrow()` / `to_arrow_ipc()`
+- `to_arrow()` / `__arrow_c_stream__()`
 - `to_pandas()`
 - `collect()`
 - 文件写出

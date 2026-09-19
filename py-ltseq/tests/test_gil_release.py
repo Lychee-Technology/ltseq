@@ -1,7 +1,7 @@
 """GIL release around heavy execution paths (issue #142).
 
 Every Rust entry point that performs real execution or I/O (collect,
-execute_stream, file scans, rayon Parquet scans, Arrow IPC encoding) must
+execute_stream, file scans, rayon Parquet scans, Arrow stream import) must
 release the GIL for the duration of that work, so other Python threads
 (web workers, Jupyter background threads, progress bars) keep running.
 
@@ -284,8 +284,6 @@ def test_cursor_shared_between_threads_does_not_deadlock(parquet_path):
     section for exactly this reason. (A per-batch heartbeat measurement is
     not robust: batches are short and Python runs between them anyway.)
     """
-    import pyarrow.ipc as ipc
-
     cursor = LTSeq.scan_parquet(parquet_path)
     totals = [0, 0]
     errors: list[BaseException] = []
@@ -293,10 +291,10 @@ def test_cursor_shared_between_threads_does_not_deadlock(parquet_path):
     def drain(slot: int) -> None:
         try:
             while True:
-                batch_bytes = cursor._inner.next_batch()
-                if batch_bytes is None:
+                batch = cursor._inner.next_batch()
+                if batch is None:
                     return
-                totals[slot] += ipc.open_stream(batch_bytes).read_next_batch().num_rows
+                totals[slot] += batch.num_rows
         except BaseException as e:  # pragma: no cover - surfaced below
             errors.append(e)
 

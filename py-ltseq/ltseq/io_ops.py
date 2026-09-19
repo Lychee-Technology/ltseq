@@ -237,7 +237,7 @@ class IOMixin:
     @classmethod
     def _from_rows(cls, rows: list[dict[str, Any]], schema: dict[str, str]) -> "LTSeq":
         """
-        Create an LTSeq instance from a list of row dictionaries via Arrow IPC.
+        Create an LTSeq instance from a list of row dictionaries via a pyarrow Table.
 
         Internal method used by partition() and similar operations.
         Callers should prefer the public from_rows() which supports schema inference.
@@ -317,47 +317,38 @@ class IOMixin:
     @classmethod
     def from_arrow(cls, arrow_table: Any) -> "LTSeq":
         """
-        Create an LTSeq table from a PyArrow Table.
+        Create an LTSeq table from Arrow data.
+
+        Accepts any object implementing the Arrow PyCapsule Interface
+        (``__arrow_c_stream__``): a ``pyarrow.Table``, ``pyarrow.RecordBatch``
+        or ``pyarrow.RecordBatchReader``, a polars DataFrame, a duckdb
+        relation, .... The buffers are shared over the Arrow C Data Interface,
+        not copied, and stay valid after the source object is released.
 
         Args:
-            arrow_table: A pyarrow.Table instance
+            arrow_table: An Arrow-compatible object
 
         Returns:
             New LTSeq instance backed by the Arrow data
+
+        Raises:
+            TypeError: If the object does not implement ``__arrow_c_stream__``
 
         Example:
             >>> import pyarrow as pa
             >>> arrow_table = pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]})
             >>> t = LTSeq.from_arrow(arrow_table)
         """
-        import pyarrow as pa
-
         from .core import LTSeq
 
-        if not isinstance(arrow_table, pa.Table):
+        if not hasattr(arrow_table, "__arrow_c_stream__"):
             raise TypeError(
-                f"Expected pyarrow.Table, got {type(arrow_table).__name__}"
+                "Expected pyarrow.Table or another Arrow-compatible object implementing "
+                "__arrow_c_stream__ (pyarrow.RecordBatch, pyarrow.RecordBatchReader, ...), "
+                f"got {type(arrow_table).__name__}"
             )
 
-        # Serialize Arrow Table to IPC bytes
-        batches = arrow_table.to_batches()
-        if not batches and arrow_table.num_rows == 0:
-            # Create an empty batch with the schema so Rust receives schema info
-            empty_batch = pa.RecordBatch.from_pydict(
-                {field.name: pa.array([], type=field.type) for field in arrow_table.schema},
-                schema=arrow_table.schema,
-            )
-            batches = [empty_batch]
-        ipc_buffers = []
-        for batch in batches:
-            sink = pa.BufferOutputStream()
-            writer = pa.ipc.new_stream(sink, batch.schema)
-            writer.write_batch(batch)
-            writer.close()
-            ipc_buffers.append(sink.getvalue().to_pybytes())
-
-        # Load into Rust via the IPC pathway
-        inner = ltseq_core.LTSeqTable.load_arrow_ipc(ipc_buffers)
+        inner = ltseq_core.LTSeqTable.from_arrow(arrow_table)
         return LTSeq._from_inner(inner)
 
     @classmethod

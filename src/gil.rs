@@ -2,7 +2,7 @@
 //!
 //! Every `#[pymethods]` entry point that performs real work — DataFusion
 //! `collect` / `execute_stream` / `count`, file scans and writes, the rayon
-//! Parquet paths, Arrow IPC encoding — runs that work through [`detached`],
+//! Parquet paths, Arrow stream import — runs that work through [`detached`],
 //! which releases the GIL for its duration so other Python threads keep
 //! running. Plan building (`filter`, `select`, `sort`, `join`, ...) is
 //! synchronous and cheap and stays under the GIL.

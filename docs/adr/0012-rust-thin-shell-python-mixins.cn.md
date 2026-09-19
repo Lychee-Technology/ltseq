@@ -11,7 +11,7 @@
 
 ## 决策
 
-**Rust 侧：薄壳 + helper。** 通过单个 `#[pymodule]` 暴露扩展。`LTSeqTable` 所有面向 Python 的方法集中在 `lib.rs` 唯一的 `#[pymethods]` 块里；**多数操作**是 1-3 行的委托 stub，调用 `src/ops/` 中的 helper 函数（basic、derive、window、sort、grouping、join、asof_join、aggregation、set_ops、pattern_match、linear_scan、parallel_scan、align、pivot、mutation、io、common），而构造、IO/终端方法及部分基础方法仍是内联实现（如 `read_csv`、`to_arrow_ipc`、`slice`）。这既是 PyO3 的现实约束，也是可维护性选择：签名集中、实现模块化，`lib.rs` 不会变成几千行的执行文件。给读者的推论：*不要假设逻辑在 `lib.rs` 里*。
+**Rust 侧：薄壳 + helper。** 通过单个 `#[pymodule]` 暴露扩展。`LTSeqTable` 所有面向 Python 的方法集中在 `lib.rs` 唯一的 `#[pymethods]` 块里；**多数操作**是 1-3 行的委托 stub，调用 `src/ops/` 中的 helper 函数（basic、derive、window、sort、grouping、join、asof_join、aggregation、set_ops、pattern_match、linear_scan、parallel_scan、align、pivot、mutation、io、common），而构造、IO/终端方法及部分基础方法仍是内联实现（如 `read_csv`、`to_arrow_reader`、`slice`）。这既是 PyO3 的现实约束，也是可维护性选择：签名集中、实现模块化，`lib.rs` 不会变成几千行的执行文件。给读者的推论：*不要假设逻辑在 `lib.rs` 里*。
 
 **Python 侧：mixin 组合。** `LTSeq` 在 `core.py` 中由分类 mixin 组装（`io_ops.py`、`transforms.py`、`joins.py`、`aggregation.py`、`advanced_ops.py`、`mutation_mixin.py`、`lookup.py`），既保持公开 API 的广度，又避免单体文件，同时对用户仍是单一类。Python 侧调用 `_inner`，拿回新的 Rust 表，经 `_from_inner()` 包装。
 

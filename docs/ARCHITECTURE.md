@@ -168,6 +168,8 @@ The Python side generally calls methods on `_inner`, receives a new Rust table o
 
 Entry points that execute or do I/O (collect, `execute_stream`, file scans and writes, the rayon Parquet paths, the cursor's per-batch pull) release the GIL for that work through `src/gil.rs::detached`. The layering is fixed: Python objects are parsed under the GIL, the execution half of the op is pure Rust returning `LtseqError`, and the `PyErr` is built only after the GIL is re-acquired. Plan-only transforms never call `block_on`. See [ADR 0016](adr/0016-gil-release-execution-boundary.md).
 
+Data crosses the boundary as shared Arrow buffers over the Arrow C Data Interface (`src/arrow_ffi.rs`, via `arrow-pyarrow`), never as IPC bytes: `from_arrow` imports any object with `__arrow_c_stream__`, `to_arrow` hands collected batches to pyarrow as a `RecordBatchReader`, the cursor yields `pyarrow.RecordBatch` objects, and `LTSeq.__arrow_c_stream__` exports a lazily executed stream so `pa.table(t)`, polars and duckdb can read a table directly. See [ADR 0017](adr/0017-arrow-c-data-interface-boundary.md).
+
 ---
 
 ## Expression Pipeline
@@ -221,7 +223,7 @@ Terminal methods trigger execution, including:
 
 - `show()`
 - `count()`
-- `to_arrow()` / `to_arrow_ipc()`
+- `to_arrow()` / `__arrow_c_stream__()`
 - `to_pandas()`
 - `collect()`
 - file writes
