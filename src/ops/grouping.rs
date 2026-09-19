@@ -28,7 +28,7 @@ use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::transpiler::window_native::{finalize_window_expr, pyexpr_to_window_expr};
-use crate::types::dict_to_py_expr;
+use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::functions_window::expr_fn::lag;
@@ -81,19 +81,20 @@ fn get_df_and_schema_or_empty(
 ///
 /// Used for `group_ordered(cond).first().count()` — returns just the
 /// number of groups (sessions) without allocating per-row arrays.
+///
+/// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
+/// predicate under the GIL and wraps this call in `gil::detached`. Every path
+/// below (rayon Parquet scans, DataFusion streaming, the full fallback) is
+/// pure Rust and reports `LtseqError`.
 pub fn group_ordered_count_impl(
     table: &LTSeqTable,
-    grouping_expr: Bound<'_, PyDict>,
-) -> PyResult<usize> {
-    // Deserialize grouping expression
-    let py_expr = dict_to_py_expr(&grouping_expr)?;
-
+    py_expr: &PyExpr,
+) -> Result<usize, LtseqError> {
     // Only works for linear scan predicates (shift-based boundary detection)
-    if !can_linear_scan(&py_expr) {
+    if !can_linear_scan(py_expr) {
         return Err(LtseqError::Validation(
             "group_ordered_count only supports shift-based boundary predicates".into(),
-        )
-        .into());
+        ));
     }
 
     // Try Parquet fast paths (bypass DataFusion entirely).
@@ -102,7 +103,7 @@ pub fn group_ordered_count_impl(
             // Preferred: parallel per-RG counting with seam stitching.
             match crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
-                &py_expr,
+                py_expr,
                 parquet_path,
             ) {
                 Ok(count) => return Ok(count),
@@ -118,7 +119,7 @@ pub fn group_ordered_count_impl(
             // Fallback: single-threaded sequential streaming.
             match crate::ops::parallel_scan::direct_streaming_group_count(
                 table,
-                &py_expr,
+                py_expr,
                 parquet_path,
             ) {
                 Ok(count) => return Ok(count),
@@ -134,27 +135,19 @@ pub fn group_ordered_count_impl(
     }
 
     // Fallback: do the full group_id computation and count
-    let result = linear_scan_group_id(table, &py_expr)?;
-    let count = RUNTIME.block_on(async {
-        let df = result
-            .dataframe
-            .as_ref()
-            .ok_or_else(|| "No data".to_string())?;
-        // Filter __rn__ == 1 and count
-        let filtered = (**df)
-            .clone()
-            .filter(
-                Expr::Column(datafusion::common::Column::new_unqualified("__rn__"))
-                    .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
-            )
-            .map_err(|e| e.to_string())?;
-        filtered.count().await.map_err(|e| e.to_string())
-    });
-
-    match count {
-        Ok(c) => Ok(c),
-        Err(e) => Err(LtseqError::Runtime(e).into()),
-    }
+    let result = linear_scan_group_id(table, py_expr)?;
+    let df = result.require_df()?;
+    // Filter __rn__ == 1 and count
+    let filtered = (**df)
+        .clone()
+        .filter(
+            Expr::Column(datafusion::common::Column::new_unqualified("__rn__"))
+                .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
+        )
+        .map_err(|e| LtseqError::Runtime(e.to_string()))?;
+    RUNTIME
+        .block_on(filtered.count())
+        .map_err(|e| LtseqError::Runtime(e.to_string()))
 }
 
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.

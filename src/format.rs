@@ -4,7 +4,6 @@ use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::temporal_conversions;
-use pyo3::PyResult;
 
 /// A typed column reference that avoids repeated `downcast_ref` per cell.
 ///
@@ -325,7 +324,7 @@ pub fn format_table(
     batches: &[RecordBatch],
     schema: &ArrowSchema,
     limit: usize,
-) -> PyResult<String> {
+) -> String {
     // Calculate column widths
     let col_widths = calculate_column_widths(batches, schema, limit);
 
@@ -346,7 +345,7 @@ pub fn format_table(
     // Draw bottom border
     output.push_str(&draw_border(&col_widths));
 
-    Ok(output)
+    output
 }
 
 #[cfg(test)]

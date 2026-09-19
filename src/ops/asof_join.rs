@@ -21,7 +21,6 @@ use datafusion::arrow::array;
 use datafusion::arrow::array::{Array, ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
-use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -33,7 +32,7 @@ fn extract_group_keys(
     converter: &RowConverter,
     batches: &[RecordBatch],
     by_indices: &[usize],
-) -> PyResult<Vec<OwnedRow>> {
+) -> Result<Vec<OwnedRow>, LtseqError> {
     let mut keys: Vec<OwnedRow> = Vec::new();
     for batch in batches {
         let cols: Vec<ArrayRef> =
@@ -53,7 +52,7 @@ fn by_col_indices(
     schema: &ArrowSchema,
     by_cols: &[String],
     side: &str,
-) -> PyResult<Vec<usize>> {
+) -> Result<Vec<usize>, LtseqError> {
     by_cols
         .iter()
         .map(|name| {
@@ -62,10 +61,10 @@ fn by_col_indices(
                 .iter()
                 .position(|f| f.name() == name)
                 .ok_or_else(|| {
-                    PyErr::from(LtseqError::Validation(format!(
+                    LtseqError::Validation(format!(
                         "by= column '{}' not found in {} table",
                         name, side
-                    )))
+                    ))
                 })
         })
         .collect()
@@ -75,6 +74,9 @@ fn by_col_indices(
 ///
 /// For each row in the left table, finds the "nearest" matching row in the right table
 /// based on a time/key column. This is commonly used in financial applications.
+///
+/// Runs with the GIL released (`lib.rs::asof_join` wraps it in `gil::detached`):
+/// both collects and the binary-search matching take only plain Rust values.
 #[expect(
     clippy::too_many_arguments,
     reason = "mirrors the flat parameter list of the PyO3 `asof_join` binding in lib.rs; \
@@ -89,7 +91,7 @@ pub fn asof_join_impl(
     suffix: &str,
     left_by_cols: Vec<String>,
     right_by_cols: Vec<String>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // 1. Validate both tables have data
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
@@ -101,8 +103,7 @@ pub fn asof_join_impl(
             return Err(LtseqError::Validation(format!(
                 "Invalid direction '{}'. Must be 'backward', 'forward', or 'nearest'",
                 direction
-            ))
-            .into())
+            )))
         }
     }
 
@@ -120,8 +121,7 @@ pub fn asof_join_impl(
                 .map_err(LtseqError::collect)?;
 
             Ok::<_, LtseqError>((left_result, right_result))
-        })
-        .map_err(PyErr::from)?;
+        })?;
 
     // 4. Get actual schemas from batches
     let left_schema = left_batches
@@ -207,8 +207,7 @@ pub fn asof_join_impl(
         if left_by_cols.len() != right_by_cols.len() {
             return Err(LtseqError::Validation(
                 "asof_join by= must name the same number of columns on both sides".into(),
-            )
-            .into());
+            ));
         }
         let left_by_idx = by_col_indices(&left_schema, &left_by_cols, "left")?;
         let right_by_idx = by_col_indices(&right_schema, &right_by_cols, "right")?;
@@ -413,7 +412,7 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
 }
 
 /// Extract time values from an Arrow array column as i64
-fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
+fn extract_time_values(col: &Arc<dyn Array>) -> Result<Vec<i64>, LtseqError> {
     let len = col.len();
     let mut values = Vec::with_capacity(len);
 
@@ -511,8 +510,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
             } else {
                 return Err(LtseqError::Validation(
                     "Unsupported timestamp type for asof join time column".into(),
-                )
-                .into());
+                ));
             }
         }
         DataType::Date32 => {
@@ -549,8 +547,7 @@ fn extract_time_values(col: &Arc<dyn Array>) -> PyResult<Vec<i64>> {
             return Err(LtseqError::Validation(format!(
                 "Unsupported data type '{}' for asof join time column",
                 other
-            ))
-            .into());
+            )));
         }
     }
 

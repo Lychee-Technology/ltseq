@@ -14,6 +14,8 @@ use pyo3::types::PyBytes;
 use std::sync::{Arc, Mutex};
 
 use crate::engine::RUNTIME;
+use crate::error::LtseqError;
+use crate::gil::detached;
 
 /// LTSeqCursor: A streaming cursor for batch-by-batch iteration
 ///
@@ -44,6 +46,35 @@ impl LTSeqCursor {
             source_path,
         }
     }
+
+    /// Pull the next batch off the stream and IPC-encode it.
+    ///
+    /// Runs with the GIL released (see `next_batch`). The mutex is taken
+    /// **inside** the detached section on purpose: if a thread blocked on
+    /// `lock()` while holding the GIL, the thread mid-`stream.next()` could
+    /// never re-attach to hand its batch back — a lock-order deadlock between
+    /// the GIL and this mutex. Contending threads instead wait here without
+    /// the GIL and simply take the following batch.
+    fn pull_ipc_batch(&self) -> Result<Option<Vec<u8>>, LtseqError> {
+        let mut guard = self
+            .stream
+            .lock()
+            .map_err(|e| LtseqError::Runtime(format!("Mutex poisoned: {}", e)))?;
+
+        let Some(stream) = guard.as_mut() else {
+            return Ok(None); // Stream already exhausted
+        };
+
+        match RUNTIME.block_on(stream.next()) {
+            Some(Ok(batch)) => serialize_batch_to_ipc(&batch).map(Some),
+            Some(Err(e)) => Err(LtseqError::Runtime(format!("Stream error: {}", e))),
+            None => {
+                // Stream exhausted, mark as None
+                *guard = None;
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[pymethods]
@@ -59,41 +90,9 @@ impl LTSeqCursor {
     /// batch = pa.ipc.read_record_batch(bytes_data, schema)
     /// ```
     fn next_batch(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
-        let mut guard = self.stream.lock().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Mutex poisoned: {}", e))
-        })?;
-
-        let stream = match guard.as_mut() {
-            Some(s) => s,
-            None => return Ok(None), // Stream already exhausted
-        };
-
-        // Block on async stream.next()
-        let result = RUNTIME.block_on(async { stream.next().await });
-
-        match result {
-            Some(Ok(batch)) => {
-                // Serialize RecordBatch to IPC format for Python consumption
-                let ipc_bytes = serialize_batch_to_ipc(&batch).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to serialize batch: {}",
-                        e
-                    ))
-                })?;
-
-                // Return as Python bytes
-                Ok(Some(PyBytes::new(py, &ipc_bytes).into()))
-            }
-            Some(Err(e)) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Stream error: {}",
-                e
-            ))),
-            None => {
-                // Stream exhausted, mark as None
-                *guard = None;
-                Ok(None)
-            }
-        }
+        // Per-batch streaming I/O + IPC encoding run with the GIL released.
+        let ipc_bytes = detached(py, || self.pull_ipc_batch())?;
+        Ok(ipc_bytes.map(|buf| PyBytes::new(py, &buf).into()))
     }
 
     /// Get the schema as a list of (name, type) tuples
@@ -120,30 +119,32 @@ impl LTSeqCursor {
     }
 
     /// Check if cursor is exhausted
-    fn is_exhausted(&self) -> bool {
-        match self.stream.lock() {
+    fn is_exhausted(&self, py: Python<'_>) -> bool {
+        // Same lock-order rule as `pull_ipc_batch`: never wait on the stream
+        // mutex while holding the GIL.
+        py.detach(|| match self.stream.lock() {
             Ok(guard) => guard.is_none(),
             Err(_) => true, // If mutex is poisoned, consider exhausted
-        }
+        })
     }
 }
 
 /// Serialize a RecordBatch to IPC format (Arrow streaming format)
-fn serialize_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, String> {
+pub(crate) fn serialize_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, LtseqError> {
     use datafusion::arrow::ipc::writer::StreamWriter;
 
     let mut buffer = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
-            .map_err(|e| format!("Failed to create IPC writer: {}", e))?;
+            .map_err(|e| LtseqError::with_context("Failed to create IPC writer", e))?;
 
         writer
             .write(batch)
-            .map_err(|e| format!("Failed to write batch: {}", e))?;
+            .map_err(|e| LtseqError::with_context("Failed to write IPC batch", e))?;
 
         writer
             .finish()
-            .map_err(|e| format!("Failed to finish IPC stream: {}", e))?;
+            .map_err(|e| LtseqError::with_context("Failed to finish IPC stream", e))?;
     }
 
     Ok(buffer)
@@ -154,26 +155,23 @@ pub fn create_cursor_from_csv(
     session: Arc<SessionContext>,
     path: &str,
     has_header: bool,
-) -> Result<LTSeqCursor, String> {
+) -> Result<LTSeqCursor, LtseqError> {
     RUNTIME.block_on(async {
         // Read CSV into DataFrame with has_header option
         let options = CsvReadOptions::new().has_header(has_header);
         let df = session
             .read_csv(path, options)
             .await
-            .map_err(|e| format!("Failed to read CSV: {}", e))?;
+            .map_err(|e| LtseqError::Runtime(format!("Failed to read CSV: {}", e)))?;
 
         // Get schema
-        let df_schema = df.schema();
-        let arrow_fields: Vec<datafusion::arrow::datatypes::Field> =
-            df_schema.fields().iter().map(|f| (**f).clone()).collect();
-        let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
+        let arrow_schema = crate::LTSeqTable::schema_from_df(df.schema());
 
         // Execute as stream
         let stream = df
             .execute_stream()
             .await
-            .map_err(|e| format!("Failed to create stream: {}", e))?;
+            .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
 
         Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
     })
@@ -183,25 +181,22 @@ pub fn create_cursor_from_csv(
 pub fn create_cursor_from_parquet(
     session: Arc<SessionContext>,
     path: &str,
-) -> Result<LTSeqCursor, String> {
+) -> Result<LTSeqCursor, LtseqError> {
     RUNTIME.block_on(async {
         // Read Parquet into DataFrame
         let df = session
             .read_parquet(path, ParquetReadOptions::default())
             .await
-            .map_err(|e| format!("Failed to read Parquet: {}", e))?;
+            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet: {}", e)))?;
 
         // Get schema
-        let df_schema = df.schema();
-        let arrow_fields: Vec<datafusion::arrow::datatypes::Field> =
-            df_schema.fields().iter().map(|f| (**f).clone()).collect();
-        let arrow_schema = Arc::new(ArrowSchema::new(arrow_fields));
+        let arrow_schema = crate::LTSeqTable::schema_from_df(df.schema());
 
         // Execute as stream
         let stream = df
             .execute_stream()
             .await
-            .map_err(|e| format!("Failed to create stream: {}", e))?;
+            .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
 
         Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
     })

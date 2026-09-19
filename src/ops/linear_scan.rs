@@ -39,7 +39,6 @@ use datafusion::common::Column;
 use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::logical_expr::{Expr, SortExpr};
 use futures_util::StreamExt;
-use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -1028,11 +1027,14 @@ pub(crate) fn build_sort_exprs(sort_specs: &[crate::SortSpec]) -> Vec<SortExpr> 
 /// **Phase B** (result assembly):
 ///   5. Return metadata-only table with __group_id__, __group_count__, __rn__
 ///
+/// Runs with the GIL released (reached only from `group_ordered_count_impl`
+/// inside `gil::detached`), so it takes only plain Rust values.
+///
 /// **Streaming fast path**: When data comes from a pre-sorted Parquet file
 /// (`source_parquet_path` + `sort_exprs`), uses `target_partitions=1` +
 /// `execute_stream()` to avoid the 32-partition SortPreservingMerge overhead
 /// and process batches individually without `concat_batches`.
-pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> PyResult<LTSeqTable> {
+pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LTSeqTable, LtseqError> {
     // ── Streaming fast path for pre-sorted Parquet ───────────────────────
     //
     // Conditions:
@@ -1080,7 +1082,7 @@ fn streaming_linear_scan_group_id(
     table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // Step 1: Extract columns needed by the predicate
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
@@ -1182,7 +1184,7 @@ fn streaming_linear_scan_group_id(
             return general_linear_scan_group_id(table, predicate);
         }
         Err(e) => {
-            return Err(LtseqError::Runtime(e).into());
+            return Err(LtseqError::Runtime(e));
         }
     };
 
@@ -1282,7 +1284,7 @@ fn build_boundary_scan_df(
 fn general_linear_scan_group_id(
     table: &LTSeqTable,
     predicate: &PyExpr,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let df = table
         .dataframe
         .as_ref()
@@ -1348,7 +1350,7 @@ fn build_group_metadata_from_boundaries(
     boundaries: &BooleanArray,
     total_rows: usize,
     table: &LTSeqTable,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // Compute group IDs from boundaries via prefix sum
     let mut group_ids: Vec<i64> = Vec::with_capacity(total_rows);
     let mut current_gid: i64 = 0;
@@ -1384,7 +1386,7 @@ pub(crate) fn build_metadata_table(
     count_values: Vec<i64>,
     rn_values: Vec<i64>,
     table: &LTSeqTable,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // ── Phase B: Return metadata as MemTable ────────────────────────────
     //
     // Instead of JOINing with the original data (expensive sort + ROW_NUMBER),

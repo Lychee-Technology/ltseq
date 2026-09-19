@@ -1,7 +1,13 @@
 //! Row-level mutation operations: insert_row, delete_rows, conditional_update, modify_row
+//!
+//! GIL layering (issue #142): the Python dict → Arrow conversion happens
+//! under the GIL; the full-table collect and batch splicing (`*_exec`) run
+//! through `gil::detached` and return `LtseqError`. `conditional_update`
+//! only builds a plan and never executes.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::gil::detached;
 use crate::LTSeqTable;
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::*;
@@ -15,20 +21,30 @@ use std::sync::Arc;
 // ============================================================================
 
 pub fn insert_row_impl(
+    py: Python<'_>,
     table: &LTSeqTable,
     pos: i64,
     row_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let (df, schema) = table.require_df_and_schema()?;
+    // Same error precedence as before: a table without data fails before
+    // the row is even converted.
+    let (_, schema) = table.require_df_and_schema()?;
+    let new_batch = row_dict_to_batch(row_dict, schema)?;
+    detached(py, || insert_row_exec(table, pos, new_batch))
+}
 
-    let batches = RUNTIME
-        .block_on(async { (**df).clone().collect().await })
-        .map_err(|e| LtseqError::with_context("Failed to collect data", e))?;
+/// Collect the table and splice `new_batch` in at `pos` (GIL released).
+fn insert_row_exec(
+    table: &LTSeqTable,
+    pos: i64,
+    new_batch: RecordBatch,
+) -> Result<LTSeqTable, LtseqError> {
+    let df = table.require_df()?;
+
+    let batches = collect_all(df)?;
 
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let pos = pos.clamp(0, num_rows as i64) as usize;
-
-    let new_batch = row_dict_to_batch(row_dict, schema)?;
 
     if num_rows == 0 {
         return LTSeqTable::from_batches(
@@ -83,12 +99,11 @@ pub fn insert_row_impl(
 // delete_rows: Delete row at a given position
 // ============================================================================
 
-pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> PyResult<LTSeqTable> {
+/// Runs with the GIL released (`lib.rs::delete_rows` wraps it in `gil::detached`).
+pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let batches = RUNTIME
-        .block_on(async { (**df).clone().collect().await })
-        .map_err(|e| LtseqError::with_context("Failed to collect data", e))?;
+    let batches = collect_all(df)?;
 
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
@@ -174,36 +189,39 @@ pub fn conditional_update_impl(
         update_map.insert(col_name, scalar);
     }
 
-    let result_df = RUNTIME
-        .block_on(async {
-            use datafusion::common::Column;
-            use datafusion::logical_expr::case;
-            use datafusion::prelude::lit;
+    // Plan building only; nothing executes here.
+    let result_df = {
+        use datafusion::common::Column;
+        use datafusion::logical_expr::case;
+        use datafusion::prelude::lit;
 
-            let mut select_exprs = Vec::new();
+        let mut select_exprs = Vec::new();
 
-            for field in schema.fields() {
-                let col_name = field.name();
-                let col_expr = datafusion::prelude::Expr::Column(Column::new_unqualified(col_name));
+        for field in schema.fields() {
+            let col_name = field.name();
+            let col_expr = datafusion::prelude::Expr::Column(Column::new_unqualified(col_name));
 
-                if let Some(scalar) = update_map.get(col_name) {
-                    let updated_expr = case(predicate_expr.clone())
-                        .when(lit(true), lit(scalar.clone()))
-                        .otherwise(col_expr.clone())
-                        .map_err(|e| format!("Failed to build CASE for '{}': {}", col_name, e))?
-                        .alias(col_name);
-                    select_exprs.push(updated_expr);
-                } else {
-                    select_exprs.push(col_expr);
-                }
+            if let Some(scalar) = update_map.get(col_name) {
+                let updated_expr = case(predicate_expr.clone())
+                    .when(lit(true), lit(scalar.clone()))
+                    .otherwise(col_expr.clone())
+                    .map_err(|e| {
+                        LtseqError::Runtime(format!(
+                            "Failed to build CASE for '{}': {}",
+                            col_name, e
+                        ))
+                    })?
+                    .alias(col_name);
+                select_exprs.push(updated_expr);
+            } else {
+                select_exprs.push(col_expr);
             }
+        }
 
-            (**df)
-                .clone()
-                .select(select_exprs)
-                .map_err(|e| format!("Conditional update execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+        (**df).clone().select(select_exprs).map_err(|e| {
+            LtseqError::Runtime(format!("Conditional update execution failed: {}", e))
+        })?
+    };
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -219,30 +237,15 @@ pub fn conditional_update_impl(
 // ============================================================================
 
 pub fn modify_row_impl(
+    py: Python<'_>,
     table: &LTSeqTable,
     pos: i64,
     updates: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let (_, schema) = table.require_df_and_schema()?;
 
-    let batches = RUNTIME
-        .block_on(async { (**df).clone().collect().await })
-        .map_err(|e| LtseqError::with_context("Failed to collect data", e))?;
-
-    let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-
-    if pos < 0 || pos as usize >= num_rows || updates.is_empty() {
-        return Ok(LTSeqTable::from_df_with_schema(
-            Arc::clone(&table.session),
-            (**df).clone(),
-            Arc::clone(schema),
-            Vec::new(),
-            None,
-        ));
-    }
-
-    let pos = pos as usize;
-
+    // Python values → typed scalars (needs the GIL). Unknown columns and
+    // unconvertible values are skipped, as before.
     let update_map: Vec<(String, ScalarValue)> = updates
         .iter()
         .filter_map(|(key, val)| {
@@ -253,6 +256,33 @@ pub fn modify_row_impl(
             Some((col_name, scalar))
         })
         .collect();
+
+    detached(py, || modify_row_exec(table, pos, &update_map))
+}
+
+/// Collect the table and rewrite the row at `pos` (GIL released).
+fn modify_row_exec(
+    table: &LTSeqTable,
+    pos: i64,
+    update_map: &[(String, ScalarValue)],
+) -> Result<LTSeqTable, LtseqError> {
+    let (df, schema) = table.require_df_and_schema()?;
+
+    let batches = collect_all(df)?;
+
+    let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+    if pos < 0 || pos as usize >= num_rows || update_map.is_empty() {
+        return Ok(LTSeqTable::from_df_with_schema(
+            Arc::clone(&table.session),
+            (**df).clone(),
+            Arc::clone(schema),
+            Vec::new(),
+            None,
+        ));
+    }
+
+    let pos = pos as usize;
 
     let mut result_batches = Vec::new();
     let mut row_offset = 0usize;
@@ -300,6 +330,15 @@ pub fn modify_row_impl(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Full-table collect for the copy-on-write mutations.
+fn collect_all(
+    df: &Arc<datafusion::dataframe::DataFrame>,
+) -> Result<Vec<RecordBatch>, LtseqError> {
+    RUNTIME
+        .block_on((**df).clone().collect())
+        .map_err(|e| LtseqError::with_context("Failed to collect data", e))
+}
 
 fn row_dict_to_batch(
     row_dict: &Bound<'_, PyDict>,
