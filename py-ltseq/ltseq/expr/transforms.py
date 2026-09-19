@@ -1,16 +1,27 @@
 """AST transformation and lambda expression capturing for LTSeq."""
 
+import __future__
 import ast
 import copy
+import functools
 import inspect
+import operator
 import types
-from typing import Any, Callable, cast
+from typing import Any, Callable, NamedTuple, cast
 
 from .base import Expr
 from .proxy import SchemaProxy
 
 
 _NULL_CHECK_HELPER = "__ltseq_null_check__"
+
+# ``co_flags`` bits recording the ``from __future__`` features of the defining
+# module. They are part of a lambda's compilation context, not of the lambda.
+_FUTURE_FLAGS = functools.reduce(
+    operator.or_,
+    (getattr(__future__, name).compiler_flag for name in __future__.all_feature_names),
+    0,
+)
 
 
 def _null_check(value: Any, negate: bool) -> Any:
@@ -51,13 +62,36 @@ def _contains_none_check(node: ast.AST) -> bool:
     )
 
 
+def _unused_name(node: ast.AST, base: str) -> str:
+    """Return ``base``, suffixed if needed, so that no parameter or name
+    reference inside ``node`` resolves to it."""
+    used = {
+        sub.id if isinstance(sub, ast.Name) else sub.arg
+        for sub in ast.walk(node)
+        if isinstance(sub, (ast.Name, ast.arg))
+    }
+    stem, dunder = (base[:-2], "__") if base.endswith("__") else (base, "")
+    name, counter = base, 0
+    while name in used:
+        counter += 1
+        # Keep the dunder form: ``__x1__`` is exempt from private-name
+        # mangling inside class bodies, ``__x__1`` is not.
+        name = f"{stem}{counter}{dunder}"
+    return name
+
+
 class _NoneCheckRewriter(ast.NodeTransformer):
-    """Rewrite ``x is None`` / ``x is not None`` into ``__ltseq_null_check__(x, negate)``.
+    """Rewrite ``x is None`` / ``x is not None`` into ``helper(x, negate)``.
 
     ``is`` cannot be overloaded in Python, so the comparison is redirected to
     :func:`_null_check`, which yields ``x.is_null()`` / ``x.is_not_null()`` for
-    expressions and plain identity checks for everything else.
+    expressions and plain identity checks for everything else. ``helper`` is an
+    identifier the lambda does not otherwise use (see :func:`_unused_name`), so
+    user bindings are never shadowed.
     """
+
+    def __init__(self, helper: str) -> None:
+        self.helper = helper
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
         node = cast(ast.Compare, self.generic_visit(node))
@@ -66,15 +100,22 @@ class _NoneCheckRewriter(ast.NodeTransformer):
             return node
         operand, negate = match
         call = ast.Call(
-            func=ast.Name(id=_NULL_CHECK_HELPER, ctx=ast.Load()),
+            func=ast.Name(id=self.helper, ctx=ast.Load()),
             args=[operand, ast.Constant(value=negate)],
             keywords=[],
         )
         return ast.copy_location(call, node)
 
 
+class _LambdaSite(NamedTuple):
+    node: ast.Lambda
+    # Innermost enclosing class, if any: names such as ``self.__x`` inside it
+    # are privately mangled, so a candidate must be compiled in the same class.
+    class_name: str | None
+
+
 # filename -> (line list handed out by linecache, lineno -> lambdas that use `is None`)
-_ModuleIndex = dict[int, list[ast.Lambda]]
+_ModuleIndex = dict[int, list[_LambdaSite]]
 _module_index_cache: dict[str, tuple[list[str], _ModuleIndex]] = {}
 
 
@@ -98,23 +139,41 @@ def _module_none_check_lambdas(fn: types.FunctionType) -> _ModuleIndex | None:
     except (SyntaxError, ValueError):
         return None
     index: _ModuleIndex = {}
-    for node in ast.walk(module):
-        if isinstance(node, ast.Lambda) and _contains_none_check(node):
-            index.setdefault(node.lineno, []).append(node)
+    stack: list[tuple[ast.AST, str | None]] = [(module, None)]
+    while stack:
+        node, class_name = stack.pop()
+        if isinstance(node, ast.ClassDef):
+            class_name = node.name
+        elif isinstance(node, ast.Lambda) and _contains_none_check(node):
+            index.setdefault(node.lineno, []).append(_LambdaSite(node, class_name))
+        stack.extend((child, class_name) for child in ast.iter_child_nodes(node))
     _module_index_cache[filename] = (lines, index)
     return index
 
 
+def _nested_code(code: types.CodeType, depth: int) -> types.CodeType:
+    """Follow the first code-object constant ``depth`` levels down."""
+    for _ in range(depth):
+        code = next(c for c in code.co_consts if isinstance(c, types.CodeType))
+    return code
+
+
 def _compile_lambda_in_scope(
-    node: ast.Lambda, scope_names: tuple[str, ...], filename: str
+    site: _LambdaSite, scope_names: tuple[str, ...], context: types.CodeType
 ) -> types.CodeType:
-    """Compile ``node`` as if it were nested in a function whose locals are
-    ``scope_names`` and return the lambda's own code object.
+    """Compile the lambda at ``site`` as if it were nested in a function whose
+    locals are ``scope_names`` and return the lambda's own code object.
 
     Names in ``scope_names`` that the lambda references compile to closure
     loads exactly as they did in the original function; every other name stays
-    a global lookup. The node is not mutated.
+    a global lookup. The compilation context otherwise matches the original:
+    the ``from __future__`` features in effect for ``context`` are applied, and
+    the wrapper is placed inside a class of the same name as the lambda's
+    enclosing class so private names mangle identically. Only ``CO_NESTED``
+    can differ from the original (see :func:`_locate_lambda`). The node is not
+    mutated.
     """
+    node = site.node
     wrapper = ast.Lambda(
         args=ast.arguments(
             posonlyargs=[],
@@ -128,28 +187,45 @@ def _compile_lambda_in_scope(
         body=node,
     )
     ast.copy_location(wrapper, node)
-    expression = ast.fix_missing_locations(ast.Expression(body=wrapper))
-    wrapper_code = next(
-        const
-        for const in compile(expression, filename, "eval").co_consts
-        if isinstance(const, types.CodeType)
+    tree: ast.AST
+    if site.class_name is None:
+        tree, mode, depth = ast.Expression(body=wrapper), "eval", 2
+    else:
+        tree = ast.parse(f"class {site.class_name}:\n    pass")
+        class_def = cast(ast.ClassDef, tree.body[0])
+        class_def.body = [ast.Expr(value=wrapper)]
+        ast.copy_location(class_def, node)
+        mode, depth = "exec", 3
+    compiled = compile(
+        ast.fix_missing_locations(tree),
+        context.co_filename,
+        mode,
+        flags=context.co_flags & _FUTURE_FLAGS,
+        dont_inherit=True,
     )
-    return next(
-        const for const in wrapper_code.co_consts if isinstance(const, types.CodeType)
-    )
+    return _nested_code(compiled, depth)
 
 
-def _locate_lambda(fn: types.FunctionType, index: _ModuleIndex) -> ast.Lambda | None:
+def _without_nesting_flag(code: types.CodeType) -> types.CodeType:
+    return code.replace(co_flags=code.co_flags & ~inspect.CO_NESTED)
+
+
+def _locate_lambda(fn: types.FunctionType, index: _ModuleIndex) -> _LambdaSite | None:
     """Find the AST node ``fn`` was compiled from, by compiling each lambda on
     its first line (with the same free variables) and comparing code objects.
 
     Byte-for-byte identity is what makes this independent of how many lambdas
     share a line, of string literals on the line, and of line continuations.
+    Candidates are always compiled inside a wrapper function, which sets
+    ``CO_NESTED``; a lambda defined at module or class-body scope lacks that
+    flag, so it is ignored on both sides.
     """
     code = fn.__code__
-    for candidate in index.get(code.co_firstlineno, ()):
-        if _compile_lambda_in_scope(candidate, code.co_freevars, code.co_filename) == code:
-            return candidate
+    target = _without_nesting_flag(code)
+    for site in index.get(code.co_firstlineno, ()):
+        compiled = _compile_lambda_in_scope(site, code.co_freevars, code)
+        if _without_nesting_flag(compiled) == target:
+            return site
     return None
 
 
@@ -169,18 +245,19 @@ def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     index = _module_none_check_lambdas(fn)
     if not index:
         return fn
-    node = _locate_lambda(fn, index)
-    if node is None:
+    site = _locate_lambda(fn, index)
+    if site is None:
         return fn
 
     original = fn.__code__
-    rewritten = _NoneCheckRewriter().visit(copy.deepcopy(node))
+    helper = _unused_name(site.node, _NULL_CHECK_HELPER)
+    rewritten = _NoneCheckRewriter(helper).visit(copy.deepcopy(site.node))
     new_code = _compile_lambda_in_scope(
-        rewritten, original.co_freevars + (_NULL_CHECK_HELPER,), original.co_filename
+        _LambdaSite(rewritten, site.class_name), original.co_freevars + (helper,), original
     )
 
     cells = dict(zip(original.co_freevars, fn.__closure__ or ()))
-    cells[_NULL_CHECK_HELPER] = types.CellType(_null_check)
+    cells[helper] = types.CellType(_null_check)
     closure = tuple(cells[name] for name in new_code.co_freevars)
 
     new_fn = types.FunctionType(
