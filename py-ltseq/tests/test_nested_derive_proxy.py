@@ -363,6 +363,110 @@ class TestFilterExprSerialization:
         assert d["right"] == {"type": "GroupRowColumn", "row": "last", "column": "price"}
 
 
+class TestGroupExprBoolContext:
+    """Group-dialect expressions must raise in boolean contexts (issue #163).
+
+    Mirrors test_expr.py::TestExprBoolContext for the row dialect (#140): without
+    __bool__, Python's default truthiness (always True) silently drops conditions
+    in `and`/`or`/`not`/`in`/ternary/chained comparisons of group predicates.
+    """
+
+    @pytest.fixture
+    def g(self):
+        from ltseq.grouping.proxies.filter_proxy import FilterGroupProxy
+
+        return FilterGroupProxy({"x": "int64"})
+
+    def test_bool_raises_type_error_with_guidance(self, g):
+        """bool(filter_expr) raises TypeError naming the misuse forms and & | ~."""
+        with pytest.raises(TypeError, match=r"ternary") as exc_info:
+            bool(g.count() > 2)
+        msg = str(exc_info.value)
+        assert "boolean context" in msg
+        assert "&" in msg and "|" in msg and "~" in msg
+        # Guidance is phrased for the group proxy, not the row proxy.
+        assert "g.count()" in msg
+
+    def test_and_raises(self, g):
+        """`cond1 and cond2` raises instead of silently dropping cond1."""
+        with pytest.raises(TypeError):
+            (g.count() > 2) and (g.sum("x") > 0)
+
+    def test_or_raises(self, g):
+        """`cond1 or cond2` raises instead of silently returning cond1."""
+        with pytest.raises(TypeError):
+            (g.count() > 2) or (g.sum("x") > 0)
+
+    def test_not_raises(self, g):
+        """`not cond` raises instead of returning a Python bool."""
+        with pytest.raises(TypeError):
+            not (g.count() > 2)
+
+    def test_in_raises(self, g):
+        """`g.count() in [...]` raises: list.__contains__ calls __eq__ then bool()."""
+        with pytest.raises(TypeError):
+            g.count() in [1, 2, 3]
+
+    def test_ternary_raises(self, g):
+        """`x if cond else y` raises instead of swallowing the condition."""
+        with pytest.raises(TypeError):
+            g.sum("x") if g.count() > 2 else g.max("x")
+
+    def test_chained_comparison_raises(self, g):
+        """`1 < g.count() < 5` raises instead of dropping the first comparison."""
+        with pytest.raises(TypeError):
+            1 < g.count() < 5
+
+    def test_if_expr_raises(self, g):
+        """`if cond:` raises instead of always taking the branch."""
+        with pytest.raises(TypeError):
+            if g.first().x == 1:
+                pass
+
+    def test_quantifier_and_raises(self, g):
+        """QuantifierFilterExpr inherits the guard: `g.all(...) and g.any(...)` raises."""
+        with pytest.raises(TypeError):
+            g.all(lambda r: r.x > 0) and g.any(lambda r: r.x > 10)
+
+    def test_bare_group_expr_raises(self, g):
+        """Aggregates and arithmetic (GroupExpr, not just FilterExpr) refuse truthiness."""
+        with pytest.raises(TypeError, match=r"boolean context"):
+            bool(g.count())
+        with pytest.raises(TypeError, match=r"boolean context"):
+            bool(g.max("x") + 1)
+        with pytest.raises(TypeError, match=r"boolean context"):
+            bool(g.first().x)
+
+    def test_derive_group_expr_raises(self):
+        """The derive proxy's GroupExpr objects carry the same guard."""
+        from ltseq.grouping.proxies.derive_proxy import DeriveGroupProxy
+
+        g = DeriveGroupProxy()
+        with pytest.raises(TypeError, match=r"boolean context"):
+            g.count() and g.sum("x")
+
+    def test_bitwise_combinators_still_work(self, g):
+        """Regression guard: & | ~ never touch bool() and keep serializing."""
+        d = ((g.count() > 2) & (g.sum("x") > 0) | ~(g.max("x") < 1)).serialize()
+        assert d["op"] == "Or"
+        assert d["left"]["op"] == "And"
+        assert d["right"]["type"] == "UnaryOp"
+
+    def test_nested_filter_with_and_raises_with_guidance(self, sample_csv):
+        """nested.filter(lambda g: cond1 and cond2) surfaces a TypeError with & guidance."""
+        t = LTSeq.read_csv(sample_csv).assume_sorted("date")
+        grouped = t.group_ordered(lambda r: r.is_up)
+        with pytest.raises(TypeError, match=r"&"):
+            grouped.filter(lambda g: (g.count() > 2) and (g.sum("volume") > 0))
+
+    def test_nested_filter_with_ampersand_keeps_both_conditions(self, sample_csv):
+        """The correct spelling keeps both conditions: only the 3-row group has count > 2."""
+        t = LTSeq.read_csv(sample_csv).assume_sorted("date")
+        grouped = t.group_ordered(lambda r: r.is_up)
+        result = grouped.filter(lambda g: (g.count() > 2) & (g.sum("volume") > 0))
+        assert result.flatten().count() == 3
+
+
 class TestDeriveInREPLContext:
     """Test that derive() works when inspect.getsource() is unavailable (REPL/exec)."""
 

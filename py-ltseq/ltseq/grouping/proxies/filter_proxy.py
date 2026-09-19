@@ -5,9 +5,11 @@ expression trees, enabling proxy-based filter capture that works in all contexts
 (pytest, REPL, exec) without requiring source code inspection.
 """
 
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
+from ...expr.base import bool_context_error
 from ..expr import (
+    GROUP_BOOL_CONTEXT_EXAMPLE,
     GroupExpr,
     GroupCountExpr,
     GroupAggExpr,
@@ -70,6 +72,11 @@ class FilterExpr:
     def __invert__(self) -> "FilterExpr":
         """Negate a filter expression with NOT."""
         return FilterExpr(self, "NOT", None)
+
+    def __bool__(self) -> NoReturn:
+        """Refuse truthiness (issue #163): `cond1 and cond2` would otherwise
+        silently evaluate to cond2. Covers QuantifierFilterExpr via inheritance."""
+        raise bool_context_error(GROUP_BOOL_CONTEXT_EXAMPLE)
 
 
 class _ComparableGroupExpr(GroupExpr):
