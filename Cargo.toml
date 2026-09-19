@@ -24,6 +24,11 @@ rayon = "1.12.0"
 # Direct Parquet reading (must match datafusion's arrow version)
 parquet = { version = "59.2.0", default-features = false, features = ["arrow"] }
 
+# Arrow C Data Interface bridge to pyarrow (issue #143). Must match
+# datafusion's arrow version; `pyarrow` implies `ffi` and pulls in
+# arrow-pyarrow, which targets the same pyo3 0.29 line as this crate.
+arrow = { version = "59.2.0", default-features = false, features = ["pyarrow"] }
+
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 
 [profile.release]

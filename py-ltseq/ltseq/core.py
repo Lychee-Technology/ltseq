@@ -255,6 +255,9 @@ class LTSeq(
         """
         Convert the table to a PyArrow Table.
 
+        Executes the lazy plan and hands the resulting batches to pyarrow over
+        the Arrow C Data Interface: the buffers are shared, not serialized.
+
         Returns:
             A pyarrow.Table containing the table data
 
@@ -265,36 +268,40 @@ class LTSeq(
             >>> arrow_table = t.to_arrow()
         """
         try:
-            import pyarrow as pa
+            import pyarrow  # noqa: F401
         except ImportError:
             raise RuntimeError(
                 "to_arrow() requires pyarrow. Install it with: pip install pyarrow"
             )
 
-        try:
-            ipc_buffers = self._inner.to_arrow_ipc()
-        except RuntimeError as e:
-            if "No data loaded" in str(e):
-                # Empty table or no data loaded - return empty table with schema
-                return pa.table({col: [] for col in self._schema.keys()})
-            raise
+        return self._inner.to_arrow_reader().read_all()
 
-        if not ipc_buffers:
-            # No batches returned - empty result
-            return pa.table({col: [] for col in self._schema.keys()})
+    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+        """
+        Arrow PyCapsule Interface: export this table as an Arrow stream.
 
-        tables = []
-        for buf in ipc_buffers:
-            reader = pa.ipc.open_stream(buf)
-            tables.append(reader.read_all())
+        Lets any Arrow consumer read an LTSeq directly, without going through
+        ``to_arrow()``::
 
-        if not tables:
-            return pa.table({col: [] for col in self._schema.keys()})
+            pa.table(t)
+            pa.RecordBatchReader.from_stream(t)
+            duckdb.sql("SELECT ... FROM t")
 
-        result = pa.concat_tables(tables)
-        if result.num_rows == 0 and result.num_columns == 0 and self._schema:
-            return pa.table({col: [] for col in self._schema.keys()})
-        return result
+        Semantics: the plan is prepared when this method is called and its
+        batches are pulled lazily by the consumer, each call executes the
+        plan anew and leaves this table untouched, and the consumer owns the
+        execution stream (dropping it cancels execution). ``requested_schema``
+        is accepted and ignored, as the protocol allows. Execution errors are
+        reported through the stream as the consumer's Arrow error type
+        (``pyarrow.ArrowInvalid`` for pyarrow), not as ``RuntimeError``.
+
+        Args:
+            requested_schema: Optional ``arrow_schema`` capsule (ignored)
+
+        Returns:
+            A PyCapsule named ``arrow_array_stream``
+        """
+        return self._inner.__arrow_c_stream__(requested_schema)
 
     def __len__(self) -> int:
         """

@@ -1,5 +1,7 @@
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
+use datafusion::arrow::pyarrow::{IntoPyArrow, PyArrowType};
 use datafusion::common::DFSchema;
 use datafusion::datasource::MemTable;
 use datafusion::physical_plan::displayable;
@@ -9,6 +11,7 @@ use pyo3::types::PyDict;
 use std::sync::Arc;
 
 // Module declarations - Organized for better maintainability
+pub(crate) mod arrow_ffi; // Arrow C Data Interface boundary with pyarrow (issue #143)
 pub(crate) mod cursor; // Streaming cursor for lazy iteration
 pub(crate) mod engine; // DataFusion session and Tokio runtime
 mod error;
@@ -501,29 +504,40 @@ impl LTSeqTable {
         detached(py, || crate::ops::basic::materialize_impl(self))
     }
 
-    /// Collect the DataFrame and return all record batches as Arrow IPC bytes.
+    /// Execute the plan and return the result as a `pyarrow.RecordBatchReader`.
     ///
-    /// Returns:
-    ///     List of bytes objects, each containing one Arrow IPC-serialized RecordBatch
-    fn to_arrow_ipc(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let df_clone = (**self.require_df()?).clone();
+    /// The batches cross the boundary over the Arrow C Data Interface: their
+    /// buffers are shared with pyarrow, not re-encoded. Python calls
+    /// `read_all()` on the reader to obtain a `pyarrow.Table`. An empty table
+    /// yields an empty reader that still carries the schema.
+    fn to_arrow_reader<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // Execution runs detached; only the pyarrow hand-off needs the GIL.
+        let reader = detached(py, || crate::ops::io::collect_arrow_reader_impl(self))?;
+        reader.into_pyarrow(py)
+    }
 
-        // Collect and IPC-encode with the GIL released; only the PyBytes
-        // construction below needs the interpreter.
-        let buffers = detached(py, || {
-            let batches = RUNTIME
-                .block_on(df_clone.collect())
-                .map_err(LtseqError::collect)?;
-            batches
-                .iter()
-                .map(crate::cursor::serialize_batch_to_ipc)
-                .collect::<Result<Vec<_>, _>>()
-        })?;
-
-        Ok(buffers
-            .into_iter()
-            .map(|buf| pyo3::types::PyBytes::new(py, &buf).into())
-            .collect())
+    /// Arrow PyCapsule Interface: export this table as an `arrow_array_stream` capsule.
+    ///
+    /// Lets `pa.table(t)`, `pa.RecordBatchReader.from_stream(t)`, polars,
+    /// duckdb and other Arrow consumers read an LTSeq directly. Semantics:
+    ///
+    /// - Planning runs here (detached), so planning errors raise immediately.
+    /// - Batches are pulled lazily by the consumer; each call executes the
+    ///   plan anew and leaves this table untouched.
+    /// - The capsule (or the consumer that imported it) owns the execution
+    ///   stream; dropping it cancels execution.
+    /// - `requested_schema` is accepted and ignored, as the protocol allows.
+    /// - Execution errors surface through the C interface as the consumer's
+    ///   Arrow error type (`pyarrow.ArrowInvalid`), not as `RuntimeError`.
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyCapsule>> {
+        let _ = requested_schema;
+        let reader = detached(py, || crate::ops::io::arrow_stream_impl(self))?;
+        crate::arrow_ffi::stream_capsule(py, reader)
     }
 
     /// Filter rows based on predicate expression
@@ -1170,17 +1184,20 @@ impl LTSeqTable {
         detached(py, || crate::ops::io::write_parquet_impl(self, path, compression))
     }
 
-    /// Load Arrow IPC bytes into a new LTSeqTable.
+    /// Build a table from any Arrow-compatible Python object.
     ///
-    /// This is the reverse of to_arrow_ipc() — accepts IPC-serialized RecordBatch
-    /// bytes from Python's pyarrow and creates a DataFusion-backed table.
-    ///
-    /// Args:
-    ///     ipc_buffers: List of bytes objects, each an Arrow IPC-serialized RecordBatch
+    /// `data` is anything implementing `__arrow_c_stream__` (`pyarrow.Table`,
+    /// `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`, polars/duckdb
+    /// objects, ...). Extracting the argument calls that method under the
+    /// GIL; draining the stream and building the in-memory table run
+    /// detached. The batches share the exporter's buffers.
     #[staticmethod]
-    fn load_arrow_ipc(py: Python<'_>, ipc_buffers: Vec<Vec<u8>>) -> PyResult<LTSeqTable> {
-        // The bytes are already copied into Rust; decoding needs no Python.
-        detached(py, || crate::ops::io::load_arrow_ipc_impl(ipc_buffers))
+    fn from_arrow(
+        py: Python<'_>,
+        data: PyArrowType<ArrowArrayStreamReader>,
+    ) -> PyResult<LTSeqTable> {
+        let reader = data.0;
+        detached(py, || crate::ops::io::from_arrow_impl(reader))
     }
 
     /// Is Subset: Check if this table is a subset of another table

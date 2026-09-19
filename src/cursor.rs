@@ -5,12 +5,12 @@
 //! in batches without loading the entire dataset into memory.
 
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
 use futures_util::StreamExt;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 use std::sync::{Arc, Mutex};
 
 use crate::engine::RUNTIME;
@@ -47,7 +47,7 @@ impl LTSeqCursor {
         }
     }
 
-    /// Pull the next batch off the stream and IPC-encode it.
+    /// Pull the next batch off the stream.
     ///
     /// Runs with the GIL released (see `next_batch`). The mutex is taken
     /// **inside** the detached section on purpose: if a thread blocked on
@@ -55,7 +55,7 @@ impl LTSeqCursor {
     /// never re-attach to hand its batch back — a lock-order deadlock between
     /// the GIL and this mutex. Contending threads instead wait here without
     /// the GIL and simply take the following batch.
-    fn pull_ipc_batch(&self) -> Result<Option<Vec<u8>>, LtseqError> {
+    fn pull_batch(&self) -> Result<Option<RecordBatch>, LtseqError> {
         let mut guard = self
             .stream
             .lock()
@@ -66,7 +66,7 @@ impl LTSeqCursor {
         };
 
         match RUNTIME.block_on(stream.next()) {
-            Some(Ok(batch)) => serialize_batch_to_ipc(&batch).map(Some),
+            Some(Ok(batch)) => Ok(Some(batch)),
             Some(Err(e)) => Err(LtseqError::Runtime(format!("Stream error: {}", e))),
             None => {
                 // Stream exhausted, mark as None
@@ -79,20 +79,18 @@ impl LTSeqCursor {
 
 #[pymethods]
 impl LTSeqCursor {
-    /// Fetch the next batch of rows.
+    /// Fetch the next batch of rows as a `pyarrow.RecordBatch`.
     ///
     /// Returns:
-    ///     bytes: IPC-serialized RecordBatch, or None if stream is exhausted
+    ///     pyarrow.RecordBatch, or None if the stream is exhausted
     ///
-    /// The returned bytes can be deserialized using PyArrow:
-    /// ```python
-    /// import pyarrow as pa
-    /// batch = pa.ipc.read_record_batch(bytes_data, schema)
-    /// ```
-    fn next_batch(&self, py: Python<'_>) -> PyResult<Option<Py<PyBytes>>> {
-        // Per-batch streaming I/O + IPC encoding run with the GIL released.
-        let ipc_bytes = detached(py, || self.pull_ipc_batch())?;
-        Ok(ipc_bytes.map(|buf| PyBytes::new(py, &buf).into()))
+    /// The batch crosses the boundary over the Arrow C Data Interface: its
+    /// buffers are shared with pyarrow and stay valid after the cursor is
+    /// dropped.
+    fn next_batch<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        // Per-batch streaming I/O runs with the GIL released.
+        let batch = detached(py, || self.pull_batch())?;
+        batch.map(|b| PyArrowType(b).into_pyobject(py)).transpose()
     }
 
     /// Get the schema as a list of (name, type) tuples
@@ -120,34 +118,13 @@ impl LTSeqCursor {
 
     /// Check if cursor is exhausted
     fn is_exhausted(&self, py: Python<'_>) -> bool {
-        // Same lock-order rule as `pull_ipc_batch`: never wait on the stream
+        // Same lock-order rule as `pull_batch`: never wait on the stream
         // mutex while holding the GIL.
         py.detach(|| match self.stream.lock() {
             Ok(guard) => guard.is_none(),
             Err(_) => true, // If mutex is poisoned, consider exhausted
         })
     }
-}
-
-/// Serialize a RecordBatch to IPC format (Arrow streaming format)
-pub(crate) fn serialize_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, LtseqError> {
-    use datafusion::arrow::ipc::writer::StreamWriter;
-
-    let mut buffer = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
-            .map_err(|e| LtseqError::with_context("Failed to create IPC writer", e))?;
-
-        writer
-            .write(batch)
-            .map_err(|e| LtseqError::with_context("Failed to write IPC batch", e))?;
-
-        writer
-            .finish()
-            .map_err(|e| LtseqError::with_context("Failed to finish IPC stream", e))?;
-    }
-
-    Ok(buffer)
 }
 
 /// Create a LTSeqCursor from a CSV file path (used by LTSeqTable::scan_csv)

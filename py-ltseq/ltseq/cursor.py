@@ -50,21 +50,19 @@ class Cursor:
     def __next__(self) -> Any:
         """Fetch the next batch.
 
+        The batch is handed over from Rust through the Arrow C Data Interface
+        (shared buffers, no serialization) and remains valid after the cursor
+        is dropped.
+
         Returns:
             PyArrow RecordBatch
 
         Raises:
             StopIteration: When stream is exhausted
         """
-        import pyarrow as pa
-
-        batch_bytes = self._inner.next_batch()
-        if batch_bytes is None:
+        batch = self._inner.next_batch()
+        if batch is None:
             raise StopIteration
-
-        # Deserialize IPC bytes to RecordBatch
-        reader = pa.ipc.open_stream(batch_bytes)
-        batch = reader.read_next_batch()
         return batch
 
     @property

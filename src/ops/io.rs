@@ -3,12 +3,22 @@
 //! This module contains helper functions for file I/O operations including:
 //! - CSV writing (via Arrow's CSV writer)
 //! - Parquet writing (via Arrow's Parquet writer)
-//! - Arrow IPC loading (for from_arrow / from_pandas interop)
+//! - Arrow interop over the C Data Interface (`from_arrow`, `to_arrow`,
+//!   `__arrow_c_stream__`), see `crate::arrow_ffi`
 //!
-//! All three entry points run with the GIL released (`lib.rs` wraps them in
+//! Every entry point here runs with the GIL released (`lib.rs` wraps them in
 //! `gil::detached`): they take only plain Rust values and report failures as
 //! `LtseqError`.
 
+use std::sync::Arc;
+
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
+
+use crate::arrow_ffi::{
+    collect_imported, collected_reader, BoxedBatchReader, DataFrameBatchReader,
+};
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
@@ -136,38 +146,64 @@ pub fn write_parquet_impl(
     })
 }
 
-/// Load Arrow IPC bytes into a new LTSeqTable.
+/// Build a table from a stream imported over the Arrow C Data Interface.
 ///
-/// This is the reverse of `to_arrow_ipc()` — it takes IPC-serialized RecordBatch
-/// bytes (from Python's pyarrow) and creates a DataFusion-backed LTSeqTable.
-///
-/// Args:
-///     ipc_buffers: List of bytes objects, each containing one Arrow IPC-serialized RecordBatch
-pub fn load_arrow_ipc_impl(ipc_buffers: Vec<Vec<u8>>) -> Result<LTSeqTable, LtseqError> {
+/// The reader comes from any Python object implementing `__arrow_c_stream__`
+/// (`pyarrow.Table`, `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`, ...).
+/// Its buffers are shared, not copied. A stream with a schema but no batches
+/// yields a table backed by one empty batch, so the result has a real plan
+/// and the schema survives (matching a `pyarrow.Table` with zero rows).
+pub fn from_arrow_impl(reader: ArrowArrayStreamReader) -> Result<LTSeqTable, LtseqError> {
     use crate::engine::create_session_context;
-    use datafusion::arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
 
-    if ipc_buffers.is_empty() {
-        let session = create_session_context();
-        return Ok(LTSeqTable::empty(session, None, Vec::new(), None));
+    let (schema, mut batches) = collect_imported(reader)?;
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
     }
+    LTSeqTable::from_batches(create_session_context(), batches, Vec::new(), None)
+}
 
-    let mut all_batches = Vec::new();
-    for buf in &ipc_buffers {
-        let cursor = Cursor::new(buf);
-        let reader = StreamReader::try_new(cursor, None).map_err(|e| {
-            LtseqError::Io(format!("Failed to read Arrow IPC data: {}", e))
-        })?;
+/// Schema of a table that may have no plan (an unloaded `LTSeq()` has neither).
+fn schema_or_empty(table: &LTSeqTable) -> SchemaRef {
+    table
+        .schema
+        .clone()
+        .unwrap_or_else(|| Arc::new(Schema::empty()))
+}
 
-        for batch_result in reader {
-            let batch = batch_result.map_err(|e| {
-                LtseqError::Io(format!("Failed to read Arrow IPC batch: {}", e))
-            })?;
-            all_batches.push(batch);
-        }
-    }
+/// Execute the plan and return a reader over the collected batches.
+///
+/// This is the `to_arrow()` path: it materializes (ADR 0004 terminal
+/// boundary) and hands the batches to pyarrow without re-encoding them. A
+/// table with no plan yields an empty reader carrying its schema, if any.
+pub fn collect_arrow_reader_impl(table: &LTSeqTable) -> Result<BoxedBatchReader, LtseqError> {
+    let Some(df) = table.dataframe.as_ref() else {
+        return Ok(collected_reader(schema_or_empty(table), Vec::new()));
+    };
+    let batches = RUNTIME
+        .block_on((**df).clone().collect())
+        .map_err(LtseqError::collect)?;
+    // Batches from one execution share a schema; prefer it over the logical
+    // schema so nullability/metadata match what pyarrow will see per batch.
+    let schema = batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| schema_or_empty(table));
+    Ok(collected_reader(schema, batches))
+}
 
-    let session = create_session_context();
-    LTSeqTable::from_batches(session, all_batches, Vec::new(), None)
+/// Start executing the plan as a stream and return a lazy reader over it.
+///
+/// This is the `__arrow_c_stream__` path. Planning happens here (so planning
+/// errors surface to the caller); batches are pulled by the consumer through
+/// `DataFrameBatchReader`. Each call executes the plan anew and leaves the
+/// table untouched.
+pub fn arrow_stream_impl(table: &LTSeqTable) -> Result<BoxedBatchReader, LtseqError> {
+    let Some(df) = table.dataframe.as_ref() else {
+        return Ok(collected_reader(schema_or_empty(table), Vec::new()));
+    };
+    let stream = RUNTIME
+        .block_on((**df).clone().execute_stream())
+        .map_err(|e| LtseqError::with_context("Failed to execute plan", e))?;
+    Ok(Box::new(DataFrameBatchReader::new(stream)))
 }

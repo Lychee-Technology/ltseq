@@ -11,7 +11,7 @@ Chained transformations (`filter → derive → sort → join → …`) should b
 
 ## Decision
 
-1. **Lazy by default.** Most operations (`filter`, `select`, `derive`, `sort`, `slice`, `join`, `group_ordered`, …) return a new lazy query object. Execution happens only at explicit terminal boundaries: `show()`, `count()`/`len()`, `collect()`, `to_arrow()`/`to_arrow_ipc()`, `to_pandas()`, `to_dicts()`, and file writes.
+1. **Lazy by default.** Most operations (`filter`, `select`, `derive`, `sort`, `slice`, `join`, `group_ordered`, …) return a new lazy query object. Execution happens only at explicit terminal boundaries: `show()`, `count()`/`len()`, `collect()`, `to_arrow()`/`__arrow_c_stream__()`, `to_pandas()`, `to_dicts()`, and file writes.
 2. **Tables are immutable.** Transformations return a new object (usually an `LTSeq`, sometimes another wrapper: `NestedTable`, `LinkedTable`, `PartitionedTable`, see [ADR 0010](0010-four-table-object-types.md)), and the original is unchanged. APIs that *look* mutative (`insert`, `delete`, `update`, `modify`, in `mutation_mixin.py`) also return new tables, but note they are currently implemented **eagerly**: the Rust side collects the table at call time (`src/ops/mutation.rs`), one of the documented eager boundaries in [ADR 0005](0005-no-materialization-rule.md).
 3. **Streaming is a separate object.** For datasets too large for memory, `LTSeq.scan()` / `scan_parquet()` return a streaming `Cursor` (iterating Arrow `RecordBatch`es, implemented in `src/cursor.rs`) rather than an `LTSeq`; `cursor.count()` counts without loading everything.
 

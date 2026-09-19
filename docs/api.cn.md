@@ -187,6 +187,7 @@ cursor = LTSeq.scan_parquet("large.parquet")
   - `schema -> dict[str, str]`（属性）、`columns -> list[str]`（属性）
   - `source -> str`（属性）：源文件路径；`exhausted -> bool`（属性）
   - `to_pandas()`、`to_arrow()`: 物化剩余流
+  - 每个批次是经 Arrow C Data Interface 交接的 `pyarrow.RecordBatch`；cursor 丢弃后批次仍有效，丢弃未读完的 cursor 会释放底层流
   - `count() -> int`: 消费整个流并统计行数
 - **示例**:
 ```python
@@ -221,13 +222,14 @@ t = LTSeq.from_dict({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]})
 
 ### `LTSeq.from_pandas` / `LTSeq.from_arrow`
 - **签名**: `LTSeq.from_pandas(df) -> LTSeq`；`LTSeq.from_arrow(arrow_table) -> LTSeq`
-- **行为**: 从 pandas DataFrame / PyArrow Table 构造表
+- **行为**: 从 pandas DataFrame 构造表，或从任何实现 Arrow PyCapsule 协议（`__arrow_c_stream__`）的对象构造：`pyarrow.Table`、`pyarrow.RecordBatch`、`pyarrow.RecordBatchReader`、polars DataFrame、duckdb relation 等。Arrow buffer 经 C Data Interface 共享而非拷贝，源对象释放后仍然有效；空输入保留带类型的 schema
 - **返回**: 新 `LTSeq`
-- **异常**: `ImportError`（未安装 pandas/pyarrow），`TypeError`（输入类型错误）
+- **异常**: `ImportError`（未安装 pandas），`TypeError`（对象未实现 `__arrow_c_stream__`）
 - **示例**:
 ```python
 t = LTSeq.from_pandas(df)
 t = LTSeq.from_arrow(arrow_table)
+t = LTSeq.from_arrow(pa.RecordBatchReader.from_batches(schema, batches))
 ```
 
 ### `seq`（整数序列构造器）
@@ -328,14 +330,27 @@ for row in t.filter(lambda r: r.active):
 
 ### `LTSeq.to_pandas` / `LTSeq.to_arrow`
 - **签名**: `LTSeq.to_pandas() -> pandas.DataFrame`；`LTSeq.to_arrow() -> pyarrow.Table`
-- **行为**: 物化为 pandas DataFrame / PyArrow Table
-- **异常**: `ImportError`（未安装 pandas/pyarrow），`MemoryError`（数据集过大）
+- **行为**: 执行计划并物化为 pandas DataFrame / PyArrow Table。结果批次经 Arrow C Data Interface 跨越 Rust/Python 边界（共享 buffer，不做 IPC 序列化）；`LTSeq` 释放后结果仍然有效；空结果保留带类型的 schema
+- **异常**: `ImportError`（未安装 pandas/pyarrow），`RuntimeError`（执行失败），`MemoryError`（数据集过大）
 - **示例**:
 ```python
 df = t.to_pandas()
 df.plot(x="date", y="price")
 
 arrow_table = t.to_arrow()
+```
+
+### `LTSeq.__arrow_c_stream__`（Arrow PyCapsule 协议）
+- **签名**: `LTSeq.__arrow_c_stream__(requested_schema=None) -> PyCapsule`
+- **行为**: 以 Arrow C stream 导出表，任何 Arrow 消费者都可直接读取 `LTSeq`：`pa.table(t)`、`pa.RecordBatchReader.from_stream(t)`、`pl.from_arrow(t)`、`duckdb.sql("SELECT ... FROM t")`。调用时准备计划，批次由消费者按需拉取
+- **语义**: 每次调用重新执行计划，`LTSeq` 本身不变；消费者持有执行流，丢弃它（例如只读了第一批）即取消执行；`requested_schema` 接受但忽略（协议允许）；执行期间 GIL 是否释放取决于消费者（pyarrow 的 `read_all()` / `read_next_batch()` 会释放）
+- **异常**: 计划无法准备时抛 `RuntimeError`；执行错误经流以消费者的 Arrow 错误类型（pyarrow 为 `pyarrow.ArrowInvalid`）抛出，而非 `RuntimeError`
+- **示例**:
+```python
+import pyarrow as pa
+table = pa.table(t)                       # 与 t.to_arrow() 行数一致
+for batch in pa.RecordBatchReader.from_stream(t):
+    ...
 ```
 
 ### `LTSeq.count` / `len(t)`

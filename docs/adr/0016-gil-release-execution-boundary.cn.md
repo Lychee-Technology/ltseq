@@ -24,7 +24,7 @@ PyO3 0.29 的两个事实决定了修法：
 2. **detach 执行。** `src/gil.rs::detached(py, || ...)` 为一个只看到纯 Rust 值的闭包释放 GIL。`F: Send` 在编译期把 `Bound`/`Py` 引用挡在外面。
 3. **之后转换。** 闭包返回 `Result<T, LtseqError>`；`detached` 在重新持有 GIL 后才构造 `PyErr`。`src/ops/*` 的执行半段（`parallel_scan`、`linear_scan`、`pattern_match`、`asof_join`、`io`、`pivot`、`mutation` 的 `*_exec` 半段、`set_ops` 的快照路径、`grouping::group_ordered_count_impl`）返回 `LtseqError` 而非 `PyResult`，从类型上排除在其中构造 `PyErr` 的可能。`LTSeqTable::require_df/require_schema/from_batches*` 出于同样原因返回 `LtseqError`。
 
-由此有两种 op 形态。整个 impl 是纯 Rust 时（`materialize`、`rvs`、`step`、`asof_join`、`pivot`、`write_*`、`load_arrow_ipc`、`delete_rows`，以及解析后的模式匹配与分组计数 impl），由 `lib.rs` stub 包裹调用。解析与执行交错时（`distinct`、`is_subset`、`insert_row`、`modify_row`、`assume_sorted`），impl 接收 `py: Python<'_>`，只包裹自己的执行部分。
+由此有两种 op 形态。整个 impl 是纯 Rust 时（`materialize`、`rvs`、`step`、`asof_join`、`pivot`、`write_*`、`from_arrow`、`delete_rows`，以及解析后的模式匹配与分组计数 impl），由 `lib.rs` stub 包裹调用。解析与执行交错时（`distinct`、`is_subset`、`insert_row`、`modify_row`、`assume_sorted`），impl 接收 `py: Python<'_>`，只包裹自己的执行部分。
 
 **流式 cursor 在 detach 段内取锁。** `next_batch` 与 `is_exhausted` 绝不在持有 GIL 时等待 stream mutex：一个持 GIL 阻塞在 `lock()` 的线程，会让正处于 `stream.next()` 中的线程永远无法重新 attach，形成 GIL 与 mutex 之间的锁序死锁。争用线程在无 GIL 状态下等待，然后拿到下一批。
 
@@ -37,7 +37,7 @@ PyO3 0.29 的两个事实决定了修法：
 
 - 一个线程上的重查询不再让解释器对其他线程停摆。`py-ltseq/tests/test_gil_release.py` 用心跳线程对每条 detach 路径做度量。
 - 新增执行路径意味着：用 `Result<_, LtseqError>` 写它的纯 Rust 半段并用 `detached` 包裹；新增只建计划的变换则完全不需要 `block_on`。
-- `format_table` 不再可失败，返回 `String`；`LTSeqCursor::serialize_batch_to_ipc` 与 `to_arrow_ipc` 共用，后者的 IPC 编码现在也在 detach 下运行。
+- `format_table` 不再可失败，返回 `String`。Arrow 边界路径（`to_arrow_reader`、`from_arrow`、`__arrow_c_stream__`、cursor 的 `next_batch`）沿用同一形态：执行或流的拉取在 detach 下运行，只有交给 pyarrow 的一步持 GIL（[ADR 0017](0017-arrow-c-data-interface-boundary.cn.md) 取代了本 ADR 最初列出的 IPC 编码）。
 - 未改动：`filter_where` await `session.sql()` 只为解析 WHERE 子句（纯计划，无执行），留在 GIL 下；`get_schema_dict`/`preview_join_schema` 在已 attach 的 pymethod 内调用 `Python::attach`，无害。
 
 ## 来源
