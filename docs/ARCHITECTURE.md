@@ -166,6 +166,8 @@ This is both a PyO3 constraint and a maintainability choice:
 
 The Python side generally calls methods on `_inner`, receives a new Rust table object back, then wraps it in a new `LTSeq` through `_from_inner()`.
 
+Entry points that execute or do I/O (collect, `execute_stream`, file scans and writes, the rayon Parquet paths, the cursor's per-batch pull) release the GIL for that work through `src/gil.rs::detached`. The layering is fixed: Python objects are parsed under the GIL, the execution half of the op is pure Rust returning `LtseqError`, and the `PyErr` is built only after the GIL is re-acquired. Plan-only transforms never call `block_on`. See [ADR 0016](adr/0016-gil-release-execution-boundary.md).
+
 ---
 
 ## Expression Pipeline

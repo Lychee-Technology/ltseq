@@ -82,6 +82,8 @@ py-ltseq/ltseq/               # Python package
 
 **PyO3 single #[pymethods] constraint**: Rust only allows one `#[pymethods]` block per struct. Most methods are defined in `lib.rs` as thin delegation stubs (1-3 lines) that call helper functions in `src/ops/`; constructors, IO/terminal methods, and a few basics remain inline (see ADR 0012). Don't assume the logic lives in `lib.rs`.
 
+**GIL release around execution** (ADR 0016): any pymethod that executes or does I/O runs that work through `gil::detached`, which releases the GIL. Parse Python objects (`Bound<PyDict>` → `PyExpr`, dict values → `ScalarValue`) under the GIL first; the execution half of the op takes plain Rust values and returns `Result<_, LtseqError>`, never `PyResult`, because building or formatting a `PyErr` re-attaches the GIL. Plan-only transforms (`filter`, `select`, `sort`, `join`, ...) are synchronous and must not be wrapped in `block_on`. The cursor takes its stream mutex inside the detached section; never wait on that mutex while holding the GIL.
+
 **Expression transpilation**: Python lambdas → SchemaProxy captures → serialized dict → Rust deserializes → DataFusion Expr. The `_capture_expr()` method in Python and `dict_to_py_expr()` in Rust handle this pipeline.
 
 **Mixin composition**: The `LTSeq` class combines multiple mixins (IOMixin, TransformMixin, JoinMixin, etc.) so operations are organized by category while users still see a single class.

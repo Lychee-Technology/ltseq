@@ -5,7 +5,6 @@
 //! DataFrame via `SessionContext::read_batch` (no table registration, no SQL
 //! text), joined against the lazy table plan.
 
-use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
@@ -145,6 +144,7 @@ fn build_ref_key_array(
 /// Native plan: ref DataFrame (`__ref_key__`, `__pos__`) LEFT JOIN table
 /// ON `__ref_key__ = key_col`, ORDER BY `__pos__`, project the table columns.
 pub fn align_impl(
+    py: Python<'_>,
     table: &LTSeqTable,
     ref_sequence: Vec<Py<PyAny>>,
     key_col: &str,
@@ -161,9 +161,8 @@ pub fn align_impl(
     })?;
 
     // Build the reference DataFrame: typed __ref_key__ + __pos__ position.
-    let ref_key_array = Python::attach(|py| {
-        build_ref_key_array(py, &ref_sequence, key_field.data_type(), key_col)
-    })?;
+    let ref_key_array =
+        build_ref_key_array(py, &ref_sequence, key_field.data_type(), key_col)?;
     let pos_array: ArrayRef = Arc::new(UInt64Array::from(
         (0..ref_sequence.len() as u64).collect::<Vec<_>>(),
     ));
@@ -187,27 +186,24 @@ pub fn align_impl(
         .map(|f| Expr::Column(Column::new_unqualified(f.name())))
         .collect();
 
-    let result_df = RUNTIME
-        .block_on(async {
-            ref_df
-                .join(
-                    (**df).clone(),
-                    JoinType::Left,
-                    &["__ref_key__"],
-                    &[key_col],
-                    None,
-                )
-                .and_then(|d| {
-                    d.sort(vec![SortExpr::new(
-                        Expr::Column(Column::new_unqualified("__pos__")),
-                        true,
-                        false,
-                    )])
-                })
-                .and_then(|d| d.select(table_cols))
-                .map_err(|e| format!("Align join failed: {}", e))
+    // Plan building only; nothing executes here.
+    let result_df = ref_df
+        .join(
+            (**df).clone(),
+            JoinType::Left,
+            &["__ref_key__"],
+            &[key_col],
+            None,
+        )
+        .and_then(|d| {
+            d.sort(vec![SortExpr::new(
+                Expr::Column(Column::new_unqualified("__pos__")),
+                true,
+                false,
+            )])
         })
-        .map_err(LtseqError::Runtime)?;
+        .and_then(|d| d.select(table_cols))
+        .map_err(|e| LtseqError::Runtime(format!("Align join failed: {}", e)))?;
 
     // Alignment defines a new row order driven by the reference sequence:
     // no sort metadata, no fast-path token.

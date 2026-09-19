@@ -17,7 +17,6 @@
 //! - Semi: Returns left rows where keys exist in right table
 //! - Anti: Returns left rows where keys do NOT exist in right table
 
-use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::common::{
     build_prefixed_join_schema, build_suffixed_join_schema, right_rename_map, JoinType,
@@ -284,21 +283,17 @@ pub fn join_impl(
         &right_col_names,
     )?;
 
-    // Execute native join
-    let joined_df = RUNTIME
-        .block_on(async {
-            (**df_left)
-                .clone()
-                .join(
-                    renamed_right_df,
-                    df_join_type,
-                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    None, // No additional filter
-                )
-                .map_err(|e| format!("Native join failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Build the native join plan (nothing executes here)
+    let joined_df = (**df_left)
+        .clone()
+        .join(
+            renamed_right_df,
+            df_join_type,
+            &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            None, // No additional filter
+        )
+        .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))?;
 
     // For inner/left joins the right equi-key duplicates the left key, so drop
     // it (Polars coalesce default). Right/full keep both keys — the left key can
@@ -390,20 +385,17 @@ pub fn join_prefixed_impl(
         .select(select_exprs)
         .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
 
-    let result_df = RUNTIME
-        .block_on(async {
-            (**df_left)
-                .clone()
-                .join(
-                    renamed_right_df,
-                    df_join_type,
-                    &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    None,
-                )
-                .map_err(|e| format!("Native join failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Plan building only; nothing executes here.
+    let result_df = (**df_left)
+        .clone()
+        .join(
+            renamed_right_df,
+            df_join_type,
+            &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            None,
+        )
+        .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))?;
 
     let expected_schema =
         build_prefixed_join_schema(stored_schema_left, stored_schema_right, alias);

@@ -8,23 +8,33 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-// Global Tokio runtime for async operations
-
 // Module declarations - Organized for better maintainability
-pub(crate) mod cursor;
-pub(crate) mod engine; // DataFusion session and LTSeqTable struct
+pub(crate) mod cursor; // Streaming cursor for lazy iteration
+pub(crate) mod engine; // DataFusion session and Tokio runtime
 mod error;
 pub(crate) mod format; // Formatting and display functions
+pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
-mod types; // Streaming cursor for lazy iteration
+mod types; // PyExpr deserialization
 
 // Re-exports for internal use
 pub(crate) use error::LtseqError;
 pub(crate) use format::format_table;
 pub(crate) use metadata::SortSpec;
 use crate::engine::{create_session_context, RUNTIME};
+use crate::gil::detached;
+use crate::types::{dict_to_py_expr, PyExpr};
+
+/// Deserialize a list of serialized expression dicts under the GIL, so the
+/// resulting pure-Rust `PyExpr`s can be handed to a detached execution.
+fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
+    dicts
+        .iter()
+        .map(|d| dict_to_py_expr(d).map_err(PyErr::from))
+        .collect()
+}
 
 /// LTSeqTable: Holds DataFusion SessionContext and loaded data
 /// This is the core Rust kernel backing LTSeq
@@ -90,7 +100,7 @@ impl LTSeqTable {
         batches: Vec<RecordBatch>,
         sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, LtseqError> {
         if batches.is_empty() {
             return Ok(LTSeqTable {
                 session,
@@ -126,7 +136,7 @@ impl LTSeqTable {
         empty_schema: Arc<ArrowSchema>,
         sort_specs: Vec<SortSpec>,
         source_parquet_path: Option<String>,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, LtseqError> {
         if batches.is_empty() {
             return Ok(LTSeqTable {
                 session,
@@ -173,27 +183,25 @@ impl LTSeqTable {
         }
     }
 
-    /// Get a reference to the DataFrame, or return a PyErr if no data is loaded.
-    pub(crate) fn require_df(&self) -> PyResult<&Arc<DataFrame>> {
-        self.dataframe
-            .as_ref()
-            .ok_or_else(|| LtseqError::NoData.into())
+    /// Get a reference to the DataFrame, or `LtseqError::NoData` if none is loaded.
+    ///
+    /// Returns `LtseqError` (not `PyErr`) so it is usable inside detached
+    /// execution closures; `?` in a `PyResult` context converts automatically.
+    pub(crate) fn require_df(&self) -> Result<&Arc<DataFrame>, LtseqError> {
+        self.dataframe.as_ref().ok_or(LtseqError::NoData)
     }
 
-    /// Get a reference to the schema, or return a PyErr if unavailable.
-    pub(crate) fn require_schema(&self) -> PyResult<&Arc<ArrowSchema>> {
-        self.schema
-            .as_ref()
-            .ok_or_else(|| LtseqError::NoSchema.into())
+    /// Get a reference to the schema, or `LtseqError::NoSchema` if unavailable.
+    pub(crate) fn require_schema(&self) -> Result<&Arc<ArrowSchema>, LtseqError> {
+        self.schema.as_ref().ok_or(LtseqError::NoSchema)
     }
 
     /// Get references to both the DataFrame and schema.
     pub(crate) fn require_df_and_schema(
         &self,
-    ) -> PyResult<(&Arc<DataFrame>, &Arc<ArrowSchema>)> {
+    ) -> Result<(&Arc<DataFrame>, &Arc<ArrowSchema>), LtseqError> {
         Ok((self.require_df()?, self.require_schema()?))
     }
-
 }
 
 #[pymethods]
@@ -216,21 +224,23 @@ impl LTSeqTable {
     ///     path: Path to CSV file
     ///     has_header: Whether the CSV file has a header row (default: true)
     #[pyo3(signature = (path, has_header=true))]
-    fn read_csv(&mut self, path: String, has_header: bool) -> PyResult<()> {
-        RUNTIME.block_on(async {
-            // Use DataFusion's built-in CSV reader with has_header option
-            let options = CsvReadOptions::new().has_header(has_header);
-            let df = self
-                .session
-                .read_csv(&path, options)
-                .await
-                .map_err(|e| LtseqError::io("Failed to read CSV", e))?;
+    fn read_csv(&mut self, py: Python<'_>, path: String, has_header: bool) -> PyResult<()> {
+        // File scan + schema inference: release the GIL for the read.
+        let session = Arc::clone(&self.session);
+        let df = detached(py, || {
+            RUNTIME.block_on(async {
+                let options = CsvReadOptions::new().has_header(has_header);
+                session
+                    .read_csv(&path, options)
+                    .await
+                    .map_err(|e| LtseqError::io("Failed to read CSV", e))
+            })
+        })?;
 
-            self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
-            self.dataframe = Some(Arc::new(df));
-            self.source_parquet_path = None;
-            Ok(())
-        })
+        self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
+        self.dataframe = Some(Arc::new(df));
+        self.source_parquet_path = None;
+        Ok(())
     }
 
     /// Read Parquet file into DataFusion DataFrame
@@ -238,20 +248,21 @@ impl LTSeqTable {
     /// Args:
     ///     path: Path to Parquet file
     #[pyo3(signature = (path))]
-    fn read_parquet(&mut self, path: String) -> PyResult<()> {
-        RUNTIME.block_on(async {
-            let options = ParquetReadOptions::default();
-            let df = self
-                .session
-                .read_parquet(&path, options)
-                .await
-                .map_err(|e| LtseqError::io("Failed to read Parquet", e))?;
+    fn read_parquet(&mut self, py: Python<'_>, path: String) -> PyResult<()> {
+        let session = Arc::clone(&self.session);
+        let df = detached(py, || {
+            RUNTIME.block_on(async {
+                session
+                    .read_parquet(&path, ParquetReadOptions::default())
+                    .await
+                    .map_err(|e| LtseqError::io("Failed to read Parquet", e))
+            })
+        })?;
 
-            self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
-            self.dataframe = Some(Arc::new(df));
-            self.source_parquet_path = Some(path);
-            Ok(())
-        })
+        self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
+        self.dataframe = Some(Arc::new(df));
+        self.source_parquet_path = Some(path);
+        Ok(())
     }
 
     /// Scan CSV file and return a streaming cursor
@@ -267,10 +278,15 @@ impl LTSeqTable {
     ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
     #[pyo3(signature = (path, has_header=true))]
-    fn scan_csv(path: String, has_header: bool) -> PyResult<crate::cursor::LTSeqCursor> {
+    fn scan_csv(
+        py: Python<'_>,
+        path: String,
+        has_header: bool,
+    ) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        crate::cursor::create_cursor_from_csv(session, &path, has_header)
-            .map_err(|e| LtseqError::Runtime(e).into())
+        detached(py, || {
+            crate::cursor::create_cursor_from_csv(session, &path, has_header)
+        })
     }
 
     /// Scan Parquet file and return a streaming cursor
@@ -281,10 +297,9 @@ impl LTSeqTable {
     /// Returns:
     ///     LTSeqCursor for lazy iteration over batches
     #[staticmethod]
-    fn scan_parquet(path: String) -> PyResult<crate::cursor::LTSeqCursor> {
+    fn scan_parquet(py: Python<'_>, path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        crate::cursor::create_cursor_from_parquet(session, &path)
-            .map_err(|e| LtseqError::Runtime(e).into())
+        detached(py, || crate::cursor::create_cursor_from_parquet(session, &path))
     }
 
     /// Load and return a CSV file as a fully initialized LTSeqTable.
@@ -301,7 +316,7 @@ impl LTSeqTable {
     ///     LTSeqTable with loaded data
     #[staticmethod]
     #[pyo3(signature = (path, has_header=true))]
-    fn from_csv(path: String, has_header: bool) -> PyResult<LTSeqTable> {
+    fn from_csv(py: Python<'_>, path: String, has_header: bool) -> PyResult<LTSeqTable> {
         let session = create_session_context();
         let mut table = LTSeqTable {
             session,
@@ -310,7 +325,7 @@ impl LTSeqTable {
             sort_specs: Vec::new(),
             source_parquet_path: None,
         };
-        table.read_csv(path, has_header)?;
+        table.read_csv(py, path, has_header)?;
         Ok(table)
     }
 
@@ -326,7 +341,7 @@ impl LTSeqTable {
     /// Returns:
     ///     LTSeqTable with loaded data
     #[staticmethod]
-    fn from_parquet(path: String) -> PyResult<LTSeqTable> {
+    fn from_parquet(py: Python<'_>, path: String) -> PyResult<LTSeqTable> {
         let session = create_session_context();
         let mut table = LTSeqTable {
             session,
@@ -335,7 +350,7 @@ impl LTSeqTable {
             sort_specs: Vec::new(),
             source_parquet_path: None,
         };
-        table.read_parquet(path)?;
+        table.read_parquet(py, path)?;
         Ok(table)
     }
 
@@ -346,27 +361,16 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     Formatted table as string
-    fn show(&self, n: usize) -> PyResult<String> {
-        let df = self
-            .dataframe
-            .as_ref()
-            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
+    fn show(&self, py: Python<'_>, n: usize) -> PyResult<String> {
+        let (df, schema) = self.require_df_and_schema()?;
+        let df_clone = (**df).clone();
 
-        let schema = self
-            .schema
-            .as_ref()
-            .ok_or_else(|| PyErr::from(LtseqError::NoSchema))?;
-
-        RUNTIME.block_on(async {
-            // Clone the DataFrame to collect data
-            let df_clone = (**df).clone();
-            let batches = df_clone
-                .collect()
-                .await
+        // Full-table collect + formatting: release the GIL.
+        detached(py, || {
+            let batches = RUNTIME
+                .block_on(df_clone.collect())
                 .map_err(LtseqError::collect)?;
-
-            let output = format_table(&batches, schema, n)?;
-            Ok(output)
+            Ok(format_table(&batches, schema, n))
         })
     }
 
@@ -457,28 +461,17 @@ impl LTSeqTable {
     /// Returns:
     ///     The number of rows
     fn count(&self, py: Python<'_>) -> PyResult<usize> {
-        let df = self
-            .dataframe
-            .as_ref()
-            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
-
-        let df_clone = (**df).clone();
-        py.detach(|| {
-            RUNTIME.block_on(async {
-                df_clone
-                    .count()
-                    .await
-                    .map_err(|e| LtseqError::with_context("Failed to count rows", e).into())
-            })
+        let df_clone = (**self.require_df()?).clone();
+        detached(py, || {
+            RUNTIME
+                .block_on(df_clone.count())
+                .map_err(|e| LtseqError::with_context("Failed to count rows", e))
         })
     }
 
     /// Return optimized logical and physical plans for debugging.
-    fn explain_plan(&self) -> PyResult<(String, String)> {
-        let df = self
-            .dataframe
-            .as_ref()
-            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
+    fn explain_plan(&self, py: Python<'_>) -> PyResult<(String, String)> {
+        let df = self.require_df()?;
 
         let logical = (**df)
             .clone()
@@ -486,14 +479,14 @@ impl LTSeqTable {
             .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
         let logical_text = format!("{}", logical.display_indent());
 
-        let physical_text = RUNTIME.block_on(async {
-            let plan = (**df)
-                .clone()
-                .create_physical_plan()
-                .await
+        // Physical planning lists files / reads footers for file sources.
+        let df_clone = (**df).clone();
+        let physical_text = detached(py, || {
+            let plan = RUNTIME
+                .block_on(df_clone.create_physical_plan())
                 .map_err(|e| LtseqError::with_context("Failed to create physical plan", e))?;
             let text = displayable(plan.as_ref()).indent(true).to_string();
-            Ok::<_, LtseqError>(text)
+            Ok(text)
         })?;
 
         Ok((logical_text, physical_text))
@@ -504,8 +497,8 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable backed by the materialized data
-    fn materialize(&self) -> PyResult<LTSeqTable> {
-        crate::ops::basic::materialize_impl(self)
+    fn materialize(&self, py: Python<'_>) -> PyResult<LTSeqTable> {
+        detached(py, || crate::ops::basic::materialize_impl(self))
     }
 
     /// Collect the DataFrame and return all record batches as Arrow IPC bytes.
@@ -513,40 +506,24 @@ impl LTSeqTable {
     /// Returns:
     ///     List of bytes objects, each containing one Arrow IPC-serialized RecordBatch
     fn to_arrow_ipc(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        use datafusion::arrow::ipc::writer::StreamWriter;
+        let df_clone = (**self.require_df()?).clone();
 
-        let df = self
-            .dataframe
-            .as_ref()
-            .ok_or_else(|| PyErr::from(LtseqError::NoData))?;
-
-        let df_clone = (**df).clone();
-        let batches = py.detach(|| {
-            RUNTIME.block_on(async {
-                df_clone
-                    .collect()
-                    .await
-                    .map_err(LtseqError::collect)
-            })
+        // Collect and IPC-encode with the GIL released; only the PyBytes
+        // construction below needs the interpreter.
+        let buffers = detached(py, || {
+            let batches = RUNTIME
+                .block_on(df_clone.collect())
+                .map_err(LtseqError::collect)?;
+            batches
+                .iter()
+                .map(crate::cursor::serialize_batch_to_ipc)
+                .collect::<Result<Vec<_>, _>>()
         })?;
 
-        let mut result = Vec::with_capacity(batches.len());
-        for batch in &batches {
-            let mut buffer = Vec::new();
-            {
-                let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
-                    .map_err(|e| LtseqError::with_context("Failed to create IPC writer", e))?;
-                writer
-                    .write(batch)
-                    .map_err(|e| LtseqError::with_context("Failed to write IPC batch", e))?;
-                writer
-                    .finish()
-                    .map_err(|e| LtseqError::with_context("Failed to finish IPC stream", e))?;
-            }
-            result.push(pyo3::types::PyBytes::new(py, &buffer).into());
-        }
-
-        Ok(result)
+        Ok(buffers
+            .into_iter()
+            .map(|buf| pyo3::types::PyBytes::new(py, &buf).into())
+            .collect())
     }
 
     /// Filter rows based on predicate expression
@@ -585,10 +562,14 @@ impl LTSeqTable {
     #[pyo3(signature = (step_predicates, partition_by=None))]
     fn search_pattern(
         &self,
+        py: Python<'_>,
         step_predicates: Vec<Bound<'_, PyDict>>,
         partition_by: Option<String>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::pattern_match::search_pattern_impl(self, step_predicates, partition_by)
+        let steps = parse_exprs(&step_predicates)?;
+        detached(py, || {
+            crate::ops::pattern_match::search_pattern_impl(self, &steps, partition_by)
+        })
     }
 
     /// Sequential pattern matching — count only (no full table collection)
@@ -602,10 +583,14 @@ impl LTSeqTable {
     #[pyo3(signature = (step_predicates, partition_by=None))]
     fn search_pattern_count(
         &self,
+        py: Python<'_>,
         step_predicates: Vec<Bound<'_, PyDict>>,
         partition_by: Option<String>,
     ) -> PyResult<usize> {
-        crate::ops::pattern_match::search_pattern_count_impl(self, step_predicates, partition_by)
+        let steps = parse_exprs(&step_predicates)?;
+        detached(py, || {
+            crate::ops::pattern_match::search_pattern_count_impl(self, &steps, partition_by)
+        })
     }
 
     /// Select columns or derived expressions
@@ -667,10 +652,11 @@ impl LTSeqTable {
     ///     New LTSeqTable with sort metadata set (same underlying data)
     fn assume_sorted(
         &self,
+        py: Python<'_>,
         sort_exprs: Vec<Bound<'_, PyDict>>,
         desc_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::sort::assume_sorted_impl(self, sort_exprs, desc_flags)
+        crate::ops::sort::assume_sorted_impl(py, self, sort_exprs, desc_flags)
     }
 
     /// Add __group_id__ column for consecutive identical grouping values
@@ -686,8 +672,15 @@ impl LTSeqTable {
     /// This is used for the `group_ordered(cond).first().count()` pattern,
     /// where we only need the total number of groups (sessions).
     /// Avoids allocating 3 x N arrays for 100M+ rows.
-    fn group_ordered_count(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<usize> {
-        crate::ops::grouping::group_ordered_count_impl(self, grouping_expr)
+    fn group_ordered_count(
+        &self,
+        py: Python<'_>,
+        grouping_expr: Bound<'_, PyDict>,
+    ) -> PyResult<usize> {
+        let py_expr = dict_to_py_expr(&grouping_expr)?;
+        detached(py, || {
+            crate::ops::grouping::group_ordered_count_impl(self, &py_expr)
+        })
     }
 
     /// Get only the first row of each group (Phase B4)
@@ -714,8 +707,8 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with unique rows
-    fn distinct(&self, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-        crate::ops::set_ops::distinct_impl(self, key_exprs)
+    fn distinct(&self, py: Python<'_>, key_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
+        crate::ops::set_ops::distinct_impl(py, self, key_exprs)
     }
 
     /// Select a contiguous range of rows
@@ -740,19 +733,13 @@ impl LTSeqTable {
         // Get DataFrame
         let df = self.require_df()?;
 
-        // Apply slice: use limit() with offset and fetch parameters
-        let sliced_df = RUNTIME
-            .block_on(async {
-                // DataFusion's limit(skip: usize, fetch: Option<usize>)
-                let skip = offset as usize;
-                let fetch = length.map(|len| len as usize);
-
-                (**df)
-                    .clone()
-                    .limit(skip, fetch)
-                    .map_err(|e| format!("Slice execution failed: {}", e))
-            })
-            .map_err(LtseqError::Runtime)?;
+        // Apply slice: DataFusion's limit(skip, fetch) only builds the plan.
+        let skip = offset as usize;
+        let fetch = length.map(|len| len as usize);
+        let sliced_df = (**df)
+            .clone()
+            .limit(skip, fetch)
+            .map_err(|e| LtseqError::Runtime(format!("Slice execution failed: {}", e)))?;
 
         // Return new LTSeqTable with sliced data (schema unchanged).
         // Row subset preserves order → keep sort_specs; the raw file no
@@ -945,6 +932,7 @@ impl LTSeqTable {
     #[pyo3(signature = (other, left_time_col, right_time_col, direction, suffix, left_by_cols=Vec::new(), right_by_cols=Vec::new()))]
     fn asof_join(
         &self,
+        py: Python<'_>,
         other: &LTSeqTable,
         left_time_col: &str,
         right_time_col: &str,
@@ -953,16 +941,18 @@ impl LTSeqTable {
         left_by_cols: Vec<String>,
         right_by_cols: Vec<String>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::asof_join::asof_join_impl(
-            self,
-            other,
-            left_time_col,
-            right_time_col,
-            direction,
-            suffix,
-            left_by_cols,
-            right_by_cols,
-        )
+        detached(py, || {
+            crate::ops::asof_join::asof_join_impl(
+                self,
+                other,
+                left_time_col,
+                right_time_col,
+                direction,
+                suffix,
+                left_by_cols,
+                right_by_cols,
+            )
+        })
     }
 
     /// Semi-join: Return rows from left table where keys exist in right table
@@ -1050,8 +1040,13 @@ impl LTSeqTable {
     /// 1. Create temp table from ref_sequence with position column
     /// 2. LEFT JOIN original table ON key
     /// 3. ORDER BY position
-    fn align(&self, ref_sequence: Vec<Py<PyAny>>, key_col: &str) -> PyResult<LTSeqTable> {
-        crate::ops::align::align_impl(self, ref_sequence, key_col)
+    fn align(
+        &self,
+        py: Python<'_>,
+        ref_sequence: Vec<Py<PyAny>>,
+        key_col: &str,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::align::align_impl(py, self, ref_sequence, key_col)
     }
 
     /// Pivot: Transform table from long to wide format
@@ -1077,12 +1072,15 @@ impl LTSeqTable {
     /// Output: year, West, East, Central (with aggregated amounts)
     fn pivot(
         &self,
+        py: Python<'_>,
         index_cols: Vec<String>,
         pivot_col: String,
         value_col: String,
         agg_fn: String,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::pivot::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
+        detached(py, || {
+            crate::ops::pivot::pivot_impl(self, index_cols, pivot_col, value_col, agg_fn)
+        })
     }
 
     /// Union: Vertically concatenate two tables with compatible schemas
@@ -1153,8 +1151,8 @@ impl LTSeqTable {
     ///
     /// Args:
     ///     path: Path to the output CSV file
-    fn write_csv(&self, path: String) -> PyResult<()> {
-        crate::ops::io::write_csv_impl(self, path)
+    fn write_csv(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        detached(py, || crate::ops::io::write_csv_impl(self, path))
     }
 
     /// Write table data to a Parquet file
@@ -1163,8 +1161,13 @@ impl LTSeqTable {
     ///     path: Path to the output Parquet file
     ///     compression: Optional compression algorithm ("snappy", "zstd", "gzip", "lz4", "none")
     #[pyo3(signature = (path, compression=None))]
-    fn write_parquet(&self, path: String, compression: Option<String>) -> PyResult<()> {
-        crate::ops::io::write_parquet_impl(self, path, compression)
+    fn write_parquet(
+        &self,
+        py: Python<'_>,
+        path: String,
+        compression: Option<String>,
+    ) -> PyResult<()> {
+        detached(py, || crate::ops::io::write_parquet_impl(self, path, compression))
     }
 
     /// Load Arrow IPC bytes into a new LTSeqTable.
@@ -1175,8 +1178,9 @@ impl LTSeqTable {
     /// Args:
     ///     ipc_buffers: List of bytes objects, each an Arrow IPC-serialized RecordBatch
     #[staticmethod]
-    fn load_arrow_ipc(ipc_buffers: Vec<Vec<u8>>) -> PyResult<LTSeqTable> {
-        crate::ops::io::load_arrow_ipc_impl(ipc_buffers)
+    fn load_arrow_ipc(py: Python<'_>, ipc_buffers: Vec<Vec<u8>>) -> PyResult<LTSeqTable> {
+        // The bytes are already copied into Rust; decoding needs no Python.
+        detached(py, || crate::ops::io::load_arrow_ipc_impl(ipc_buffers))
     }
 
     /// Is Subset: Check if this table is a subset of another table
@@ -1194,25 +1198,26 @@ impl LTSeqTable {
     /// Boolean indicating if this table is a subset of the other
     fn is_subset(
         &self,
+        py: Python<'_>,
         other: &LTSeqTable,
         key_expr_dict: Option<Bound<'_, PyDict>>,
     ) -> PyResult<bool> {
-        crate::ops::set_ops::is_subset_impl(self, other, key_expr_dict)
+        crate::ops::set_ops::is_subset_impl(py, self, other, key_expr_dict)
     }
 
     /// Reverse: return rows in reversed order
     ///
     /// Uses ROW_NUMBER() OVER () to assign stable positions, then reverses.
-    fn rvs(&self) -> PyResult<LTSeqTable> {
-        crate::ops::set_ops::rvs_impl(self)
+    fn rvs(&self, py: Python<'_>) -> PyResult<LTSeqTable> {
+        detached(py, || crate::ops::set_ops::rvs_impl(self))
     }
 
     /// Step: take every nth row (0-based — rows 0, n, 2n, …)
     ///
     /// Args:
     ///     n: Step size (must be >= 1)
-    fn step(&self, n: usize) -> PyResult<LTSeqTable> {
-        crate::ops::set_ops::step_impl(self, n)
+    fn step(&self, py: Python<'_>, n: usize) -> PyResult<LTSeqTable> {
+        detached(py, || crate::ops::set_ops::step_impl(self, n))
     }
 
     // ── Mutation operations ─────────────────────────────────────
@@ -1221,15 +1226,20 @@ impl LTSeqTable {
     ///
     /// The row data is provided as a Python dict mapping column names to values.
     /// Position is clamped: negative → 0, beyond end → append.
-    fn insert_row(&self, pos: i64, row_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::mutation::insert_row_impl(self, pos, row_dict)
+    fn insert_row(
+        &self,
+        py: Python<'_>,
+        pos: i64,
+        row_dict: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::insert_row_impl(py, self, pos, row_dict)
     }
 
     /// Delete the row at the given 0-based position (copy-on-write).
     ///
     /// Out-of-range positions are silently ignored (no-op).
-    fn delete_rows(&self, pos: i64) -> PyResult<LTSeqTable> {
-        crate::ops::mutation::delete_rows_impl(self, pos)
+    fn delete_rows(&self, py: Python<'_>, pos: i64) -> PyResult<LTSeqTable> {
+        detached(py, || crate::ops::mutation::delete_rows_impl(self, pos))
     }
 
     /// Conditionally update columns where predicate is True (copy-on-write).
@@ -1248,8 +1258,13 @@ impl LTSeqTable {
     ///
     /// Updates is a dict mapping column names to new values.
     /// Out-of-range positions are silently ignored (no-op).
-    fn modify_row(&self, pos: i64, updates: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::mutation::modify_row_impl(self, pos, updates)
+    fn modify_row(
+        &self,
+        py: Python<'_>,
+        pos: i64,
+        updates: &Bound<'_, PyDict>,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::mutation::modify_row_impl(py, self, pos, updates)
     }
 }
 

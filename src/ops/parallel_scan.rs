@@ -30,7 +30,6 @@ use datafusion::arrow::array::{
 use datafusion::arrow::compute::concat_batches;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ProjectionMask;
-use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -51,7 +50,7 @@ pub fn direct_streaming_group_ordered(
     table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // Step 1: Extract columns needed by the predicate
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
@@ -113,7 +112,7 @@ pub fn direct_streaming_group_ordered(
         // Compute boundaries within this batch
         let mut result = vec![false; n];
         if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()).into());
+            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()));
         }
 
         // Accumulate group IDs from boundaries
@@ -167,7 +166,7 @@ pub fn direct_streaming_group_count(
     _table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
-) -> PyResult<usize> {
+) -> Result<usize, LtseqError> {
     // Step 1: Extract columns needed by the predicate
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
@@ -227,7 +226,7 @@ pub fn direct_streaming_group_count(
         // Compute boundaries within this batch
         let mut result = vec![false; n];
         if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()).into());
+            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()));
         }
 
         // Just count boundaries — no group_ids array needed
@@ -383,7 +382,7 @@ pub fn parallel_streaming_group_count(
     _table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
-) -> PyResult<usize> {
+) -> Result<usize, LtseqError> {
     // 1. Extract referenced columns for projection pruning.
     let mut needed_cols: HashSet<String> = HashSet::new();
     extract_referenced_columns(predicate, &mut needed_cols);
@@ -414,8 +413,7 @@ pub fn parallel_streaming_group_count(
     if proj_indices.is_empty() {
         return Err(LtseqError::Runtime(
             "PARALLEL_FALLBACK: no predicate columns found in schema".into(),
-        )
-        .into());
+        ));
     }
 
     let projection_mask = ProjectionMask::roots(
@@ -535,7 +533,7 @@ pub fn parallel_pattern_match_count(
     step_predicates: &[PyExpr],
     partition_col: &str,
     parquet_path: &str,
-) -> PyResult<usize> {
+) -> Result<usize, LtseqError> {
     let num_steps = step_predicates.len();
     let fast_path_plan = same_string_column_starts_with_plan(step_predicates);
 

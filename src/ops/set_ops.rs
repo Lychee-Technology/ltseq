@@ -25,9 +25,14 @@
 //! set algebra, row_number windows for keyed distinct / rvs / step. No SQL
 //! strings, no temp-table registration; the only materialization is the
 //! scalar `is_subset` count.
+//!
+//! GIL layering (issue #142): key-column parsing happens under the GIL; the
+//! position snapshot (`rvs` / `step` / keyed `distinct`) and the `is_subset`
+//! count run through `gil::detached`, so those halves return `LtseqError`.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::gil::detached;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::Column;
@@ -113,28 +118,24 @@ fn row_position_expr() -> Expr {
 fn snapshot_single_partition(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
-) -> PyResult<datafusion::dataframe::DataFrame> {
+) -> Result<datafusion::dataframe::DataFrame, LtseqError> {
     let batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect for position snapshot: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+        .block_on((**df).clone().collect())
+        .map_err(|e| {
+            LtseqError::Runtime(format!("Failed to collect for position snapshot: {}", e))
+        })?;
 
     let schema = batches
         .first()
         .map(|b| b.schema())
-        .ok_or_else(|| LtseqError::NoData)?;
+        .ok_or(LtseqError::NoData)?;
     let combined = datafusion::arrow::compute::concat_batches(&schema, &batches)
         .map_err(|e| LtseqError::Runtime(format!("Failed to combine batches: {}", e)))?;
 
     table
         .session
         .read_batch(combined)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to read snapshot: {}", e)).into())
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read snapshot: {}", e)))
 }
 
 // ============================================================================
@@ -144,9 +145,11 @@ fn snapshot_single_partition(
 /// Helper function to remove duplicate rows
 ///
 /// Args:
+///     py: GIL token; the keyed path snapshots the table with the GIL released
 ///     table: Reference to LTSeqTable
 ///     key_exprs: Column expressions to determine uniqueness (empty = use all columns)
 pub fn distinct_impl(
+    py: Python<'_>,
     table: &LTSeqTable,
     key_exprs: Vec<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
@@ -167,11 +170,11 @@ pub fn distinct_impl(
         return distinct_all_columns(table, df);
     }
 
-    // Convert key expressions to column names
+    // Convert key expressions to column names (needs the GIL)
     let key_cols = extract_key_cols_from_exprs(&key_exprs, schema)?;
 
-    // Execute distinct with key columns
-    distinct_with_keys(table, df, schema, &key_cols)
+    // Snapshot + window plan: pure Rust, GIL released
+    detached(py, || distinct_with_keys(table, df, schema, &key_cols))
 }
 
 /// Simple distinct on all columns
@@ -179,14 +182,11 @@ fn distinct_all_columns(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
 ) -> PyResult<LTSeqTable> {
-    let distinct_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .distinct()
-                .map_err(|e| format!("Distinct execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Plan building only; nothing executes here.
+    let distinct_df = (**df)
+        .clone()
+        .distinct()
+        .map_err(|e| LtseqError::Runtime(format!("Distinct execution failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(&table.session),
@@ -241,7 +241,7 @@ fn distinct_with_keys(
     df: &Arc<datafusion::dataframe::DataFrame>,
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let key_exprs: Vec<Expr> = key_cols
         .iter()
         .map(|c| Expr::Column(Column::new_unqualified(c)))
@@ -302,14 +302,11 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
         .into());
     }
 
-    let union_df = RUNTIME
-        .block_on(async {
-            (**df1)
-                .clone()
-                .union((**df2).clone())
-                .map_err(|e| format!("Union failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Plan building only; nothing executes here.
+    let union_df = (**df1)
+        .clone()
+        .union((**df2).clone())
+        .map_err(|e| LtseqError::Runtime(format!("Union failed: {}", e)))?;
 
     Ok(create_result_table(&table1.session, union_df))
 }
@@ -351,6 +348,7 @@ pub fn diff_impl(
 /// Returns true if all rows in the left table also appear in the right table.
 /// If no key expression provided, uses all columns.
 pub fn is_subset_impl(
+    py: Python<'_>,
     table1: &LTSeqTable,
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
@@ -358,9 +356,11 @@ pub fn is_subset_impl(
     // t1 ⊆ t2 iff anti-join(t1, t2) is empty. count() is a scalar terminal,
     // so executing it here is within the no-materialization rule.
     let anti = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftAnti)?;
-    let missing = RUNTIME
-        .block_on(async { anti.count().await })
-        .map_err(|e| LtseqError::Runtime(format!("Subset count failed: {}", e)))?;
+    let missing = detached(py, || {
+        RUNTIME
+            .block_on(anti.count())
+            .map_err(|e| LtseqError::Runtime(format!("Subset count failed: {}", e)))
+    })?;
     Ok(missing == 0)
 }
 
@@ -388,7 +388,9 @@ fn semi_anti_on_keys(
 ///
 /// Assigns a native row-position column, sorts by it descending, and projects
 /// it away. Determinism matches the legacy SQL: single in-order partition.
-pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+///
+/// Runs with the GIL released (`lib.rs::rvs` wraps it in `gil::detached`).
+pub fn rvs_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
     let mut stage = all_column_exprs(schema);
@@ -412,9 +414,11 @@ pub fn rvs_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 }
 
 /// Step: Take every nth row (0-based, rows 0, n, 2n, …)
-pub fn step_impl(table: &LTSeqTable, n: usize) -> PyResult<LTSeqTable> {
+///
+/// Runs with the GIL released (`lib.rs::step` wraps it in `gil::detached`).
+pub fn step_impl(table: &LTSeqTable, n: usize) -> Result<LTSeqTable, LtseqError> {
     if n == 0 {
-        return Err(LtseqError::Validation("step() n must be >= 1".into()).into());
+        return Err(LtseqError::Validation("step() n must be >= 1".into()));
     }
 
     let (df, schema) = table.require_df_and_schema()?;

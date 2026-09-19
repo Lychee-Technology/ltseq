@@ -4,6 +4,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::gil::detached;
 use crate::metadata::{sort_specs_to_file_sort_order, SortSpec};
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
@@ -72,15 +73,11 @@ pub fn sort_impl(
         });
     }
 
-    // Apply sort (async operation)
-    let sorted_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .sort(df_sort_exprs)
-                .map_err(|e| format!("Sort execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Apply sort (plan building only; nothing executes here)
+    let sorted_df = (**df)
+        .clone()
+        .sort(df_sort_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Sort execution failed: {}", e)))?;
 
     // Return new LTSeqTable with sorted data and captured sort specs
     // (schema unchanged). The physical sort defines a new row order, so the
@@ -117,6 +114,7 @@ pub fn sort_impl(
 /// declared order. Incorrect metadata will produce wrong results in window
 /// functions and shift operations.
 pub fn assume_sorted_impl(
+    py: Python<'_>,
     table: &LTSeqTable,
     sort_exprs: Vec<Bound<'_, PyDict>>,
     desc_flags: Vec<bool>,
@@ -150,20 +148,24 @@ pub fn assume_sorted_impl(
     // Build DataFusion sort order for the optimizer
     let sort_order = sort_specs_to_file_sort_order(&captured_specs);
 
+    // Parsing is done; both paths below do real I/O or a collect, so they
+    // run with the GIL released.
+
     // Try Parquet re-read path first (fully lazy, no materialization)
     if let Some(ref path) = table.source_parquet_path {
         let parquet_path = path.clone();
         let session = Arc::clone(&table.session);
-        let result_df = RUNTIME
-            .block_on(async {
-                let options =
-                    ParquetReadOptions::default().file_sort_order(sort_order.clone());
-                session
-                    .read_parquet(&parquet_path, options)
-                    .await
-                    .map_err(|e| format!("Failed to re-read Parquet with sort order: {}", e))
+        let result_df = detached(py, || {
+            RUNTIME.block_on(async {
+                let options = ParquetReadOptions::default().file_sort_order(sort_order);
+                session.read_parquet(&parquet_path, options).await.map_err(|e| {
+                    LtseqError::Runtime(format!(
+                        "Failed to re-read Parquet with sort order: {}",
+                        e
+                    ))
+                })
             })
-            .map_err(LtseqError::Runtime)?;
+        })?;
 
         let result_schema = LTSeqTable::schema_from_df(result_df.schema());
 
@@ -177,15 +179,11 @@ pub fn assume_sorted_impl(
     }
 
     // Non-Parquet fallback: collect batches and create MemTable with sort order
-    let batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect data for assume_sorted: {}", e))
+    let batches = detached(py, || {
+        RUNTIME.block_on((**df).clone().collect()).map_err(|e| {
+            LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))
         })
-        .map_err(LtseqError::Runtime)?;
+    })?;
 
     // A filtered-to-empty table must stay queryable (PR #126 review):
     // assume_sorted() is the one-line migration for the declared-order

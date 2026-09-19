@@ -2,6 +2,9 @@
 //!
 //! Transforms table from long to wide format using native DataFusion
 //! conditional aggregation (no SQL string construction).
+//!
+//! Runs with the GIL released (`lib.rs::pivot` wraps `pivot_impl` in
+//! `gil::detached`): plain Rust arguments, `LtseqError` results.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -10,7 +13,6 @@ use datafusion::arrow::array::Array;
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Case;
 use datafusion::logical_expr::{case, col, lit, Expr};
-use pyo3::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -29,10 +31,10 @@ pub fn pivot_impl(
     pivot_col: String,
     value_col: String,
     agg_fn: String,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // Validate inputs
     if table.dataframe.is_none() {
-        return Err(LtseqError::Validation("Cannot pivot empty table".into()).into());
+        return Err(LtseqError::Validation("Cannot pivot empty table".into()));
     }
 
     // SAFETY: dataframe.is_none() is checked above
@@ -54,8 +56,7 @@ pub fn pivot_impl(
             return Err(LtseqError::Validation(format!(
                 "Index column '{}' not found in table",
                 col
-            ))
-            .into());
+            )));
         }
     }
 
@@ -63,16 +64,14 @@ pub fn pivot_impl(
         return Err(LtseqError::Validation(format!(
             "Pivot column '{}' not found in table",
             pivot_col
-        ))
-        .into());
+        )));
     }
 
     if !col_names.contains(&value_col) {
         return Err(LtseqError::Validation(format!(
             "Value column '{}' not found in table",
             value_col
-        ))
-        .into());
+        )));
     }
 
     // Validate aggregation function
@@ -83,8 +82,7 @@ pub fn pivot_impl(
             return Err(LtseqError::Validation(format!(
                 "Invalid aggregation function '{}'. Must be one of: sum, mean, count, min, max",
                 agg_fn
-            ))
-            .into());
+            )));
         }
     }
 
@@ -243,7 +241,7 @@ fn build_agg_expr(agg_fn: &str, expr: Expr) -> Expr {
 fn extract_pivot_values(
     col_arr: &std::sync::Arc<dyn datafusion::arrow::array::Array>,
     pivot_values_set: &mut HashSet<String>,
-) -> PyResult<()> {
+) -> Result<(), LtseqError> {
     match col_arr.data_type() {
         DataType::Utf8 | DataType::LargeUtf8 => {
             if let Some(string_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::StringArray>() {
@@ -293,8 +291,7 @@ fn extract_pivot_values(
         _ => {
             return Err(LtseqError::Validation(
                 "Pivot column must be string, int, or float type".into(),
-            )
-            .into());
+            ));
         }
     }
     Ok(())

@@ -26,8 +26,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-use crate::engine::RUNTIME;
-
 /// Helper function to filter rows based on a predicate expression
 ///
 /// Args:
@@ -56,15 +54,11 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
     // 4. Get DataFrame
     let df = table.require_df()?;
 
-    // 5. Apply filter (async operation)
-    let filtered_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .filter(df_expr)
-                .map_err(|e| format!("Filter execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // 5. Apply filter (plan building only; nothing executes here)
+    let filtered_df = (**df)
+        .clone()
+        .filter(df_expr)
+        .map_err(|e| LtseqError::Runtime(format!("Filter execution failed: {}", e)))?;
 
     // 6. Return new LTSeqTable with filtered data (schema unchanged)
     Ok(LTSeqTable::from_df_with_schema(
@@ -111,15 +105,11 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // 3. Get DataFrame
     let df = table.require_df()?;
 
-    // 4. Apply select (async operation)
-    let selected_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .select(df_exprs)
-                .map_err(|e| format!("Select execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // 4. Apply select (plan building only; nothing executes here)
+    let selected_df = (**df)
+        .clone()
+        .select(df_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Select execution failed: {}", e)))?;
 
     // 5. Keep the longest prefix of sort keys whose columns survived the
     // projection: a table sorted by (a, b) is still sorted by (a) after b is
@@ -189,14 +179,10 @@ pub fn rename_columns_impl(
         .collect();
 
     let df = table.require_df()?;
-    let renamed_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .select(df_exprs)
-                .map_err(|e| format!("Rename execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    let renamed_df = (**df)
+        .clone()
+        .select(df_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Rename execution failed: {}", e)))?;
 
     // Remap sort metadata to the new names (a rename preserves row order)
     let sort_specs: Vec<crate::SortSpec> = table
@@ -240,17 +226,13 @@ pub fn search_first_impl(
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(LtseqError::Validation)?;
 
-    // Apply filter and limit to first result
-    let result_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .filter(df_expr)
-                .map_err(|e| format!("Filter failed: {}", e))?
-                .limit(0, Some(1))
-                .map_err(|e| format!("Limit failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Apply filter and limit to first result (plan building only)
+    let result_df = (**df)
+        .clone()
+        .filter(df_expr)
+        .map_err(|e| LtseqError::Runtime(format!("Filter failed: {}", e)))?
+        .limit(0, Some(1))
+        .map_err(|e| LtseqError::Runtime(format!("Limit failed: {}", e)))?;
 
     // Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(
@@ -268,9 +250,12 @@ pub fn search_first_impl(
 /// the computed data instead of re-executing the plan. Rows, schema, and row
 /// order are unchanged, so sort metadata is carried over.
 ///
+/// Runs with the GIL released (`lib.rs::materialize` wraps it in
+/// `gil::detached`), so it takes no Python objects and returns `LtseqError`.
+///
 /// Args:
 ///     table: Reference to LTSeqTable
-pub fn materialize_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     // No dataframe loaded (fresh/empty table): materialization is a no-op
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::empty(
@@ -282,15 +267,9 @@ pub fn materialize_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
     }
 
     let df = table.require_df()?;
-    let batches = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .collect()
-                .await
-                .map_err(|e| format!("collect() materialization failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    let batches = crate::engine::RUNTIME
+        .block_on((**df).clone().collect())
+        .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
 
     // The data now lives in memory: drop source_parquet_path so downstream ops
     // scan the snapshot instead of re-reading the original file.

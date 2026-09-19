@@ -17,7 +17,6 @@
 //! - Handled by: crate::ops::window module
 //! - This module detects window functions and delegates
 
-use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
@@ -84,14 +83,11 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     // #125 finding 4): an existing name is replaced in place, new names
     // append — never a duplicate column.
     let all_exprs = crate::ops::common::merge_derived_columns(schema, derived_exprs);
-    let result_df = RUNTIME
-        .block_on(async {
-            (**df)
-                .clone()
-                .select(all_exprs)
-                .map_err(|e| format!("Derive execution failed: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+    // Plan building only; nothing executes here.
+    let result_df = (**df)
+        .clone()
+        .select(all_exprs)
+        .map_err(|e| LtseqError::Runtime(format!("Derive execution failed: {}", e)))?;
 
     // 6. Return new LTSeqTable with derived columns added (schema recomputed).
     // Overwriting a sort key invalidates the declared order from that key on.

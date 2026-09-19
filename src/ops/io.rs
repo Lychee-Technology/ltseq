@@ -4,18 +4,21 @@
 //! - CSV writing (via Arrow's CSV writer)
 //! - Parquet writing (via Arrow's Parquet writer)
 //! - Arrow IPC loading (for from_arrow / from_pandas interop)
+//!
+//! All three entry points run with the GIL released (`lib.rs` wraps them in
+//! `gil::detached`): they take only plain Rust values and report failures as
+//! `LtseqError`.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
-use pyo3::prelude::*;
 
 /// Write table data to a CSV file using Arrow's native CSV writer.
 ///
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     path: Path to the output CSV file
-pub fn write_csv_impl(table: &LTSeqTable, path: String) -> PyResult<()> {
+pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError> {
     let df = table.require_df()?;
 
     RUNTIME.block_on(async {
@@ -55,7 +58,7 @@ pub fn write_parquet_impl(
     table: &LTSeqTable,
     path: String,
     compression: Option<String>,
-) -> PyResult<()> {
+) -> Result<(), LtseqError> {
     let df = table.require_df()?;
 
     RUNTIME.block_on(async {
@@ -84,7 +87,7 @@ pub fn write_parquet_impl(
                 return Err(LtseqError::Validation(format!(
                     "Unknown compression '{}'. Use 'snappy', 'zstd', 'gzip', 'lz4', or 'none'.",
                     other
-                )).into());
+                )));
             }
         };
 
@@ -122,7 +125,7 @@ pub fn write_parquet_impl(
         if !wrote_any {
             drop(writer);
             let _ = std::fs::remove_file(&path);
-            return Err(LtseqError::Validation("No data to write".into()).into());
+            return Err(LtseqError::Validation("No data to write".into()));
         }
 
         writer.close().map_err(|e| {
@@ -140,7 +143,7 @@ pub fn write_parquet_impl(
 ///
 /// Args:
 ///     ipc_buffers: List of bytes objects, each containing one Arrow IPC-serialized RecordBatch
-pub fn load_arrow_ipc_impl(ipc_buffers: Vec<Vec<u8>>) -> PyResult<LTSeqTable> {
+pub fn load_arrow_ipc_impl(ipc_buffers: Vec<Vec<u8>>) -> Result<LTSeqTable, LtseqError> {
     use crate::engine::create_session_context;
     use datafusion::arrow::ipc::reader::StreamReader;
     use std::io::Cursor;

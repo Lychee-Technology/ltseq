@@ -24,13 +24,11 @@ use datafusion::arrow::array::{
 use datafusion::arrow::compute::{concat_batches, take};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::*;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::linear_scan::{build_sort_exprs, extract_referenced_columns};
-use crate::types::{dict_to_py_expr, PyExpr};
+use crate::types::PyExpr;
 use crate::LTSeqTable;
 
 /// Evaluate a predicate PyExpr against a RecordBatch, returning a BooleanArray.
@@ -617,30 +615,26 @@ fn build_partition_ids(boundaries: &BooleanArray) -> Vec<u64> {
 ///
 /// The returned table contains the rows where step 1 matched (i.e., row index i
 /// where step1(i), step2(i+1), ..., stepN(i+N-1) all matched within the same partition).
+///
+/// Runs with the GIL released: `lib.rs::search_pattern` deserializes the
+/// predicates under the GIL and wraps this call in `gil::detached`.
 pub fn search_pattern_impl(
     table: &LTSeqTable,
-    step_predicates: Vec<Bound<'_, PyDict>>,
+    py_exprs: &[PyExpr],
     partition_by: Option<String>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
-    let num_steps = step_predicates.len();
+    let num_steps = py_exprs.len();
 
     if num_steps == 0 {
         return Err(LtseqError::Validation(
             "search_pattern requires at least one step predicate".into(),
-        )
-        .into());
+        ));
     }
 
-    // 1. Deserialize all step predicates
-    let py_exprs: Vec<PyExpr> = step_predicates
-        .iter()
-        .map(|d| dict_to_py_expr(d))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // 2. Extract referenced columns for projection pruning
+    // 1. Extract referenced columns for projection pruning
     let mut referenced_cols = HashSet::new();
-    for expr in &py_exprs {
+    for expr in py_exprs {
         extract_referenced_columns(expr, &mut referenced_cols);
     }
     if let Some(ref part_col) = partition_by {
@@ -669,8 +663,7 @@ pub fn search_pattern_impl(
         if select_exprs.is_empty() {
             return Err(LtseqError::Validation(
                 "No valid columns found in step predicates".into(),
-            )
-            .into());
+            ));
         }
 
         let proj = (**df)
@@ -693,7 +686,7 @@ pub fn search_pattern_impl(
 
     // 4. Collect into a single RecordBatch
     let batches = RUNTIME
-        .block_on(async { projected_df.collect().await })
+        .block_on(projected_df.collect())
         .map_err(LtseqError::collect)?;
 
     if batches.is_empty() {
@@ -832,7 +825,7 @@ pub fn search_pattern_impl(
     };
 
     let full_batches = RUNTIME
-        .block_on(async { full_df.collect().await })
+        .block_on(full_df.collect())
         .map_err(LtseqError::collect)?;
 
     if full_batches.is_empty() {
@@ -875,25 +868,21 @@ pub fn search_pattern_impl(
 
 /// Optimized version: return just the count of matching patterns.
 /// Avoids collecting the full table — only collects pruned columns.
+///
+/// Runs with the GIL released: `lib.rs::search_pattern_count` deserializes
+/// the predicates under the GIL and wraps this call in `gil::detached`.
 pub fn search_pattern_count_impl(
     table: &LTSeqTable,
-    step_predicates: Vec<Bound<'_, PyDict>>,
+    py_exprs: &[PyExpr],
     partition_by: Option<String>,
-) -> PyResult<usize> {
-    let num_steps = step_predicates.len();
+) -> Result<usize, LtseqError> {
+    let num_steps = py_exprs.len();
 
     if num_steps == 0 {
         return Err(LtseqError::Validation(
             "search_pattern requires at least one step predicate".into(),
-        )
-        .into());
+        ));
     }
-
-    // 1. Deserialize all step predicates (lightweight, no DataFusion needed)
-    let py_exprs: Vec<PyExpr> = step_predicates
-        .iter()
-        .map(|d| dict_to_py_expr(d))
-        .collect::<Result<Vec<_>, _>>()?;
 
     // Try parallel fast path BEFORE creating DataFusion session.
     // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
@@ -903,7 +892,7 @@ pub fn search_pattern_count_impl(
         if !table.sort_specs.is_empty() {
             match crate::ops::parallel_scan::parallel_pattern_match_count(
                 table,
-                &py_exprs,
+                py_exprs,
                 part_col,
                 parquet_path,
             ) {
@@ -926,7 +915,7 @@ pub fn search_pattern_count_impl(
 
     // 2. Extract referenced columns for projection pruning
     let mut referenced_cols = HashSet::new();
-    for expr in &py_exprs {
+    for expr in py_exprs {
         extract_referenced_columns(expr, &mut referenced_cols);
     }
     if let Some(ref part_col) = partition_by {
@@ -1058,7 +1047,7 @@ fn collect_projected_sorted(
     referenced_cols: &HashSet<String>,
     schema: &Arc<datafusion::arrow::datatypes::Schema>,
     sort_keys: &[crate::SortSpec],
-) -> PyResult<Vec<RecordBatch>> {
+) -> Result<Vec<RecordBatch>, LtseqError> {
     let select_exprs: Vec<Expr> = referenced_cols
         .iter()
         .filter(|col_name| {
@@ -1073,8 +1062,7 @@ fn collect_projected_sorted(
     if select_exprs.is_empty() {
         return Err(LtseqError::Validation(
             "No valid columns found in step predicates".into(),
-        )
-        .into());
+        ));
     }
 
     let proj = (**df)
@@ -1094,6 +1082,6 @@ fn collect_projected_sorted(
     };
 
     RUNTIME
-        .block_on(async { projected_df.collect().await })
-        .map_err(|e| LtseqError::collect(e).into())
+        .block_on(projected_df.collect())
+        .map_err(LtseqError::collect)
 }
