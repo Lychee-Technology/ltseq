@@ -311,6 +311,61 @@ class TestHelperNameCollision:
         assert a_values(t.filter(pred)) == [3]
 
 
+class TestPublicBoundaries:
+    """Every public API that takes ``lambda r: ...`` applies the rewrite, not
+    only the ones that happen to route through ``_lambda_to_expr``."""
+
+    def test_select_expression(self, t):
+        out = rows(t.select(lambda r: r.b is None))
+        assert [next(iter(r.values())) for r in out] == [True, False, True, False]
+        assert out == rows(t.select(lambda r: r.b.is_null()))
+
+    def test_select_list(self, t):
+        out = rows(t.select(lambda r: [r.a, r.b is not None]))
+        assert [list(r.values()) for r in out] == [
+            [1, False],
+            [2, True],
+            [3, False],
+            [4, True],
+        ]
+
+    def test_select_module_scope_lambda(self, t):
+        assert rows(t.select(MODULE_PRED)) == rows(t.select(lambda r: r.b.is_null()))
+
+    def test_select_plain_def_gives_guidance(self, t):
+        def col(r):
+            return r.b is None
+
+        with pytest.raises(TypeError, match=r"is_null\(\)"):
+            t.select(col)
+
+    def test_delete_removes_null_rows(self, t):
+        assert a_values(t.delete(lambda r: r.b is None)) == [2, 4]
+        assert a_values(t.delete(lambda r: r.b is not None)) == [1, 3]
+
+    def test_delete_with_closure(self, t):
+        th = 2
+        assert a_values(t.delete(lambda r: (r.b is not None) & (r.a > th))) == [1, 2, 3]
+
+    def test_delete_module_scope_lambda(self, t):
+        assert a_values(t.delete(MODULE_PRED)) == [2, 4]
+
+    def test_delete_plain_def_gives_guidance(self, t):
+        def pred(r):
+            return r.b is None
+
+        with pytest.raises(TypeError, match=r"is_null\(\)"):
+            t.delete(pred)
+
+    def test_delete_rejects_dict_predicate(self, t):
+        with pytest.raises(TypeError, match="boolean expression"):
+            t.delete(lambda r: {"x": r.a > 1})
+
+    def test_update_predicate(self, t):
+        out = rows(t.update(lambda r: r.b is None, a=0))
+        assert [r["a"] for r in out] == [0, 2, 0, 4]
+
+
 class TestFallbacks:
     def test_lambda_without_source_gives_guidance(self, t):
         fn = eval("lambda r: r.b is None")

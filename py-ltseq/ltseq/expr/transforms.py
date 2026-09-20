@@ -268,6 +268,36 @@ def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     return new_fn
 
 
+def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
+    """Run a user row lambda against a :class:`SchemaProxy` for ``schema``.
+
+    Every public API that accepts ``lambda r: ...`` must call the lambda
+    through this function rather than on a proxy of its own, so the
+    ``is None`` / ``is not None`` rewrite applies uniformly. The raw result
+    is returned; callers validate its shape (``Expr``, dict, list, ...).
+    """
+    # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
+    # lambda into explicit null checks before running it against the proxy.
+    fn = _transform_lambda_for_none_checks(fn)
+    return fn(SchemaProxy(schema))
+
+
+def _none_check_hint(result: Any) -> str:
+    """Guidance appended to a "lambda returned a non-Expr" error when the
+    result looks like an un-rewritten ``is None`` check (a Python bool)."""
+    if result is True or result is False:
+        return (
+            "\n\nHint: If you're using 'is None' or 'is not None', use the "
+            "is_null() or is_not_null() methods instead:\n"
+            "  - r.col.is_null()      instead of  r.col is None\n"
+            "  - r.col.is_not_null()  instead of  r.col is not None\n"
+            "LTSeq rewrites 'is None' checks inside lambdas automatically "
+            "when their source is available; the methods are required in "
+            "a REPL or exec/eval string and in plain def functions."
+        )
+    return ""
+
+
 def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
     """
     Execute a lambda with a SchemaProxy to capture its expression tree.
@@ -299,13 +329,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
         >>> expr_dict["type"]
         'Dict'
     """
-    proxy = SchemaProxy(schema)
-
-    # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
-    # lambda into explicit null checks before running it against the proxy.
-    fn = _transform_lambda_for_none_checks(fn)
-
-    result = fn(proxy)
+    result = _invoke_row_lambda(fn, schema)
 
     if isinstance(result, dict):
         # Handle dict returns: {"col_name": Expr, "col_name2": Expr}
@@ -326,19 +350,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
         # Handle Expr returns: lambda r: r.age > 18
         return result.serialize()
     else:
-        # Check if this might be an 'is None' / 'is not None' issue
-        hint = ""
-        if result is True or result is False:
-            hint = (
-                "\n\nHint: If you're using 'is None' or 'is not None', use the "
-                "is_null() or is_not_null() methods instead:\n"
-                "  - r.col.is_null()      instead of  r.col is None\n"
-                "  - r.col.is_not_null()  instead of  r.col is not None\n"
-                "LTSeq rewrites 'is None' checks inside lambdas automatically "
-                "when their source is available; the methods are required in "
-                "a REPL or exec/eval string and in plain def functions."
-            )
         raise TypeError(
             f"Lambda must return an Expr or dict, got {type(result).__name__}. "
-            f"Did you forget to use the 'r' parameter?{hint}"
+            f"Did you forget to use the 'r' parameter?{_none_check_hint(result)}"
         )

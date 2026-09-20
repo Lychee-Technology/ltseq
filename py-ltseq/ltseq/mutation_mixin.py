@@ -68,8 +68,17 @@ class MutationMixin(LTSeqLike):
             )
 
         if callable(predicate_or_pos):
-            pred = predicate_or_pos
-            return self.filter(lambda r, _p=pred: ~_p(r))
+            # Capture the user's predicate directly (so the `is None` rewrite
+            # and its guidance apply) and negate the captured expression;
+            # wrapping the predicate in another lambda would bypass both.
+            expr_dict = self._capture_expr(predicate_or_pos)
+            if expr_dict.get("type") == "Dict":
+                raise TypeError(
+                    "delete() predicate must return a boolean expression, "
+                    "got a dict"
+                )
+            negated = {"type": "UnaryOp", "op": "Not", "operand": expr_dict}
+            return LTSeq._from_inner(self._inner.filter(negated))
 
         # integer positional delete — delegate to Rust
         pos = int(predicate_or_pos)
