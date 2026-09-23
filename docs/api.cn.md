@@ -1347,7 +1347,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
-- **说明**: lambda 中的 `r.col is None` / `r.col is not None` 会被改写为同样的表达式（`IS NULL` / `IS NOT NULL`，而不是 `= NULL`），并保留 lambda 的模块全局变量与闭包变量。改写依赖 lambda 源码，对这类 lambda 的 `functools.partial` 同样生效。在 REPL、`exec`/`eval` 字符串、普通 `def` 函数以及其他包装器（装饰器、`functools.lru_cache` 等）之后，任何 `is None` / `is not None`（即使作用于 Python 值）都会抛出说明写法的 `TypeError`，而不会在未改写的情况下执行；因此请在这些场景中使用上述方法，并在构造函数之前判断 Python 值。`r.col == None` 不会被改写，它与 SQL `NULL` 做比较。
+- **说明**: lambda 中的 `r.col is None` / `r.col is not None` 会被改写为同样的表达式（`IS NULL` / `IS NOT NULL`，而不是 `= NULL`），并保留 lambda 的模块全局变量与闭包变量。改写依赖 lambda 源码，对这类 lambda 的 `functools.partial` 同样生效。在 REPL、`exec`/`eval` 字符串、普通 `def` 函数以及其他包装器（装饰器、`functools.lru_cache` 等）之后，任何 `is None` / `is not None`（即使作用于 Python 值）都会抛出说明写法的 `TypeError`，而不会在未改写的情况下执行；因此请在这些场景中使用上述方法，并在构造函数之前判断 Python 值。改写和上述检查都不会进入 lambda 调用的辅助函数：对于 `lambda r: missing(r) or (r.a > 1)` 且 `def missing(r): return r.b is None`，`missing(r)` 是 Python bool `False`，捕获到的谓词只剩 `r.a > 1`。请在辅助函数中使用 `.is_null()` / `.is_not_null()`。`r.col == None` 不会被改写，它与 SQL `NULL` 做比较。
 
 #### `r.col.is_in`
 - **签名**: `r.col.is_in(values: list[Any]) -> Expr`

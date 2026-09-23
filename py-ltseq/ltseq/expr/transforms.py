@@ -297,6 +297,37 @@ _NULL_METHOD_GUIDANCE = (
 )
 
 
+def _source_span(
+    positions: dis.Positions | None,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """``((line, col), (end_line, end_col))``, or ``None`` if any part is
+    missing (``-X no_debug_ranges`` drops column offsets)."""
+    if positions is None:
+        return None
+    line, end_line, col, end_col = positions
+    if line is None or end_line is None or col is None or end_col is None:
+        return None
+    return (line, col), (end_line, end_col)
+
+
+def _may_be_operand_of(
+    value: dis.Positions | None, comparison: dis.Positions | None
+) -> bool:
+    """Whether the expression at ``value`` can be an operand of the
+    comparison at ``comparison``, judged by source span.
+
+    An operand lies inside the comparison's span and is strictly smaller,
+    since the span also covers the operator and the other operand. (The
+    implicit ``return None`` of a function can inherit the span of its last
+    ``if`` test: equal, not smaller.) Without a span the answer is yes, so
+    the check stays closed.
+    """
+    inner, outer = _source_span(value), _source_span(comparison)
+    if inner is None or outer is None:
+        return True
+    return outer[0] <= inner[0] and inner[1] <= outer[1] and inner != outer
+
+
 @functools.lru_cache(maxsize=1024)
 def _tests_identity_with_none(code: types.CodeType) -> bool:
     """Whether ``code``, or a function nested in it, compares a value with
@@ -304,19 +335,28 @@ def _tests_identity_with_none(code: types.CodeType) -> bool:
 
     Read from bytecode, so it needs no source: a ``POP_JUMP_IF_NONE`` /
     ``POP_JUMP_IF_NOT_NONE`` (the check used as a branch condition), or an
-    ``IS_OP`` in a code object that also loads the ``None`` constant (the
-    check used as a value). The second test does not pair the two
-    instructions, so an unrelated ``is`` next to a ``None`` literal also
+    ``IS_OP`` whose source span encloses a load of the ``None`` constant
+    (the check used as a value; see :func:`_may_be_operand_of`). Pairing by
+    span rather than by stack position also covers ``None is (a if c else b)``,
+    where the compiler emits one ``IS_OP`` per branch after the ``None`` load.
+    A ``None`` nested deeper inside an operand (``f(None) is marker``) still
     matches; that errs towards rejecting a function, never towards running
     one whose check was not rewritten.
     """
-    has_is = loads_none = False
-    for instr in dis.get_instructions(code):
-        if instr.opname in _NONE_JUMP_OPNAMES:
-            return True
-        has_is = has_is or instr.opname == "IS_OP"
-        loads_none = loads_none or (instr.opname == "LOAD_CONST" and instr.argval is None)
-    if has_is and loads_none:
+    instructions = list(dis.get_instructions(code))
+    if any(instr.opname in _NONE_JUMP_OPNAMES for instr in instructions):
+        return True
+    none_loads = [
+        instr.positions
+        for instr in instructions
+        if instr.opname == "LOAD_CONST" and instr.argval is None
+    ]
+    if any(
+        _may_be_operand_of(none_load, instr.positions)
+        for instr in instructions
+        if instr.opname == "IS_OP"
+        for none_load in none_loads
+    ):
         return True
     return any(
         _tests_identity_with_none(const)

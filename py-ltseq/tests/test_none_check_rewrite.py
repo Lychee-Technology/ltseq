@@ -20,6 +20,7 @@ The rewrite must:
 import functools
 import importlib.util
 import os
+import subprocess
 import sys
 import textwrap
 
@@ -399,6 +400,13 @@ class TestFallbacks:
             # a branch condition compiles to POP_JUMP_IF_NOT_NONE, not IS_OP
             "lambda r: r.a > 1 if r.b is None else r.a > 3",
             "lambda r: (lambda v: v is not None)(r.b) and (r.a > 1)",
+            # parenthesized `None` operands
+            "lambda r: ((None) is not r.b) and (r.a > 1)",
+            "lambda r: (r.b is not (None)) and (r.a > 1)",
+            # the compiler emits one IS_OP per branch, after the `None` load
+            "lambda r: (None is not (r.b if r.a > 0 else r.c)) and (r.a > 1)",
+            # an unrelated identity test next to the real null check
+            "lambda r: (r.b is not None) and (r.a > 1) if r is not r.a else r.a",
         ],
     )
     def test_short_circuit_without_source_fails_closed(self, t, source):
@@ -444,6 +452,62 @@ class TestFallbacks:
         fn = eval("lambda r: r.a > th if th is not None else r.a > 3", {"th": 1})
         with pytest.raises(TypeError, match=r"before building the function"):
             t.filter(fn)
+
+    def test_unrelated_identity_check_next_to_none_literal_runs(self, t):
+        # `flag is marker` compares two Python values and the `None` is an
+        # if_else branch value: neither is a null identity check, with or
+        # without source.
+        marker = object()
+        flag = marker
+        ns = {"if_else": if_else, "flag": flag, "marker": marker}
+        source = "lambda r: {'x': if_else(r.a > 2, None if flag is marker else 1, 0)}"
+        expected = [0, 0, None, None]
+        for fn in (
+            lambda r: {"x": if_else(r.a > 2, None if flag is marker else 1, 0)},  # pyright: ignore[reportArgumentType]
+            eval(source, ns),
+        ):
+            assert t.derive(fn).to_arrow().column("x").to_pylist() == expected
+
+    def test_rewritten_lambda_with_unrelated_identity_check_runs(self, t):
+        # After the rewrite `r.b is None` is a helper call; the remaining
+        # `flag is marker` and `None` literal must not trip the check.
+        marker = object()
+        flag = marker
+        out = t.derive(
+            lambda r: {
+                "x": if_else(r.b is None, None if flag is marker else 1, r.a)  # pyright: ignore[reportArgumentType]
+            }
+        )
+        assert out.to_arrow().column("x").to_pylist() == [None, 2, None, 4]
+
+    def test_plain_def_with_unrelated_identity_check_runs(self, t):
+        # CPython 3.14 gives the implicit `return None` the position of the
+        # last `if` test, here an identity check against a sentinel.
+        marker = object()
+
+        def pred(r, flag=marker):
+            if flag is marker:
+                return r.a > 2
+
+        assert a_values(t.filter(pred)) == [3, 4]
+
+    def test_check_without_column_offsets_fails_closed(self):
+        # `-X no_debug_ranges` drops column offsets, so an IS_OP cannot be
+        # paired with its operands; any IS_OP next to a `None` load counts.
+        script = textwrap.dedent(
+            """
+            import pandas as pd
+            from ltseq import LTSeq
+            t = LTSeq.from_pandas(pd.DataFrame({"a": [1, 2], "b": [None, "x"]}))
+            try:
+                t.filter(eval("lambda r: (None is not r.b) and (r.a > 1)"))
+            except TypeError as e:
+                assert "could not rewrite" in str(e), e
+            else:
+                raise AssertionError("ran an unrewritten null check")
+            """
+        )
+        subprocess.run([sys.executable, "-X", "no_debug_ranges", "-c", script], check=True)
 
     def test_stale_source_fails_closed(self, t, tmp_path):
         # The source on disk no longer matches the loaded lambda, so it cannot
