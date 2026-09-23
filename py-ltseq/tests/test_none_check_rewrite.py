@@ -10,11 +10,13 @@ The rewrite must:
 - locate lambdas defined at module scope and in modules that use
   `from __future__` imports, not only lambdas nested in functions;
 - never let the injected helper shadow a user name;
-- fall back to a guidance TypeError (never a NameError, never a silent
-  wrong result) when the lambda source cannot be inspected.
+- fail closed with a guidance TypeError (never a NameError, never a silent
+  wrong or partial result) when a null identity check cannot be rewritten:
+  no source, a plain def, or source that no longer matches the lambda.
 """
 
 import importlib.util
+import os
 import sys
 import textwrap
 
@@ -367,6 +369,11 @@ class TestPublicBoundaries:
 
 
 class TestFallbacks:
+    """A null identity check that could not be rewritten fails closed with the
+    guidance ``TypeError``. Run as is it would be a Python bool, and ``and`` /
+    ``or`` / conditional expressions would return a partial ``Expr`` that
+    filters the wrong rows without any error."""
+
     def test_lambda_without_source_gives_guidance(self, t):
         fn = eval("lambda r: r.b is None")
         with pytest.raises(TypeError, match=r"is_null\(\)"):
@@ -375,8 +382,93 @@ class TestFallbacks:
     def test_lambda_without_source_and_closure_never_name_errors(self, t):
         ns = {"th": 2}
         fn = eval("lambda r: (r.b is not None) & (r.a > th)", ns)
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match=r"is_not_null\(\)"):
             t.filter(fn)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # `True and expr` -> expr: the null check vanished ([2, 3, 4], not [2, 4])
+            "lambda r: (r.b is not None) and (r.a > 1)",
+            # `False or expr` -> expr: the other branch vanished ([4], not [1, 3, 4])
+            "lambda r: (r.b is None) or (r.a == 4)",
+            "lambda r: (None is not r.b) and (r.a > 1)",
+            # a branch condition compiles to POP_JUMP_IF_NOT_NONE, not IS_OP
+            "lambda r: r.a > 1 if r.b is None else r.a > 3",
+            "lambda r: (lambda v: v is not None)(r.b) and (r.a > 1)",
+        ],
+    )
+    def test_short_circuit_without_source_fails_closed(self, t, source):
+        with pytest.raises(TypeError, match=r"could not rewrite"):
+            t.filter(eval(source))
+
+    def test_short_circuit_in_plain_def_fails_closed(self, t):
+        def pred(r):
+            return (r.b is not None) and (r.a > 1)
+
+        def pred_branch(r):
+            if r.b is None:
+                return r.a > 1
+            return r.a > 3
+
+        for fn in (pred, pred_branch):
+            with pytest.raises(TypeError, match=r"'.*pred.*' compares a value with None"):
+                t.filter(fn)
+
+    def test_short_circuit_in_callable_instance_fails_closed(self, t):
+        class Pred:
+            def __call__(self, r):
+                return (r.b is None) or (r.a == 4)
+
+        with pytest.raises(TypeError, match=r"is_null\(\)"):
+            t.filter(Pred())
+
+    def test_every_public_boundary_fails_closed(self, t):
+        fn = eval("lambda r: (r.b is not None) and (r.a > 1)")
+        for call in (
+            lambda: t.filter(fn),
+            lambda: t.select(fn),
+            lambda: t.delete(fn),
+            lambda: t.update(fn, a=0),
+            lambda: t.derive(eval("lambda r: {'x': (r.b is None) or r.a}")),
+        ):
+            with pytest.raises(TypeError, match=r"could not rewrite"):
+                call()
+
+    def test_python_value_check_without_source_fails_closed(self, t):
+        # Without source the operand's type is unknown, so a check on a
+        # Python value is rejected too; the guidance says to test it outside.
+        fn = eval("lambda r: r.a > th if th is not None else r.a > 3", {"th": 1})
+        with pytest.raises(TypeError, match=r"before building the function"):
+            t.filter(fn)
+
+    def test_stale_source_fails_closed(self, t, tmp_path):
+        # The source on disk no longer matches the loaded lambda, so it cannot
+        # be located; it must not run unrewritten.
+        mod = _import_module_from_source(
+            tmp_path,
+            "ltseq_none_check_stale_mod",
+            """
+            PRED = lambda r: (r.b is not None) and (r.a > 1)  # noqa: E731
+            """,
+        )
+        try:
+            path = tmp_path / "ltseq_none_check_stale_mod.py"
+            # Same line, different lambda: the candidate compiles, but not to
+            # the loaded code object.
+            path.write_text("\nPRED = lambda r: (r.b is None) or (r.a > 1)  # noqa: E731\n")
+            stat = path.stat()
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+            with pytest.raises(TypeError, match=r"could not rewrite"):
+                t.filter(mod.PRED)
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_methods_and_eq_none_without_source_still_work(self, t):
+        assert a_values(t.filter(eval("lambda r: r.b.is_not_null() & (r.a > 1)"))) == [2, 4]
+        assert a_values(t.filter(eval("lambda r: r.a > 1"))) == [2, 3, 4]
+        # `== None` is an ordinary comparison (SQL `= NULL`), not an identity check
+        assert a_values(t.filter(eval("lambda r: r.b == None"))) == []
 
     def test_plain_def_gives_guidance(self, t):
         def pred(r):
@@ -384,6 +476,12 @@ class TestFallbacks:
 
         with pytest.raises(TypeError, match=r"is_null\(\)"):
             t.filter(pred)
+
+    def test_plain_def_without_none_check_runs(self, t):
+        def pred(r):
+            return r.a > 1
+
+        assert a_values(t.filter(pred)) == [2, 3, 4]
 
     def test_lambda_without_none_check_is_returned_unchanged(self):
         fn = lambda r: r.a > 1  # noqa: E731

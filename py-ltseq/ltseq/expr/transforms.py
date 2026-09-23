@@ -3,6 +3,7 @@
 import __future__
 import ast
 import copy
+import dis
 import functools
 import inspect
 import operator
@@ -22,6 +23,10 @@ _FUTURE_FLAGS = functools.reduce(
     (getattr(__future__, name).compiler_flag for name in __future__.all_feature_names),
     0,
 )
+
+# Opcodes the compiler emits for ``x is None`` / ``x is not None`` used as a
+# branch condition (``if``, conditional expressions).
+_NONE_JUMP_OPNAMES = frozenset({"POP_JUMP_IF_NONE", "POP_JUMP_IF_NOT_NONE"})
 
 
 def _null_check(value: Any, negate: bool) -> Any:
@@ -238,7 +243,8 @@ def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     with the same free variables, and rebuilt on the original ``__globals__``
     and the original closure cells (matched by name, so live bindings are
     preserved). When the source cannot be inspected, ``fn`` is returned
-    unchanged and :func:`_lambda_to_expr` reports how to spell the check.
+    unchanged and :func:`_invoke_row_lambda` refuses to run it if it
+    contains a null identity check.
     """
     if not isinstance(fn, types.FunctionType) or fn.__code__.co_name != "<lambda>":
         return fn
@@ -268,6 +274,54 @@ def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     return new_fn
 
 
+_NULL_METHOD_GUIDANCE = (
+    "Use the is_null() or is_not_null() methods instead:\n"
+    "  - r.col.is_null()      instead of  r.col is None\n"
+    "  - r.col.is_not_null()  instead of  r.col is not None\n"
+    "LTSeq rewrites 'is None' checks automatically only inside a lambda "
+    "whose source file is available. In a REPL, an exec/eval string or a "
+    "plain def function, use the methods, and test Python values (such as "
+    "an optional threshold) before building the function."
+)
+
+
+@functools.lru_cache(maxsize=1024)
+def _tests_identity_with_none(code: types.CodeType) -> bool:
+    """Whether ``code``, or a function nested in it, compares a value with
+    ``None`` by identity (``x is None`` / ``x is not None``).
+
+    Read from bytecode, so it needs no source: a ``POP_JUMP_IF_NONE`` /
+    ``POP_JUMP_IF_NOT_NONE`` (the check used as a branch condition), or an
+    ``IS_OP`` in a code object that also loads the ``None`` constant (the
+    check used as a value). The second test does not pair the two
+    instructions, so an unrelated ``is`` next to a ``None`` literal also
+    matches; that errs towards rejecting a function, never towards running
+    one whose check was not rewritten.
+    """
+    has_is = loads_none = False
+    for instr in dis.get_instructions(code):
+        if instr.opname in _NONE_JUMP_OPNAMES:
+            return True
+        has_is = has_is or instr.opname == "IS_OP"
+        loads_none = loads_none or (instr.opname == "LOAD_CONST" and instr.argval is None)
+    if has_is and loads_none:
+        return True
+    return any(
+        _tests_identity_with_none(const)
+        for const in code.co_consts
+        if isinstance(const, types.CodeType)
+    )
+
+
+def _python_code(fn: Callable) -> types.CodeType | None:
+    """The code object that runs when ``fn`` is called, if it is Python code:
+    a function's or bound method's own, or a callable instance's ``__call__``."""
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        code = getattr(getattr(type(fn), "__call__", None), "__code__", None)
+    return code if isinstance(code, types.CodeType) else None
+
+
 def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     """Run a user row lambda against a :class:`SchemaProxy` for ``schema``.
 
@@ -275,25 +329,38 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     through this function rather than on a proxy of its own, so the
     ``is None`` / ``is not None`` rewrite applies uniformly. The raw result
     is returned; callers validate its shape (``Expr``, dict, list, ...).
+
+    Raises:
+        TypeError: If ``fn`` still compares a value with ``None`` by identity
+            after the rewrite (source unavailable, a plain ``def``, ...).
+            Such a check is a Python bool, not a null predicate, and
+            ``and`` / ``or`` / conditional expressions would otherwise
+            silently drop part of the captured expression.
     """
     # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
     # lambda into explicit null checks before running it against the proxy.
     fn = _transform_lambda_for_none_checks(fn)
+    code = _python_code(fn)
+    if code is not None and _tests_identity_with_none(code):
+        name = getattr(fn, "__qualname__", type(fn).__qualname__)
+        raise TypeError(
+            f"{name!r} compares a value with None using 'is' / 'is not', "
+            "which LTSeq could not rewrite into a null check. Unrewritten, "
+            "the comparison is a Python bool rather than a column predicate "
+            "and would silently change the captured expression.\n\n"
+            f"{_NULL_METHOD_GUIDANCE}"
+        )
     return fn(SchemaProxy(schema))
 
 
 def _none_check_hint(result: Any) -> str:
     """Guidance appended to a "lambda returned a non-Expr" error when the
-    result looks like an un-rewritten ``is None`` check (a Python bool)."""
+    result looks like an un-rewritten ``is None`` check (a Python bool), for
+    example one made in a helper function that the lambda calls."""
     if result is True or result is False:
         return (
-            "\n\nHint: If you're using 'is None' or 'is not None', use the "
-            "is_null() or is_not_null() methods instead:\n"
-            "  - r.col.is_null()      instead of  r.col is None\n"
-            "  - r.col.is_not_null()  instead of  r.col is not None\n"
-            "LTSeq rewrites 'is None' checks inside lambdas automatically "
-            "when their source is available; the methods are required in "
-            "a REPL or exec/eval string and in plain def functions."
+            "\n\nHint: a bool result often comes from an unrewritten "
+            f"'is None' / 'is not None' check. {_NULL_METHOD_GUIDANCE}"
         )
     return ""
 
