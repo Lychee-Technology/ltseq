@@ -8,7 +8,7 @@ import functools
 import inspect
 import operator
 import types
-from typing import Any, Callable, NamedTuple, cast
+from typing import Any, Callable, Iterator, NamedTuple, cast
 
 from .base import Expr
 from .proxy import SchemaProxy
@@ -242,10 +242,20 @@ def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
     compiled identity, rewritten by :class:`_NoneCheckRewriter`, recompiled
     with the same free variables, and rebuilt on the original ``__globals__``
     and the original closure cells (matched by name, so live bindings are
-    preserved). When the source cannot be inspected, ``fn`` is returned
-    unchanged and :func:`_invoke_row_lambda` refuses to run it if it
-    contains a null identity check.
+    preserved). A ``functools.partial`` of a lambda is rebuilt around the
+    rewritten lambda with the same bound arguments. When the source cannot
+    be inspected, ``fn`` is returned unchanged and :func:`_invoke_row_lambda`
+    refuses to run it if it contains a null identity check.
     """
+    if isinstance(fn, functools.partial):
+        # Only an exact partial is rebuilt: a subclass may change how it calls
+        # its function, so it is left to the check in _invoke_row_lambda.
+        if type(fn) is not functools.partial:
+            return fn
+        inner = _transform_lambda_for_none_checks(fn.func)
+        if inner is fn.func:
+            return fn
+        return functools.partial(inner, *fn.args, **fn.keywords)
     if not isinstance(fn, types.FunctionType) or fn.__code__.co_name != "<lambda>":
         return fn
     index = _module_none_check_lambdas(fn)
@@ -279,9 +289,11 @@ _NULL_METHOD_GUIDANCE = (
     "  - r.col.is_null()      instead of  r.col is None\n"
     "  - r.col.is_not_null()  instead of  r.col is not None\n"
     "LTSeq rewrites 'is None' checks automatically only inside a lambda "
-    "whose source file is available. In a REPL, an exec/eval string or a "
-    "plain def function, use the methods, and test Python values (such as "
-    "an optional threshold) before building the function."
+    "(or a functools.partial of one) whose source file is available. In a "
+    "REPL, an exec/eval string, a plain def function or a lambda behind "
+    "another wrapper (a decorator, functools.lru_cache, ...), use the "
+    "methods, and test Python values (such as an optional threshold) before "
+    "building the function."
 )
 
 
@@ -313,13 +325,44 @@ def _tests_identity_with_none(code: types.CodeType) -> bool:
     )
 
 
-def _python_code(fn: Callable) -> types.CodeType | None:
-    """The code object that runs when ``fn`` is called, if it is Python code:
-    a function's or bound method's own, or a callable instance's ``__call__``."""
-    code = getattr(fn, "__code__", None)
-    if code is None:
-        code = getattr(getattr(type(fn), "__call__", None), "__code__", None)
-    return code if isinstance(code, types.CodeType) else None
+def _called_code(fn: Callable) -> Iterator[types.CodeType]:
+    """The Python code objects that calling ``fn`` runs directly: a function's
+    or bound method's own, a callable instance's ``__call__``, and those of
+    the functions a wrapper forwards to (``functools.partial``, nested or not,
+    ``staticmethod`` / ``classmethod``, and anything that sets ``__wrapped__``,
+    such as ``functools.wraps`` decorators and ``functools.lru_cache``).
+
+    Wrappers are followed rather than treated as opaque because the ones
+    implemented in C have no code of their own: stopping at them would let
+    the function they call run unchecked. Attributes are read where these
+    wrappers keep them, never through ``__getattr__``, so an object that
+    fabricates attributes on demand (a ``Mock``) cannot make the walk endless.
+    """
+    pending: list[Any] = [fn]
+    # Keyed by id, holding the object so the id cannot be reused mid-walk.
+    seen: dict[int, Any] = {}
+    while pending:
+        obj = pending.pop()
+        if id(obj) in seen:
+            continue
+        seen[id(obj)] = obj
+        code = getattr(obj, "__code__", None)
+        has_code = isinstance(code, types.CodeType)
+        if has_code:
+            yield code
+        if isinstance(obj, functools.partial):
+            pending.append(obj.func)
+        elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
+            pending.append(obj.__func__)
+        # functools.update_wrapper stores `__wrapped__` in the instance dict.
+        attrs = getattr(obj, "__dict__", None)
+        if isinstance(attrs, dict) and "__wrapped__" in attrs:
+            pending.append(attrs["__wrapped__"])
+        if not has_code:
+            # A C slot (as on functools.partial itself) has no code to follow.
+            call = getattr(type(obj), "__call__", None)
+            if call is not None and not isinstance(call, types.WrapperDescriptorType):
+                pending.append(call)
 
 
 def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
@@ -331,8 +374,9 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     is returned; callers validate its shape (``Expr``, dict, list, ...).
 
     Raises:
-        TypeError: If ``fn`` still compares a value with ``None`` by identity
-            after the rewrite (source unavailable, a plain ``def``, ...).
+        TypeError: If ``fn``, or a function it wraps (see
+            :func:`_called_code`), still compares a value with ``None`` by
+            identity after the rewrite (source unavailable, a plain ``def``, ...).
             Such a check is a Python bool, not a null predicate, and
             ``and`` / ``or`` / conditional expressions would otherwise
             silently drop part of the captured expression.
@@ -340,11 +384,12 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
     # lambda into explicit null checks before running it against the proxy.
     fn = _transform_lambda_for_none_checks(fn)
-    code = _python_code(fn)
-    if code is not None and _tests_identity_with_none(code):
-        name = getattr(fn, "__qualname__", type(fn).__qualname__)
+    unrewritten = next(
+        (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
+    )
+    if unrewritten is not None:
         raise TypeError(
-            f"{name!r} compares a value with None using 'is' / 'is not', "
+            f"{unrewritten.co_qualname!r} compares a value with None using 'is' / 'is not', "
             "which LTSeq could not rewrite into a null check. Unrewritten, "
             "the comparison is a Python bool rather than a column predicate "
             "and would silently change the captured expression.\n\n"

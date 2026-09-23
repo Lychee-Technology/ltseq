@@ -1350,7 +1350,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
-- **Note**: inside a lambda, `r.col is None` / `r.col is not None` are rewritten to the same expressions (`IS NULL` / `IS NOT NULL`, never `= NULL`), and the lambda keeps its module globals and closure variables. The rewrite needs the lambda's source. In a REPL, in `exec`/`eval` strings, and in plain `def` functions, any `is None` / `is not None` (even on a Python value) raises a `TypeError` that explains the spelling instead of running unrewritten, so use the methods there and test Python values before building the function. `r.col == None` is not rewritten and compares against SQL `NULL`.
+- **Note**: inside a lambda, `r.col is None` / `r.col is not None` are rewritten to the same expressions (`IS NULL` / `IS NOT NULL`, never `= NULL`), and the lambda keeps its module globals and closure variables. The rewrite needs the lambda's source, and also applies to a `functools.partial` of such a lambda. In a REPL, in `exec`/`eval` strings, in plain `def` functions, and behind other wrappers (a decorator, `functools.lru_cache`, ...), any `is None` / `is not None` (even on a Python value) raises a `TypeError` that explains the spelling instead of running unrewritten, so use the methods there and test Python values before building the function. `r.col == None` is not rewritten and compares against SQL `NULL`.
 
 #### `r.col.is_in`
 - **Signature**: `r.col.is_in(values: list[Any]) -> Expr`

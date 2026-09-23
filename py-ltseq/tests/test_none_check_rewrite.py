@@ -12,9 +12,12 @@ The rewrite must:
 - never let the injected helper shadow a user name;
 - fail closed with a guidance TypeError (never a NameError, never a silent
   wrong or partial result) when a null identity check cannot be rewritten:
-  no source, a plain def, or source that no longer matches the lambda.
+  no source, a plain def, or source that no longer matches the lambda;
+- see through wrappers: a functools.partial of a lambda is rewritten, and a
+  check behind partial, lru_cache, staticmethod or a decorator fails closed.
 """
 
+import functools
 import importlib.util
 import os
 import sys
@@ -493,4 +496,106 @@ class TestFallbacks:
                 return r.a > 1
 
         p = Pred()
+        assert _transform_lambda_for_none_checks(p) is p
+
+
+def _unflattened_partial(fn, *args, **kwargs):
+    """A partial of a partial. CPython flattens ``partial(partial(f))`` into
+    one partial unless the inner one carries attributes."""
+    inner = functools.partial(fn, *args, **kwargs)
+    setattr(inner, "tag", "inner")
+    outer = functools.partial(inner)
+    assert outer.func is inner
+    return outer
+
+
+class TestWrappedCallables:
+    """A wrapper implemented in C (``functools.partial``, ``lru_cache``,
+    ``staticmethod``) has no code of its own. The fail-closed check must look
+    through it at the function it calls, or an unrewritten ``is None`` runs
+    and ``and`` / ``or`` silently drop part of the predicate."""
+
+    def test_partial_of_lambda_is_rewritten(self, t):
+        pred = lambda r, th: (r.b is not None) & (r.a > th)  # noqa: E731
+        assert a_values(t.filter(functools.partial(pred, th=1))) == [2, 4]
+        assert a_values(t.filter(functools.partial(pred, th=2))) == [4]
+
+    def test_nested_partial_of_lambda_is_rewritten(self, t):
+        pred = lambda r, th: (r.b is None) | (r.a > th)  # noqa: E731
+        assert a_values(t.filter(_unflattened_partial(pred, th=3))) == [1, 3, 4]
+
+    def test_partial_of_lambda_with_short_circuit_never_drops_the_check(self, t):
+        # Rewritten, `and` reaches Expr.__bool__, which refuses instead of
+        # returning `r.a > 1` alone (which would admit row 3, where b is null).
+        pred = lambda r: (r.b is not None) and (r.a > 1)  # noqa: E731
+        with pytest.raises(TypeError, match=r"&"):
+            t.filter(functools.partial(pred))
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            functools.partial,
+            _unflattened_partial,
+            functools.lru_cache,
+            staticmethod,
+        ],
+        ids=["partial", "nested-partial", "lru_cache", "staticmethod"],
+    )
+    def test_wrapped_function_without_source_fails_closed(self, t, wrap):
+        # Unwrapped, this admits rows 2 and 3 instead of only 2.
+        fn = eval("lambda r: (r.b is not None) and (r.a > 1)")
+        with pytest.raises(TypeError, match=r"could not rewrite"):
+            t.filter(wrap(fn))
+
+    def test_wrapped_plain_def_fails_closed(self, t):
+        def pred(r):
+            return (r.b is None) or (r.a == 4)
+
+        for wrapped in (functools.partial(pred), functools.lru_cache(pred)):
+            with pytest.raises(TypeError, match=r"'.*pred' compares a value with None"):
+                t.filter(wrapped)
+
+    def test_decorated_lambda_fails_closed(self, t):
+        # The decorator's own code has no null check; the lambda it calls
+        # (reachable through __wrapped__) does, and was not rewritten.
+        def logged(fn):
+            @functools.wraps(fn)
+            def wrapper(r):
+                return fn(r)
+
+            return wrapper
+
+        with pytest.raises(TypeError, match=r"could not rewrite"):
+            t.filter(logged(lambda r: (r.b is not None) and (r.a > 1)))
+
+    def test_partial_subclass_fails_closed(self, t):
+        # Only an exact functools.partial is rebuilt around the rewritten
+        # lambda; a subclass may change how it calls, so it is checked instead.
+        class Bound(functools.partial):
+            pass
+
+        pred = lambda r: (r.b is not None) and (r.a > 1)  # noqa: E731
+        with pytest.raises(TypeError, match=r"could not rewrite"):
+            t.filter(Bound(pred))
+
+    def test_wrapped_function_without_null_check_runs(self, t):
+        pred = eval("lambda r, th: r.a > th")
+        assert a_values(t.filter(functools.partial(pred, th=2))) == [3, 4]
+        assert a_values(t.filter(_unflattened_partial(pred, th=2))) == [3, 4]
+        assert a_values(t.filter(functools.lru_cache(lambda r: r.a > 2))) == [3, 4]
+
+    def test_callable_that_fabricates_attributes_runs(self, t):
+        # `__getattr__` returns a fresh object for `__wrapped__` / `__func__`;
+        # following those would never end.
+        class Anything:
+            def __getattr__(self, name):
+                return Anything()
+
+            def __call__(self, r):
+                return r.a > 2
+
+        assert a_values(t.filter(Anything())) == [3, 4]
+
+    def test_partial_without_null_check_is_returned_unchanged(self):
+        p = functools.partial(lambda r, th: r.a > th, th=1)
         assert _transform_lambda_for_none_checks(p) is p
