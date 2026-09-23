@@ -1,176 +1,453 @@
 """AST transformation and lambda expression capturing for LTSeq."""
 
+import __future__
 import ast
+import copy
+import dis
+import functools
 import inspect
-from typing import Any, Callable
+import operator
+import types
+from typing import Any, Callable, Iterator, NamedTuple, cast
 
 from .base import Expr
 from .proxy import SchemaProxy
 
 
-class IsNoneTransformer(ast.NodeTransformer):
+_NULL_CHECK_HELPER = "__ltseq_null_check__"
+
+# ``co_flags`` bits recording the ``from __future__`` features of the defining
+# module. They are part of a lambda's compilation context, not of the lambda.
+_FUTURE_FLAGS = functools.reduce(
+    operator.or_,
+    (getattr(__future__, name).compiler_flag for name in __future__.all_feature_names),
+    0,
+)
+
+# Opcodes the compiler emits for ``x is None`` / ``x is not None`` used as a
+# branch condition (``if``, conditional expressions).
+_NONE_JUMP_OPNAMES = frozenset({"POP_JUMP_IF_NONE", "POP_JUMP_IF_NOT_NONE"})
+
+
+def _null_check(value: Any, negate: bool) -> Any:
+    """Runtime target of a rewritten ``x is None`` / ``x is not None``.
+
+    Expression operands become explicit null predicates; anything else keeps
+    plain Python identity semantics, so captured Python values such as
+    ``lambda r: r.a > th if th is not None else r.a`` behave as written.
     """
-    Transform 'x is None' and 'x is not None' to '==' and '!=' comparisons.
+    if isinstance(value, Expr):
+        return value.is_not_null() if negate else value.is_null()
+    return (value is not None) if negate else (value is None)
 
-    This allows filter expressions like:
-        lambda r: r.col is not None
-    to work by converting them to:
-        lambda r: r.col != None
 
-    which can be intercepted by Expr.__ne__().
+def _is_none_constant(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _none_check_operand(node: ast.Compare) -> tuple[ast.expr, bool] | None:
+    """Return ``(operand, negate)`` if ``node`` is ``x is None`` / ``x is not None``
+    (or the reversed spelling), else ``None``. Chained comparisons are not rewritten."""
+    if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Is, ast.IsNot)):
+        return None
+    left, right = node.left, node.comparators[0]
+    if _is_none_constant(right) and not _is_none_constant(left):
+        operand = left
+    elif _is_none_constant(left) and not _is_none_constant(right):
+        operand = right
+    else:
+        return None
+    return operand, isinstance(node.ops[0], ast.IsNot)
+
+
+def _contains_none_check(node: ast.AST) -> bool:
+    return any(
+        isinstance(sub, ast.Compare) and _none_check_operand(sub) is not None
+        for sub in ast.walk(node)
+    )
+
+
+def _unused_name(node: ast.AST, base: str) -> str:
+    """Return ``base``, suffixed if needed, so that no parameter or name
+    reference inside ``node`` resolves to it."""
+    used = {
+        sub.id if isinstance(sub, ast.Name) else sub.arg
+        for sub in ast.walk(node)
+        if isinstance(sub, (ast.Name, ast.arg))
+    }
+    stem, dunder = (base[:-2], "__") if base.endswith("__") else (base, "")
+    name, counter = base, 0
+    while name in used:
+        counter += 1
+        # Keep the dunder form: ``__x1__`` is exempt from private-name
+        # mangling inside class bodies, ``__x__1`` is not.
+        name = f"{stem}{counter}{dunder}"
+    return name
+
+
+class _NoneCheckRewriter(ast.NodeTransformer):
+    """Rewrite ``x is None`` / ``x is not None`` into ``helper(x, negate)``.
+
+    ``is`` cannot be overloaded in Python, so the comparison is redirected to
+    :func:`_null_check`, which yields ``x.is_null()`` / ``x.is_not_null()`` for
+    expressions and plain identity checks for everything else. ``helper`` is an
+    identifier the lambda does not otherwise use (see :func:`_unused_name`), so
+    user bindings are never shadowed.
     """
 
-    def visit_Compare(self, node):
-        """
-        Transform Compare nodes that use 'is' or 'is not' with None.
+    def __init__(self, helper: str) -> None:
+        self.helper = helper
 
-        Args:
-            node: The Compare AST node
+    def visit_Compare(self, node: ast.Compare) -> ast.expr:
+        node = cast(ast.Compare, self.generic_visit(node))
+        match = _none_check_operand(node)
+        if match is None:
+            return node
+        operand, negate = match
+        call = ast.Call(
+            func=ast.Name(id=self.helper, ctx=ast.Load()),
+            args=[operand, ast.Constant(value=negate)],
+            keywords=[],
+        )
+        return ast.copy_location(call, node)
 
-        Returns:
-            Modified Compare node or original if no 'is' comparisons found
-        """
-        # First, recursively visit child nodes
-        node = self.generic_visit(node)
 
-        # Check if any of the operators are 'is' or 'is not'
-        new_ops = []
-        new_comparators = []
+class _LambdaSite(NamedTuple):
+    node: ast.Lambda
+    # Innermost enclosing class, if any: names such as ``self.__x`` inside it
+    # are privately mangled, so a candidate must be compiled in the same class.
+    class_name: str | None
 
-        for i, (op, comparator) in enumerate(zip(node.ops, node.comparators)):  # type: ignore
-            # Check if this is comparing with None
-            is_none_comparison = (
-                isinstance(comparator, ast.Constant) and comparator.value is None
-            )
 
-            if isinstance(op, ast.Is) and is_none_comparison:
-                # Transform 'x is None' to 'x == None'
-                new_ops.append(ast.Eq())
-                new_comparators.append(comparator)
-            elif isinstance(op, ast.IsNot) and is_none_comparison:
-                # Transform 'x is not None' to 'x != None'
-                new_ops.append(ast.NotEq())
-                new_comparators.append(comparator)
-            else:
-                new_ops.append(op)
-                new_comparators.append(comparator)
+# filename -> (line list handed out by linecache, lineno -> lambdas that use `is None`)
+_ModuleIndex = dict[int, list[_LambdaSite]]
+_module_index_cache: dict[str, tuple[list[str], _ModuleIndex]] = {}
 
-        node.ops = new_ops  # type: ignore
-        node.comparators = new_comparators  # type: ignore
-        return node
+
+def _module_none_check_lambdas(fn: types.FunctionType) -> _ModuleIndex | None:
+    """Parse the module that defines ``fn`` (cached) and index, by line, the
+    lambdas whose body contains an ``is None`` / ``is not None`` comparison.
+
+    Returns ``None`` when the source is unavailable (REPL, ``eval`` strings) or
+    does not parse as the running interpreter's Python.
+    """
+    try:
+        lines, _ = inspect.findsource(fn)
+    except (OSError, TypeError):
+        return None
+    filename = fn.__code__.co_filename
+    cached = _module_index_cache.get(filename)
+    if cached is not None and cached[0] is lines:
+        return cached[1]
+    try:
+        module = ast.parse("".join(lines), filename)
+    except (SyntaxError, ValueError):
+        return None
+    index: _ModuleIndex = {}
+    stack: list[tuple[ast.AST, str | None]] = [(module, None)]
+    while stack:
+        node, class_name = stack.pop()
+        if isinstance(node, ast.ClassDef):
+            class_name = node.name
+        elif isinstance(node, ast.Lambda) and _contains_none_check(node):
+            index.setdefault(node.lineno, []).append(_LambdaSite(node, class_name))
+        stack.extend((child, class_name) for child in ast.iter_child_nodes(node))
+    _module_index_cache[filename] = (lines, index)
+    return index
+
+
+def _nested_code(code: types.CodeType, depth: int) -> types.CodeType:
+    """Follow the first code-object constant ``depth`` levels down."""
+    for _ in range(depth):
+        code = next(c for c in code.co_consts if isinstance(c, types.CodeType))
+    return code
+
+
+def _compile_lambda_in_scope(
+    site: _LambdaSite, scope_names: tuple[str, ...], context: types.CodeType
+) -> types.CodeType:
+    """Compile the lambda at ``site`` as if it were nested in a function whose
+    locals are ``scope_names`` and return the lambda's own code object.
+
+    Names in ``scope_names`` that the lambda references compile to closure
+    loads exactly as they did in the original function; every other name stays
+    a global lookup. The compilation context otherwise matches the original:
+    the ``from __future__`` features in effect for ``context`` are applied, and
+    the wrapper is placed inside a class of the same name as the lambda's
+    enclosing class so private names mangle identically. Only ``CO_NESTED``
+    can differ from the original (see :func:`_locate_lambda`). The node is not
+    mutated.
+    """
+    node = site.node
+    wrapper = ast.Lambda(
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg=name) for name in scope_names],
+            vararg=None,
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=node,
+    )
+    ast.copy_location(wrapper, node)
+    tree: ast.AST
+    if site.class_name is None:
+        tree, mode, depth = ast.Expression(body=wrapper), "eval", 2
+    else:
+        tree = ast.parse(f"class {site.class_name}:\n    pass")
+        class_def = cast(ast.ClassDef, tree.body[0])
+        class_def.body = [ast.Expr(value=wrapper)]
+        ast.copy_location(class_def, node)
+        mode, depth = "exec", 3
+    compiled = compile(
+        ast.fix_missing_locations(tree),
+        context.co_filename,
+        mode,
+        flags=context.co_flags & _FUTURE_FLAGS,
+        dont_inherit=True,
+    )
+    return _nested_code(compiled, depth)
+
+
+def _without_nesting_flag(code: types.CodeType) -> types.CodeType:
+    return code.replace(co_flags=code.co_flags & ~inspect.CO_NESTED)
+
+
+def _locate_lambda(fn: types.FunctionType, index: _ModuleIndex) -> _LambdaSite | None:
+    """Find the AST node ``fn`` was compiled from, by compiling each lambda on
+    its first line (with the same free variables) and comparing code objects.
+
+    Byte-for-byte identity is what makes this independent of how many lambdas
+    share a line, of string literals on the line, and of line continuations.
+    Candidates are always compiled inside a wrapper function, which sets
+    ``CO_NESTED``; a lambda defined at module or class-body scope lacks that
+    flag, so it is ignored on both sides.
+    """
+    code = fn.__code__
+    target = _without_nesting_flag(code)
+    for site in index.get(code.co_firstlineno, ()):
+        compiled = _compile_lambda_in_scope(site, code.co_freevars, code)
+        if _without_nesting_flag(compiled) == target:
+            return site
+    return None
 
 
 def _transform_lambda_for_none_checks(fn: Callable) -> Callable:
+    """Return ``fn`` with ``is None`` / ``is not None`` rewritten to explicit
+    null checks, or ``fn`` itself when nothing needs rewriting.
+
+    Only lambdas are rewritten: the lambda is located in its module's AST by
+    compiled identity, rewritten by :class:`_NoneCheckRewriter`, recompiled
+    with the same free variables, and rebuilt on the original ``__globals__``
+    and the original closure cells (matched by name, so live bindings are
+    preserved). A ``functools.partial`` of a lambda is rebuilt around the
+    rewritten lambda with the same bound arguments. When the source cannot
+    be inspected, ``fn`` is returned unchanged and :func:`_invoke_row_lambda`
+    refuses to run it if it contains a null identity check.
     """
-    Transform lambda functions to replace 'is None' and 'is not None' with comparisons.
-
-    This allows expressions like:
-        lambda r: r.col is not None
-    to work by converting them to:
-        lambda r: r.col != None
-
-    Args:
-        fn: The lambda function to transform
-
-    Returns:
-        A new lambda function with transformed AST, or original if no transformation needed
-    """
-    try:
-        # Get the source code of the lambda
-        source = inspect.getsource(fn).strip()
-
-        # If source ends with a comma or other characters, clean it up
-        # Find the lambda expression
-        if "lambda" not in source:
+    if isinstance(fn, functools.partial):
+        # Only an exact partial is rebuilt: a subclass may change how it calls
+        # its function, so it is left to the check in _invoke_row_lambda.
+        if type(fn) is not functools.partial:
             return fn
-
-        # Skip transformation if source doesn't contain 'is' comparisons
-        # This avoids issues with multiple lambdas on the same line
-        if " is " not in source and " is not " not in source:
+        inner = _transform_lambda_for_none_checks(fn.func)
+        if inner is fn.func:
             return fn
-
-        # Check if there are multiple lambdas in the source
-        # If so, skip transformation to avoid picking the wrong one
-        if source.count("lambda") > 1:
-            return fn
-
-        # Extract just the lambda expression
-        lambda_start = source.find("lambda")
-        if lambda_start == -1:
-            return fn
-
-        # Find the end of the lambda expression by counting parentheses and brackets
-        start_pos = lambda_start
-        end_pos = lambda_start + len("lambda")
-        paren_count = 0
-        bracket_count = 0
-        brace_count = 0
-        in_string = False
-        string_char = None
-
-        for i in range(end_pos, len(source)):
-            c = source[i]
-
-            # Handle strings
-            if c in ('"', "'") and (i == 0 or source[i - 1] != "\\"):
-                if not in_string:
-                    in_string = True
-                    string_char = c
-                elif c == string_char:
-                    in_string = False
-                continue
-
-            if in_string:
-                continue
-
-            if c == "(":
-                paren_count += 1
-            elif c == ")":
-                if paren_count == 0:
-                    # This is the end of the lambda expression
-                    end_pos = i
-                    break
-                paren_count -= 1
-            elif c == "[":
-                bracket_count += 1
-            elif c == "]":
-                bracket_count -= 1
-            elif c == "{":
-                brace_count += 1
-            elif c == "}":
-                brace_count -= 1
-            elif (
-                c in (",", ";")
-                and paren_count == 0
-                and bracket_count == 0
-                and brace_count == 0
-            ):
-                # End of lambda at comma/semicolon
-                end_pos = i
-                break
-
-            end_pos = i + 1
-
-        lambda_source = source[lambda_start:end_pos].strip()
-
-        # Parse it as an expression
-        tree = ast.parse(lambda_source, mode="eval")
-
-        # Transform the tree
-        transformer = IsNoneTransformer()
-        new_tree = transformer.visit(tree)
-
-        # Fix missing locations
-        ast.fix_missing_locations(new_tree)
-
-        # Compile and evaluate to get a new lambda
-        code = compile(new_tree, "<lambda>", "eval")
-        new_fn = eval(code)
-
-        return new_fn
-    except Exception:
-        # If transformation fails for any reason, return original
+        return functools.partial(inner, *fn.args, **fn.keywords)
+    if not isinstance(fn, types.FunctionType) or fn.__code__.co_name != "<lambda>":
         return fn
+    index = _module_none_check_lambdas(fn)
+    if not index:
+        return fn
+    site = _locate_lambda(fn, index)
+    if site is None:
+        return fn
+
+    original = fn.__code__
+    helper = _unused_name(site.node, _NULL_CHECK_HELPER)
+    rewritten = _NoneCheckRewriter(helper).visit(copy.deepcopy(site.node))
+    new_code = _compile_lambda_in_scope(
+        _LambdaSite(rewritten, site.class_name), original.co_freevars + (helper,), original
+    )
+
+    cells = dict(zip(original.co_freevars, fn.__closure__ or ()))
+    cells[helper] = types.CellType(_null_check)
+    closure = tuple(cells[name] for name in new_code.co_freevars)
+
+    new_fn = types.FunctionType(
+        new_code, fn.__globals__, fn.__name__, fn.__defaults__, closure
+    )
+    new_fn.__kwdefaults__ = fn.__kwdefaults__
+    new_fn.__qualname__ = fn.__qualname__
+    return new_fn
+
+
+_NULL_METHOD_GUIDANCE = (
+    "Use the is_null() or is_not_null() methods instead:\n"
+    "  - r.col.is_null()      instead of  r.col is None\n"
+    "  - r.col.is_not_null()  instead of  r.col is not None\n"
+    "LTSeq rewrites 'is None' checks automatically only inside a lambda "
+    "(or a functools.partial of one) whose source file is available. In a "
+    "REPL, an exec/eval string, a plain def function or a lambda behind "
+    "another wrapper (a decorator, functools.lru_cache, ...), use the "
+    "methods, and test Python values (such as an optional threshold) before "
+    "building the function."
+)
+
+
+def _source_span(
+    positions: dis.Positions | None,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """``((line, col), (end_line, end_col))``, or ``None`` if any part is
+    missing (``-X no_debug_ranges`` drops column offsets)."""
+    if positions is None:
+        return None
+    line, end_line, col, end_col = positions
+    if line is None or end_line is None or col is None or end_col is None:
+        return None
+    return (line, col), (end_line, end_col)
+
+
+def _may_be_operand_of(
+    value: dis.Positions | None, comparison: dis.Positions | None
+) -> bool:
+    """Whether the expression at ``value`` can be an operand of the
+    comparison at ``comparison``, judged by source span.
+
+    An operand lies inside the comparison's span and is strictly smaller,
+    since the span also covers the operator and the other operand. (The
+    implicit ``return None`` of a function can inherit the span of its last
+    ``if`` test: equal, not smaller.) Without a span the answer is yes, so
+    the check stays closed.
+    """
+    inner, outer = _source_span(value), _source_span(comparison)
+    if inner is None or outer is None:
+        return True
+    return outer[0] <= inner[0] and inner[1] <= outer[1] and inner != outer
+
+
+@functools.lru_cache(maxsize=1024)
+def _tests_identity_with_none(code: types.CodeType) -> bool:
+    """Whether ``code``, or a function nested in it, compares a value with
+    ``None`` by identity (``x is None`` / ``x is not None``).
+
+    Read from bytecode, so it needs no source: a ``POP_JUMP_IF_NONE`` /
+    ``POP_JUMP_IF_NOT_NONE`` (the check used as a branch condition), or an
+    ``IS_OP`` whose source span encloses a load of the ``None`` constant
+    (the check used as a value; see :func:`_may_be_operand_of`). Pairing by
+    span rather than by stack position also covers ``None is (a if c else b)``,
+    where the compiler emits one ``IS_OP`` per branch after the ``None`` load.
+    A ``None`` nested deeper inside an operand (``f(None) is marker``) still
+    matches; that errs towards rejecting a function, never towards running
+    one whose check was not rewritten.
+    """
+    instructions = list(dis.get_instructions(code))
+    if any(instr.opname in _NONE_JUMP_OPNAMES for instr in instructions):
+        return True
+    none_loads = [
+        instr.positions
+        for instr in instructions
+        if instr.opname == "LOAD_CONST" and instr.argval is None
+    ]
+    if any(
+        _may_be_operand_of(none_load, instr.positions)
+        for instr in instructions
+        if instr.opname == "IS_OP"
+        for none_load in none_loads
+    ):
+        return True
+    return any(
+        _tests_identity_with_none(const)
+        for const in code.co_consts
+        if isinstance(const, types.CodeType)
+    )
+
+
+def _called_code(fn: Callable) -> Iterator[types.CodeType]:
+    """The Python code objects that calling ``fn`` runs directly: a function's
+    or bound method's own, a callable instance's ``__call__``, and those of
+    the functions a wrapper forwards to (``functools.partial``, nested or not,
+    ``staticmethod`` / ``classmethod``, and anything that sets ``__wrapped__``,
+    such as ``functools.wraps`` decorators and ``functools.lru_cache``).
+
+    Wrappers are followed rather than treated as opaque because the ones
+    implemented in C have no code of their own: stopping at them would let
+    the function they call run unchecked. Attributes are read where these
+    wrappers keep them, never through ``__getattr__``, so an object that
+    fabricates attributes on demand (a ``Mock``) cannot make the walk endless.
+    """
+    pending: list[Any] = [fn]
+    # Keyed by id, holding the object so the id cannot be reused mid-walk.
+    seen: dict[int, Any] = {}
+    while pending:
+        obj = pending.pop()
+        if id(obj) in seen:
+            continue
+        seen[id(obj)] = obj
+        code = getattr(obj, "__code__", None)
+        has_code = isinstance(code, types.CodeType)
+        if has_code:
+            yield code
+        if isinstance(obj, functools.partial):
+            pending.append(obj.func)
+        elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
+            pending.append(obj.__func__)
+        # functools.update_wrapper stores `__wrapped__` in the instance dict.
+        attrs = getattr(obj, "__dict__", None)
+        if isinstance(attrs, dict) and "__wrapped__" in attrs:
+            pending.append(attrs["__wrapped__"])
+        if not has_code:
+            # A C slot (as on functools.partial itself) has no code to follow.
+            call = getattr(type(obj), "__call__", None)
+            if call is not None and not isinstance(call, types.WrapperDescriptorType):
+                pending.append(call)
+
+
+def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
+    """Run a user row lambda against a :class:`SchemaProxy` for ``schema``.
+
+    Every public API that accepts ``lambda r: ...`` must call the lambda
+    through this function rather than on a proxy of its own, so the
+    ``is None`` / ``is not None`` rewrite applies uniformly. The raw result
+    is returned; callers validate its shape (``Expr``, dict, list, ...).
+
+    Raises:
+        TypeError: If ``fn``, or a function it wraps (see
+            :func:`_called_code`), still compares a value with ``None`` by
+            identity after the rewrite (source unavailable, a plain ``def``, ...).
+            Such a check is a Python bool, not a null predicate, and
+            ``and`` / ``or`` / conditional expressions would otherwise
+            silently drop part of the captured expression.
+    """
+    # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
+    # lambda into explicit null checks before running it against the proxy.
+    fn = _transform_lambda_for_none_checks(fn)
+    unrewritten = next(
+        (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
+    )
+    if unrewritten is not None:
+        raise TypeError(
+            f"{unrewritten.co_qualname!r} compares a value with None using 'is' / 'is not', "
+            "which LTSeq could not rewrite into a null check. Unrewritten, "
+            "the comparison is a Python bool rather than a column predicate "
+            "and would silently change the captured expression.\n\n"
+            f"{_NULL_METHOD_GUIDANCE}"
+        )
+    return fn(SchemaProxy(schema))
+
+
+def _none_check_hint(result: Any) -> str:
+    """Guidance appended to a "lambda returned a non-Expr" error when the
+    result looks like an un-rewritten ``is None`` check (a Python bool), for
+    example one made in a helper function that the lambda calls."""
+    if result is True or result is False:
+        return (
+            "\n\nHint: a bool result often comes from an unrewritten "
+            f"'is None' / 'is not None' check. {_NULL_METHOD_GUIDANCE}"
+        )
+    return ""
 
 
 def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
@@ -204,12 +481,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
         >>> expr_dict["type"]
         'Dict'
     """
-    proxy = SchemaProxy(schema)
-
-    # Transform the lambda to replace 'is None' and 'is not None' with comparisons
-    fn = _transform_lambda_for_none_checks(fn)
-
-    result = fn(proxy)
+    result = _invoke_row_lambda(fn, schema)
 
     if isinstance(result, dict):
         # Handle dict returns: {"col_name": Expr, "col_name2": Expr}
@@ -230,18 +502,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
         # Handle Expr returns: lambda r: r.age > 18
         return result.serialize()
     else:
-        # Check if this might be an 'is None' / 'is not None' issue
-        hint = ""
-        if result is True or result is False:
-            hint = (
-                "\n\nHint: If you're using 'is None' or 'is not None', use the "
-                "is_null() or is_not_null() methods instead:\n"
-                "  - r.col.is_null()      instead of  r.col is None\n"
-                "  - r.col.is_not_null()  instead of  r.col is not None\n"
-                "This is required in pytest/REPL contexts where source code "
-                "inspection is unavailable."
-            )
         raise TypeError(
             f"Lambda must return an Expr or dict, got {type(result).__name__}. "
-            f"Did you forget to use the 'r' parameter?{hint}"
+            f"Did you forget to use the 'r' parameter?{_none_check_hint(result)}"
         )

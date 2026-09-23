@@ -6,7 +6,7 @@ from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
 
-from .expr import SchemaProxy
+from .expr.transforms import _invoke_row_lambda, _none_check_hint
 from .lookup import LookupMixin
 
 
@@ -44,8 +44,7 @@ def _process_select_col(col: str | Callable, schema: dict[str, str]) -> dict[str
             )
         return {"type": "Column", "name": col}
     elif callable(col):
-        proxy = SchemaProxy(schema)
-        result = col(proxy)
+        result = _invoke_row_lambda(col, schema)
 
         if isinstance(result, list):
             exprs = []
@@ -62,6 +61,7 @@ def _process_select_col(col: str | Callable, schema: dict[str, str]) -> dict[str
         else:
             raise TypeError(
                 f"Lambda must return Expr(s) or list of Exprs, got {type(result)}"
+                f"{_none_check_hint(result)}"
             )
     else:
         raise TypeError(
