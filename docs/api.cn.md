@@ -33,6 +33,7 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `TypeError: LTSeq expressions cannot be used in a boolean context` | 对行表达式或组谓词使用了 `and`/`or`/`not`/`in`/三元/链式比较，如 `(r.a > 2) and (r.b < 1.5)` 或 `(g.count() > 2) and (g.sum("x") > 0)` | 用 `&` `\|` `~` 组合条件，如 `(r.a > 2) & (r.b < 1.5)` 或 `(g.count() > 2) & (g.sum("x") > 0)`。`in` 的替代：行表达式改用 `.is_in([...])`；组谓词没有 `is_in`，用 `\|` 组合多个 `==` 比较，如 `(g.count() == 1) \| (g.count() == 2)` |
+| `TypeError: Unsupported literal type list ...` | 在表达式中使用了没有对应字面量类型的 Python 值（list、dict、`timedelta` 等），如 `r.a + [1, 2]` | 改用支持的字面量类型（§8「字面量」）；成员判断用 `.is_in([...])` |
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
 | `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
@@ -1288,6 +1289,29 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 - **示例**:
 ```python
 expr = (r.price * r.qty) > 100
+```
+
+### 字面量
+表达式里用到的 Python 常量（`r.price > 100`、`r.day >= date(2024, 1, 1)`、方法参数）会变成带类型的字面量。类型在 lambda 捕获时就已确定，Rust 端拿到的是原生值，不会先转成字符串再解析回来。
+
+| Python 值 | 字面量类型 |
+|---|---|
+| `bool` | `Boolean` |
+| `int`（含 numpy 整数） | `Int64` |
+| `float`（含 numpy 浮点数） | `Float64` |
+| `str` | `Utf8` |
+| `None` | null |
+| `decimal.Decimal` | `Decimal128(precision, scale)`，取自值本身的数字位（`Decimal("1.50")` 即 `Decimal128(3, 2)`） |
+| `datetime.date` | `Date32` |
+| `datetime.datetime` | `Timestamp(us)`。naive 值保持 naive；带时区的值换算为 UTC 时刻并标记为 `UTC` |
+
+- **异常**: 其他任何值（list、tuple、dict、set、bytes、`timedelta`、`Fraction`、任意对象）抛出指明类型的 `TypeError`，在 lambda 内使用该值处抛出。超出 Int64 范围的 `int`、NaN 或无穷的 `Decimal`、超过 38 位的 `Decimal` 抛出 `ValueError`。
+- **示例**:
+```python
+from datetime import date
+from decimal import Decimal
+t.filter(lambda r: (r.amount > Decimal("99.95")) & (r.day >= date(2024, 1, 1)))
+t.filter(lambda r: r.id.is_in([1, 2, 3]))  # 列表请用 is_in()，不要直接参与运算
 ```
 
 ### `if_else`

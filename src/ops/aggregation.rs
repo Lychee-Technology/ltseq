@@ -82,8 +82,8 @@ fn pyexpr_to_agg_plan(
                 _ => return Err("percentile requires a column reference".to_string()),
             };
             let p = args.first().and_then(|arg| {
-                if let PyExpr::Literal { value, .. } = arg {
-                    value.parse::<f64>().ok()
+                if let PyExpr::Literal(value) = arg {
+                    value.as_f64()
                 } else {
                     None
                 }
@@ -206,8 +206,8 @@ fn pyexpr_to_agg_plan(
             let k = args
                 .first()
                 .and_then(|arg| {
-                    if let PyExpr::Literal { value, .. } = arg {
-                        value.parse::<i64>().ok()
+                    if let PyExpr::Literal(value) = arg {
+                        value.as_i64()
                     } else {
                         None
                     }

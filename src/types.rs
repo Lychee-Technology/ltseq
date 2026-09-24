@@ -1,9 +1,94 @@
 //! PyExpr type definition and deserialization
 
 use crate::error::PyExprError;
+use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Largest precision a Decimal128 literal can carry.
+const DECIMAL128_MAX_PRECISION: u8 = 38;
+
+/// A literal value decoded at the Python boundary into Rust-owned data.
+///
+/// Python encodes each literal as a typed payload (see `LiteralExpr` in
+/// `core_types.py`); the parser extracts the matching native type once, so no
+/// consumer ever re-parses a string or holds a Python object.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralValue {
+    Null,
+    Boolean(bool),
+    Int64(i64),
+    Float64(f64),
+    String(String),
+    /// Unscaled integer with the precision/scale of the Python `Decimal`.
+    Decimal128 {
+        value: i128,
+        precision: u8,
+        scale: i8,
+    },
+    /// Days since the Unix epoch.
+    Date32(i32),
+    /// Microseconds since the Unix epoch; `tz` is `None` for naive datetimes.
+    TimestampMicrosecond {
+        value: i64,
+        tz: Option<String>,
+    },
+}
+
+impl LiteralValue {
+    /// The wire `dtype` name of this literal.
+    pub fn dtype(&self) -> &'static str {
+        match self {
+            LiteralValue::Null => "Null",
+            LiteralValue::Boolean(_) => "Boolean",
+            LiteralValue::Int64(_) => "Int64",
+            LiteralValue::Float64(_) => "Float64",
+            LiteralValue::String(_) => "String",
+            LiteralValue::Decimal128 { .. } => "Decimal128",
+            LiteralValue::Date32(_) => "Date32",
+            LiteralValue::TimestampMicrosecond { .. } => "TimestampMicrosecond",
+        }
+    }
+
+    /// Convert to the DataFusion scalar this literal denotes.
+    pub fn to_scalar_value(&self) -> ScalarValue {
+        match self {
+            LiteralValue::Null => ScalarValue::Null,
+            LiteralValue::Boolean(v) => ScalarValue::Boolean(Some(*v)),
+            LiteralValue::Int64(v) => ScalarValue::Int64(Some(*v)),
+            LiteralValue::Float64(v) => ScalarValue::Float64(Some(*v)),
+            LiteralValue::String(v) => ScalarValue::Utf8(Some(v.clone())),
+            LiteralValue::Decimal128 {
+                value,
+                precision,
+                scale,
+            } => ScalarValue::Decimal128(Some(*value), *precision, *scale),
+            LiteralValue::Date32(v) => ScalarValue::Date32(Some(*v)),
+            LiteralValue::TimestampMicrosecond { value, tz } => {
+                ScalarValue::TimestampMicrosecond(Some(*value), tz.as_deref().map(Arc::from))
+            }
+        }
+    }
+
+    /// The value of an `Int64` literal.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            LiteralValue::Int64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// The value of an `Int64` or `Float64` literal as a float.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            LiteralValue::Int64(v) => Some(*v as f64),
+            LiteralValue::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
 
 /// Represents a serialized Python expression for transpilation to DataFusion
 #[derive(Debug, Clone, PartialEq)]
@@ -11,8 +96,8 @@ pub enum PyExpr {
     /// Column reference: {"type": "Column", "name": "age"}
     Column(String),
 
-    /// Literal value: {"type": "Literal", "value": "18", "dtype": "Int64"}
-    Literal { value: String, dtype: String },
+    /// Literal value: {"type": "Literal", "value": 18, "dtype": "Int64"}
+    Literal(LiteralValue),
 
     /// Binary operation: {"type": "BinOp", "op": "Gt", "left": {...}, "right": {...}}
     BinOp {
@@ -55,24 +140,97 @@ fn parse_column_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     Ok(PyExpr::Column(name))
 }
 
-/// Deserialize a Literal expression
+/// Fetch a required field of a Literal payload.
+fn literal_field<'py>(
+    dict: &Bound<'py, PyDict>,
+    field: &str,
+) -> Result<Bound<'py, PyAny>, PyExprError> {
+    dict.get_item(field)
+        .map_err(|_| PyExprError::MissingField(field.to_string()))?
+        .ok_or_else(|| PyExprError::MissingField(field.to_string()))
+}
+
+/// Extract a required Literal payload field as `T`, naming the dtype on failure.
+fn extract_literal_field<'py, T>(
+    dict: &Bound<'py, PyDict>,
+    field: &str,
+    dtype: &str,
+    expected: &str,
+) -> Result<T, PyExprError>
+where
+    T: for<'a> FromPyObject<'a, 'py>,
+{
+    let obj = literal_field(dict, field)?;
+    obj.extract::<T>().map_err(|_| {
+        PyExprError::InvalidType(format!(
+            "{dtype} literal '{field}' must be {expected}, got {}",
+            obj.get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string())
+        ))
+    })
+}
+
+/// Deserialize a Literal expression by extracting the native type its dtype names.
 fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let value_obj = dict
-        .get_item("value")
-        .map_err(|_| PyExprError::MissingField("value".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("value".to_string()))?;
-
-    // Convert Python value to string (handles int, float, str, bool, None)
-    let value = value_obj.to_string();
-
-    let dtype = dict
-        .get_item("dtype")
-        .map_err(|_| PyExprError::MissingField("dtype".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("dtype".to_string()))?
-        .extract::<String>()
+    let dtype: String = literal_field(dict, "dtype")?
+        .extract()
         .map_err(|_| PyExprError::InvalidType("dtype must be string".to_string()))?;
 
-    Ok(PyExpr::Literal { value, dtype })
+    let value = match dtype.as_str() {
+        "Null" => LiteralValue::Null,
+        "Boolean" => LiteralValue::Boolean(extract_literal_field(dict, "value", &dtype, "a bool")?),
+        "Int64" => LiteralValue::Int64(extract_literal_field(
+            dict,
+            "value",
+            &dtype,
+            "an int in the Int64 range",
+        )?),
+        "Float64" => {
+            LiteralValue::Float64(extract_literal_field(dict, "value", &dtype, "a float")?)
+        }
+        "String" => LiteralValue::String(extract_literal_field(dict, "value", &dtype, "a str")?),
+        "Decimal128" => {
+            let precision: u8 = extract_literal_field(dict, "precision", &dtype, "an int")?;
+            let scale: i8 = extract_literal_field(dict, "scale", &dtype, "an int")?;
+            if !(1..=DECIMAL128_MAX_PRECISION).contains(&precision)
+                || scale < 0
+                || scale.unsigned_abs() > precision
+            {
+                return Err(PyExprError::InvalidType(format!(
+                    "Decimal128 literal has invalid precision {precision} / scale {scale}"
+                )));
+            }
+            LiteralValue::Decimal128 {
+                value: extract_literal_field(
+                    dict,
+                    "value",
+                    &dtype,
+                    "an int in the Decimal128 range",
+                )?,
+                precision,
+                scale,
+            }
+        }
+        "Date32" => LiteralValue::Date32(extract_literal_field(
+            dict,
+            "value",
+            &dtype,
+            "an int in the Int32 range",
+        )?),
+        "TimestampMicrosecond" => LiteralValue::TimestampMicrosecond {
+            value: extract_literal_field(dict, "value", &dtype, "an int in the Int64 range")?,
+            tz: extract_literal_field(dict, "tz", &dtype, "a str or None")?,
+        },
+        other => {
+            return Err(PyExprError::InvalidType(format!(
+                "Unknown literal dtype: {other}"
+            )))
+        }
+    };
+
+    Ok(PyExpr::Literal(value))
 }
 
 /// Deserialize a BinOp expression

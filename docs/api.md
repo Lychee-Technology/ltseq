@@ -33,6 +33,7 @@ This document describes the API **as currently implemented**. Every signature be
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `TypeError: LTSeq expressions cannot be used in a boolean context` | Used `and`/`or`/`not`/`in`/ternary/chained comparison on a row expression or a group predicate, e.g. `(r.a > 2) and (r.b < 1.5)` or `(g.count() > 2) and (g.sum("x") > 0)` | Combine conditions with `&` `\|` `~`, e.g. `(r.a > 2) & (r.b < 1.5)` or `(g.count() > 2) & (g.sum("x") > 0)`. Instead of `in`: row expressions use `.is_in([...])`; group predicates have no `is_in`, so combine `==` comparisons with `\|`, e.g. `(g.count() == 1) \| (g.count() == 2)` |
+| `TypeError: Unsupported literal type list ...` | A Python value with no literal type (list, dict, `timedelta`, ...) was used in an expression, e.g. `r.a + [1, 2]` | Use a supported literal type (§8 "Literal values"); for membership use `.is_in([...])` |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
@@ -1291,6 +1292,29 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 - **Example**:
 ```python
 expr = (r.price * r.qty) > 100
+```
+
+### Literal values
+Python constants used in expressions (`r.price > 100`, `r.day >= date(2024, 1, 1)`, method arguments) become typed literals. The type is fixed when the lambda is captured, and Rust receives native values; nothing is converted to a string and parsed back.
+
+| Python value | Literal type |
+|---|---|
+| `bool` | `Boolean` |
+| `int` (and numpy integers) | `Int64` |
+| `float` (and numpy floats) | `Float64` |
+| `str` | `Utf8` |
+| `None` | null |
+| `decimal.Decimal` | `Decimal128(precision, scale)`, taken from the value's own digits (`Decimal("1.50")` is `Decimal128(3, 2)`) |
+| `datetime.date` | `Date32` |
+| `datetime.datetime` | `Timestamp(us)`. Naive values stay naive; timezone-aware values are converted to their UTC instant and tagged `UTC` |
+
+- **Exceptions**: `TypeError` naming the type for any other value (list, tuple, dict, set, bytes, `timedelta`, `Fraction`, arbitrary objects), raised inside the lambda where the value is used. `ValueError` for an `int` outside the Int64 range, a NaN or infinite `Decimal`, or a `Decimal` with more than 38 digits.
+- **Example**:
+```python
+from datetime import date
+from decimal import Decimal
+t.filter(lambda r: (r.amount > Decimal("99.95")) & (r.day >= date(2024, 1, 1)))
+t.filter(lambda r: r.id.is_in([1, 2, 3]))  # lists go through is_in(), not operators
 ```
 
 ### `if_else`

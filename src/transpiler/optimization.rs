@@ -6,16 +6,12 @@
 //! - **Boolean Simplification**: Trivial boolean expressions are simplified
 //!   (e.g., `x & True` → `x`, `x | False` → `x`)
 
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 
 /// Extract numeric value from a literal PyExpr (for constant folding)
 fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
     match expr {
-        PyExpr::Literal { value, dtype } => match dtype.as_str() {
-            "Int64" | "Int32" => value.parse::<i64>().ok().map(|v| v as f64),
-            "Float64" | "Float32" => value.parse::<f64>().ok(),
-            _ => None,
-        },
+        PyExpr::Literal(value) => value.as_f64(),
         _ => None,
     }
 }
@@ -23,14 +19,7 @@ fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
 /// Extract boolean value from a literal PyExpr
 fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
     match expr {
-        PyExpr::Literal { value, dtype } => match dtype.as_str() {
-            "Boolean" | "Bool" => match value.to_lowercase().as_str() {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            },
-            _ => None,
-        },
+        PyExpr::Literal(LiteralValue::Boolean(b)) => Some(*b),
         _ => None,
     }
 }
@@ -39,24 +28,15 @@ fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
 fn make_literal_f64(value: f64) -> PyExpr {
     // If it's a whole number, prefer Int64 representation
     if value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
-        PyExpr::Literal {
-            value: (value as i64).to_string(),
-            dtype: "Int64".to_string(),
-        }
+        PyExpr::Literal(LiteralValue::Int64(value as i64))
     } else {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: "Float64".to_string(),
-        }
+        PyExpr::Literal(LiteralValue::Float64(value))
     }
 }
 
 /// Create a literal PyExpr from a boolean value
 fn make_literal_bool(value: bool) -> PyExpr {
-    PyExpr::Literal {
-        value: value.to_string(),
-        dtype: "Boolean".to_string(),
-    }
+    PyExpr::Literal(LiteralValue::Boolean(value))
 }
 
 /// Try to fold a binary operation on two literals into a single literal

@@ -21,12 +21,12 @@
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
 //! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
-//! | `Literal { value, dtype }` | Constant value |
+//! | `Literal(value)` | Constant value (null, bool, int, float, string) |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 
 use crate::engine::{create_sequential_session, RUNTIME};
 use crate::error::LtseqError;
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
@@ -60,7 +60,7 @@ pub fn can_linear_scan(expr: &PyExpr) -> bool {
 fn contains_shift(expr: &PyExpr) -> bool {
     match expr {
         PyExpr::Column(_) => false,
-        PyExpr::Literal { .. } => false,
+        PyExpr::Literal(_) => false,
         PyExpr::BinOp { left, right, .. } => contains_shift(left) || contains_shift(right),
         PyExpr::UnaryOp { operand, .. } => contains_shift(operand),
         PyExpr::Call { func, on, .. } => {
@@ -79,7 +79,17 @@ fn contains_shift(expr: &PyExpr) -> bool {
 fn is_supported_expr(expr: &PyExpr) -> bool {
     match expr {
         PyExpr::Column(_) => true,
-        PyExpr::Literal { .. } => true,
+        // Only the literal kinds the scan evaluator's kernels handle; any other
+        // (Decimal, date, timestamp) makes the predicate ineligible so the
+        // caller falls back instead of failing mid-scan.
+        PyExpr::Literal(value) => matches!(
+            value,
+            LiteralValue::Null
+                | LiteralValue::Boolean(_)
+                | LiteralValue::Int64(_)
+                | LiteralValue::Float64(_)
+                | LiteralValue::String(_)
+        ),
         PyExpr::BinOp { op, left, right } => {
             let valid_op = matches!(
                 op.as_str(),
@@ -112,24 +122,8 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
                     if !matches!(on.as_ref(), PyExpr::Column(_)) {
                         return false;
                     }
-                    // First arg must be literal integer 1
-                    if args.len() != 1 {
-                        return false;
-                    }
-                    match &args[0] {
-                        PyExpr::Literal { value, dtype } => {
-                            // Accept shift(1) only
-                            if value != "1" {
-                                return false;
-                            }
-                            // Must be integer type
-                            matches!(
-                                dtype.as_str(),
-                                "Int64" | "Int32" | "int" | "UInt64" | "UInt32"
-                            )
-                        }
-                        _ => false,
-                    }
+                    // The only arg must be the integer literal 1
+                    matches!(args.as_slice(), [PyExpr::Literal(LiteralValue::Int64(1))])
                 }
                 "is_null" => {
                     // is_null() on a supported sub-expression
@@ -157,33 +151,18 @@ enum Value {
     Str(String),
 }
 
-/// Parse a literal PyExpr into a Value
-fn literal_to_value(value: &str, dtype: &str) -> Value {
-    match dtype {
-        "Int64" | "Int32" | "int" | "UInt64" | "UInt32" => {
-            value.parse::<i64>().map(Value::Int64).unwrap_or(Value::Null)
-        }
-        "Float64" | "Float32" | "float" => value
-            .parse::<f64>()
-            .map(Value::Float64)
-            .unwrap_or(Value::Null),
-        "Utf8" | "str" | "String" => Value::Str(value.to_string()),
-        "Boolean" | "bool" => match value {
-            "True" | "true" | "1" => Value::Bool(true),
-            "False" | "false" | "0" => Value::Bool(false),
-            _ => Value::Null,
-        },
-        "NoneType" | "null" | "None" => Value::Null,
-        _ => {
-            // Try numeric parsing as fallback
-            if let Ok(v) = value.parse::<i64>() {
-                Value::Int64(v)
-            } else if let Ok(v) = value.parse::<f64>() {
-                Value::Float64(v)
-            } else {
-                Value::Str(value.to_string())
-            }
-        }
+/// Map a literal onto the evaluator's value type; `None` for literal kinds
+/// the scan does not evaluate.
+fn literal_to_value(value: &LiteralValue) -> Option<Value> {
+    match value {
+        LiteralValue::Null => Some(Value::Null),
+        LiteralValue::Boolean(v) => Some(Value::Bool(*v)),
+        LiteralValue::Int64(v) => Some(Value::Int64(*v)),
+        LiteralValue::Float64(v) => Some(Value::Float64(*v)),
+        LiteralValue::String(v) => Some(Value::Str(v.clone())),
+        LiteralValue::Decimal128 { .. }
+        | LiteralValue::Date32(_)
+        | LiteralValue::TimestampMicrosecond { .. } => None,
     }
 }
 
@@ -197,7 +176,7 @@ pub(crate) fn extract_referenced_columns(expr: &PyExpr, cols: &mut HashSet<Strin
         PyExpr::Column(name) => {
             cols.insert(name.clone());
         }
-        PyExpr::Literal { .. } => {}
+        PyExpr::Literal(_) => {}
         PyExpr::BinOp { left, right, .. } => {
             extract_referenced_columns(left, cols);
             extract_referenced_columns(right, cols);
@@ -405,16 +384,15 @@ fn is_shift_of_same_column(left: &PyExpr, right: &PyExpr) -> bool {
     false
 }
 
-/// Extract an i64 literal value from a PyExpr::Literal
+/// Extract an integer threshold from a numeric literal. A float qualifies only
+/// when it is integral: truncating `-0.5` to `0` would change `diff > -0.5`.
 fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
     match expr {
-        PyExpr::Literal { value, dtype } => {
-            // value is a String representation; parse based on dtype
-            match dtype.as_str() {
-                "Int64" | "Int32" | "Int16" | "Int8" => value.parse::<i64>().ok(),
-                "Float64" | "Float32" => value.parse::<f64>().ok().map(|f| f as i64),
-                _ => value.parse::<i64>().ok(),
-            }
+        PyExpr::Literal(LiteralValue::Int64(v)) => Some(*v),
+        PyExpr::Literal(LiteralValue::Float64(f))
+            if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f < i64::MAX as f64 =>
+        {
+            Some(*f as i64)
         }
         _ => None,
     }
@@ -684,9 +662,10 @@ fn vectorized_eval_expr(
             Ok(Arc::clone(batch.column(*idx)))
         }
         
-        PyExpr::Literal { value, dtype } => {
+        PyExpr::Literal(value) => {
             let n = batch.num_rows();
-            let val = literal_to_value(value, dtype);
+            let val = literal_to_value(value)
+                .ok_or_else(|| format!("Unsupported {} literal in linear scan", value.dtype()))?;
             match val {
                 Value::Int64(v) => Ok(Arc::new(Int64Array::from(vec![v; n])) as ArrayRef),
                 Value::Float64(v) => Ok(Arc::new(Float64Array::from(vec![v; n])) as ArrayRef),
@@ -1445,18 +1424,12 @@ mod tests {
                 left: Box::new(PyExpr::Column("eventtime".to_string())),
                 right: Box::new(PyExpr::Call {
                     func: "shift".to_string(),
-                    args: vec![PyExpr::Literal {
-                        value: "1".to_string(),
-                        dtype: "Int64".to_string(),
-                    }],
+                    args: vec![PyExpr::Literal(LiteralValue::Int64(1))],
                     kwargs: HashMap::new(),
                     on: Box::new(PyExpr::Column("eventtime".to_string())),
                 }),
             }),
-            right: Box::new(PyExpr::Literal {
-                value: "10".to_string(),
-                dtype: "Int64".to_string(),
-            }),
+            right: Box::new(PyExpr::Literal(LiteralValue::Int64(10))),
         }
     }
 

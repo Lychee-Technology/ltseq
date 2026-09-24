@@ -148,9 +148,10 @@ t.filter(lambda r: r.age > 18)
 ```python
 {"type": "Column", "name": "age"}
 {"type": "Literal", "value": 18, "dtype": "Int64"}
+{"type": "Literal", "value": 15, "dtype": "Decimal128", "precision": 2, "scale": 1}
 ```
 
-在 Rust 侧，这些会在 `src/types.rs` 中被还原为 `PyExpr`。
+在 Rust 侧，这些会在 `src/types.rs` 中被还原为 `PyExpr`。字面量载荷带类型：`LiteralExpr` 在捕获时校验 Python 值（不支持的类型抛出 `TypeError`），Rust 按 `dtype` 提取对应的原生值，存为 `LiteralValue`，不会先转成字符串再解析回来。
 
 ### 2.3 转译路径
 
