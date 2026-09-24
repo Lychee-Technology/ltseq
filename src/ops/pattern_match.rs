@@ -138,7 +138,10 @@ fn eval_expr(
             args,
             on,
             kwargs: _,
-        } => eval_call(func, args, on, batch, name_to_idx),
+        } => {
+            let on = crate::transpiler::require_on(on.as_deref(), func)?;
+            eval_call(func, args, on, batch, name_to_idx)
+        }
 
         PyExpr::Window { .. } => {
             Err("Window expressions not supported in search_pattern predicates".to_string())
@@ -310,7 +313,7 @@ pub(crate) fn same_string_column_starts_with_plan(
         if func != "starts_with" && func != "str_starts_with" {
             return None;
         }
-        let PyExpr::Column(name) = on.as_ref() else {
+        let Some(PyExpr::Column(name)) = on.as_deref() else {
             return None;
         };
         let PyExpr::Literal { value, dtype } = &args[0] else {

@@ -193,12 +193,12 @@ pub fn optimize_expr(expr: PyExpr) -> PyExpr {
             kwargs,
         } => {
             // Optimize the 'on' expression and all arguments
-            let opt_on = optimize_expr(*on);
+            let opt_on = on.map(|on| Box::new(optimize_expr(*on)));
             let opt_args: Vec<PyExpr> = args.into_iter().map(optimize_expr).collect();
 
             PyExpr::Call {
                 func,
-                on: Box::new(opt_on),
+                on: opt_on,
                 args: opt_args,
                 kwargs,
             }

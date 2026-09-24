@@ -199,9 +199,9 @@ fn pyexpr_to_window_inner(
             "mean" | "sum" | "min" | "max" | "count" | "std" => {
                 // Check if this is rolling().agg()
                 if let PyExpr::Call { on, .. } = &py_expr {
-                    if let PyExpr::Call {
+                    if let Some(PyExpr::Call {
                         func: inner_func, ..
-                    } = on.as_ref()
+                    }) = on.as_deref()
                     {
                         if inner_func == "rolling" {
                             return convert_rolling_agg(&py_expr, schema, order_by);
@@ -226,7 +226,7 @@ fn pyexpr_to_window_inner(
             {
                 convert_window_ranking(&py_expr, schema, order_by)
             }
-            PyExpr::Call { func, on, .. } if super::is_window_call(func, on.as_ref()) => {
+            PyExpr::Call { func, on, .. } if super::is_window_call(func, on.as_deref()) => {
                 convert_window_sequence(&py_expr, schema, order_by)
             }
             _ => Err(
@@ -254,7 +254,8 @@ fn convert_shift(
         on, args, kwargs, ..
     } = py_expr
     {
-        let col_expr = pyexpr_to_datafusion(*on.clone(), schema)?;
+        let col_expr =
+            pyexpr_to_datafusion(super::require_on(on.as_deref(), "shift")?.clone(), schema)?;
 
         // Get offset (default 1)
         let offset: i64 = if args.is_empty() {
@@ -304,7 +305,8 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
         on, args, kwargs, ..
     } = py_expr
     {
-        let col_expr = pyexpr_to_datafusion(*on.clone(), schema)?;
+        let col_expr =
+            pyexpr_to_datafusion(super::require_on(on.as_deref(), "diff")?.clone(), schema)?;
 
         // Get periods (default 1)
         let periods: i64 = if args.is_empty() {
@@ -341,7 +343,8 @@ fn convert_cum_agg(
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Call { on, kwargs, .. } = py_expr {
-        let col_expr = pyexpr_to_datafusion(*on.clone(), schema)?;
+        let col_expr =
+            pyexpr_to_datafusion(super::require_on(on.as_deref(), &func)?.clone(), schema)?;
 
         // Extract partition_by from kwargs
         let partition_by_exprs = extract_partition_by(kwargs, schema)?;
@@ -375,12 +378,12 @@ fn convert_rolling_agg(
 ) -> Result<Expr, String> {
     if let PyExpr::Call { func, on, .. } = py_expr {
         // `on` is the rolling() call
-        if let PyExpr::Call {
+        if let Some(PyExpr::Call {
             args: inner_args,
             on: inner_on,
             kwargs: inner_kwargs,
             ..
-        } = on.as_ref()
+        }) = on.as_deref()
         {
             // Get window size from rolling() args
             let window_size: i64 = if inner_args.is_empty() {
@@ -428,7 +431,10 @@ fn convert_rolling_agg(
             }
 
             // Get the column being aggregated
-            let col_expr = pyexpr_to_datafusion(*inner_on.clone(), schema)?;
+            let col_expr = pyexpr_to_datafusion(
+                super::require_on(inner_on.as_deref(), "rolling")?.clone(),
+                schema,
+            )?;
 
             // Extract partition_by from the rolling() call's kwargs
             let partition_by_exprs = extract_partition_by(inner_kwargs, schema)?;
@@ -599,15 +605,15 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
         let is_rolling_agg = matches!(
             func.as_str(),
             "mean" | "sum" | "min" | "max" | "count" | "std"
-        ) && matches!(on.as_ref(), PyExpr::Call { func: f, .. } if f == "rolling");
+        ) && matches!(on.as_deref(), Some(PyExpr::Call { func: f, .. }) if f == "rolling");
 
         if is_rolling_agg {
-            if let PyExpr::Call {
+            if let Some(PyExpr::Call {
                 func: rf,
                 args: rargs,
                 kwargs: rkwargs,
                 on: ron,
-            } = on.as_ref()
+            }) = on.as_deref()
             {
                 let mut new_kwargs = rkwargs.clone();
                 new_kwargs.insert("partition_by".to_string(), pb);
@@ -621,7 +627,7 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
                     func: func.clone(),
                     args: args.clone(),
                     kwargs: kwargs.clone(),
-                    on: Box::new(new_rolling),
+                    on: Some(Box::new(new_rolling)),
                 })
             } else {
                 Err("Expected rolling() call in rolling aggregate".to_string())
@@ -697,6 +703,7 @@ fn convert_expr_with_window_children(
 
             match func.as_str() {
                 "fill_null" => {
+                    let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, schema, order_by)?
                     } else {
@@ -713,6 +720,7 @@ fn convert_expr_with_window_children(
                     Ok(coalesce(vec![on_expr, default_expr]))
                 }
                 "is_null" => {
+                    let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, schema, order_by)?
                     } else {
@@ -721,6 +729,7 @@ fn convert_expr_with_window_children(
                     Ok(on_expr.is_null())
                 }
                 "is_not_null" => {
+                    let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, schema, order_by)?
                     } else {
