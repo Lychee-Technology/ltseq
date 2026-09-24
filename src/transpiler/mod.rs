@@ -106,7 +106,7 @@ fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result
 }
 
 /// Check if the "on" field is an empty column (standalone function call with on=None)
-fn is_on_empty(on: &PyExpr) -> bool {
+pub(super) fn is_on_empty(on: &PyExpr) -> bool {
     matches!(on, PyExpr::Column(name) if name.is_empty())
 }
 
