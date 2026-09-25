@@ -307,6 +307,18 @@ class TestRound:
         assert vals[0] == 3.1   # 3.14 -> 3.1
         assert vals[3] == 10.0  # 9.999 -> 10.0
 
+    @pytest.mark.parametrize("decimals", ["2", 1.5, True, None])
+    def test_round_non_int_decimals_fails_at_capture(self, numbers_table, decimals):
+        """A non-int decimals argument raises inside the lambda, not at collect time."""
+        with pytest.raises(TypeError, match=r"round\(\) decimals must be an int"):
+            numbers_table.derive(rounded=lambda r: r.val.round(decimals))
+
+    def test_round_accepts_numpy_integer_decimals(self, numbers_table):
+        import numpy as np
+
+        vals = numbers_table.derive(rounded=lambda r: r.val.round(np.int64(1))).to_pandas()["rounded"].tolist()
+        assert vals[0] == 3.1
+
 
 # ============================================================================
 # floor
@@ -553,3 +565,55 @@ class TestSprint1Regression:
         df = result.to_pandas()
         assert "double_x" in df.columns
         assert df["double_x"].tolist() == [20, -6, 0, 14]
+
+
+# ============================================================================
+# Math methods on window expressions
+# ============================================================================
+
+
+class TestMathOnWindowExpressions:
+    """abs/round/floor/ceil applied to an expression containing shift().
+
+    These go through the window transpiler, which must read the method
+    receiver (`on`) exactly like the row transpiler does.
+    """
+
+    @pytest.fixture
+    def sorted_numbers(self, numbers_table):
+        return numbers_table.sort("id")
+
+    def _derived(self, table, fn):
+        return table.derive(out=fn).to_pandas()["out"].tolist()[1:]
+
+    def test_round_method_rounds_the_receiver(self, sorted_numbers):
+        # val.shift(1) = [null, 3.14, 2.718, -1.5]
+        assert self._derived(sorted_numbers, lambda r: r.val.shift(1).round(1)) == [3.1, 2.7, -1.5]
+
+    def test_round_method_default_decimals(self, sorted_numbers):
+        assert self._derived(sorted_numbers, lambda r: r.val.shift(1).round()) == [3.0, 3.0, -2.0]
+
+    def test_round_method_on_arithmetic_over_a_window(self, sorted_numbers):
+        assert self._derived(sorted_numbers, lambda r: (r.val.shift(1) + 1).round(1)) == [4.1, 3.7, -0.5]
+
+    def test_abs_method(self, sorted_numbers):
+        # x - x.shift(1) = [null, -13, 3, 7]
+        assert self._derived(sorted_numbers, lambda r: (r.x - r.x.shift(1)).abs()) == [13, 3, 7]
+
+    def test_abs_builtin(self, sorted_numbers):
+        assert self._derived(sorted_numbers, lambda r: abs(r.x - r.x.shift(1))) == [13, 3, 7]
+
+    def test_floor_and_ceil_methods(self, sorted_numbers):
+        assert self._derived(sorted_numbers, lambda r: r.val.shift(1).floor()) == [3.0, 2.0, -2.0]
+        assert self._derived(sorted_numbers, lambda r: r.val.shift(1).ceil()) == [4.0, 3.0, -1.0]
+
+
+class TestShiftOffsetRange:
+    def test_shift_i64_min_offset_is_an_error(self, numbers_table):
+        """Negating i64::MIN used to panic inside the window builder."""
+        with pytest.raises(ValueError, match=r"shift\(\) offset -9223372036854775808 is out of range"):
+            numbers_table.sort("id").derive(prev=lambda r: r.x.shift(-(2**63)))
+
+    def test_shift_largest_negatable_offset_leads(self, numbers_table):
+        out = numbers_table.sort("id").derive(nxt=lambda r: r.x.shift(-(2**63 - 1))).to_arrow().column("nxt").to_pylist()
+        assert out == [None, None, None, None]

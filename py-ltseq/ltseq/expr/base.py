@@ -1,5 +1,6 @@
 """Base expression class for LTSeq."""
 
+import numbers
 from abc import ABC, abstractmethod
 from typing import Any, NoReturn, TYPE_CHECKING, cast
 
@@ -843,12 +844,19 @@ class Expr(ABC):
         Returns:
             Expression with rounding applied
 
+        Raises:
+            TypeError: decimals is not an int
+
         Example:
             >>> t.derive(rounded=lambda r: r.score.round(2))
         """
         from .types import CallExpr, LiteralExpr
 
-        return CallExpr("round", (LiteralExpr(decimals),), {}, on=cast(Any, self))
+        if isinstance(decimals, bool) or not isinstance(decimals, numbers.Integral):
+            raise TypeError(
+                f"round() decimals must be an int, got {type(decimals).__name__} ({decimals!r})"
+            )
+        return CallExpr("round", (LiteralExpr(int(decimals)),), {}, on=cast(Any, self))
 
     def floor(self) -> "CallExpr":
         """
