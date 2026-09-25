@@ -307,6 +307,18 @@ class TestRound:
         assert vals[0] == 3.1   # 3.14 -> 3.1
         assert vals[3] == 10.0  # 9.999 -> 10.0
 
+    @pytest.mark.parametrize("decimals", ["2", 1.5, True, None])
+    def test_round_non_int_decimals_fails_at_capture(self, numbers_table, decimals):
+        """A non-int decimals argument raises inside the lambda, not at collect time."""
+        with pytest.raises(TypeError, match=r"round\(\) decimals must be an int"):
+            numbers_table.derive(rounded=lambda r: r.val.round(decimals))
+
+    def test_round_accepts_numpy_integer_decimals(self, numbers_table):
+        import numpy as np
+
+        vals = numbers_table.derive(rounded=lambda r: r.val.round(np.int64(1))).to_pandas()["rounded"].tolist()
+        assert vals[0] == 3.1
+
 
 # ============================================================================
 # floor
