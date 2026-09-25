@@ -393,9 +393,9 @@ class TemporalAccessor:
                   "hour", "minute", "second" (default: "day")
 
         Returns:
-            Float expression: elapsed time for "day"/"hour"/"minute"/"second"
-            (fractional when a timestamp is involved), calendar-field difference
-            for "month"/"year"
+            For "day"/"hour"/"minute"/"second": a float expression, the elapsed
+            time in that unit (fractional when a timestamp is involved). For
+            "month"/"year": an integer expression, the calendar-field difference
 
         Example:
             >>> t.derive(days_open=lambda r: r.close_date.dt.diff(r.open_date))

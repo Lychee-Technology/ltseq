@@ -1603,7 +1603,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **Behavior**: Returns `self` minus `other` in the specified unit, as a float. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) measure elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days). `month`/`year` subtract the calendar fields and ignore the day. A non-temporal `other` is a `ValueError` at plan time
+- **Behavior**: Returns `self` minus `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) return a float measuring elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days); with these units a non-temporal `other` is a `ValueError` at plan time. `month`/`year` return an integer that subtracts the calendar fields and ignores the day
 - **SPL Equivalent**: `interval(t1, t2, unit)`
 - **Example**:
 ```python
