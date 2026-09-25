@@ -67,7 +67,7 @@ fn contains_shift(expr: &PyExpr) -> bool {
             if func == "shift" {
                 true
             } else {
-                contains_shift(on)
+                on.as_deref().is_some_and(contains_shift)
             }
         }
         PyExpr::Window { .. } => false,
@@ -109,7 +109,7 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
             match func.as_str() {
                 "shift" => {
                     // Only support shift(1) on a column reference
-                    if !matches!(on.as_ref(), PyExpr::Column(_)) {
+                    if !matches!(on.as_deref(), Some(PyExpr::Column(_))) {
                         return false;
                     }
                     // First arg must be literal integer 1
@@ -133,7 +133,7 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
                 }
                 "is_null" => {
                     // is_null() on a supported sub-expression
-                    is_supported_expr(on)
+                    on.as_deref().is_some_and(is_supported_expr)
                 }
                 _ => false,
             }
@@ -206,7 +206,9 @@ pub(crate) fn extract_referenced_columns(expr: &PyExpr, cols: &mut HashSet<Strin
             extract_referenced_columns(operand, cols);
         }
         PyExpr::Call { on, args, .. } => {
-            extract_referenced_columns(on, cols);
+            if let Some(on) = on {
+                extract_referenced_columns(on, cols);
+            }
             for arg in args {
                 extract_referenced_columns(arg, cols);
             }
@@ -396,7 +398,7 @@ fn is_shift_of_same_column(left: &PyExpr, right: &PyExpr) -> bool {
     if let PyExpr::Column(left_name) = left {
         if let PyExpr::Call { func, on, .. } = right {
             if func == "shift" {
-                if let PyExpr::Column(right_name) = on.as_ref() {
+                if let Some(PyExpr::Column(right_name)) = on.as_deref() {
                     return left_name == right_name;
                 }
             }
@@ -697,6 +699,7 @@ fn vectorized_eval_expr(
         }
         
         PyExpr::Call { func, on, .. } => {
+            let on = crate::transpiler::require_on(on.as_deref(), func)?;
             match func.as_str() {
                 "shift" => {
                     // shift(1): prepend null, drop last element
@@ -1450,7 +1453,7 @@ mod tests {
                         dtype: "Int64".to_string(),
                     }],
                     kwargs: HashMap::new(),
-                    on: Box::new(PyExpr::Column("eventtime".to_string())),
+                    on: Some(Box::new(PyExpr::Column("eventtime".to_string()))),
                 }),
             }),
             right: Box::new(PyExpr::Literal {

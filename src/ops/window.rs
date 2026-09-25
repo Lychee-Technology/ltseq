@@ -116,6 +116,16 @@ struct StagedWindowPlan {
     final_cols: Vec<(String, PyExpr)>,
 }
 
+/// A window call's input: hoisted when it itself bears a window, otherwise
+/// rewritten recursively.
+fn hoist_window_input(input: PyExpr, hoist: &mut dyn FnMut(PyExpr) -> PyExpr) -> Box<PyExpr> {
+    Box::new(if crate::transpiler::contains_window_function(&input) {
+        hoist(input)
+    } else {
+        rewrite_nested(input, hoist)
+    })
+}
+
 /// Recursive rewrite for `build_staged_plan`: hoists any window call's
 /// window-bearing input via `hoist`, recursing through plain combinators.
 /// Ranking (`PyExpr::Window`) nodes are deliberately not entered — nesting
@@ -126,43 +136,30 @@ fn rewrite_nested(
 ) -> PyExpr {
     match expr {
         PyExpr::Call { func, on, args, kwargs } => {
-            if crate::transpiler::is_window_call(&func, &on) {
+            if crate::transpiler::is_window_call(&func, on.as_deref()) {
                 // The window's input: for rolling aggregates the input
                 // lives one level down (agg → rolling → input).
-                if func != "rolling" && matches!(&*on, PyExpr::Call { func: f, .. } if f == "rolling") {
+                let new_on = on.map(|on| match *on {
                     // agg over rolling: dig into the rolling call's input
-                    if let PyExpr::Call { func: rfunc, on: rin, args: rargs, kwargs: rkwargs } = *on {
-                        let new_rin = if crate::transpiler::contains_window_function(&rin) {
-                            hoist(*rin)
-                        } else {
-                            rewrite_nested(*rin, hoist)
-                        };
-                        return PyExpr::Call {
-                            func,
-                            on: Box::new(PyExpr::Call {
-                                func: rfunc,
-                                on: Box::new(new_rin),
-                                args: rargs,
-                                kwargs: rkwargs,
-                            }),
-                            args,
-                            kwargs,
-                        };
+                    PyExpr::Call { func: rfunc, on: rin, args: rargs, kwargs: rkwargs }
+                        if func != "rolling" && rfunc == "rolling" =>
+                    {
+                        Box::new(PyExpr::Call {
+                            func: rfunc,
+                            on: rin.map(|rin| hoist_window_input(*rin, hoist)),
+                            args: rargs,
+                            kwargs: rkwargs,
+                        })
                     }
-                    unreachable!("matched rolling above");
-                }
-                // shift/diff/cum_sum/rolling: input is `on`
-                let new_on = if crate::transpiler::contains_window_function(&on) {
-                    hoist(*on)
-                } else {
-                    rewrite_nested(*on, hoist)
-                };
-                return PyExpr::Call { func, on: Box::new(new_on), args, kwargs };
+                    // shift/diff/cum_sum/rolling: input is `on`
+                    input => hoist_window_input(input, hoist),
+                });
+                return PyExpr::Call { func, on: new_on, args, kwargs };
             }
             // Plain call: recurse into on and args
             PyExpr::Call {
                 func,
-                on: Box::new(rewrite_nested(*on, hoist)),
+                on: on.map(|on| Box::new(rewrite_nested(*on, hoist))),
                 args: args.into_iter().map(|a| rewrite_nested(a, hoist)).collect(),
                 kwargs,
             }

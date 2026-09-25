@@ -147,25 +147,28 @@ fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result
     }
 }
 
-/// Check if the "on" field is an empty column (standalone function call with on=None)
-fn is_on_empty(on: &PyExpr) -> bool {
-    matches!(on, PyExpr::Column(name) if name.is_empty())
+/// The receiver of a method-style call. Errors when a function that needs a
+/// receiver arrives as a standalone call (`on=None`).
+pub(crate) fn require_on<T>(on: Option<T>, func: &str) -> Result<T, String> {
+    on.ok_or_else(|| format!("{func} must be called as a method on an expression"))
 }
 
-/// Resolve the actual input expression: if "on" is empty, use args[0]; otherwise use "on"
+/// Resolve the input of a function usable both ways: the receiver for a
+/// method call, or `args[0]` for a standalone call.
 fn resolve_on_or_args(
-    on: &PyExpr,
+    on: Option<&PyExpr>,
     args: &[PyExpr],
     schema: &ArrowSchema,
     func_name: &str,
 ) -> Result<Expr, String> {
-    if is_on_empty(on) {
-        if args.is_empty() {
-            return Err(format!("{} requires an argument", func_name));
+    match on {
+        Some(on) => pyexpr_to_datafusion_inner(on.clone(), schema),
+        None => {
+            let input = args
+                .first()
+                .ok_or_else(|| format!("{} requires an argument", func_name))?;
+            pyexpr_to_datafusion_inner(input.clone(), schema)
         }
-        pyexpr_to_datafusion_inner(args[0].clone(), schema)
-    } else {
-        pyexpr_to_datafusion_inner(on.clone(), schema)
     }
 }
 
@@ -201,7 +204,7 @@ fn parse_call_conditional(
 /// Handle null-related operations (fill_null, is_null, is_not_null, coalesce)
 fn parse_call_null_ops(
     func: &str,
-    on: PyExpr,
+    on: Option<PyExpr>,
     args: Vec<PyExpr>,
     schema: &ArrowSchema,
 ) -> Result<Expr, String> {
@@ -210,16 +213,16 @@ fn parse_call_null_ops(
             if args.is_empty() {
                 return Err("fill_null requires a default value argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
             let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
             Ok(coalesce(vec![on_expr, default_expr]))
         }
         "is_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
             Ok(on_expr.is_null())
         }
         "is_not_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
             Ok(on_expr.is_not_null())
         }
         "coalesce" => {
@@ -239,7 +242,7 @@ fn parse_call_null_ops(
 /// Handle math operations (abs, ceil, floor, round, sqrt, power, sign, log, etc.)
 fn parse_call_math(
     func: &str,
-    on: &PyExpr,
+    on: Option<&PyExpr>,
     args: &[PyExpr],
     schema: &ArrowSchema,
 ) -> Result<Expr, String> {
@@ -262,7 +265,7 @@ fn parse_call_math(
         "round" => {
             use datafusion::functions::math::expr_fn::round;
             let input = resolve_on_or_args(on, args, schema, "round")?;
-            let decimals_expr = if is_on_empty(on) {
+            let decimals_expr = if on.is_none() {
                 // Standalone: round(expr, decimals) — decimals is args[1] if present
                 if args.len() > 1 {
                     pyexpr_to_datafusion_inner(args[1].clone(), schema)?
@@ -288,7 +291,7 @@ fn parse_call_math(
             use datafusion::functions::math::expr_fn::power;
             // base is first arg (or on), exponent is second arg
             let base = resolve_on_or_args(on, args, schema, "power")?;
-            let exp_expr = if is_on_empty(on) {
+            let exp_expr = if on.is_none() {
                 if args.len() < 2 {
                     return Err("power() requires two arguments: base and exponent".to_string());
                 }
@@ -315,7 +318,7 @@ fn parse_call_math(
             // log(x) → ln(x), log(x, 10) → log10(x), log(x, 2) → log2(x), else log(base, x)
             let input = resolve_on_or_args(on, args, schema, "log")?;
             // Look for optional base argument
-            let base_arg = if is_on_empty(on) {
+            let base_arg = if on.is_none() {
                 args.get(1)
             } else {
                 args.first()
@@ -385,19 +388,19 @@ fn parse_call_math(
         "math_atan2" => {
             use datafusion::functions::math::expr_fn::atan2;
             // atan2(y, x) — y is first arg, x is second
-            if is_on_empty(on) {
-                if args.len() < 2 {
-                    return Err("atan2() requires two arguments: y and x".to_string());
-                }
-                let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-                let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
-                Ok(atan2(y_expr, x_expr))
-            } else {
+            if let Some(on) = on {
                 let y_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
                 if args.is_empty() {
                     return Err("atan2() requires x argument".to_string());
                 }
                 let x_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                Ok(atan2(y_expr, x_expr))
+            } else {
+                if args.len() < 2 {
+                    return Err("atan2() requires two arguments: y and x".to_string());
+                }
+                let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
                 Ok(atan2(y_expr, x_expr))
             }
         }
@@ -407,36 +410,36 @@ fn parse_call_math(
         }
         "math_gcd" => {
             // gcd(a, b) — both args required
-            if is_on_empty(on) {
-                if args.len() < 2 {
-                    return Err("gcd() requires two arguments".to_string());
-                }
-                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
-                Ok(gcd(a_expr, b_expr))
-            } else {
+            if let Some(on) = on {
                 if args.is_empty() {
                     return Err("gcd() requires a second argument".to_string());
                 }
                 let a_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
                 Ok(gcd(a_expr, b_expr))
-            }
-        }
-        "math_lcm" => {
-            if is_on_empty(on) {
+            } else {
                 if args.len() < 2 {
-                    return Err("lcm() requires two arguments".to_string());
+                    return Err("gcd() requires two arguments".to_string());
                 }
                 let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
-                Ok(lcm(a_expr, b_expr))
-            } else {
+                Ok(gcd(a_expr, b_expr))
+            }
+        }
+        "math_lcm" => {
+            if let Some(on) = on {
                 if args.is_empty() {
                     return Err("lcm() requires a second argument".to_string());
                 }
                 let a_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                Ok(lcm(a_expr, b_expr))
+            } else {
+                if args.len() < 2 {
+                    return Err("lcm() requires two arguments".to_string());
+                }
+                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
                 Ok(lcm(a_expr, b_expr))
             }
         }
@@ -492,6 +495,47 @@ fn parse_call_type_ops(
             Ok(on_expr.in_list(list_exprs, false))
         }
         _ => Err(format!("Not a type operation: {}", func)),
+    }
+}
+
+/// Handle string functions that accept a standalone call: `str_concat_ws`
+/// never has a receiver, and `str_char` works either way.
+fn parse_call_string_standalone(
+    func: &str,
+    on: Option<PyExpr>,
+    args: Vec<PyExpr>,
+    schema: &ArrowSchema,
+) -> Result<Expr, String> {
+    match func {
+        "str_char" => {
+            // chr(n) → single-character string from code point; standalone: args[0] is the input
+            let n_expr = match on {
+                Some(on) => pyexpr_to_datafusion_inner(on, schema)?,
+                None => {
+                    let input = args
+                        .first()
+                        .ok_or("str_char requires a code point argument")?;
+                    pyexpr_to_datafusion_inner(input.clone(), schema)?
+                }
+            };
+            Ok(chr(n_expr))
+        }
+        "str_concat_ws" => {
+            // concat_ws(delimiter, s1, s2, ...) — first arg is always the delimiter literal
+            if args.len() < 2 {
+                return Err(
+                    "str_concat_ws requires a delimiter and at least one string".to_string(),
+                );
+            }
+            let delim_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let str_exprs: Vec<Expr> = args
+                .into_iter()
+                .skip(1)
+                .map(|a| pyexpr_to_datafusion_inner(a, schema))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(concat_ws(delim_expr, str_exprs))
+        }
+        _ => Err(format!("Not a standalone string function: {}", func)),
     }
 }
 
@@ -707,33 +751,6 @@ fn parse_call_string(
             let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok(ascii(on_expr))
         }
-        "str_char" => {
-            // chr(n) → single-character string from code point; standalone: args[0] is the input
-            let n_expr = if is_on_empty(&on) {
-                if args.is_empty() {
-                    return Err("str_char requires a code point argument".to_string());
-                }
-                pyexpr_to_datafusion_inner(args[0].clone(), schema)?
-            } else {
-                pyexpr_to_datafusion_inner(on, schema)?
-            };
-            Ok(chr(n_expr))
-        }
-        "str_concat_ws" => {
-            // concat_ws(delimiter, s1, s2, ...) — first arg is always the delimiter literal
-            if args.len() < 2 {
-                return Err(
-                    "str_concat_ws requires a delimiter and at least one string".to_string(),
-                );
-            }
-            let delim_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-            let str_exprs: Vec<Expr> = args
-                .into_iter()
-                .skip(1)
-                .map(|a| pyexpr_to_datafusion_inner(a, schema))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(concat_ws(delim_expr, str_exprs))
-        }
         _ => Err(format!("Not a string function: {}", func)),
     }
 }
@@ -914,13 +931,6 @@ fn parse_call_temporal(
             let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             Ok((date_part(lit("dow"), on_expr) + lit(6_f64)) % lit(7_f64))
         }
-        "dt_now" => {
-            // now() returns current timestamp; no column required
-            Ok(now())
-        }
-        "dt_today" => {
-            Ok(current_date())
-        }
         _ => Err(format!("Not a temporal function: {}", func)),
     }
 }
@@ -931,7 +941,7 @@ fn parse_call_temporal(
 /// type, string, and temporal operations.
 fn parse_call_expr(
     func: &str,
-    on: PyExpr,
+    on: Option<PyExpr>,
     args: Vec<PyExpr>,
     schema: &ArrowSchema,
 ) -> Result<Expr, String> {
@@ -943,15 +953,15 @@ fn parse_call_expr(
             parse_call_null_ops(func, on, args, schema)
         }
         // Math (built-in method-style: abs, ceil, floor, round)
-        "abs" | "ceil" | "floor" | "round" => parse_call_math(func, &on, &args, schema),
+        "abs" | "ceil" | "floor" | "round" => parse_call_math(func, on.as_ref(), &args, schema),
         // Extended math functions (math_* prefix from global functions)
-        f if f.starts_with("math_") => parse_call_math(func, &on, &args, schema),
+        f if f.starts_with("math_") => parse_call_math(func, on.as_ref(), &args, schema),
         // Standalone math functions without prefix
-        "gcd" => parse_call_math("math_gcd", &on, &args, schema),
-        "lcm" => parse_call_math("math_lcm", &on, &args, schema),
-        "factorial" => parse_call_math("math_factorial", &on, &args, schema),
+        "gcd" => parse_call_math("math_gcd", on.as_ref(), &args, schema),
+        "lcm" => parse_call_math("math_lcm", on.as_ref(), &args, schema),
+        "factorial" => parse_call_math("math_factorial", on.as_ref(), &args, schema),
         // Type / membership
-        "cast" | "is_in" => parse_call_type_ops(func, on, args, schema),
+        "cast" | "is_in" => parse_call_type_ops(func, require_on(on, func)?, args, schema),
         // Window functions (must be handled elsewhere)
         "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min" | "mean" | "sum"
         | "min" | "max" | "count" | "std" => Err(format!(
@@ -959,9 +969,14 @@ fn parse_call_expr(
             func
         )),
         // String operations
-        f if f.starts_with("str_") => parse_call_string(func, on, args, schema),
+        "str_char" | "str_concat_ws" => parse_call_string_standalone(func, on, args, schema),
+        f if f.starts_with("str_") => parse_call_string(func, require_on(on, func)?, args, schema),
         // Temporal operations
-        f if f.starts_with("dt_") => parse_call_temporal(func, on, &args, schema),
+        "dt_now" => Ok(now()),
+        "dt_today" => Ok(current_date()),
+        f if f.starts_with("dt_") => {
+            parse_call_temporal(func, require_on(on, func)?, &args, schema)
+        }
         _ => Err(format!("Method '{}' not yet supported", func)),
     }
 }
@@ -984,7 +999,9 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
         PyExpr::Literal { value, dtype } => parse_literal_expr(&value, &dtype),
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
-        PyExpr::Call { func, on, args, .. } => parse_call_expr(&func, *on, args, schema),
+        PyExpr::Call { func, on, args, .. } => {
+            parse_call_expr(&func, on.map(|on| *on), args, schema)
+        }
         PyExpr::Alias { expr, alias } => {
             let inner = pyexpr_to_datafusion_inner(*expr, schema)?;
             Ok(inner.alias(alias))
@@ -1003,14 +1020,14 @@ fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<E
 /// The single source of truth for "what counts as a window call" — shared by
 /// `contains_window_function` and the staged nested-window rewriter in
 /// window.rs (issue #101). Do not duplicate this match.
-pub(crate) fn is_window_call(func: &str, on: &PyExpr) -> bool {
+pub(crate) fn is_window_call(func: &str, on: Option<&PyExpr>) -> bool {
     // Direct window functions
     if matches!(func, "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min") {
         return true;
     }
     // Aggregation functions applied to rolling windows
     if matches!(func, "mean" | "sum" | "min" | "max" | "count" | "std") {
-        if let PyExpr::Call { func: inner_func, .. } = on {
+        if let Some(PyExpr::Call { func: inner_func, .. }) = on {
             if inner_func == "rolling" {
                 return true;
             }
@@ -1025,11 +1042,11 @@ pub fn contains_window_function(py_expr: &PyExpr) -> bool {
         PyExpr::Window { .. } => true,
 
         PyExpr::Call { func, on, args, .. } => {
-            if is_window_call(func, on) {
+            if is_window_call(func, on.as_deref()) {
                 return true;
             }
             // Check recursively in the `on` field
-            if contains_window_function(on) {
+            if on.as_deref().is_some_and(contains_window_function) {
                 return true;
             }
             // Check recursively in the `args` field (for standalone functions like abs(x))
@@ -1172,7 +1189,16 @@ mod tests {
             func: func.to_string(),
             args,
             kwargs: Default::default(),
-            on: Box::new(on),
+            on: Some(Box::new(on)),
+        }
+    }
+
+    fn standalone_call(func: &str, args: Vec<PyExpr>) -> PyExpr {
+        PyExpr::Call {
+            func: func.to_string(),
+            args,
+            kwargs: Default::default(),
+            on: None,
         }
     }
 
@@ -1398,5 +1424,54 @@ mod tests {
         let err = pyexpr_to_datafusion(call_expr("dt_year", col_expr("a"), vec![]), &schema)
             .unwrap_err();
         assert!(err.contains("requires a date/datetime column"), "{err}");
+    }
+
+    // ---- standalone calls: no receiver, inputs in args ----
+
+    #[test]
+    fn standalone_call_takes_its_input_from_args() {
+        use datafusion::functions::math::expr_fn::abs;
+        let schema = test_schema();
+        let a = || Expr::Column(Column::new_unqualified("a"));
+        assert_eq!(
+            pyexpr_to_datafusion(standalone_call("abs", vec![col_expr("a")]), &schema),
+            Ok(abs(a()))
+        );
+        assert_eq!(
+            pyexpr_to_datafusion(call_expr("abs", col_expr("a"), vec![]), &schema),
+            Ok(abs(a()))
+        );
+        assert_eq!(
+            pyexpr_to_datafusion(
+                standalone_call("coalesce", vec![col_expr("a"), lit_expr("0", "Int64")]),
+                &schema
+            ),
+            Ok(coalesce(vec![a(), lit(0_i64)]))
+        );
+    }
+
+    #[test]
+    fn receiver_functions_reject_standalone_calls() {
+        // These used to fail with "Column '' not found in schema".
+        let schema = test_schema();
+        for func in [
+            "fill_null",
+            "is_null",
+            "cast",
+            "is_in",
+            "str_lower",
+            "dt_year",
+        ] {
+            let err = pyexpr_to_datafusion(standalone_call(func, vec![col_expr("s")]), &schema)
+                .unwrap_err();
+            assert!(err.contains("must be called as a method"), "{func}: {err}");
+        }
+    }
+
+    #[test]
+    fn standalone_aggregate_is_not_a_rolling_window() {
+        let rolling = call_expr("rolling", col_expr("a"), vec![lit_expr("3", "Int64")]);
+        assert!(is_window_call("mean", Some(&rolling)));
+        assert!(!is_window_call("mean", None));
     }
 }
