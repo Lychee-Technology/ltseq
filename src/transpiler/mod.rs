@@ -1104,11 +1104,13 @@ fn validate_string_column(
 
 /// Elapsed time `on - other` in a fixed-length unit of `unit_seconds`, as Float64.
 ///
-/// DataFusion types the subtraction by its operands: two dates give an Int64
-/// day count, and anything involving a timestamp gives a Duration in the
-/// coerced time unit. The tick length is read from that planned type, so a
-/// date pair and a timestamp pair both report the unit asked for. The integer
-/// factor between tick and unit keeps whole-day date differences exact.
+/// The operands are coerced with DataFusion's own rule first (a mixed
+/// Date32/Date64 pair becomes two Date64, a date and a timestamp become two
+/// timestamps), then the subtraction is typed: two dates give an Int64 day
+/// count, two timestamps give a Duration in the coerced time unit. The tick
+/// length is read from that type, so a date pair and a timestamp pair both
+/// report the unit asked for. The integer factor between tick and unit keeps
+/// whole-day date differences exact.
 fn dt_elapsed(
     on_expr: Expr,
     other_expr: Expr,
@@ -1117,10 +1119,40 @@ fn dt_elapsed(
 ) -> Result<Expr, String> {
     use datafusion::arrow::datatypes::TimeUnit;
     use datafusion::common::DFSchema;
+    use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
     use datafusion::logical_expr::ExprSchemable;
 
-    let diff_expr = on_expr - other_expr;
     let df_schema = DFSchema::try_from(schema.clone()).map_err(|e| format!("dt_diff: {e}"))?;
+    let on_type = on_expr
+        .get_type(&df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    let other_type = other_expr
+        .get_type(&df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    // DataFusion types a subtraction before coercing its operands, and for a mixed
+    // Date32/Date64 pair the two disagree: the logical type is Duration(ms) while the
+    // kernel that runs after coercion returns an Int64 day count. Coerce the operands
+    // first so the type read below is the type the kernel produces.
+    let is_temporal =
+        |t: &DataType| matches!(t, DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _));
+    let (on_coerced, other_coerced) =
+        BinaryTypeCoercer::new(&on_type, &Operator::Minus, &other_type)
+            .get_input_types()
+            .ok()
+            .filter(|(l, r)| is_temporal(l) && is_temporal(r))
+            .ok_or_else(|| {
+                format!(
+                    "dt_diff cannot subtract {other_type:?} from {on_type:?}; \
+                     both sides must be dates or timestamps"
+                )
+            })?;
+    let on_expr = on_expr
+        .cast_to(&on_coerced, &df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    let other_expr = other_expr
+        .cast_to(&other_coerced, &df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    let diff_expr = on_expr - other_expr;
     let diff_type = diff_expr
         .get_type(&df_schema)
         .map_err(|e| format!("dt_diff: {e}"))?;

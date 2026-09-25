@@ -411,14 +411,38 @@ class TestDtDiffElapsed:
         }))
         assert t.derive(h=lambda r: r.ny.dt.diff(r.utc, unit="hour")).to_dicts()[0]["h"] == 6
 
+    def test_diff_mixed_date32_and_date64_columns(self):
+        # DataFusion types `Date64 - Date32` as Duration(ms) but runs it as an Int64
+        # day count, so the tick must be read from the coerced operands.
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d32": pa.array([datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)], type=pa.date32()),
+            "d64": pa.array([datetime.date(2024, 1, 31), None], type=pa.date64()),
+            "e64": pa.array([datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)], type=pa.date64()),
+        }))
+        got = t.derive(
+            a=lambda r: r.d64.dt.diff(r.d32),
+            b=lambda r: r.d32.dt.diff(r.d64),
+            h=lambda r: r.d64.dt.diff(r.d32, unit="hour"),
+            p=lambda r: r.d64.dt.diff(r.e64),  # Date64 pair: the control
+        ).to_arrow()
+        assert got.column("a").to_pylist() == [30.0, None]
+        assert got.column("b").to_pylist() == [-30.0, None]
+        assert got.column("h").to_pylist() == [720.0, None]
+        assert got.column("p").to_pylist() == [30.0, None]
+
     def test_diff_rejects_non_temporal_other(self):
         import datetime
         import pyarrow as pa
         t = LTSeq.from_arrow(pa.table({
             "d": pa.array([datetime.date(2024, 1, 2)], type=pa.date32()),
             "i": pa.array([1], type=pa.int64()),
+            "ts": pa.array([datetime.datetime(2024, 1, 2)], type=pa.timestamp("us")),
         }))
         with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
-            t.derive(x=lambda r: r.d.dt.diff(r.i)).to_arrow()
+            t.derive(x=lambda r: r.d.dt.diff(r.i))
         with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
-            t.derive(x=lambda r: r.d.dt.diff(5)).to_arrow()
+            t.derive(x=lambda r: r.d.dt.diff(5))
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.ts.dt.diff(r.i))
