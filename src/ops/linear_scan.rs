@@ -414,7 +414,16 @@ fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
             // value is a String representation; parse based on dtype
             match dtype.as_str() {
                 "Int64" | "Int32" | "Int16" | "Int8" => value.parse::<i64>().ok(),
-                "Float64" | "Float32" => value.parse::<f64>().ok().map(|f| f as i64),
+                "Float64" | "Float32" => value.parse::<f64>().ok().and_then(|f| {
+                    // A float qualifies only when it is a finite integer in
+                    // range: truncating -0.5 to 0 would change `diff > -0.5`,
+                    // and NaN/Inf have no integer meaning.
+                    (f.is_finite()
+                        && f.fract() == 0.0
+                        && f >= i64::MIN as f64
+                        && f < i64::MAX as f64)
+                        .then_some(f as i64)
+                }),
                 _ => value.parse::<i64>().ok(),
             }
         }
