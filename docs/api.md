@@ -1378,7 +1378,8 @@ t.derive(amount=lambda r: r.amount_str.cast("float64"))
 
 #### `r.col.abs` / `r.col.round` / `r.col.floor` / `r.col.ceil`
 - **Signature**: `r.col.abs() -> Expr`; `r.col.round(decimals: int = 0) -> Expr`; `r.col.floor() -> Expr`; `r.col.ceil() -> Expr`
-- **Behavior**: Numeric rounding helpers
+- **Behavior**: Numeric rounding helpers. They apply to window expressions too, e.g. `r.x.shift(1).round(2)` rounds the shifted value
+- **Exceptions**: `TypeError` when `decimals` is not an int (raised inside the lambda)
 - **Example**:
 ```python
 t.derive(
