@@ -1600,7 +1600,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **签名**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **行为**: 返回 `self` 与 `other` 在指定单位下的整数差。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`
+- **行为**: 返回 `self` 减 `other` 在指定单位下的差值。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`。定长单位（`day`/`hour`/`minute`/`second`）返回浮点数，度量经过的时间：两个日期相减得整数值，涉及时间戳时可为小数（12 小时即 `0.5` 天）；这些单位下 `other` 不是日期/时间戳时在计划阶段抛出 `ValueError`。`month`/`year` 返回整数，按日历字段相减，忽略日
 - **SPL 等价**: `interval(t1, t2, unit)`
 - **示例**:
 ```python
@@ -1782,7 +1782,7 @@ for batch in LTSeq.scan("huge.csv"):
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` 等 | `EXTRACT(YEAR FROM col)` 等 |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
-| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other)` | `col - other`，以天计（日期即 `DATEDIFF('day', other, col)`） |
 | `r.col.dt.age()` | 相对 `CURRENT_DATE` 的年差（含年内日修正）|
 | `gcd(a, b)` / `lcm(a, b)` / `factorial(n)` | `GCD` / `LCM` / `FACTORIAL` |
 | `count_if(cond)` | `SUM(CASE WHEN cond THEN 1 ELSE 0 END)` |

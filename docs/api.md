@@ -1603,7 +1603,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **Behavior**: Returns the integer difference between `self` and `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`
+- **Behavior**: Returns `self` minus `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) return a float measuring elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days); with these units a non-temporal `other` is a `ValueError` at plan time. `month`/`year` return an integer that subtracts the calendar fields and ignores the day
 - **SPL Equivalent**: `interval(t1, t2, unit)`
 - **Example**:
 ```python
@@ -1785,7 +1785,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
-| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other)` | `col - other` in days (`DATEDIFF('day', other, col)` for dates) |
 | `r.col.dt.age()` | year diff from `CURRENT_DATE` with day-of-year correction |
 | `gcd(a, b)` / `lcm(a, b)` / `factorial(n)` | `GCD` / `LCM` / `FACTORIAL` |
 | `count_if(cond)` | `SUM(CASE WHEN cond THEN 1 ELSE 0 END)` |
