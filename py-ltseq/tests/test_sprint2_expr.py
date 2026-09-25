@@ -606,3 +606,14 @@ class TestMathOnWindowExpressions:
     def test_floor_and_ceil_methods(self, sorted_numbers):
         assert self._derived(sorted_numbers, lambda r: r.val.shift(1).floor()) == [3.0, 2.0, -2.0]
         assert self._derived(sorted_numbers, lambda r: r.val.shift(1).ceil()) == [4.0, 3.0, -1.0]
+
+
+class TestShiftOffsetRange:
+    def test_shift_i64_min_offset_is_an_error(self, numbers_table):
+        """Negating i64::MIN used to panic inside the window builder."""
+        with pytest.raises(ValueError, match=r"shift\(\) offset -9223372036854775808 is out of range"):
+            numbers_table.sort("id").derive(prev=lambda r: r.x.shift(-(2**63)))
+
+    def test_shift_largest_negatable_offset_leads(self, numbers_table):
+        out = numbers_table.sort("id").derive(nxt=lambda r: r.x.shift(-(2**63 - 1))).to_arrow().column("nxt").to_pylist()
+        assert out == [None, None, None, None]

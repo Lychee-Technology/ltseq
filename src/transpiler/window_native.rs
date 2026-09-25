@@ -288,7 +288,10 @@ fn convert_shift(
         let window_expr = if offset >= 0 {
             lag(col_expr, Some(offset), default_value)
         } else {
-            lead(col_expr, Some(-offset), default_value)
+            let lead_by = offset
+                .checked_neg()
+                .ok_or_else(|| format!("shift() offset {offset} is out of range"))?;
+            lead(col_expr, Some(lead_by), default_value)
         };
 
         finalize_window_expr(window_expr, partition_by_exprs, order_by, "shift")
