@@ -7,6 +7,10 @@ from a column within each group as a semicolon-delimited string.
 import pytest
 import tempfile
 import os
+from decimal import Decimal
+
+import pyarrow as pa
+
 from ltseq import LTSeq
 
 
@@ -231,3 +235,36 @@ class TestTopKNulls:
             assert df["top"][0] == "30"
         finally:
             os.unlink(csv.name)
+
+
+class TestTopKArgument:
+    """k must be a positive integer; a supplied k never falls back to the default 10."""
+
+    @pytest.fixture
+    def scores(self):
+        return LTSeq.from_arrow(
+            pa.table({"id": pa.array([1, 2, 3, 4, 5], pa.int64()), "score": pa.array([85, 92, 78, 95, 88], pa.int64())})
+        )
+
+    def _top(self, t, k):
+        return t.agg(v=lambda g: g.score.top_k(k)).to_arrow().column("v").to_pylist()[0]
+
+    def test_top_k_absent_defaults_to_ten(self, scores):
+        assert scores.agg(v=lambda g: g.score.top_k()).to_arrow().column("v").to_pylist()[0] == "95;92;88;85;78"
+
+    def test_top_k_accepts_decimal_k(self, scores):
+        assert self._top(scores, Decimal("3")) == "95;92;88"
+
+    @pytest.mark.parametrize("k", [2.5, True, "abc"])
+    def test_top_k_rejects_non_integer_k(self, scores, k):
+        with pytest.raises(ValueError, match=r"top_k\(\) k must be an integer, got"):
+            scores.agg(v=lambda g: g.score.top_k(k))
+
+    def test_top_k_rejects_non_literal_k(self, scores):
+        with pytest.raises(ValueError, match=r"top_k\(\) k must be a literal integer"):
+            scores.agg(v=lambda g: g.score.top_k(g.id))
+
+    @pytest.mark.parametrize("k", [0, -1])
+    def test_top_k_rejects_non_positive_k(self, scores, k):
+        with pytest.raises(ValueError, match=r"top_k\(\) k must be >= 1"):
+            scores.agg(v=lambda g: g.score.top_k(k))

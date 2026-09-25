@@ -1199,8 +1199,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
-- **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0 to 1 (approximate percentile)
+- **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p) / .top_k(k)`
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0 to 1 (approximate percentile); a supplied `p` outside that range, a `p` that does not parse as a number, or a non-literal `p` raises `ValueError` at `agg()` time, and the default (the median) applies only when `p` is omitted. `top_k(k)` returns the `k` largest values as a `;`-joined string; `k` must be a literal that parses as an integer `>= 1` (anything else is a `ValueError` at `agg()` time), and its default 10 applies only when `k` is omitted
 - **Example**:
 ```python
 stats = t.group_by("region").agg(

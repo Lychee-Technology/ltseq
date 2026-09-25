@@ -7,7 +7,9 @@ aggregate functions.
 import math
 import os
 import tempfile
+from decimal import Decimal
 
+import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
@@ -341,3 +343,34 @@ class TestSkew:
         )
         assert df["s"][0] == pytest.approx(self._expected_skew([1, 2, 9]))
         assert df["s"][1] == pytest.approx(0.0)
+
+
+class TestPercentileArgument:
+    """p must be a number in [0, 1]; a supplied p never falls back to the median."""
+
+    @pytest.fixture
+    def hundred(self):
+        return LTSeq.from_arrow(pa.table({"x": pa.array(list(range(1, 101)), pa.int64())}))
+
+    def _p(self, t, p):
+        return t.agg(v=lambda g: g.x.percentile(p)).to_arrow().column("v").to_pylist()[0]
+
+    def test_percentile_absent_is_the_median(self, hundred):
+        assert abs(hundred.agg(v=lambda g: g.x.percentile()).to_arrow().column("v").to_pylist()[0] - 50.5) < 1.5
+
+    def test_percentile_accepts_decimal_p(self, hundred):
+        assert abs(self._p(hundred, Decimal("0.95")) - 95.5) < 2.0
+
+    @pytest.mark.parametrize("p", [True, None, "abc"])
+    def test_percentile_rejects_non_numeric_p(self, hundred, p):
+        with pytest.raises(ValueError, match=r"percentile\(\) p must be a number, got"):
+            hundred.agg(v=lambda g: g.x.percentile(p))
+
+    @pytest.mark.parametrize("p", [1.5, -0.1, float("nan")])
+    def test_percentile_rejects_out_of_range_p(self, hundred, p):
+        with pytest.raises(ValueError, match=r"percentile\(\) p must be between 0 and 1"):
+            hundred.agg(v=lambda g: g.x.percentile(p))
+
+    def test_percentile_rejects_non_literal_p(self, hundred):
+        with pytest.raises(ValueError, match=r"percentile\(\) p must be a literal number"):
+            hundred.agg(v=lambda g: g.x.percentile(g.x))
