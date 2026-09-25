@@ -838,15 +838,7 @@ fn parse_call_temporal(
             };
 
             match unit.as_str() {
-                "day" | "days" => {
-                    // Date - Date returns Int64 (days) directly in DataFusion 53+;
-                    // no need for date_part, just cast to Float64 for consistency
-                    let diff_expr = on_expr - other_expr;
-                    Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    )))
-                }
+                "day" | "days" => dt_elapsed(on_expr, other_expr, schema, 86_400),
                 "month" | "months" => {
                     // (year(on) - year(other)) * 12 + (month(on) - month(other))
                     let on_year = date_part(lit("year"), on_expr.clone());
@@ -860,33 +852,9 @@ fn parse_call_temporal(
                     let other_year = date_part(lit("year"), other_expr);
                     Ok(on_year - other_year)
                 }
-                "hour" | "hours" => {
-                    // Date - Date returns Int64 (days); hours = days * 24
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(24_f64))
-                }
-                "minute" | "minutes" => {
-                    // Date - Date returns Int64 (days); minutes = days * 1440
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(1440_f64))
-                }
-                "second" | "seconds" => {
-                    // Date - Date returns Int64 (days); seconds = days * 86400
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(86400_f64))
-                }
+                "hour" | "hours" => dt_elapsed(on_expr, other_expr, schema, 3_600),
+                "minute" | "minutes" => dt_elapsed(on_expr, other_expr, schema, 60),
+                "second" | "seconds" => dt_elapsed(on_expr, other_expr, schema, 1),
                 _ => Err(format!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",
                     unit
@@ -1132,6 +1100,54 @@ fn validate_string_column(
         }
     }
     Ok(())
+}
+
+/// Elapsed time `on - other` in a fixed-length unit of `unit_seconds`, as Float64.
+///
+/// DataFusion types the subtraction by its operands: two dates give an Int64
+/// day count, and anything involving a timestamp gives a Duration in the
+/// coerced time unit. The tick length is read from that planned type, so a
+/// date pair and a timestamp pair both report the unit asked for. The integer
+/// factor between tick and unit keeps whole-day date differences exact.
+fn dt_elapsed(
+    on_expr: Expr,
+    other_expr: Expr,
+    schema: &ArrowSchema,
+    unit_seconds: i64,
+) -> Result<Expr, String> {
+    use datafusion::arrow::datatypes::TimeUnit;
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::ExprSchemable;
+
+    let diff_expr = on_expr - other_expr;
+    let df_schema = DFSchema::try_from(schema.clone()).map_err(|e| format!("dt_diff: {e}"))?;
+    let diff_type = diff_expr
+        .get_type(&df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    let tick_nanos: i64 = match diff_type {
+        DataType::Int64 => 86_400 * 1_000_000_000,
+        DataType::Duration(TimeUnit::Second) => 1_000_000_000,
+        DataType::Duration(TimeUnit::Millisecond) => 1_000_000,
+        DataType::Duration(TimeUnit::Microsecond) => 1_000,
+        DataType::Duration(TimeUnit::Nanosecond) => 1,
+        other => {
+            return Err(format!(
+                "dt_diff cannot measure a difference of type {other:?}; \
+                 both sides must be dates or timestamps"
+            ))
+        }
+    };
+    let unit_nanos = unit_seconds * 1_000_000_000;
+    let ticks = Expr::Cast(datafusion::logical_expr::Cast::new(
+        Box::new(diff_expr),
+        DataType::Float64,
+    ));
+    // Both lengths are whole seconds or whole days, so one divides the other.
+    Ok(if tick_nanos >= unit_nanos {
+        ticks * lit((tick_nanos / unit_nanos) as f64)
+    } else {
+        ticks / lit((unit_nanos / tick_nanos) as f64)
+    })
 }
 
 /// Validate that a column is a temporal type
