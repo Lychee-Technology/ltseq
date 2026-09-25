@@ -799,4 +799,3 @@ fn convert_expr_with_window_children(
         other => pyexpr_to_datafusion(other, schema),
     }
 }
-

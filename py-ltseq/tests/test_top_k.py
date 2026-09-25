@@ -5,6 +5,7 @@ from a column within each group as a semicolon-delimited string.
 """
 
 import pytest
+from decimal import Decimal
 import tempfile
 import os
 from ltseq import LTSeq
@@ -169,6 +170,37 @@ class TestTopKNoGroupBy:
         assert len(top_scores) == 3
         # Top 3 should be 95, 92, 88
         assert top_scores == [95.0, 92.0, 88.0]
+
+
+class TestTopKArgument:
+    """k must be a positive integer literal; it never falls back to a default."""
+
+    @pytest.fixture
+    def scores(self):
+        csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
+        csv.write("id,score\n")
+        for i, score in enumerate([85, 92, 78, 95, 88], start=1):
+            csv.write(f"{i},{score}\n")
+        csv.close()
+        yield LTSeq.read_csv(csv.name)
+        os.unlink(csv.name)
+
+    @pytest.mark.parametrize(
+        "k, dtype",
+        [(Decimal("3"), "Decimal128"), (2.5, "Float64"), ("3", "String"), (True, "Boolean")],
+    )
+    def test_top_k_rejects_non_integer_k(self, scores, k, dtype):
+        with pytest.raises(ValueError, match=f"top_k\\(\\) k must be an integer, got a {dtype} literal"):
+            scores.agg(v=lambda g: g.score.top_k(k))
+
+    def test_top_k_rejects_non_literal_k(self, scores):
+        with pytest.raises(ValueError, match="top_k\\(\\) k must be a literal integer"):
+            scores.agg(v=lambda g: g.score.top_k(g.id))
+
+    @pytest.mark.parametrize("k", [0, -1])
+    def test_top_k_rejects_non_positive_k(self, scores, k):
+        with pytest.raises(ValueError, match="top_k\\(\\) k must be >= 1"):
+            scores.agg(v=lambda g: g.score.top_k(k))
 
 
 class TestTopKWithOtherAggregates:

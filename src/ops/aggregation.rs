@@ -81,13 +81,18 @@ fn pyexpr_to_agg_plan(
                 }
                 _ => return Err("percentile requires a column reference".to_string()),
             };
-            let p = args.first().and_then(|arg| {
-                if let PyExpr::Literal(value) = arg {
-                    value.as_f64()
-                } else {
-                    None
-                }
-            }).unwrap_or(0.5);
+            // The default applies only when p is absent; a supplied argument
+            // that is not a number is an error, never the median.
+            let p = match args.first() {
+                None => 0.5,
+                Some(PyExpr::Literal(value)) => value.as_f64().ok_or_else(|| {
+                    format!(
+                        "percentile() p must be a number, got a {} literal",
+                        value.dtype()
+                    )
+                })?,
+                Some(_) => return Err("percentile() p must be a literal number".to_string()),
+            };
             let sort = datafusion::logical_expr::SortExpr::new(col_expr, true, false);
             Ok(AggPlan::Plain(agg_fn::approx_percentile_cont(sort, lit(p), None)))
         }
@@ -203,16 +208,21 @@ fn pyexpr_to_agg_plan(
             let PyExpr::Column(col_name) = on.as_ref() else {
                 return Err("top_k requires a column reference".to_string());
             };
-            let k = args
-                .first()
-                .and_then(|arg| {
-                    if let PyExpr::Literal(value) = arg {
-                        value.as_i64()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(10);
+            // The default applies only when k is absent; a supplied argument
+            // that is not a positive integer is an error, never 10.
+            let k = match args.first() {
+                None => 10,
+                Some(PyExpr::Literal(value)) => value.as_i64().ok_or_else(|| {
+                    format!(
+                        "top_k() k must be an integer, got a {} literal",
+                        value.dtype()
+                    )
+                })?,
+                Some(_) => return Err("top_k() k must be a literal integer".to_string()),
+            };
+            if k < 1 {
+                return Err(format!("top_k() k must be >= 1, got {k}"));
+            }
 
             let col_f64 = cast(
                 Expr::Column(Column::new_unqualified(col_name)),

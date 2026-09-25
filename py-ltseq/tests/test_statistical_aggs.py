@@ -9,6 +9,7 @@ import os
 import tempfile
 
 import pytest
+from decimal import Decimal
 
 from ltseq import LTSeq
 
@@ -89,6 +90,19 @@ class TestPercentile:
 
         # 95th percentile of 1-100 should be around 95
         assert abs(df["p95"].iloc[0] - 95.0) < 2.0
+
+    @pytest.mark.parametrize(
+        "p, dtype",
+        [(Decimal("0.95"), "Decimal128"), ("0.95", "String"), (True, "Boolean"), (None, "Null")],
+    )
+    def test_percentile_rejects_non_numeric_p(self, sample_table, p, dtype):
+        """A supplied p that is not an int/float literal is an error, never the median."""
+        with pytest.raises(ValueError, match=f"percentile\\(\\) p must be a number, got a {dtype} literal"):
+            sample_table.agg(v=lambda g: g.score.percentile(p))
+
+    def test_percentile_rejects_non_literal_p(self, sample_table):
+        with pytest.raises(ValueError, match="percentile\\(\\) p must be a literal number"):
+            sample_table.agg(v=lambda g: g.score.percentile(g.score))
 
     def test_percentile_25th(self, sample_table):
         """percentile(0.25) should return first quartile."""

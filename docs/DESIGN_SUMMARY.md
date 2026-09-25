@@ -148,7 +148,7 @@ Examples:
 {"type": "Literal", "value": 15, "dtype": "Decimal128", "precision": 2, "scale": 1}
 ```
 
-On the Rust side, these become `PyExpr` values in `src/types.rs`. Literal payloads are typed: `LiteralExpr` validates the Python value at capture time (raising `TypeError` for unsupported types), and Rust extracts the native value named by `dtype` into a `LiteralValue`. Nothing is converted to a string and parsed back.
+On the Rust side, these become `PyExpr` values in `src/types.rs`. Literal payloads are typed: `LiteralExpr` validates the Python value at capture time (raising `TypeError` for unsupported types), and Rust checks that the payload has the Python type `dtype` names (a `bool` is not an `Int64` value, an `int` is not a `Float64` value) before extracting it into a `LiteralValue`. Nothing is converted to a string and parsed back.
 
 ### 2.3 Transpilation Paths
 

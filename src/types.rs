@@ -3,7 +3,7 @@
 use crate::error::PyExprError;
 use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyString};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -150,26 +150,84 @@ fn literal_field<'py>(
         .ok_or_else(|| PyExprError::MissingField(field.to_string()))
 }
 
+/// The Python type a Literal payload field must have on the wire.
+///
+/// PyO3's numeric extraction is coercive (`True` extracts as `1i64`, `1`
+/// extracts as `1.0f64`), so the field's Python type is checked before the
+/// value is extracted; a payload that contradicts its dtype is rejected.
+#[derive(Clone, Copy)]
+enum WireType {
+    Bool,
+    /// A Python `int`; `bool` is excluded even though it subclasses `int`.
+    Int,
+    Float,
+    Str,
+    /// A Python `str` or `None`.
+    OptionalStr,
+    None,
+}
+
+impl WireType {
+    fn matches(self, obj: &Bound<'_, PyAny>) -> bool {
+        match self {
+            WireType::Bool => obj.is_instance_of::<PyBool>(),
+            WireType::Int => obj.is_instance_of::<PyInt>() && !obj.is_instance_of::<PyBool>(),
+            WireType::Float => obj.is_instance_of::<PyFloat>(),
+            WireType::Str => obj.is_instance_of::<PyString>(),
+            WireType::OptionalStr => obj.is_none() || obj.is_instance_of::<PyString>(),
+            WireType::None => obj.is_none(),
+        }
+    }
+}
+
+/// The error for a Literal payload field whose value is not what its dtype requires.
+fn literal_field_mismatch(
+    obj: &Bound<'_, PyAny>,
+    field: &str,
+    dtype: &str,
+    expected: &str,
+) -> PyExprError {
+    PyExprError::InvalidType(format!(
+        "{dtype} literal '{field}' must be {expected}, got {}",
+        obj.get_type()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string())
+    ))
+}
+
+/// Fetch a required Literal payload field and check it has the `wire` Python type.
+fn checked_literal_field<'py>(
+    dict: &Bound<'py, PyDict>,
+    field: &str,
+    dtype: &str,
+    wire: WireType,
+    expected: &str,
+) -> Result<Bound<'py, PyAny>, PyExprError> {
+    let obj = literal_field(dict, field)?;
+    if !wire.matches(&obj) {
+        return Err(literal_field_mismatch(&obj, field, dtype, expected));
+    }
+    Ok(obj)
+}
+
 /// Extract a required Literal payload field as `T`, naming the dtype on failure.
+///
+/// The field must have the `wire` Python type; the extraction after that
+/// check only fails on range (an int outside `T`), which `expected` names.
 fn extract_literal_field<'py, T>(
     dict: &Bound<'py, PyDict>,
     field: &str,
     dtype: &str,
+    wire: WireType,
     expected: &str,
 ) -> Result<T, PyExprError>
 where
     T: for<'a> FromPyObject<'a, 'py>,
 {
-    let obj = literal_field(dict, field)?;
-    obj.extract::<T>().map_err(|_| {
-        PyExprError::InvalidType(format!(
-            "{dtype} literal '{field}' must be {expected}, got {}",
-            obj.get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "<unknown>".to_string())
-        ))
-    })
+    let obj = checked_literal_field(dict, field, dtype, wire, expected)?;
+    obj.extract::<T>()
+        .map_err(|_| literal_field_mismatch(&obj, field, dtype, expected))
 }
 
 /// Deserialize a Literal expression by extracting the native type its dtype names.
@@ -179,21 +237,42 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .map_err(|_| PyExprError::InvalidType("dtype must be string".to_string()))?;
 
     let value = match dtype.as_str() {
-        "Null" => LiteralValue::Null,
-        "Boolean" => LiteralValue::Boolean(extract_literal_field(dict, "value", &dtype, "a bool")?),
+        "Null" => {
+            checked_literal_field(dict, "value", &dtype, WireType::None, "None")?;
+            LiteralValue::Null
+        }
+        "Boolean" => LiteralValue::Boolean(extract_literal_field(
+            dict,
+            "value",
+            &dtype,
+            WireType::Bool,
+            "a bool",
+        )?),
         "Int64" => LiteralValue::Int64(extract_literal_field(
             dict,
             "value",
             &dtype,
+            WireType::Int,
             "an int in the Int64 range",
         )?),
-        "Float64" => {
-            LiteralValue::Float64(extract_literal_field(dict, "value", &dtype, "a float")?)
-        }
-        "String" => LiteralValue::String(extract_literal_field(dict, "value", &dtype, "a str")?),
+        "Float64" => LiteralValue::Float64(extract_literal_field(
+            dict,
+            "value",
+            &dtype,
+            WireType::Float,
+            "a float",
+        )?),
+        "String" => LiteralValue::String(extract_literal_field(
+            dict,
+            "value",
+            &dtype,
+            WireType::Str,
+            "a str",
+        )?),
         "Decimal128" => {
-            let precision: u8 = extract_literal_field(dict, "precision", &dtype, "an int")?;
-            let scale: i8 = extract_literal_field(dict, "scale", &dtype, "an int")?;
+            let precision: u8 =
+                extract_literal_field(dict, "precision", &dtype, WireType::Int, "an int")?;
+            let scale: i8 = extract_literal_field(dict, "scale", &dtype, WireType::Int, "an int")?;
             if !(1..=DECIMAL128_MAX_PRECISION).contains(&precision)
                 || scale < 0
                 || scale.unsigned_abs() > precision
@@ -207,6 +286,7 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
                     dict,
                     "value",
                     &dtype,
+                    WireType::Int,
                     "an int in the Decimal128 range",
                 )?,
                 precision,
@@ -217,11 +297,18 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             dict,
             "value",
             &dtype,
+            WireType::Int,
             "an int in the Int32 range",
         )?),
         "TimestampMicrosecond" => LiteralValue::TimestampMicrosecond {
-            value: extract_literal_field(dict, "value", &dtype, "an int in the Int64 range")?,
-            tz: extract_literal_field(dict, "tz", &dtype, "a str or None")?,
+            value: extract_literal_field(
+                dict,
+                "value",
+                &dtype,
+                WireType::Int,
+                "an int in the Int64 range",
+            )?,
+            tz: extract_literal_field(dict, "tz", &dtype, WireType::OptionalStr, "a str or None")?,
         },
         other => {
             return Err(PyExprError::InvalidType(format!(

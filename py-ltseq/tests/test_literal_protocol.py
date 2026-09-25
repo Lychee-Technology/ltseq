@@ -105,6 +105,26 @@ def test_decimal_over_precision_38_rejected():
         LiteralExpr(Decimal("1" * 39))
 
 
+@pytest.mark.parametrize("value", [Decimal("1E+38"), Decimal("1E+5000"), Decimal("5E+100000")])
+def test_decimal_over_precision_is_rejected_before_exponent_expansion(value):
+    # The precision comes from the coefficient digits and the exponent; the
+    # unscaled integer is never built, so a huge exponent fails the same way
+    # a 39-digit value does instead of hitting Python's int-to-str limit.
+    with pytest.raises(ValueError, match="needs precision"):
+        LiteralExpr(value)
+
+
+@pytest.mark.parametrize("value", [Decimal("0E+5000"), Decimal("-0E+5000")])
+def test_zero_decimal_with_positive_exponent_is_plain_zero(value):
+    assert LiteralExpr(value).serialize() == {
+        "type": "Literal",
+        "value": 0,
+        "dtype": "Decimal128",
+        "precision": 1,
+        "scale": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Serialization shape
 # ---------------------------------------------------------------------------
@@ -346,6 +366,30 @@ def _gt_literal(literal: dict) -> dict:
         ),
         ({"type": "Literal", "value": 1, "dtype": "Decimal128"}, "Missing field: precision"),
         ({"type": "Literal", "value": 1, "dtype": "Int32"}, "Unknown literal dtype: Int32"),
+        # PyO3 would coerce these; the boundary checks the Python type first.
+        ({"type": "Literal", "value": True, "dtype": "Int64"}, "Int64 literal 'value' must be an int"),
+        ({"type": "Literal", "value": 1, "dtype": "Float64"}, "Float64 literal 'value' must be a float"),
+        ({"type": "Literal", "value": True, "dtype": "Float64"}, "Float64 literal 'value' must be a float"),
+        ({"type": "Literal", "value": 1, "dtype": "Boolean"}, "Boolean literal 'value' must be a bool"),
+        (
+            {"type": "Literal", "value": True, "dtype": "Decimal128", "precision": 1, "scale": 0},
+            "Decimal128 literal 'value' must be an int",
+        ),
+        (
+            {"type": "Literal", "value": 1, "dtype": "Decimal128", "precision": True, "scale": 0},
+            "Decimal128 literal 'precision' must be an int",
+        ),
+        ({"type": "Literal", "value": True, "dtype": "Date32"}, "Date32 literal 'value' must be an int"),
+        (
+            {"type": "Literal", "value": 1.0, "dtype": "TimestampMicrosecond", "tz": None},
+            "TimestampMicrosecond literal 'value' must be an int",
+        ),
+        (
+            {"type": "Literal", "value": 1, "dtype": "TimestampMicrosecond", "tz": 0},
+            "TimestampMicrosecond literal 'tz' must be a str or None",
+        ),
+        ({"type": "Literal", "dtype": "Null"}, "Missing field: value"),
+        ({"type": "Literal", "value": 0, "dtype": "Null"}, "Null literal 'value' must be None"),
     ],
 )
 def test_rust_rejects_mistyped_literal_payloads(ints, literal, message):

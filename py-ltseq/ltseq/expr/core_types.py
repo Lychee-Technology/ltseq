@@ -27,20 +27,23 @@ def _encode_decimal(value: Decimal) -> dict[str, Any]:
         raise ValueError(f"Decimal literal {value!r} is not finite")
     sign, digits, exponent = value.as_tuple()
     assert isinstance(exponent, int)  # finite Decimals have an int exponent
-    unscaled = int("".join(map(str, digits)))
-    if exponent > 0:
-        unscaled *= 10**exponent
-        scale = 0
+    # Size the value from its digit tuple before building the unscaled int, so
+    # an oversized exponent is refused without allocating a 10**exponent.
+    if value.is_zero():
+        # Any zero is Decimal128(1, 0); a positive exponent adds no digits.
+        digit_count, exponent = 1, min(exponent, 0)
     else:
-        scale = -exponent
-    if sign:
-        unscaled = -unscaled
-    precision = max(len(str(abs(unscaled))), scale)
+        digit_count = len(digits) + max(exponent, 0)
+    scale = max(-exponent, 0)
+    precision = max(digit_count, scale)
     if precision > _DECIMAL128_MAX_PRECISION:
         raise ValueError(
             f"Decimal literal {value!r} needs precision {precision}; "
             f"at most {_DECIMAL128_MAX_PRECISION} digits are supported"
         )
+    unscaled = int("".join(map(str, digits))) * 10 ** max(exponent, 0)
+    if sign:
+        unscaled = -unscaled
     return {"value": unscaled, "dtype": "Decimal128", "precision": precision, "scale": scale}
 
 
