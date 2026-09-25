@@ -203,16 +203,18 @@ fn pyexpr_to_agg_plan(
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err("top_k requires a column reference".to_string());
             };
-            let k = args
-                .first()
-                .and_then(|arg| {
-                    if let PyExpr::Literal { value, .. } = arg {
-                        value.parse::<i64>().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(10);
+            // The default applies only when k is absent; a supplied argument
+            // that is not a positive integer is an error, never 10.
+            let k = match args.first() {
+                None => 10,
+                Some(PyExpr::Literal { value, .. }) => value
+                    .parse::<i64>()
+                    .map_err(|_| format!("top_k() k must be an integer, got '{value}'"))?,
+                Some(_) => return Err("top_k() k must be a literal integer".to_string()),
+            };
+            if k < 1 {
+                return Err(format!("top_k() k must be >= 1, got {k}"));
+            }
 
             let col_f64 = cast(
                 Expr::Column(Column::new_unqualified(col_name)),
