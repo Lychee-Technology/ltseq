@@ -138,10 +138,7 @@ fn eval_expr(
             args,
             on,
             kwargs: _,
-        } => {
-            let on = crate::transpiler::require_on(on.as_deref(), func)?;
-            eval_call(func, args, on, batch, name_to_idx)
-        }
+        } => eval_call(func, args, on.as_deref(), batch, name_to_idx),
 
         PyExpr::Window { .. } => {
             Err("Window expressions not supported in search_pattern predicates".to_string())
@@ -225,35 +222,38 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
 fn eval_call(
     func: &str,
     args: &[PyExpr],
-    on: &PyExpr,
+    on: Option<&PyExpr>,
     batch: &RecordBatch,
     name_to_idx: &std::collections::HashMap<String, usize>,
 ) -> Result<ArrayRef, String> {
+    // The receiver is required only by the functions this evaluator supports;
+    // an unsupported function is reported as unsupported whatever its shape.
+    let receiver = || crate::transpiler::require_on(on, func);
     match func {
         "starts_with" | "str_starts_with" => {
-            let source = eval_expr(on, batch, name_to_idx)?;
+            let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let prefix = extract_literal_string(&args[0])?;
             eval_starts_with(&source, &prefix)
         }
         "ends_with" | "str_ends_with" => {
-            let source = eval_expr(on, batch, name_to_idx)?;
+            let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let suffix = extract_literal_string(&args[0])?;
             eval_ends_with(&source, &suffix)
         }
         "contains" | "str_contains" => {
-            let source = eval_expr(on, batch, name_to_idx)?;
+            let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let substr = extract_literal_string(&args[0])?;
             eval_contains(&source, &substr)
         }
         "is_null" => {
-            let source = eval_expr(on, batch, name_to_idx)?;
+            let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let result: BooleanArray = (0..source.len())
                 .map(|i| Some(source.is_null(i)))
                 .collect();
             Ok(Arc::new(result))
         }
         "is_not_null" => {
-            let source = eval_expr(on, batch, name_to_idx)?;
+            let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let result: BooleanArray = (0..source.len())
                 .map(|i| Some(!source.is_null(i)))
                 .collect();

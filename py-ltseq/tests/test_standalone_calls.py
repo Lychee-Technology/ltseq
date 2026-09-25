@@ -101,3 +101,18 @@ def test_receiver_function_called_standalone_names_the_problem(t, func):
     with pytest.raises(Exception, match=f"{func} must be called as a method") as excinfo:
         t._inner.derive({"out": call})
     assert "Column ''" not in str(excinfo.value)
+
+
+def test_search_pattern_keeps_the_unsupported_function_message_for_standalone_calls(t):
+    """search_pattern's evaluator supports a handful of functions. A standalone
+    function it does not support must still be reported as unsupported, not as
+    "must be called as a method" (coalesce has no method form)."""
+    sorted_t = t.sort("n")
+    with pytest.raises(Exception, match="Unsupported function in search_pattern predicate: 'coalesce'"):
+        sorted_t.search_pattern(lambda r: coalesce(r.y, r.x) > 0, lambda r: r.x > 0)
+    # A function the evaluator does support still needs its receiver.
+    with pytest.raises(Exception, match="is_null must be called as a method"):
+        sorted_t._inner.search_pattern(
+            [{"type": "Call", "func": "is_null", "args": [{"type": "Column", "name": "y"}], "kwargs": {}, "on": None}],
+            None,
+        )
