@@ -1196,8 +1196,8 @@ total = t.agg(total=lambda g: g.sales.sum())
 ```
 
 ### 聚合列方法（`agg` / `group_by().agg()` 的 lambda 内）
-- **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p)`
-- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0 到 1（近似分位数）
+- **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p) / .top_k(k)`
+- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0 到 1（近似分位数）；传入的 `p` 超出该范围、无法解析为数字或不是字面量时，`agg()` 抛出 `ValueError`，默认值（中位数）仅在省略 `p` 时生效。`top_k(k)` 返回最大的 `k` 个值（以 `;` 连接的字符串）；`k` 必须是能解析为整数且 `>= 1` 的字面量（否则 `agg()` 抛出 `ValueError`），默认值 10 仅在省略 `k` 时生效
 - **示例**:
 ```python
 stats = t.group_by("region").agg(
