@@ -345,3 +345,80 @@ class TestFactorial:
         result = t.filter(lambda r: factorial(r.n) > 100).to_dicts()
         assert len(result) == 2  # 5! = 120, 6! = 720
         assert all(r["n"] >= 5 for r in result)
+
+
+class TestDtDiffElapsed:
+    """Fixed-length units measure elapsed time; timestamps give fractions."""
+
+    def test_diff_fixed_units_on_date_columns(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d1": pa.array([datetime.date(2024, 1, 31)], type=pa.date32()),
+            "d2": pa.array([datetime.date(2024, 1, 1)], type=pa.date32()),
+        }))
+        result = t.derive(
+            h=lambda r: r.d1.dt.diff(r.d2, unit="hour"),
+            m=lambda r: r.d1.dt.diff(r.d2, unit="minute"),
+            s=lambda r: r.d1.dt.diff(r.d2, unit="second"),
+        ).to_dicts()
+        assert (result[0]["h"], result[0]["m"], result[0]["s"]) == (720, 43200, 2592000)
+
+    def test_diff_timestamp_columns_report_elapsed_time_in_unit(self):
+        """Timestamp - timestamp is a Duration; the result is elapsed time in the
+        requested unit, not the Duration's tick count."""
+        import datetime
+        import pyarrow as pa
+        base = datetime.datetime(2024, 1, 1)
+        for arrow_unit in ("s", "ms", "us", "ns"):
+            t = LTSeq.from_arrow(pa.table({
+                "end": pa.array(
+                    [datetime.datetime(2024, 1, 3, 12), datetime.datetime(2024, 1, 1, 0, 0, 30), None],
+                    type=pa.timestamp(arrow_unit),
+                ),
+                "start": pa.array([base, base, base], type=pa.timestamp(arrow_unit)),
+            }))
+            out = t.derive(
+                d=lambda r: r.end.dt.diff(r.start),
+                h=lambda r: r.end.dt.diff(r.start, unit="hour"),
+                s=lambda r: r.end.dt.diff(r.start, unit="second"),
+            ).to_arrow()
+            assert out.column("d").to_pylist() == [2.5, 30 / 86400, None], arrow_unit
+            assert out.column("h").to_pylist() == [60, 30 / 3600, None], arrow_unit
+            assert out.column("s").to_pylist() == [216000, 30, None], arrow_unit
+
+    def test_diff_mixed_date_and_timestamp_columns(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "ts": pa.array([datetime.datetime(2024, 1, 3, 6)], type=pa.timestamp("us")),
+            "d": pa.array([datetime.date(2024, 1, 1)], type=pa.date32()),
+        }))
+        result = t.derive(
+            a=lambda r: r.ts.dt.diff(r.d, unit="hour"),
+            b=lambda r: r.d.dt.diff(r.ts),
+        ).to_dicts()
+        assert result[0]["a"] == 54
+        assert result[0]["b"] == -2.25
+
+    def test_diff_zoned_timestamps_subtract_by_instant(self):
+        import datetime
+        import pyarrow as pa
+        from zoneinfo import ZoneInfo
+        t = LTSeq.from_arrow(pa.table({
+            "ny": pa.array([datetime.datetime(2024, 1, 1, 1, tzinfo=ZoneInfo("America/New_York"))], type=pa.timestamp("us", tz="America/New_York")),
+            "utc": pa.array([datetime.datetime(2024, 1, 1, 0, tzinfo=datetime.timezone.utc)], type=pa.timestamp("us", tz="UTC")),
+        }))
+        assert t.derive(h=lambda r: r.ny.dt.diff(r.utc, unit="hour")).to_dicts()[0]["h"] == 6
+
+    def test_diff_rejects_non_temporal_other(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d": pa.array([datetime.date(2024, 1, 2)], type=pa.date32()),
+            "i": pa.array([1], type=pa.int64()),
+        }))
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.d.dt.diff(r.i)).to_arrow()
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.d.dt.diff(5)).to_arrow()
