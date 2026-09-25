@@ -281,6 +281,59 @@ def test_datetime_literal_derives_timestamp(dates):
     assert pa.types.is_timestamp(out.schema.field("t").type)
 
 
+@pytest.mark.parametrize(
+    "unit, expected",
+    [("day", [0, 0.5, 1]), ("hour", [0, 12, 24]), ("minute", [0, 720, 1440]), ("second", [0, 43200, 86400])],
+)
+@pytest.mark.parametrize("column", ["ts", "ts_ns"])
+def test_dt_diff_against_datetime_literal_reports_the_unit(dates, column, unit, expected):
+    """A datetime literal used to fail planning (Timestamp - Utf8); once typed it
+    must yield the requested unit, not the Duration's raw tick count."""
+    out = dates.derive(x=lambda r: getattr(r, column).dt.diff(datetime(2024, 1, 1), unit)).to_arrow()
+    assert out.column("x").to_pylist() == expected
+
+
+def test_dt_diff_date_column_against_datetime_and_date_literals(dates):
+    for other in (datetime(2024, 1, 1), date(2024, 1, 1)):
+        out = dates.derive(x=lambda r: r.d.dt.diff(other)).to_arrow()
+        assert out.column("x").to_pylist() == [-1, 0, 152]
+
+
+def test_dt_diff_against_aware_datetime_literal(dates):
+    # 2024-01-01T00:00+02:00 is 2023-12-31T22:00 UTC.
+    other = datetime(2024, 1, 1, tzinfo=timezone(timedelta(hours=2)))
+    out = dates.derive(x=lambda r: r.ts_utc.dt.diff(other, "hour")).to_arrow()
+    assert out.column("x").to_pylist() == [2, 14, 26]
+
+
+def test_aware_literal_merged_into_zoned_column_takes_utc_zone():
+    """Documented in api.md "Literal values": fill_null/if_else give a merge of
+    two zoned timestamps the zone of the later operand, and an aware literal is
+    zoned UTC. A naive literal keeps the column's zone."""
+    from ltseq.expr import if_else
+
+    zone = "America/New_York"
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "ts": pa.array([datetime(2024, 1, 1, 6), None], pa.timestamp("us", tz=zone)),
+                "c": [True, False],
+            }
+        )
+    )
+    aware = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    out = t.derive(
+        filled_aware=lambda r: r.ts.fill_null(aware),
+        case_aware=lambda r: if_else(r.c, r.ts, aware),
+        filled_naive=lambda r: r.ts.fill_null(datetime(2024, 1, 1)),
+    ).to_arrow()
+    assert out.schema.field("filled_aware").type == pa.timestamp("us", tz="UTC")
+    assert out.schema.field("case_aware").type == pa.timestamp("us", tz="UTC")
+    assert out.schema.field("filled_naive").type == pa.timestamp("us", tz=zone)
+    # Only the zone tag differs; the instants are the same.
+    assert out.column("filled_aware").to_pylist()[0] == out.column("ts").to_pylist()[0]
+
+
 # ---------------------------------------------------------------------------
 # End to end: numpy scalars and primitives
 # ---------------------------------------------------------------------------
@@ -365,6 +418,15 @@ def _gt_literal(literal: dict) -> dict:
             "invalid precision",
         ),
         ({"type": "Literal", "value": 1, "dtype": "Decimal128"}, "Missing field: precision"),
+        # The unscaled value must fit the declared precision.
+        (
+            {"type": "Literal", "value": 10**30, "dtype": "Decimal128", "precision": 1, "scale": 0},
+            "does not fit precision 1",
+        ),
+        (
+            {"type": "Literal", "value": -100, "dtype": "Decimal128", "precision": 2, "scale": 0},
+            "does not fit precision 2",
+        ),
         ({"type": "Literal", "value": 1, "dtype": "Int32"}, "Unknown literal dtype: Int32"),
         # PyO3 would coerce these; the boundary checks the Python type first.
         ({"type": "Literal", "value": True, "dtype": "Int64"}, "Int64 literal 'value' must be an int"),

@@ -1309,6 +1309,7 @@ Python constants used in expressions (`r.price > 100`, `r.day >= date(2024, 1, 1
 | `datetime.datetime` | `Timestamp(us)`. Naive values stay naive; timezone-aware values are converted to their UTC instant and tagged `UTC` |
 
 - **Exceptions**: `TypeError` naming the type for any other value (list, tuple, dict, set, bytes, `timedelta`, `Fraction`, arbitrary objects), raised inside the lambda where the value is used. `ValueError` for an `int` outside the Int64 range, a NaN or infinite `Decimal`, or a `Decimal` with more than 38 digits.
+- **Time zones**: comparisons and arithmetic with an aware `datetime` work by instant against a zoned column, whatever its zone. When `fill_null`, `coalesce`, or `if_else` merges two zoned timestamps, the result takes the zone of the later operand, and an aware literal counts as zoned `UTC`: on a `timestamp[us, tz=America/New_York]` column, `r.ts.fill_null(aware)` comes back as `timestamp[us, tz=UTC]` (same instants, different zone tag). A naive literal keeps the column's zone and is read as wall-clock time in that zone.
 - **Example**:
 ```python
 from datetime import date
@@ -1627,7 +1628,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **Behavior**: Returns the integer difference between `self` and `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`
+- **Behavior**: Returns `self` minus `other` in the specified unit, as a float. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) measure elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days). `month`/`year` subtract the calendar fields and ignore the day. `other` may be a column or a `date`/`datetime` literal
 - **SPL Equivalent**: `interval(t1, t2, unit)`
 - **Example**:
 ```python
@@ -1809,7 +1810,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
-| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other)` | `col - other` in days (`DATEDIFF('day', other, col)` for dates) |
 | `r.col.dt.age()` | year diff from `CURRENT_DATE` with day-of-year correction |
 | `gcd(a, b)` / `lcm(a, b)` / `factorial(n)` | `GCD` / `LCM` / `FACTORIAL` |
 | `count_if(cond)` | `SUM(CASE WHEN cond THEN 1 ELSE 0 END)` |

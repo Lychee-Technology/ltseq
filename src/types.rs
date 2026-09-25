@@ -281,14 +281,20 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
                     "Decimal128 literal has invalid precision {precision} / scale {scale}"
                 )));
             }
+            let value: i128 = extract_literal_field(
+                dict,
+                "value",
+                &dtype,
+                WireType::Int,
+                "an int in the Decimal128 range",
+            )?;
+            if value.unsigned_abs() >= 10u128.pow(u32::from(precision)) {
+                return Err(PyExprError::InvalidType(format!(
+                    "Decimal128 literal value {value} does not fit precision {precision}"
+                )));
+            }
             LiteralValue::Decimal128 {
-                value: extract_literal_field(
-                    dict,
-                    "value",
-                    &dtype,
-                    WireType::Int,
-                    "an int in the Decimal128 range",
-                )?,
+                value,
                 precision,
                 scale,
             }

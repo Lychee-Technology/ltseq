@@ -1306,6 +1306,7 @@ expr = (r.price * r.qty) > 100
 | `datetime.datetime` | `Timestamp(us)`。naive 值保持 naive；带时区的值换算为 UTC 时刻并标记为 `UTC` |
 
 - **异常**: 其他任何值（list、tuple、dict、set、bytes、`timedelta`、`Fraction`、任意对象）抛出指明类型的 `TypeError`，在 lambda 内使用该值处抛出。超出 Int64 范围的 `int`、NaN 或无穷的 `Decimal`、超过 38 位的 `Decimal` 抛出 `ValueError`。
+- **时区**: 带时区的 `datetime` 与带时区的列（无论何种时区）比较或运算时按时刻计算。`fill_null`、`coalesce`、`if_else` 合并两个带时区的时间戳时，结果取后一个操作数的时区，而带时区的字面量视为 `UTC` 时区：在 `timestamp[us, tz=America/New_York]` 列上，`r.ts.fill_null(aware)` 的结果是 `timestamp[us, tz=UTC]`（时刻相同，时区标记不同）。naive 字面量保留列的时区，并按该时区的本地时间解释。
 - **示例**:
 ```python
 from datetime import date
@@ -1624,7 +1625,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **签名**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **行为**: 返回 `self` 与 `other` 在指定单位下的整数差。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`
+- **行为**: 返回 `self` 减 `other` 在指定单位下的差值（浮点数）。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`。定长单位（`day`/`hour`/`minute`/`second`）度量经过的时间：两个日期相减得整数，涉及时间戳时可为小数（12 小时即 `0.5` 天）。`month`/`year` 按日历字段相减，忽略日。`other` 可以是列，也可以是 `date`/`datetime` 字面量
 - **SPL 等价**: `interval(t1, t2, unit)`
 - **示例**:
 ```python
@@ -1806,7 +1807,7 @@ for batch in LTSeq.scan("huge.csv"):
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` 等 | `EXTRACT(YEAR FROM col)` 等 |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
-| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other)` | `col - other`，以天计（日期即 `DATEDIFF('day', other, col)`） |
 | `r.col.dt.age()` | 相对 `CURRENT_DATE` 的年差（含年内日修正）|
 | `gcd(a, b)` / `lcm(a, b)` / `factorial(n)` | `GCD` / `LCM` / `FACTORIAL` |
 | `count_if(cond)` | `SUM(CASE WHEN cond THEN 1 ELSE 0 END)` |
