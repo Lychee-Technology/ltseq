@@ -33,6 +33,7 @@ This document describes the API **as currently implemented**. Every signature be
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `TypeError: LTSeq expressions cannot be used in a boolean context` | Used `and`/`or`/`not`/`in`/ternary/chained comparison on a row expression or a group predicate, e.g. `(r.a > 2) and (r.b < 1.5)` or `(g.count() > 2) and (g.sum("x") > 0)` | Combine conditions with `&` `\|` `~`, e.g. `(r.a > 2) & (r.b < 1.5)` or `(g.count() > 2) & (g.sum("x") > 0)`. Instead of `in`: row expressions use `.is_in([...])`; group predicates have no `is_in`, so combine `==` comparisons with `\|`, e.g. `(g.count() == 1) \| (g.count() == 2)` |
+| `TypeError: Unsupported literal type list ...` | A Python value with no literal type (list, dict, `timedelta`, ...) was used in an expression, e.g. `r.a + [1, 2]` | Use a supported literal type (§8 "Literal values"); for membership use `.is_in([...])` |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
@@ -1293,6 +1294,31 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 expr = (r.price * r.qty) > 100
 ```
 
+### Literal values
+Python constants used in expressions (`r.price > 100`, `r.day >= date(2024, 1, 1)`, method arguments) become typed literals. The type is fixed when the lambda is captured, and Rust receives native values; nothing is converted to a string and parsed back.
+
+| Python value | Literal type |
+|---|---|
+| `bool` | `Boolean` |
+| `int` (and numpy integers) | `Int64` |
+| `float` (and numpy floats) | `Float64` |
+| `str` | `Utf8` |
+| `None` | null |
+| `decimal.Decimal` | `Decimal128(precision, scale)`, taken from the value's own digits (`Decimal("1.50")` is `Decimal128(3, 2)`) |
+| `datetime.date` | `Date32` |
+| `datetime.datetime` | `Timestamp(us)`. Naive values stay naive; timezone-aware values are converted to their UTC instant and tagged `UTC`. A `pandas.Timestamp` with a nonzero sub-microsecond remainder uses `Timestamp(ns)` so that precision is preserved |
+
+- **Exceptions**: `TypeError` naming the type for any other value (list, tuple, dict, set, bytes, `timedelta`, `Fraction`, arbitrary objects), raised inside the lambda where the value is used. `ValueError` for an `int` outside the Int64 range, a NaN or infinite `Decimal`, or a `Decimal` with more than 38 digits.
+- **Time zones**: comparisons and arithmetic with an aware `datetime` work by instant against a zoned column, whatever its zone. When `fill_null`, `coalesce`, or `if_else` merges two zoned timestamps, the result takes the zone of the later operand, and an aware literal counts as zoned `UTC`: on a `timestamp[us, tz=America/New_York]` column, `r.ts.fill_null(aware)` comes back as `timestamp[us, tz=UTC]` (same instants, different zone tag). A naive literal keeps the column's zone and is read as wall-clock time in that zone.
+- **Precision**: a `datetime` literal finer than the column's unit (a `pandas.Timestamp` with nanoseconds against `timestamp[us]`, or a `datetime` with microseconds against `timestamp[s]`) is still compared by instant. An aligned literal is converted to the column's unit; an unaligned one lies between two representable values, so `<`/`<=` match the values at or below it, `>`/`>=` the values above it, and `==` / `is_in` match nothing. Arithmetic, `fill_null`, and `if_else` widen the column to the literal's unit instead (`r.ts_us - sub_microsecond_literal` is `duration[ns]`).
+- **Example**:
+```python
+from datetime import date
+from decimal import Decimal
+t.filter(lambda r: (r.amount > Decimal("99.95")) & (r.day >= date(2024, 1, 1)))
+t.filter(lambda r: r.id.is_in([1, 2, 3]))  # lists go through is_in(), not operators
+```
+
 ### `if_else`
 - **Signature**: `if_else(condition: Expr, true_value: Any, false_value: Any) -> Expr`
 - **Behavior**: Conditional expression (SQL CASE WHEN)
@@ -1603,7 +1629,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **Behavior**: Returns the integer difference between `self` and `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`
+- **Behavior**: Returns `self` minus `other` in the specified unit, as a float. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) measure elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days). `month`/`year` subtract the calendar fields and ignore the day. `other` may be a column or a `date`/`datetime` literal
 - **SPL Equivalent**: `interval(t1, t2, unit)`
 - **Example**:
 ```python
@@ -1785,7 +1811,7 @@ All expressions are transpiled to the Rust/DataFusion layer before execution. No
 | `concat_ws(d, ...)` | `CONCAT_WS(d, ...)` |
 | `r.col.dt.year()` etc. | `EXTRACT(YEAR FROM col)` etc. |
 | `r.col.dt.add(days=n)` | `col + INTERVAL 'n' DAY` |
-| `r.col.dt.diff(other)` | `DATEDIFF('day', other, col)` |
+| `r.col.dt.diff(other)` | `col - other` in days (`DATEDIFF('day', other, col)` for dates) |
 | `r.col.dt.age()` | year diff from `CURRENT_DATE` with day-of-year correction |
 | `gcd(a, b)` / `lcm(a, b)` / `factorial(n)` | `GCD` / `LCM` / `FACTORIAL` |
 | `count_if(cond)` | `SUM(CASE WHEN cond THEN 1 ELSE 0 END)` |

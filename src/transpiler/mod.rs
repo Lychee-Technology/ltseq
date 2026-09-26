@@ -23,11 +23,12 @@ pub(crate) mod window_native;
 pub use optimization::optimize_expr;
 pub use window_native::pyexpr_to_window_expr;
 
-use crate::types::PyExpr;
-use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+use crate::types::{LiteralValue, PyExpr};
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema, TimeUnit};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
+use std::sync::Arc;
 
 // String functions
 use datafusion::functions::string::expr_fn::{
@@ -54,48 +55,6 @@ fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, String> {
     // (col() function lowercases column names, which breaks uppercase column names like 'IsOfficial')
     use datafusion::common::Column;
     Ok(Expr::Column(Column::new_unqualified(name)))
-}
-
-/// Parse a literal value based on its dtype into a DataFusion expression
-fn parse_literal_expr(value: &str, dtype: &str) -> Result<Expr, String> {
-    match dtype {
-        "Int64" => {
-            let int_val = value
-                .parse::<i64>()
-                .map_err(|_| format!("Failed to parse '{}' as Int64", value))?;
-            Ok(lit(int_val))
-        }
-        "Int32" => {
-            let int_val = value
-                .parse::<i32>()
-                .map_err(|_| format!("Failed to parse '{}' as Int32", value))?;
-            Ok(lit(int_val))
-        }
-        "Float64" => {
-            let float_val = value
-                .parse::<f64>()
-                .map_err(|_| format!("Failed to parse '{}' as Float64", value))?;
-            Ok(lit(float_val))
-        }
-        "Float32" => {
-            let float_val = value
-                .parse::<f32>()
-                .map_err(|_| format!("Failed to parse '{}' as Float32", value))?;
-            Ok(lit(float_val))
-        }
-        "String" | "Utf8" => Ok(lit(value)),
-        "Boolean" | "Bool" => {
-            // Python uses "True"/"False" (capitalized), Rust expects "true"/"false"
-            let bool_val = match value.to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
-            };
-            Ok(lit(bool_val))
-        }
-        "Null" => Ok(lit(ScalarValue::Null)),
-        _ => Err(format!("Unknown dtype: {}", dtype)),
-    }
 }
 
 /// Map a serialized operator name (shared by the row and group dialects)
@@ -128,14 +87,179 @@ fn parse_binop_expr(
 ) -> Result<Expr, String> {
     let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
     let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
-
     let operator = op_str_to_operator(op)?;
+    Ok(binary_expr(left_expr, operator, right_expr, schema))
+}
 
-    Ok(Expr::BinaryExpr(BinaryExpr::new(
-        Box::new(left_expr),
-        operator,
-        Box::new(right_expr),
-    )))
+/// Build `left op right`, the one binary-expression constructor shared by the
+/// row, window, and group dialects.
+///
+/// A comparison between a timestamp expression and a finer-grained timestamp
+/// literal is planned at the expression's unit (see
+/// `compare_timestamp_at_expr_unit`); everything else is a plain
+/// `BinaryExpr`.
+pub(crate) fn binary_expr(left: Expr, op: Operator, right: Expr, schema: &ArrowSchema) -> Expr {
+    let exact = match (timestamp_literal(&left), timestamp_literal(&right)) {
+        (None, Some(literal)) => compare_timestamp_at_expr_unit(&left, op, &literal, schema),
+        (Some(literal), None) => op
+            .swap()
+            .and_then(|op| compare_timestamp_at_expr_unit(&right, op, &literal, schema)),
+        _ => None,
+    };
+    exact.unwrap_or_else(|| Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right))))
+}
+
+/// A non-null timestamp literal: ticks of `unit` since the epoch.
+struct TimestampLiteral {
+    value: i64,
+    unit: TimeUnit,
+    tz: Option<Arc<str>>,
+}
+
+fn timestamp_literal(expr: &Expr) -> Option<TimestampLiteral> {
+    let Expr::Literal(scalar, _) = expr else {
+        return None;
+    };
+    let (value, unit, tz) = match scalar {
+        ScalarValue::TimestampSecond(Some(v), tz) => (*v, TimeUnit::Second, tz),
+        ScalarValue::TimestampMillisecond(Some(v), tz) => (*v, TimeUnit::Millisecond, tz),
+        ScalarValue::TimestampMicrosecond(Some(v), tz) => (*v, TimeUnit::Microsecond, tz),
+        ScalarValue::TimestampNanosecond(Some(v), tz) => (*v, TimeUnit::Nanosecond, tz),
+        _ => return None,
+    };
+    Some(TimestampLiteral {
+        value,
+        unit,
+        tz: tz.clone(),
+    })
+}
+
+fn timestamp_ticks_per_second(unit: &TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Second => 1,
+        TimeUnit::Millisecond => 1_000,
+        TimeUnit::Microsecond => 1_000_000,
+        TimeUnit::Nanosecond => 1_000_000_000,
+    }
+}
+
+fn timestamp_scalar(unit: &TimeUnit, value: i64, tz: Option<Arc<str>>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), tz),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), tz),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), tz),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), tz),
+    }
+}
+
+/// The unit of `expr` and the tick ratio `literal.unit : expr.unit` when
+/// `expr` plans as a timestamp coarser than the literal. `None` when the
+/// expression is not a timestamp, cannot be typed against the schema, or is
+/// at least as fine as the literal (DataFusion widens the literal losslessly).
+fn coarser_timestamp_unit(
+    expr: &Expr,
+    literal: &TimestampLiteral,
+    schema: &ArrowSchema,
+) -> Option<(TimeUnit, i64)> {
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::ExprSchemable;
+
+    let df_schema = DFSchema::try_from(schema.clone()).ok()?;
+    let DataType::Timestamp(expr_unit, _) = expr.get_type(&df_schema).ok()? else {
+        return None;
+    };
+    let ratio = timestamp_ticks_per_second(&literal.unit) / timestamp_ticks_per_second(&expr_unit);
+    (ratio > 1).then_some((expr_unit, ratio))
+}
+
+/// `verdict` wherever `expr` is not null, null where it is: the result of an
+/// equality test that no value can satisfy, with SQL's null semantics kept.
+fn never_equal(expr: Expr, verdict: bool) -> Expr {
+    Expr::Case(datafusion::logical_expr::Case::new(
+        None,
+        vec![(
+            Box::new(expr.is_null()),
+            Box::new(lit(ScalarValue::Boolean(None))),
+        )],
+        Some(Box::new(lit(verdict))),
+    ))
+}
+
+/// Compare a timestamp expression with a finer-grained timestamp literal at
+/// the expression's own unit.
+///
+/// DataFusion coerces `ts_us < lit_ns` by casting the column to nanoseconds,
+/// and its simplifier then moves that cast onto the literal by dividing the
+/// literal's ticks without checking the remainder (`cast_between_timestamp`
+/// in datafusion-expr-common 55), so `ts_us < 1.0000005s` ran as
+/// `ts_us < 1.000000s`. Planning the comparison at the expression's unit keeps
+/// it exact: an aligned literal is converted as is; an unaligned one lies
+/// strictly between two representable values, so the ordering operators use
+/// the floor with `<`/`<=` becoming `<= floor` and `>`/`>=` becoming
+/// `> floor`, and no value can equal it.
+///
+/// Returns `None`, leaving the ordinary binary expression in place, when the
+/// operator is not a comparison or the expression is not a coarser timestamp
+/// (see `coarser_timestamp_unit`).
+fn compare_timestamp_at_expr_unit(
+    expr: &Expr,
+    op: Operator,
+    literal: &TimestampLiteral,
+    schema: &ArrowSchema,
+) -> Option<Expr> {
+    if !matches!(
+        op,
+        Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq
+    ) {
+        return None;
+    }
+    let (expr_unit, ratio) = coarser_timestamp_unit(expr, literal, schema)?;
+    let floor = literal.value.div_euclid(ratio);
+    let aligned = literal.value.rem_euclid(ratio) == 0;
+    let bound = lit(timestamp_scalar(&expr_unit, floor, literal.tz.clone()));
+    let expr = expr.clone();
+    if aligned {
+        return Some(Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(expr),
+            op,
+            Box::new(bound),
+        )));
+    }
+    Some(match op {
+        Operator::Lt | Operator::LtEq => expr.lt_eq(bound),
+        Operator::Gt | Operator::GtEq => expr.gt(bound),
+        _ => never_equal(expr, op == Operator::NotEq),
+    })
+}
+
+/// `expr IN (list)` with the same treatment of finer-grained timestamp
+/// literals as `compare_timestamp_at_expr_unit`: an aligned literal is
+/// converted to the expression's unit, an unaligned one can equal nothing and
+/// is dropped, and a list emptied that way is false for non-null values.
+fn in_list_at_expr_unit(expr: Expr, list: Vec<Expr>, schema: &ArrowSchema) -> Expr {
+    let mut kept = Vec::with_capacity(list.len());
+    for item in list {
+        let finer = timestamp_literal(&item)
+            .and_then(|l| coarser_timestamp_unit(&expr, &l, schema).map(|(u, r)| (l, u, r)));
+        match finer {
+            Some((literal, unit, ratio)) => {
+                if literal.value.rem_euclid(ratio) == 0 {
+                    let value = literal.value.div_euclid(ratio);
+                    kept.push(lit(timestamp_scalar(&unit, value, literal.tz)));
+                }
+            }
+            None => kept.push(item),
+        }
+    }
+    if kept.is_empty() {
+        return never_equal(expr, false);
+    }
+    expr.in_list(kept, false)
 }
 
 /// Parse a unary operation into a DataFusion expression
@@ -148,7 +272,7 @@ fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result
 }
 
 /// Check if the "on" field is an empty column (standalone function call with on=None)
-fn is_on_empty(on: &PyExpr) -> bool {
+pub(super) fn is_on_empty(on: &PyExpr) -> bool {
     matches!(on, PyExpr::Column(name) if name.is_empty())
 }
 
@@ -325,10 +449,13 @@ fn parse_call_math(
                     use datafusion::functions::math::expr_fn::ln;
                     Ok(ln(input))
                 }
-                Some(PyExpr::Literal { value, .. }) => {
-                    let base_val = value
-                        .parse::<f64>()
-                        .map_err(|_| format!("log() base must be a number, got '{}'", value))?;
+                Some(PyExpr::Literal(value)) => {
+                    let base_val = value.as_f64().ok_or_else(|| {
+                        format!(
+                            "log() base must be a number, got a {} literal",
+                            value.dtype()
+                        )
+                    })?;
                     if (base_val - 10.0_f64).abs() < 1e-9 {
                         use datafusion::functions::math::expr_fn::log10;
                         Ok(log10(input))
@@ -462,7 +589,7 @@ fn parse_call_type_ops(
                 return Err("cast requires a target type argument".to_string());
             }
             let target_type = match &args[0] {
-                PyExpr::Literal { value, .. } => value.clone(),
+                PyExpr::Literal(LiteralValue::String(value)) => value.as_str(),
                 _ => return Err("cast target type must be a string literal".to_string()),
             };
             let arrow_type = match target_type.to_lowercase().as_str() {
@@ -489,7 +616,7 @@ fn parse_call_type_ops(
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(on_expr.in_list(list_exprs, false))
+            Ok(in_list_at_expr_unit(on_expr, list_exprs, schema))
         }
         _ => Err(format!("Not a type operation: {}", func)),
     }
@@ -777,9 +904,7 @@ fn parse_call_temporal(
 
             let parse_lit_i64 = |arg: &PyExpr, name: &str| -> Result<i64, String> {
                 match arg {
-                    PyExpr::Literal { value, .. } => value
-                        .parse::<i64>()
-                        .map_err(|_| format!("dt_add {name} must be a literal integer")),
+                    PyExpr::Literal(LiteralValue::Int64(value)) => Ok(*value),
                     _ => Err(format!("dt_add {name} must be a literal integer")),
                 }
             };
@@ -813,7 +938,13 @@ fn parse_call_temporal(
 
             let unit = if args.len() > 1 {
                 match &args[1] {
-                    PyExpr::Literal { value, .. } => value.to_lowercase(),
+                    PyExpr::Literal(LiteralValue::String(value)) => value.to_lowercase(),
+                    PyExpr::Literal(other) => {
+                        return Err(format!(
+                            "dt_diff unit must be a string, got a {} literal",
+                            other.dtype()
+                        ))
+                    }
                     _ => "day".to_string(),
                 }
             } else {
@@ -821,15 +952,7 @@ fn parse_call_temporal(
             };
 
             match unit.as_str() {
-                "day" | "days" => {
-                    // Date - Date returns Int64 (days) directly in DataFusion 53+;
-                    // no need for date_part, just cast to Float64 for consistency
-                    let diff_expr = on_expr - other_expr;
-                    Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    )))
-                }
+                "day" | "days" => dt_elapsed(on_expr, other_expr, schema, 86_400),
                 "month" | "months" => {
                     // (year(on) - year(other)) * 12 + (month(on) - month(other))
                     let on_year = date_part(lit("year"), on_expr.clone());
@@ -843,33 +966,9 @@ fn parse_call_temporal(
                     let other_year = date_part(lit("year"), other_expr);
                     Ok(on_year - other_year)
                 }
-                "hour" | "hours" => {
-                    // Date - Date returns Int64 (days); hours = days * 24
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(24_f64))
-                }
-                "minute" | "minutes" => {
-                    // Date - Date returns Int64 (days); minutes = days * 1440
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(1440_f64))
-                }
-                "second" | "seconds" => {
-                    // Date - Date returns Int64 (days); seconds = days * 86400
-                    let diff_expr = on_expr - other_expr;
-                    let diff_days = Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(diff_expr),
-                        DataType::Float64,
-                    ));
-                    Ok(diff_days * lit(86400_f64))
-                }
+                "hour" | "hours" => dt_elapsed(on_expr, other_expr, schema, 3_600),
+                "minute" | "minutes" => dt_elapsed(on_expr, other_expr, schema, 60),
+                "second" | "seconds" => dt_elapsed(on_expr, other_expr, schema, 1),
                 _ => Err(format!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",
                     unit
@@ -981,7 +1080,7 @@ pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Exp
 fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, schema),
-        PyExpr::Literal { value, dtype } => parse_literal_expr(&value, &dtype),
+        PyExpr::Literal(value) => Ok(lit(value.to_scalar_value())),
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
         PyExpr::Call { func, on, args, .. } => parse_call_expr(&func, *on, args, schema),
@@ -1117,6 +1216,54 @@ fn validate_string_column(
     Ok(())
 }
 
+/// Elapsed time `on - other` in a fixed-length unit of `unit_seconds`, as Float64.
+///
+/// DataFusion types the subtraction by its operands: two dates give an Int64
+/// day count, and anything involving a timestamp gives a Duration in the
+/// coerced time unit. The tick length is read from that planned type, so a
+/// date pair and a timestamp pair (column or literal) both report the unit
+/// asked for. The integer factor between tick and unit keeps whole-day date
+/// differences exact.
+fn dt_elapsed(
+    on_expr: Expr,
+    other_expr: Expr,
+    schema: &ArrowSchema,
+    unit_seconds: i64,
+) -> Result<Expr, String> {
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::ExprSchemable;
+
+    let diff_expr = on_expr - other_expr;
+    let df_schema = DFSchema::try_from(schema.clone()).map_err(|e| format!("dt_diff: {e}"))?;
+    let diff_type = diff_expr
+        .get_type(&df_schema)
+        .map_err(|e| format!("dt_diff: {e}"))?;
+    let tick_nanos: i64 = match diff_type {
+        DataType::Int64 => 86_400 * 1_000_000_000,
+        DataType::Duration(TimeUnit::Second) => 1_000_000_000,
+        DataType::Duration(TimeUnit::Millisecond) => 1_000_000,
+        DataType::Duration(TimeUnit::Microsecond) => 1_000,
+        DataType::Duration(TimeUnit::Nanosecond) => 1,
+        other => {
+            return Err(format!(
+                "dt_diff cannot measure a difference of type {other:?}; \
+                 both sides must be dates or timestamps"
+            ))
+        }
+    };
+    let unit_nanos = unit_seconds * 1_000_000_000;
+    let ticks = Expr::Cast(datafusion::logical_expr::Cast::new(
+        Box::new(diff_expr),
+        DataType::Float64,
+    ));
+    // Both lengths are whole seconds or whole days, so one divides the other.
+    Ok(if tick_nanos >= unit_nanos {
+        ticks * lit((tick_nanos / unit_nanos) as f64)
+    } else {
+        ticks / lit((unit_nanos / tick_nanos) as f64)
+    })
+}
+
 /// Validate that a column is a temporal type
 fn validate_temporal_column(
     on: &PyExpr,
@@ -1160,11 +1307,12 @@ mod tests {
         PyExpr::Column(name.to_string())
     }
 
-    fn lit_expr(value: &str, dtype: &str) -> PyExpr {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: dtype.to_string(),
-        }
+    fn int_lit(value: i64) -> PyExpr {
+        PyExpr::Literal(LiteralValue::Int64(value))
+    }
+
+    fn str_lit(value: &str) -> PyExpr {
+        PyExpr::Literal(LiteralValue::String(value.to_string()))
     }
 
     fn call_expr(func: &str, on: PyExpr, args: Vec<PyExpr>) -> PyExpr {
@@ -1211,48 +1359,183 @@ mod tests {
         }
     }
 
-    // ---- parse_literal_expr: every dtype branch ----
+    // ---- timestamp literal vs coarser timestamp expression: exact at the
+    // expression's unit, so DataFusion never divides the literal's ticks ----
 
     #[test]
-    fn literal_dtype_table() {
+    fn timestamp_literal_compares_at_the_column_unit() {
+        use datafusion::arrow::datatypes::TimeUnit;
+
+        let schema = ArrowSchema::new(vec![
+            Field::new("s", DataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new("us", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("ns", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+        ]);
+        let column = |name: &str| Expr::Column(Column::new_unqualified(name));
+        let ns_lit =
+            |value: i64| PyExpr::Literal(LiteralValue::TimestampNanosecond { value, tz: None });
+        let us_lit =
+            |value: i64| PyExpr::Literal(LiteralValue::TimestampMicrosecond { value, tz: None });
+        let us_scalar = |v: i64| lit(ScalarValue::TimestampMicrosecond(Some(v), None));
+        let s_scalar = |v: i64| lit(ScalarValue::TimestampSecond(Some(v), None));
+        let binop = |op: &str, left: PyExpr, right: PyExpr| PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let never_equal = |name: &str, verdict: bool| {
+            when(column(name).is_null(), lit(ScalarValue::Boolean(None)))
+                .otherwise(lit(verdict))
+                .unwrap()
+        };
+
         let table = [
-            ("42", "Int64", lit(42_i64)),
-            ("-7", "Int32", lit(-7_i32)),
-            ("2.5", "Float64", lit(2.5_f64)),
-            ("1.5", "Float32", lit(1.5_f32)),
-            ("hello", "String", lit("hello")),
-            ("hello", "Utf8", lit("hello")),
-            ("True", "Boolean", lit(true)),
-            ("False", "Boolean", lit(false)),
-            ("true", "Bool", lit(true)),
-            ("false", "Bool", lit(false)),
-            ("", "Null", lit(ScalarValue::Null)),
+            // 1.0000005 s lies between two microseconds: floor and adjust the operator.
+            (
+                "Lt",
+                ns_lit(1_000_000_500),
+                column("us").lt_eq(us_scalar(1_000_000)),
+            ),
+            (
+                "Le",
+                ns_lit(1_000_000_500),
+                column("us").lt_eq(us_scalar(1_000_000)),
+            ),
+            (
+                "Gt",
+                ns_lit(1_000_000_500),
+                column("us").gt(us_scalar(1_000_000)),
+            ),
+            (
+                "Ge",
+                ns_lit(1_000_000_500),
+                column("us").gt(us_scalar(1_000_000)),
+            ),
+            ("Eq", ns_lit(1_000_000_500), never_equal("us", false)),
+            ("Ne", ns_lit(1_000_000_500), never_equal("us", true)),
+            // A negative unaligned instant floors towards -inf, not towards zero.
+            ("Lt", ns_lit(-500), column("us").lt_eq(us_scalar(-1))),
+            // An aligned literal converts exactly and keeps its operator.
+            (
+                "Lt",
+                ns_lit(1_000_001_000),
+                column("us").lt(us_scalar(1_000_001)),
+            ),
+            (
+                "Eq",
+                ns_lit(1_000_001_000),
+                column("us").eq(us_scalar(1_000_001)),
+            ),
         ];
-        for (value, dtype, expected) in table {
+        for (op, literal, expected) in table {
+            let expr = pyexpr_to_datafusion(binop(op, col_expr("us"), literal), &schema).unwrap();
+            assert_eq!(expr, expected, "us {op} ns literal");
+        }
+
+        // The same applies to a microsecond literal against a second column ...
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", col_expr("s"), us_lit(1_500_000)), &schema).unwrap();
+        assert_eq!(expr, column("s").lt_eq(s_scalar(1)));
+        // ... and with the literal on the left, the operator is mirrored.
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", us_lit(1_500_000), col_expr("s")), &schema).unwrap();
+        assert_eq!(expr, column("s").gt(s_scalar(1)));
+
+        // A literal that is not finer than the column is left to DataFusion, which
+        // widens it losslessly; so is arithmetic.
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", col_expr("ns"), us_lit(1_500_000)), &schema).unwrap();
+        assert_eq!(expr, column("ns").lt(us_scalar(1_500_000)));
+        let expr =
+            pyexpr_to_datafusion(binop("Sub", col_expr("us"), ns_lit(1_000_000_500)), &schema)
+                .unwrap();
+        assert_eq!(
+            expr,
+            column("us") - lit(ScalarValue::TimestampNanosecond(Some(1_000_000_500), None))
+        );
+
+        // `is_in` converts aligned literals and drops unaligned ones.
+        let is_in = |values: Vec<PyExpr>| call_expr("is_in", col_expr("us"), values);
+        let expr = pyexpr_to_datafusion(
+            is_in(vec![ns_lit(1_000_000_500), ns_lit(1_000_001_000)]),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(
+            expr,
+            column("us").in_list(vec![us_scalar(1_000_001)], false)
+        );
+        let expr = pyexpr_to_datafusion(is_in(vec![ns_lit(1_000_000_500)]), &schema).unwrap();
+        assert_eq!(expr, never_equal("us", false));
+    }
+
+    // ---- literals: typed values become DataFusion literals unchanged ----
+
+    #[test]
+    fn literal_transpiles_to_its_scalar() {
+        let schema = test_schema();
+        let table = [
+            (LiteralValue::Int64(42), lit(42_i64)),
+            (LiteralValue::Float64(2.5), lit(2.5_f64)),
+            (LiteralValue::String("hello".into()), lit("hello")),
+            (LiteralValue::Boolean(true), lit(true)),
+            (LiteralValue::Null, lit(ScalarValue::Null)),
+            (
+                LiteralValue::Decimal128 {
+                    value: 15,
+                    precision: 2,
+                    scale: 1,
+                },
+                lit(ScalarValue::Decimal128(Some(15), 2, 1)),
+            ),
+            (
+                LiteralValue::Date32(19723),
+                lit(ScalarValue::Date32(Some(19723))),
+            ),
+            (
+                LiteralValue::TimestampMicrosecond {
+                    value: 1,
+                    tz: Some("UTC".into()),
+                },
+                lit(ScalarValue::TimestampMicrosecond(Some(1), Some("UTC".into()))),
+            ),
+            (
+                LiteralValue::TimestampNanosecond { value: 1, tz: None },
+                lit(ScalarValue::TimestampNanosecond(Some(1), None)),
+            ),
+        ];
+        for (value, expected) in table {
+            let label = format!("{value:?}");
             assert_eq!(
-                parse_literal_expr(value, dtype),
+                pyexpr_to_datafusion(PyExpr::Literal(value), &schema),
                 Ok(expected),
-                "literal {value}:{dtype}"
+                "{label}"
             );
         }
     }
 
     #[test]
-    fn literal_parse_failures() {
-        let table = [
-            ("abc", "Int64", "Failed to parse"),
-            ("1.5", "Int64", "Failed to parse"),
-            ("abc", "Int32", "Failed to parse"),
-            ("abc", "Float64", "Failed to parse"),
-            ("abc", "Float32", "Failed to parse"),
-            ("maybe", "Boolean", "Failed to parse"),
-            ("1", "Decimal128", "Unknown dtype"),
-            ("x", "", "Unknown dtype"),
-        ];
-        for (value, dtype, expected_msg) in table {
-            let err = parse_literal_expr(value, dtype).unwrap_err();
-            assert!(err.contains(expected_msg), "literal {value}:{dtype}: {err}");
-        }
+    fn literal_arguments_require_their_declared_type() {
+        let schema = test_schema();
+        // A literal's declared type is authoritative: nothing re-parses a
+        // string as a number or a number as a string.
+        let err = pyexpr_to_datafusion(call_expr("cast", col_expr("a"), vec![int_lit(1)]), &schema)
+            .unwrap_err();
+        assert!(
+            err.contains("cast target type must be a string literal"),
+            "{err}"
+        );
+
+        let err = pyexpr_to_datafusion(
+            call_expr(
+                "dt_add",
+                col_expr("d"),
+                vec![str_lit("1"), int_lit(0), int_lit(0)],
+            ),
+            &schema,
+        )
+        .unwrap_err();
+        assert!(err.contains("dt_add days must be a literal integer"), "{err}");
     }
 
     // ---- pyexpr_to_datafusion: structure and error classification ----
@@ -1278,7 +1561,7 @@ mod tests {
             PyExpr::BinOp {
                 op: "Gt".to_string(),
                 left: Box::new(col_expr("a")),
-                right: Box::new(lit_expr("5", "Int64")),
+                right: Box::new(int_lit(5)),
             },
             &schema,
         )

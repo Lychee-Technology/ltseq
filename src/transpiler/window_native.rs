@@ -19,7 +19,7 @@
 //! When `partition_by` is specified, any sort expression that matches a partition
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
@@ -55,9 +55,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
         _ => return vec![],
     };
     match kwargs.get("partition_by") {
-        Some(PyExpr::Literal { value, dtype }) if dtype == "String" || dtype == "Utf8" => {
-            vec![value.clone()]
-        }
+        Some(PyExpr::Literal(LiteralValue::String(value))) => vec![value.clone()],
         Some(PyExpr::Column(name)) => vec![name.clone()],
         _ => vec![],
     }
@@ -66,7 +64,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
 /// Extract `partition_by` from kwargs and convert to `Vec<Expr>`.
 ///
 /// Handles these forms from the Python side:
-/// - `partition_by="col"` → `PyExpr::Literal { value: "col", dtype: "String" }` → `col("col")`
+/// - `partition_by="col"` → `PyExpr::Literal(LiteralValue::String("col"))` → `col("col")`
 /// - `partition_by=r.col` → `PyExpr::Column("col")` → `col("col")`
 ///
 /// Returns an empty Vec if no `partition_by` kwarg is present.
@@ -80,9 +78,7 @@ fn extract_partition_by(
     };
     match pb {
         // partition_by="col_name" — string literal used as column name
-        PyExpr::Literal { value, dtype } if dtype == "String" || dtype == "Utf8" => {
-            Ok(vec![col(value)])
-        }
+        PyExpr::Literal(LiteralValue::String(value)) => Ok(vec![col(value)]),
         // partition_by=r.col — column expression
         PyExpr::Column(name) => Ok(vec![col(name)]),
         // Any other expression — try converting through the standard path
@@ -259,10 +255,10 @@ fn convert_shift(
         // Get offset (default 1)
         let offset: i64 = if args.is_empty() {
             1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
+        } else if let PyExpr::Literal(value) = &args[0] {
             value
-                .parse::<i64>()
-                .map_err(|_| "shift() offset must be an integer".to_string())?
+                .as_i64()
+                .ok_or_else(|| "shift() offset must be an integer".to_string())?
         } else {
             return Err("shift() offset must be a literal integer".to_string());
         };
@@ -270,10 +266,7 @@ fn convert_shift(
         // Get optional default value
         let default_value = if let Some(default_expr) = kwargs.get("default") {
             match default_expr {
-                PyExpr::Literal { value, dtype } => {
-                    let sv = literal_to_scalar_value(value, dtype)?;
-                    Some(sv)
-                }
+                PyExpr::Literal(value) => Some(value.to_scalar_value()),
                 _ => None,
             }
         } else {
@@ -309,10 +302,10 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
         // Get periods (default 1)
         let periods: i64 = if args.is_empty() {
             1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
+        } else if let PyExpr::Literal(value) = &args[0] {
             value
-                .parse::<i64>()
-                .map_err(|_| "diff() periods must be an integer".to_string())?
+                .as_i64()
+                .ok_or_else(|| "diff() periods must be an integer".to_string())?
         } else {
             return Err("diff() periods must be a literal integer".to_string());
         };
@@ -385,10 +378,10 @@ fn convert_rolling_agg(
             // Get window size from rolling() args
             let window_size: i64 = if inner_args.is_empty() {
                 return Err("rolling() requires a window size".to_string());
-            } else if let PyExpr::Literal { value, .. } = &inner_args[0] {
+            } else if let PyExpr::Literal(value) = &inner_args[0] {
                 value
-                    .parse::<i64>()
-                    .map_err(|_| "rolling() window size must be an integer".to_string())?
+                    .as_i64()
+                    .ok_or_else(|| "rolling() window size must be an integer".to_string())?
             } else {
                 return Err("rolling() window size must be a literal integer".to_string());
             };
@@ -491,10 +484,10 @@ fn convert_window_ranking(
                 if args.is_empty() {
                     return Err("ntile() requires a bucket count argument".to_string());
                 }
-                if let PyExpr::Literal { value, .. } = &args[0] {
+                if let PyExpr::Literal(value) = &args[0] {
                     let n = value
-                        .parse::<i64>()
-                        .map_err(|_| "ntile() bucket count must be an integer".to_string())?;
+                        .as_i64()
+                        .ok_or_else(|| "ntile() bucket count must be an integer".to_string())?;
                     ntile(lit(n))
                 } else {
                     return Err("ntile() bucket count must be a literal integer".to_string());
@@ -667,12 +660,9 @@ fn convert_expr_with_window_children(
             };
 
             let operator = crate::transpiler::op_str_to_operator(&op)?;
-
-            Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                Box::new(left_expr),
-                operator,
-                Box::new(right_expr),
-            )))
+            Ok(crate::transpiler::binary_expr(
+                left_expr, operator, right_expr, schema,
+            ))
         }
         PyExpr::UnaryOp { op, operand } => {
             let operand_expr = if contains_window_function(&operand) {
@@ -754,63 +744,40 @@ fn convert_expr_with_window_children(
                         .otherwise(false_expr)
                         .map_err(|e| format!("Failed to create CASE expression: {}", e))
                 }
-                "abs" => {
-                    // abs(x) where x might contain window functions
-                    if args.is_empty() {
-                        return Err("abs() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
+                "abs" | "ceil" | "floor" | "round" => {
+                    use datafusion::functions::math::expr_fn::{abs, ceil, floor, round};
+                    // Same operand layout as the row transpiler: the method
+                    // form `x.round(2)` carries the input in `on` and the
+                    // decimals in args[0]; the standalone form `abs(x)` has
+                    // an empty `on` and carries the input in args[0].
+                    let (input, rest) = if super::is_on_empty(&on) {
+                        let (first, rest) = args
+                            .split_first()
+                            .ok_or_else(|| format!("{}() requires an argument", func))?;
+                        (first.clone(), rest)
                     } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
+                        (*on, args.as_slice())
                     };
-                    Ok(datafusion::functions::math::expr_fn::abs(arg_expr))
-                }
-                "ceil" => {
-                    if args.is_empty() {
-                        return Err("ceil() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::ceil(arg_expr))
-                }
-                "floor" => {
-                    if args.is_empty() {
-                        return Err("floor() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::floor(arg_expr))
-                }
-                "round" => {
-                    if args.is_empty() {
-                        return Err("round() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    // round takes (value, decimal_places)
-                    let decimals = if args.len() > 1 {
-                        if let PyExpr::Literal { value, .. } = &args[1] {
-                            value.parse::<i64>().unwrap_or(0)
+                    let lower = |e: PyExpr| {
+                        if contains_window_function(&e) {
+                            pyexpr_to_window_inner(e, schema, order_by)
                         } else {
-                            0
+                            pyexpr_to_datafusion(e, schema)
                         }
-                    } else {
-                        0
                     };
-                    Ok(datafusion::functions::math::expr_fn::round(vec![
-                        arg_expr,
-                        lit(decimals),
-                    ]))
+                    let input = lower(input)?;
+                    Ok(match func.as_str() {
+                        "abs" => abs(input),
+                        "ceil" => ceil(input),
+                        "floor" => floor(input),
+                        _ => {
+                            let decimals = match rest.first() {
+                                Some(d) => lower(d.clone())?,
+                                None => lit(0i64),
+                            };
+                            round(vec![input, decimals])
+                        }
+                    })
                 }
                 _ => {
                     // For other function calls, try to handle as non-window
@@ -827,46 +794,5 @@ fn convert_expr_with_window_children(
         }
         // For non-window expressions, use the standard converter
         other => pyexpr_to_datafusion(other, schema),
-    }
-}
-
-/// Convert literal value string + dtype to ScalarValue
-fn literal_to_scalar_value(value: &str, dtype: &str) -> Result<ScalarValue, String> {
-    match dtype {
-        "Int64" => {
-            let v = value
-                .parse::<i64>()
-                .map_err(|_| format!("Failed to parse '{}' as Int64", value))?;
-            Ok(ScalarValue::Int64(Some(v)))
-        }
-        "Int32" => {
-            let v = value
-                .parse::<i32>()
-                .map_err(|_| format!("Failed to parse '{}' as Int32", value))?;
-            Ok(ScalarValue::Int32(Some(v)))
-        }
-        "Float64" => {
-            let v = value
-                .parse::<f64>()
-                .map_err(|_| format!("Failed to parse '{}' as Float64", value))?;
-            Ok(ScalarValue::Float64(Some(v)))
-        }
-        "Float32" => {
-            let v = value
-                .parse::<f32>()
-                .map_err(|_| format!("Failed to parse '{}' as Float32", value))?;
-            Ok(ScalarValue::Float32(Some(v)))
-        }
-        "String" | "Utf8" => Ok(ScalarValue::Utf8(Some(value.to_string()))),
-        "Boolean" | "Bool" => {
-            let b = match value.to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
-            };
-            Ok(ScalarValue::Boolean(Some(b)))
-        }
-        "Null" => Ok(ScalarValue::Null),
-        _ => Err(format!("Unknown dtype for ScalarValue: {}", dtype)),
     }
 }
