@@ -48,23 +48,43 @@ def _encode_decimal(value: Decimal) -> dict[str, Any]:
 
 
 def _encode_datetime(value: datetime) -> dict[str, Any]:
-    """Encode a datetime as microseconds since the Unix epoch.
+    """Encode a datetime as microseconds, or nanoseconds when needed.
 
     Naive datetimes stay naive. Aware datetimes are normalized to their UTC
     instant, so they compare correctly against any timezone-aware column.
+    ``pandas.Timestamp`` exposes any sub-microsecond remainder separately; when
+    present, encode the instant at nanosecond resolution instead of truncating it.
     """
     if value != value:  # pandas.NaT subclasses datetime but is a missing value
         raise ValueError(f"{value!r} is not a supported literal; use None for a null value")
-    if value.utcoffset() is None:
+    aware = value.utcoffset() is not None
+    delta = (
+        value - _EPOCH_UTC
+        if aware
+        else value.replace(tzinfo=None) - _EPOCH_NAIVE
+    )
+    microseconds = int(delta // _ONE_MICROSECOND)
+    tz = "UTC" if aware else None
+
+    # pandas.Timestamp is a datetime subclass, but its .nanosecond property
+    # carries the 0–999 ns remainder beyond the ordinary microsecond field.
+    submicrosecond_ns = int(getattr(value, "nanosecond", 0))
+    if submicrosecond_ns:
+        nanoseconds = microseconds * 1_000 + submicrosecond_ns
+        if not _INT64_MIN <= nanoseconds <= _INT64_MAX:
+            raise ValueError(
+                f"Nanosecond timestamp literal {value!r} is outside the Int64 range"
+            )
         return {
-            "value": (value.replace(tzinfo=None) - _EPOCH_NAIVE) // _ONE_MICROSECOND,
-            "dtype": "TimestampMicrosecond",
-            "tz": None,
+            "value": nanoseconds,
+            "dtype": "TimestampNanosecond",
+            "tz": tz,
         }
+
     return {
-        "value": (value - _EPOCH_UTC) // _ONE_MICROSECOND,
+        "value": microseconds,
         "dtype": "TimestampMicrosecond",
-        "tz": "UTC",
+        "tz": tz,
     }
 
 

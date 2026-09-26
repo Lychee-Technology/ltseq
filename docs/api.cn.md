@@ -1303,10 +1303,11 @@ expr = (r.price * r.qty) > 100
 | `None` | null |
 | `decimal.Decimal` | `Decimal128(precision, scale)`，取自值本身的数字位（`Decimal("1.50")` 即 `Decimal128(3, 2)`） |
 | `datetime.date` | `Date32` |
-| `datetime.datetime` | `Timestamp(us)`。naive 值保持 naive；带时区的值换算为 UTC 时刻并标记为 `UTC` |
+| `datetime.datetime` | `Timestamp(us)`。naive 值保持 naive；带时区的值换算为 UTC 时刻并标记为 `UTC`。当 `pandas.Timestamp` 带有非零的亚微秒余量时，使用 `Timestamp(ns)` 保留精度 |
 
 - **异常**: 其他任何值（list、tuple、dict、set、bytes、`timedelta`、`Fraction`、任意对象）抛出指明类型的 `TypeError`，在 lambda 内使用该值处抛出。超出 Int64 范围的 `int`、NaN 或无穷的 `Decimal`、超过 38 位的 `Decimal` 抛出 `ValueError`。
 - **时区**: 带时区的 `datetime` 与带时区的列（无论何种时区）比较或运算时按时刻计算。`fill_null`、`coalesce`、`if_else` 合并两个带时区的时间戳时，结果取后一个操作数的时区，而带时区的字面量视为 `UTC` 时区：在 `timestamp[us, tz=America/New_York]` 列上，`r.ts.fill_null(aware)` 的结果是 `timestamp[us, tz=UTC]`（时刻相同，时区标记不同）。naive 字面量保留列的时区，并按该时区的本地时间解释。
+- **精度**: 比列的时间单位更精细的 `datetime` 字面量（带纳秒的 `pandas.Timestamp` 对 `timestamp[us]` 列，或带微秒的 `datetime` 对 `timestamp[s]` 列）仍按时刻比较。能整除的字面量直接换算为列的单位；不能整除的字面量落在两个可表示值之间，因此 `<`/`<=` 匹配不高于它的值，`>`/`>=` 匹配高于它的值，`==` 和 `is_in` 不匹配任何值。算术运算、`fill_null` 和 `if_else` 则把列扩展到字面量的单位（`r.ts_us - 亚微秒字面量` 的类型是 `duration[ns]`）。
 - **示例**:
 ```python
 from datetime import date

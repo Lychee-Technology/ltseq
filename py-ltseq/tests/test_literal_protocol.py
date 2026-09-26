@@ -3,7 +3,8 @@
 Python literals cross the FFI boundary as typed payloads, never as strings that
 Rust re-parses. Unsupported values fail when the literal is created inside the
 user's lambda, naming the offending type; Decimal / date / datetime literals
-travel as Decimal128 / Date32 / TimestampMicrosecond.
+travel as Decimal128 / Date32 / TimestampMicrosecond (or TimestampNanosecond when
+a pandas Timestamp has sub-microsecond precision).
 """
 
 from datetime import date, datetime, timedelta, timezone
@@ -76,6 +77,149 @@ def test_pandas_timestamp_is_a_datetime_literal():
         "dtype": "TimestampMicrosecond",
         "tz": "UTC",
     }
+
+
+@pytest.mark.parametrize(
+    "timestamp, expected_value, expected_tz",
+    [
+        ("1970-01-01 00:00:01.000000500", 1_000_000_500, None),
+        ("1969-12-31 23:59:59.999999500", -500, None),
+        ("1970-01-01 00:00:01.000000500+00:00", 1_000_000_500, "UTC"),
+    ],
+)
+def test_pandas_timestamp_submicrosecond_keeps_nanosecond_precision(
+    timestamp, expected_value, expected_tz
+):
+    pd = pytest.importorskip("pandas")
+    serialized = LiteralExpr(pd.Timestamp(timestamp)).serialize()
+    assert serialized == {
+        "type": "Literal",
+        "value": expected_value,
+        "dtype": "TimestampNanosecond",
+        "tz": expected_tz,
+    }
+
+
+@pytest.fixture
+def ticks():
+    """Ticks around one second, in ns and µs columns; the µs column has the
+    same instants where they are representable."""
+    ns = [1_000_000_001, 1_000_000_499, 1_000_000_500, 1_000_000_501, 1_000_001_000]
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "ns": pa.array(ns, type=pa.timestamp("ns")),
+                "us": pa.array([1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_001], pa.timestamp("us")),
+                "us_ny": pa.array(
+                    [1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_001],
+                    pa.timestamp("us", tz="America/New_York"),
+                ),
+            }
+        )
+    )
+
+
+def _ticks(table: pa.Table, column: str) -> list[int]:
+    return table.column(column).cast(pa.int64()).to_pylist()
+
+
+def test_submicrosecond_pandas_timestamp_filters_nanosecond_column_exactly(ticks):
+    """Flooring the literal to 1.000000 s used to admit all five rows."""
+    pd = pytest.importorskip("pandas")
+    cutoff = pd.Timestamp("1970-01-01 00:00:01.000000500")
+    out = ticks.filter(lambda r: r.ns > cutoff).to_arrow()
+    assert _ticks(out, "ns") == [1_000_000_501, 1_000_001_000]
+
+
+def test_submicrosecond_pandas_timestamp_compares_by_instant_on_microsecond_column(ticks):
+    """A ns literal against a µs column coerces the column, not the literal:
+    1.000000 s is below 1.0000005 s, 1.000001 s is above it."""
+    pd = pytest.importorskip("pandas")
+    cutoff = pd.Timestamp("1970-01-01 00:00:01.000000500")
+    assert _ticks(ticks.filter(lambda r: r.us > cutoff).to_arrow(), "us") == [1_000_001]
+    assert _ticks(ticks.filter(lambda r: r.us < cutoff).to_arrow(), "us") == [1_000_000] * 4
+
+
+def test_aware_submicrosecond_pandas_timestamp_compares_by_instant(ticks):
+    """1970-01-01T05:30:01.0000005+05:30 is 00:00:01.0000005 UTC."""
+    pd = pytest.importorskip("pandas")
+    cutoff = pd.Timestamp("1970-01-01 05:30:01.000000500+05:30")
+    assert _ticks(ticks.filter(lambda r: r.us_ny > cutoff).to_arrow(), "us_ny") == [1_000_001]
+
+
+def test_submicrosecond_pandas_timestamp_equality_on_microsecond_column():
+    """No microsecond equals 1.0000005 s; a null column value stays null."""
+    pd = pytest.importorskip("pandas")
+    cutoff = pd.Timestamp("1970-01-01 00:00:01.000000500")
+    t = LTSeq.from_arrow(
+        pa.table({"us": pa.array([1_000_000, 1_000_001, None], pa.timestamp("us"))})
+    )
+    out = t.derive(eq=lambda r: r.us == cutoff, ne=lambda r: r.us != cutoff).to_arrow()
+    assert out.column("eq").to_pylist() == [False, False, None]
+    assert out.column("ne").to_pylist() == [True, True, None]
+    assert t.filter(lambda r: r.us == cutoff).to_arrow().num_rows == 0
+
+    # is_in is equality against each value: the unaligned cutoff matches nothing,
+    # an aligned one converts exactly.
+    aligned = pd.Timestamp("1970-01-01 00:00:01.000001")
+    out = t.derive(
+        none=lambda r: r.us.is_in([cutoff]), one=lambda r: r.us.is_in([cutoff, aligned])
+    ).to_arrow()
+    assert out.column("none").to_pylist() == [False, False, None]
+    assert out.column("one").to_pylist() == [False, True, None]
+
+
+@pytest.mark.parametrize(
+    "unit, ticks, literal",
+    [
+        ("s", [1, 2], datetime(1970, 1, 1, 0, 0, 1, 500_000)),  # 1.5 s
+        ("ms", [1000, 1001], datetime(1970, 1, 1, 0, 0, 1, 500)),  # 1.0005 s
+    ],
+)
+def test_microsecond_datetime_literal_against_coarser_column_compares_by_instant(
+    unit, ticks, literal
+):
+    """DataFusion 55 divides a finer literal down to the column's unit when it
+    unwraps the comparison cast, so `col < 1.5 s` ran as `col < 1 s` and
+    matched nothing. The comparison is planned at the column's unit instead."""
+    t = LTSeq.from_arrow(pa.table({"ts": pa.array(ticks, pa.timestamp(unit))}))
+    below = t.filter(lambda r: r.ts < literal).to_arrow()
+    above = t.filter(lambda r: r.ts >= literal).to_arrow()
+    assert _ticks(below, "ts") == ticks[:1]
+    assert _ticks(above, "ts") == ticks[1:]
+    assert t.filter(lambda r: r.ts.is_in([literal])).to_arrow().num_rows == 0
+
+
+def test_submicrosecond_pandas_timestamp_against_window_and_group_expressions():
+    """The window and group dialects build their comparisons through the same
+    path as row expressions, so a shifted or aggregated microsecond column is
+    compared at its own unit too."""
+    pd = pytest.importorskip("pandas")
+    cutoff = pd.Timestamp("1970-01-01 00:00:01.000000500")
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "us": pa.array([1_000_000, 1_000_000, 1_000_001, 1_000_001], pa.timestamp("us")),
+                "g": [1, 1, 2, 2],
+            }
+        )
+    ).assume_sorted("us")
+
+    shifted = t.derive(below=lambda r: r.us.shift(1) < cutoff).to_arrow()
+    assert shifted.column("below").to_pylist() == [None, True, True, False]
+
+    groups = t.group_ordered(lambda r: r.g)
+    assert _ticks(groups.filter(lambda g: g.max("us") < cutoff).flatten().to_arrow(), "us") == [
+        1_000_000,
+        1_000_000,
+    ]
+
+
+def test_dt_diff_against_submicrosecond_pandas_timestamp(ticks):
+    pd = pytest.importorskip("pandas")
+    other = pd.Timestamp("1970-01-01 00:00:01.000000500")
+    out = ticks.derive(x=lambda r: r.ns.dt.diff(other, "second")).to_arrow()
+    assert out.column("x").to_pylist() == pytest.approx([-499e-9, -1e-9, 0.0, 1e-9, 500e-9])
 
 
 @pytest.mark.parametrize("value", [2**63, -(2**63) - 1, 2**70])
@@ -449,6 +593,14 @@ def _gt_literal(literal: dict) -> dict:
         (
             {"type": "Literal", "value": 1, "dtype": "TimestampMicrosecond", "tz": 0},
             "TimestampMicrosecond literal 'tz' must be a str or None",
+        ),
+        (
+            {"type": "Literal", "value": 1.0, "dtype": "TimestampNanosecond", "tz": None},
+            "TimestampNanosecond literal 'value' must be an int",
+        ),
+        (
+            {"type": "Literal", "value": 1, "dtype": "TimestampNanosecond", "tz": 0},
+            "TimestampNanosecond literal 'tz' must be a str or None",
         ),
         ({"type": "Literal", "dtype": "Null"}, "Missing field: value"),
         ({"type": "Literal", "value": 0, "dtype": "Null"}, "Null literal 'value' must be None"),

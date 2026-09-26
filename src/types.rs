@@ -35,6 +35,11 @@ pub enum LiteralValue {
         value: i64,
         tz: Option<String>,
     },
+    /// Nanoseconds since the Unix epoch; used when a datetime has sub-microsecond precision.
+    TimestampNanosecond {
+        value: i64,
+        tz: Option<String>,
+    },
 }
 
 impl LiteralValue {
@@ -49,6 +54,7 @@ impl LiteralValue {
             LiteralValue::Decimal128 { .. } => "Decimal128",
             LiteralValue::Date32(_) => "Date32",
             LiteralValue::TimestampMicrosecond { .. } => "TimestampMicrosecond",
+            LiteralValue::TimestampNanosecond { .. } => "TimestampNanosecond",
         }
     }
 
@@ -68,6 +74,9 @@ impl LiteralValue {
             LiteralValue::Date32(v) => ScalarValue::Date32(Some(*v)),
             LiteralValue::TimestampMicrosecond { value, tz } => {
                 ScalarValue::TimestampMicrosecond(Some(*value), tz.as_deref().map(Arc::from))
+            }
+            LiteralValue::TimestampNanosecond { value, tz } => {
+                ScalarValue::TimestampNanosecond(Some(*value), tz.as_deref().map(Arc::from))
             }
         }
     }
@@ -230,6 +239,22 @@ where
         .map_err(|_| literal_field_mismatch(&obj, field, dtype, expected))
 }
 
+/// Decode the common payload fields for timestamp literals at any Arrow unit.
+fn parse_timestamp_payload(
+    dict: &Bound<'_, PyDict>,
+    dtype: &str,
+) -> Result<(i64, Option<String>), PyExprError> {
+    let value = extract_literal_field(
+        dict,
+        "value",
+        dtype,
+        WireType::Int,
+        "an int in the Int64 range",
+    )?;
+    let tz = extract_literal_field(dict, "tz", dtype, WireType::OptionalStr, "a str or None")?;
+    Ok((value, tz))
+}
+
 /// Deserialize a Literal expression by extracting the native type its dtype names.
 fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
     let dtype: String = literal_field(dict, "dtype")?
@@ -306,16 +331,14 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
             WireType::Int,
             "an int in the Int32 range",
         )?),
-        "TimestampMicrosecond" => LiteralValue::TimestampMicrosecond {
-            value: extract_literal_field(
-                dict,
-                "value",
-                &dtype,
-                WireType::Int,
-                "an int in the Int64 range",
-            )?,
-            tz: extract_literal_field(dict, "tz", &dtype, WireType::OptionalStr, "a str or None")?,
-        },
+        "TimestampMicrosecond" => {
+            let (value, tz) = parse_timestamp_payload(dict, &dtype)?;
+            LiteralValue::TimestampMicrosecond { value, tz }
+        }
+        "TimestampNanosecond" => {
+            let (value, tz) = parse_timestamp_payload(dict, &dtype)?;
+            LiteralValue::TimestampNanosecond { value, tz }
+        }
         other => {
             return Err(PyExprError::InvalidType(format!(
                 "Unknown literal dtype: {other}"

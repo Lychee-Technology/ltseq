@@ -24,10 +24,11 @@ pub use optimization::optimize_expr;
 pub use window_native::pyexpr_to_window_expr;
 
 use crate::types::{LiteralValue, PyExpr};
-use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema, TimeUnit};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
+use std::sync::Arc;
 
 // String functions
 use datafusion::functions::string::expr_fn::{
@@ -86,14 +87,179 @@ fn parse_binop_expr(
 ) -> Result<Expr, String> {
     let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
     let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
-
     let operator = op_str_to_operator(op)?;
+    Ok(binary_expr(left_expr, operator, right_expr, schema))
+}
 
-    Ok(Expr::BinaryExpr(BinaryExpr::new(
-        Box::new(left_expr),
-        operator,
-        Box::new(right_expr),
-    )))
+/// Build `left op right`, the one binary-expression constructor shared by the
+/// row, window, and group dialects.
+///
+/// A comparison between a timestamp expression and a finer-grained timestamp
+/// literal is planned at the expression's unit (see
+/// `compare_timestamp_at_expr_unit`); everything else is a plain
+/// `BinaryExpr`.
+pub(crate) fn binary_expr(left: Expr, op: Operator, right: Expr, schema: &ArrowSchema) -> Expr {
+    let exact = match (timestamp_literal(&left), timestamp_literal(&right)) {
+        (None, Some(literal)) => compare_timestamp_at_expr_unit(&left, op, &literal, schema),
+        (Some(literal), None) => op
+            .swap()
+            .and_then(|op| compare_timestamp_at_expr_unit(&right, op, &literal, schema)),
+        _ => None,
+    };
+    exact.unwrap_or_else(|| Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right))))
+}
+
+/// A non-null timestamp literal: ticks of `unit` since the epoch.
+struct TimestampLiteral {
+    value: i64,
+    unit: TimeUnit,
+    tz: Option<Arc<str>>,
+}
+
+fn timestamp_literal(expr: &Expr) -> Option<TimestampLiteral> {
+    let Expr::Literal(scalar, _) = expr else {
+        return None;
+    };
+    let (value, unit, tz) = match scalar {
+        ScalarValue::TimestampSecond(Some(v), tz) => (*v, TimeUnit::Second, tz),
+        ScalarValue::TimestampMillisecond(Some(v), tz) => (*v, TimeUnit::Millisecond, tz),
+        ScalarValue::TimestampMicrosecond(Some(v), tz) => (*v, TimeUnit::Microsecond, tz),
+        ScalarValue::TimestampNanosecond(Some(v), tz) => (*v, TimeUnit::Nanosecond, tz),
+        _ => return None,
+    };
+    Some(TimestampLiteral {
+        value,
+        unit,
+        tz: tz.clone(),
+    })
+}
+
+fn timestamp_ticks_per_second(unit: &TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Second => 1,
+        TimeUnit::Millisecond => 1_000,
+        TimeUnit::Microsecond => 1_000_000,
+        TimeUnit::Nanosecond => 1_000_000_000,
+    }
+}
+
+fn timestamp_scalar(unit: &TimeUnit, value: i64, tz: Option<Arc<str>>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), tz),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), tz),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), tz),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), tz),
+    }
+}
+
+/// The unit of `expr` and the tick ratio `literal.unit : expr.unit` when
+/// `expr` plans as a timestamp coarser than the literal. `None` when the
+/// expression is not a timestamp, cannot be typed against the schema, or is
+/// at least as fine as the literal (DataFusion widens the literal losslessly).
+fn coarser_timestamp_unit(
+    expr: &Expr,
+    literal: &TimestampLiteral,
+    schema: &ArrowSchema,
+) -> Option<(TimeUnit, i64)> {
+    use datafusion::common::DFSchema;
+    use datafusion::logical_expr::ExprSchemable;
+
+    let df_schema = DFSchema::try_from(schema.clone()).ok()?;
+    let DataType::Timestamp(expr_unit, _) = expr.get_type(&df_schema).ok()? else {
+        return None;
+    };
+    let ratio = timestamp_ticks_per_second(&literal.unit) / timestamp_ticks_per_second(&expr_unit);
+    (ratio > 1).then_some((expr_unit, ratio))
+}
+
+/// `verdict` wherever `expr` is not null, null where it is: the result of an
+/// equality test that no value can satisfy, with SQL's null semantics kept.
+fn never_equal(expr: Expr, verdict: bool) -> Expr {
+    Expr::Case(datafusion::logical_expr::Case::new(
+        None,
+        vec![(
+            Box::new(expr.is_null()),
+            Box::new(lit(ScalarValue::Boolean(None))),
+        )],
+        Some(Box::new(lit(verdict))),
+    ))
+}
+
+/// Compare a timestamp expression with a finer-grained timestamp literal at
+/// the expression's own unit.
+///
+/// DataFusion coerces `ts_us < lit_ns` by casting the column to nanoseconds,
+/// and its simplifier then moves that cast onto the literal by dividing the
+/// literal's ticks without checking the remainder (`cast_between_timestamp`
+/// in datafusion-expr-common 55), so `ts_us < 1.0000005s` ran as
+/// `ts_us < 1.000000s`. Planning the comparison at the expression's unit keeps
+/// it exact: an aligned literal is converted as is; an unaligned one lies
+/// strictly between two representable values, so the ordering operators use
+/// the floor with `<`/`<=` becoming `<= floor` and `>`/`>=` becoming
+/// `> floor`, and no value can equal it.
+///
+/// Returns `None`, leaving the ordinary binary expression in place, when the
+/// operator is not a comparison or the expression is not a coarser timestamp
+/// (see `coarser_timestamp_unit`).
+fn compare_timestamp_at_expr_unit(
+    expr: &Expr,
+    op: Operator,
+    literal: &TimestampLiteral,
+    schema: &ArrowSchema,
+) -> Option<Expr> {
+    if !matches!(
+        op,
+        Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq
+    ) {
+        return None;
+    }
+    let (expr_unit, ratio) = coarser_timestamp_unit(expr, literal, schema)?;
+    let floor = literal.value.div_euclid(ratio);
+    let aligned = literal.value.rem_euclid(ratio) == 0;
+    let bound = lit(timestamp_scalar(&expr_unit, floor, literal.tz.clone()));
+    let expr = expr.clone();
+    if aligned {
+        return Some(Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(expr),
+            op,
+            Box::new(bound),
+        )));
+    }
+    Some(match op {
+        Operator::Lt | Operator::LtEq => expr.lt_eq(bound),
+        Operator::Gt | Operator::GtEq => expr.gt(bound),
+        _ => never_equal(expr, op == Operator::NotEq),
+    })
+}
+
+/// `expr IN (list)` with the same treatment of finer-grained timestamp
+/// literals as `compare_timestamp_at_expr_unit`: an aligned literal is
+/// converted to the expression's unit, an unaligned one can equal nothing and
+/// is dropped, and a list emptied that way is false for non-null values.
+fn in_list_at_expr_unit(expr: Expr, list: Vec<Expr>, schema: &ArrowSchema) -> Expr {
+    let mut kept = Vec::with_capacity(list.len());
+    for item in list {
+        let finer = timestamp_literal(&item)
+            .and_then(|l| coarser_timestamp_unit(&expr, &l, schema).map(|(u, r)| (l, u, r)));
+        match finer {
+            Some((literal, unit, ratio)) => {
+                if literal.value.rem_euclid(ratio) == 0 {
+                    let value = literal.value.div_euclid(ratio);
+                    kept.push(lit(timestamp_scalar(&unit, value, literal.tz)));
+                }
+            }
+            None => kept.push(item),
+        }
+    }
+    if kept.is_empty() {
+        return never_equal(expr, false);
+    }
+    expr.in_list(kept, false)
 }
 
 /// Parse a unary operation into a DataFusion expression
@@ -450,7 +616,7 @@ fn parse_call_type_ops(
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(on_expr.in_list(list_exprs, false))
+            Ok(in_list_at_expr_unit(on_expr, list_exprs, schema))
         }
         _ => Err(format!("Not a type operation: {}", func)),
     }
@@ -1064,7 +1230,6 @@ fn dt_elapsed(
     schema: &ArrowSchema,
     unit_seconds: i64,
 ) -> Result<Expr, String> {
-    use datafusion::arrow::datatypes::TimeUnit;
     use datafusion::common::DFSchema;
     use datafusion::logical_expr::ExprSchemable;
 
@@ -1194,6 +1359,116 @@ mod tests {
         }
     }
 
+    // ---- timestamp literal vs coarser timestamp expression: exact at the
+    // expression's unit, so DataFusion never divides the literal's ticks ----
+
+    #[test]
+    fn timestamp_literal_compares_at_the_column_unit() {
+        use datafusion::arrow::datatypes::TimeUnit;
+
+        let schema = ArrowSchema::new(vec![
+            Field::new("s", DataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new("us", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("ns", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
+        ]);
+        let column = |name: &str| Expr::Column(Column::new_unqualified(name));
+        let ns_lit =
+            |value: i64| PyExpr::Literal(LiteralValue::TimestampNanosecond { value, tz: None });
+        let us_lit =
+            |value: i64| PyExpr::Literal(LiteralValue::TimestampMicrosecond { value, tz: None });
+        let us_scalar = |v: i64| lit(ScalarValue::TimestampMicrosecond(Some(v), None));
+        let s_scalar = |v: i64| lit(ScalarValue::TimestampSecond(Some(v), None));
+        let binop = |op: &str, left: PyExpr, right: PyExpr| PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let never_equal = |name: &str, verdict: bool| {
+            when(column(name).is_null(), lit(ScalarValue::Boolean(None)))
+                .otherwise(lit(verdict))
+                .unwrap()
+        };
+
+        let table = [
+            // 1.0000005 s lies between two microseconds: floor and adjust the operator.
+            (
+                "Lt",
+                ns_lit(1_000_000_500),
+                column("us").lt_eq(us_scalar(1_000_000)),
+            ),
+            (
+                "Le",
+                ns_lit(1_000_000_500),
+                column("us").lt_eq(us_scalar(1_000_000)),
+            ),
+            (
+                "Gt",
+                ns_lit(1_000_000_500),
+                column("us").gt(us_scalar(1_000_000)),
+            ),
+            (
+                "Ge",
+                ns_lit(1_000_000_500),
+                column("us").gt(us_scalar(1_000_000)),
+            ),
+            ("Eq", ns_lit(1_000_000_500), never_equal("us", false)),
+            ("Ne", ns_lit(1_000_000_500), never_equal("us", true)),
+            // A negative unaligned instant floors towards -inf, not towards zero.
+            ("Lt", ns_lit(-500), column("us").lt_eq(us_scalar(-1))),
+            // An aligned literal converts exactly and keeps its operator.
+            (
+                "Lt",
+                ns_lit(1_000_001_000),
+                column("us").lt(us_scalar(1_000_001)),
+            ),
+            (
+                "Eq",
+                ns_lit(1_000_001_000),
+                column("us").eq(us_scalar(1_000_001)),
+            ),
+        ];
+        for (op, literal, expected) in table {
+            let expr = pyexpr_to_datafusion(binop(op, col_expr("us"), literal), &schema).unwrap();
+            assert_eq!(expr, expected, "us {op} ns literal");
+        }
+
+        // The same applies to a microsecond literal against a second column ...
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", col_expr("s"), us_lit(1_500_000)), &schema).unwrap();
+        assert_eq!(expr, column("s").lt_eq(s_scalar(1)));
+        // ... and with the literal on the left, the operator is mirrored.
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", us_lit(1_500_000), col_expr("s")), &schema).unwrap();
+        assert_eq!(expr, column("s").gt(s_scalar(1)));
+
+        // A literal that is not finer than the column is left to DataFusion, which
+        // widens it losslessly; so is arithmetic.
+        let expr =
+            pyexpr_to_datafusion(binop("Lt", col_expr("ns"), us_lit(1_500_000)), &schema).unwrap();
+        assert_eq!(expr, column("ns").lt(us_scalar(1_500_000)));
+        let expr =
+            pyexpr_to_datafusion(binop("Sub", col_expr("us"), ns_lit(1_000_000_500)), &schema)
+                .unwrap();
+        assert_eq!(
+            expr,
+            column("us") - lit(ScalarValue::TimestampNanosecond(Some(1_000_000_500), None))
+        );
+
+        // `is_in` converts aligned literals and drops unaligned ones.
+        let is_in = |values: Vec<PyExpr>| call_expr("is_in", col_expr("us"), values);
+        let expr = pyexpr_to_datafusion(
+            is_in(vec![ns_lit(1_000_000_500), ns_lit(1_000_001_000)]),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(
+            expr,
+            column("us").in_list(vec![us_scalar(1_000_001)], false)
+        );
+        let expr = pyexpr_to_datafusion(is_in(vec![ns_lit(1_000_000_500)]), &schema).unwrap();
+        assert_eq!(expr, never_equal("us", false));
+    }
+
     // ---- literals: typed values become DataFusion literals unchanged ----
 
     #[test]
@@ -1223,6 +1498,10 @@ mod tests {
                     tz: Some("UTC".into()),
                 },
                 lit(ScalarValue::TimestampMicrosecond(Some(1), Some("UTC".into()))),
+            ),
+            (
+                LiteralValue::TimestampNanosecond { value: 1, tz: None },
+                lit(ScalarValue::TimestampNanosecond(Some(1), None)),
             ),
         ];
         for (value, expected) in table {

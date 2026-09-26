@@ -660,12 +660,9 @@ fn convert_expr_with_window_children(
             };
 
             let operator = crate::transpiler::op_str_to_operator(&op)?;
-
-            Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                Box::new(left_expr),
-                operator,
-                Box::new(right_expr),
-            )))
+            Ok(crate::transpiler::binary_expr(
+                left_expr, operator, right_expr, schema,
+            ))
         }
         PyExpr::UnaryOp { op, operand } => {
             let operand_expr = if contains_window_function(&operand) {

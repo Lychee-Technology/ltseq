@@ -162,7 +162,8 @@ fn literal_to_value(value: &LiteralValue) -> Option<Value> {
         LiteralValue::String(v) => Some(Value::Str(v.clone())),
         LiteralValue::Decimal128 { .. }
         | LiteralValue::Date32(_)
-        | LiteralValue::TimestampMicrosecond { .. } => None,
+        | LiteralValue::TimestampMicrosecond { .. }
+        | LiteralValue::TimestampNanosecond { .. } => None,
     }
 }
 

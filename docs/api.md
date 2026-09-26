@@ -1306,10 +1306,11 @@ Python constants used in expressions (`r.price > 100`, `r.day >= date(2024, 1, 1
 | `None` | null |
 | `decimal.Decimal` | `Decimal128(precision, scale)`, taken from the value's own digits (`Decimal("1.50")` is `Decimal128(3, 2)`) |
 | `datetime.date` | `Date32` |
-| `datetime.datetime` | `Timestamp(us)`. Naive values stay naive; timezone-aware values are converted to their UTC instant and tagged `UTC` |
+| `datetime.datetime` | `Timestamp(us)`. Naive values stay naive; timezone-aware values are converted to their UTC instant and tagged `UTC`. A `pandas.Timestamp` with a nonzero sub-microsecond remainder uses `Timestamp(ns)` so that precision is preserved |
 
 - **Exceptions**: `TypeError` naming the type for any other value (list, tuple, dict, set, bytes, `timedelta`, `Fraction`, arbitrary objects), raised inside the lambda where the value is used. `ValueError` for an `int` outside the Int64 range, a NaN or infinite `Decimal`, or a `Decimal` with more than 38 digits.
 - **Time zones**: comparisons and arithmetic with an aware `datetime` work by instant against a zoned column, whatever its zone. When `fill_null`, `coalesce`, or `if_else` merges two zoned timestamps, the result takes the zone of the later operand, and an aware literal counts as zoned `UTC`: on a `timestamp[us, tz=America/New_York]` column, `r.ts.fill_null(aware)` comes back as `timestamp[us, tz=UTC]` (same instants, different zone tag). A naive literal keeps the column's zone and is read as wall-clock time in that zone.
+- **Precision**: a `datetime` literal finer than the column's unit (a `pandas.Timestamp` with nanoseconds against `timestamp[us]`, or a `datetime` with microseconds against `timestamp[s]`) is still compared by instant. An aligned literal is converted to the column's unit; an unaligned one lies between two representable values, so `<`/`<=` match the values at or below it, `>`/`>=` the values above it, and `==` / `is_in` match nothing. Arithmetic, `fill_null`, and `if_else` widen the column to the literal's unit instead (`r.ts_us - sub_microsecond_literal` is `duration[ns]`).
 - **Example**:
 ```python
 from datetime import date
