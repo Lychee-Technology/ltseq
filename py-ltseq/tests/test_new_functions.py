@@ -345,3 +345,137 @@ class TestFactorial:
         result = t.filter(lambda r: factorial(r.n) > 100).to_dicts()
         assert len(result) == 2  # 5! = 120, 6! = 720
         assert all(r["n"] >= 5 for r in result)
+
+
+class TestDtDiffElapsed:
+    """Fixed-length units measure elapsed time; timestamps give fractions."""
+
+    def test_diff_fixed_units_on_date_columns(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d1": pa.array([datetime.date(2024, 1, 31)], type=pa.date32()),
+            "d2": pa.array([datetime.date(2024, 1, 1)], type=pa.date32()),
+        }))
+        result = t.derive(
+            h=lambda r: r.d1.dt.diff(r.d2, unit="hour"),
+            m=lambda r: r.d1.dt.diff(r.d2, unit="minute"),
+            s=lambda r: r.d1.dt.diff(r.d2, unit="second"),
+        ).to_dicts()
+        assert (result[0]["h"], result[0]["m"], result[0]["s"]) == (720, 43200, 2592000)
+
+    def test_diff_timestamp_columns_report_elapsed_time_in_unit(self):
+        """Timestamp - timestamp is a Duration; the result is elapsed time in the
+        requested unit, not the Duration's tick count."""
+        import datetime
+        import pyarrow as pa
+        base = datetime.datetime(2024, 1, 1)
+        for arrow_unit in ("s", "ms", "us", "ns"):
+            t = LTSeq.from_arrow(pa.table({
+                "end": pa.array(
+                    [datetime.datetime(2024, 1, 3, 12), datetime.datetime(2024, 1, 1, 0, 0, 30), None],
+                    type=pa.timestamp(arrow_unit),
+                ),
+                "start": pa.array([base, base, base], type=pa.timestamp(arrow_unit)),
+            }))
+            out = t.derive(
+                d=lambda r: r.end.dt.diff(r.start),
+                h=lambda r: r.end.dt.diff(r.start, unit="hour"),
+                s=lambda r: r.end.dt.diff(r.start, unit="second"),
+            ).to_arrow()
+            assert out.column("d").to_pylist() == [2.5, 30 / 86400, None], arrow_unit
+            assert out.column("h").to_pylist() == [60, 30 / 3600, None], arrow_unit
+            assert out.column("s").to_pylist() == [216000, 30, None], arrow_unit
+
+    def test_diff_mixed_date_and_timestamp_columns(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "ts": pa.array([datetime.datetime(2024, 1, 3, 6)], type=pa.timestamp("us")),
+            "d": pa.array([datetime.date(2024, 1, 1)], type=pa.date32()),
+        }))
+        result = t.derive(
+            a=lambda r: r.ts.dt.diff(r.d, unit="hour"),
+            b=lambda r: r.d.dt.diff(r.ts),
+        ).to_dicts()
+        assert result[0]["a"] == 54
+        assert result[0]["b"] == -2.25
+
+    def test_diff_zoned_timestamps_subtract_by_instant(self):
+        import datetime
+        import pyarrow as pa
+        from zoneinfo import ZoneInfo
+        t = LTSeq.from_arrow(pa.table({
+            "ny": pa.array([datetime.datetime(2024, 1, 1, 1, tzinfo=ZoneInfo("America/New_York"))], type=pa.timestamp("us", tz="America/New_York")),
+            "utc": pa.array([datetime.datetime(2024, 1, 1, 0, tzinfo=datetime.timezone.utc)], type=pa.timestamp("us", tz="UTC")),
+        }))
+        assert t.derive(h=lambda r: r.ny.dt.diff(r.utc, unit="hour")).to_dicts()[0]["h"] == 6
+
+    def test_diff_mixed_date32_and_date64_columns(self):
+        # DataFusion types `Date64 - Date32` as Duration(ms) but runs it as an Int64
+        # day count, so the tick must be read from the coerced operands.
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d32": pa.array([datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)], type=pa.date32()),
+            "d64": pa.array([datetime.date(2024, 1, 31), None], type=pa.date64()),
+            "e64": pa.array([datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)], type=pa.date64()),
+        }))
+        got = t.derive(
+            a=lambda r: r.d64.dt.diff(r.d32),
+            b=lambda r: r.d32.dt.diff(r.d64),
+            h=lambda r: r.d64.dt.diff(r.d32, unit="hour"),
+            p=lambda r: r.d64.dt.diff(r.e64),  # Date64 pair: the control
+        ).to_arrow()
+        assert got.column("a").to_pylist() == [30.0, None]
+        assert got.column("b").to_pylist() == [-30.0, None]
+        assert got.column("h").to_pylist() == [720.0, None]
+        assert got.column("p").to_pylist() == [30.0, None]
+
+    @pytest.mark.parametrize("naive_unit, aware_unit", [("us", "us"), ("us", "ns"), ("ms", "us")])
+    def test_diff_rejects_a_naive_and_an_aware_timestamp(self, naive_unit, aware_unit):
+        """A naive and a timezone-aware timestamp are refused in either order: DataFusion
+        reads the naive side as UTC or as wall-clock time depending on the units."""
+        import datetime
+        import pyarrow as pa
+
+        t = LTSeq.from_arrow(pa.table({
+            "naive": pa.array([datetime.datetime(2024, 1, 1, 6)], type=pa.timestamp(naive_unit)),
+            "tokyo": pa.array([datetime.datetime(2024, 1, 1, 0)], type=pa.timestamp(aware_unit, tz="Asia/Tokyo")),
+        }))
+        with pytest.raises(ValueError, match="one timestamp is timezone-aware and the other is naive"):
+            t.derive(h=lambda r: r.naive.dt.diff(r.tokyo, unit="hour")).to_arrow()
+        with pytest.raises(ValueError, match="one timestamp is timezone-aware and the other is naive"):
+            t.derive(h=lambda r: r.tokyo.dt.diff(r.naive, unit="hour")).to_arrow()
+
+    def test_diff_aware_timestamps_with_different_zones_and_units(self):
+        import datetime
+        import pyarrow as pa
+
+        # Naive datetimes in a zoned Arrow array are UTC instants: 06:00Z, 00:00Z, 00:00Z.
+        t = LTSeq.from_arrow(pa.table({
+            "utc_us": pa.array([datetime.datetime(2024, 1, 1, 6), None], type=pa.timestamp("us", tz="UTC")),
+            "ny_ns": pa.array([datetime.datetime(2024, 1, 1, 0)] * 2, type=pa.timestamp("ns", tz="America/New_York")),
+            "tokyo_ms": pa.array([datetime.datetime(2024, 1, 1, 0)] * 2, type=pa.timestamp("ms", tz="Asia/Tokyo")),
+        }))
+        out = t.derive(
+            a=lambda r: r.utc_us.dt.diff(r.ny_ns, unit="hour"),
+            b=lambda r: r.tokyo_ms.dt.diff(r.utc_us, unit="hour"),
+        ).to_arrow()
+        assert out.column("a").to_pylist() == [6.0, None]
+        assert out.column("b").to_pylist() == [-6.0, None]
+
+    def test_diff_rejects_non_temporal_other(self):
+        import datetime
+        import pyarrow as pa
+        t = LTSeq.from_arrow(pa.table({
+            "d": pa.array([datetime.date(2024, 1, 2)], type=pa.date32()),
+            "i": pa.array([1], type=pa.int64()),
+            "ts": pa.array([datetime.datetime(2024, 1, 2)], type=pa.timestamp("us")),
+        }))
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.d.dt.diff(r.i))
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.d.dt.diff(5))
+        with pytest.raises(ValueError, match="both sides must be dates or timestamps"):
+            t.derive(x=lambda r: r.ts.dt.diff(r.i))

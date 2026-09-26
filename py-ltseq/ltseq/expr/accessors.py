@@ -393,7 +393,11 @@ class TemporalAccessor:
                   "hour", "minute", "second" (default: "day")
 
         Returns:
-            Integer expression representing the difference in the specified unit
+            For "day"/"hour"/"minute"/"second": a float expression, the elapsed
+            time in that unit (fractional when a timestamp is involved). A
+            timezone-aware and a naive timestamp cannot be mixed. For "month": a
+            whole-number float; for "year": an integer; both are the
+            calendar-field difference
 
         Example:
             >>> t.derive(days_open=lambda r: r.close_date.dt.diff(r.open_date))
