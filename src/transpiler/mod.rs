@@ -1129,6 +1129,53 @@ fn dt_elapsed(
     let other_type = other_expr
         .get_type(&df_schema)
         .map_err(|e| format!("dt_diff: {e}"))?;
+    // A naive and a zoned timestamp have no single meaning: DataFusion reads the naive
+    // side as UTC when the units match and as wall-clock time in the other zone when
+    // they differ, so the elapsed time would depend on the column units. Refuse the
+    // pair. Two zoned timestamps are cast to UTC at the finer unit, so any mix of zones
+    // and units subtracts as instants (DataFusion cannot coerce differing zones and units).
+    let finer = |a: TimeUnit, b: TimeUnit| {
+        let rank = |u: TimeUnit| match u {
+            TimeUnit::Second => 0,
+            TimeUnit::Millisecond => 1,
+            TimeUnit::Microsecond => 2,
+            TimeUnit::Nanosecond => 3,
+        };
+        if rank(a) >= rank(b) {
+            a
+        } else {
+            b
+        }
+    };
+    let zoned_pair_unit = match (&on_type, &other_type) {
+        (DataType::Timestamp(lu, ltz), DataType::Timestamp(ru, rtz)) => match (ltz, rtz) {
+            (Some(_), Some(_)) => Some(finer(*lu, *ru)),
+            (None, None) => None,
+            _ => {
+                return Err(format!(
+                    "dt_diff cannot subtract {other_type:?} from {on_type:?}: one timestamp is \
+                     timezone-aware and the other is naive; both must be aware or both naive"
+                ))
+            }
+        },
+        _ => None,
+    };
+    let (on_expr, other_expr, on_type, other_type) = match zoned_pair_unit {
+        Some(unit) => {
+            let utc = DataType::Timestamp(unit, Some("UTC".into()));
+            (
+                on_expr
+                    .cast_to(&utc, &df_schema)
+                    .map_err(|e| format!("dt_diff: {e}"))?,
+                other_expr
+                    .cast_to(&utc, &df_schema)
+                    .map_err(|e| format!("dt_diff: {e}"))?,
+                utc.clone(),
+                utc,
+            )
+        }
+        None => (on_expr, other_expr, on_type, other_type),
+    };
     // DataFusion types a subtraction before coercing its operands, and for a mixed
     // Date32/Date64 pair the two disagree: the logical type is Duration(ms) while the
     // kernel that runs after coercion returns an Int64 day count. Coerce the operands

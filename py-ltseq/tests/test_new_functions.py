@@ -432,6 +432,39 @@ class TestDtDiffElapsed:
         assert got.column("h").to_pylist() == [720.0, None]
         assert got.column("p").to_pylist() == [30.0, None]
 
+    @pytest.mark.parametrize("naive_unit, aware_unit", [("us", "us"), ("us", "ns"), ("ms", "us")])
+    def test_diff_rejects_a_naive_and_an_aware_timestamp(self, naive_unit, aware_unit):
+        """A naive and a timezone-aware timestamp are refused in either order: DataFusion
+        reads the naive side as UTC or as wall-clock time depending on the units."""
+        import datetime
+        import pyarrow as pa
+
+        t = LTSeq.from_arrow(pa.table({
+            "naive": pa.array([datetime.datetime(2024, 1, 1, 6)], type=pa.timestamp(naive_unit)),
+            "tokyo": pa.array([datetime.datetime(2024, 1, 1, 0)], type=pa.timestamp(aware_unit, tz="Asia/Tokyo")),
+        }))
+        with pytest.raises(ValueError, match="one timestamp is timezone-aware and the other is naive"):
+            t.derive(h=lambda r: r.naive.dt.diff(r.tokyo, unit="hour")).to_arrow()
+        with pytest.raises(ValueError, match="one timestamp is timezone-aware and the other is naive"):
+            t.derive(h=lambda r: r.tokyo.dt.diff(r.naive, unit="hour")).to_arrow()
+
+    def test_diff_aware_timestamps_with_different_zones_and_units(self):
+        import datetime
+        import pyarrow as pa
+
+        # Naive datetimes in a zoned Arrow array are UTC instants: 06:00Z, 00:00Z, 00:00Z.
+        t = LTSeq.from_arrow(pa.table({
+            "utc_us": pa.array([datetime.datetime(2024, 1, 1, 6), None], type=pa.timestamp("us", tz="UTC")),
+            "ny_ns": pa.array([datetime.datetime(2024, 1, 1, 0)] * 2, type=pa.timestamp("ns", tz="America/New_York")),
+            "tokyo_ms": pa.array([datetime.datetime(2024, 1, 1, 0)] * 2, type=pa.timestamp("ms", tz="Asia/Tokyo")),
+        }))
+        out = t.derive(
+            a=lambda r: r.utc_us.dt.diff(r.ny_ns, unit="hour"),
+            b=lambda r: r.tokyo_ms.dt.diff(r.utc_us, unit="hour"),
+        ).to_arrow()
+        assert out.column("a").to_pylist() == [6.0, None]
+        assert out.column("b").to_pylist() == [-6.0, None]
+
     def test_diff_rejects_non_temporal_other(self):
         import datetime
         import pyarrow as pa
