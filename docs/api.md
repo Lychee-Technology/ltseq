@@ -1604,7 +1604,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **Signature**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **Behavior**: Returns `self` minus `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) return a float measuring elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days); with these units a non-temporal `other` is a `ValueError` at plan time. `month`/`year` return an integer that subtracts the calendar fields and ignores the day
+- **Behavior**: Returns `self` minus `other` in the specified unit. `unit` can be `"day"` (default), `"month"`, `"year"`, `"hour"`, `"minute"`, or `"second"`. The fixed-length units (`day`/`hour`/`minute`/`second`) return a float measuring elapsed time: whole numbers for two dates, fractional once a timestamp is involved (12 hours is `0.5` days); with these units a non-temporal `other`, or a timezone-aware timestamp against a naive one, is a `ValueError` at plan time, and two timezone-aware timestamps subtract as instants whatever their zones and units. `month` returns a whole-number float and `year` an integer; both subtract the calendar fields and ignore the day
 - **SPL Equivalent**: `interval(t1, t2, unit)`
 - **Example**:
 ```python

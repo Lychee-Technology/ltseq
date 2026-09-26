@@ -1601,7 +1601,7 @@ next_week  = t.derive(d2=lambda r: r.date.dt.add(weeks=1))
 
 #### `diff`
 - **签名**: `r.col.dt.diff(other: Expr, unit: str = "day") -> Expr`
-- **行为**: 返回 `self` 减 `other` 在指定单位下的差值。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`。定长单位（`day`/`hour`/`minute`/`second`）返回浮点数，度量经过的时间：两个日期相减得整数值，涉及时间戳时可为小数（12 小时即 `0.5` 天）；这些单位下 `other` 不是日期/时间戳时在计划阶段抛出 `ValueError`。`month`/`year` 返回整数，按日历字段相减，忽略日
+- **行为**: 返回 `self` 减 `other` 在指定单位下的差值。`unit` 可取 `"day"`（默认）、`"month"`、`"year"`、`"hour"`、`"minute"`、`"second"`。定长单位（`day`/`hour`/`minute`/`second`）返回浮点数，度量经过的时间：两个日期相减得整数值，涉及时间戳时可为小数（12 小时即 `0.5` 天）；这些单位下 `other` 不是日期/时间戳，或一侧带时区而另一侧不带时区时，在计划阶段抛出 `ValueError`；两个带时区的时间戳无论时区和单位如何都按时刻相减。`month` 返回整数值的浮点数，`year` 返回整数，均按日历字段相减，忽略日
 - **SPL 等价**: `interval(t1, t2, unit)`
 - **示例**:
 ```python
