@@ -29,7 +29,9 @@ pub enum PyExpr {
         func: String,
         args: Vec<PyExpr>,
         kwargs: HashMap<String, PyExpr>,
-        on: Box<PyExpr>,
+        /// Receiver of a method-style call (`r.x.abs()`); `None` for a
+        /// standalone function (`abs(r.x)`), whose inputs are all in `args`.
+        on: Option<Box<PyExpr>>,
     },
 
     /// Window expression: {"type": "Window", "expr": {...}, "partition_by": {...}, "order_by": {...}, "descending": bool}
@@ -188,25 +190,19 @@ fn parse_call_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .ok_or_else(|| PyExprError::MissingField("kwargs".to_string()))?;
     let kwargs = parse_call_kwargs(&kwargs_obj)?;
 
-    // Parse "on" field - can be None for standalone functions like abs()
-    let on_obj = dict
+    // "on" is None (or absent) for standalone functions like abs(x),
+    // whose inputs are all in args.
+    let on = match dict
         .get_item("on")
-        .map_err(|_| PyExprError::MissingField("on".to_string()))?;
-
-    let on = if let Some(on_val) = on_obj {
-        // Check if it's Python None (null in JSON)
-        if on_val.is_none() {
-            // For standalone functions like abs(x), on is None and x is in args
-            Box::new(PyExpr::Column(String::new()))
-        } else {
+        .map_err(|_| PyExprError::MissingField("on".to_string()))?
+    {
+        Some(on_val) if !on_val.is_none() => {
             let on_dict: &Bound<'_, PyDict> = on_val
                 .cast::<PyDict>()
                 .map_err(|_| PyExprError::InvalidType("on must be a dict or None".to_string()))?;
-            Box::new(dict_to_py_expr(on_dict)?)
+            Some(Box::new(dict_to_py_expr(on_dict)?))
         }
-    } else {
-        // If "on" key is missing, create a dummy column reference
-        Box::new(PyExpr::Column(String::new()))
+        _ => None,
     };
 
     Ok(PyExpr::Call {

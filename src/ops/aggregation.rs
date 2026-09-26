@@ -50,8 +50,8 @@ fn pyexpr_to_agg_plan(
         // Simple aggregations on a column
         "sum" | "count" | "min" | "max" | "avg" | "mean" | "median" | "variance" | "var"
         | "stddev" | "std" => {
-            let col_expr = match on.as_ref() {
-                PyExpr::Column(col_name) => {
+            let col_expr = match on.as_deref() {
+                Some(PyExpr::Column(col_name)) => {
                     Expr::Column(Column::new_unqualified(col_name))
                 }
                 _ if func == "count" => {
@@ -75,8 +75,8 @@ fn pyexpr_to_agg_plan(
             Ok(AggPlan::Plain(agg_expr))
         }
         "percentile" => {
-            let col_expr = match on.as_ref() {
-                PyExpr::Column(col_name) => {
+            let col_expr = match on.as_deref() {
+                Some(PyExpr::Column(col_name)) => {
                     Expr::Column(Column::new_unqualified(col_name))
                 }
                 _ => return Err("percentile requires a column reference".to_string()),
@@ -130,8 +130,16 @@ fn pyexpr_to_agg_plan(
         }
         // Statistical aggregates — native DataFusion path
         "corr" => {
-            // corr(col_a, col_b) — both come from args when on is empty
-            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+            // corr(col_a, col_b) — both come from args for a standalone call
+            let (col_a, col_b) = if let Some(on) = on {
+                if args.is_empty() {
+                    return Err("corr requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion((**on).clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            } else {
                 if args.len() < 2 {
                     return Err("corr requires two column arguments".to_string());
                 }
@@ -139,19 +147,19 @@ fn pyexpr_to_agg_plan(
                     crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
                     crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
                 )
-            } else {
-                if args.is_empty() {
-                    return Err("corr requires a second column argument".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                )
             };
             Ok(AggPlan::Plain(agg_fn::corr(col_a, col_b)))
         }
         "covar" => {
-            let (col_a, col_b) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+            let (col_a, col_b) = if let Some(on) = on {
+                if args.is_empty() {
+                    return Err("covar requires a second column argument".to_string());
+                }
+                (
+                    crate::transpiler::pyexpr_to_datafusion((**on).clone(), schema)?,
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
+                )
+            } else {
                 if args.len() < 2 {
                     return Err("covar requires two column arguments".to_string());
                 }
@@ -159,34 +167,26 @@ fn pyexpr_to_agg_plan(
                     crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
                     crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?,
                 )
-            } else {
-                if args.is_empty() {
-                    return Err("covar requires a second column argument".to_string());
-                }
-                (
-                    crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?,
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
-                )
             };
             Ok(AggPlan::Plain(agg_fn::covar_samp(col_a, col_b)))
         }
         "concat_agg" => {
             // concat_agg(col, delimiter) — uses native string_agg UDAF
-            let (col_expr, delim_expr) = if matches!(on.as_ref(), PyExpr::Column(name) if name.is_empty()) {
+            let (col_expr, delim_expr) = if let Some(on) = on {
+                let col = crate::transpiler::pyexpr_to_datafusion((**on).clone(), schema)?;
+                let delim = if !args.is_empty() {
+                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?
+                } else {
+                    lit(",")
+                };
+                (col, delim)
+            } else {
                 if args.is_empty() {
                     return Err("concat_agg requires a column argument".to_string());
                 }
                 let col = crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?;
                 let delim = if args.len() > 1 {
                     crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?
-                } else {
-                    lit(",")
-                };
-                (col, delim)
-            } else {
-                let col = crate::transpiler::pyexpr_to_datafusion(*on.clone(), schema)?;
-                let delim = if !args.is_empty() {
-                    crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?
                 } else {
                     lit(",")
                 };
@@ -200,7 +200,7 @@ fn pyexpr_to_agg_plan(
         // Output format (semicolon-joined doubles, descending) matches the
         // legacy SQL expression exactly.
         "top_k" => {
-            let PyExpr::Column(col_name) = on.as_ref() else {
+            let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err("top_k requires a column reference".to_string());
             };
             let k = args
@@ -245,7 +245,7 @@ fn pyexpr_to_agg_plan(
         // column passed in args[0] (NestedTable.agg passes __rn__). "last" is
         // first_value over the reversed order.
         "first" | "last" => {
-            let PyExpr::Column(col_name) = on.as_ref() else {
+            let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err(format!("{} requires a column reference", func));
             };
             let col_expr = Expr::Column(Column::new_unqualified(col_name));
@@ -270,7 +270,7 @@ fn pyexpr_to_agg_plan(
         // i.e. min, not a true statistical mode). Real mode semantics are
         // deferred per issue #91 risk 3.
         "mode" => {
-            let PyExpr::Column(col_name) = on.as_ref() else {
+            let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err("mode requires a column reference".to_string());
             };
             let col_expr = Expr::Column(Column::new_unqualified(col_name));
@@ -283,10 +283,10 @@ fn pyexpr_to_agg_plan(
         // Values are cast to Float64 up front to avoid integer overflow.
         "skew" => {
             // Method form g.col.skew() carries the column in `on`; the
-            // exported free function skew(g.col) leaves `on` as the empty
-            // placeholder and passes the column in args[0].
-            let col_name = match on.as_ref() {
-                PyExpr::Column(name) if !name.is_empty() => name.clone(),
+            // exported free function skew(g.col) has no `on` and passes the
+            // column in args[0].
+            let col_name = match on.as_deref() {
+                Some(PyExpr::Column(name)) => name.clone(),
                 _ => match args.first() {
                     Some(PyExpr::Column(name)) if !name.is_empty() => name.clone(),
                     _ => return Err("skew requires a column reference".to_string()),
