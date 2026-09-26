@@ -249,8 +249,14 @@ class TestTopKArgument:
     def _top(self, t, k):
         return t.agg(v=lambda g: g.score.top_k(k)).to_arrow().column("v").to_pylist()[0]
 
-    def test_top_k_absent_defaults_to_ten(self, scores):
-        assert scores.agg(v=lambda g: g.score.top_k()).to_arrow().column("v").to_pylist()[0] == "95;92;88;85;78"
+    def test_top_k_absent_defaults_to_ten(self):
+        # 12 rows, so the default of 10 is visible.
+        t = LTSeq.from_arrow(pa.table({"score": pa.array(list(range(1, 13)), pa.int64())}))
+        assert t.agg(v=lambda g: g.score.top_k()).to_arrow().column("v").to_pylist()[0] == "12;11;10;9;8;7;6;5;4;3"
+
+    @pytest.mark.parametrize("k", [2**31 - 1, 2**31, 2**32 + 3, 2**63 - 1])
+    def test_top_k_larger_than_the_group_returns_every_value(self, scores, k):
+        assert self._top(scores, k) == "95;92;88;85;78"
 
     def test_top_k_accepts_decimal_k(self, scores):
         assert self._top(scores, Decimal("3")) == "95;92;88"

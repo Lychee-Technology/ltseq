@@ -220,6 +220,9 @@ fn pyexpr_to_agg_plan(
             if k < 1 {
                 return Err(format!("top_k() k must be >= 1, got {k}"));
             }
+            // array_slice takes an i32 end index; any k beyond it already
+            // means "every value", so clamp instead of failing at collect.
+            let k = k.min(i64::from(i32::MAX));
 
             let col_f64 = cast(
                 Expr::Column(Column::new_unqualified(col_name)),
