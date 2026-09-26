@@ -288,7 +288,10 @@ fn convert_shift(
         let window_expr = if offset >= 0 {
             lag(col_expr, Some(offset), default_value)
         } else {
-            lead(col_expr, Some(-offset), default_value)
+            let lead_by = offset
+                .checked_neg()
+                .ok_or_else(|| format!("shift() offset {offset} is out of range"))?;
+            lead(col_expr, Some(lead_by), default_value)
         };
 
         finalize_window_expr(window_expr, partition_by_exprs, order_by, "shift")
@@ -763,63 +766,41 @@ fn convert_expr_with_window_children(
                         .otherwise(false_expr)
                         .map_err(|e| format!("Failed to create CASE expression: {}", e))
                 }
-                "abs" => {
-                    // abs(x) where x might contain window functions
-                    if args.is_empty() {
-                        return Err("abs() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::abs(arg_expr))
-                }
-                "ceil" => {
-                    if args.is_empty() {
-                        return Err("ceil() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::ceil(arg_expr))
-                }
-                "floor" => {
-                    if args.is_empty() {
-                        return Err("floor() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    Ok(datafusion::functions::math::expr_fn::floor(arg_expr))
-                }
-                "round" => {
-                    if args.is_empty() {
-                        return Err("round() requires an argument".to_string());
-                    }
-                    let arg_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
-                    } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
-                    };
-                    // round takes (value, decimal_places)
-                    let decimals = if args.len() > 1 {
-                        if let PyExpr::Literal { value, .. } = &args[1] {
-                            value.parse::<i64>().unwrap_or(0)
-                        } else {
-                            0
+                "abs" | "ceil" | "floor" | "round" => {
+                    use datafusion::functions::math::expr_fn::{abs, ceil, floor, round};
+                    // Same operand layout as the row transpiler: the method
+                    // form `x.round(2)` carries the input in `on` and the
+                    // decimals in args[0]; the standalone form `abs(x)` has
+                    // no `on` and carries the input in args[0].
+                    let (input, rest) = match on {
+                        Some(on) => (*on, args.as_slice()),
+                        None => {
+                            let (first, rest) = args
+                                .split_first()
+                                .ok_or_else(|| format!("{}() requires an argument", func))?;
+                            (first.clone(), rest)
                         }
-                    } else {
-                        0
                     };
-                    Ok(datafusion::functions::math::expr_fn::round(vec![
-                        arg_expr,
-                        lit(decimals),
-                    ]))
+                    let lower = |e: PyExpr| {
+                        if contains_window_function(&e) {
+                            pyexpr_to_window_inner(e, schema, order_by)
+                        } else {
+                            pyexpr_to_datafusion(e, schema)
+                        }
+                    };
+                    let input = lower(input)?;
+                    Ok(match func.as_str() {
+                        "abs" => abs(input),
+                        "ceil" => ceil(input),
+                        "floor" => floor(input),
+                        _ => {
+                            let decimals = match rest.first() {
+                                Some(d) => lower(d.clone())?,
+                                None => lit(0i64),
+                            };
+                            round(vec![input, decimals])
+                        }
+                    })
                 }
                 _ => {
                     // For other function calls, try to handle as non-window

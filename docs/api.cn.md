@@ -1375,7 +1375,8 @@ t.derive(amount=lambda r: r.amount_str.cast("float64"))
 
 #### `r.col.abs` / `r.col.round` / `r.col.floor` / `r.col.ceil`
 - **签名**: `r.col.abs() -> Expr`；`r.col.round(decimals: int = 0) -> Expr`；`r.col.floor() -> Expr`；`r.col.ceil() -> Expr`
-- **行为**: 数值取整辅助函数
+- **行为**: 数值取整辅助函数。同样适用于窗口表达式，如 `r.x.shift(1).round(2)` 对平移后的值取整
+- **异常**: `decimals` 不是 int 时抛出 `TypeError`（在 lambda 内抛出）
 - **示例**:
 ```python
 t.derive(
