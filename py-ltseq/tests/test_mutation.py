@@ -1,5 +1,7 @@
 """Tests for MutationMixin: insert, delete, update, modify operations."""
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -165,3 +167,57 @@ class TestModify:
     def test_modify_does_not_mutate_original(self, sample):
         _ = sample.modify(0, score=999)
         assert sample.to_pandas().iloc[0]["score"] == 10
+
+
+# ─── string column types ─────────────────────────────────────────────────────
+
+# `read_parquet` yields string_view (DataFusion 55 scans Parquet strings as
+# Utf8View); `from_arrow` keeps the caller's type; `from_rows` gives string.
+STRING_TYPES = [pa.string(), pa.large_string(), pa.string_view()]
+
+
+def _people(name_type: pa.DataType) -> pa.Table:
+    return pa.table(
+        {
+            "id": pa.array([1, 2, 3], pa.int64()),
+            "name": pa.array(["alice", "bob", "carol"], name_type),
+            "score": pa.array([10, 20, 30], pa.int64()),
+        }
+    )
+
+
+def _names(t: LTSeq) -> list:
+    # Read through Arrow: to_dicts() goes via pandas and turns nulls into NaN.
+    return t.to_arrow().column("name").to_pylist()
+
+
+class TestStringColumnTypes:
+    """Mutations must write a Python str into every Arrow string type (#177)."""
+
+    @pytest.fixture(params=STRING_TYPES, ids=str)
+    def typed(self, request) -> LTSeq:
+        return LTSeq.from_arrow(_people(request.param))
+
+    def test_insert_str(self, typed):
+        result = typed.insert(1, {"id": 9, "name": "zed", "score": 0})
+        assert _names(result) == ["alice", "zed", "bob", "carol"]
+
+    def test_insert_null_str(self, typed):
+        result = typed.insert(0, {"id": 9, "name": None, "score": 0})
+        assert _names(result) == [None, "alice", "bob", "carol"]
+
+    def test_modify_str(self, typed):
+        assert _names(typed.modify(1, name="zed")) == ["alice", "zed", "carol"]
+
+    def test_update_str(self, typed):
+        result = typed.update(lambda r: r.score >= 20, name="senior")
+        assert _names(result) == ["alice", "senior", "senior"]
+
+    def test_parquet_scan_string_column(self, tmp_path):
+        """The reported path: a Parquet scan hands the mutations string_view data."""
+        path = tmp_path / "people.parquet"
+        pq.write_table(_people(pa.string()), path)
+        t = LTSeq.read_parquet(str(path))
+        assert _names(t.insert(0, {"id": 0, "name": "zero", "score": 0})) == ["zero", "alice", "bob", "carol"]
+        assert _names(t.modify(0, name="zed")) == ["zed", "bob", "carol"]
+        assert _names(t.update(lambda r: r.id == 3, name="carla")) == ["alice", "bob", "carla"]

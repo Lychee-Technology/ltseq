@@ -4,7 +4,10 @@ Tests the pivot() method which reshapes data from long format to wide format
 (pivot table operation), transforming rows and columns based on grouping keys.
 """
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+
 from ltseq import LTSeq
 
 
@@ -341,3 +344,44 @@ class TestPivotRegressions:
         # Both should have same structure
         assert len(df1) == len(df2)
         assert set(df1.columns) == set(df2.columns)
+
+
+# Arrow has three physical string types. `read_parquet` yields string_view
+# (DataFusion 55 scans Parquet strings as Utf8View), `from_arrow` keeps the
+# caller's type, and `read_csv` / `from_rows` produce plain string.
+STRING_TYPES = [pa.string(), pa.large_string(), pa.string_view()]
+
+
+def _events(url_type: pa.DataType) -> pa.Table:
+    return pa.table(
+        {
+            "userid": pa.array([1, 1, 1, 2, 2], pa.int64()),
+            "url": pa.array(["a", "a", "b", "a", "b"], url_type),
+            "value": pa.array([1.0, 10.0, 2.0, 3.0, 4.0], pa.float64()),
+        }
+    )
+
+
+def _assert_pivoted_by_url(pivoted: LTSeq) -> None:
+    assert set(pivoted.schema) == {"userid", "a", "b"}
+    rows = {row["userid"]: row for row in pivoted.to_dicts()}
+    assert rows[1]["a"] == 11.0 and rows[1]["b"] == 2.0
+    assert rows[2]["a"] == 3.0 and rows[2]["b"] == 4.0
+
+
+class TestPivotStringColumnTypes:
+    """pivot() must accept every Arrow string type as the pivot column (#177)."""
+
+    @pytest.mark.parametrize("url_type", STRING_TYPES, ids=str)
+    def test_pivot_on_each_arrow_string_type(self, url_type):
+        t = LTSeq.from_arrow(_events(url_type))
+        pivoted = t.pivot(index="userid", columns="url", values="value", agg_fn="sum")
+        _assert_pivoted_by_url(pivoted)
+
+    def test_pivot_on_parquet_string_column(self, tmp_path):
+        """The reported path: a Parquet scan hands pivot() string_view data."""
+        path = tmp_path / "events.parquet"
+        pq.write_table(_events(pa.string()), path)
+        t = LTSeq.read_parquet(str(path))
+        pivoted = t.pivot(index="userid", columns="url", values="value", agg_fn="sum")
+        _assert_pivoted_by_url(pivoted)

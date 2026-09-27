@@ -383,8 +383,15 @@ fn python_value_to_scalar(val: &Bound<'_, PyAny>, dt: &DataType) -> Option<Scala
         DataType::Int8 => val.extract::<i8>().ok().map(|v| ScalarValue::Int8(Some(v))),
         DataType::Float64 => val.extract::<f64>().ok().map(|v| ScalarValue::Float64(Some(v))),
         DataType::Float32 => val.extract::<f32>().ok().map(|v| ScalarValue::Float32(Some(v))),
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            val.extract::<String>().ok().map(|v| ScalarValue::Utf8(Some(v)))
+        // The scalar must carry the column's exact Arrow string layout: the
+        // insert batch is spliced into the collected batches as-is, and a
+        // Parquet scan yields Utf8View.
+        DataType::Utf8 => val.extract::<String>().ok().map(|v| ScalarValue::Utf8(Some(v))),
+        DataType::LargeUtf8 => {
+            val.extract::<String>().ok().map(|v| ScalarValue::LargeUtf8(Some(v)))
+        }
+        DataType::Utf8View => {
+            val.extract::<String>().ok().map(|v| ScalarValue::Utf8View(Some(v)))
         }
         DataType::Boolean => val.extract::<bool>().ok().map(|v| ScalarValue::Boolean(Some(v))),
         DataType::Date32 => val.extract::<i32>().ok().map(|v| ScalarValue::Date32(Some(v))),
