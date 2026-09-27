@@ -10,6 +10,7 @@ use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{Array, ArrayAccessor, AsArray};
+use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Case;
 use datafusion::logical_expr::{case, col, lit, Expr};
@@ -248,6 +249,14 @@ fn extract_pivot_values(
         DataType::Utf8 => insert_string_values(col_arr.as_string::<i32>(), pivot_values_set),
         DataType::LargeUtf8 => insert_string_values(col_arr.as_string::<i64>(), pivot_values_set),
         DataType::Utf8View => insert_string_values(col_arr.as_string_view(), pivot_values_set),
+        // A dictionary-encoded column pivots on its value type. Casting
+        // decodes only the entries the keys reference, so an unused dictionary
+        // value (a pandas category with no rows) does not become a column.
+        DataType::Dictionary(_, value_type) => {
+            let decoded = cast(col_arr, value_type)
+                .map_err(|e| LtseqError::with_context("Failed to decode dictionary pivot column", e))?;
+            extract_pivot_values(&decoded, pivot_values_set)?;
+        }
         DataType::Int32 => {
             if let Some(int_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Int32Array>() {
                 for i in 0..int_col.len() {

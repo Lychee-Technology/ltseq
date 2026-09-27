@@ -171,9 +171,18 @@ class TestModify:
 
 # ─── string column types ─────────────────────────────────────────────────────
 
-# `read_parquet` yields string_view (DataFusion 55 scans Parquet strings as
-# Utf8View); `from_arrow` keeps the caller's type; `from_rows` gives string.
-STRING_TYPES = [pa.string(), pa.large_string(), pa.string_view()]
+# Arrow has three physical string types, each of which can also be
+# dictionary-encoded. `read_parquet` yields string_view (DataFusion 55 scans
+# Parquet strings as Utf8View) unless the file stores a dictionary-encoded
+# column, e.g. a pandas categorical; `from_arrow` / `from_pandas` keep the
+# source type; `from_rows` gives string.
+STRING_TYPES = [
+    pa.string(),
+    pa.large_string(),
+    pa.string_view(),
+    pa.dictionary(pa.int8(), pa.string()),
+    pa.dictionary(pa.int8(), pa.large_string()),  # a pandas 3 categorical
+]
 
 
 def _people(name_type: pa.DataType) -> pa.Table:
@@ -213,11 +222,67 @@ class TestStringColumnTypes:
         result = typed.update(lambda r: r.score >= 20, name="senior")
         assert _names(result) == ["alice", "senior", "senior"]
 
-    def test_parquet_scan_string_column(self, tmp_path):
-        """The reported path: a Parquet scan hands the mutations string_view data."""
+    @pytest.mark.parametrize(
+        ("written", "scanned"),
+        [
+            (pa.string(), pa.string_view()),
+            (pa.dictionary(pa.int8(), pa.string()), pa.dictionary(pa.int8(), pa.string())),
+        ],
+        ids=["string", "dictionary"],
+    )
+    def test_parquet_scan_string_column(self, tmp_path, written, scanned):
+        """The reported path: a Parquet scan hands the mutations string_view data,
+        or dictionary data when the file stores a dictionary-encoded column."""
         path = tmp_path / "people.parquet"
-        pq.write_table(_people(pa.string()), path)
+        pq.write_table(_people(written), path)
         t = LTSeq.read_parquet(str(path))
+        # Guard the premise, which depends on DataFusion's scan defaults.
+        assert t.to_arrow().schema.field("name").type == scanned
         assert _names(t.insert(0, {"id": 0, "name": "zero", "score": 0})) == ["zero", "alice", "bob", "carol"]
         assert _names(t.modify(0, name="zed")) == ["zed", "bob", "carol"]
         assert _names(t.update(lambda r: r.id == 3, name="carla")) == ["alice", "bob", "carla"]
+
+    def test_dictionary_encoded_int_column(self):
+        """A dictionary-encoded column takes values of its value type."""
+        t = LTSeq.from_arrow(pa.table({"code": pa.array([7, 8], pa.int64()).dictionary_encode()}))
+
+        def codes(result: LTSeq) -> list:
+            return result.to_arrow().column("code").to_pylist()
+
+        assert codes(t.insert(1, {"code": 9})) == [7, 9, 8]
+        assert codes(t.modify(0, code=9)) == [9, 8]
+        assert codes(t.update(lambda r: r.code == 8, code=9)) == [7, 9]
+
+
+# ─── schema-level metadata ───────────────────────────────────────────────────
+
+
+class TestSplicedBatchSchema:
+    """insert / modify splice their new batch among the collected ones, so it
+    must carry the same schema, schema-level metadata included."""
+
+    @pytest.fixture
+    def tagged(self) -> LTSeq:
+        # Two chunks, so the new batch can land before an untouched one. The
+        # metadata stands in for the `pandas` key that from_pandas attaches.
+        chunk = _people(pa.string())
+        table = pa.concat_tables([chunk, chunk]).replace_schema_metadata({"origin": "test"})
+        return LTSeq.from_arrow(table)
+
+    def test_from_pandas_insert_at_start(self):
+        t = LTSeq.from_pandas(pd.DataFrame({"id": [1, 2], "name": ["alice", "bob"], "score": [10, 20]}))
+        assert _names(t.insert(0, {"id": 0, "name": "zero", "score": 0})) == ["zero", "alice", "bob"]
+
+    def test_insert_at_start(self, tagged):
+        result = tagged.insert(0, {"id": 0, "name": "zero", "score": 0})
+        assert _names(result) == ["zero"] + ["alice", "bob", "carol"] * 2
+
+    def test_insert_at_start_after_derive(self, tagged):
+        # derive() rebuilds the table schema without metadata; the scan keeps it.
+        derived = tagged.derive(double=lambda r: r.score * 2)
+        result = derived.insert(0, {"id": 0, "name": "zero", "score": 0, "double": 0})
+        assert _names(result) == ["zero"] + ["alice", "bob", "carol"] * 2
+
+    def test_modify_first_batch_after_derive(self, tagged):
+        derived = tagged.derive(double=lambda r: r.score * 2)
+        assert _names(derived.modify(0, name="zed")) == ["zed", "bob", "carol", "alice", "bob", "carol"]

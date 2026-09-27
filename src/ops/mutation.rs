@@ -55,6 +55,15 @@ fn insert_row_exec(
         );
     }
 
+    // `new_batch` was built from the table schema, which can lack schema-level
+    // metadata the collected batches carry (the `pandas` key from_pandas
+    // attaches survives the scan; a derived table's schema is rebuilt without
+    // it). `from_batches` builds the MemTable from the first batch's schema and
+    // rejects batches that schema does not contain, so splice the row under
+    // the collected schema.
+    let new_batch = RecordBatch::try_new(batches[0].schema(), new_batch.columns().to_vec())
+        .map_err(|e| LtseqError::with_context("Failed to create record batch for insert", e))?;
+
     let mut result_batches = Vec::new();
     let mut row_offset = 0usize;
     let mut inserted = false;
@@ -316,7 +325,8 @@ fn modify_row_exec(
                     new_columns.push(col);
                 }
             }
-            let new_batch = RecordBatch::try_new(Arc::clone(schema), new_columns)
+            // Keep the batch's own schema, not the table's: see insert_row_exec.
+            let new_batch = RecordBatch::try_new(batch.schema(), new_columns)
                 .map_err(|e| LtseqError::with_context("Failed to create batch", e))?;
             result_batches.push(new_batch);
         }
@@ -393,6 +403,10 @@ fn python_value_to_scalar(val: &Bound<'_, PyAny>, dt: &DataType) -> Option<Scala
         DataType::Utf8View => {
             val.extract::<String>().ok().map(|v| ScalarValue::Utf8View(Some(v)))
         }
+        // Likewise a dictionary-encoded column: convert to the value type,
+        // then wrap so the scalar keeps the column's key type.
+        DataType::Dictionary(key_type, value_type) => python_value_to_scalar(val, value_type)
+            .map(|v| ScalarValue::Dictionary(key_type.clone(), Box::new(v))),
         DataType::Boolean => val.extract::<bool>().ok().map(|v| ScalarValue::Boolean(Some(v))),
         DataType::Date32 => val.extract::<i32>().ok().map(|v| ScalarValue::Date32(Some(v))),
         DataType::Date64 => val.extract::<i64>().ok().map(|v| ScalarValue::Date64(Some(v))),

@@ -346,10 +346,18 @@ class TestPivotRegressions:
         assert set(df1.columns) == set(df2.columns)
 
 
-# Arrow has three physical string types. `read_parquet` yields string_view
-# (DataFusion 55 scans Parquet strings as Utf8View), `from_arrow` keeps the
-# caller's type, and `read_csv` / `from_rows` produce plain string.
-STRING_TYPES = [pa.string(), pa.large_string(), pa.string_view()]
+# Arrow has three physical string types, each of which can also be
+# dictionary-encoded. `read_parquet` yields string_view (DataFusion 55 scans
+# Parquet strings as Utf8View) unless the file stores a dictionary-encoded
+# column, e.g. a pandas categorical; `from_arrow` / `from_pandas` keep the
+# source type; `read_csv` / `from_rows` produce plain string.
+STRING_TYPES = [
+    pa.string(),
+    pa.large_string(),
+    pa.string_view(),
+    pa.dictionary(pa.int8(), pa.string()),
+    pa.dictionary(pa.int8(), pa.large_string()),  # a pandas 3 categorical
+]
 
 
 def _events(url_type: pa.DataType) -> pa.Table:
@@ -378,10 +386,47 @@ class TestPivotStringColumnTypes:
         pivoted = t.pivot(index="userid", columns="url", values="value", agg_fn="sum")
         _assert_pivoted_by_url(pivoted)
 
-    def test_pivot_on_parquet_string_column(self, tmp_path):
-        """The reported path: a Parquet scan hands pivot() string_view data."""
+    @pytest.mark.parametrize(
+        ("written", "scanned"),
+        [
+            (pa.string(), pa.string_view()),
+            (pa.dictionary(pa.int8(), pa.string()), pa.dictionary(pa.int8(), pa.string())),
+        ],
+        ids=["string", "dictionary"],
+    )
+    def test_pivot_on_parquet_string_column(self, tmp_path, written, scanned):
+        """The reported path: a Parquet scan hands pivot() string_view data, or
+        dictionary data when the file stores a dictionary-encoded column."""
         path = tmp_path / "events.parquet"
-        pq.write_table(_events(pa.string()), path)
+        pq.write_table(_events(written), path)
         t = LTSeq.read_parquet(str(path))
+        # Guard the premise, which depends on DataFusion's scan defaults.
+        assert t.to_arrow().schema.field("url").type == scanned
         pivoted = t.pivot(index="userid", columns="url", values="value", agg_fn="sum")
         _assert_pivoted_by_url(pivoted)
+
+    def test_pivot_ignores_unreferenced_dictionary_values(self):
+        """A dictionary entry no row uses (a pandas category with no rows left)
+        must not become a pivot column."""
+        url = pa.DictionaryArray.from_arrays(
+            pa.array([0, 0, 1, 0, 1], pa.int8()), pa.array(["a", "b", "unused"])
+        )
+        t = LTSeq.from_arrow(_events(pa.string()).set_column(1, "url", url))
+        pivoted = t.pivot(index="userid", columns="url", values="value", agg_fn="sum")
+        _assert_pivoted_by_url(pivoted)
+
+    def test_pivot_on_dictionary_encoded_int_column(self):
+        """A dictionary-encoded pivot column pivots like its value type."""
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "userid": pa.array([1, 1, 2], pa.int64()),
+                    "code": pa.array([7, 8, 7], pa.int64()).dictionary_encode(),
+                    "value": pa.array([1.0, 2.0, 3.0], pa.float64()),
+                }
+            )
+        )
+        pivoted = t.pivot(index="userid", columns="code", values="value", agg_fn="sum")
+        assert set(pivoted.schema) == {"userid", "7", "8"}
+        rows = {row["userid"]: row for row in pivoted.to_dicts()}
+        assert rows[1]["7"] == 1.0 and rows[1]["8"] == 2.0 and rows[2]["7"] == 3.0
