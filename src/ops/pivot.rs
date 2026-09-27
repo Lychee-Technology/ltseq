@@ -253,8 +253,9 @@ fn extract_pivot_values(
         // decodes only the entries the keys reference, so an unused dictionary
         // value (a pandas category with no rows) does not become a column.
         DataType::Dictionary(_, value_type) => {
-            let decoded = cast(col_arr, value_type)
-                .map_err(|e| LtseqError::with_context("Failed to decode dictionary pivot column", e))?;
+            let decoded = cast(col_arr, value_type).map_err(|e| {
+                LtseqError::with_context("Failed to decode dictionary pivot column", e)
+            })?;
             extract_pivot_values(&decoded, pivot_values_set)?;
         }
         DataType::Int32 => {
