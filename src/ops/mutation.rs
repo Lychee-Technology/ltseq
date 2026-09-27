@@ -39,7 +39,7 @@ fn insert_row_exec(
     pos: i64,
     new_batch: RecordBatch,
 ) -> Result<LTSeqTable, LtseqError> {
-    let df = table.require_df()?;
+    let (df, schema) = table.require_df_and_schema()?;
 
     let batches = collect_all(df)?;
 
@@ -55,14 +55,9 @@ fn insert_row_exec(
         );
     }
 
-    // `new_batch` was built from the table schema, which can lack schema-level
-    // metadata the collected batches carry (the `pandas` key from_pandas
-    // attaches survives the scan; a derived table's schema is rebuilt without
-    // it). `from_batches` builds the MemTable from the first batch's schema and
-    // rejects batches that schema does not contain, so splice the row under
-    // the collected schema.
-    let new_batch = RecordBatch::try_new(batches[0].schema(), new_batch.columns().to_vec())
-        .map_err(|e| LtseqError::with_context("Failed to create record batch for insert", e))?;
+    let (batches, splice_schema) = align_for_splice(batches, schema)?;
+    let new_batch = RecordBatch::try_new(splice_schema, new_batch.columns().to_vec())
+        .map_err(|e| LtseqError::with_context("Failed to splice the inserted row", e))?;
 
     let mut result_batches = Vec::new();
     let mut row_offset = 0usize;
@@ -296,6 +291,7 @@ fn modify_row_exec(
     }
 
     let pos = pos as usize;
+    let (batches, splice_schema) = align_for_splice(batches, schema)?;
 
     let mut result_batches = Vec::new();
     let mut row_offset = 0usize;
@@ -325,8 +321,7 @@ fn modify_row_exec(
                     new_columns.push(col);
                 }
             }
-            // Keep the batch's own schema, not the table's: see insert_row_exec.
-            let new_batch = RecordBatch::try_new(batch.schema(), new_columns)
+            let new_batch = RecordBatch::try_new(Arc::clone(&splice_schema), new_columns)
                 .map_err(|e| LtseqError::with_context("Failed to create batch", e))?;
             result_batches.push(new_batch);
         }
@@ -352,6 +347,50 @@ fn collect_all(
     RUNTIME
         .block_on((**df).clone().collect())
         .map_err(|e| LtseqError::with_context("Failed to collect data", e))
+}
+
+/// Rebase the collected batches onto the one schema `insert` / `modify` splice
+/// their new data under, and return that schema. `batches` must be non-empty.
+///
+/// `from_batches` rejects any batch the first batch's schema does not contain,
+/// so every spliced batch needs the same schema, and neither the table schema
+/// (which the new data was validated against) nor the collected schema works
+/// on its own. The collected schema can carry schema-level metadata the table
+/// schema lacks: the `pandas` key from_pandas attaches survives the scan, while
+/// a derived table's schema is rebuilt without it. The table schema can allow
+/// nulls the batches do not: join and link schemas mark every right-side field
+/// nullable, while an inner join keeps a non-nullable right column
+/// non-nullable. So take the collected schema, for its exact types and
+/// metadata, and make a field nullable wherever the table schema allows nulls.
+/// The rebase only widens nullability, so it is zero-copy.
+fn align_for_splice(
+    batches: Vec<RecordBatch>,
+    table_schema: &Schema,
+) -> Result<(Vec<RecordBatch>, SchemaRef), LtseqError> {
+    let collected = batches[0].schema();
+    let fields: Vec<FieldRef> = collected
+        .fields()
+        .iter()
+        .zip(table_schema.fields())
+        .map(|(field, table_field)| {
+            if table_field.is_nullable() && !field.is_nullable() {
+                Arc::new(field.as_ref().clone().with_nullable(true))
+            } else {
+                Arc::clone(field)
+            }
+        })
+        .collect();
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        collected.metadata().clone(),
+    ));
+
+    let batches = batches
+        .into_iter()
+        .map(|batch| batch.with_schema(Arc::clone(&schema)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| LtseqError::with_context("Failed to align the collected batches", e))?;
+    Ok((batches, schema))
 }
 
 fn row_dict_to_batch(
