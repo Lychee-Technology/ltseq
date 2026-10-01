@@ -46,16 +46,9 @@ fn insert_row_exec(
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let pos = pos.clamp(0, num_rows as i64) as usize;
 
-    if num_rows == 0 {
-        return LTSeqTable::from_batches(
-            Arc::clone(&table.session),
-            vec![new_batch],
-            Vec::new(),
-            None,
-        );
-    }
-
-    let (batches, splice_schema) = align_for_splice(batches, schema)?;
+    // An empty table goes through the same alignment: the row is then the
+    // only data, and its schema is the one the result carries.
+    let (batches, splice_schema) = align_for_splice(batches, df, schema)?;
     let new_batch = RecordBatch::try_new(splice_schema, new_batch.columns().to_vec())
         .map_err(|e| LtseqError::with_context("Failed to splice the inserted row", e))?;
 
@@ -291,7 +284,7 @@ fn modify_row_exec(
     }
 
     let pos = pos as usize;
-    let (batches, splice_schema) = align_for_splice(batches, schema)?;
+    let (batches, splice_schema) = align_for_splice(batches, df, schema)?;
 
     let mut result_batches = Vec::new();
     let mut row_offset = 0usize;
@@ -350,7 +343,7 @@ fn collect_all(
 }
 
 /// Rebase the collected batches onto the one schema `insert` / `modify` splice
-/// their new data under, and return that schema. `batches` must be non-empty.
+/// their new data under, and return that schema.
 ///
 /// `from_batches` rejects any batch the first batch's schema does not contain,
 /// so every spliced batch needs the same schema, and neither the table schema
@@ -363,11 +356,19 @@ fn collect_all(
 /// non-nullable. So take the collected schema, for its exact types and
 /// metadata, and make a field nullable wherever the table schema allows nulls.
 /// The rebase only widens nullability, so it is zero-copy.
+///
+/// An empty table can collect to no batches at all (a filter that matches
+/// nothing emits none). The plan's schema then stands in for the collected
+/// one; it carries the same metadata.
 fn align_for_splice(
     batches: Vec<RecordBatch>,
+    df: &datafusion::dataframe::DataFrame,
     table_schema: &Schema,
 ) -> Result<(Vec<RecordBatch>, SchemaRef), LtseqError> {
-    let collected = batches[0].schema();
+    let collected = batches
+        .first()
+        .map(|batch| batch.schema())
+        .unwrap_or_else(|| Arc::clone(df.schema().inner()));
     let fields: Vec<FieldRef> = collected
         .fields()
         .iter()

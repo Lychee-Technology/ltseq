@@ -289,6 +289,30 @@ class TestSplicedBatchSchema:
         derived = tagged.derive(double=lambda r: r.score * 2)
         assert _names(derived.modify(0, name="zed")) == ["zed", "bob", "carol", "alice", "bob", "carol"]
 
+    @pytest.mark.parametrize(
+        "make_empty",
+        [
+            lambda empty, full: empty,
+            lambda empty, full: empty.derive(y=lambda r: r.x + 1),
+            # A filter that matches nothing collects to no batches at all.
+            lambda empty, full: full.filter(lambda r: r.x > 5),
+            lambda empty, full: full.derive(y=lambda r: r.x + 1).filter(lambda r: r.x > 5),
+        ],
+        ids=["empty", "derived", "filtered", "derived-filtered"],
+    )
+    def test_insert_into_empty_table_keeps_pandas_index(self, make_empty):
+        # The row is the result's only data, so its schema must still carry the
+        # `pandas` metadata that tells to_pandas() which field is the index.
+        index = pd.Index([], dtype="int64", name="idx")
+        empty = LTSeq.from_pandas(pd.DataFrame({"x": pd.Series([], dtype="int64")}, index=index))
+        full = LTSeq.from_pandas(pd.DataFrame({"x": [1, 2]}, index=pd.Index([10, 11], name="idx")))
+        t = make_empty(empty, full)
+        assert len(t) == 0
+        out = t.insert(0, {"idx": 7, "x": 1}).to_pandas()
+        assert out.index.name == "idx"
+        assert out.index.tolist() == [7]
+        assert out["x"].tolist() == [1]
+
     @pytest.fixture(params=["join", "link"])
     def joined(self, request) -> tuple[LTSeq, str]:
         """An inner join / link result and its right-side value column. The
