@@ -21,7 +21,6 @@ use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
-use datafusion::datasource::MemTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -35,14 +34,9 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
     // 1. Deserialize expression
     let py_expr = dict_to_py_expr(expr_dict)?;
 
-    // If no dataframe, return empty result (for unit tests)
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     // 2. Get schema (required for transpilation)
@@ -76,14 +70,9 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
 ///     table: Reference to LTSeqTable
 ///     exprs: List of serialized expression dicts (from Python)
 pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result (for unit tests)
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     // 1. Get schema
@@ -256,53 +245,23 @@ pub fn search_first_impl(
 /// Args:
 ///     table: Reference to LTSeqTable
 pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
-    // No dataframe loaded (fresh/empty table): materialization is a no-op
+    // A never-loaded table has nothing to materialize
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            table.sort_specs.clone(),
-            None,
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
-    let df = table.require_df()?;
+    let (df, schema) = table.require_df_and_schema()?;
     let batches = crate::engine::RUNTIME
         .block_on((**df).clone().collect())
         .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
 
-    // The data now lives in memory: drop source_parquet_path so downstream ops
-    // scan the snapshot instead of re-reading the original file.
-    match table.schema.as_ref() {
-        // A 0-row plan must still materialize to a scannable (empty) table,
-        // not a schema-only shell, so count/filter keep working downstream.
-        Some(schema) if batches.is_empty() => {
-            let mem_table = MemTable::try_new(Arc::clone(schema), vec![vec![]])
-                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
-            let empty_df = table
-                .session
-                .read_table(Arc::new(mem_table))
-                .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
-            Ok(LTSeqTable::from_df_with_schema(
-                Arc::clone(&table.session),
-                empty_df,
-                Arc::clone(schema),
-                table.sort_specs.clone(),
-                None,
-            ))
-        }
-        Some(schema) => LTSeqTable::from_batches_with_schema(
-            Arc::clone(&table.session),
-            batches,
-            Arc::clone(schema),
-            table.sort_specs.clone(),
-            None,
-        ),
-        None => LTSeqTable::from_batches(
-            Arc::clone(&table.session),
-            batches,
-            table.sort_specs.clone(),
-            None,
-        ),
-    }
+    // The data now lives in memory, so from_batches drops source_parquet_path
+    // and downstream ops scan the snapshot instead of re-reading the file. A
+    // 0-row plan still materializes to a scannable zero-row table.
+    LTSeqTable::from_batches(
+        Arc::clone(&table.session),
+        batches,
+        Arc::clone(schema),
+        table.sort_specs.clone(),
+    )
 }

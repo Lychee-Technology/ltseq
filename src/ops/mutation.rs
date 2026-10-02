@@ -49,7 +49,7 @@ fn insert_row_exec(
     // An empty table goes through the same alignment: the row is then the
     // only data, and its schema is the one the result carries.
     let (batches, splice_schema) = align_for_splice(batches, df, schema)?;
-    let new_batch = RecordBatch::try_new(splice_schema, new_batch.columns().to_vec())
+    let new_batch = RecordBatch::try_new(Arc::clone(&splice_schema), new_batch.columns().to_vec())
         .map_err(|e| LtseqError::with_context("Failed to splice the inserted row", e))?;
 
     let mut result_batches = Vec::new();
@@ -87,8 +87,8 @@ fn insert_row_exec(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
+        splice_schema,
         Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
-        None,
     )
 }
 
@@ -140,11 +140,13 @@ pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> Result<LTSeqTable, Ltse
         row_offset += batch_len;
     }
 
+    // Deleting the only row leaves no batches: the result is then a zero-row
+    // table with the plan's schema (which carries the collected metadata).
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
+        Arc::clone(df.schema().inner()),
         Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
-        None,
     )
 }
 
@@ -324,8 +326,8 @@ fn modify_row_exec(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_batches,
+        splice_schema,
         Vec::new(), // mutations invalidate declared order (mirrors Python _sort_keys = None)
-        None,
     )
 }
 

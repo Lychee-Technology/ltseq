@@ -328,14 +328,9 @@ fn original_columns(schema: &ArrowSchema) -> Vec<Expr> {
 /// DataFrame yields an empty result whose schema already carries the new
 /// cumsum columns.
 pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result (for unit tests)
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            table.sort_specs.clone(),
-            None, // column set changed relative to the raw file: drop fast-path token
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     let (df, schema) = table.require_df_and_schema()?;

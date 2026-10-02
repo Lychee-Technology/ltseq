@@ -88,7 +88,8 @@ impl From<PyExprError> for PyErr {
 /// enabling error chain traversal via `std::error::Error::source()`.
 #[derive(Debug)]
 pub enum LtseqError {
-    /// Table has no data loaded (dataframe is None).
+    /// The table was never loaded from a data source (`LTSeqTable::unloaded`).
+    /// An empty result is a zero-row table, never this error.
     NoData,
 
     /// Table has no schema available.
@@ -132,7 +133,11 @@ pub enum LtseqError {
 impl fmt::Display for LtseqError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            LtseqError::NoData => write!(f, "No data loaded"),
+            LtseqError::NoData => write!(
+                f,
+                "No data loaded: this table was never loaded from a data source \
+                 (create it with read_csv(), read_parquet(), from_arrow() or from_pandas())"
+            ),
             LtseqError::NoSchema => write!(f, "Schema not available"),
             LtseqError::ColumnNotFound(col) => write!(f, "Column '{}' not found in schema", col),
             LtseqError::SortRequired(msg) => write!(f, "{}", msg),

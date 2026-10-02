@@ -355,8 +355,8 @@ pub fn asof_join_impl(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         vec![result_batch],
+        result_schema,
         Vec::new(),
-        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }
 

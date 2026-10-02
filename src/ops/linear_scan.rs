@@ -1201,12 +1201,7 @@ fn streaming_linear_scan_group_id(
 
     let total_rows = group_ids.len();
     if total_rows == 0 {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
     }
 
     // Step 5: Build metadata from accumulated group IDs
@@ -1312,24 +1307,9 @@ fn general_linear_scan_group_id(
         })
         .map_err(LtseqError::Runtime)?;
 
-    if proj_batches.is_empty() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-
     let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
-
     if total_rows == 0 {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
     }
 
     let schema = proj_batches[0].schema();
@@ -1432,8 +1412,8 @@ pub(crate) fn build_metadata_table(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         vec![meta_batch],
+        meta_schema,
         Vec::new(),
-        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }
 
@@ -1540,5 +1520,76 @@ mod tests {
             "expected a Sort for undeclared-order input:\n{}",
             plan
         );
+    }
+
+    fn declared_specs() -> Vec<SortSpec> {
+        vec![
+            SortSpec::new("userid".to_string(), false),
+            SortSpec::new("eventtime".to_string(), false),
+        ]
+    }
+
+    /// An empty input must yield the zero-row METADATA table, whose columns
+    /// group_ordered_count filters on, not a stub carrying the input schema
+    /// (issue #161).
+    fn assert_empty_metadata_table(result: &LTSeqTable) {
+        let names: Vec<&str> = result
+            .require_schema()
+            .expect("metadata schema")
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        assert_eq!(names, ["__group_id__", "__group_count__", "__rn__"]);
+        let df = result.require_df().expect("zero-row table has a plan");
+        let rows = RUNTIME.block_on((**df).clone().count()).expect("count");
+        assert_eq!(rows, 0);
+    }
+
+    /// The general path (in-memory input).
+    #[test]
+    fn group_id_on_empty_input_is_empty_metadata_table() {
+        let table = LTSeqTable::from_batches(
+            crate::engine::create_session_context(),
+            Vec::new(),
+            sample_batch().schema(),
+            declared_specs(),
+        )
+        .expect("zero-row table");
+
+        let result = linear_scan_group_id(&table, &secondary_key_predicate())
+            .expect("group ids of an empty table");
+        assert_empty_metadata_table(&result);
+    }
+
+    /// The direct Parquet streaming path (pre-sorted file with no rows).
+    #[test]
+    fn group_id_on_empty_parquet_is_empty_metadata_table() {
+        let path = std::env::temp_dir().join(format!(
+            "ltseq_issue161_empty_{}.parquet",
+            std::process::id()
+        ));
+        let schema = sample_batch().schema();
+        let file = std::fs::File::create(&path).expect("create parquet file");
+        let writer = parquet::arrow::ArrowWriter::try_new(file, Arc::clone(&schema), None)
+            .expect("parquet writer");
+        writer.close().expect("write empty parquet file");
+
+        let path_str = path.to_str().expect("utf-8 temp path").to_string();
+        let session = crate::engine::create_session_context();
+        let df = RUNTIME
+            .block_on(session.read_parquet(&path_str, ParquetReadOptions::default()))
+            .expect("read parquet");
+        let table = LTSeqTable::from_df_with_schema(
+            Arc::clone(&session),
+            df,
+            schema,
+            declared_specs(),
+            Some(path_str),
+        );
+
+        let result = linear_scan_group_id(&table, &secondary_key_predicate());
+        let _ = std::fs::remove_file(&path);
+        assert_empty_metadata_table(&result.expect("group ids of an empty file"));
     }
 }

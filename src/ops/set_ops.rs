@@ -125,10 +125,12 @@ fn snapshot_single_partition(
             LtseqError::Runtime(format!("Failed to collect for position snapshot: {}", e))
         })?;
 
+    // A zero-row plan can collect to no batches: snapshot an empty batch with
+    // the plan's schema then, so the result is a zero-row table, not NoData.
     let schema = batches
         .first()
         .map(|b| b.schema())
-        .ok_or(LtseqError::NoData)?;
+        .unwrap_or_else(|| Arc::clone(df.schema().inner()));
     let combined = datafusion::arrow::compute::concat_batches(&schema, &batches)
         .map_err(|e| LtseqError::Runtime(format!("Failed to combine batches: {}", e)))?;
 
@@ -153,14 +155,9 @@ pub fn distinct_impl(
     table: &LTSeqTable,
     key_exprs: Vec<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result (for unit tests)
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None,
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     let (df, schema) = table.require_df_and_schema()?;

@@ -693,12 +693,11 @@ pub fn search_pattern_impl(
         .map_err(LtseqError::collect)?;
 
     if batches.is_empty() {
-        return Ok(LTSeqTable::empty(
+        return LTSeqTable::empty(
             Arc::clone(&table.session),
-            Some(Arc::clone(schema)),
+            Arc::clone(schema),
             table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        );
     }
 
     let batch_schema = batches[0].schema();
@@ -708,12 +707,11 @@ pub fn search_pattern_impl(
 
     let n = combined.num_rows();
     if n < num_steps {
-        return Ok(LTSeqTable::empty(
+        return LTSeqTable::empty(
             Arc::clone(&table.session),
-            Some(Arc::clone(schema)),
+            Arc::clone(schema),
             table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        );
     }
 
     // 5. Build column name → index mapping
@@ -795,12 +793,11 @@ pub fn search_pattern_impl(
 
     // 9. If no matches, return empty table with original schema
     if matching_indices.is_empty() {
-        return Ok(LTSeqTable::empty(
+        return LTSeqTable::empty(
             Arc::clone(&table.session),
-            Some(Arc::clone(schema)),
+            Arc::clone(schema),
             table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        );
     }
 
     // 10. Collect FULL table (all columns) and take matching rows
@@ -832,12 +829,11 @@ pub fn search_pattern_impl(
         .map_err(LtseqError::collect)?;
 
     if full_batches.is_empty() {
-        return Ok(LTSeqTable::empty(
+        return LTSeqTable::empty(
             Arc::clone(&table.session),
-            Some(Arc::clone(schema)),
+            Arc::clone(schema),
             table.sort_specs.clone(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        );
     }
 
     let full_schema = full_batches[0].schema();
@@ -864,8 +860,8 @@ pub fn search_pattern_impl(
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         vec![result_batch],
+        full_schema,
         table.sort_specs.clone(),
-        None, // row set / columns diverge from the raw file: drop fast-path token
     )
 }
 
