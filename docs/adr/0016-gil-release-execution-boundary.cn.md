@@ -22,7 +22,7 @@ PyO3 0.29 的两个事实决定了修法：
 
 1. **持 GIL 解析。** 一切触碰 Python 对象的工作（`Bound<PyDict>` → `PyExpr`，dict 值 → `ScalarValue`）在 `lib.rs` stub 或 op 的前半段完成。
 2. **detach 执行。** `src/gil.rs::detached(py, || ...)` 为一个只看到纯 Rust 值的闭包释放 GIL。`F: Send` 在编译期把 `Bound`/`Py` 引用挡在外面。
-3. **之后转换。** 闭包返回 `Result<T, LtseqError>`；`detached` 在重新持有 GIL 后才构造 `PyErr`。`src/ops/*` 的执行半段（`parallel_scan`、`linear_scan`、`pattern_match`、`asof_join`、`io`、`pivot`、`mutation` 的 `*_exec` 半段、`set_ops` 的快照路径、`grouping::group_ordered_count_impl`）返回 `LtseqError` 而非 `PyResult`，从类型上排除在其中构造 `PyErr` 的可能。`LTSeqTable::require_df/require_schema/from_batches*` 出于同样原因返回 `LtseqError`。
+3. **之后转换。** 闭包返回 `Result<T, LtseqError>`；`detached` 在重新持有 GIL 后才构造 `PyErr`。`src/ops/*` 的执行半段（`parallel_scan`、`linear_scan`、`pattern_match`、`asof_join`、`io`、`pivot`、`mutation` 的 `*_exec` 半段、`set_ops` 的快照路径、`grouping::group_ordered_count_impl`）返回 `LtseqError` 而非 `PyResult`，从类型上排除在其中构造 `PyErr` 的可能。`LTSeqTable::require_df/require_schema/from_batches/empty` 出于同样原因返回 `LtseqError`。
 
 由此有两种 op 形态。整个 impl 是纯 Rust 时（`materialize`、`rvs`、`step`、`asof_join`、`pivot`、`write_*`、`from_arrow`、`delete_rows`，以及解析后的模式匹配与分组计数 impl），由 `lib.rs` stub 包裹调用。解析与执行交错时（`distinct`、`is_subset`、`insert_row`、`modify_row`、`assume_sorted`），impl 接收 `py: Python<'_>`，只包裹自己的执行部分。
 
