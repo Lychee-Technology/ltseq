@@ -772,7 +772,7 @@ first_big = t.sort("price").search_first(lambda r: r.price > 100)
 - **签名**: `LTSeq.search_pattern(*step_predicates: Callable, partition_by: str | None = None) -> LTSeq`
 - **行为**: 查找**连续行**依次匹配一组谓词的位置（漏斗/序列匹配）。返回第 1 步匹配的行，即满足 `step1(i), step2(i+1), ..., stepN(i+N-1)` 全部成立的行 `i`。指定 `partition_by` 时模式不跨分区边界
 - **参数**: `step_predicates` 每步一个 lambda；`partition_by` 可选分区列
-- **返回**: 第 1 步所在行组成的 `LTSeq`
+- **返回**: 第 1 步所在行组成的 `LTSeq`；无匹配时为列相同的零行 `LTSeq`，可正常 `count()` 及继续链式调用
 - **异常**: `ValueError`（无谓词或 schema 未初始化）
 - **示例**:
 ```python

@@ -40,40 +40,6 @@ use pyo3::types::PyDict;
 use std::sync::Arc;
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Get validated dataframe and schema, or return empty table
-fn get_df_and_schema_or_empty(
-    table: &LTSeqTable,
-) -> Result<(&Arc<datafusion::dataframe::DataFrame>, &Arc<ArrowSchema>), LTSeqTable> {
-    if table.dataframe.is_none() {
-        return Err(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-    // SAFETY: dataframe.is_none() is checked above
-    let df = table.dataframe.as_ref().expect("dataframe checked above");
-    let schema = table.schema.as_ref().ok_or_else(|| {
-        LTSeqTable::empty(
-            Arc::clone(&table.session),
-            None,
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        )
-    })?;
-    Ok((df, schema))
-}
-
-
-
-
-
-
-// ============================================================================
 // Public API Functions
 // ============================================================================
 
@@ -161,10 +127,11 @@ pub fn group_ordered_count_impl(
 /// 2. **SQL phase**: From the materialized `__boundary__` column, compute mask,
 ///    cumulative sum → `__group_id__`, then `__group_count__` and `__rn__`
 pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-    let (df, schema) = match get_df_and_schema_or_empty(table) {
-        Ok(v) => v,
-        Err(empty_table) => return Ok(empty_table),
-    };
+    // A never-loaded table yields another never-loaded table
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
+    }
+    let (df, schema) = table.require_df_and_schema()?;
 
     // Deserialize grouping expression
     let py_expr = dict_to_py_expr(&grouping_expr)?;
@@ -394,10 +361,11 @@ pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
 
 /// Shared implementation for first_row and last_row
 fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqTable> {
-    let (df, schema) = match get_df_and_schema_or_empty(table) {
-        Ok(v) => v,
-        Err(empty_table) => return Ok(empty_table),
-    };
+    // A never-loaded table yields another never-loaded table
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
+    }
+    let (df, schema) = table.require_df_and_schema()?;
 
     // Verify __group_id__ column exists
     if !schema.fields().iter().any(|f| f.name() == "__group_id__") {

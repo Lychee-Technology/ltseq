@@ -129,12 +129,7 @@ pub fn direct_streaming_group_ordered(
 
     let total_rows = group_ids.len();
     if total_rows == 0 {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
     }
 
     // Step 4: Compute group_count and rn (two passes over group_ids)

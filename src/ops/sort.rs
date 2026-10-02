@@ -25,14 +25,9 @@ pub fn sort_impl(
     sort_exprs: Vec<Bound<'_, PyDict>>,
     desc_flags: Vec<bool>,
 ) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result (for unit tests)
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     let (df, schema) = table.require_df_and_schema()?;
@@ -119,14 +114,9 @@ pub fn assume_sorted_impl(
     sort_exprs: Vec<Bound<'_, PyDict>>,
     desc_flags: Vec<bool>,
 ) -> PyResult<LTSeqTable> {
-    // If no dataframe, return empty result
+    // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::empty(
-            Arc::clone(&table.session),
-            table.schema.as_ref().map(Arc::clone),
-            Vec::new(),
-            table.source_parquet_path.clone(),
-        ));
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
     let (df, _schema) = table.require_df_and_schema()?;

@@ -775,7 +775,7 @@ first_big = t.sort("price").search_first(lambda r: r.price > 100)
 - **Signature**: `LTSeq.search_pattern(*step_predicates: Callable, partition_by: str | None = None) -> LTSeq`
 - **Behavior**: Find rows where **consecutive rows** match a sequence of predicates (funnel/sequence matching). Returns the rows where step 1 matched, i.e. row `i` such that `step1(i), step2(i+1), ..., stepN(i+N-1)` all hold. With `partition_by`, the pattern cannot cross partition boundaries
 - **Parameters**: `step_predicates` one lambda per step; `partition_by` optional partition column
-- **Returns**: `LTSeq` of step-1 rows
+- **Returns**: `LTSeq` of step-1 rows; when nothing matches, a zero-row `LTSeq` with the same columns that supports `count()` and further chaining
 - **Exceptions**: `ValueError` (no predicates or schema not initialized)
 - **Example**:
 ```python

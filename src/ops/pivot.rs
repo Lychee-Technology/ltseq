@@ -162,12 +162,11 @@ pub fn pivot_impl(
         Arc::new(ArrowSchema::new(fields))
     };
 
-    LTSeqTable::from_batches_with_schema(
+    LTSeqTable::from_batches(
         Arc::clone(&table.session),
         result_df,
         result_schema,
         Vec::new(),
-        None,
     )
 }
 

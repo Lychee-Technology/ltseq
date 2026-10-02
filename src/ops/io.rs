@@ -159,9 +159,9 @@ pub fn from_arrow_impl(reader: ArrowArrayStreamReader) -> Result<LTSeqTable, Lts
 
     let (schema, mut batches) = collect_imported(reader)?;
     if batches.is_empty() {
-        batches.push(RecordBatch::new_empty(schema));
+        batches.push(RecordBatch::new_empty(Arc::clone(&schema)));
     }
-    LTSeqTable::from_batches(create_session_context(), batches, Vec::new(), None)
+    LTSeqTable::from_batches(create_session_context(), batches, schema, Vec::new())
 }
 
 /// Schema of a table that may have no plan (an unloaded `LTSeq()` has neither).

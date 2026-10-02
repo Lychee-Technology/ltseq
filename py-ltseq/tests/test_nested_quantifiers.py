@@ -146,15 +146,8 @@ class TestQuantifierEdgeCases:
 
             # No values are negative - result should be empty
             result = groups.filter(lambda g: g.any(lambda r: r.value < 0))
-            # When all groups are filtered out, the result may be empty
-            # Try to get length or catch the empty data error
-            try:
-                flattened = result.flatten()
-                length = len(flattened)
-                assert length == 0
-            except RuntimeError as e:
-                # Empty result is expected - no data loaded means no matching groups
-                assert "No data loaded" in str(e)
+            # Filtering out every group leaves a zero-row table (issue #161)
+            assert len(result.flatten()) == 0
 
 
 class TestQuantifierCombinations:

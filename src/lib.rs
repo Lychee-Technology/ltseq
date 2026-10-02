@@ -44,6 +44,9 @@ fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
 #[pyclass]
 pub struct LTSeqTable {
     session: Arc<SessionContext>,
+    // `None` only for a table that was never loaded (`unloaded`), and then
+    // `schema` is `None` too. Every result table, zero-row ones included, has
+    // a plan, so `require_df` failing always means "never loaded".
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
     sort_specs: Vec<SortSpec>, // Declared row order (column + direction), drives window ORDER BY
@@ -96,28 +99,21 @@ impl LTSeqTable {
         }
     }
 
-    /// Create a table from record batches via MemTable.
-    /// Schema is inferred from the first batch; returns an empty table if batches are empty.
+    /// Create a table from record batches via a single-partition MemTable.
+    ///
+    /// The batches' own schema is authoritative when there are any (it is the
+    /// exact schema the data was built with); `schema` is what a zero-batch
+    /// result keeps, so it is still a queryable zero-row table. The data lives
+    /// in memory, so the raw-file fast-path token is never carried over.
     pub(crate) fn from_batches(
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
+        schema: Arc<ArrowSchema>,
         sort_specs: Vec<SortSpec>,
-        source_parquet_path: Option<String>,
     ) -> Result<Self, LtseqError> {
-        if batches.is_empty() {
-            return Ok(LTSeqTable {
-                session,
-                dataframe: None,
-                schema: None,
-                sort_specs,
-                source_parquet_path,
-            });
-        }
-
-        let result_schema = batches[0].schema();
-        let mem_table =
-            MemTable::try_new(Arc::clone(&result_schema), vec![batches])
-                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
+        let schema = batches.first().map_or(schema, |batch| batch.schema());
+        let mem_table = MemTable::try_new(Arc::clone(&schema), vec![batches])
+            .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
 
         let result_df = session
             .read_table(Arc::new(mem_table))
@@ -126,67 +122,43 @@ impl LTSeqTable {
         Ok(LTSeqTable {
             session,
             dataframe: Some(Arc::new(result_df)),
-            schema: Some(result_schema),
+            schema: Some(schema),
             sort_specs,
-            source_parquet_path,
+            source_parquet_path: None,
         })
     }
 
-    /// Like `from_batches`, but uses a fallback schema when batches are empty.
-    pub(crate) fn from_batches_with_schema(
-        session: Arc<SessionContext>,
-        batches: Vec<RecordBatch>,
-        empty_schema: Arc<ArrowSchema>,
-        sort_specs: Vec<SortSpec>,
-        source_parquet_path: Option<String>,
-    ) -> Result<Self, LtseqError> {
-        if batches.is_empty() {
-            return Ok(LTSeqTable {
-                session,
-                dataframe: None,
-                schema: Some(empty_schema),
-                sort_specs,
-                source_parquet_path,
-            });
-        }
-
-        let result_schema = batches[0].schema();
-        let mem_table =
-            MemTable::try_new(Arc::clone(&result_schema), vec![batches])
-                .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
-
-        let result_df = session
-            .read_table(Arc::new(mem_table))
-            .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
-
-        Ok(LTSeqTable {
-            session,
-            dataframe: Some(Arc::new(result_df)),
-            schema: Some(result_schema),
-            sort_specs,
-            source_parquet_path,
-        })
-    }
-
-    /// Create an empty table with a known schema (dataframe: None).
-    /// Used for early returns when no data is loaded.
+    /// Create a zero-row table with the given schema.
+    ///
+    /// This is the early-return value of queries that find no rows (e.g. a
+    /// `search_pattern` with no match). It has a real plan, so `count()`,
+    /// `to_pandas()` and further transforms work on it like on any table that
+    /// a lazy `filter` emptied (issue #161).
     pub(crate) fn empty(
         session: Arc<SessionContext>,
-        schema: Option<Arc<ArrowSchema>>,
+        schema: Arc<ArrowSchema>,
         sort_specs: Vec<SortSpec>,
-        source_parquet_path: Option<String>,
-    ) -> Self {
-        // Explicit field initialization for clarity and future-proofing
+    ) -> Result<Self, LtseqError> {
+        Self::from_batches(session, Vec::new(), schema, sort_specs)
+    }
+
+    /// Create a table that has no data source yet, as `LTSeqTable()` does.
+    ///
+    /// This is the only state without a plan: operations on it that build a
+    /// new table return another unloaded table, and those that need data
+    /// raise `LtseqError::NoData`.
+    pub(crate) fn unloaded(session: Arc<SessionContext>) -> Self {
         LTSeqTable {
             session,
             dataframe: None,
-            schema,
-            sort_specs,
-            source_parquet_path,
+            schema: None,
+            sort_specs: Vec::new(),
+            source_parquet_path: None,
         }
     }
 
-    /// Get a reference to the DataFrame, or `LtseqError::NoData` if none is loaded.
+    /// Get a reference to the DataFrame, or `LtseqError::NoData` if the table
+    /// was never loaded.
     ///
     /// Returns `LtseqError` (not `PyErr`) so it is usable inside detached
     /// execution closures; `?` in a `PyResult` context converts automatically.
@@ -211,14 +183,7 @@ impl LTSeqTable {
 impl LTSeqTable {
     #[new]
     fn new() -> Self {
-        let session = create_session_context();
-        LTSeqTable {
-            session,
-            dataframe: None,
-            schema: None,
-            sort_specs: Vec::with_capacity(0),
-            source_parquet_path: None,
-        }
+        LTSeqTable::unloaded(create_session_context())
     }
 
     /// Read CSV file into DataFusion DataFrame
@@ -320,14 +285,7 @@ impl LTSeqTable {
     #[staticmethod]
     #[pyo3(signature = (path, has_header=true))]
     fn from_csv(py: Python<'_>, path: String, has_header: bool) -> PyResult<LTSeqTable> {
-        let session = create_session_context();
-        let mut table = LTSeqTable {
-            session,
-            dataframe: None,
-            schema: None,
-            sort_specs: Vec::new(),
-            source_parquet_path: None,
-        };
+        let mut table = LTSeqTable::unloaded(create_session_context());
         table.read_csv(py, path, has_header)?;
         Ok(table)
     }
@@ -345,14 +303,7 @@ impl LTSeqTable {
     ///     LTSeqTable with loaded data
     #[staticmethod]
     fn from_parquet(py: Python<'_>, path: String) -> PyResult<LTSeqTable> {
-        let session = create_session_context();
-        let mut table = LTSeqTable {
-            session,
-            dataframe: None,
-            schema: None,
-            sort_specs: Vec::new(),
-            source_parquet_path: None,
-        };
+        let mut table = LTSeqTable::unloaded(create_session_context());
         table.read_parquet(py, path)?;
         Ok(table)
     }
@@ -742,14 +693,9 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with selected row range
     fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
-        // If no dataframe, return empty result (for unit tests)
+        // A never-loaded table slices to another never-loaded table
         if self.dataframe.is_none() {
-            return Ok(LTSeqTable::empty(
-                Arc::clone(&self.session),
-                self.schema.as_ref().map(Arc::clone),
-                self.sort_specs.clone(),
-                None,
-            ));
+            return Ok(LTSeqTable::unloaded(Arc::clone(&self.session)));
         }
 
         // Get DataFrame
@@ -1330,4 +1276,36 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::DataType;
+
+    fn schema() -> Arc<ArrowSchema> {
+        let x = Field::new("x", DataType::Int64, true);
+        Arc::new(ArrowSchema::new(vec![x]))
+    }
+
+    /// Issue #161: a result built from no batches is a zero-row table with a
+    /// plan, not a schema-only stub whose every use raises NoData.
+    #[test]
+    fn from_batches_without_batches_is_a_queryable_zero_row_table() {
+        let table =
+            LTSeqTable::from_batches(create_session_context(), Vec::new(), schema(), Vec::new())
+                .expect("zero-row table");
+
+        assert_eq!(table.require_schema().expect("schema"), &schema());
+        let df = table.require_df().expect("zero-row table has a plan");
+        let rows = RUNTIME.block_on((**df).clone().count()).expect("count");
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn only_a_never_loaded_table_has_no_plan() {
+        let table = LTSeqTable::unloaded(create_session_context());
+        assert!(matches!(table.require_df(), Err(LtseqError::NoData)));
+        assert!(table.schema.is_none());
+    }
 }

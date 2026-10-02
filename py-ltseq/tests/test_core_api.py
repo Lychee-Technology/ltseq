@@ -403,7 +403,7 @@ class TestEmptyTableHandling:
         assert result == []
 
     def test_empty_count(self):
-        """count() on empty table raises RuntimeError (no data loaded)."""
+        """count() on a never-loaded table raises RuntimeError (no data loaded)."""
         t = LTSeq()
         with pytest.raises(RuntimeError, match="No data loaded"):
             t.count()
