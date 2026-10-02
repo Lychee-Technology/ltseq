@@ -231,12 +231,9 @@ def test_asof_join_releases_gil(events):
     assert result.count() == N_ROWS
 
 
-def test_pivot_releases_gil(events_mem):
-    # events_mem: pivot() does not accept the Utf8View strings a Parquet scan
-    # yields (pre-existing, unrelated to the GIL); the two collects inside
-    # pivot() do real aggregation work on the in-memory table anyway.
+def test_pivot_releases_gil(events):
     result = assert_releases_gil(
-        lambda: events_mem.pivot(index="userid", columns="url", values="value", agg_fn="sum")
+        lambda: events.pivot(index="userid", columns="url", values="value", agg_fn="sum")
     )
     assert result.count() == N_USERS
 
@@ -246,27 +243,19 @@ def test_pivot_releases_gil(events_mem):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def numeric_events(events) -> LTSeq:
-    # Still a lazy Parquet scan (collect decodes the file), minus the string
-    # column: insert() cannot build a row for the Utf8View strings a Parquet
-    # scan yields (pre-existing, unrelated to the GIL).
-    return events.select("userid", "eventtime", "value")
-
-
-def test_insert_row_releases_gil(numeric_events):
-    row = {"userid": -1, "eventtime": -1, "value": 0.0}
-    t = assert_releases_gil(lambda: numeric_events.insert(0, row))
+def test_insert_row_releases_gil(events):
+    row = {"userid": -1, "eventtime": -1, "value": 0.0, "url": "landing/gil"}
+    t = assert_releases_gil(lambda: events.insert(0, row))
     assert t.count() == N_ROWS + 1
 
 
-def test_delete_row_releases_gil(numeric_events):
-    t = assert_releases_gil(lambda: numeric_events.delete(0))
+def test_delete_row_releases_gil(events):
+    t = assert_releases_gil(lambda: events.delete(0))
     assert t.count() == N_ROWS - 1
 
 
-def test_modify_row_releases_gil(numeric_events):
-    t = assert_releases_gil(lambda: numeric_events.modify(0, value=42.0))
+def test_modify_row_releases_gil(events):
+    t = assert_releases_gil(lambda: events.modify(0, value=42.0))
     assert t.count() == N_ROWS
 
 

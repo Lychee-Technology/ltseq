@@ -9,7 +9,8 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, ArrayAccessor, AsArray};
+use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Case;
 use datafusion::logical_expr::{case, col, lit, Expr};
@@ -243,14 +244,19 @@ fn extract_pivot_values(
     pivot_values_set: &mut HashSet<String>,
 ) -> Result<(), LtseqError> {
     match col_arr.data_type() {
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            if let Some(string_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::StringArray>() {
-                for i in 0..string_col.len() {
-                    if !string_col.is_null(i) {
-                        pivot_values_set.insert(string_col.value(i).to_string());
-                    }
-                }
-            }
+        // Arrow has three physical string layouts: a Parquet scan yields
+        // Utf8View, `from_arrow` keeps whatever the caller passed.
+        DataType::Utf8 => insert_string_values(col_arr.as_string::<i32>(), pivot_values_set),
+        DataType::LargeUtf8 => insert_string_values(col_arr.as_string::<i64>(), pivot_values_set),
+        DataType::Utf8View => insert_string_values(col_arr.as_string_view(), pivot_values_set),
+        // A dictionary-encoded column pivots on its value type. Casting
+        // decodes only the entries the keys reference, so an unused dictionary
+        // value (a pandas category with no rows) does not become a column.
+        DataType::Dictionary(_, value_type) => {
+            let decoded = cast(col_arr, value_type).map_err(|e| {
+                LtseqError::with_context("Failed to decode dictionary pivot column", e)
+            })?;
+            extract_pivot_values(&decoded, pivot_values_set)?;
         }
         DataType::Int32 => {
             if let Some(int_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Int32Array>() {
@@ -295,4 +301,17 @@ fn extract_pivot_values(
         }
     }
     Ok(())
+}
+
+/// Insert every non-null value of a string array (any of the three Arrow
+/// string layouts) into the pivot value set.
+fn insert_string_values<'a>(
+    arr: impl ArrayAccessor<Item = &'a str>,
+    pivot_values_set: &mut HashSet<String>,
+) {
+    for i in 0..arr.len() {
+        if !arr.is_null(i) {
+            pivot_values_set.insert(arr.value(i).to_string());
+        }
+    }
 }
