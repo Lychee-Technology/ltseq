@@ -158,8 +158,9 @@ RUST_GUARD_PARAMS = [
     pytest.param(
         "src/ops/aggregation.rs",
         # filter_where uses session.sql as a parser-as-library (empty table,
-        # no data round-trip) — explicitly allowlisted by issue #91.
-        {"filter_where_impl"},
+        # no data round-trip) — explicitly allowlisted by issue #91. The
+        # parse lives in its own fn so filter_where_impl stays SQL-free.
+        {"parse_where_clause"},
         id="aggregation",
     ),
     pytest.param(
