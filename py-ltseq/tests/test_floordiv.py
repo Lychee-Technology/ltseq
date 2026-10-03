@@ -94,6 +94,12 @@ class TestPythonSemantics:
         assert result.schema.field("v").type == expected
         assert result.column("v").to_pylist() == [3, 2]
 
+    def test_dictionary_encoded_column(self):
+        # pandas categoricals and dictionary Parquet pages arrive this way.
+        codes = pa.array([7, -7, 9], pa.int64()).dictionary_encode()
+        t = LTSeq.from_arrow(pa.table({"x": codes}))
+        assert _col(t.derive(v=lambda r: r.x // 2)) == [3, -4, 4]
+
     def test_integers_beyond_float_precision_stay_exact(self):
         big = 2**53 + 1  # not representable as a float64
         t = LTSeq.from_arrow(pa.table({"x": pa.array([big, -big], pa.int64())}))

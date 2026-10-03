@@ -76,6 +76,11 @@ pub(crate) fn floor_div_arrays(left: &ArrayRef, right: &ArrayRef) -> Result<Arra
 fn common_type(lhs: &DataType, rhs: &DataType) -> Result<DataType> {
     let int_or_float = |t: &DataType| t.is_integer() || t.is_floating();
     match (lhs, rhs) {
+        // Dictionary-encoded columns (pandas categoricals, dictionary Parquet
+        // pages) divide as their values, as they do for `/`.
+        (DataType::Dictionary(_, value), other) | (other, DataType::Dictionary(_, value)) => {
+            common_type(value, other)
+        }
         (DataType::Null, DataType::Null) => Ok(DataType::Int64),
         (DataType::Null, other) | (other, DataType::Null) => common_type(other, other),
         (l, r) if !int_or_float(l) || !int_or_float(r) => {
@@ -177,9 +182,10 @@ impl ScalarUDFImpl for FloorDivUdf {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{
-        Array, Float64Array, Int32Array, Int64Array, NullArray, StringArray, UInt32Array,
-        UInt64Array,
+        Array, DictionaryArray, Float64Array, Int32Array, Int64Array, Int8Array, NullArray,
+        StringArray, UInt32Array, UInt64Array,
     };
+    use datafusion::arrow::datatypes::Int8Type;
 
     // Expected values were computed with CPython's `//`.
 
@@ -303,6 +309,17 @@ mod tests {
             (Null, Int32, Int64),
             (Float64, Null, Float64),
             (Null, Null, Int64),
+            (Dictionary(Box::new(Int8), Box::new(Int64)), Int64, Int64),
+            (
+                Int8,
+                Dictionary(Box::new(Int32), Box::new(Float32)),
+                Float64,
+            ),
+            (
+                Dictionary(Box::new(Int8), Box::new(UInt32)),
+                Dictionary(Box::new(Int8), Box::new(UInt8)),
+                UInt64,
+            ),
         ];
         for (lhs, rhs, expected) in table {
             assert_eq!(common_type(&lhs, &rhs).unwrap(), expected, "{lhs} // {rhs}");
@@ -317,6 +334,7 @@ mod tests {
             (Int64, Boolean),
             (Decimal128(10, 2), Int64),
             (Date32, Int64),
+            (Dictionary(Box::new(Int8), Box::new(Utf8)), Int64),
         ] {
             let err = common_type(&lhs, &rhs).unwrap_err().to_string();
             assert!(err.contains("needs integer or float operands"), "{err}");
@@ -370,6 +388,16 @@ mod tests {
         let got = floor_div_arrays(&left, &right).unwrap();
         assert_eq!(got.data_type(), &DataType::Int64);
         assert_eq!(got.null_count(), 2);
+    }
+
+    #[test]
+    fn arrays_dictionary_operand() {
+        let keys = Int8Array::from(vec![0, 1, 0]);
+        let values: ArrayRef = Arc::new(Int64Array::from(vec![-7, 9]));
+        let left: ArrayRef = Arc::new(DictionaryArray::<Int8Type>::try_new(keys, values).unwrap());
+        let right: ArrayRef = Arc::new(Int64Array::from(vec![2, 2, -2]));
+        let got = floor_div_arrays(&left, &right).unwrap();
+        assert_eq!(got.as_primitive::<Int64Type>().values(), &[-4, 4, 3]);
     }
 
     #[test]
