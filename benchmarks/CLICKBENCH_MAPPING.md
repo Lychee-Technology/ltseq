@@ -111,7 +111,7 @@ FROM Diff
 - LTSeq：0.21s，内存 +2 MB
 - 结论：**LTSeq 快 7.6×，内存仅 1/29**
 
-性能差异来源：DuckDB 的 `LAG OVER (PARTITION BY ... ORDER BY ...)` 需要物化中间列并维护排序状态；LTSeq 的 `shift` 是零拷贝指针偏移（Zero-copy Pointer Offset），`group_ordered` 是单次流式扫描。
+性能差异来源：DuckDB 的 `LAG OVER (PARTITION BY ... ORDER BY ...)` 需要物化中间列并维护排序状态。LTSeq 在这一轮并不执行 `shift`：`group_ordered(cond).first().count()` 命中专用内核，不经过 DataFusion，直接并行读取已排序的 Parquet，比较相邻行来数会话边界，也不生成逐行分组数组。这条快路径只对特定查询形状生效，见“六、快路径的适用条件与回退”。
 
 ---
 
@@ -158,7 +158,7 @@ WHERE starts_with(url, 'http://liver.ru/saint-peterburg')
 - LTSeq：4.00s，内存 +17 MB
 - 结论：**LTSeq 快 3.76×，内存仅 1/40**
 
-性能差异来源：DuckDB 的 `LEAD(url)` 和 `LEAD(url, 2)` 需要为每行计算并存储 2 个新列（涉及大量字符串复制），再过滤；`search_pattern_count` 是单次流式扫描，使用状态机匹配，无中间列。
+性能差异来源：DuckDB 的 `LEAD(url)` 和 `LEAD(url, 2)` 需要为每行计算并存储 2 个新列（涉及大量字符串复制），再过滤。LTSeq 的 `search_pattern_count` 命中专用内核：按 row group 并行读取已排序的 Parquet；三个步骤都是同一字符串列上的 `starts_with`，所以直接对原始字符串做前缀比较，不生成中间列；跨 row group 的匹配单独拼接。适用条件见“六、快路径的适用条件与回退”。
 
 ---
 
@@ -201,4 +201,31 @@ LTSeq 的 ClickBench 使用相同数据集，但针对标准 ClickBench **刻意
 - **排序开销**：PARTITION BY + ORDER BY 需要 O(n log n) 排序
 - **代码复杂度**：多步骤漏斗需要嵌套 CTE，可读性差
 
-LTSeq 的 `shift`（零拷贝指针偏移）、`group_ordered`（流式扫描）和 `search_pattern_count`（状态机匹配）从算法层面规避了这些开销，从而在 R2/R3 中实现了数量级的性能提升。
+R2/R3 的数量级优势来自为这两种查询形状专门编写的 Rust 内核：它们直接并行读取已排序的 Parquet，只读所需列，不物化 LAG/LEAD 中间列。谓词写法、数据来源或分区列类型稍有不同，就会回退到通用路径，结果相同但慢一个数量级以上（见第六节）。因此这两轮说明的是 LTSeq 在这些形状上的表现，不代表任意序列查询都能获得同等加速。
+
+---
+
+## 六、快路径的适用条件与回退
+
+R2/R3 中 LTSeq 的耗时来自按查询形状选择的专用 Rust 内核（`src/ops/parallel_scan.rs`、`src/ops/linear_scan.rs`、`src/ops/pattern_match.rs`）。查询不满足下列条件时，LTSeq 回退到通用路径：结果相同，但要先把所需列收集到内存。在一个合成的 500 万行已排序 Parquet 上，两轮的通用路径都比快路径慢 13–24 倍；仅把 R2 谓词写成 `r.userid.shift(1) != r.userid` 就足以离开快路径。R1 没有快路径，是普通的 DataFusion 聚合。
+
+### R2：`group_ordered(cond).first().count()`
+
+快路径（并行直读 Parquet，只数分组边界）要求同时满足：
+
+1. 表直接来自 `LTSeq.read_parquet(...)` 再接 `assume_sorted(...)`。其他来源（CSV、`from_arrow`、`collect()`）或两者之间的任何变换（包括 `sort()`）都会断开与文件的关联。
+2. 以 `first().count()`（或 `len()` 作用于 `first()`）消费分组。对 `first()` 的其他用法会通过 DataFusion 窗口函数物化分组表。
+3. `cond` 由 `|`、`&` 组合而成，且每个叶子恰好是 `r.c != r.c.shift(1)` 或 `(r.c - r.c.shift(1)) > N`：`c` 是 Int32/Int64/UInt32/UInt64 或 timestamp 列，`N` 是整数字面量，或有限、取整数值且绝对值小于 `2**53` 的浮点字面量。R2 的谓词正是这个形状。操作数交换（`r.c.shift(1) != r.c`）、其他比较（`>=`、`<`、`==`）、`n != 1` 的 `shift(n)`、字符串列、`is_null()` 都不在其内。
+
+条件 1 或 3 不满足时走通用线性扫描路径：按声明顺序收集谓词列和全部排序键（数据源未声明该顺序时会先排序），用中间数组求值谓词，构造三个逐行数组，再经 DataFusion 计数。该路径仍要求谓词只由列、字面量、`shift(1)`、`is_null()`、比较、算术、`&`、`|`、`~` 组成，且至少含一个 `shift(1)`；否则物化分组表后计数。条件 3 不接受的浮点 `N` 作用于整数列时也会物化，但要等线性扫描路径收集完数据之后：该路径的求值器不做整数与浮点之间的类型转换，会直接报错（#189）。线性扫描计数与 DataFusion 路径目前在 NULL 上结果不一致（#189）。
+
+### R3：`search_pattern_count(*steps, partition_by=col)`
+
+快路径（按 row group 并行匹配，再拼接跨 row group 的匹配）要求同时满足：
+
+1. 表直接来自 `read_parquet(...)` + `assume_sorted(...)`，与 R2 相同。
+2. 指定了 `partition_by`，且分区列是 Int32/Int64/UInt32/UInt64。字符串分区列目前会直接报错，而不是回退（#211）。
+
+内核中，若所有步骤都是同一字符串列上的 `r.c.s.starts_with("字面量")`，就对原始字符串做前缀循环比较。这只取决于形状而不是列名，R3 在 `url` 上的三个前缀只是其中一例。其他步骤谓词在每个 row group 上向量化求值；内核无法求值的谓词会让整个计数回退到通用路径。
+
+不满足条件 1、未指定 `partition_by` 或内核放弃时，通用路径按声明顺序把所需列收集为一个批次，并在整批上求值第 1 步。同一列上的后续 `starts_with` 步骤只在第 1 步命中的行上做前缀比较；其他步骤各自在整批上求值。两条路径都用 LTSeq 自己的求值器而不是 DataFusion，该求值器没有隐式类型转换（#188）。

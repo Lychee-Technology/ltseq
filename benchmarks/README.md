@@ -9,12 +9,12 @@ This directory holds LTSeq's performance benchmarks: core-operation micro-benchm
 | 文件 / File | 用途 / Purpose | 需要数据 / Needs data |
 |---|---|---|
 | `run_all.py` | 一键编排：按序运行 build → 核心基准 → ClickBench 对比，并打印 PASS/SKIP/FAIL 摘要 | 否（自带门控）/ No (gated) |
-| `bench_core.py` | LTSeq 单引擎核心算子微基准（filter / derive / join / window / group / sort / mutation / I/O），10K/100K/1M 三档 | 否（内部生成临时数据）/ No |
+| `bench_core.py` | LTSeq 单引擎核心基准，10K/100K/1M 三档，分三组：算子（输入先解析进内存，计时区只含算子的构建与执行）、I/O、端到端（`e2e_csv_*`，含 CSV 解析） / Core suite in three groups: operators on in-memory input, I/O, and end-to-end CSV pipelines (`e2e_csv_*`) | 否（内部生成临时数据）/ No |
 | `bench_arrow_boundary.py` | Python↔Rust Arrow 边界：`from_arrow` / `to_arrow` / `pa.table(t)` / cursor 的耗时与峰值 RSS 增量，每项在独立子进程中测量（#143） / Arrow boundary transfer time and peak-RSS growth, one subprocess per op | 否（内部生成）/ No |
-| `bench_vs.py` | LTSeq vs DuckDB 的 ClickBench 三轮对比（Top URLs / Sessionization / Funnel） | 是 / Yes |
+| `bench_vs.py` | LTSeq vs DuckDB 的 ClickBench 三轮对比（Top URLs / Sessionization / Funnel）；R2/R3 的 LTSeq 耗时来自只对特定查询形状生效的快路径 / R2 and R3 LTSeq timings come from shape-specific fast paths | 是 / Yes |
 | `prepare_data.py` | 下载 ClickBench `hits.parquet`（约 14GB）并生成预排序数据集与 1M 采样 | — |
 | `verify_parquet_order.py` | 校验 parquet 文件是否按指定列物理有序 | 传入的 parquet |
-| `CLICKBENCH_MAPPING.md` | 三轮设计与标准 ClickBench（43 条查询）的对应关系与实测结论 | — |
+| `CLICKBENCH_MAPPING.md` | 三轮设计与标准 ClickBench（43 条查询）的对应关系、实测结论与 R2/R3 快路径的适用条件 | — |
 | `autoresearch/` | 基准门控的自动化性能研究 + 受控 pilot | 是 / Yes |
 
 ## 快速开始 / Quick start
@@ -77,6 +77,6 @@ uv run --group bench python benchmarks/verify_parquet_order.py \
 
 ## 延伸阅读 / See also
 
-- [`docs/BENCHMARK.md`](../docs/BENCHMARK.md) — 完整运行说明、可复现性约定、各轮次细节
+- [`docs/BENCHMARK.md`](../docs/BENCHMARK.md) — 完整运行说明、可复现性约定、各轮次细节、核心基准的分组与计时口径、R2/R3 快路径的适用条件
 - [`docs/BENCHMARK_AUTORESEARCH.md`](../docs/BENCHMARK_AUTORESEARCH.md) — autoresearch 受控自动循环、产物保留与评审规则
 - [`CLICKBENCH_MAPPING.md`](CLICKBENCH_MAPPING.md) — 三轮设计原理与和标准 ClickBench 的对应
