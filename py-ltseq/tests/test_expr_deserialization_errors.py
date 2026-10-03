@@ -44,6 +44,8 @@ CASES = [
     (_drop(BINOP, "right"), "Missing field: right"),
     (_with(BINOP, "right", [COL]), "Invalid type: right must be a dict"),
     (_with(BINOP, "left", {"type": "Column"}), "Missing field: name"),
+    # `left` deserializes before `right` is looked up.
+    (_drop(_with(BINOP, "left", {"type": "Column"}), "right"), "Missing field: name"),
     (_drop(UNARY, "operand"), "Missing field: operand"),
     (_with(UNARY, "operand", "x"), "Invalid type: operand must be a dict"),
     (_drop(CALL, "func"), "Missing field: func"),

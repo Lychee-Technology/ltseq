@@ -73,13 +73,33 @@ def test_parquet_count_falls_back_for_unfused_predicate(sorted_parquet):
     assert _kernel(sorted_parquet, pred) == _reference(sorted_parquet, pred)
 
 
-def test_parquet_directory_count_falls_back_to_general_path(tmp_path):
-    # The direct Parquet reader opens a single file; for a directory the
-    # parallel scan declines and the general path reads it through DataFusion.
-    # Before #157 a sequential fallback raised "Is a directory" here instead.
-    events = _events()
-    for part, start in enumerate(range(0, len(U), 5)):
-        pq.write_table(events.slice(start, 5), tmp_path / f"part-{part}.parquet")
+# #189's repro. Except for "changes", these predicates have no fused form, and
+# the general linear-scan path miscounts them because `x` holds a NULL.
+NULL_X = [1, 2, None, 10, 11, 30, 31, 32]
+NULL_Y = [1, 1, 1, 2, 2, 2, 3, 3]
+
+DIRECTORY_PREDICATES = {
+    "changes": lambda r: r.x != r.x.shift(1),
+    "swapped_gap": lambda r: (r.x.shift(1) - r.x) > -5,
+    "swapped_gap_and_same_y": lambda r: ((r.x.shift(1) - r.x) < -5) & (r.y == r.y.shift(1)),
+    "not_changes": lambda r: ~(r.x != r.x.shift(1)),
+}
+
+
+@pytest.mark.parametrize("name", DIRECTORY_PREDICATES)
+def test_parquet_directory_count_matches_reference(tmp_path, name):
+    # The direct Parquet reader opens a single file. For a directory the
+    # kernel raises and count() materializes through DataFusion. It must not
+    # answer through the general linear-scan path while #189 is open.
+    events = pa.table(
+        {
+            "i": pa.array(range(len(NULL_X)), pa.int64()),
+            "x": pa.array(NULL_X, pa.int64()),
+            "y": pa.array(NULL_Y, pa.int64()),
+        }
+    )
+    for part, start in enumerate(range(0, len(NULL_X), 3)):
+        pq.write_table(events.slice(start, 3), tmp_path / f"part-{part}.parquet")
     t = LTSeq.read_parquet(str(tmp_path)).assume_sorted("i")
-    pred = PREDICATES["changes_or_gap"]
-    assert _kernel(t, pred) == _reference(t, pred)
+    pred = DIRECTORY_PREDICATES[name]
+    assert t.group_ordered(pred).first().count() == _reference(t, pred)

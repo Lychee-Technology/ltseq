@@ -139,18 +139,39 @@ def _rust_functions(source: str) -> list[tuple[str, str]]:
 
 _RUST_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 
+# A column-0 `#[cfg(test)]` module, through the `}` that rustfmt puts at
+# column 0 to close it. Test fixtures may build MemTables; the rule governs
+# the ops. Left in, the module would be scanned as part of the fn before it,
+# and only that fn's allowlist entry would keep it from failing. Code after
+# the module is still scanned.
+_RUST_TEST_MOD_RE = re.compile(r"^#\[cfg\(test\)\]\nmod \w+ \{\n.*?^\}", re.M | re.S)
 
-def _scan_rust_file(rel_path: str, allowed_fns: set) -> list[str]:
+
+def _rust_violations(source: str, allowed_fns: set) -> list[str]:
     # Strip line comments so documentation may mention the forbidden tokens.
-    source = _RUST_LINE_COMMENT_RE.sub("", (REPO_ROOT / rel_path).read_text())
+    source = _RUST_LINE_COMMENT_RE.sub("", source)
+    source = _RUST_TEST_MOD_RE.sub("", source)
     violations = []
     for fn_name, body in _rust_functions(source):
         if fn_name in allowed_fns:
             continue
         for token in RUST_ROUNDTRIP_TOKENS:
             if token in body:
-                violations.append(f"{rel_path}: fn {fn_name} uses {token}")
+                violations.append(f"fn {fn_name} uses {token}")
     return violations
+
+
+def test_rust_guard_skips_test_modules_only() -> None:
+    source = (
+        "fn parse() { session.sql(&q) }\n"
+        "fn helper() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn fixture() { MemTable::try_new(s, b) }\n"
+        "}\n"
+        "fn after_tests() { register_table(t) }\n"
+    )
+    assert _rust_violations(source, {"parse"}) == ["fn after_tests uses register_table("]
 
 
 RUST_GUARD_PARAMS = [
@@ -198,5 +219,5 @@ RUST_GUARD_PARAMS = [
 
 @pytest.mark.parametrize("rel_path,allowed_fns", RUST_GUARD_PARAMS)
 def test_rust_table_ops_do_not_sql_roundtrip(rel_path: str, allowed_fns: set) -> None:
-    violations = _scan_rust_file(rel_path, allowed_fns)
-    assert not violations, "\n".join(violations)
+    violations = _rust_violations((REPO_ROOT / rel_path).read_text(), allowed_fns)
+    assert not violations, "\n".join(f"{rel_path}: {v}" for v in violations)

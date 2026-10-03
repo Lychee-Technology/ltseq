@@ -64,9 +64,9 @@ pub fn group_ordered_count_impl(
     }
 
     // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
-    // counting with seam stitching. It falls back when the predicate has no
-    // fused form or the file cannot be read directly; the general path below
-    // handles both.
+    // counting with seam stitching. It falls back to the general path below
+    // when the predicate has no fused form. A source it cannot read is an
+    // error, not a fallback (see parallel_streaming_group_count).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
             match crate::ops::parallel_scan::parallel_streaming_group_count(

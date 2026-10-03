@@ -61,7 +61,8 @@ struct RgChunkResult {
 /// batch, so boundaries inside the chunk need no seam handling here.
 ///
 /// Returns `Err("PARALLEL_FALLBACK: …")` if the predicate has no fused form
-/// for these columns (see `linear_scan::fused_boundaries`).
+/// for these columns (see `linear_scan::fused_boundaries`). A read failure
+/// is a plain error, as in `chunked_group_count`.
 fn process_chunk_session_count(
     parquet_path: &str,
     start_rg: usize,
@@ -69,26 +70,25 @@ fn process_chunk_session_count(
     projection_mask: &ProjectionMask,
     predicate: &PyExpr,
     name_to_idx: &HashMap<String, usize>,
+    batch_rows: usize,
 ) -> Result<RgChunkResult, String> {
-    let file = File::open(parquet_path)
-        .map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
+    let file = File::open(parquet_path).map_err(|e| format!("Failed to open Parquet: {}", e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| format!("PARALLEL_FALLBACK: builder failed: {}", e))?;
+        .map_err(|e| format!("Failed to read Parquet metadata: {}", e))?;
     let row_groups: Vec<usize> = (start_rg..end_rg).collect();
     let reader = builder
         .with_row_groups(row_groups)
         .with_projection(projection_mask.clone())
-        .with_batch_size(65536)
+        .with_batch_size(batch_rows)
         .build()
-        .map_err(|e| format!("PARALLEL_FALLBACK: build failed: {}", e))?;
+        .map_err(|e| format!("Failed to build Parquet reader: {}", e))?;
 
     let mut count = 0usize;
     let mut first_row: Option<RecordBatch> = None;
     let mut last_row: Option<RecordBatch> = None;
 
     for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
+        let batch = batch_result.map_err(|e| format!("Failed to read Parquet batch: {}", e))?;
         let n = batch.num_rows();
         if n == 0 {
             continue;
@@ -133,11 +133,29 @@ fn process_chunk_session_count(
 /// 4. total = Σ(chunk internal counts) + seam boundaries.
 ///
 /// Returns `Err("PARALLEL_FALLBACK: …")` when the predicate is unsupported;
-/// the caller degrades to the general linear-scan path.
+/// the caller degrades to the general linear-scan path. A source this reader
+/// cannot read, such as a directory, is a plain error instead, so Python
+/// counts it through the DataFusion path. The general path could read it,
+/// but for predicates without a fused form it miscounts NULLs (#189).
 pub fn parallel_streaming_group_count(
     _table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
+) -> Result<usize, LtseqError> {
+    chunked_group_count(predicate, parquet_path, COUNT_BATCH_ROWS)
+}
+
+/// Rows per record batch a count worker reads. The worker carries the
+/// previous row across every batch boundary inside its chunk.
+const COUNT_BATCH_ROWS: usize = 65536;
+
+/// `parallel_streaming_group_count` with the read batch size as a parameter,
+/// so tests can cut a chunk into several batches without writing more than
+/// `COUNT_BATCH_ROWS` rows.
+fn chunked_group_count(
+    predicate: &PyExpr,
+    parquet_path: &str,
+    batch_rows: usize,
 ) -> Result<usize, LtseqError> {
     // 1. Extract referenced columns for projection pruning.
     let mut needed_cols: HashSet<String> = HashSet::new();
@@ -145,9 +163,9 @@ pub fn parallel_streaming_group_count(
 
     // 2. Open Parquet and read metadata (sequential, metadata-only).
     let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("PARALLEL_FALLBACK: {}", e)))?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("PARALLEL_FALLBACK: {}", e)))?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
 
     let parquet_schema = builder.schema().clone();
     let num_row_groups = builder.metadata().num_row_groups();
@@ -209,6 +227,7 @@ pub fn parallel_streaming_group_count(
                 &projection_mask,
                 predicate,
                 &name_to_idx,
+                batch_rows,
             )
         })
         .collect::<Result<Vec<_>, String>>()
@@ -996,6 +1015,34 @@ mod tests {
                 assert_eq!(
                     count, expected,
                     "rows_per_group={rows_per_group}, threads={threads}"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// Inside a chunk, a worker hands each batch the previous batch's last
+    /// row. The fixtures above fit in one `COUNT_BATCH_ROWS` batch, so here
+    /// batches of 1–5 rows put a batch boundary at every position, on one
+    /// chunk and on several, with NULLs on both sides of some boundaries.
+    #[test]
+    fn parallel_count_carries_previous_row_across_batches() {
+        let expr = sessionization();
+        let expected = general_path_count(&expr);
+
+        for (rows_per_group, threads) in [(12, 1), (6, 2), (4, 3)] {
+            let path = write_parquet(&events(), rows_per_group, "batches");
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            for batch_rows in 1..=5 {
+                let count = pool
+                    .install(|| chunked_group_count(&expr, &path, batch_rows))
+                    .expect("parallel count");
+                assert_eq!(
+                    count, expected,
+                    "rows_per_group={rows_per_group}, threads={threads}, batch_rows={batch_rows}"
                 );
             }
             let _ = std::fs::remove_file(&path);
