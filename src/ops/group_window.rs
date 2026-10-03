@@ -274,7 +274,7 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
 /// Original (user-visible) columns: everything except the internal grouping
 /// columns. Inputs to these ops are always `flatten()` products, so exact-name
 /// exclusion is sound.
-fn original_column_exprs(schema: &ArrowSchema) -> Vec<Expr> {
+pub(crate) fn original_column_exprs(schema: &ArrowSchema) -> Vec<Expr> {
     schema
         .fields()
         .iter()
