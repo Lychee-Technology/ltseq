@@ -1283,14 +1283,18 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 ## 8. Expression API (inside lambdas)
 
 ### Expression Operators
-- **Signature**: `+ - * / // %`, `== != > >= < <=`, `& | ~`
+- **Signature**: `+ - * / // %`, `== != > >= < <=`, `& | ~`, `abs()`
 - **Behavior**: Build expression trees, not executed in Python
+  - `//` is floor division with Python's semantics. Integer operands floor exactly (`-7 // 2 == -4`, also beyond 2^53) and give Int64, or UInt64 when both are unsigned. A float operand gives Float64, computed as Python's float `//` (`1.0 // 0.1 == 9.0`). NULL in either operand gives NULL. Decimal and non-numeric operands are rejected; cast decimals to float first
+  - `/` and `%` follow SQL semantics, not Python's: on integers `/` truncates (`-7 / 2 == -3`), and `%` takes the sign of the dividend (`-7 % 2 == -1`, also for floats)
+  - Unary minus and `**` are not supported: write `0 - r.x` and `power(r.x, n)`
 - **Parameters**: left/right operands (Expr or literals)
 - **Returns**: expression object
-- **Exceptions**: `TypeError` (type mismatch)
+- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected, for a zero `//` divisor (integer or float, as Python raises) or an integer overflow such as `i64::MIN // -1`
 - **Example**:
 ```python
 expr = (r.price * r.qty) > 100
+bucket = r.minutes // 15
 ```
 
 ### `if_else`
