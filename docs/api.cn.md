@@ -1287,7 +1287,7 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - 不支持一元负号和 `**`：请改写为 `0 - r.x` 和 `power(r.x, n)`
 - **参数**: 左右操作数（Expr 或字面量）
 - **返回**: 表达式对象
-- **异常**: `TypeError`（类型不匹配）；`NotImplementedError`（一元负号、`**`）；收集结果时抛 `ValueError`：`//` 的除数为零（整数和浮点数都会，与 Python 一致），或整数溢出（如 `i64::MIN // -1`）
+- **异常**: `TypeError`（类型不匹配）；`NotImplementedError`（一元负号、`**`）；收集结果时抛 `ValueError`（`search_pattern` 抛 `RuntimeError`）：`//` 的除数为零（整数和浮点数都会，与 Python 一致），或整数溢出（如 `i64::MIN // -1`）
 - **示例**:
 ```python
 expr = (r.price * r.qty) > 100

@@ -10,9 +10,16 @@ module ties the DSL surface to execution:
    be added without a case here.
 2. Each discovered entry point needs a case in `CASES`, or a reason in
    `UNSUPPORTED_OPERATORS` or `NOT_ROW_SCALAR`.
-3. Each case runs through `derive`, `filter` and `search_first`, and the
-   three paths must select the same rows. Operator cases are also checked
-   value by value against a reference.
+3. Each case runs through `derive`, `filter` and `search_first`. For every
+   value the derived column takes, a predicate comparing the expression to
+   that value must select exactly the rows holding it, so the filter paths
+   are pinned to the derived values. Operator cases also check those values
+   against a reference.
+
+The three paths share the DataFusion transpiler. The hand-written
+evaluators are guarded elsewhere: the linear-scan operator allow-list by a
+Rust test in `src/ops/linear_scan.rs`, and `search_pattern`, whose
+evaluator supports a narrow subset, by #188.
 
 Window functions (`shift`, `rolling`, ...) are reached through
 `ColumnExpr.__getattr__`, which accepts any name, so they cannot be
@@ -78,7 +85,7 @@ CASES: dict[str, Case] = {
     "__truediv__": Case(lambda r: r.x / r.y, lambda row: _trunc_div(row["x"], row["y"])),
     "__rtruediv__": Case(lambda r: 100 / r.y, lambda row: _trunc_div(100, row["y"])),
     "__floordiv__": Case(lambda r: r.x // r.y, lambda row: row["x"] // row["y"]),
-    "__rfloordiv__": Case(lambda r: 100 // r.y, lambda row: 100 // row["y"]),
+    "__rfloordiv__": Case(lambda r: -7 // r.y, lambda row: -7 // row["y"]),
     "__mod__": Case(lambda r: r.x % r.y, lambda row: _trunc_mod(row["x"], row["y"])),
     "__rmod__": Case(lambda r: 100 % r.y, lambda row: _trunc_mod(100, row["y"])),
     # Comparison
@@ -205,6 +212,21 @@ def _ids(t: LTSeq) -> list[int]:
     return t.to_arrow().column("i").to_pylist()
 
 
+def _predicates(case: Case, values: list) -> list[tuple[Callable[[Any], Any], list[bool]]]:
+    """Predicates over the case's expression, each with the rows it must select."""
+    present = [v for v in values if v is not None]
+    if case.stable and all(isinstance(v, bool) for v in present):
+        return [(case.build, [v is True for v in values])]
+    if case.stable and all(isinstance(v, (int, float, str)) for v in present):
+        return [
+            ((lambda r, p=probe: case.build(r) == p), [v == probe for v in values])
+            for probe in dict.fromkeys(present)
+        ]
+    # No DSL literal for the type (timestamps), or a value that drifts
+    # between calls (dt.age): the expression must still run and keep non-nulls.
+    return [((lambda r: case.build(r).is_not_null()), [v is not None for v in values])]
+
+
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_case_executes_on_every_path(table, name):
     case = CASES[name]
@@ -212,19 +234,11 @@ def test_case_executes_on_every_path(table, name):
     if case.reference is not None:
         assert values == [case.reference(row) for row in ROWS]
 
-    # A predicate built from the same expression must select the same rows
-    # in filter and search_first as the derived values imply.
-    probe = next(v for v in values if v is not None)
-    if case.stable and isinstance(probe, bool):
-        pred, selected = case.build, [v is True for v in values]
-    elif case.stable and isinstance(probe, (int, float, str)):
-        pred, selected = (lambda r: case.build(r) == probe), [v == probe for v in values]
-    else:  # no DSL literal for the type, or a value that drifts between calls
-        pred, selected = (lambda r: case.build(r).is_not_null()), [v is not None for v in values]
-    expected = [row["i"] for row, keep in zip(ROWS, selected) if keep]
-    assert expected, "the probe must select at least one row"
-    assert _ids(table.filter(pred)) == expected
-    assert _ids(table.search_first(pred)) == expected[:1]
+    for pred, selected in _predicates(case, values):
+        expected = [row["i"] for row, keep in zip(ROWS, selected) if keep]
+        assert expected, "each probe must select at least one row"
+        assert _ids(table.filter(pred)) == expected
+        assert _ids(table.search_first(pred)) == expected[:1]
 
 
 @pytest.mark.parametrize("name", sorted(UNSUPPORTED_OPERATORS))

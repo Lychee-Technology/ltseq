@@ -1290,7 +1290,7 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - Unary minus and `**` are not supported: write `0 - r.x` and `power(r.x, n)`
 - **Parameters**: left/right operands (Expr or literals)
 - **Returns**: expression object
-- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected, for a zero `//` divisor (integer or float, as Python raises) or an integer overflow such as `i64::MIN // -1`
+- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected (`RuntimeError` from `search_pattern`), for a zero `//` divisor (integer or float, as Python raises) or an integer overflow such as `i64::MIN // -1`
 - **Example**:
 ```python
 expr = (r.price * r.qty) > 100
