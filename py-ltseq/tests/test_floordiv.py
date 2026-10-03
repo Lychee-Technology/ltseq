@@ -166,6 +166,17 @@ class TestExecutionPaths:
         assert t._inner.group_ordered_count(t._capture_expr(_bucket_change)) == 5
         assert t.group_ordered(_bucket_change).first().count() == 5
 
+    def test_group_ordered_count_uint64_above_i64_max(self):
+        # The linear scan's shift once wrapped UInt64 into Int64, so
+        # `u.shift(1) // v.shift(1)` disagreed with `u // v` on equal rows.
+        big = 2**64 - 2
+        t = LTSeq.from_arrow(
+            pa.table({"i": [0, 1, 2], "u": pa.array([big] * 3, pa.uint64()), "v": pa.array([4] * 3, pa.uint64())})
+        ).sort("i")
+        pred = lambda r: (r.u // r.v) != (r.u.shift(1) // r.v.shift(1))  # noqa: E731
+        assert t._inner.group_ordered_count(t._capture_expr(pred)) == 1
+        assert len(t.group_ordered(pred).first().to_arrow()) == 1
+
     def test_group_ordered_count_sorted_parquet(self, tmp_path):
         path = str(tmp_path / "x.parquet")
         pq.write_table(_table(GROUP_XS, [0] * len(GROUP_XS)), path)

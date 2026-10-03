@@ -753,8 +753,12 @@ fn shift_array_by_1(arr: &ArrayRef) -> Result<ArrayRef, String> {
         return Ok(Arc::clone(arr));
     }
 
-    // Fast path for Int64 and Timestamp (most common in boundary predicates)
-    if let Some(i64_arr) = coerce_to_i64(arr) {
+    // Fast path for Int64 and Timestamp (most common in boundary predicates).
+    // UInt64 is excluded: coerce_to_i64 wraps values above i64::MAX, so the
+    // shifted column would hold different numbers than the unshifted one,
+    // which type-sensitive ops (`//`) then see (#147).
+    let lossless = !matches!(arr.data_type(), DataType::UInt64);
+    if let Some(i64_arr) = lossless.then(|| coerce_to_i64(arr)).flatten() {
         let src_values = i64_arr.values();
         // Build new values: [0, src[0], src[1], ..., src[n-2]]
         let mut new_values = Vec::with_capacity(n);
@@ -1443,6 +1447,16 @@ mod tests {
             let result = vectorized_binop(op, left, right);
             assert!(result.is_ok(), "{op}: {:?}", result.err());
         }
+    }
+
+    #[test]
+    fn shift_keeps_uint64_values_above_i64_max() {
+        let big = u64::MAX - 1;
+        let arr: ArrayRef = Arc::new(UInt64Array::from(vec![big, big]));
+        let shifted = shift_array_by_1(&arr).unwrap();
+        let shifted = shifted.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert!(shifted.is_null(0));
+        assert_eq!(shifted.value(1), big);
     }
 
     #[test]
