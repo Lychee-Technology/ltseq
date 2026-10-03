@@ -19,7 +19,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray, UInt64Array,
+    Array, ArrayAccessor, ArrayIter, ArrayRef, BooleanArray, Int64Array, LargeStringArray,
+    RecordBatch, StringArray, StringViewArray, UInt64Array,
 };
 use datafusion::arrow::compute::{concat_batches, take};
 use datafusion::arrow::datatypes::DataType;
@@ -233,17 +234,17 @@ fn eval_call(
         "starts_with" | "str_starts_with" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let prefix = extract_literal_string(&args[0])?;
-            eval_starts_with(&source, &prefix)
+            eval_string_predicate(&source, "starts_with", |s| s.starts_with(prefix.as_str()))
         }
         "ends_with" | "str_ends_with" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let suffix = extract_literal_string(&args[0])?;
-            eval_ends_with(&source, &suffix)
+            eval_string_predicate(&source, "ends_with", |s| s.ends_with(suffix.as_str()))
         }
         "contains" | "str_contains" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
             let substr = extract_literal_string(&args[0])?;
-            eval_contains(&source, &substr)
+            eval_string_predicate(&source, "contains", |s| s.contains(substr.as_str()))
         }
         "is_null" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
@@ -354,12 +355,12 @@ pub(crate) fn count_prefix_matches_on(
     same_partition: impl Fn(usize) -> bool + Copy,
 ) -> Option<usize> {
     let any = col.as_any();
-    if let Some(arr) = any.downcast_ref::<datafusion::arrow::array::StringViewArray>() {
+    if let Some(arr) = any.downcast_ref::<StringViewArray>() {
         Some(count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
     } else if let Some(arr) = any.downcast_ref::<StringArray>() {
         Some(count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
     } else {
-        any.downcast_ref::<datafusion::arrow::array::LargeStringArray>()
+        any.downcast_ref::<LargeStringArray>()
             .map(|arr| count_prefix_matches(arr, step1_mask, prefixes, max_start, same_partition))
     }
 }
@@ -372,7 +373,7 @@ fn count_prefix_matches<'a, A>(
     same_partition: impl Fn(usize) -> bool,
 ) -> usize
 where
-    A: datafusion::arrow::array::ArrayAccessor<Item = &'a str> + Copy,
+    A: ArrayAccessor<Item = &'a str> + Copy,
 {
     let offset = if step1_mask.is_some() { 1 } else { 0 };
     let mut count = 0;
@@ -400,112 +401,33 @@ where
     count
 }
 
-/// Evaluate starts_with on a string array.
-fn eval_starts_with(source: &ArrayRef, prefix: &str) -> Result<ArrayRef, String> {
-    // Try Utf8 (StringArray)
-    if let Some(str_arr) = source.as_any().downcast_ref::<StringArray>() {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.starts_with(prefix)))
-            .collect();
-        return Ok(Arc::new(result));
+/// Evaluate a string test (`starts_with`, `ends_with`, `contains`) on every
+/// value of a Utf8, LargeUtf8 or Utf8View array; NULL stays NULL. `func`
+/// names the operation in the error for any other array type.
+fn eval_string_predicate(
+    source: &ArrayRef,
+    func: &str,
+    test: impl Fn(&str) -> bool,
+) -> Result<ArrayRef, String> {
+    fn apply<'a>(arr: impl ArrayAccessor<Item = &'a str>, test: impl Fn(&str) -> bool) -> ArrayRef {
+        let result: BooleanArray = ArrayIter::new(arr).map(|v| v.map(&test)).collect();
+        Arc::new(result)
     }
-    // Try LargeUtf8
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.starts_with(prefix)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    // Try Utf8View
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.starts_with(prefix)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    Err(format!(
-        "starts_with requires string column, got {:?}",
-        source.data_type()
-    ))
-}
 
-/// Evaluate ends_with on a string array.
-fn eval_ends_with(source: &ArrayRef, suffix: &str) -> Result<ArrayRef, String> {
-    if let Some(str_arr) = source.as_any().downcast_ref::<StringArray>() {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.ends_with(suffix)))
-            .collect();
-        return Ok(Arc::new(result));
+    let any = source.as_any();
+    if let Some(arr) = any.downcast_ref::<StringArray>() {
+        Ok(apply(arr, test))
+    } else if let Some(arr) = any.downcast_ref::<LargeStringArray>() {
+        Ok(apply(arr, test))
+    } else if let Some(arr) = any.downcast_ref::<StringViewArray>() {
+        Ok(apply(arr, test))
+    } else {
+        Err(format!(
+            "{} requires string column, got {:?}",
+            func,
+            source.data_type()
+        ))
     }
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.ends_with(suffix)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.ends_with(suffix)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    Err(format!(
-        "ends_with requires string column, got {:?}",
-        source.data_type()
-    ))
-}
-
-/// Evaluate contains on a string array.
-fn eval_contains(source: &ArrayRef, substr: &str) -> Result<ArrayRef, String> {
-    if let Some(str_arr) = source.as_any().downcast_ref::<StringArray>() {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.contains(substr)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.contains(substr)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    if let Some(str_arr) = source
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
-    {
-        let result: BooleanArray = str_arr
-            .iter()
-            .map(|opt| opt.map(|s| s.contains(substr)))
-            .collect();
-        return Ok(Arc::new(result));
-    }
-    Err(format!(
-        "contains requires string column, got {:?}",
-        source.data_type()
-    ))
 }
 
 /// Compute partition boundaries from a partition column.
@@ -1083,4 +1005,82 @@ fn collect_projected_sorted(
     RUNTIME
         .block_on(projected_df.collect())
         .map_err(LtseqError::collect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use std::collections::HashMap;
+
+    fn string_call(func: &str, column: &str, arg: &str) -> PyExpr {
+        PyExpr::Call {
+            func: func.to_string(),
+            args: vec![PyExpr::Literal {
+                value: arg.to_string(),
+                dtype: "Utf8".to_string(),
+            }],
+            kwargs: HashMap::new(),
+            on: Some(Box::new(PyExpr::Column(column.to_string()))),
+        }
+    }
+
+    /// The same values in each Arrow string layout, plus an Int64 column.
+    fn string_batch() -> (RecordBatch, HashMap<String, usize>) {
+        let values = vec![Some("apple"), None, Some("pineapple"), Some("app")];
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            ("utf8", Arc::new(StringArray::from(values.clone()))),
+            ("large", Arc::new(LargeStringArray::from(values.clone()))),
+            ("view", Arc::new(StringViewArray::from(values))),
+            ("int", Arc::new(Int64Array::from(vec![1, 2, 3, 4]))),
+        ];
+        let schema = Schema::new(
+            columns
+                .iter()
+                .map(|(name, arr)| Field::new(*name, arr.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            columns.into_iter().map(|(_, arr)| arr).collect(),
+        )
+        .expect("valid string batch");
+        let idx = (0..batch.num_columns())
+            .map(|i| (batch.schema().field(i).name().clone(), i))
+            .collect();
+        (batch, idx)
+    }
+
+    /// Every string test gives the same answer on all three string layouts,
+    /// and NULL input stays NULL.
+    #[test]
+    fn string_predicates_agree_across_string_layouts() {
+        let (batch, idx) = string_batch();
+        let cases = [
+            ("starts_with", "app", [Some(true), None, Some(false), Some(true)]),
+            ("ends_with", "le", [Some(true), None, Some(true), Some(false)]),
+            ("contains", "pple", [Some(true), None, Some(true), Some(false)]),
+        ];
+        for (func, arg, expected) in cases {
+            for column in ["utf8", "large", "view"] {
+                let result = eval_predicate(&string_call(func, column, arg), &batch, &idx)
+                    .expect("string predicate");
+                assert_eq!(
+                    result.iter().collect::<Vec<_>>(),
+                    expected,
+                    "{func}({arg}) on {column}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn string_predicate_on_non_string_column_names_the_operation() {
+        let (batch, idx) = string_batch();
+        for func in ["starts_with", "ends_with", "contains"] {
+            let err = eval_predicate(&string_call(func, "int", "1"), &batch, &idx)
+                .expect_err("non-string column");
+            assert_eq!(err, format!("{func} requires string column, got Int64"));
+        }
+    }
 }
