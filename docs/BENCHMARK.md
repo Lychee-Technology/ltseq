@@ -208,7 +208,8 @@ of these hold:
 3. `cond` combines leaves with `|` and `&`, and every leaf is exactly
    `r.c != r.c.shift(1)` or `(r.c - r.c.shift(1)) > N`, where `c` is an
    Int32, Int64, UInt32, UInt64, or timestamp column and `N` is an integer
-   literal (a float literal with an integral value also qualifies). The
+   literal, or a float literal that is finite, integral, and smaller than
+   `2**53` in magnitude. The
    benchmark's `(r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)`
    has this shape. Swapped operands (`r.c.shift(1) != r.c`), other
    comparisons (`>=`, `<`, `==`), `shift(n)` with `n != 1`, string columns,
@@ -221,9 +222,11 @@ predicate with intermediate arrays, builds three per-row arrays, and counts
 through DataFusion. That path still requires a
 predicate built from columns, literals, `shift(1)`, `is_null()`, comparisons,
 arithmetic, `&`, `|`, and `~` that contains at least one `shift(1)`. Anything
-else materializes the grouped table and counts its first rows. The linear-scan
-count and the DataFusion path currently disagree on NULLs and mixed numeric
-types (#189).
+else materializes the grouped table and counts its first rows. A float `N`
+that condition 3 rejects, on an integer column, is materialized too, but only
+after the linear-scan path has collected: that path's evaluator has no
+integer/float coercion and raises (#189). The linear-scan count and the
+DataFusion path currently disagree on NULLs (#189).
 
 **Round 3, `search_pattern_count(*steps, partition_by=col)`.** The parallel
 kernel matches each Parquet row group independently and stitches matches that
