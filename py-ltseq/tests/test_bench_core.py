@@ -1,12 +1,14 @@
 """bench_core measures what each benchmark names (issue #151).
 
-Two distortions are pinned down here:
+Pinned down here:
 
 - The timed region must execute the result. LTSeq transforms are lazy, so an
   unexecuted result times plan construction only (search_first used to), and
   ``len()`` lets DataFusion drop derived columns and sorts.
 - Operator benchmarks must not read their source file inside the timed
   region; only the read and end-to-end benchmarks may.
+- Order-dependent operators get inputs whose order DataFusion can see, so
+  their timed plans do not sort the input again.
 """
 
 from __future__ import annotations
