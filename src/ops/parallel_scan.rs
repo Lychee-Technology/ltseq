@@ -1,22 +1,17 @@
 //! Direct Parquet sequence engine — bypasses DataFusion for sequence operations.
 //!
-//! Three strategies for pre-sorted Parquet:
+//! Two strategies for pre-sorted Parquet:
 //!
-//! 1. **Sequential streaming** (R2 group_ordered): Single file handle, sequential
-//!    scan, `streaming_fuse_eval` per batch.  Used as fallback.
-//!
-//! 1b. **Parallel chunk streaming** (R2 group_ordered count): Divide row groups
+//! 1. **Parallel chunk streaming** (R2 group_ordered count): Divide row groups
 //!    into N contiguous chunks (N = CPU threads).  Each thread opens the file
-//!    once, reads its chunk sequentially, and `StreamState` carries naturally
-//!    across RG boundaries.  N seam checks between chunks.  Only N file opens.
+//!    once and reads its chunk sequentially, carrying the previous row across
+//!    batch boundaries.  N seam checks between chunks.  Only N file opens.
 //!
 //! 2. **Parallel partitioned** (R3 pattern matching): Read row groups in parallel,
 //!    split by partition key, run pattern matching per-partition in parallel.
 
 use crate::error::LtseqError;
-use crate::ops::linear_scan::{
-    build_metadata_table, extract_referenced_columns, streaming_fuse_eval, StreamState,
-};
+use crate::ops::linear_scan::{extract_referenced_columns, fused_boundaries};
 use crate::ops::pattern_match::{
     count_prefix_matches_on, eval_predicate, same_string_column_starts_with_plan,
     StartsWithFastPathPlan,
@@ -36,216 +31,13 @@ use std::fs::File;
 use std::sync::Arc;
 
 // ============================================================================
-// Strategy 1: Sequential Streaming for R2 (group_ordered)
-// ============================================================================
-
-/// Direct Parquet streaming group_ordered — bypasses DataFusion completely.
-///
-/// Reads the Parquet file sequentially with a single file handle, computes
-/// boundary flags with `streaming_fuse_eval`, and builds group metadata
-/// in a single pass.
-///
-/// Falls back with PARALLEL_FALLBACK if the expression can't be fuse-evaluated.
-pub fn direct_streaming_group_ordered(
-    table: &LTSeqTable,
-    predicate: &PyExpr,
-    parquet_path: &str,
-) -> Result<LTSeqTable, LtseqError> {
-    // Step 1: Extract columns needed by the predicate
-    let mut needed_cols: HashSet<String> = HashSet::new();
-    extract_referenced_columns(predicate, &mut needed_cols);
-
-    // Step 2: Open Parquet and build projection
-    let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
-
-    let parquet_schema = builder.schema().clone();
-    let total_rows_estimate = builder.metadata().file_metadata().num_rows() as usize;
-    let parquet_metadata = builder.metadata().clone();
-
-    // Build projection mask — only read columns referenced in predicate
-    let proj_indices: Vec<usize> = parquet_schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| needed_cols.contains(f.name()))
-        .map(|(i, _)| i)
-        .collect();
-
-    let projection_mask = ProjectionMask::roots(
-        parquet_metadata.file_metadata().schema_descr(),
-        proj_indices,
-    );
-
-    // Step 3: Sequential streaming read with boundary detection
-    let reader = builder
-        .with_projection(projection_mask)
-        .with_batch_size(65536)
-        .build()
-        .map_err(|e| LtseqError::Runtime(format!("Failed to build Parquet reader: {}", e)))?;
-
-    let mut state = StreamState::new();
-    let mut group_ids: Vec<i64> = Vec::with_capacity(total_rows_estimate);
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut idx_built = false;
-
-    for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet batch: {}", e)))?;
-
-        let n = batch.num_rows();
-        if n == 0 {
-            continue;
-        }
-
-        // Build name_to_idx from first batch
-        if !idx_built {
-            for (i, field) in batch.schema().fields().iter().enumerate() {
-                name_to_idx.insert(field.name().clone(), i);
-            }
-            idx_built = true;
-        }
-
-        // Compute boundaries within this batch
-        let mut result = vec![false; n];
-        if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()));
-        }
-
-        // Accumulate group IDs from boundaries
-        for &is_boundary in result.iter().take(n) {
-            if is_boundary {
-                state.current_gid += 1;
-            }
-            group_ids.push(state.current_gid);
-        }
-
-        // Save last row's column values for cross-batch boundary detection
-        state.save_last_row(&batch, &name_to_idx);
-    }
-
-    let total_rows = group_ids.len();
-    if total_rows == 0 {
-        return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
-    }
-
-    // Step 4: Compute group_count and rn (two passes over group_ids)
-    let total_groups = state.current_gid as usize;
-    let mut group_counts: Vec<i64> = vec![0; total_groups + 1];
-    for &gid in &group_ids {
-        group_counts[gid as usize] += 1;
-    }
-
-    let mut rn_values: Vec<i64> = Vec::with_capacity(total_rows);
-    let mut count_values: Vec<i64> = Vec::with_capacity(total_rows);
-    let mut rn_counters: Vec<i64> = vec![0; total_groups + 1];
-
-    for &gid in &group_ids {
-        rn_counters[gid as usize] += 1;
-        rn_values.push(rn_counters[gid as usize]);
-        count_values.push(group_counts[gid as usize]);
-    }
-
-    build_metadata_table(group_ids, count_values, rn_values, table)
-}
-
-/// Fast path: count the number of groups without building metadata arrays.
-///
-/// This is used when the consumer only needs `group_ordered().first().count()`,
-/// which is equivalent to counting the number of session boundaries.
-/// Avoids allocating 3 x N arrays (group_ids, rn, count) for 100M+ rows.
-pub fn direct_streaming_group_count(
-    _table: &LTSeqTable,
-    predicate: &PyExpr,
-    parquet_path: &str,
-) -> Result<usize, LtseqError> {
-    // Step 1: Extract columns needed by the predicate
-    let mut needed_cols: HashSet<String> = HashSet::new();
-    extract_referenced_columns(predicate, &mut needed_cols);
-
-    // Step 2: Open Parquet and build projection
-    let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
-
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
-
-    let parquet_schema = builder.schema().clone();
-    let parquet_metadata = builder.metadata().clone();
-
-    // Build projection mask — only read columns referenced in predicate
-    let proj_indices: Vec<usize> = parquet_schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| needed_cols.contains(f.name()))
-        .map(|(i, _)| i)
-        .collect();
-
-    let projection_mask = ProjectionMask::roots(
-        parquet_metadata.file_metadata().schema_descr(),
-        proj_indices,
-    );
-
-    // Step 3: Sequential streaming read — count boundaries only
-    let reader = builder
-        .with_projection(projection_mask)
-        .with_batch_size(65536)
-        .build()
-        .map_err(|e| LtseqError::Runtime(format!("Failed to build Parquet reader: {}", e)))?;
-
-    let mut state = StreamState::new();
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    let mut idx_built = false;
-
-    for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet batch: {}", e)))?;
-
-        let n = batch.num_rows();
-        if n == 0 {
-            continue;
-        }
-
-        // Build name_to_idx from first batch
-        if !idx_built {
-            for (i, field) in batch.schema().fields().iter().enumerate() {
-                name_to_idx.insert(field.name().clone(), i);
-            }
-            idx_built = true;
-        }
-
-        // Compute boundaries within this batch
-        let mut result = vec![false; n];
-        if !streaming_fuse_eval(predicate, &batch, &name_to_idx, &state, &mut result) {
-            return Err(LtseqError::Runtime("PARALLEL_FALLBACK".into()));
-        }
-
-        // Just count boundaries — no group_ids array needed
-        for &is_boundary in result.iter().take(n) {
-            if is_boundary {
-                state.current_gid += 1;
-            }
-        }
-
-        // Save last row's column values for cross-batch boundary detection
-        state.save_last_row(&batch, &name_to_idx);
-    }
-
-    Ok(state.current_gid as usize)
-}
-
-// ============================================================================
-// Strategy 1b: Parallel Chunk Streaming for R2 (group_ordered count)
+// Strategy 1: Parallel Chunk Streaming for R2 (group_ordered count)
 //
 // Divides row groups into N contiguous chunks (N = rayon thread count).
 // Each thread opens the file ONCE and reads its chunk sequentially, carrying
-// StreamState across row group boundaries naturally.  This yields only N file
-// opens (vs. num_row_groups in a naïve per-RG approach) and keeps I/O
-// sequential within each thread — better for both OS page-cache and SSD.
+// the previous row across batch boundaries.  This yields only N file opens
+// (vs. num_row_groups in a naïve per-RG approach) and keeps I/O sequential
+// within each thread — better for both OS page-cache and SSD.
 //
 // The only cross-chunk boundaries that need a seam check are the N-1 joints
 // between consecutive chunks.
@@ -253,32 +45,24 @@ pub fn direct_streaming_group_count(
 
 /// Result from processing a contiguous chunk of row groups (one parallel worker).
 struct RgChunkResult {
-    /// Internal boundary count for this chunk.
-    /// First chunk: includes the row-0 boundary (first session start).
-    /// Non-first chunks: excludes the chunk's row 0 (seam pass handles it).
+    /// Boundaries in this chunk, excluding the chunk's first row: a worker
+    /// cannot see the row before it, so the seam pass decides that one.
     count: usize,
-    /// StreamState after the last row of this chunk.
-    /// Used as context when the seam pass evaluates the next chunk's first row.
-    /// `None` only when the entire chunk was empty.
-    last_row_state: Option<StreamState>,
-    /// First row of this chunk as a 1-row RecordBatch.
-    /// Used by the previous chunk's seam check.
-    /// `None` only when the entire chunk was empty.
-    first_row_batch: Option<RecordBatch>,
+    /// First and last row of this chunk as one-row batches, for the seam
+    /// pass. `None` only when the entire chunk was empty.
+    first_row: Option<RecordBatch>,
+    last_row: Option<RecordBatch>,
 }
 
 /// Process a contiguous range of row groups for session boundary counting.
 ///
 /// Opens the Parquet file once and streams row groups `start_rg..end_rg`
-/// sequentially.  `StreamState` is carried naturally across RG boundaries
-/// within the chunk — no per-RG seam handling is needed here.
+/// sequentially, carrying the previous batch's last row into the next
+/// batch, so boundaries inside the chunk need no seam handling here.
 ///
-/// For non-first chunks (`is_first_chunk = false`), the first row of the
-/// chunk is skipped: the caller's seam pass will check whether it is a real
-/// boundary by comparing the previous chunk's last-row state.
-///
-/// Returns `Err("PARALLEL_FALLBACK: …")` if the predicate cannot be handled
-/// by `streaming_fuse_eval` (e.g. columns not i64-coercible).
+/// Returns `Err("PARALLEL_FALLBACK: …")` if the predicate has no fused form
+/// for these columns (see `linear_scan::fused_boundaries`). A read failure
+/// is a plain error, as in `chunked_group_count`.
 fn process_chunk_session_count(
     parquet_path: &str,
     start_rg: usize,
@@ -286,73 +70,50 @@ fn process_chunk_session_count(
     projection_mask: &ProjectionMask,
     predicate: &PyExpr,
     name_to_idx: &HashMap<String, usize>,
-    is_first_chunk: bool,
+    batch_rows: usize,
 ) -> Result<RgChunkResult, String> {
-    let file = File::open(parquet_path)
-        .map_err(|e| format!("PARALLEL_FALLBACK: open failed: {}", e))?;
+    let file = File::open(parquet_path).map_err(|e| format!("Failed to open Parquet: {}", e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| format!("PARALLEL_FALLBACK: builder failed: {}", e))?;
+        .map_err(|e| format!("Failed to read Parquet metadata: {}", e))?;
     let row_groups: Vec<usize> = (start_rg..end_rg).collect();
     let reader = builder
         .with_row_groups(row_groups)
         .with_projection(projection_mask.clone())
-        .with_batch_size(65536)
+        .with_batch_size(batch_rows)
         .build()
-        .map_err(|e| format!("PARALLEL_FALLBACK: build failed: {}", e))?;
+        .map_err(|e| format!("Failed to build Parquet reader: {}", e))?;
 
-    let mut state = StreamState::new();
     let mut count = 0usize;
-    let mut first_row_batch: Option<RecordBatch> = None;
-    let mut is_first_batch = true;
+    let mut first_row: Option<RecordBatch> = None;
+    let mut last_row: Option<RecordBatch> = None;
 
     for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| format!("PARALLEL_FALLBACK: read failed: {}", e))?;
+        let batch = batch_result.map_err(|e| format!("Failed to read Parquet batch: {}", e))?;
         let n = batch.num_rows();
         if n == 0 {
             continue;
         }
 
-        // Capture the first row of this chunk for the caller's seam check.
-        if first_row_batch.is_none() {
-            first_row_batch = Some(batch.slice(0, 1));
-        }
+        let flags = fused_boundaries(predicate, &batch, name_to_idx, last_row.as_ref())
+            .ok_or("PARALLEL_FALLBACK: predicate has no fused form")?;
 
-        let mut result = vec![false; n];
-        if !streaming_fuse_eval(predicate, &batch, name_to_idx, &state, &mut result) {
-            return Err("PARALLEL_FALLBACK: streaming_fuse_eval failed".into());
-        }
+        // The chunk's first row has no previous row here: leave it to the
+        // seam pass, which compares it with the previous chunk's last row.
+        let skip = if first_row.is_none() {
+            first_row = Some(batch.slice(0, 1));
+            1
+        } else {
+            0
+        };
+        count += flags.iter().skip(skip).filter(|&&is_boundary| is_boundary).count();
 
-        // For the first batch of a non-first chunk, skip row 0.
-        // `streaming_fuse_eval` always marks it `true` (empty prev_values),
-        // but the seam pass decides whether it is a real boundary.
-        let start = if is_first_batch && !is_first_chunk { 1 } else { 0 };
-        for &is_boundary in result.iter().take(n).skip(start) {
-            if is_boundary {
-                count += 1;
-            }
-        }
-
-        state.save_last_row(&batch, name_to_idx);
-        is_first_batch = false;
+        last_row = Some(batch.slice(n - 1, 1));
     }
-
-    // If the chunk had rows but `save_last_row` left prev_values empty
-    // (columns not i64-coercible), the seam check would be incorrect.
-    if first_row_batch.is_some() && state.prev_values.is_empty() {
-        return Err("PARALLEL_FALLBACK: column type not i64-coercible".into());
-    }
-
-    let last_row_state = if first_row_batch.is_some() {
-        Some(state)
-    } else {
-        None
-    };
 
     Ok(RgChunkResult {
         count,
-        last_row_state,
-        first_row_batch,
+        first_row,
+        last_row,
     })
 }
 
@@ -360,23 +121,41 @@ fn process_chunk_session_count(
 ///
 /// Divides the Parquet row groups into N contiguous chunks (N = rayon thread
 /// count) and processes each chunk in parallel.  Each worker opens the file
-/// once and streams its chunk sequentially; `StreamState` carries naturally
-/// across RG boundaries within the chunk.
+/// once and streams its chunk sequentially, carrying the previous row
+/// across batch boundaries within the chunk.
 ///
 /// Algorithm:
 /// 1. Read Parquet metadata; partition row groups into N chunks.
-/// 2. `rayon::into_par_iter` over chunks → `process_chunk_session_count`.
-///    - First chunk: row-0 counted as a session start.
-///    - Non-first chunks: row 0 of first batch skipped (seam pass handles it).
-/// 3. Sequential seam pass: N-1 checks between adjacent chunks.
+/// 2. `rayon::into_par_iter` over chunks → `process_chunk_session_count`,
+///    which counts every boundary except the chunk's first row.
+/// 3. Sequential seam pass: each non-empty chunk's first row against the
+///    last row of the nearest preceding non-empty chunk.
 /// 4. total = Σ(chunk internal counts) + seam boundaries.
 ///
 /// Returns `Err("PARALLEL_FALLBACK: …")` when the predicate is unsupported;
-/// the caller degrades to the sequential single-pass path.
+/// the caller degrades to the general linear-scan path. A source this reader
+/// cannot read, such as a directory, is a plain error instead, so Python
+/// counts it through the DataFusion path. The general path could read it,
+/// but for predicates without a fused form it miscounts NULLs (#189).
 pub fn parallel_streaming_group_count(
     _table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
+) -> Result<usize, LtseqError> {
+    chunked_group_count(predicate, parquet_path, COUNT_BATCH_ROWS)
+}
+
+/// Rows per record batch a count worker reads. The worker carries the
+/// previous row across every batch boundary inside its chunk.
+const COUNT_BATCH_ROWS: usize = 65536;
+
+/// `parallel_streaming_group_count` with the read batch size as a parameter,
+/// so tests can cut a chunk into several batches without writing more than
+/// `COUNT_BATCH_ROWS` rows.
+fn chunked_group_count(
+    predicate: &PyExpr,
+    parquet_path: &str,
+    batch_rows: usize,
 ) -> Result<usize, LtseqError> {
     // 1. Extract referenced columns for projection pruning.
     let mut needed_cols: HashSet<String> = HashSet::new();
@@ -384,9 +163,9 @@ pub fn parallel_streaming_group_count(
 
     // 2. Open Parquet and read metadata (sequential, metadata-only).
     let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("PARALLEL_FALLBACK: {}", e)))?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("PARALLEL_FALLBACK: {}", e)))?;
+        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
 
     let parquet_schema = builder.schema().clone();
     let num_row_groups = builder.metadata().num_row_groups();
@@ -448,7 +227,7 @@ pub fn parallel_streaming_group_count(
                 &projection_mask,
                 predicate,
                 &name_to_idx,
-                start_rg == 0,
+                batch_rows,
             )
         })
         .collect::<Result<Vec<_>, String>>()
@@ -457,36 +236,22 @@ pub fn parallel_streaming_group_count(
     // 5. Sum internal boundary counts.
     let total_internal: usize = chunk_results.iter().map(|r| r.count).sum();
 
-    // 6. Sequential seam pass between non-empty chunks. Empty chunks are
-    //    skipped: each non-empty chunk's first row is checked against the
-    //    last row of the nearest preceding non-empty chunk.
+    // 6. Sequential seam pass over the non-empty chunks. Each chunk's first
+    //    row is compared with the last row of the nearest preceding non-empty
+    //    chunk; the first non-empty chunk has none, so its first row starts
+    //    the sequence and counts as a boundary.
     let mut seam_count = 0usize;
-    let mut prev_state: Option<&StreamState> = None;
-    for (idx, chunk) in chunk_results.iter().enumerate() {
-        if let Some(first_batch) = &chunk.first_row_batch {
-            match prev_state {
-                Some(last_state) => {
-                    let mut result = vec![false; 1];
-                    if streaming_fuse_eval(
-                        predicate,
-                        first_batch,
-                        &name_to_idx,
-                        last_state,
-                        &mut result,
-                    ) && result[0]
-                    {
-                        seam_count += 1;
-                    }
-                }
-                // Every earlier chunk was empty, so this chunk's first row is
-                // the first row of the whole stream — always a session start.
-                // (Chunk 0 counts its own first row internally.)
-                None if idx > 0 => seam_count += 1,
-                None => {}
-            }
+    let mut prev_last_row: Option<&RecordBatch> = None;
+    for chunk in &chunk_results {
+        if let Some(first_row) = &chunk.first_row {
+            let flags = fused_boundaries(predicate, first_row, &name_to_idx, prev_last_row)
+                .ok_or_else(|| {
+                    LtseqError::Runtime("PARALLEL_FALLBACK: predicate has no fused form".into())
+                })?;
+            seam_count += usize::from(flags[0]);
         }
-        if let Some(state) = &chunk.last_row_state {
-            prev_state = Some(state);
+        if let Some(last_row) = &chunk.last_row {
+            prev_last_row = Some(last_row);
         }
     }
 
@@ -1076,4 +841,228 @@ fn count_patterns_in_rg_batch(
     }
 
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{create_session_context, RUNTIME};
+    use crate::metadata::SortSpec;
+    use crate::ops::grouping::group_ordered_count_impl;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::file_format::options::ParquetReadOptions;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+
+    fn col(name: &str) -> PyExpr {
+        PyExpr::Column(name.to_string())
+    }
+
+    fn binop(op: &str, left: PyExpr, right: PyExpr) -> PyExpr {
+        PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn shift1(name: &str) -> PyExpr {
+        PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![PyExpr::Literal {
+                value: "1".to_string(),
+                dtype: "Int64".to_string(),
+            }],
+            kwargs: HashMap::new(),
+            on: Some(Box::new(col(name))),
+        }
+    }
+
+    /// The R2 shape: `(u != u.shift(1)) | ((t - t.shift(1)) > 4)`.
+    fn sessionization() -> PyExpr {
+        let gap = binop(
+            "Gt",
+            binop("Sub", col("t"), shift1("t")),
+            PyExpr::Literal {
+                value: "4".to_string(),
+                dtype: "Int64".to_string(),
+            },
+        );
+        binop("Or", binop("Ne", col("u"), shift1("u")), gap)
+    }
+
+    /// Sorted by `i`, with NULLs in both predicate columns. With row groups
+    /// of 1–4 rows, seams fall both on boundaries and inside groups, and
+    /// NULLs sit on either side of some of them. Parquet reads a NULL slot
+    /// back as 0, so `u = [.., ∅, 0, ..]` catches a seam check that compares
+    /// the previous row's value without looking at its NULL bit.
+    fn events() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("i", DataType::Int64, false),
+            Field::new("u", DataType::Int64, true),
+            Field::new("t", DataType::Int64, true),
+        ]));
+        let u = vec![
+            Some(1),
+            Some(1),
+            Some(1),
+            None,
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(0),
+            None,
+            None,
+            Some(3),
+            Some(3),
+        ];
+        let t = vec![
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            None,
+            Some(6),
+            Some(20),
+            Some(21),
+            Some(22),
+            Some(23),
+            Some(24),
+        ];
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..12)),
+                Arc::new(Int64Array::from(u)),
+                Arc::new(Int64Array::from(t)),
+            ],
+        )
+        .expect("valid events batch")
+    }
+
+    fn write_parquet(batch: &RecordBatch, rows_per_group: usize, tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ltseq_issue157_{}_{}_{}.parquet",
+            tag,
+            rows_per_group,
+            std::process::id()
+        ));
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(rows_per_group))
+            .build();
+        let file = File::create(&path).expect("create parquet file");
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), Some(props)).expect("parquet writer");
+        writer.write(batch).expect("write batch");
+        writer.close().expect("close parquet file");
+        path.to_str().expect("utf-8 temp path").to_string()
+    }
+
+    /// A table as `read_parquet(path).assume_sorted("i")` builds it.
+    fn sorted_parquet_table(path: &str) -> LTSeqTable {
+        let session = create_session_context();
+        let df = RUNTIME
+            .block_on(session.read_parquet(path, ParquetReadOptions::default()))
+            .expect("read parquet");
+        let schema = Arc::new(df.schema().as_arrow().clone());
+        LTSeqTable::from_df_with_schema(
+            session,
+            df,
+            schema,
+            vec![SortSpec::new("i".to_string(), false)],
+            Some(path.to_string()),
+        )
+    }
+
+    /// The same rows as one in-memory batch, which takes the general
+    /// linear-scan path.
+    fn general_path_count(expr: &PyExpr) -> usize {
+        let batch = events();
+        let table = LTSeqTable::from_batches(
+            create_session_context(),
+            vec![batch.clone()],
+            batch.schema(),
+            vec![SortSpec::new("i".to_string(), false)],
+        )
+        .expect("in-memory table");
+        group_ordered_count_impl(&table, expr).expect("general path count")
+    }
+
+    /// The parallel count stitches chunks at their first rows, so its answer
+    /// must not depend on where the chunks start. Row groups of 1–4 rows on
+    /// 1–4 workers cover the usual layouts; 12 workers on one-row groups put
+    /// a seam before every row, including the rows that do not start a group.
+    #[test]
+    fn parallel_count_matches_general_path_at_every_seam() {
+        let expr = sessionization();
+        let expected = general_path_count(&expr);
+        // Hand count for `events()`: rows 0 and 3–10 start a group; rows 1,
+        // 2 and 11 do not.
+        assert_eq!(expected, 9);
+
+        for rows_per_group in 1..=4 {
+            let path = write_parquet(&events(), rows_per_group, "seams");
+            let table = sorted_parquet_table(&path);
+            for threads in [1, 2, 3, 4, 12] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("rayon pool");
+                let count = pool
+                    .install(|| parallel_streaming_group_count(&table, &expr, &path))
+                    .expect("parallel count");
+                assert_eq!(
+                    count, expected,
+                    "rows_per_group={rows_per_group}, threads={threads}"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// Inside a chunk, a worker hands each batch the previous batch's last
+    /// row. The fixtures above fit in one `COUNT_BATCH_ROWS` batch, so here
+    /// batches of 1–5 rows put a batch boundary at every position, on one
+    /// chunk and on several, with NULLs on both sides of some boundaries.
+    #[test]
+    fn parallel_count_carries_previous_row_across_batches() {
+        let expr = sessionization();
+        let expected = general_path_count(&expr);
+
+        for (rows_per_group, threads) in [(12, 1), (6, 2), (4, 3)] {
+            let path = write_parquet(&events(), rows_per_group, "batches");
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            for batch_rows in 1..=5 {
+                let count = pool
+                    .install(|| chunked_group_count(&expr, &path, batch_rows))
+                    .expect("parallel count");
+                assert_eq!(
+                    count, expected,
+                    "rows_per_group={rows_per_group}, threads={threads}, batch_rows={batch_rows}"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A predicate with no fused form makes the parallel count fall back, and
+    /// `group_ordered_count_impl` answers through the general path instead.
+    #[test]
+    fn unfused_predicate_falls_back_to_general_path() {
+        // `u.shift(1) != u`: swapped operands are outside the fused shapes.
+        let expr = binop("Ne", shift1("u"), col("u"));
+        let path = write_parquet(&events(), 2, "fallback");
+        let table = sorted_parquet_table(&path);
+
+        let err = parallel_streaming_group_count(&table, &expr, &path)
+            .expect_err("no fused form");
+        assert!(err.to_string().contains("PARALLEL_FALLBACK"), "{err}");
+        let count = group_ordered_count_impl(&table, &expr).expect("general path count");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(count, general_path_count(&expr));
+    }
 }

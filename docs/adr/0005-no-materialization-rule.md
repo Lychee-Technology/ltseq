@@ -29,7 +29,7 @@ The rule does not (and cannot) cover every table-returning API. The following op
 - **`pivot()`** collects the distinct pivot keys (and executes the aggregate) to construct the output schema (`src/ops/pivot.rs`).
 - **Mutation APIs** (`insert`/`delete`/`update`/`modify`) collect the table at call time (`src/ops/mutation.rs`); see [ADR 0004](0004-lazy-execution-immutable-tables.md).
 - **`search_pattern`** collects to run its sequential matcher (`src/ops/pattern_match.rs`).
-- **`linear_scan` general path** (`group_ordered` boundary counting off the Parquet fast path) collects a small projection — the predicate columns plus all declared sort keys — for vectorized boundary evaluation (`src/ops/linear_scan.rs::general_linear_scan_group_id`).
+- **`linear_scan` general path** (`group_ordered` boundary counting off the Parquet fast path) collects a small projection — the predicate columns plus all declared sort keys — for vectorized boundary evaluation (`src/ops/linear_scan.rs::linear_scan_group_id`).
 
 These live on the Rust side (Arrow batches, no Python row round-trips), but they do end plan laziness; treating them as lazy when composing pipelines misestimates cost.
 

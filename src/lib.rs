@@ -781,51 +781,26 @@ impl LTSeqTable {
         crate::ops::group_window::filter_group_window_impl(self, predicate)
     }
 
-    /// Phase 8B: Join two tables using pointer-based foreign keys
+    /// Equi-join with another table; the plan stays lazy (`ops::join::join_impl`).
     ///
-    /// This method implements an inner join between two tables based on specified join keys.
-    /// It supports lazy evaluation - the join is only executed when the result is accessed.
-    ///
-    /// # DataFusion Schema Conflict Workaround
-    ///
-    /// DataFusion's join() API rejects tables with duplicate column names in the join input,
-    /// even if the columns are from different tables. This implementation works around this
-    /// limitation by:
-    ///
-    /// 1. Temporarily renaming the right table's join key to `__join_key_right__`
-    /// 2. Executing the join on `left.join_key == right.__join_key_right__`
-    /// 3. After joining, selecting all columns and renaming back to the desired schema with alias
-    /// 4. The final schema has: `{all_left_cols, all_right_cols_prefixed_with_alias}`
-    ///
-    /// # Example
-    ///
-    /// For join(orders, products, left_key="product_id", right_key="product_id", alias="prod"):
-    ///
-    /// - orders schema: {id, product_id, quantity}
-    /// - products schema: {product_id, name, price}
-    /// - result schema: {id, product_id, quantity, prod_product_id, prod_name, prod_price}
+    /// Right-table columns whose names collide with a left column get `suffix`
+    /// appended; the others keep their names (Polars semantics). Inner and left
+    /// joins drop the right key columns, which equal the left keys; right and
+    /// full joins keep both, because there the left key can be NULL.
     ///
     /// # Arguments
     ///
-    /// * `other` - The table to join with (right table)
-    /// * `left_key_expr_dict` - Serialized Column expression dict for left join key
-    /// * `right_key_expr_dict` - Serialized Column expression dict for right join key
-    /// * `join_type` - Type of join (currently only "inner" is supported in Phase 8B MVP)
-    /// * `alias` - Prefix for right table columns (used to avoid name conflicts)
+    /// * `other` - The right table
+    /// * `left_key_expr_dict` / `right_key_expr_dict` - Serialized join keys: a
+    ///   Column on each side, or for a composite key an `And` of column equalities
+    /// * `join_type` - "inner", "left", "right" or "full" (case-insensitive)
+    /// * `suffix` - Appended to right column names that collide with the left table
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// A new LTSeqTable containing the joined result with combined schema
-    ///
-    /// # Panics
-    ///
-    /// Returns PyValueError if:
-    /// - Join key expressions are not simple Column references
-    /// - Join operation fails due to schema/data issues
-    /// Phase 8B: Join two tables using pointer-based foreign keys
-    ///
-    /// This method implements an inner join between two tables based on specified join keys.
-    /// It supports lazy evaluation - the join is only executed when the result is accessed.
+    /// ValueError for an unknown `join_type`, a key that is not a column
+    /// reference, or a key column missing from its table; RuntimeError if
+    /// DataFusion cannot build the join plan.
     fn join(
         &self,
         other: &LTSeqTable,
