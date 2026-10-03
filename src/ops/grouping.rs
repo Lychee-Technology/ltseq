@@ -49,9 +49,9 @@ use std::sync::Arc;
 /// number of groups (sessions) without allocating per-row arrays.
 ///
 /// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
-/// predicate under the GIL and wraps this call in `gil::detached`. Every path
-/// below (rayon Parquet scans, DataFusion streaming, the full fallback) is
-/// pure Rust and reports `LtseqError`.
+/// predicate under the GIL and wraps this call in `gil::detached`. Both paths
+/// below (the rayon Parquet scan and the general linear scan) are pure Rust
+/// and report `LtseqError`.
 pub fn group_ordered_count_impl(
     table: &LTSeqTable,
     py_expr: &PyExpr,
@@ -63,10 +63,12 @@ pub fn group_ordered_count_impl(
         ));
     }
 
-    // Try Parquet fast paths (bypass DataFusion entirely).
+    // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
+    // counting with seam stitching. It falls back when the predicate has no
+    // fused form or the file cannot be read directly; the general path below
+    // handles both.
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            // Preferred: parallel per-RG counting with seam stitching.
             match crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
                 py_expr,
@@ -78,29 +80,13 @@ pub fn group_ordered_count_impl(
                     if !msg.contains("PARALLEL_FALLBACK") {
                         return Err(e);
                     }
-                    // Fall through to sequential streaming.
-                }
-            }
-
-            // Fallback: single-threaded sequential streaming.
-            match crate::ops::parallel_scan::direct_streaming_group_count(
-                table,
-                py_expr,
-                parquet_path,
-            ) {
-                Ok(count) => return Ok(count),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to DataFusion full path.
+                    // Fall through to the general path.
                 }
             }
         }
     }
 
-    // Fallback: do the full group_id computation and count
+    // General path: do the full group_id computation and count
     let result = linear_scan_group_id(table, py_expr)?;
     let df = result.require_df()?;
     // Filter __rn__ == 1 and count
