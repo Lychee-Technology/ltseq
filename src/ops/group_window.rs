@@ -23,7 +23,7 @@ use datafusion::functions_aggregate::expr_fn as agg_fn;
 use datafusion::functions_window::expr_fn::{first_value, last_value};
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::{
-    case, BinaryExpr, Expr, ExprFunctionExt, WindowFrame, WindowFrameBound, WindowFrameUnits,
+    case, Expr, ExprFunctionExt, WindowFrame, WindowFrameBound, WindowFrameUnits,
 };
 use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
@@ -253,12 +253,7 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
         GroupNode::BinOp { op, left, right } => {
             let left_expr = group_node_to_expr(*left, schema)?;
             let right_expr = group_node_to_expr(*right, schema)?;
-            let operator = crate::transpiler::op_str_to_operator(&op)?;
-            Ok(Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(left_expr),
-                operator,
-                Box::new(right_expr),
-            )))
+            crate::transpiler::binary_expr(&op, left_expr, right_expr)
         }
         GroupNode::UnaryOp { op, operand } => {
             let operand_expr = group_node_to_expr(*operand, schema)?;

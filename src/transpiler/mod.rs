@@ -17,6 +17,7 @@
 //! - **Boolean Simplification**: Trivial boolean expressions are simplified
 //!   (e.g., `x & True` → `x`, `x | False` → `x`)
 
+pub(crate) mod floor_div;
 mod optimization;
 pub(crate) mod window_native;
 
@@ -98,10 +99,19 @@ fn parse_literal_expr(value: &str, dtype: &str) -> Result<Expr, String> {
     }
 }
 
+/// A serialized binary operator. Floor division has no DataFusion
+/// `Operator` (`/` truncates toward zero), so it is its own variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinaryOp {
+    Native(Operator),
+    FloorDiv,
+}
+
 /// Map a serialized operator name (shared by the row and group dialects)
-/// to a DataFusion Operator.
-pub(crate) fn op_str_to_operator(op: &str) -> Result<Operator, String> {
-    Ok(match op {
+/// to a [`BinaryOp`].
+pub(crate) fn parse_binary_op(op: &str) -> Result<BinaryOp, String> {
+    let operator = match op {
+        "FloorDiv" => return Ok(BinaryOp::FloorDiv),
         "Add" => Operator::Plus,
         "Sub" => Operator::Minus,
         "Mul" => Operator::Multiply,
@@ -116,6 +126,19 @@ pub(crate) fn op_str_to_operator(op: &str) -> Result<Operator, String> {
         "And" => Operator::And,
         "Or" => Operator::Or,
         _ => return Err(format!("Unknown binary operator: {}", op)),
+    };
+    Ok(BinaryOp::Native(operator))
+}
+
+/// `left <op> right` for a serialized operator name. The row, window and
+/// group transpilers all build binary expressions here, so an operator is
+/// either executable in every dialect or rejected by name in every one.
+pub(crate) fn binary_expr(op: &str, left: Expr, right: Expr) -> Result<Expr, String> {
+    Ok(match parse_binary_op(op)? {
+        BinaryOp::Native(operator) => {
+            Expr::BinaryExpr(BinaryExpr::new(Box::new(left), operator, Box::new(right)))
+        }
+        BinaryOp::FloorDiv => floor_div::floor_div(left, right),
     })
 }
 
@@ -128,14 +151,7 @@ fn parse_binop_expr(
 ) -> Result<Expr, String> {
     let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
     let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
-
-    let operator = op_str_to_operator(op)?;
-
-    Ok(Expr::BinaryExpr(BinaryExpr::new(
-        Box::new(left_expr),
-        operator,
-        Box::new(right_expr),
-    )))
+    binary_expr(op, left_expr, right_expr)
 }
 
 /// Parse a unary operation into a DataFusion expression
@@ -1297,7 +1313,7 @@ mod tests {
         }
     }
 
-    // ---- op_str_to_operator: every row of the mapping table ----
+    // ---- parse_binary_op: every row of the mapping table ----
 
     #[test]
     fn operator_mapping_table() {
@@ -1317,17 +1333,15 @@ mod tests {
             ("Or", Operator::Or),
         ];
         for (name, expected) in table {
-            assert_eq!(op_str_to_operator(name), Ok(expected), "op {name}");
+            assert_eq!(parse_binary_op(name), Ok(BinaryOp::Native(expected)), "op {name}");
         }
+        assert_eq!(parse_binary_op("FloorDiv"), Ok(BinaryOp::FloorDiv));
     }
 
     #[test]
     fn operator_unknown_is_error() {
-        // FloorDiv serializes on the Python side but has no kernel mapping
-        // (#147 tracks the end-to-end behavior) — it must hit the error path,
-        // never a silent fallback.
-        for bad in ["FloorDiv", "Pow", "BitXor", ""] {
-            let err = op_str_to_operator(bad).unwrap_err();
+        for bad in ["Pow", "BitXor", "floordiv", ""] {
+            let err = parse_binary_op(bad).unwrap_err();
             assert!(err.contains("Unknown binary operator"), "op {bad}: {err}");
         }
     }
@@ -1409,18 +1423,37 @@ mod tests {
     }
 
     #[test]
+    fn binop_floor_div_builds_udf_call() {
+        let schema = test_schema();
+        let expr = pyexpr_to_datafusion(
+            PyExpr::BinOp {
+                op: "FloorDiv".to_string(),
+                left: Box::new(col_expr("a")),
+                right: Box::new(lit_expr("2", "Int64")),
+            },
+            &schema,
+        )
+        .unwrap();
+        let expected = floor_div::floor_div(
+            Expr::Column(Column::new_unqualified("a")),
+            lit(2_i64),
+        );
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
     fn binop_unknown_operator_is_error() {
         let schema = test_schema();
         let err = pyexpr_to_datafusion(
             PyExpr::BinOp {
-                op: "FloorDiv".to_string(),
+                op: "Pow".to_string(),
                 left: Box::new(col_expr("a")),
                 right: Box::new(col_expr("b")),
             },
             &schema,
         )
         .unwrap_err();
-        assert!(err.contains("Unknown binary operator: FloorDiv"), "{err}");
+        assert!(err.contains("Unknown binary operator: Pow"), "{err}");
     }
 
     #[test]

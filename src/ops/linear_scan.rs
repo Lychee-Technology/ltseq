@@ -20,7 +20,7 @@
 //! | `Call { func: "is_null", on: expr }` | Check if evaluated value is null |
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
-//! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
+//! | `BinOp { op: Add/Sub/Mul/Div/FloorDiv/Mod }` | Arithmetic |
 //! | `Literal { value, dtype }` | Constant value |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 
@@ -75,29 +75,22 @@ fn contains_shift(expr: &PyExpr) -> bool {
     }
 }
 
+/// Binary operators admitted by `is_supported_expr`. Each one must have an
+/// arm in `vectorized_binop`: an admitted operator the evaluator rejects
+/// fails the whole linear scan at run time.
+const SUPPORTED_BINARY_OPS: [&str; 14] = [
+    "Ne", "Eq", "Gt", "Lt", "Ge", "Le", "Or", "And", "Add", "Sub", "Mul", "Div", "FloorDiv", "Mod",
+];
+
 /// Check if all nodes in the expression tree are supported by the linear scan evaluator.
 fn is_supported_expr(expr: &PyExpr) -> bool {
     match expr {
         PyExpr::Column(_) => true,
         PyExpr::Literal { .. } => true,
         PyExpr::BinOp { op, left, right } => {
-            let valid_op = matches!(
-                op.as_str(),
-                "Ne" | "Eq"
-                    | "Gt"
-                    | "Lt"
-                    | "Ge"
-                    | "Le"
-                    | "Or"
-                    | "And"
-                    | "Add"
-                    | "Sub"
-                    | "Mul"
-                    | "Div"
-                    | "FloorDiv"
-                    | "Mod"
-            );
-            valid_op && is_supported_expr(left) && is_supported_expr(right)
+            SUPPORTED_BINARY_OPS.contains(&op.as_str())
+                && is_supported_expr(left)
+                && is_supported_expr(right)
         }
         PyExpr::UnaryOp { op, operand } => op == "Not" && is_supported_expr(operand),
         PyExpr::Call {
@@ -1012,6 +1005,15 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             }
             Err(format!("Div: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
+        "Mod" => {
+            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
+                return Ok(Arc::new(numeric::rem(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+            }
+            Err(format!("Mod: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
+        }
+        // Coerces its own operands, so no i64 fast path is needed here.
+        "FloorDiv" => crate::transpiler::floor_div::floor_div_arrays(left, right)
+            .map_err(|e| e.to_string()),
         _ => Err(format!("Unsupported binary op: {}", op)),
     }
 }
@@ -1425,6 +1427,40 @@ mod tests {
     use datafusion::datasource::MemTable;
     use datafusion::physical_plan::displayable;
     use datafusion::prelude::SessionContext;
+
+    /// Every operator `can_linear_scan` admits evaluates (#147: FloorDiv and
+    /// Mod were admitted with no arm in `vectorized_binop`).
+    #[test]
+    fn every_supported_binary_op_evaluates() {
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![-7, 7, 6]));
+        let divisors: ArrayRef = Arc::new(Int64Array::from(vec![2, -2, 3]));
+        let bools: ArrayRef = Arc::new(BooleanArray::from(vec![true, false, true]));
+        for op in SUPPORTED_BINARY_OPS {
+            let (left, right) = match op {
+                "And" | "Or" => (&bools, &bools),
+                _ => (&ints, &divisors),
+            };
+            let result = vectorized_binop(op, left, right);
+            assert!(result.is_ok(), "{op}: {:?}", result.err());
+        }
+    }
+
+    #[test]
+    fn floor_div_and_mod_values() {
+        let left: ArrayRef = Arc::new(Int64Array::from(vec![-7, 7, -7, 6]));
+        let right: ArrayRef = Arc::new(Int64Array::from(vec![2, -2, -2, 3]));
+        let floor_div = vectorized_binop("FloorDiv", &left, &right).unwrap();
+        assert_eq!(
+            floor_div.as_any().downcast_ref::<Int64Array>().unwrap().values(),
+            &[-4, -4, 3, 2]
+        );
+        // `%` keeps the transpiler's (DataFusion's) truncated remainder.
+        let modulo = vectorized_binop("Mod", &left, &right).unwrap();
+        assert_eq!(
+            modulo.as_any().downcast_ref::<Int64Array>().unwrap().values(),
+            &[-1, 1, -1, 0]
+        );
+    }
 
     /// The issue #141 trigger predicate shape: references only the SECONDARY
     /// sort key — `(eventtime - eventtime.shift(1)) > 10`.
