@@ -4,10 +4,11 @@
 it: the serialization tests passed, and nothing ran the expression. This
 module ties the DSL surface to execution:
 
-1. The surface is discovered from the classes themselves: the operator
+1. The surface is discovered from the package itself: the operator
    dunders defined on `Expr`, the public methods of the `.s` and `.dt`
-   accessors, and the public scalar methods of `Expr`. New surface cannot
-   be added without a case here.
+   accessors, the public scalar methods of `Expr`, and the functions
+   exported from `ltseq.expr` (`if_else`, `power`, ...). New surface
+   cannot be added to any of these without a case here.
 2. Each discovered entry point needs a case in `CASES`, or a reason in
    `UNSUPPORTED_OPERATORS` or `NOT_ROW_SCALAR`.
 3. Each case runs through `derive`, `filter` and `search_first`. For every
@@ -17,9 +18,10 @@ module ties the DSL surface to execution:
    against a reference.
 
 The three paths share the DataFusion transpiler. The hand-written
-evaluators are guarded elsewhere: the linear-scan operator allow-list by a
-Rust test in `src/ops/linear_scan.rs`, and `search_pattern`, whose
-evaluator supports a narrow subset, by #188.
+evaluators are guarded elsewhere: the `group_ordered(...).first().count()`
+kernel by `test_group_count_fast_path.py`, which compares it with the
+DataFusion path, and `search_pattern`, whose evaluator supports a narrow
+subset, by #188.
 
 Window functions (`shift`, `rolling`, ...) are reached through
 `ColumnExpr.__getattr__`, which accepts any name, so they cannot be
@@ -34,6 +36,7 @@ from typing import Any, Callable
 import pyarrow as pa
 import pytest
 
+import ltseq.expr as dsl
 from ltseq import LTSeq
 from ltseq.expr.accessors import StringAccessor, TemporalAccessor
 from ltseq.expr.base import Expr
@@ -152,6 +155,35 @@ CASES: dict[str, Case] = {
     "dt.second": Case(lambda r: r.ts.dt.second()),
     "dt.weekday": Case(lambda r: r.ts.dt.weekday()),
     "dt.year": Case(lambda r: r.ts.dt.year()),
+    # Functions exported from ltseq.expr. The math arguments stay inside
+    # each function's domain: a NaN result has no row equal to it.
+    "fn.if_else": Case(lambda r: dsl.if_else(r.x > 0, r.x, r.y)),
+    "fn.when": Case(lambda r: dsl.when(r.x > 6, 2).when(r.x > 0, 1).otherwise(0)),
+    "fn.coalesce": Case(lambda r: dsl.coalesce(r.n, r.x)),
+    "fn.nvl": Case(lambda r: dsl.nvl(r.n, 0)),
+    "fn.ifa": Case(lambda r: dsl.ifa(r.x > 0, r.x)),
+    "fn.sqrt": Case(lambda r: dsl.sqrt(r.i)),
+    "fn.power": Case(lambda r: dsl.power(r.x, 2)),
+    "fn.sign": Case(lambda r: dsl.sign(r.x)),
+    "fn.log": Case(lambda r: dsl.log(r.i + 1, 10)),
+    "fn.ln": Case(lambda r: dsl.ln(r.i + 1)),
+    "fn.exp": Case(lambda r: dsl.exp(r.i)),
+    "fn.sin": Case(lambda r: dsl.sin(r.f)),
+    "fn.cos": Case(lambda r: dsl.cos(r.f)),
+    "fn.tan": Case(lambda r: dsl.tan(r.f)),
+    "fn.asin": Case(lambda r: dsl.asin(r.f / 8)),
+    "fn.acos": Case(lambda r: dsl.acos(r.f / 8)),
+    "fn.atan": Case(lambda r: dsl.atan(r.f)),
+    "fn.atan2": Case(lambda r: dsl.atan2(r.f, r.y)),
+    "fn.rand": Case(lambda r: dsl.rand(), stable=False),
+    "fn.gcd": Case(lambda r: dsl.gcd(r.x, r.y)),
+    "fn.lcm": Case(lambda r: dsl.lcm(r.x, r.y)),
+    "fn.factorial": Case(lambda r: dsl.factorial(r.i)),
+    "fn.str_char": Case(lambda r: dsl.str_char(r.i + 65)),
+    "fn.char": Case(lambda r: dsl.char(r.i + 65)),
+    "fn.concat_ws": Case(lambda r: dsl.concat_ws("-", r.s, r.s)),
+    "fn.now": Case(lambda r: dsl.now(), stable=False),
+    "fn.today": Case(lambda r: dsl.today(), stable=False),
 }
 
 # Operators Expr defines only to refuse with a pointer to the alternative,
@@ -162,11 +194,25 @@ UNSUPPORTED_OPERATORS: dict[str, tuple[Callable[[Any], Any], str]] = {
     "__rpow__": (lambda r: 2**r.x, r"use power\(base, exponent\)"),
 }
 
-# Public Expr methods that are not row-scalar expressions.
+# Public Expr methods and exported functions that are not row-scalar
+# expressions, so derive/filter/search_first are not where they run.
 NOT_ROW_SCALAR = {
     "serialize": "the serializer itself",
     "pct_change": "window function over table order; test_sequence_ops_advanced.py",
     "lookup": "needs a second table; test_lookup.py",
+    "fn.count_if": "aggregate, runs in agg(); test_conditional_aggs.py",
+    "fn.sum_if": "aggregate, runs in agg(); test_conditional_aggs.py",
+    "fn.avg_if": "aggregate, runs in agg(); test_conditional_aggs.py",
+    "fn.min_if": "aggregate, runs in agg(); test_conditional_aggs.py",
+    "fn.max_if": "aggregate, runs in agg(); test_conditional_aggs.py",
+    "fn.skew": "aggregate, runs in agg(); test_statistical_aggs.py",
+    "fn.corr": "aggregate, runs in agg(); test_standalone_calls.py",
+    "fn.covar": "aggregate, runs in agg()",
+    "fn.concat_agg": "aggregate, runs in agg(); test_standalone_calls.py",
+    "fn.row_number": "ranking window, needs .over(); test_ranking.py",
+    "fn.rank": "ranking window, needs .over(); test_ranking.py",
+    "fn.dense_rank": "ranking window, needs .over(); test_ranking.py",
+    "fn.ntile": "ranking window, needs .over(); test_ranking.py",
 }
 
 # Python's operator protocol: binary operators with their reflected forms,
@@ -189,11 +235,18 @@ def _public_methods(cls: type) -> set[str]:
     return {name for name, _ in inspect.getmembers(cls, inspect.isfunction) if not name.startswith("_")}
 
 
+def _exported_functions(module) -> set[str]:
+    return {
+        name for name in module.__all__ if not name.startswith("_") and inspect.isfunction(getattr(module, name))
+    }
+
+
 def discovered_surface() -> set[str]:
     operators = {name for name in PYTHON_OPERATOR_DUNDERS if _defines(ColumnExpr, name)}
     strings = {f"s.{name}" for name in _public_methods(StringAccessor)}
     temporal = {f"dt.{name}" for name in _public_methods(TemporalAccessor)}
-    return operators | strings | temporal | _public_methods(Expr)
+    functions = {f"fn.{name}" for name in _exported_functions(dsl)}
+    return operators | strings | temporal | functions | _public_methods(Expr)
 
 
 def test_every_dsl_entry_point_has_a_case():
