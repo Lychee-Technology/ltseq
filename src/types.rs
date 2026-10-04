@@ -46,87 +46,73 @@ pub enum PyExpr {
     Alias { expr: Box<PyExpr>, alias: String },
 }
 
+/// A field that must be present.
+fn required<'py>(dict: &Bound<'py, PyDict>, key: &str) -> Result<Bound<'py, PyAny>, PyExprError> {
+    dict.get_item(key)
+        .map_err(|_| PyExprError::MissingField(key.to_string()))?
+        .ok_or_else(|| PyExprError::MissingField(key.to_string()))
+}
+
+/// A string field that must be present.
+fn required_str(dict: &Bound<'_, PyDict>, key: &str) -> Result<String, PyExprError> {
+    required(dict, key)?
+        .extract::<String>()
+        .map_err(|_| PyExprError::InvalidType(format!("{} must be string", key)))
+}
+
+/// A nested expression that must be present.
+fn required_expr(dict: &Bound<'_, PyDict>, key: &str) -> Result<Box<PyExpr>, PyExprError> {
+    let value = required(dict, key)?;
+    let nested = value
+        .cast::<PyDict>()
+        .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict", key)))?;
+    Ok(Box::new(dict_to_py_expr(nested)?))
+}
+
+/// A nested expression that may be absent or None.
+fn optional_expr(dict: &Bound<'_, PyDict>, key: &str) -> Result<Option<Box<PyExpr>>, PyExprError> {
+    match dict
+        .get_item(key)
+        .map_err(|_| PyExprError::MissingField(key.to_string()))?
+    {
+        Some(value) if !value.is_none() => {
+            let nested = value
+                .cast::<PyDict>()
+                .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict or None", key)))?;
+            Ok(Some(Box::new(dict_to_py_expr(nested)?)))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Deserialize a Column expression
 fn parse_column_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let name = dict
-        .get_item("name")
-        .map_err(|_| PyExprError::MissingField("name".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("name".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("name must be string".to_string()))?;
-    Ok(PyExpr::Column(name))
+    Ok(PyExpr::Column(required_str(dict, "name")?))
 }
 
 /// Deserialize a Literal expression
 fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let value_obj = dict
-        .get_item("value")
-        .map_err(|_| PyExprError::MissingField("value".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("value".to_string()))?;
-
     // Convert Python value to string (handles int, float, str, bool, None)
-    let value = value_obj.to_string();
-
-    let dtype = dict
-        .get_item("dtype")
-        .map_err(|_| PyExprError::MissingField("dtype".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("dtype".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("dtype must be string".to_string()))?;
-
+    let value = required(dict, "value")?.to_string();
+    let dtype = required_str(dict, "dtype")?;
     Ok(PyExpr::Literal { value, dtype })
 }
 
 /// Deserialize a BinOp expression
 fn parse_binop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let op = dict
-        .get_item("op")
-        .map_err(|_| PyExprError::MissingField("op".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("op".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("op must be string".to_string()))?;
-
-    let left_dict_obj = dict
-        .get_item("left")
-        .map_err(|_| PyExprError::MissingField("left".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("left".to_string()))?;
-    let left_dict = left_dict_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("left must be a dict".to_string()))?;
-
-    let right_dict_obj = dict
-        .get_item("right")
-        .map_err(|_| PyExprError::MissingField("right".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("right".to_string()))?;
-    let right_dict = right_dict_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("right must be a dict".to_string()))?;
-
-    let left = Box::new(dict_to_py_expr(left_dict)?);
-    let right = Box::new(dict_to_py_expr(right_dict)?);
-
-    Ok(PyExpr::BinOp { op, left, right })
+    Ok(PyExpr::BinOp {
+        op: required_str(dict, "op")?,
+        left: required_expr(dict, "left")?,
+        right: required_expr(dict, "right")?,
+    })
 }
 
 /// Deserialize a UnaryOp expression
 fn parse_unaryop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let op = dict
-        .get_item("op")
-        .map_err(|_| PyExprError::MissingField("op".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("op".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("op must be string".to_string()))?;
-
-    let operand_dict_obj = dict
-        .get_item("operand")
-        .map_err(|_| PyExprError::MissingField("operand".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("operand".to_string()))?;
-    let operand_dict = operand_dict_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("operand must be a dict".to_string()))?;
-
-    let operand = Box::new(dict_to_py_expr(operand_dict)?);
-    Ok(PyExpr::UnaryOp { op, operand })
+    Ok(PyExpr::UnaryOp {
+        op: required_str(dict, "op")?,
+        operand: required_expr(dict, "operand")?,
+    })
 }
 
 /// Deserialize args list for a Call expression
@@ -169,96 +155,18 @@ fn parse_call_kwargs(
 
 /// Deserialize a Call expression
 fn parse_call_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let func = dict
-        .get_item("func")
-        .map_err(|_| PyExprError::MissingField("func".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("func".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("func must be string".to_string()))?;
-
-    // Parse args array
-    let args_obj = dict
-        .get_item("args")
-        .map_err(|_| PyExprError::MissingField("args".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("args".to_string()))?;
-    let args = parse_call_args(&args_obj)?;
-
-    // Parse kwargs dict
-    let kwargs_obj = dict
-        .get_item("kwargs")
-        .map_err(|_| PyExprError::MissingField("kwargs".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("kwargs".to_string()))?;
-    let kwargs = parse_call_kwargs(&kwargs_obj)?;
-
-    // "on" is None (or absent) for standalone functions like abs(x),
-    // whose inputs are all in args.
-    let on = match dict
-        .get_item("on")
-        .map_err(|_| PyExprError::MissingField("on".to_string()))?
-    {
-        Some(on_val) if !on_val.is_none() => {
-            let on_dict: &Bound<'_, PyDict> = on_val
-                .cast::<PyDict>()
-                .map_err(|_| PyExprError::InvalidType("on must be a dict or None".to_string()))?;
-            Some(Box::new(dict_to_py_expr(on_dict)?))
-        }
-        _ => None,
-    };
-
     Ok(PyExpr::Call {
-        func,
-        args,
-        kwargs,
-        on,
+        func: required_str(dict, "func")?,
+        args: parse_call_args(&required(dict, "args")?)?,
+        kwargs: parse_call_kwargs(&required(dict, "kwargs")?)?,
+        // "on" is None (or absent) for standalone functions like abs(x),
+        // whose inputs are all in args.
+        on: optional_expr(dict, "on")?,
     })
 }
 
 /// Deserialize a Window expression
 fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    // Parse the inner expression (e.g., row_number(), rank(), etc.)
-    let expr_obj = dict
-        .get_item("expr")
-        .map_err(|_| PyExprError::MissingField("expr".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("expr".to_string()))?;
-    let expr_dict = expr_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
-    let expr = Box::new(dict_to_py_expr(expr_dict)?);
-
-    // Parse partition_by (optional)
-    let partition_by = if let Some(pb_obj) = dict
-        .get_item("partition_by")
-        .map_err(|_| PyExprError::MissingField("partition_by".to_string()))?
-    {
-        if pb_obj.is_none() {
-            None
-        } else {
-            let pb_dict = pb_obj
-                .cast::<PyDict>()
-                .map_err(|_| PyExprError::InvalidType("partition_by must be a dict".to_string()))?;
-            Some(Box::new(dict_to_py_expr(pb_dict)?))
-        }
-    } else {
-        None
-    };
-
-    // Parse order_by (optional)
-    let order_by = if let Some(ob_obj) = dict
-        .get_item("order_by")
-        .map_err(|_| PyExprError::MissingField("order_by".to_string()))?
-    {
-        if ob_obj.is_none() {
-            None
-        } else {
-            let ob_dict = ob_obj
-                .cast::<PyDict>()
-                .map_err(|_| PyExprError::InvalidType("order_by must be a dict".to_string()))?;
-            Some(Box::new(dict_to_py_expr(ob_dict)?))
-        }
-    } else {
-        None
-    };
-
     // Parse descending (default false)
     let descending = dict
         .get_item("descending")
@@ -268,45 +176,26 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .unwrap_or(false);
 
     Ok(PyExpr::Window {
-        expr,
-        partition_by,
-        order_by,
+        // The inner expression (e.g., row_number(), rank(), etc.)
+        expr: required_expr(dict, "expr")?,
+        partition_by: optional_expr(dict, "partition_by")?,
+        order_by: optional_expr(dict, "order_by")?,
         descending,
     })
 }
 
 /// Deserialize an Alias expression
 fn parse_alias_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    let alias = dict
-        .get_item("alias")
-        .map_err(|_| PyExprError::MissingField("alias".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("alias".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("alias must be string".to_string()))?;
-
-    let expr_obj = dict
-        .get_item("expr")
-        .map_err(|_| PyExprError::MissingField("expr".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("expr".to_string()))?;
-    let expr_dict = expr_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("expr must be a dict".to_string()))?;
-    let expr = Box::new(dict_to_py_expr(expr_dict)?);
-
-    Ok(PyExpr::Alias { expr, alias })
+    Ok(PyExpr::Alias {
+        alias: required_str(dict, "alias")?,
+        expr: required_expr(dict, "expr")?,
+    })
 }
 
 /// Recursively deserialize a Python dict to PyExpr
 pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    // Get "type" field
-    let expr_type = dict
-        .get_item("type")
-        .map_err(|_| PyExprError::MissingField("type".to_string()))?
-        .ok_or_else(|| PyExprError::MissingField("type".to_string()))?
-        .extract::<String>()
-        .map_err(|_| PyExprError::InvalidType("type must be string".to_string()))?;
-
     // Dispatch to type-specific parser
+    let expr_type = required_str(dict, "type")?;
     match expr_type.as_str() {
         "Column" => parse_column_expr(dict),
         "Literal" => parse_literal_expr(dict),

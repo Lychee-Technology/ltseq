@@ -199,9 +199,10 @@ it is an ordinary DataFusion aggregation.
 group boundaries without building per-row group arrays. It runs only when all
 of these hold:
 
-1. The table comes straight from `LTSeq.read_parquet(...)` followed by
-   `assume_sorted(...)`. Any other source (CSV, `from_arrow`, `collect()`) or
-   any transform in between, `sort()` included, drops the link to the file.
+1. The table comes straight from `LTSeq.read_parquet(...)` on a single
+   Parquet file, followed by `assume_sorted(...)`. Any other source (CSV,
+   `from_arrow`, `collect()`) or any transform in between, `sort()` included,
+   drops the link to the file.
 2. The groups are consumed as `first().count()` (or `len()` of `first()`).
    Any other use of `first()` materializes the grouped table through
    DataFusion window functions.
@@ -226,14 +227,17 @@ else materializes the grouped table and counts its first rows. A float `N`
 that condition 3 rejects, on an integer column, is materialized too, but only
 after the linear-scan path has collected: that path's evaluator has no
 integer/float coercion and raises (#189). The linear-scan count and the
-DataFusion path currently disagree on NULLs (#189).
+DataFusion path currently disagree on NULLs (#189), so a directory passed to
+`read_parquet`, which the kernel cannot read, does not take the linear-scan
+path: its grouped table is materialized.
 
 **Round 3, `search_pattern_count(*steps, partition_by=col)`.** The parallel
 kernel matches each Parquet row group independently and stitches matches that
 cross row-group boundaries. It runs only when all of these hold:
 
-1. The table comes straight from `read_parquet(...)` + `assume_sorted(...)`,
-   as in Round 2.
+1. The table comes straight from `read_parquet(...)` on a single file +
+   `assume_sorted(...)`, as in Round 2. A directory currently raises instead
+   of falling back (#217).
 2. `partition_by` is given, and the partition column is Int32, Int64, UInt32,
    or UInt64. A string partition column currently raises instead of falling
    back (#211).

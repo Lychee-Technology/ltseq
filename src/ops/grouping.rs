@@ -24,6 +24,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::group_window::original_column_exprs;
 use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
 use crate::transpiler::pyexpr_to_datafusion;
@@ -49,9 +50,9 @@ use std::sync::Arc;
 /// number of groups (sessions) without allocating per-row arrays.
 ///
 /// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
-/// predicate under the GIL and wraps this call in `gil::detached`. Every path
-/// below (rayon Parquet scans, DataFusion streaming, the full fallback) is
-/// pure Rust and reports `LtseqError`.
+/// predicate under the GIL and wraps this call in `gil::detached`. Both paths
+/// below (the rayon Parquet scan and the general linear scan) are pure Rust
+/// and report `LtseqError`.
 pub fn group_ordered_count_impl(
     table: &LTSeqTable,
     py_expr: &PyExpr,
@@ -63,10 +64,12 @@ pub fn group_ordered_count_impl(
         ));
     }
 
-    // Try Parquet fast paths (bypass DataFusion entirely).
+    // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
+    // counting with seam stitching. It falls back to the general path below
+    // when the predicate has no fused form. A source it cannot read is an
+    // error, not a fallback (see parallel_streaming_group_count).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            // Preferred: parallel per-RG counting with seam stitching.
             match crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
                 py_expr,
@@ -78,29 +81,13 @@ pub fn group_ordered_count_impl(
                     if !msg.contains("PARALLEL_FALLBACK") {
                         return Err(e);
                     }
-                    // Fall through to sequential streaming.
-                }
-            }
-
-            // Fallback: single-threaded sequential streaming.
-            match crate::ops::parallel_scan::direct_streaming_group_count(
-                table,
-                py_expr,
-                parquet_path,
-            ) {
-                Ok(count) => return Ok(count),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to DataFusion full path.
+                    // Fall through to the general path.
                 }
             }
         }
     }
 
-    // Fallback: do the full group_id computation and count
+    // General path: do the full group_id computation and count
     let result = linear_scan_group_id(table, py_expr)?;
     let df = result.require_df()?;
     // Filter __rn__ == 1 and count
@@ -381,113 +368,45 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         .iter()
         .any(|f| f.name() == "__group_count__");
 
-    // ── Fast path: use existing __rn__ / __group_count__ columns ─────
-    // When linear_scan_group_id produced these columns lazily, we can
-    // filter directly without SQL ROW_NUMBER overhead.
-    if is_first && has_rn {
-        // first row = __rn__ == 1
-        let filtered = (**df)
-            .clone()
-            .filter(col("__rn__").eq(lit(1i64)))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to filter first rows: {}", e))
-            })?;
-
-        // Remove internal columns (__rn__, __group_id__, __group_count__)
-        let keep_cols: Vec<Expr> = filtered
-            .schema()
-            .fields()
-            .iter()
-            .filter(|f| {
-                let name = f.name();
-                !name.starts_with("__rn")
-                    && !name.starts_with("__group_id__")
-                    && !name.starts_with("__group_count__")
-                    && !name.starts_with("__row_num")
-                    && !name.starts_with("__mask")
-                    && !name.starts_with("__cnt")
-            })
-            .map(|f| col(f.name()))
-            .collect();
-
-        // If no non-internal columns remain (metadata-only table from linear scan),
-        // return the filtered DF as-is — count() will still work correctly.
-        if keep_cols.is_empty() {
-            return Ok(LTSeqTable::from_df(
-                Arc::clone(&table.session),
-                filtered,
-                Vec::new(),
-                None, // row set / columns diverge from the raw file: drop fast-path token
-            ));
-        }
-
-        let projected = filtered.select(keep_cols).map_err(|e| {
-            LtseqError::Runtime(format!("Failed to project first_row result: {}", e))
-        })?;
-
-        return Ok(LTSeqTable::from_df(
-            Arc::clone(&table.session),
-            projected,
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-
-    if !is_first && has_rn && has_count {
-        // last row = __rn__ == __group_count__
-        let filtered = (**df)
-            .clone()
-            .filter(col("__rn__").eq(col("__group_count__")))
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Failed to filter last rows: {}", e))
-            })?;
-
-        // Remove internal columns
-        let keep_cols: Vec<Expr> = filtered
-            .schema()
-            .fields()
-            .iter()
-            .filter(|f| {
-                let name = f.name();
-                !name.starts_with("__rn")
-                    && !name.starts_with("__group_id__")
-                    && !name.starts_with("__group_count__")
-                    && !name.starts_with("__row_num")
-                    && !name.starts_with("__mask")
-                    && !name.starts_with("__cnt")
-            })
-            .map(|f| col(f.name()))
-            .collect();
-
-        if keep_cols.is_empty() {
-            return Ok(LTSeqTable::from_df(
-                Arc::clone(&table.session),
-                filtered,
-                Vec::new(),
-                None, // row set / columns diverge from the raw file: drop fast-path token
-            ));
-        }
-
-        let projected = filtered.select(keep_cols).map_err(|e| {
-            LtseqError::Runtime(format!("Failed to project last_row result: {}", e))
-        })?;
-
-        return Ok(LTSeqTable::from_df(
-            Arc::clone(&table.session),
-            projected,
-            Vec::new(),
-            None, // row set / columns diverge from the raw file: drop fast-path token
-        ));
-    }
-
     // Both group_id producers (the native window path and the linear scan)
-    // emit __rn__ and __group_count__, so this point is unreachable for
+    // emit __rn__ and __group_count__, so the error arm is unreachable for
     // flatten() products. Guard against direct misuse instead of keeping the
     // old collect → MemTable → SQL fallback alive (issue #91 PR 4).
-    Err(LtseqError::Validation(
-        "first_row/last_row require __rn__ and __group_count__ from flatten(); \
-         legacy group_id tables without them are no longer supported"
-            .into(),
-    )
-    .into())
+    let (predicate, which) = match (is_first, has_rn, has_count) {
+        (true, true, _) => (col("__rn__").eq(lit(1i64)), "first"),
+        (false, true, true) => (col("__rn__").eq(col("__group_count__")), "last"),
+        _ => {
+            return Err(LtseqError::Validation(
+                "first_row/last_row require __rn__ and __group_count__ from flatten(); \
+                 legacy group_id tables without them are no longer supported"
+                    .into(),
+            )
+            .into())
+        }
+    };
+
+    let filtered = (**df).clone().filter(predicate).map_err(|e| {
+        LtseqError::Runtime(format!("Failed to filter {} rows: {}", which, e))
+    })?;
+
+    // Drop the grouping columns by exact name (issue #214): a user column
+    // such as `__rn_x` is not one of them.
+    let keep_cols = original_column_exprs(filtered.schema().as_arrow());
+
+    // If no user columns remain (metadata-only table from linear scan),
+    // return the filtered DF as-is — count() still works on it.
+    let result = if keep_cols.is_empty() {
+        filtered
+    } else {
+        filtered.select(keep_cols).map_err(|e| {
+            LtseqError::Runtime(format!("Failed to project {}_row result: {}", which, e))
+        })?
+    };
+
+    Ok(LTSeqTable::from_df(
+        Arc::clone(&table.session),
+        result,
+        Vec::new(),
+        None, // row set / columns diverge from the raw file: drop fast-path token
+    ))
 }

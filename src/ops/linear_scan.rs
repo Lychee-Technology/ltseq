@@ -24,7 +24,7 @@
 //! | `Literal { value, dtype }` | Constant value |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 
-use crate::engine::{create_sequential_session, RUNTIME};
+use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::types::PyExpr;
 use crate::LTSeqTable;
@@ -36,9 +36,7 @@ use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::Column;
-use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::logical_expr::{Expr, SortExpr};
-use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -216,188 +214,152 @@ pub(crate) fn extract_referenced_columns(expr: &PyExpr, cols: &mut HashSet<Strin
 }
 
 // ============================================================================
-// Vectorized boundary evaluator — uses Arrow compute kernels
+// Fused boundary evaluator — one pass, no intermediate arrays
 // ============================================================================
 
-/// Evaluate a PyExpr over the entire batch at once using Arrow compute kernels.
-/// Returns a BooleanArray where true = boundary (new group starts).
+/// Boundary flags for `batch` from a fused single-pass evaluation, or `None`
+/// if `expr` has no fused form (callers then use `vectorized_eval_expr` or
+/// fall back to the general path).
 ///
-/// For each node type:
-/// - Column("x") → the array from the batch
-/// - shift(1) on Column("x") → array shifted right by 1 (null prepended)
-/// - BinOp → Arrow compute kernel (neq, eq, gt, lt, add, sub, etc.)
-/// - Literal → scalar array filled with the literal value
-///
-/// This is ~10x faster than row-by-row evaluation for large batches
-/// because it leverages SIMD and avoids per-row Value boxing.
-/// Fused boundary evaluation: detect common shifted-comparison patterns and
-/// evaluate them in a single pass without creating intermediate arrays.
-///
-/// Common patterns and their fused evaluation:
+/// Fused shapes, combined with `|` and `&`:
 /// - `Column != Column.shift(1)` → `arr[i] != arr[i-1]`
 /// - `(Column - Column.shift(1)) > Literal` → `arr[i] - arr[i-1] > threshold`
-/// - `expr1 | expr2` → combine two sub-evaluations
 ///
-/// Returns Some(BooleanArray) if the expression can be fused, None otherwise.
-fn try_fused_boundary_eval(
+/// `prev` is the row just before `batch` in the sequence, as a one-row batch
+/// with the same schema, or `None` when `batch` starts the sequence. Row 0
+/// is compared against `prev`, so a sequence evaluated batch by batch gets
+/// the same flags as the concatenated batch; with no `prev`, row 0 is a
+/// boundary. A NULL on either side of a comparison is a boundary, as on the
+/// DataFusion path, where a NULL predicate starts a new group. Because each
+/// leaf maps NULL to `true` and `&`/`|` are monotone, combining the leaves
+/// as plain `bool`s agrees with evaluating the predicate in SQL three-valued
+/// logic and then counting NULL as a boundary.
+pub(crate) fn fused_boundaries(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
-) -> Option<BooleanArray> {
-    let n = batch.num_rows();
-    if n == 0 {
-        return Some(BooleanArray::from(Vec::<bool>::new()));
+    prev: Option<&RecordBatch>,
+) -> Option<Vec<bool>> {
+    if batch.num_rows() == 0 {
+        return Some(Vec::new());
     }
-
-    // Try to fuse the entire expression into a single pass
-    let mut result = vec![true; n]; // row 0 always boundary
-    if fuse_eval(expr, batch, name_to_idx, &mut result) {
-        Some(BooleanArray::from(result))
-    } else {
-        None
-    }
+    let mut out = vec![false; batch.num_rows()];
+    fuse_eval(expr, batch, name_to_idx, prev, &mut out).then_some(out)
 }
 
-/// Recursively fuse-evaluate an expression, writing boolean results into `out`.
-/// `out` is pre-filled with `true` for row 0.
-/// Returns true if fusion was successful, false if the expression can't be fused.
+/// Recursively fuse-evaluate `expr` into `out` (one flag per row of `batch`).
+/// Returns false if the expression can't be fused.
 fn fuse_eval(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
+    prev: Option<&RecordBatch>,
     out: &mut [bool],
 ) -> bool {
-    let n = out.len();
     match expr {
-        // Pattern: expr1 | expr2
-        PyExpr::BinOp { op, left, right } if op == "Or" => {
-            // Evaluate left into temp, right into out, then OR them
-            let mut left_out = vec![true; n];
-            let mut right_out = vec![true; n];
-            if !fuse_eval(left, batch, name_to_idx, &mut left_out) {
+        // Pattern: expr1 | expr2, expr1 & expr2
+        PyExpr::BinOp { op, left, right } if op == "Or" || op == "And" => {
+            let mut left_out = vec![false; out.len()];
+            if !fuse_eval(left, batch, name_to_idx, prev, &mut left_out)
+                || !fuse_eval(right, batch, name_to_idx, prev, out)
+            {
                 return false;
             }
-            if !fuse_eval(right, batch, name_to_idx, &mut right_out) {
-                return false;
-            }
-            out[0] = true; // row 0 always boundary
-            for i in 1..n {
-                out[i] = left_out[i] || right_out[i];
-            }
-            true
-        }
-        // Pattern: expr1 & expr2
-        PyExpr::BinOp { op, left, right } if op == "And" => {
-            let mut left_out = vec![true; n];
-            let mut right_out = vec![true; n];
-            if !fuse_eval(left, batch, name_to_idx, &mut left_out) {
-                return false;
-            }
-            if !fuse_eval(right, batch, name_to_idx, &mut right_out) {
-                return false;
-            }
-            out[0] = true;
-            for i in 1..n {
-                out[i] = left_out[i] && right_out[i];
+            if op == "Or" {
+                for (o, l) in out.iter_mut().zip(left_out) {
+                    *o |= l;
+                }
+            } else {
+                for (o, l) in out.iter_mut().zip(left_out) {
+                    *o &= l;
+                }
             }
             true
         }
         // Pattern: Column != Column.shift(1)
-        PyExpr::BinOp { op, left, right } if op == "Ne" => {
-            if let (Some(col_name), true) = (get_column_name(left), is_shift_of_same_column(left, right)) {
-                let idx = match name_to_idx.get(col_name) {
-                    Some(i) => *i,
-                    None => return false,
-                };
-                let col = batch.column(idx);
-                if let Some(i64_arr) = coerce_to_i64(col) {
-                    let vals = i64_arr.values();
-                    let nulls = i64_arr.nulls();
-                    out[0] = true;
-                    if let Some(nb) = nulls {
-                        for i in 1..n {
-                            out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1) || vals[i] != vals[i - 1];
-                        }
-                    } else {
-                        for i in 1..n {
-                            out[i] = vals[i] != vals[i - 1];
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
+        PyExpr::BinOp { op, left, right } if op == "Ne" => match shifted_column(left, right) {
+            Some(name) => fuse_shifted_compare(name, batch, name_to_idx, prev, out, |cur, prev| {
+                cur != prev
+            }),
+            None => false,
+        },
         // Pattern: (Column - Column.shift(1)) > Literal
         PyExpr::BinOp { op, left, right } if op == "Gt" => {
-            // Check if left is Sub(Column, Column.shift(1)) and right is Literal
-            if let PyExpr::BinOp { op: sub_op, left: sub_left, right: sub_right } = left.as_ref() {
-                if sub_op == "Sub" {
-                    if let (Some(col_name), true) = (get_column_name(sub_left), is_shift_of_same_column(sub_left, sub_right)) {
-                        if let Some(threshold) = get_literal_i64(right) {
-                            let idx = match name_to_idx.get(col_name) {
-                                Some(i) => *i,
-                                None => return false,
-                            };
-                            let col = batch.column(idx);
-                            if let Some(i64_arr) = coerce_to_i64(col) {
-                                let vals = i64_arr.values();
-                                let nulls = i64_arr.nulls();
-                                out[0] = true;
-                                if let Some(nb) = nulls {
-                                    for i in 1..n {
-                                        out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1)
-                                            || vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                } else {
-                                    for i in 1..n {
-                                        out[i] = vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
+            let PyExpr::BinOp {
+                op: sub_op,
+                left: sub_left,
+                right: sub_right,
+            } = left.as_ref()
+            else {
+                return false;
+            };
+            match (sub_op == "Sub", shifted_column(sub_left, sub_right), get_literal_i64(right)) {
+                (true, Some(name), Some(threshold)) => {
+                    fuse_shifted_compare(name, batch, name_to_idx, prev, out, |cur, prev| {
+                        cur.wrapping_sub(prev) > threshold
+                    })
                 }
-            } else {
-                false
+                _ => false,
             }
         }
         _ => false,
     }
 }
 
-/// Extract column name from a PyExpr::Column
-fn get_column_name(expr: &PyExpr) -> Option<&str> {
-    match expr {
-        PyExpr::Column(name) => Some(name.as_str()),
-        _ => None,
-    }
-}
+/// The leaf both fused shapes share: `out[i] = differs(c[i], c[i-1])` over
+/// column `name` coerced to i64, where `c[-1]` is `prev`'s row. Row 0 with
+/// no `prev` is a boundary, and so is any row where either value is NULL.
+/// Returns false if the column is missing or not i64-coercible.
+fn fuse_shifted_compare(
+    name: &str,
+    batch: &RecordBatch,
+    name_to_idx: &HashMap<String, usize>,
+    prev: Option<&RecordBatch>,
+    out: &mut [bool],
+    differs: impl Fn(i64, i64) -> bool,
+) -> bool {
+    let Some(&idx) = name_to_idx.get(name) else {
+        return false;
+    };
+    let Some(cur) = coerce_to_i64(batch.column(idx)) else {
+        return false;
+    };
+    let vals = cur.values();
 
-/// Check if `right` is `shift(1)` of the same column as `left`
-fn is_shift_of_same_column(left: &PyExpr, right: &PyExpr) -> bool {
-    if let PyExpr::Column(left_name) = left {
-        if let PyExpr::Call { func, on, .. } = right {
-            if func == "shift" {
-                if let Some(PyExpr::Column(right_name)) = on.as_deref() {
-                    return left_name == right_name;
-                }
-            }
+    out[0] = match prev {
+        None => true,
+        Some(prev) => {
+            let Some(prev) = coerce_to_i64(prev.column(idx)) else {
+                return false;
+            };
+            cur.is_null(0) || prev.is_null(0) || differs(vals[0], prev.value(0))
+        }
+    };
+
+    if let Some(nb) = cur.nulls() {
+        for i in 1..out.len() {
+            out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1) || differs(vals[i], vals[i - 1]);
+        }
+    } else {
+        for i in 1..out.len() {
+            out[i] = differs(vals[i], vals[i - 1]);
         }
     }
-    false
+    true
+}
+
+/// The column name if `right` is `shift(...)` of the same column `left` is.
+fn shifted_column<'a>(left: &'a PyExpr, right: &PyExpr) -> Option<&'a str> {
+    let PyExpr::Column(name) = left else {
+        return None;
+    };
+    match right {
+        PyExpr::Call { func, on, .. } if func == "shift" => match on.as_deref() {
+            Some(PyExpr::Column(shifted)) if shifted == name => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Extract an i64 literal value from a PyExpr::Literal
@@ -424,253 +386,38 @@ fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
 }
 
 // ============================================================================
-// Streaming fuse_eval — cross-batch boundary detection for sequential execution
+// Vectorized boundary evaluator — Arrow compute kernels, intermediate arrays
 // ============================================================================
 
-/// State carried across batches during streaming boundary detection.
-///
-/// Enables `fuse_eval` to correctly detect boundaries at batch boundaries
-/// by remembering the last row's column values from the previous batch.
-pub(crate) struct StreamState {
-    /// Last row's column values from the previous batch (keyed by column name).
-    /// `None` means the column value was NULL or no previous batch exists.
-    pub(crate) prev_values: HashMap<String, Option<i64>>,
-    /// Current group ID (incremented on each boundary).
-    pub(crate) current_gid: i64,
-}
-
-impl StreamState {
-    pub(crate) fn new() -> Self {
-        StreamState {
-            prev_values: HashMap::new(),
-            current_gid: 0,
-        }
-    }
-
-    /// Save the last row's column values from the current batch.
-    pub(crate) fn save_last_row(&mut self, batch: &RecordBatch, name_to_idx: &HashMap<String, usize>) {
-        let last = batch.num_rows() - 1;
-        for (name, idx) in name_to_idx {
-            let col = batch.column(*idx);
-            if col.is_null(last) {
-                self.prev_values.insert(name.clone(), None);
-            } else if let Some(i64_arr) = coerce_to_i64(col) {
-                self.prev_values.insert(name.clone(), Some(i64_arr.value(last)));
-            }
-        }
-    }
-}
-
-/// Streaming version of `fuse_eval` that handles cross-batch boundaries.
-///
-/// Like `fuse_eval`, but row 0 of each batch compares against `state.prev_values`
-/// instead of unconditionally being `true`. First batch (empty prev_values) still
-/// marks row 0 as boundary.
-pub(crate) fn streaming_fuse_eval(
+/// Boundary flags for the general path's single concatenated batch: the
+/// fused evaluator when `expr` has a fused form, otherwise a multi-pass
+/// vectorized evaluation. Row 0 is always a boundary, and so is a NULL
+/// predicate result.
+fn boundary_flags(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
-    state: &StreamState,
-    out: &mut [bool],
-) -> bool {
-    let n = out.len();
-    match expr {
-        // Pattern: expr1 | expr2
-        PyExpr::BinOp { op, left, right } if op == "Or" => {
-            let mut left_out = vec![false; n];
-            let mut right_out = vec![false; n];
-            if !streaming_fuse_eval(left, batch, name_to_idx, state, &mut left_out) {
-                return false;
-            }
-            if !streaming_fuse_eval(right, batch, name_to_idx, state, &mut right_out) {
-                return false;
-            }
-            for i in 0..n {
-                out[i] = left_out[i] || right_out[i];
-            }
-            // First batch, first row is always a boundary
-            if state.prev_values.is_empty() {
-                out[0] = true;
-            }
-            true
-        }
-        // Pattern: expr1 & expr2
-        PyExpr::BinOp { op, left, right } if op == "And" => {
-            let mut left_out = vec![false; n];
-            let mut right_out = vec![false; n];
-            if !streaming_fuse_eval(left, batch, name_to_idx, state, &mut left_out) {
-                return false;
-            }
-            if !streaming_fuse_eval(right, batch, name_to_idx, state, &mut right_out) {
-                return false;
-            }
-            for i in 0..n {
-                out[i] = left_out[i] && right_out[i];
-            }
-            // First batch, first row is always a boundary
-            if state.prev_values.is_empty() {
-                out[0] = true;
-            }
-            true
-        }
-        // Pattern: Column != Column.shift(1)
-        PyExpr::BinOp { op, left, right } if op == "Ne" => {
-            if let (Some(col_name), true) = (get_column_name(left), is_shift_of_same_column(left, right)) {
-                let idx = match name_to_idx.get(col_name) {
-                    Some(i) => *i,
-                    None => return false,
-                };
-                let col = batch.column(idx);
-                if let Some(i64_arr) = coerce_to_i64(col) {
-                    let vals = i64_arr.values();
-                    let nulls = i64_arr.nulls();
-
-                    // Row 0: compare against previous batch's last value
-                    if state.prev_values.is_empty() {
-                        out[0] = true; // First batch: always boundary
-                    } else {
-                        let cur_null = nulls.is_some_and(|nb| !nb.is_valid(0));
-                        match state.prev_values.get(col_name) {
-                            Some(Some(prev_val)) => {
-                                out[0] = cur_null || vals[0] != *prev_val;
-                            }
-                            _ => {
-                                out[0] = true; // prev was null → boundary
-                            }
-                        }
-                    }
-
-                    // Rows 1..n: same as non-streaming fuse_eval
-                    if let Some(nb) = nulls {
-                        for i in 1..n {
-                            out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1) || vals[i] != vals[i - 1];
-                        }
-                    } else {
-                        for i in 1..n {
-                            out[i] = vals[i] != vals[i - 1];
-                        }
-                    }
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
-        // Pattern: (Column - Column.shift(1)) > Literal
-        PyExpr::BinOp { op, left, right } if op == "Gt" => {
-            if let PyExpr::BinOp { op: sub_op, left: sub_left, right: sub_right } = left.as_ref() {
-                if sub_op == "Sub" {
-                    if let (Some(col_name), true) = (get_column_name(sub_left), is_shift_of_same_column(sub_left, sub_right)) {
-                        if let Some(threshold) = get_literal_i64(right) {
-                            let idx = match name_to_idx.get(col_name) {
-                                Some(i) => *i,
-                                None => return false,
-                            };
-                            let col = batch.column(idx);
-                            if let Some(i64_arr) = coerce_to_i64(col) {
-                                let vals = i64_arr.values();
-                                let nulls = i64_arr.nulls();
-
-                                // Row 0: compare against previous batch's last value
-                                if state.prev_values.is_empty() {
-                                    out[0] = true;
-                                } else {
-                                    let cur_null = nulls.is_some_and(|nb| !nb.is_valid(0));
-                                    match state.prev_values.get(col_name) {
-                                        Some(Some(prev_val)) => {
-                                            out[0] = cur_null || vals[0].wrapping_sub(*prev_val) > threshold;
-                                        }
-                                        _ => {
-                                            out[0] = true;
-                                        }
-                                    }
-                                }
-
-                                // Rows 1..n
-                                if let Some(nb) = nulls {
-                                    for i in 1..n {
-                                        out[i] = !nb.is_valid(i) || !nb.is_valid(i - 1)
-                                            || vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                } else {
-                                    for i in 1..n {
-                                        out[i] = vals[i].wrapping_sub(vals[i - 1]) > threshold;
-                                    }
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        }
-        _ => false,
+) -> Result<Vec<bool>, String> {
+    match fused_boundaries(expr, batch, name_to_idx, None) {
+        Some(fused) => Ok(fused),
+        None => vectorized_boundary_flags(expr, batch, name_to_idx),
     }
 }
 
-/// Try streaming fused boundary evaluation on a batch.
-/// Returns Some(BooleanArray) if fusion succeeds, None otherwise.
-fn try_streaming_fused_boundary_eval(
+/// The multi-pass half of `boundary_flags`, for predicates with no fused form.
+fn vectorized_boundary_flags(
     expr: &PyExpr,
     batch: &RecordBatch,
     name_to_idx: &HashMap<String, usize>,
-    state: &StreamState,
-) -> Option<BooleanArray> {
-    let n = batch.num_rows();
-    if n == 0 {
-        return Some(BooleanArray::from(Vec::<bool>::new()));
-    }
-
-    let mut result = vec![false; n]; // streaming: row 0 NOT unconditionally true
-    if streaming_fuse_eval(expr, batch, name_to_idx, state, &mut result) {
-        Some(BooleanArray::from(result))
-    } else {
-        None
-    }
-}
-
-fn vectorized_boundary_eval(
-    expr: &PyExpr,
-    batch: &RecordBatch,
-    name_to_idx: &HashMap<String, usize>,
-) -> Result<BooleanArray, String> {
-    // Try fused single-pass evaluation first (avoids intermediate arrays)
-    if let Some(fused) = try_fused_boundary_eval(expr, batch, name_to_idx) {
-        return Ok(fused);
-    }
-
-    // Fallback: multi-pass vectorized evaluation with intermediate arrays
+) -> Result<Vec<bool>, String> {
     let arr = vectorized_eval_expr(expr, batch, name_to_idx)?;
-    
-    // Convert result to BooleanArray
-    let n = batch.num_rows();
-    if let Some(bool_arr) = arr.as_any().downcast_ref::<BooleanArray>() {
-        // Set row 0 to true (always a boundary)
-        let mut result = Vec::with_capacity(n);
-        result.push(true);
-        for i in 1..n {
-            if bool_arr.is_null(i) {
-                result.push(true); // NULL → boundary
-            } else {
-                result.push(bool_arr.value(i));
-            }
-        }
-        Ok(BooleanArray::from(result))
-    } else {
-        Err("Vectorized evaluation did not produce a BooleanArray".to_string())
-    }
+    let bool_arr = arr
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or("Vectorized evaluation did not produce a BooleanArray")?;
+    Ok((0..bool_arr.len())
+        .map(|i| i == 0 || bool_arr.is_null(i) || bool_arr.value(i))
+        .collect())
 }
 
 /// Recursively evaluate a PyExpr into an ArrayRef using Arrow compute.
@@ -1033,203 +780,62 @@ pub(crate) fn build_sort_exprs(sort_specs: &[crate::SortSpec]) -> Vec<SortExpr> 
 
 /// Single-pass group ID assignment with `__group_count__` and `__rn__`.
 ///
-/// Optimized two-phase approach:
+/// 1. Project the predicate's columns plus every declared sort key, in the
+///    full declared order (`build_boundary_scan_df`), and collect them.
+/// 2. Concatenate and evaluate the boundary flags in one pass
+///    (`boundary_flags`).
+/// 3. Return a metadata-only table with `__group_id__`, `__group_count__`
+///    and `__rn__`.
 ///
-/// **Phase A** (boundary detection — lightweight):
-///   1. Extract only the columns referenced in the predicate + sort keys
-///   2. Project + Sort (DataFusion uses SortPreservingMerge for pre-sorted Parquet)
-///   3. Collect the small projection → process batches sequentially (no concat)
-///   4. Compute group_id, group_count, rn arrays
-///
-/// **Phase B** (result assembly):
-///   5. Return metadata-only table with __group_id__, __group_count__, __rn__
-///
-/// Runs with the GIL released (reached only from `group_ordered_count_impl`
-/// inside `gil::detached`), so it takes only plain Rust values.
-///
-/// **Streaming fast path**: When data comes from a pre-sorted Parquet file
-/// (`source_parquet_path` + `sort_exprs`), uses `target_partitions=1` +
-/// `execute_stream()` to avoid the 32-partition SortPreservingMerge overhead
-/// and process batches individually without `concat_batches`.
+/// This is the count path's fallback when the parallel Parquet count
+/// (`parallel_scan::parallel_streaming_group_count`) does not apply, and the
+/// whole path for every other input. Runs with the GIL released (reached
+/// only from `group_ordered_count_impl` inside `gil::detached`), so it takes
+/// only plain Rust values.
 pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LTSeqTable, LtseqError> {
-    // ── Streaming fast path for pre-sorted Parquet ───────────────────────
-    //
-    // Conditions:
-    //   1. Data comes from a Parquet file (source_parquet_path is set)
-    //   2. Sort order is declared (sort_exprs is non-empty)
-    //   3. The predicate can be fuse-evaluated (common boundary patterns)
-    //
-    // Benefits over the general path:
-    //   - target_partitions=1: no SortPreservingMerge (single partition preserves order)
-    //   - execute_stream(): batch-by-batch processing, no concat_batches
-    //   - Skip .sort() node: single partition + file_sort_order is sufficient
-    if let Some(ref parquet_path) = table.source_parquet_path {
-        if !table.sort_specs.is_empty() {
-            // Direct Parquet streaming — bypasses DataFusion for lower overhead
-            match crate::ops::parallel_scan::direct_streaming_group_ordered(
-                table,
-                predicate,
-                parquet_path,
-            ) {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to DataFusion streaming path
-                }
-            }
+    let df = table
+        .dataframe
+        .as_ref()
+        .ok_or(LtseqError::NoData)?;
 
-            return streaming_linear_scan_group_id(
-                table,
-                predicate,
-                parquet_path,
-            );
-        }
-    }
+    let sorted_projected = build_boundary_scan_df(df, &table.sort_specs, predicate)?;
 
-    // ── General path (non-Parquet or unsorted data) ─────────────────────
-    general_linear_scan_group_id(table, predicate)
-}
+    let proj_batches = RUNTIME
+        .block_on(async {
+            sorted_projected
+                .collect()
+                .await
+                .map_err(|e| format!("Failed to collect projected data: {}", e))
+        })
+        .map_err(LtseqError::Runtime)?;
 
-/// Streaming fast path: read pre-sorted Parquet with single partition,
-/// process batches via execute_stream() with cross-batch boundary state.
-fn streaming_linear_scan_group_id(
-    table: &LTSeqTable,
-    predicate: &PyExpr,
-    parquet_path: &str,
-) -> Result<LTSeqTable, LtseqError> {
-    // Step 1: Extract columns needed by the predicate
-    let mut needed_cols: HashSet<String> = HashSet::new();
-    extract_referenced_columns(predicate, &mut needed_cols);
-
-    // Step 2: Create single-partition session and read Parquet with declared sort order
-    let seq_session = create_sequential_session();
-
-    // Build file_sort_order from sort_specs (same as assume_sorted_impl)
-    let sort_order: Vec<Vec<SortExpr>> =
-        crate::metadata::sort_specs_to_file_sort_order(&table.sort_specs);
-
-    let col_names: Vec<String> = needed_cols.into_iter().collect();
-
-    let result = RUNTIME.block_on(async {
-        // Read Parquet with sort order metadata (single partition)
-        let options = ParquetReadOptions::default().file_sort_order(sort_order);
-        let df = seq_session
-            .read_parquet(parquet_path, options)
-            .await
-            .map_err(|e| format!("Failed to read Parquet: {}", e))?;
-
-        // Project to only needed columns (DataFusion handles column pruning at Parquet level)
-        let col_exprs: Vec<Expr> = col_names
-            .iter()
-            .map(|name| Expr::Column(Column::new_unqualified(name)))
-            .collect();
-
-        let projected_df = if col_exprs.is_empty() {
-            df
-        } else {
-            df.select(col_exprs)
-                .map_err(|e| format!("Failed to project: {}", e))?
-        };
-
-        // No .sort() needed: single partition + file_sort_order preserves order natively
-
-        // Step 3: Execute as stream — batch-by-batch processing
-        let mut stream = projected_df
-            .execute_stream()
-            .await
-            .map_err(|e| format!("Failed to create stream: {}", e))?;
-
-        // Step 4: Streaming boundary detection with cross-batch state
-        let mut state = StreamState::new();
-        let mut group_ids: Vec<i64> = Vec::new();
-        let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-        let mut idx_built = false;
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| format!("Stream error: {}", e))?;
-            let n = batch.num_rows();
-            if n == 0 {
-                continue;
-            }
-
-            // Build name_to_idx from first batch
-            if !idx_built {
-                for (i, field) in batch.schema().fields().iter().enumerate() {
-                    name_to_idx.insert(field.name().clone(), i);
-                }
-                idx_built = true;
-            }
-
-            // Try streaming fused boundary evaluation
-            let boundaries = match try_streaming_fused_boundary_eval(
-                predicate, &batch, &name_to_idx, &state,
-            ) {
-                Some(b) => b,
-                None => {
-                    // Fallback: can't fuse this expression in streaming mode.
-                    // Return error to trigger general path (should not happen for
-                    // R2 sessionization predicates).
-                    return Err(
-                        "STREAMING_FALLBACK".to_string()
-                    );
-                }
-            };
-
-            // Accumulate group IDs from boundaries
-            for i in 0..n {
-                if boundaries.value(i) {
-                    state.current_gid += 1;
-                }
-                group_ids.push(state.current_gid);
-            }
-
-            // Save last row's column values for cross-batch boundary detection
-            state.save_last_row(&batch, &name_to_idx);
-        }
-
-        Ok(group_ids)
-    });
-
-    // Handle fallback: if streaming fuse_eval couldn't handle the expression,
-    // fall back to the general path
-    let group_ids = match result {
-        Ok(ids) => ids,
-        Err(e) if e == "STREAMING_FALLBACK" => {
-            return general_linear_scan_group_id(table, predicate);
-        }
-        Err(e) => {
-            return Err(LtseqError::Runtime(e));
-        }
-    };
-
-    let total_rows = group_ids.len();
+    let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
     if total_rows == 0 {
         return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
     }
 
-    // Step 5: Build metadata from accumulated group IDs
-    // SAFETY: total_rows == 0 returned early above
-    let current_gid = *group_ids.last().expect("group_ids is non-empty");
-    let num_groups = current_gid as usize;
-    let mut group_counts: Vec<i64> = vec![0; num_groups + 1];
-    for &gid in &group_ids {
-        group_counts[gid as usize] += 1;
+    let schema = proj_batches[0].schema();
+    let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
+        LtseqError::Runtime(format!(
+            "Failed to concatenate projected batches: {}",
+            e
+        ))
+    })?;
+
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, field) in concat_batch.schema().fields().iter().enumerate() {
+        name_to_idx.insert(field.name().clone(), i);
     }
 
-    let mut rn_values: Vec<i64> = Vec::with_capacity(total_rows);
-    let mut count_values: Vec<i64> = Vec::with_capacity(total_rows);
-    let mut rn_counters: Vec<i64> = vec![0; num_groups + 1];
+    let boundaries = boundary_flags(predicate, &concat_batch, &name_to_idx)
+        .map_err(|e| {
+            LtseqError::Runtime(format!(
+                "Vectorized boundary evaluation failed: {}",
+                e
+            ))
+        })?;
 
-    for &gid in &group_ids {
-        rn_counters[gid as usize] += 1;
-        rn_values.push(rn_counters[gid as usize]);
-        count_values.push(group_counts[gid as usize]);
-    }
-
-    build_metadata_table(group_ids, count_values, rn_values, table)
+    build_group_metadata_from_boundaries(&boundaries, table)
 }
 
 /// Build the projected + re-sorted DataFrame the general linear-scan path
@@ -1244,8 +850,8 @@ fn streaming_linear_scan_group_id(
 /// already satisfies that ordering, DataFusion's enforce_sorting removes
 /// the Sort node, so an already-sorted prefix costs nothing.
 ///
-/// Split from `general_linear_scan_group_id` so tests can assert on the
-/// exact plan this path executes (see `tests` module below).
+/// Split from `linear_scan_group_id` so tests can assert on the exact plan
+/// this path executes (see `tests` module below).
 fn build_boundary_scan_df(
     df: &datafusion::dataframe::DataFrame,
     sort_specs: &[crate::metadata::SortSpec],
@@ -1291,73 +897,23 @@ fn build_boundary_scan_df(
     }
 }
 
-/// Fallback: general path for when streaming can't handle the expression
-/// (also the whole non-Parquet path of linear_scan_group_id).
-fn general_linear_scan_group_id(
-    table: &LTSeqTable,
-    predicate: &PyExpr,
-) -> Result<LTSeqTable, LtseqError> {
-    let df = table
-        .dataframe
-        .as_ref()
-        .ok_or(LtseqError::NoData)?;
-
-    let sorted_projected = build_boundary_scan_df(df, &table.sort_specs, predicate)?;
-
-    let proj_batches = RUNTIME
-        .block_on(async {
-            sorted_projected
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect projected data: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
-
-    let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
-    if total_rows == 0 {
-        return build_metadata_table(Vec::new(), Vec::new(), Vec::new(), table);
-    }
-
-    let schema = proj_batches[0].schema();
-    let concat_batch = concat_batches(&schema, &proj_batches).map_err(|e| {
-        LtseqError::Runtime(format!(
-            "Failed to concatenate projected batches: {}",
-            e
-        ))
-    })?;
-
-    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
-    for (i, field) in concat_batch.schema().fields().iter().enumerate() {
-        name_to_idx.insert(field.name().clone(), i);
-    }
-
-    let boundaries = vectorized_boundary_eval(predicate, &concat_batch, &name_to_idx)
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Vectorized boundary evaluation failed: {}",
-                e
-            ))
-        })?;
-
-    build_group_metadata_from_boundaries(&boundaries, total_rows, table)
-}
-
-/// Build group metadata arrays from a BooleanArray of boundaries.
+/// Build group metadata arrays from per-row boundary flags.
 fn build_group_metadata_from_boundaries(
-    boundaries: &BooleanArray,
-    total_rows: usize,
+    boundaries: &[bool],
     table: &LTSeqTable,
 ) -> Result<LTSeqTable, LtseqError> {
+    let total_rows = boundaries.len();
+
     // Compute group IDs from boundaries via prefix sum
     let mut group_ids: Vec<i64> = Vec::with_capacity(total_rows);
     let mut current_gid: i64 = 0;
-    for i in 0..total_rows {
-        if boundaries.value(i) {
+    for &is_boundary in boundaries {
+        if is_boundary {
             current_gid += 1;
         }
         group_ids.push(current_gid);
     }
-    
+
     let num_groups = current_gid as usize;
     let mut group_counts: Vec<i64> = vec![0; num_groups + 1];
     for &gid in &group_ids {
@@ -1378,7 +934,7 @@ fn build_group_metadata_from_boundaries(
 }
 
 /// Build the metadata LTSeqTable from group_id, count, and rn arrays.
-pub(crate) fn build_metadata_table(
+fn build_metadata_table(
     group_ids: Vec<i64>,
     count_values: Vec<i64>,
     rn_values: Vec<i64>,
@@ -1612,9 +1168,11 @@ mod tests {
         assert_empty_metadata_table(&result);
     }
 
-    /// The direct Parquet streaming path (pre-sorted file with no rows).
+    /// A lazy Parquet scan (pre-sorted file with no rows).
     #[test]
     fn group_id_on_empty_parquet_is_empty_metadata_table() {
+        use datafusion::datasource::file_format::options::ParquetReadOptions;
+
         let path = std::env::temp_dir().join(format!(
             "ltseq_issue161_empty_{}.parquet",
             std::process::id()
@@ -1641,5 +1199,228 @@ mod tests {
         let result = linear_scan_group_id(&table, &secondary_key_predicate());
         let _ = std::fs::remove_file(&path);
         assert_empty_metadata_table(&result.expect("group ids of an empty file"));
+    }
+
+    // ── Fused evaluator: batch-split consistency (issue #157) ──────────────
+
+    fn col(name: &str) -> PyExpr {
+        PyExpr::Column(name.to_string())
+    }
+
+    fn lit(value: &str, dtype: &str) -> PyExpr {
+        PyExpr::Literal {
+            value: value.to_string(),
+            dtype: dtype.to_string(),
+        }
+    }
+
+    fn binop(op: &str, left: PyExpr, right: PyExpr) -> PyExpr {
+        PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn shift1(name: &str) -> PyExpr {
+        PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![lit("1", "Int64")],
+            kwargs: HashMap::new(),
+            on: Some(Box::new(col(name))),
+        }
+    }
+
+    /// `c != c.shift(1)`
+    fn changes(name: &str) -> PyExpr {
+        binop("Ne", col(name), shift1(name))
+    }
+
+    /// `(c - c.shift(1)) > threshold`
+    fn gap_over(name: &str, threshold: &str) -> PyExpr {
+        binop(
+            "Gt",
+            binop("Sub", col(name), shift1(name)),
+            lit(threshold, "Int64"),
+        )
+    }
+
+    /// Every fused shape and combination the R2 kernel accepts.
+    fn fusable_predicates() -> Vec<PyExpr> {
+        vec![
+            changes("u"),
+            gap_over("t", "4"),
+            gap_over("ts", "50"),
+            binop("Or", changes("u"), gap_over("t", "4")),
+            binop("And", changes("u"), gap_over("ts", "50")),
+            binop(
+                "Or",
+                binop("And", changes("u"), gap_over("t", "4")),
+                changes("t"),
+            ),
+        ]
+    }
+
+    /// Int64 `u`, Int32 `t` and microsecond-timestamp `ts`, so every
+    /// i64 coercion in `coerce_to_i64` meets a batch cut. With `nulls`, NULLs
+    /// sit next to each other, at the first and last row, and on both sides
+    /// of every cut position the tests try. A NULL slot keeps a value that
+    /// would NOT start a group, so an evaluator that ignored the validity
+    /// bitmap (here or in the previous row) gets a different answer.
+    fn boundary_batch(nulls: bool) -> RecordBatch {
+        use datafusion::arrow::array::{Int32Array, TimestampMicrosecondArray};
+        use datafusion::arrow::buffer::NullBuffer;
+        use datafusion::arrow::datatypes::TimeUnit;
+
+        let validity = |null_rows: &[usize]| {
+            nulls.then(|| NullBuffer::from_iter((0..12).map(|i| !null_rows.contains(&i))))
+        };
+        let u = Int64Array::new(
+            vec![1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 4].into(),
+            validity(&[2, 5, 6]),
+        );
+        let t = Int32Array::new(
+            vec![0, 5, 6, 7, 8, 21, 30, 31, 32, 33, 41, 50].into(),
+            validity(&[0, 3, 8]),
+        );
+        let ts = TimestampMicrosecondArray::new(
+            vec![0, 100, 120, 200, 210, 230, 310, 320, 400, 401, 402, 900].into(),
+            validity(&[4, 11]),
+        );
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("u", DataType::Int64, true),
+            Field::new("t", DataType::Int32, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+        ]));
+        RecordBatch::try_new(schema, vec![Arc::new(u), Arc::new(t), Arc::new(ts)])
+            .expect("valid boundary batch")
+    }
+
+    fn name_index(batch: &RecordBatch) -> HashMap<String, usize> {
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name().clone(), i))
+            .collect()
+    }
+
+    /// Flags for `batch` evaluated as consecutive pieces starting at each of
+    /// `cuts`, each piece seeing the previous piece's last row as `prev`.
+    fn flags_in_pieces(expr: &PyExpr, batch: &RecordBatch, cuts: &[usize]) -> Vec<bool> {
+        let idx = name_index(batch);
+        let mut starts = vec![0];
+        starts.extend_from_slice(cuts);
+        starts.push(batch.num_rows());
+        let mut flags = Vec::new();
+        let mut prev: Option<RecordBatch> = None;
+        for w in starts.windows(2) {
+            let piece = batch.slice(w[0], w[1] - w[0]);
+            flags.extend(
+                fused_boundaries(expr, &piece, &idx, prev.as_ref())
+                    .expect("fusable predicate"),
+            );
+            prev = Some(piece.slice(piece.num_rows() - 1, 1));
+        }
+        flags
+    }
+
+    /// Pins the NULL semantics the split tests below rely on, so they cannot
+    /// pass by agreeing on a wrong answer: a NULL on either side of the
+    /// comparison starts a group, as on the DataFusion path.
+    #[test]
+    fn fused_flags_mark_nulls_as_boundaries() {
+        let batch = boundary_batch(true);
+        let flags = fused_boundaries(&changes("u"), &batch, &name_index(&batch), None)
+            .expect("fusable predicate");
+        // u = [1, 1, ∅, 1, 2, ∅, ∅, 3, 3, 3, 4, 4]; the NULL-free variant
+        // [1, 1, 1, 1, 2, 2, 3, 3, ...] would flag only rows 0, 4, 6 and 10.
+        let expected = [
+            true, false, true, true, true, true, true, true, false, false, true, false,
+        ];
+        assert_eq!(flags, expected);
+    }
+
+    /// Splitting a batch anywhere and carrying the previous row across the
+    /// cut gives the same flags as evaluating it whole. This is the
+    /// streaming-vs-batch consistency the parallel Parquet count relies on.
+    #[test]
+    fn fused_flags_do_not_depend_on_batch_cuts() {
+        for nulls in [false, true] {
+            let batch = boundary_batch(nulls);
+            let n = batch.num_rows();
+            for expr in fusable_predicates() {
+                let whole = flags_in_pieces(&expr, &batch, &[]);
+                for cut in 1..n {
+                    assert_eq!(
+                        flags_in_pieces(&expr, &batch, &[cut]),
+                        whole,
+                        "cut at {cut}, nulls={nulls}, expr={expr:?}"
+                    );
+                }
+                let every_row: Vec<usize> = (1..n).collect();
+                assert_eq!(
+                    flags_in_pieces(&expr, &batch, &every_row),
+                    whole,
+                    "one-row pieces, nulls={nulls}, expr={expr:?}"
+                );
+            }
+        }
+    }
+
+    /// On NULL-free data the fused evaluator agrees with the multi-pass one
+    /// (issue #189 tracks where the multi-pass one gets NULLs wrong).
+    #[test]
+    fn fused_flags_match_vectorized_flags_without_nulls() {
+        let batch = boundary_batch(false);
+        let idx = name_index(&batch);
+        for expr in fusable_predicates() {
+            assert_eq!(
+                fused_boundaries(&expr, &batch, &idx, None),
+                Some(vectorized_boundary_flags(&expr, &batch, &idx).expect("vectorized flags")),
+                "expr={expr:?}"
+            );
+        }
+    }
+
+    /// Shapes outside the fused set are declined, with or without a previous
+    /// row, so the caller falls back instead of getting a guessed answer.
+    #[test]
+    fn fused_evaluator_declines_unsupported_shapes() {
+        let mut batch = boundary_batch(false);
+        let idx_cols = batch.num_columns();
+        let strings = datafusion::arrow::array::StringArray::from(vec!["a"; batch.num_rows()]);
+        let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| (**f).clone()).collect();
+        fields.push(Field::new("s", DataType::Utf8, false));
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(strings));
+        batch = RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns)
+            .expect("batch with a string column");
+        assert_eq!(batch.num_columns(), idx_cols + 1);
+        let idx = name_index(&batch);
+        let prev = batch.slice(0, 1);
+
+        let unsupported = [
+            binop("Ne", shift1("u"), col("u")),                  // swapped operands
+            binop("Ne", col("u"), shift1("t")),                  // different columns
+            changes("s"),                                        // not i64-coercible
+            binop("Gt", binop("Sub", col("t"), shift1("t")), lit("1.5", "Float64")),
+            binop("Ge", binop("Sub", col("t"), shift1("t")), lit("4", "Int64")),
+            binop("Or", changes("u"), changes("s")),             // one leaf unsupported
+        ];
+        for expr in unsupported {
+            assert_eq!(fused_boundaries(&expr, &batch, &idx, None), None, "expr={expr:?}");
+            assert_eq!(
+                fused_boundaries(&expr, &batch, &idx, Some(&prev)),
+                None,
+                "expr={expr:?}"
+            );
+        }
     }
 }

@@ -29,7 +29,7 @@
 - **`pivot()`** 收集 distinct 透视键（并执行聚合）以构造输出 schema（`src/ops/pivot.rs`）。
 - **Mutation 类 API**（`insert`/`delete`/`update`/`modify`）在调用时收集全表（`src/ops/mutation.rs`），见 [ADR 0004](0004-lazy-execution-immutable-tables.cn.md)。
 - **`search_pattern`** 收集数据以运行顺序匹配器（`src/ops/pattern_match.rs`）。
-- **`linear_scan` 通用路径**（Parquet 快路之外的 `group_ordered` 边界计数）collect 一个小投影——谓词引用列加全部声明排序键——做向量化边界求值（`src/ops/linear_scan.rs::general_linear_scan_group_id`）。
+- **`linear_scan` 通用路径**（Parquet 快路之外的 `group_ordered` 边界计数）collect 一个小投影——谓词引用列加全部声明排序键——做向量化边界求值（`src/ops/linear_scan.rs::linear_scan_group_id`）。
 
 这些路径都在 Rust 侧（Arrow 批次，无 Python 行往返），但它们确实终结了计划的惰性；组合流水线时若把它们当作惰性会错估成本。
 

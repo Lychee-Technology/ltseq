@@ -6,15 +6,17 @@
 //! two stages: hidden aggregate parts in the Aggregate node, combined by a
 //! post-aggregation projection.
 //!
-//! `filter_where_impl` keeps its `session.sql()` call by design: it uses the
-//! SQL engine as a WHERE-clause parser against an empty table (allowlisted in
-//! issue #91 — no data ever round-trips).
+//! `filter_where_impl` keeps a `session.sql()` call by design, isolated in
+//! `parse_where_clause`: it uses the SQL engine as a WHERE-clause parser
+//! against an empty table (allowlisted in issue #91 — no data ever
+//! round-trips).
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion::common::Column;
 use datafusion::functions_aggregate::expr_fn as agg_fn;
 use datafusion::logical_expr::{case, Expr, ExprFunctionExt, SortExpr};
@@ -443,6 +445,18 @@ pub fn agg_impl(
     ))
 }
 
+/// Drop the table qualifier from every column reference in `expr`, wherever
+/// it sits in the tree.
+fn strip_table_qualifiers(expr: Expr) -> datafusion::error::Result<Expr> {
+    expr.transform(|e| match e {
+        Expr::Column(c) if c.relation.is_some() => {
+            Ok(Transformed::yes(Expr::Column(Column::new_unqualified(c.name))))
+        }
+        other => Ok(Transformed::no(other)),
+    })
+    .data()
+}
+
 /// Filter rows using a raw SQL WHERE clause
 ///
 /// Uses DataFusion's SQL parser to convert the WHERE clause into a native
@@ -450,197 +464,8 @@ pub fn agg_impl(
 pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    // Parse the WHERE clause into a native expression by building a SQL query
-    // against a temp table with the same schema, then extract the filter expression
-    // and strip any table qualifiers so it works with the original DataFrame.
-    let filter_expr = RUNTIME
-        .block_on(async {
-            let temp_name = "__ltseq_filter_parse_tmp";
-            let _ = table.session.deregister_table(temp_name);
-
-            // Register an empty table with the same schema for parsing
-            let empty_batch = datafusion::arrow::record_batch::RecordBatch::new_empty(Arc::clone(schema));
-            let mem_table = datafusion::datasource::MemTable::try_new(
-                Arc::clone(schema),
-                vec![vec![empty_batch]],
-            ).map_err(|e| format!("Failed to create parse table: {}", e))?;
-
-            table
-                .session
-                .register_table(temp_name, Arc::new(mem_table))
-                .map_err(|e| format!("Failed to register parse table: {}", e))?;
-
-            // Parse the full SELECT to get the filter expression in context
-            let parsed_df = table
-                .session
-                .sql(&format!("SELECT * FROM \"{}\" WHERE {}", temp_name, where_clause))
-                .await
-                .map_err(|e| format!("Failed to parse WHERE clause: {}", e))?;
-
-            // Walk the logical plan to find the Filter node
-            fn extract_filter_predicate(
-                plan: &datafusion::logical_expr::LogicalPlan,
-            ) -> Option<datafusion::logical_expr::Expr> {
-                match plan {
-                    datafusion::logical_expr::LogicalPlan::Filter(filter) => {
-                        Some(filter.predicate.clone())
-                    }
-                    datafusion::logical_expr::LogicalPlan::Projection(proj) => {
-                        extract_filter_predicate(&proj.input)
-                    }
-                    _ => None,
-                }
-            }
-
-            let predicate = extract_filter_predicate(parsed_df.logical_plan())
-                .ok_or_else(|| format!("No filter expression found in: {}", where_clause))?;
-
-            // Clean up temp table
-            let _ = table.session.deregister_table(temp_name);
-
-            // Strip table qualifiers from the expression so it works with the original DataFrame.
-            // Columns parsed from SQL will be qualified with the temp table name,
-            // but we need unqualified columns for the native filter.
-            fn strip_table_qualifiers(expr: datafusion::logical_expr::Expr) -> datafusion::logical_expr::Expr {
-                use datafusion::logical_expr::Expr;
-                match expr {
-                    Expr::Column(col) => {
-                        // Remove table qualifier
-                        Expr::Column(datafusion::common::Column::new_unqualified(col.name))
-                    }
-                    Expr::Alias(alias) => {
-                        Expr::Alias(datafusion::logical_expr::expr::Alias {
-                            expr: Box::new(strip_table_qualifiers(*alias.expr)),
-                            ..alias
-                        })
-                    }
-                    Expr::BinaryExpr(binary) => {
-                        Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
-                            left: Box::new(strip_table_qualifiers(*binary.left)),
-                            right: Box::new(strip_table_qualifiers(*binary.right)),
-                            op: binary.op,
-                        })
-                    }
-                    Expr::Like(like) => {
-                        Expr::Like(datafusion::logical_expr::expr::Like {
-                            negated: like.negated,
-                            expr: Box::new(strip_table_qualifiers(*like.expr)),
-                            pattern: Box::new(strip_table_qualifiers(*like.pattern)),
-                            escape_char: like.escape_char,
-                            case_insensitive: like.case_insensitive,
-                        })
-                    }
-                    Expr::InList(in_list) => {
-                        Expr::InList(datafusion::logical_expr::expr::InList {
-                            expr: Box::new(strip_table_qualifiers(*in_list.expr)),
-                            list: in_list.list.into_iter().map(strip_table_qualifiers).collect(),
-                            negated: in_list.negated,
-                        })
-                    }
-                    Expr::Between(between) => {
-                        Expr::Between(datafusion::logical_expr::expr::Between {
-                            expr: Box::new(strip_table_qualifiers(*between.expr)),
-                            negated: between.negated,
-                            low: Box::new(strip_table_qualifiers(*between.low)),
-                            high: Box::new(strip_table_qualifiers(*between.high)),
-                        })
-                    }
-                    Expr::Case(case) => {
-                        Expr::Case(datafusion::logical_expr::expr::Case {
-                            expr: case.expr.map(|e| Box::new(strip_table_qualifiers(*e))),
-                            when_then_expr: case.when_then_expr.into_iter().map(|(w, t)| {
-                                (Box::new(strip_table_qualifiers(*w)), Box::new(strip_table_qualifiers(*t)))
-                            }).collect(),
-                            else_expr: case.else_expr.map(|e| Box::new(strip_table_qualifiers(*e))),
-                        })
-                    }
-                    Expr::ScalarFunction(func) => {
-                        Expr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction {
-                            func: func.func,
-                            args: func.args.into_iter().map(strip_table_qualifiers).collect(),
-                        })
-                    }
-                    Expr::AggregateFunction(agg) => {
-                        Expr::AggregateFunction(datafusion::logical_expr::expr::AggregateFunction {
-                            func: agg.func,
-                            params: datafusion::logical_expr::expr::AggregateFunctionParams {
-                                args: agg.params.args.into_iter().map(strip_table_qualifiers).collect(),
-                                filter: agg.params.filter.map(|e| Box::new(strip_table_qualifiers(*e))),
-                                order_by: agg.params.order_by,
-                                distinct: agg.params.distinct,
-                                null_treatment: agg.params.null_treatment,
-                            },
-                        })
-                    }
-                    Expr::WindowFunction(win) => {
-                        Expr::WindowFunction(Box::new(datafusion::logical_expr::expr::WindowFunction {
-                            fun: win.fun,
-                            params: datafusion::logical_expr::expr::WindowFunctionParams {
-                                args: win.params.args.into_iter().map(strip_table_qualifiers).collect(),
-                                partition_by: win.params.partition_by.into_iter().map(strip_table_qualifiers).collect(),
-                                order_by: win.params.order_by.into_iter().map(|s| datafusion::logical_expr::expr::Sort {
-                                    expr: strip_table_qualifiers(s.expr),
-                                    asc: s.asc,
-                                    nulls_first: s.nulls_first,
-                                }).collect(),
-                                window_frame: win.params.window_frame,
-                                filter: win.params.filter.map(|e| Box::new(strip_table_qualifiers(*e))),
-                                null_treatment: win.params.null_treatment,
-                                distinct: win.params.distinct,
-                            },
-                        }))
-                    }
-                    Expr::Cast(cast) => {
-                        Expr::Cast(datafusion::logical_expr::expr::Cast {
-                            expr: Box::new(strip_table_qualifiers(*cast.expr)),
-                            field: cast.field,
-                        })
-                    }
-                    Expr::TryCast(try_cast) => {
-                        Expr::TryCast(datafusion::logical_expr::expr::TryCast {
-                            expr: Box::new(strip_table_qualifiers(*try_cast.expr)),
-                            field: try_cast.field,
-                        })
-                    }
-                    Expr::Not(not) => {
-                        Expr::Not(Box::new(strip_table_qualifiers(*not)))
-                    }
-                    Expr::IsNotNull(is_not_null) => {
-                        Expr::IsNotNull(Box::new(strip_table_qualifiers(*is_not_null)))
-                    }
-                    Expr::IsNull(is_null) => {
-                        Expr::IsNull(Box::new(strip_table_qualifiers(*is_null)))
-                    }
-                    Expr::IsTrue(is_true) => {
-                        Expr::IsTrue(Box::new(strip_table_qualifiers(*is_true)))
-                    }
-                    Expr::IsFalse(is_false) => {
-                        Expr::IsFalse(Box::new(strip_table_qualifiers(*is_false)))
-                    }
-                    Expr::IsUnknown(is_unknown) => {
-                        Expr::IsUnknown(Box::new(strip_table_qualifiers(*is_unknown)))
-                    }
-                    Expr::IsNotTrue(is_not_true) => {
-                        Expr::IsNotTrue(Box::new(strip_table_qualifiers(*is_not_true)))
-                    }
-                    Expr::IsNotFalse(is_not_false) => {
-                        Expr::IsNotFalse(Box::new(strip_table_qualifiers(*is_not_false)))
-                    }
-                    Expr::IsNotUnknown(is_not_unknown) => {
-                        Expr::IsNotUnknown(Box::new(strip_table_qualifiers(*is_not_unknown)))
-                    }
-                    Expr::Negative(neg) => {
-                        Expr::Negative(Box::new(strip_table_qualifiers(*neg)))
-                    }
-                    // GetIndexedField removed in DataFusion 53
-                    // Literals and other leaf expressions pass through unchanged
-                    other => other,
-                }
-            }
-
-            Ok::<_, String>(strip_table_qualifiers(predicate))
-        })
-        .map_err(LtseqError::Runtime)?;
+    let filter_expr =
+        parse_where_clause(&table.session, schema, where_clause).map_err(LtseqError::Runtime)?;
 
     // Apply the filter natively — stays lazy
     let filtered_df = (**df)
@@ -655,4 +480,124 @@ pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTS
         table.sort_specs.clone(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
+}
+
+/// Parse a SQL WHERE clause into a native expression over `schema`'s columns.
+///
+/// Plans `SELECT * FROM <empty table with this schema> WHERE <clause>`, takes
+/// the Filter node's predicate, and strips the parse table's qualifier from
+/// every column so the predicate applies to the original DataFrame.
+fn parse_where_clause(
+    session: &SessionContext,
+    schema: &Arc<ArrowSchema>,
+    where_clause: &str,
+) -> Result<Expr, String> {
+    RUNTIME.block_on(async {
+        let temp_name = "__ltseq_filter_parse_tmp";
+        let _ = session.deregister_table(temp_name);
+
+        // Register an empty table with the same schema for parsing
+        let empty_batch = datafusion::arrow::record_batch::RecordBatch::new_empty(Arc::clone(schema));
+        let mem_table = datafusion::datasource::MemTable::try_new(
+            Arc::clone(schema),
+            vec![vec![empty_batch]],
+        ).map_err(|e| format!("Failed to create parse table: {}", e))?;
+
+        session
+            .register_table(temp_name, Arc::new(mem_table))
+            .map_err(|e| format!("Failed to register parse table: {}", e))?;
+
+        // Parse the full SELECT to get the filter expression in context
+        let parsed_df = session
+            .sql(&format!("SELECT * FROM \"{}\" WHERE {}", temp_name, where_clause))
+            .await
+            .map_err(|e| format!("Failed to parse WHERE clause: {}", e))?;
+
+        // Walk the logical plan to find the Filter node
+        fn extract_filter_predicate(
+            plan: &datafusion::logical_expr::LogicalPlan,
+        ) -> Option<datafusion::logical_expr::Expr> {
+            match plan {
+                datafusion::logical_expr::LogicalPlan::Filter(filter) => {
+                    Some(filter.predicate.clone())
+                }
+                datafusion::logical_expr::LogicalPlan::Projection(proj) => {
+                    extract_filter_predicate(&proj.input)
+                }
+                _ => None,
+            }
+        }
+
+        let predicate = extract_filter_predicate(parsed_df.logical_plan())
+            .ok_or_else(|| format!("No filter expression found in: {}", where_clause))?;
+
+        // Clean up temp table
+        let _ = session.deregister_table(temp_name);
+
+        // Columns parsed from SQL are qualified with the temp table name;
+        // the original DataFrame needs them unqualified.
+        strip_table_qualifiers(predicate)
+            .map_err(|e| format!("Failed to unqualify WHERE clause columns: {}", e))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+    use datafusion::arrow::datatypes::Field;
+    use datafusion::datasource::MemTable;
+
+    /// `x` values of the rows a WHERE clause keeps, parsed the way
+    /// `filter_where_impl` parses it and applied to a separate DataFrame.
+    fn filtered_x(where_clause: &str) -> Vec<i64> {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("s", DataType::Utf8, false),
+            Field::new("x", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["apple", "banana", "avocado"])),
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+            ],
+        )
+        .expect("valid batch");
+        let session = SessionContext::new();
+        let df = session
+            .read_table(Arc::new(
+                MemTable::try_new(Arc::clone(&schema), vec![vec![batch]]).expect("MemTable"),
+            ))
+            .expect("read MemTable");
+
+        let predicate =
+            parse_where_clause(&session, &schema, where_clause).expect("parse WHERE clause");
+        let batches = RUNTIME
+            .block_on(df.filter(predicate).expect("apply filter").collect())
+            .expect("collect");
+        batches
+            .iter()
+            .flat_map(|b| {
+                b.column_by_name("x")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                    .expect("x column")
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    /// The parsed predicate's columns are qualified with the parse table's
+    /// name wherever they sit; the old hand-written walk skipped expression
+    /// kinds it did not list, such as `SIMILAR TO`, and the filter then failed
+    /// with "No field named __ltseq_filter_parse_tmp.s".
+    #[test]
+    fn where_clause_columns_are_unqualified_in_every_expression_kind() {
+        assert_eq!(filtered_x(r#""s" SIMILAR TO 'apple'"#), [1]);
+        assert_eq!(
+            filtered_x(r#"CASE WHEN "x" BETWEEN 2 AND 3 THEN "s" LIKE 'a%' ELSE "x" IN (1) END"#),
+            [1, 3]
+        );
+        assert_eq!(filtered_x(r#"NOT ("s" IS NULL) AND abs(-"x") > 1"#), [2, 3]);
+    }
 }
