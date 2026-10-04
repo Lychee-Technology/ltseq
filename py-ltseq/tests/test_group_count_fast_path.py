@@ -103,3 +103,62 @@ def test_parquet_directory_count_matches_reference(tmp_path, name):
     t = LTSeq.read_parquet(str(tmp_path)).assume_sorted("i")
     pred = DIRECTORY_PREDICATES[name]
     assert t.group_ordered(pred).first().count() == _reference(t, pred)
+
+
+# `%` and `//` in a boundary predicate (#147). The counting kernel does not
+# evaluate them: with #189 open it would miscount every predicate below
+# because `x` holds a NULL. count() must agree with the reference whichever
+# path answers. Each predicate is paired with its group count in SQL
+# three-valued logic, where a NULL result starts a group.
+MOD_FLOORDIV_PREDICATES = {
+    "mod_gap": (lambda r: (r.x % 10 - r.x.shift(1) % 10) > 0, 7),
+    "mod_swapped_gap": (lambda r: (r.x.shift(1) % 10 - r.x % 10) > -5, 8),
+    "mod_gap_and_same_y": (lambda r: ((r.x.shift(1) % 10 - r.x % 10) < -5) & (r.y == r.y.shift(1)), 2),
+    "mod_not_changes": (lambda r: ~((r.x % 10) != (r.x.shift(1) % 10)), 3),
+    "floordiv_gap": (lambda r: (r.x // 10 - r.x.shift(1) // 10) > 0, 4),
+    "floordiv_gap_and_same_y": (lambda r: ((r.x.shift(1) // 10 - r.x // 10) < -1) & (r.y == r.y.shift(1)), 3),
+    "floordiv_not_changes": (lambda r: ~((r.x // 10) != (r.x.shift(1) // 10)), 7),
+}
+
+
+@pytest.mark.parametrize("name", MOD_FLOORDIV_PREDICATES)
+@pytest.mark.parametrize("source", ["memory", "parquet"])
+def test_mod_and_floordiv_count_matches_reference(tmp_path, source, name):
+    events = pa.table(
+        {
+            "i": pa.array(range(len(NULL_X)), pa.int64()),
+            "x": pa.array(NULL_X, pa.int64()),
+            "y": pa.array(NULL_Y, pa.int64()),
+        }
+    )
+    if source == "memory":
+        t = LTSeq.from_arrow(events).sort("i")
+    else:
+        path = str(tmp_path / "events.parquet")
+        pq.write_table(events, path, row_group_size=3)
+        t = LTSeq.read_parquet(path).assume_sorted("i")
+    pred, expected = MOD_FLOORDIV_PREDICATES[name]
+    assert t.group_ordered(pred).first().count() == expected
+    assert _reference(t, pred) == expected
+
+
+# UInt64 values at or above 2^63, which the counting kernel reads as
+# negative Int64 (#189). Read correctly, the first column is 5 mod 16
+# throughout (one group), 2**64 - 3 is 1 mod 3 (every row starts a group),
+# and a constant column has one `//` bucket (one group).
+UINT64_PREDICATES = {
+    "mod_changes": ([5, 2**63 + 5, 21, 2**64 - 11], lambda r: (r.u % 16) != (r.u.shift(1) % 16), 1),
+    "mod_or_changes": ([2**64 - 3] * 3, lambda r: (r.u % 3 == 1) | (r.u != r.u.shift(1)), 3),
+    "floordiv_changes": ([2**64 - 2] * 3, lambda r: (r.u // 4) != (r.u.shift(1) // 4), 1),
+    "floordiv_column_changes": ([2**64 - 2] * 3, lambda r: (r.u // r.u) != (r.u.shift(1) // r.u.shift(1)), 1),
+}
+
+
+@pytest.mark.parametrize("name", UINT64_PREDICATES)
+def test_mod_and_floordiv_count_on_uint64_above_i64_max(name):
+    values, pred, expected = UINT64_PREDICATES[name]
+    t = LTSeq.from_arrow(
+        pa.table({"i": pa.array(range(len(values)), pa.int64()), "u": pa.array(values, pa.uint64())})
+    ).sort("i")
+    assert t.group_ordered(pred).first().count() == expected
+    assert _reference(t, pred) == expected

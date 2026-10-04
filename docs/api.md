@@ -1283,14 +1283,19 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 ## 8. Expression API (inside lambdas)
 
 ### Expression Operators
-- **Signature**: `+ - * / // %`, `== != > >= < <=`, `& | ~`
+- **Signature**: `+ - * / // %`, `== != > >= < <=`, `& | ~`, `abs()`
 - **Behavior**: Build expression trees, not executed in Python
+  - `//` is floor division with Python's semantics. Integer operands floor exactly (`-7 // 2 == -4`, also beyond 2^53) and give Int64, or UInt64 when both are unsigned. A Python int literal counts as signed, so `r.u // 3` on a UInt64 column gives Int64: every UInt64 value divides, and only a quotient above `i64::MAX` (`r.u // 1`) overflows. A float operand gives Float64, computed as Python's float `//` (`1.0 // 0.1 == 9.0`). NULL in either operand gives NULL. Decimal and non-numeric operands are rejected; cast decimals to float first
+  - A zero `//` divisor raises, for floats too (`/` on floats returns inf). Guard it with `if_else(r.y != 0, r.x // r.y, 0)`, which divides only the rows that pass the condition. `(r.y != 0) & (r.x // r.y > 1)` and an earlier `.filter(lambda r: r.y != 0)` are not guards: the division still runs on the rows they reject
+  - `/` and `%` follow SQL semantics, not Python's: on integers `/` truncates (`-7 / 2 == -3`), and `%` takes the sign of the dividend (`-7 % 2 == -1`, also for floats)
+  - Unary minus and `**` are not supported: write `0 - r.x` and `power(r.x, n)`
 - **Parameters**: left/right operands (Expr or literals)
 - **Returns**: expression object
-- **Exceptions**: `TypeError` (type mismatch)
+- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected (`RuntimeError` from `search_pattern`), for a zero `//` divisor (integer or float, as Python raises) or an integer overflow such as `i64::MIN // -1`
 - **Example**:
 ```python
 expr = (r.price * r.qty) > 100
+bucket = r.minutes // 15
 ```
 
 ### `if_else`

@@ -447,8 +447,8 @@ mod tests {
             ("Div", float(1.0), float(0.0)),
             ("Div", float(1.0), float(-0.0)),
             ("Mod", float(5.5), float(0.0)),
-            // Unknown operators: FloorDiv must still reach the transpiler's
-            // "Unknown binary operator" error (#147).
+            // FloorDiv is left to the floor_div kernel: folding through f64
+            // would lose integer precision and Python's floor semantics.
             ("FloorDiv", int(7), int(2)),
             ("Pow", int(2), int(3)),
             ("And", int(1), int(0)),

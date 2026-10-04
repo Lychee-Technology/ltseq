@@ -208,7 +208,7 @@ def test_search_pattern_count_unsupported_predicate_raises_instead_of_zero(tmp_p
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
-    path = tmp_path / "vals_mod.parquet"
+    path = tmp_path / "vals_abs.parquet"
     table = pa.table(
         {
             "userid": [1, 1],
@@ -220,12 +220,13 @@ def test_search_pattern_count_unsupported_predicate_raises_instead_of_zero(tmp_p
 
     t = LTSeq.read_parquet(str(path)).assume_sorted("userid", "eventtime")
 
-    # Modulo is not supported by the pattern-match evaluator: the parallel
-    # path must fall back, and the general path must raise — never return 0.
-    with pytest.raises(Exception, match="Mod|[Uu]nsupported"):
+    # abs() is not supported by the pattern-match evaluator (#188): the
+    # parallel path must fall back, and the general path must raise — never
+    # return 0. (The true count is 1.)
+    with pytest.raises(Exception, match="[Uu]nsupported"):
         t.search_pattern_count(
-            lambda r: r.value % 2 == 1,
-            lambda r: r.value % 2 == 0,
+            lambda r: abs(r.value) == 3,
+            lambda r: abs(r.value) == 4,
             partition_by="userid",
         )
 

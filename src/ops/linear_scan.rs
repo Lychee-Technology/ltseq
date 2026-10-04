@@ -73,29 +73,28 @@ fn contains_shift(expr: &PyExpr) -> bool {
     }
 }
 
+/// Binary operators admitted by `is_supported_expr`. Each one must have an
+/// arm in `vectorized_binop`: an admitted operator the evaluator rejects
+/// fails the whole linear scan at run time.
+///
+/// `Mod` and `FloorDiv` are left out on purpose. A predicate that is not
+/// admitted is counted by the DataFusion path, which is the reference; one
+/// that is admitted is counted by `vectorized_binop`, whose NULL and UInt64
+/// handling still disagrees with that reference (#189). Admit them once the
+/// evaluator matches it.
+const SUPPORTED_BINARY_OPS: [&str; 12] = [
+    "Ne", "Eq", "Gt", "Lt", "Ge", "Le", "Or", "And", "Add", "Sub", "Mul", "Div",
+];
+
 /// Check if all nodes in the expression tree are supported by the linear scan evaluator.
 fn is_supported_expr(expr: &PyExpr) -> bool {
     match expr {
         PyExpr::Column(_) => true,
         PyExpr::Literal { .. } => true,
         PyExpr::BinOp { op, left, right } => {
-            let valid_op = matches!(
-                op.as_str(),
-                "Ne" | "Eq"
-                    | "Gt"
-                    | "Lt"
-                    | "Ge"
-                    | "Le"
-                    | "Or"
-                    | "And"
-                    | "Add"
-                    | "Sub"
-                    | "Mul"
-                    | "Div"
-                    | "FloorDiv"
-                    | "Mod"
-            );
-            valid_op && is_supported_expr(left) && is_supported_expr(right)
+            SUPPORTED_BINARY_OPS.contains(&op.as_str())
+                && is_supported_expr(left)
+                && is_supported_expr(right)
         }
         PyExpr::UnaryOp { op, operand } => op == "Not" && is_supported_expr(operand),
         PyExpr::Call {
@@ -981,6 +980,23 @@ mod tests {
     use datafusion::datasource::MemTable;
     use datafusion::physical_plan::displayable;
     use datafusion::prelude::SessionContext;
+
+    /// Every operator `can_linear_scan` admits evaluates (#147: FloorDiv and
+    /// Mod were admitted with no arm in `vectorized_binop`).
+    #[test]
+    fn every_supported_binary_op_evaluates() {
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![-7, 7, 6]));
+        let divisors: ArrayRef = Arc::new(Int64Array::from(vec![2, -2, 3]));
+        let bools: ArrayRef = Arc::new(BooleanArray::from(vec![true, false, true]));
+        for op in SUPPORTED_BINARY_OPS {
+            let (left, right) = match op {
+                "And" | "Or" => (&bools, &bools),
+                _ => (&ints, &divisors),
+            };
+            let result = vectorized_binop(op, left, right);
+            assert!(result.is_ok(), "{op}: {:?}", result.err());
+        }
+    }
 
     /// The issue #141 trigger predicate shape: references only the SECONDARY
     /// sort key — `(eventtime - eventtime.shift(1)) > 10`.

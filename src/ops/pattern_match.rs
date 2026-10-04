@@ -37,7 +37,7 @@ use crate::LTSeqTable;
 /// Supports a subset of expressions commonly used in funnel predicates:
 /// - Column references
 /// - Literal values
-/// - BinOp: ==, !=, <, >, <=, >=, &, |
+/// - BinOp: + - * / // %, ==, !=, <, >, <=, >=, &, |
 /// - UnaryOp: Not
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
@@ -150,16 +150,23 @@ fn eval_expr(
 
 /// Evaluate a binary operation on two arrays.
 ///
-/// Operator names are parsed by the transpiler's `op_str_to_operator` — the
+/// Operator names are parsed by the transpiler's `parse_binary_op` — the
 /// single source of truth shared with the DataFusion path — so the serializer
 /// (expr/base.py), the transpiler, and this evaluator can never drift apart.
 fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
+    use crate::transpiler::BinaryOp;
     use datafusion::arrow::compute::kernels::boolean;
     use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::numeric;
     use datafusion::logical_expr::Operator;
 
-    let operator = crate::transpiler::op_str_to_operator(op)?;
+    let operator = match crate::transpiler::parse_binary_op(op)? {
+        BinaryOp::Native(operator) => operator,
+        BinaryOp::FloorDiv => {
+            return crate::transpiler::floor_div::floor_div_arrays(left, right)
+                .map_err(|e| format!("FloorDiv failed: {}", e));
+        }
+    };
 
     match operator {
         Operator::Eq => Ok(Arc::new(
@@ -184,6 +191,7 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
         Operator::Minus => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
         Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
         Operator::Divide => numeric::div(left, right).map_err(|e| format!("Div failed: {}", e)),
+        Operator::Modulo => numeric::rem(left, right).map_err(|e| format!("Mod failed: {}", e)),
         Operator::And => {
             let l = left
                 .as_any()
@@ -210,8 +218,9 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 boolean::or(l, r).map_err(|e| format!("OR failed: {}", e))?,
             ))
         }
-        // Known to the transpiler but not implemented here (e.g. Modulo):
-        // error explicitly so the parallel path falls back and never counts 0.
+        // parse_binary_op yields none of the remaining operators; if it ever
+        // does, error explicitly so the parallel path falls back and never
+        // counts 0.
         other => Err(format!(
             "Unsupported binary operator in search_pattern predicate: {:?}",
             other

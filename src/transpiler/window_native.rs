@@ -675,13 +675,7 @@ fn convert_expr_with_window_children(
                 pyexpr_to_datafusion(*right, schema)?
             };
 
-            let operator = crate::transpiler::op_str_to_operator(&op)?;
-
-            Ok(Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                Box::new(left_expr),
-                operator,
-                Box::new(right_expr),
-            )))
+            crate::transpiler::binary_expr(&op, left_expr, right_expr)
         }
         PyExpr::UnaryOp { op, operand } => {
             let operand_expr = if contains_window_function(&operand) {

@@ -554,6 +554,13 @@ def bool_context_error(example: str) -> TypeError:
     )
 
 
+def _pow_not_supported() -> NotImplementedError:
+    return NotImplementedError(
+        "The ** operator is not supported in LTSeq expressions; "
+        "use power(base, exponent) from ltseq instead, e.g. power(r.x, 2)"
+    )
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.
@@ -676,6 +683,23 @@ class Expr(ABC):
         from .types import CallExpr
 
         return CallExpr("abs", (self,), {}, on=None)
+
+    # Operators with no kernel support. Without these, Python raises a bare
+    # TypeError about operand types that does not say what to write instead.
+    def __neg__(self) -> NoReturn:
+        """Refuse unary minus: -expr"""
+        raise NotImplementedError(
+            "Unary minus is not supported in LTSeq expressions; "
+            "write a subtraction instead, e.g. 0 - r.x"
+        )
+
+    def __pow__(self, other: Any) -> NoReturn:
+        """Refuse the power operator: expr ** other"""
+        raise _pow_not_supported()
+
+    def __rpow__(self, other: Any) -> NoReturn:
+        """Refuse the power operator: other ** expr"""
+        raise _pow_not_supported()
 
     # Right-hand operators (for reversed operations like 5 + r.col)
     def __radd__(self, other: Any) -> "BinOpExpr":  # type: ignore[misc]
