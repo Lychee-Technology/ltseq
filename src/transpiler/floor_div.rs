@@ -4,17 +4,20 @@
 //! integers toward zero: `-7 / 2 == -3` where Python's `-7 // 2 == -4`.
 //! Every evaluator that runs `//` goes through this module — the
 //! `floor_div` UDF in DataFusion plans, [`floor_div_arrays`] in the
-//! hand-written linear-scan and search_pattern evaluators — so the
-//! semantics are defined once:
+//! hand-written search_pattern evaluator — so the semantics are defined
+//! once:
 //!
 //! - Integer operands floor in integer arithmetic (no float round trip, so
 //!   values beyond 2^53 stay exact) and produce Int64, or UInt64 when both
-//!   operands are unsigned.
+//!   operands are unsigned. Every integer operand value is accepted; only a
+//!   quotient that does not fit the result type is an error.
 //! - A float operand makes both Float64, computed with CPython's float
 //!   floor-division algorithm (`1.0 // 0.1 == 9.0`, signed zeros, inf/NaN).
 //! - A zero divisor is an error for integers and floats alike, as Python
 //!   raises ZeroDivisionError (`/` on floats returns inf instead).
-//! - Integer overflow (`i64::MIN // -1`) is an error, as it is for `/`.
+//! - Integer overflow is an error: `i64::MIN // -1`, as for `/`, and a
+//!   UInt64 dividend over a signed divisor whose quotient does not fit
+//!   Int64 (`u64::MAX // 1`).
 //! - NULL in either operand gives NULL, never an error.
 
 use std::sync::{Arc, LazyLock};
@@ -42,53 +45,95 @@ pub(crate) fn floor_div(left: Expr, right: Expr) -> Expr {
 
 /// `left // right` over two arrays of any supported types.
 pub(crate) fn floor_div_arrays(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
-    let target = common_type(left.data_type(), right.data_type())?;
-    // A value that does not fit the common type must error, not become
-    // NULL (`safe: true`, arrow's default, would silently null it).
+    let (left_type, right_type) = operand_types(left.data_type(), right.data_type())?;
+    // These casts only widen, or round an integer to Float64, so none can
+    // fail. `safe: false` is a backstop: arrow's default would turn a value
+    // that did not fit into NULL instead of an error.
     let options = CastOptions {
         safe: false,
         ..Default::default()
     };
-    let left = cast_with_options(left, &target, &options)?;
-    let right = cast_with_options(right, &target, &options)?;
-    let result: ArrayRef = match target {
-        DataType::Int64 => Arc::new(try_binary::<_, _, _, Int64Type>(
+    let left = cast_with_options(left, &left_type, &options)?;
+    let right = cast_with_options(right, &right_type, &options)?;
+    let result: ArrayRef = match (&left_type, &right_type) {
+        (DataType::Int64, DataType::Int64) => Arc::new(try_binary::<_, _, _, Int64Type>(
             left.as_primitive::<Int64Type>(),
             right.as_primitive::<Int64Type>(),
             floor_div_int,
         )?),
-        DataType::UInt64 => Arc::new(try_binary::<_, _, _, UInt64Type>(
+        (DataType::UInt64, DataType::UInt64) => Arc::new(try_binary::<_, _, _, UInt64Type>(
             left.as_primitive::<UInt64Type>(),
             right.as_primitive::<UInt64Type>(),
             floor_div_int,
         )?),
-        DataType::Float64 => Arc::new(try_binary::<_, _, _, Float64Type>(
+        (DataType::Float64, DataType::Float64) => Arc::new(try_binary::<_, _, _, Float64Type>(
             left.as_primitive::<Float64Type>(),
             right.as_primitive::<Float64Type>(),
             floor_div_float,
         )?),
-        other => return internal_err!("floor_div: unexpected common type {other}"),
+        (DataType::UInt64, DataType::Int64) => Arc::new(try_binary::<_, _, _, Int64Type>(
+            left.as_primitive::<UInt64Type>(),
+            right.as_primitive::<Int64Type>(),
+            |a, b| floor_div_wide(a.into(), b.into()),
+        )?),
+        (DataType::Int64, DataType::UInt64) => Arc::new(try_binary::<_, _, _, Int64Type>(
+            left.as_primitive::<Int64Type>(),
+            right.as_primitive::<UInt64Type>(),
+            |a, b| floor_div_wide(a.into(), b.into()),
+        )?),
+        other => return internal_err!("floor_div: unexpected operand types {other:?}"),
     };
     Ok(result)
 }
 
-/// The type both operands are cast to, which is also the result type.
-fn common_type(lhs: &DataType, rhs: &DataType) -> Result<DataType> {
+/// The types the two operands are cast to before dividing.
+///
+/// Both get the same type (Float64, UInt64 or Int64), except a UInt64
+/// operand against a signed one: no 64-bit type holds every value of both,
+/// so each keeps its own and [`floor_div_wide`] divides them. That pair is
+/// what `r.u // 3` on a UInt64 column is, because a Python int literal
+/// arrives as Int64.
+fn operand_types(lhs: &DataType, rhs: &DataType) -> Result<(DataType, DataType)> {
+    use DataType::{Dictionary, Float64, Int64, Null, UInt64};
+    // Dictionary-encoded columns (pandas categoricals, dictionary Parquet
+    // pages) divide as their values, as they do for `/`.
+    fn value_type(t: &DataType) -> &DataType {
+        match t {
+            Dictionary(_, value) => value,
+            other => other,
+        }
+    }
+    // A NULL-typed operand takes the other operand's type.
+    let (l, r) = match (value_type(lhs), value_type(rhs)) {
+        (Null, Null) => (&Int64, &Int64),
+        (Null, other) | (other, Null) => (other, other),
+        pair => pair,
+    };
     let int_or_float = |t: &DataType| t.is_integer() || t.is_floating();
-    match (lhs, rhs) {
-        // Dictionary-encoded columns (pandas categoricals, dictionary Parquet
-        // pages) divide as their values, as they do for `/`.
-        (DataType::Dictionary(_, value), other) | (other, DataType::Dictionary(_, value)) => {
-            common_type(value, other)
-        }
-        (DataType::Null, DataType::Null) => Ok(DataType::Int64),
-        (DataType::Null, other) | (other, DataType::Null) => common_type(other, other),
-        (l, r) if !int_or_float(l) || !int_or_float(r) => {
-            plan_err!("floor division (//) needs integer or float operands, got {lhs} and {rhs}")
-        }
-        (l, r) if l.is_floating() || r.is_floating() => Ok(DataType::Float64),
-        (l, r) if l.is_unsigned_integer() && r.is_unsigned_integer() => Ok(DataType::UInt64),
-        _ => Ok(DataType::Int64),
+    if !int_or_float(l) || !int_or_float(r) {
+        return plan_err!(
+            "floor division (//) needs integer or float operands, got {lhs} and {rhs}"
+        );
+    }
+    Ok(if l.is_floating() || r.is_floating() {
+        (Float64, Float64)
+    } else if l.is_unsigned_integer() && r.is_unsigned_integer() {
+        (UInt64, UInt64)
+    } else {
+        // A signed operand is involved. Int64 holds every integer type
+        // except UInt64, which therefore stays as it is.
+        let widen = |t: &DataType| if *t == UInt64 { UInt64 } else { Int64 };
+        (widen(l), widen(r))
+    })
+}
+
+/// The result type for a pair of types from [`operand_types`]: the operands'
+/// own type when they share one, Int64 for the UInt64/Int64 pair.
+fn result_type(left: &DataType, right: &DataType) -> DataType {
+    if left == right {
+        left.clone()
+    } else {
+        DataType::Int64
     }
 }
 
@@ -103,6 +148,15 @@ fn floor_div_int<T: ArrowNativeTypeOp>(a: T, b: T) -> Result<T, ArrowError> {
     } else {
         Ok(quotient)
     }
+}
+
+/// `a // b` as Int64 for a UInt64 operand against an Int64 one. i128 holds
+/// every value of both types, so the division itself cannot overflow and
+/// the operands need no range check; only a quotient outside Int64 is an
+/// error (`u64::MAX // 1`).
+fn floor_div_wide(a: i128, b: i128) -> Result<i64, ArrowError> {
+    i64::try_from(floor_div_int(a, b)?)
+        .map_err(|_| ArrowError::ArithmeticOverflow(format!("Overflow happened on: {a} // {b}")))
 }
 
 /// Float `a // b`, ported from CPython's `_float_div_mod`. `floor(a / b)`
@@ -148,12 +202,14 @@ impl ScalarUDFImpl for FloorDivUdf {
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
         let [lhs, rhs] = take_function_args(self.name(), arg_types)?;
-        common_type(lhs, rhs)
+        let (left, right) = operand_types(lhs, rhs)?;
+        Ok(result_type(&left, &right))
     }
 
     fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
-        let common = self.return_type(arg_types)?;
-        Ok(vec![common.clone(), common])
+        let [lhs, rhs] = take_function_args(self.name(), arg_types)?;
+        let (left, right) = operand_types(lhs, rhs)?;
+        Ok(vec![left, right])
     }
 
     fn is_strict(&self) -> bool {
@@ -293,41 +349,46 @@ mod tests {
     }
 
     #[test]
-    fn common_type_table() {
+    fn operand_and_result_types_table() {
         use DataType::*;
+        let dict = |value: DataType| Dictionary(Box::new(Int8), Box::new(value));
+        // (lhs, rhs, operand types, result type)
         let table = [
-            (Int64, Int64, Int64),
-            (Int32, Int64, Int64),
-            (Int32, Int32, Int64),
-            (Int8, UInt8, Int64),
-            (UInt32, UInt64, UInt64),
-            (UInt8, UInt8, UInt64),
-            (Int64, UInt64, Int64),
-            (Int64, Float64, Float64),
-            (Float32, Int32, Float64),
-            (Float32, Float32, Float64),
-            (Null, Int32, Int64),
-            (Float64, Null, Float64),
-            (Null, Null, Int64),
-            (Dictionary(Box::new(Int8), Box::new(Int64)), Int64, Int64),
-            (
-                Int8,
-                Dictionary(Box::new(Int32), Box::new(Float32)),
-                Float64,
-            ),
-            (
-                Dictionary(Box::new(Int8), Box::new(UInt32)),
-                Dictionary(Box::new(Int8), Box::new(UInt8)),
-                UInt64,
-            ),
+            (Int64, Int64, (Int64, Int64), Int64),
+            (Int32, Int64, (Int64, Int64), Int64),
+            (Int32, Int32, (Int64, Int64), Int64),
+            (Int8, UInt8, (Int64, Int64), Int64),
+            (UInt32, Int64, (Int64, Int64), Int64),
+            (UInt32, UInt64, (UInt64, UInt64), UInt64),
+            (UInt8, UInt8, (UInt64, UInt64), UInt64),
+            // UInt64 against a signed type keeps both and gives Int64.
+            (UInt64, Int64, (UInt64, Int64), Int64),
+            (Int8, UInt64, (Int64, UInt64), Int64),
+            (Int64, Float64, (Float64, Float64), Float64),
+            (Float32, Int32, (Float64, Float64), Float64),
+            (Float32, Float32, (Float64, Float64), Float64),
+            (UInt64, Float32, (Float64, Float64), Float64),
+            (Null, Int32, (Int64, Int64), Int64),
+            (UInt64, Null, (UInt64, UInt64), UInt64),
+            (Float64, Null, (Float64, Float64), Float64),
+            (Null, Null, (Int64, Int64), Int64),
+            (dict(Int64), Int64, (Int64, Int64), Int64),
+            (Int8, dict(Float32), (Float64, Float64), Float64),
+            (dict(UInt32), dict(UInt8), (UInt64, UInt64), UInt64),
+            (Int64, dict(UInt64), (Int64, UInt64), Int64),
         ];
-        for (lhs, rhs, expected) in table {
-            assert_eq!(common_type(&lhs, &rhs).unwrap(), expected, "{lhs} // {rhs}");
+        for (lhs, rhs, operands, result) in table {
+            let got = operand_types(&lhs, &rhs).unwrap();
+            assert_eq!(got, operands, "{lhs} // {rhs}");
+            assert_eq!(result_type(&got.0, &got.1), result, "{lhs} // {rhs}");
+            // The kernel casts to these types itself, so coercing twice (the
+            // plan, then the kernel) must change nothing.
+            assert_eq!(operand_types(&got.0, &got.1).unwrap(), got, "{lhs} // {rhs}");
         }
     }
 
     #[test]
-    fn common_type_rejects_non_int_or_float() {
+    fn operand_types_reject_non_int_or_float() {
         use DataType::*;
         for (lhs, rhs) in [
             (Utf8, Int64),
@@ -336,7 +397,7 @@ mod tests {
             (Date32, Int64),
             (Dictionary(Box::new(Int8), Box::new(Utf8)), Int64),
         ] {
-            let err = common_type(&lhs, &rhs).unwrap_err().to_string();
+            let err = operand_types(&lhs, &rhs).unwrap_err().to_string();
             assert!(err.contains("needs integer or float operands"), "{err}");
         }
     }
@@ -373,12 +434,78 @@ mod tests {
     }
 
     #[test]
-    fn arrays_out_of_range_cast_errors() {
-        // UInt64 above i64::MAX against a signed operand: the Int64 cast
-        // must fail rather than null the row.
+    fn uint64_against_signed_matches_python() {
+        const MIN: i64 = i64::MIN;
+        const MAX: i64 = i64::MAX;
+        const TOP: u64 = 1 << 63; // i64::MAX + 1
+        // UInt64 // Int64. A dividend above i64::MAX is fine as long as the
+        // quotient fits Int64.
+        let unsigned_by_signed = [
+            (u64::MAX, 2, MAX),
+            (u64::MAX - 2, 3, 6148914691236517204),
+            (u64::MAX, -2, MIN),
+            (TOP, -1, MIN),
+            (TOP, 2, 4611686018427387904),
+            (u64::MAX, MAX, 2),
+            (u64::MAX, MIN, -2),
+            (10, 3, 3),
+            (10, -3, -4),
+            (0, -5, 0),
+        ];
+        for (a, b, expected) in unsigned_by_signed {
+            let left: ArrayRef = Arc::new(UInt64Array::from(vec![a]));
+            let right: ArrayRef = Arc::new(Int64Array::from(vec![b]));
+            let got = floor_div_arrays(&left, &right).unwrap();
+            assert_eq!(got.as_primitive::<Int64Type>().value(0), expected, "{a} // {b}");
+        }
+        // Int64 // UInt64. The quotient is no larger in magnitude than the
+        // dividend, so it always fits.
+        let signed_by_unsigned = [
+            (-7, 2, -4),
+            (7, 2, 3),
+            (MIN, u64::MAX, -1),
+            (MAX, u64::MAX, 0),
+            (-1, u64::MAX, -1),
+            (MIN, 1, MIN),
+            (-100, TOP + 5, -1),
+        ];
+        for (a, b, expected) in signed_by_unsigned {
+            let left: ArrayRef = Arc::new(Int64Array::from(vec![a]));
+            let right: ArrayRef = Arc::new(UInt64Array::from(vec![b]));
+            let got = floor_div_arrays(&left, &right).unwrap();
+            assert_eq!(got.as_primitive::<Int64Type>().value(0), expected, "{a} // {b}");
+        }
+    }
+
+    #[test]
+    fn uint64_against_signed_errors() {
+        // The quotient does not fit Int64.
+        for (a, b) in [(u64::MAX, 1), (u64::MAX, -1), (1 << 63, 1), ((1 << 63) + 1, -1)] {
+            assert!(
+                matches!(
+                    floor_div_wide(a.into(), b.into()),
+                    Err(ArrowError::ArithmeticOverflow(_))
+                ),
+                "{a} // {b}"
+            );
+        }
+        assert!(matches!(floor_div_wide(5, 0), Err(ArrowError::DivideByZero)));
+        // Through the kernel: an error, not a NULL row.
         let left: ArrayRef = Arc::new(UInt64Array::from(vec![u64::MAX]));
-        let right: ArrayRef = Arc::new(Int64Array::from(vec![2]));
+        let right: ArrayRef = Arc::new(Int64Array::from(vec![1]));
         assert!(floor_div_arrays(&left, &right).is_err());
+    }
+
+    #[test]
+    fn uint64_against_signed_nulls() {
+        // The value under a NULL slot (0 here) must not raise.
+        let left: ArrayRef = Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(9)]));
+        let right: ArrayRef = Arc::new(Int64Array::from(vec![Some(4), Some(3), None]));
+        let got = floor_div_arrays(&left, &right).unwrap();
+        assert_eq!(
+            got.as_primitive::<Int64Type>().iter().collect::<Vec<_>>(),
+            [Some(4611686018427387903), None, None]
+        );
     }
 
     #[test]
