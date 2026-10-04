@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, if_else
 
 # Every sign combination, an exact division and a zero dividend.
 XS = [7, -7, 7, -7, -3, 3, 6, 0]
@@ -85,6 +85,7 @@ class TestPythonSemantics:
             (pa.int32(), pa.int32(), pa.int64()),
             (pa.int16(), pa.uint8(), pa.int64()),
             (pa.uint32(), pa.uint64(), pa.uint64()),
+            (pa.uint64(), pa.int64(), pa.int64()),
             (pa.int64(), pa.float32(), pa.float64()),
         ],
     )
@@ -93,6 +94,22 @@ class TestPythonSemantics:
         result = t.derive(v=lambda r: r.a // r.b).to_arrow()
         assert result.schema.field("v").type == expected
         assert result.column("v").to_pylist() == [3, 2]
+
+    def test_uint64_column_with_int_literal(self):
+        # A Python int literal is Int64, so this is a UInt64/signed pair and
+        # the result is Int64. Values above i64::MAX (hash columns reach
+        # them) must still divide; they used to fail an Int64 cast.
+        us = [2**64 - 3, 2**63, 10]
+        t = LTSeq.from_arrow(pa.table({"u": pa.array(us, pa.uint64())}))
+        for fn, reference in [
+            (lambda r: r.u // 3, lambda u: u // 3),
+            (lambda r: r.u // -3, lambda u: u // -3),
+            (lambda r: 100 // r.u, lambda u: 100 // u),
+            (lambda r: -100 // r.u, lambda u: -100 // u),
+        ]:
+            result = t.derive(v=fn).to_arrow()
+            assert result.schema.field("v").type == pa.int64()
+            assert result.column("v").to_pylist() == [reference(u) for u in us]
 
     def test_dictionary_encoded_column(self):
         # pandas categoricals and dictionary Parquet pages arrive this way.
@@ -135,6 +152,22 @@ class TestErrors:
         with pytest.raises(ValueError, match="Overflow"):
             t.derive(v=lambda r: r.x // -1).to_arrow()
 
+    def test_uint64_quotient_beyond_int64_raises(self):
+        # UInt64 // int literal gives Int64, which cannot hold 2**64 - 3.
+        t = LTSeq.from_arrow(pa.table({"u": pa.array([2**64 - 3], pa.uint64())}))
+        with pytest.raises(ValueError, match="Overflow"):
+            t.derive(v=lambda r: r.u // 1).to_arrow()
+
+    def test_if_else_guards_a_zero_divisor(self):
+        # if_else evaluates a branch only on the rows that take it, which
+        # makes it the guard docs/api.md names. (`&` is not one: both sides
+        # are evaluated on every row.)
+        t = LTSeq.from_arrow(pa.table({"x": [7, 8, 9], "y": [2, 0, 3], "f": [7.0, 8.0, 9.0], "g": [2.0, 0.0, 3.0]}))
+        assert _col(t.derive(v=lambda r: if_else(r.y != 0, r.x // r.y, 0))) == [3, 0, 3]
+        assert _col(t.derive(v=lambda r: if_else(r.g != 0, r.f // r.g, 0.0))) == [3.0, 0.0, 3.0]
+        guarded = t.filter(lambda r: if_else(r.y != 0, r.x // r.y > 1, False))
+        assert _col(guarded, "x") == [7, 9]
+
     def test_non_numeric_operand_is_rejected(self):
         t = LTSeq.from_arrow(pa.table({"s": ["a"]}))
         with pytest.raises(RuntimeError, match="needs integer or float operands"):
@@ -159,29 +192,18 @@ class TestExecutionPaths:
         firsts = t.group_ordered(_bucket_change).first().to_arrow().column("x").to_pylist()
         assert firsts == [-5, 5, 12, -15, -25]
 
-    def test_group_ordered_count_linear_scan(self):
+    # first().count() has its own counting kernel for shift predicates. It
+    # does not take `//` (test_group_count_fast_path.py compares the two
+    # paths on NULLs and UInt64); the count must come out right either way.
+    def test_group_ordered_count(self):
         t = LTSeq.from_arrow(_table(GROUP_XS, [0] * len(GROUP_XS))).sort("i")
-        # Called directly: first().count() falls back to the window path on
-        # any kernel error, which would hide a missing linear-scan operator.
-        assert t._inner.group_ordered_count(t._capture_expr(_bucket_change)) == 5
         assert t.group_ordered(_bucket_change).first().count() == 5
-
-    def test_group_ordered_count_uint64_above_i64_max(self):
-        # The linear scan's shift once wrapped UInt64 into Int64, so
-        # `u.shift(1) // v.shift(1)` disagreed with `u // v` on equal rows.
-        big = 2**64 - 2
-        t = LTSeq.from_arrow(
-            pa.table({"i": [0, 1, 2], "u": pa.array([big] * 3, pa.uint64()), "v": pa.array([4] * 3, pa.uint64())})
-        ).sort("i")
-        pred = lambda r: (r.u // r.v) != (r.u.shift(1) // r.v.shift(1))  # noqa: E731
-        assert t._inner.group_ordered_count(t._capture_expr(pred)) == 1
-        assert len(t.group_ordered(pred).first().to_arrow()) == 1
 
     def test_group_ordered_count_sorted_parquet(self, tmp_path):
         path = str(tmp_path / "x.parquet")
         pq.write_table(_table(GROUP_XS, [0] * len(GROUP_XS)), path)
         t = LTSeq.read_parquet(path).assume_sorted("i")
-        assert t._inner.group_ordered_count(t._capture_expr(_bucket_change)) == 5
+        assert t.group_ordered(_bucket_change).first().count() == 5
 
     # Step 1 at row i, step 2 at row i + 1. x // 2 == -4 holds at rows 1 and
     # 3 (x = -7); x % 4 == 3 holds at row 2 (7) but not at row 4 (-3).
