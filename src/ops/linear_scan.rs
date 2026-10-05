@@ -17,7 +17,7 @@
 //! |--------|-----------|
 //! | `Column("x")` | Read column value at current row |
 //! | `Call { func: "shift", on: Column("x"), args: [1] }` | Read column value at previous row |
-//! | `Call { func: "is_null", on: expr }` | Check if evaluated value is null |
+//! | `Call { func: "is_null" / "is_not_null", on: expr }` | Check if evaluated value is (not) null |
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
 //! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
@@ -49,7 +49,8 @@ use std::sync::Arc;
 /// Returns true if the expression tree:
 /// 1. Contains at least one shift(1) call (otherwise, it's a simple column/expression
 ///    and should use the standard DataFusion IS DISTINCT FROM LAG path)
-/// 2. Only contains operations we support: Column, shift(1), is_null, BinOp, UnaryOp, Literal
+/// 2. Only contains operations we support: Column, shift(1), is_null, is_not_null, BinOp,
+///    UnaryOp, Literal
 pub fn can_linear_scan(expr: &PyExpr) -> bool {
     is_supported_expr(expr) && contains_shift(expr)
 }
@@ -128,8 +129,9 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
                         _ => false,
                     }
                 }
-                "is_null" => {
-                    // is_null() on a supported sub-expression
+                "is_null" | "is_not_null" => {
+                    // is_null() / is_not_null() (also what `== None` /
+                    // `!= None` build) on a supported sub-expression
                     on.as_deref().is_some_and(is_supported_expr)
                 }
                 _ => false,
@@ -460,12 +462,13 @@ fn vectorized_eval_expr(
                     let source = vectorized_eval_expr(on, batch, name_to_idx)?;
                     shift_array_by_1(&source)
                 }
-                "is_null" => {
+                "is_null" | "is_not_null" => {
                     let source = vectorized_eval_expr(on, batch, name_to_idx)?;
+                    let want_null = func == "is_null";
                     let n = source.len();
                     let mut result = Vec::with_capacity(n);
                     for i in 0..n {
-                        result.push(source.is_null(i));
+                        result.push(source.is_null(i) == want_null);
                     }
                     Ok(Arc::new(BooleanArray::from(result)) as ArrayRef)
                 }

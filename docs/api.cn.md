@@ -305,7 +305,7 @@ rows = result.to_dicts()
 
 ### `LTSeq.to_dicts`
 - **签名**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
-- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）
+- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）。值由 pyarrow 转换为 Python 对象（`as_py()`）：任何列的 NULL 都是 `None`，整数列含 NULL 时仍为 `int`，NaN 仍是浮点 `nan`（与 `None` 区分），日期和时间戳是 `datetime` 对象（列带时区时为带时区的对象），decimal 是 `Decimal`，列表是 Python list。不需要 pandas，只有一个例外：安装了 pandas 时纳秒时间戳返回 `pandas.Timestamp`，未安装时带亚微秒精度的值会抛 `ValueError`（`datetime` 无法表示）
 - **参数**: 无
 - **返回**: 行字典列表
 - **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
@@ -474,7 +474,7 @@ t.drop("tmp", "debug_flag")
 
 ### `LTSeq.sort`
 - **签名**: `LTSeq.sort(*keys: str | Callable, desc: bool | list[bool] = False, descending: bool | list[bool] | None = None) -> LTSeq`
-- **行为**: 按一个或多个键排序；窗口/有序计算的前置条件。同时填充 `sort_keys` 用于排序状态追踪。`descending` 是 `desc` 的别名（Polars 命名），两者同时给出时 `descending` 优先
+- **行为**: 按一个或多个键排序；窗口/有序计算的前置条件。同时填充 `sort_keys` 用于排序状态追踪。`descending` 是 `desc` 的别名（Polars 命名），两者同时给出时 `descending` 优先。NULL 视为最大值：升序时排在最后，降序时排在最前。没有选项可以改变这一点；排名函数和 `.over(order_by=...)` 窗口以同样方式放置 NULL
 - **参数**: `keys` 列名或表达式；`desc`/`descending` 全局或逐键降序标志
 - **返回**: 排序后的 `LTSeq`（带排序键追踪）
 - **异常**: `ValueError`（schema 未初始化或 desc 长度不匹配），`TypeError`（键类型无效），`AttributeError`（列不存在）
@@ -647,7 +647,7 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 
 #### `LTSeq.fold`（有序状态累积）
 - **签名**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
-- **行为**: 按当前顺序遍历行，通过 `fn(state, row)` 传递运行中的 `state`，并把结果作为新列 `into` 追加。表达窗口函数无法表达的复利、余额滚动、小型状态机（SPL 风格能力）。`row` 是当前行列值的只读字典；返回值既存入 `into` 又传递给下一行。`partition_by` 在每个分区开头把 `state` 重置为 `init`（分区按首次出现顺序）
+- **行为**: 按当前顺序遍历行，通过 `fn(state, row)` 传递运行中的 `state`，并把结果作为新列 `into` 追加。表达窗口函数无法表达的复利、余额滚动、小型状态机（SPL 风格能力）。`row` 是当前行列值的只读字典，取值与 `to_dicts()` 相同（NULL 为 `None`）；返回值既存入 `into` 又传递给下一行。`partition_by` 在每个分区开头把 `state` 重置为 `init`（分区按首次出现顺序）；键为 NULL 的行共用一个分区
 - **执行路径**: 与表达式（`cum_sum`/`shift`/`when`，下推到 Rust 引擎）不同，`fold` **逐行执行 Python 回调**，因此会把整表物化到 Python，**不是惰性的**。能用表达式表达时优先用表达式，仅在确实需要顺序状态时才用 `fold`。大表上这是慢路径（对照 Polars `cumulative_eval`，同样带此警告）
 - **要求**: 需前置 `.sort()` / `.assume_sorted()` 以确定累积顺序
 - **返回**: 新的内存 `LTSeq`，原始行按序 + `into` 列（保留排序元数据，故窗口操作可继续链式）
@@ -738,7 +738,7 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over`（窗口规格）
 - **签名**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **行为**: 为窗口表达式应用窗口规格，既可用于排名函数（`row_number`/`rank`/`dense_rank`/`ntile`），也可用于序列窗口（`shift`/`rolling`/`diff`/`cum_*`）。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值。序列窗口的 `order_by` 可省略（退回表序），排名函数则必需
+- **行为**: 为窗口表达式应用窗口规格，既可用于排名函数（`row_number`/`rank`/`dense_rank`/`ntile`），也可用于序列窗口（`shift`/`rolling`/`diff`/`cum_*`）。`partition_by` 和 `order_by` 各接受**单个列表达式**；`descending` 是作用于 `order_by` 的单个布尔值。序列窗口的 `order_by` 可省略（退回表序），排名函数则必需。`order_by` 中的 NULL 与 `sort()` 放在同一位置（升序在后、降序在前），因此升序 `rank()` 中并列的 NULL 共享最后的名次。`partition_by` 为 NULL 的行构成一个分区
 - **参数**:
   - `partition_by` 分区列（可选）
   - `order_by` 排序列（排名函数必需；序列窗口可选）
@@ -957,6 +957,15 @@ groups.filter(lambda g: g.std("amount") > 5)
 - **示例**:
 ```python
 groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
+```
+
+#### 空值检查（仅 filter）: `.is_null()`、`.is_not_null()`、`== None`、`!= None`
+- **签名**: `x.is_null() -> Expr`；`x.is_not_null() -> Expr`，其中 `x` 是 `g.first().col`、`g.last().col`、`g.count()` 或 `g.sum("col")` 之类的聚合
+- **行为**: 值为 NULL / 非 NULL 的组为真。与行 lambda 一致，`x == None` 和 `x != None` 就是这两个检查，而不是 SQL `= NULL`。只含 NULL 的聚合（全 NULL 组的 `g.sum("col")`）为 NULL
+- **示例**:
+```python
+groups.filter(lambda g: g.first().email.is_null())
+groups.filter(lambda g: g.last().closed_at != None)
 ```
 
 #### 量词（仅 filter）: `g.all()`、`g.any()`、`g.none()`
@@ -1285,10 +1294,13 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - `//` 是向下取整除法，语义与 Python 一致。整数操作数精确向下取整（`-7 // 2 == -4`，超过 2^53 也精确），结果为 Int64；两个操作数都是无符号整数时为 UInt64。Python 整数字面量按有符号处理，所以 UInt64 列上的 `r.u // 3` 结果为 Int64：任何 UInt64 值都能参与除法，只有商超过 `i64::MAX`（如 `r.u // 1`）才会溢出。任一操作数为浮点数时结果为 Float64，按 Python 浮点 `//` 计算（`1.0 // 0.1 == 9.0`）。任一操作数为 NULL 时结果为 NULL。不支持 Decimal 和非数值操作数；Decimal 请先转换为浮点数
   - `//` 的除数为零会报错，浮点数也一样（浮点 `/` 返回 inf）。用 `if_else(r.y != 0, r.x // r.y, 0)` 保护：它只对满足条件的行做除法。`(r.y != 0) & (r.x // r.y > 1)` 和前置的 `.filter(lambda r: r.y != 0)` 起不到保护作用：被它们排除的行仍然会执行除法
   - `/` 和 `%` 遵循 SQL 语义，不是 Python 语义：整数 `/` 向零截断（`-7 / 2 == -3`），`%` 的符号跟随被除数（`-7 % 2 == -1`，浮点数同样如此）
+  - `r.x == None` 和 `r.x != None` 就是 `r.x.is_null()` 和 `r.x.is_not_null()`，`None` 来自变量时同样如此（`region = None` 时 `r.region == region` 选出 NULL 行）。其他与 NULL 的比较遵循 SQL：任一侧为 NULL 时 `r.a == r.b` 为 NULL，因此不被选中
+  - NaN 是值而不是 NULL：`is_null()` 和 `== None` 不匹配它。比较时 NaN 大于任何数字（包括 `inf`）且等于自身，因此 `NaN > 0` 为真（Python 中为假），`sort()` 把 NaN 排在数字之后、NULL 之前，`max` 返回 NaN
+  - 整数溢出会静默回绕（二进制补码，与 NumPy、Polars 相同）：`x = 2**62` 时 `r.x * 4` 为 `0`，`r.x + r.x` 为 `-2**63`。边界取决于结果类型：两个 Int32 列的运算结果为 Int32，超过 `2**31 - 1` 即回绕；Python int 字面量是 Int64，因此 Int32 列上的 `r.a * 4` 以 Int64 计算。较窄整数列的求和结果为 Int64。这适用于 `+ - *`、`diff` 以及求和类：`sum`、`g.sum`、`sum_if`、`cum_sum` 和 `rolling(n).sum()`。`avg`/`mean` 以浮点计算，不会回绕。以下例外会抛错：整数 `/` 和 `//` 遇到 `i64::MIN / -1`、`abs()` 遇到 `i64::MIN`，以及 `search_pattern` 谓词中的任何溢出（它运行在独立的求值器上；#221 跟踪各路径对齐以及是否提供检查算术）。Int64 数值可能接近 ±9.2e18 时请先转换类型：`r.x.cast("float64") * 4`，或先派生浮点列再聚合（聚合方法只接受裸列）
   - 不支持一元负号和 `**`：请改写为 `0 - r.x` 和 `power(r.x, n)`
 - **参数**: 左右操作数（Expr 或字面量）
 - **返回**: 表达式对象
-- **异常**: `TypeError`（类型不匹配）；`NotImplementedError`（一元负号、`**`）；收集结果时抛 `ValueError`（`search_pattern` 抛 `RuntimeError`）：`//` 的除数为零（整数和浮点数都会，与 Python 一致），或整数溢出（如 `i64::MIN // -1`）
+- **异常**: `TypeError`（类型不匹配）；`NotImplementedError`（一元负号、`**`）；收集结果时抛 `ValueError`（`search_pattern` 抛 `RuntimeError`）：`//` 的除数为零（整数和浮点数都会，与 Python 一致），或上文列出的会抛错的溢出（如 `i64::MIN // -1`）
 - **示例**:
 ```python
 expr = (r.price * r.qty) > 100
@@ -1346,13 +1358,13 @@ safe_price = r.price.fill_null(0)
 
 #### `r.col.is_null` / `r.col.is_not_null`
 - **签名**: `r.col.is_null() -> Expr`；`r.col.is_not_null() -> Expr`
-- **行为**: NULL / NOT NULL 判断
+- **行为**: NULL / NOT NULL 判断。浮点 NaN 不是 NULL，因此 `is_null()` 对它为假
 - **示例**:
 ```python
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
-- **说明**: lambda 中的 `r.col is None` / `r.col is not None` 会被改写为同样的表达式（`IS NULL` / `IS NOT NULL`，而不是 `= NULL`），并保留 lambda 的模块全局变量与闭包变量。改写依赖 lambda 源码，对这类 lambda 的 `functools.partial` 同样生效。在 REPL、`exec`/`eval` 字符串、普通 `def` 函数以及其他包装器（装饰器、`functools.lru_cache` 等）之后，任何 `is None` / `is not None`（即使作用于 Python 值）都会抛出说明写法的 `TypeError`，而不会在未改写的情况下执行；因此请在这些场景中使用上述方法，并在构造函数之前判断 Python 值。改写和上述检查都不会进入 lambda 调用的辅助函数：对于 `lambda r: missing(r) or (r.a > 1)` 且 `def missing(r): return r.b is None`，`missing(r)` 是 Python bool `False`，捕获到的谓词只剩 `r.a > 1`。请在辅助函数中使用 `.is_null()` / `.is_not_null()`。`r.col == None` 不会被改写，它与 SQL `NULL` 做比较。
+- **说明**: lambda 中的 `r.col is None` / `r.col is not None` 会被改写为同样的表达式（`IS NULL` / `IS NOT NULL`，而不是 `= NULL`），并保留 lambda 的模块全局变量与闭包变量。改写依赖 lambda 源码，对这类 lambda 的 `functools.partial` 同样生效。在 REPL、`exec`/`eval` 字符串、普通 `def` 函数以及其他包装器（装饰器、`functools.lru_cache` 等）之后，任何 `is None` / `is not None`（即使作用于 Python 值）都会抛出说明写法的 `TypeError`，而不会在未改写的情况下执行；因此请在这些场景中使用上述方法，并在构造函数之前判断 Python 值。改写和上述检查都不会进入 lambda 调用的辅助函数：对于 `lambda r: missing(r) or (r.a > 1)` 且 `def missing(r): return r.b is None`，`missing(r)` 是 Python bool `False`，捕获到的谓词只剩 `r.a > 1`。请在辅助函数中使用 `.is_null()` / `.is_not_null()`。`r.col == None` / `r.col != None` 不需要改写：运算符本身就会构造 `.is_null()` / `.is_not_null()`，因此在 REPL、`exec`/`eval` 字符串和辅助函数中同样有效。
 
 #### `r.col.is_in`
 - **签名**: `r.col.is_in(values: list[Any]) -> Expr`

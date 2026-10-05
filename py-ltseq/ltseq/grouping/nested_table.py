@@ -154,6 +154,8 @@ class NestedTable:
                 "  - g.first().column op value (e.g., g.first().price > 100)\n"
                 "  - g.last().column op value\n"
                 "  - g.max('column') op value, g.min(), g.sum(), g.avg()\n"
+                "  - g.first().column.is_null() / .is_not_null() "
+                "(or == None / != None; 'is None' is not supported here)\n"
                 "  - g.all(lambda r: r.col op val), g.any(...), g.none(...)\n"
                 "  - Combinations with & (AND) and | (OR)\n"
                 "If you need a predicate that cannot be expressed this way, consider "

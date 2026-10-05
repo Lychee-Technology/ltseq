@@ -472,6 +472,21 @@ fn convert_rolling_agg(
     }
 }
 
+/// The single sort key of `.over(order_by=..., descending=...)`. NULLs go
+/// where `sort()` puts them, so ranking or accumulating over a column agrees
+/// with sorting by it.
+fn over_order_by(
+    order_by: &PyExpr,
+    descending: bool,
+    schema: &ArrowSchema,
+) -> Result<Sort, String> {
+    Ok(Sort {
+        expr: pyexpr_to_datafusion(order_by.clone(), schema)?,
+        asc: !descending,
+        nulls_first: crate::metadata::nulls_first(descending),
+    })
+}
+
 /// Convert PyExpr::Window (row_number, rank, dense_rank, ntile) to native window expressions
 fn convert_window_ranking(
     py_expr: &PyExpr,
@@ -521,12 +536,7 @@ fn convert_window_ranking(
 
         // Build ORDER BY - prefer the window's own order_by, fall back to table sort_exprs
         let window_order: Vec<Sort> = if let Some(ob) = window_order_by {
-            let ob_expr = pyexpr_to_datafusion(*ob.clone(), schema)?;
-            vec![Sort {
-                expr: ob_expr,
-                asc: !descending,
-                nulls_first: !descending, // ascending → nulls first, descending → nulls last
-            }]
+            vec![over_order_by(ob, *descending, schema)?]
         } else if !order_by.is_empty() {
             order_by.to_vec()
         } else {
@@ -570,12 +580,7 @@ fn convert_window_sequence(
         // Effective ORDER BY: the wrapper's own single order_by key if given,
         // else fall back to the table sort. Mirrors convert_window_ranking.
         let effective_order_by: Vec<Sort> = if let Some(ob) = order_by {
-            let ob_expr = pyexpr_to_datafusion(*ob.clone(), schema)?;
-            vec![Sort {
-                expr: ob_expr,
-                asc: !descending,
-                nulls_first: !descending, // ascending → nulls first, descending → nulls last
-            }]
+            vec![over_order_by(ob, *descending, schema)?]
         } else {
             table_order_by.to_vec()
         };

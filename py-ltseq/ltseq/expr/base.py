@@ -618,16 +618,21 @@ class Expr(ABC):
 
     # Comparison operators
     # Note: These override object.__eq__ and __ne__, intentionally returning Expr instead of bool
-    def __eq__(self, other: "Expr | Any") -> "BinOpExpr":  # type: ignore[override]
-        """Equality operator: expr == other"""
+    def __eq__(self, other: "Expr | Any") -> "BinOpExpr | CallExpr":  # type: ignore[override]
+        """Equality operator: expr == other. ``expr == None`` is ``expr.is_null()``
+        (SQL ``= NULL`` would be NULL for every row)."""
         from .types import BinOpExpr
 
+        if other is None:
+            return self.is_null()
         return BinOpExpr("Eq", cast(Any, self), self._coerce(other))
 
-    def __ne__(self, other: "Expr | Any") -> "BinOpExpr":  # type: ignore[override]
-        """Inequality operator: expr != other"""
+    def __ne__(self, other: "Expr | Any") -> "BinOpExpr | CallExpr":  # type: ignore[override]
+        """Inequality operator: expr != other. ``expr != None`` is ``expr.is_not_null()``."""
         from .types import BinOpExpr
 
+        if other is None:
+            return self.is_not_null()
         return BinOpExpr("Ne", cast(Any, self), self._coerce(other))
 
     def __lt__(self, other: "Expr | Any") -> "BinOpExpr":
