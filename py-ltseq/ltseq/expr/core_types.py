@@ -4,7 +4,7 @@ import numbers
 import reprlib
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from .base import Expr
 
@@ -102,7 +102,7 @@ def _encode_datetime(value: datetime) -> dict[str, Any]:
         # asm8 is the UTC instant as a numpy datetime64 in the Timestamp's
         # own unit; reading its ticks avoids a Timedelta, which overflows
         # beyond the nanosecond range.
-        ticks = int(value.asm8.view("int64"))
+        ticks = int(cast(Any, value).asm8.view("int64"))
         return {"dtype": "Timestamp", "value": ticks, "unit": unit, "tz": tz}
     delta = value - _EPOCH_UTC if tz is not None else value - _EPOCH_NAIVE
     ticks = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
