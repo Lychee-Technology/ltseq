@@ -64,6 +64,14 @@ class TestIntegerOverflowWraps:
         assert _col(big.derive(c=lambda r: r.x.cum_sum()), "c") == [BIG, I64_MIN]
         assert _col(big.derive(c=lambda r: r.x.rolling(2).sum()), "c") == [BIG, I64_MIN]
 
+    def test_bound_is_the_result_type(self):
+        # Int32 op Int32 is Int32 and wraps at 2**31; an int literal is Int64,
+        # so the same multiplication by a literal widens; sums widen to Int64.
+        t = LTSeq.from_arrow(pa.table({"a": pa.array([2**30, 2**30], pa.int32())}))
+        assert _col(t.derive(y=lambda r: r.a + r.a), "y") == [-(2**31)] * 2
+        assert _col(t.derive(y=lambda r: r.a * 4), "y") == [2**32] * 2
+        assert _col(t.agg(s=lambda g: g.a.sum()), "s") == [2**31]
+
     def test_diff(self):
         t = _int64_table(i=[0, 1], x=[I64_MIN, I64_MAX]).sort("i")
         assert _col(t.derive(d=lambda r: r.x.diff()), "d") == [None, -1]
@@ -142,6 +150,14 @@ class TestDecimal:
             Decimal("2.25")
         ]
 
-    def test_cum_sum(self, dec):
-        out = dec.assume_sorted("g").cum_sum("d")
+    def test_cum_sum(self):
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "i": [1, 2, 3],
+                    "d": pa.array([Decimal("1.10"), Decimal("2.25"), None], pa.decimal128(10, 2)),
+                }
+            )
+        )
+        out = t.sort("i").cum_sum("d")
         assert _col(out, "d_cumsum") == [Decimal("1.10"), Decimal("3.35"), Decimal("3.35")]

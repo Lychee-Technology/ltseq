@@ -25,6 +25,9 @@ PREDICATES = {
     "changes_or_gap": lambda r: (r.u != r.u.shift(1)) | ((r.t - r.t.shift(1)) > 4),
     "changes_and_gap": lambda r: (r.u != r.u.shift(1)) & ((r.t - r.t.shift(1)) > 4),
     "nested": lambda r: ((r.u != r.u.shift(1)) & ((r.t - r.t.shift(1)) > 4)) | (r.t != r.t.shift(1)),
+    # `== None` / `!= None` build is_null() / is_not_null() (#154).
+    "prev_null": lambda r: r.u.shift(1) == None,  # noqa: E711
+    "prev_not_null": lambda r: (r.u.shift(1) != None) & (r.t != None),  # noqa: E711
 }
 
 

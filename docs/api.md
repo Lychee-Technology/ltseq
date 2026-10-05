@@ -308,7 +308,7 @@ rows = result.to_dicts()
 
 ### `LTSeq.to_dicts`
 - **Signature**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
-- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`). Values are pyarrow's Python conversions (`as_py()`), so NULL is `None` in every column, an integer column stays `int` even when it holds NULLs, NaN stays a float `nan` (distinct from `None`), dates and timestamps are `datetime` objects (timezone-aware when the column has a zone), decimals are `Decimal`, and lists are Python lists. pandas is not required
+- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`). Values are pyarrow's Python conversions (`as_py()`), so NULL is `None` in every column, an integer column stays `int` even when it holds NULLs, NaN stays a float `nan` (distinct from `None`), dates and timestamps are `datetime` objects (timezone-aware when the column has a zone), decimals are `Decimal`, and lists are Python lists. pandas is not required, with one exception: nanosecond timestamps come back as `pandas.Timestamp` when pandas is installed, and without it a value with sub-microsecond precision raises `ValueError` (a `datetime` cannot hold it)
 - **Parameters**: none
 - **Returns**: list of row dictionaries
 - **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
@@ -1298,7 +1298,8 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - A zero `//` divisor raises, for floats too (`/` on floats returns inf). Guard it with `if_else(r.y != 0, r.x // r.y, 0)`, which divides only the rows that pass the condition. `(r.y != 0) & (r.x // r.y > 1)` and an earlier `.filter(lambda r: r.y != 0)` are not guards: the division still runs on the rows they reject
   - `/` and `%` follow SQL semantics, not Python's: on integers `/` truncates (`-7 / 2 == -3`), and `%` takes the sign of the dividend (`-7 % 2 == -1`, also for floats)
   - `r.x == None` and `r.x != None` are `r.x.is_null()` and `r.x.is_not_null()`, also when the `None` comes from a variable (`r.region == region` with `region = None` selects the NULL rows). Any other comparison with NULL follows SQL: `r.a == r.b` is NULL, so not selected, when either side is NULL
-  - Integer overflow wraps around silently (two's complement, as in NumPy and Polars): with `x = 2**62`, `r.x * 4` is `0` and `r.x + r.x` is `-2**63`. This holds for `+ - *`, for `diff`, and for the sums: `sum`, `g.sum`, `sum_if`, `cum_sum` and `rolling(n).sum()`. `avg`/`mean` is computed in floating point and does not wrap. The exceptions raise instead: integer `/` and `//` on `i64::MIN / -1`, `abs()` on `i64::MIN`, and any overflow inside a `search_pattern` predicate, which runs on a separate evaluator (#221 tracks aligning the paths and whether to offer checked arithmetic). When values can approach ±9.2e18, cast first: `r.x.cast("float64") * 4`, or derive a float column and aggregate that, since aggregate methods take a bare column
+  - NaN is a value, not NULL: `is_null()` and `== None` do not match it. Comparisons order NaN above every number, `inf` included, and equal to itself, so `NaN > 0` is true (it is false in Python), `sort()` puts NaN after the numbers and before NULL, and `max` returns NaN
+  - Integer overflow wraps around silently (two's complement, as in NumPy and Polars): with `x = 2**62`, `r.x * 4` is `0` and `r.x + r.x` is `-2**63`. The bound is the result type's: two Int32 columns give Int32 and wrap past `2**31 - 1`, while a Python int literal is Int64, so `r.a * 4` on an Int32 column is computed in Int64. Sums of narrower integer columns are Int64. This holds for `+ - *`, for `diff`, and for the sums: `sum`, `g.sum`, `sum_if`, `cum_sum` and `rolling(n).sum()`. `avg`/`mean` is computed in floating point and does not wrap. The exceptions raise instead: integer `/` and `//` on `i64::MIN / -1`, `abs()` on `i64::MIN`, and any overflow inside a `search_pattern` predicate, which runs on a separate evaluator (#221 tracks aligning the paths and whether to offer checked arithmetic). When Int64 values can approach ±9.2e18, cast first: `r.x.cast("float64") * 4`, or derive a float column and aggregate that, since aggregate methods take a bare column
   - Unary minus and `**` are not supported: write `0 - r.x` and `power(r.x, n)`
 - **Parameters**: left/right operands (Expr or literals)
 - **Returns**: expression object
@@ -1360,7 +1361,7 @@ safe_price = r.price.fill_null(0)
 
 #### `r.col.is_null` / `r.col.is_not_null`
 - **Signature**: `r.col.is_null() -> Expr`; `r.col.is_not_null() -> Expr`
-- **Behavior**: NULL / NOT NULL check
+- **Behavior**: NULL / NOT NULL check. A float NaN is not NULL, so `is_null()` is false for it
 - **Example**:
 ```python
 missing = t.filter(lambda r: r.email.is_null())

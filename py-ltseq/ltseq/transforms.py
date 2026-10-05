@@ -726,17 +726,23 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 f"Available columns: {list(self._schema.keys())}"
             )
 
-        from .io_ops import _infer_schema_from_rows
-
         import copy
 
-        rows = self.to_dicts()
+        import pyarrow as pa
+
+        # The rows only feed ``fn``; the result keeps the source Arrow table,
+        # so the original columns keep their exact types (an all-NULL Int64
+        # column, Decimal128 precision, nanosecond timestamps) instead of
+        # being re-inferred from Python values.
+        source = self.to_arrow()
+        rows = source.to_pylist()
+        values: list[Any] = []
 
         if partition_by is None:
             state = copy.deepcopy(init)
             for row in rows:
                 state = fn(state, _FoldRow(row))
-                row[into] = state
+                values.append(state)
         else:
             states: dict[Any, Any] = {}
             for row in rows:
@@ -746,21 +752,16 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 state = states[key] if key in states else copy.deepcopy(init)
                 state = fn(state, _FoldRow(row))
                 states[key] = state
-                row[into] = state
+                values.append(state)
 
-        # Infer the new column's type from the produced values so the schema
-        # is complete; fall back to the existing schema for the other columns.
-        out_schema = dict(self._schema)
-        if rows:
-            sample = next((r[into] for r in rows if r[into] is not None), None)
-            if sample is not None:
-                out_schema[into] = _infer_schema_from_rows({into: sample})[into]
-            else:
-                out_schema[into] = "Float64"
+        # The new column's type comes from the produced values; with no
+        # value to infer from (no rows, or only None) it is Float64.
+        if any(v is not None for v in values):
+            into_column = pa.array(values)
         else:
-            out_schema[into] = "Float64"
+            into_column = pa.array(values, pa.float64())
 
-        result = LTSeq._from_rows(rows, out_schema)
+        result = LTSeq.from_arrow(source.append_column(into, into_column))
         # The accumulation preserved input order; re-declare it so downstream
         # window ops keep working without a redundant physical sort.
         sort_cols = [c for c, _ in self._sort_keys]

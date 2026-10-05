@@ -305,7 +305,7 @@ rows = result.to_dicts()
 
 ### `LTSeq.to_dicts`
 - **签名**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
-- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）。值由 pyarrow 转换为 Python 对象（`as_py()`）：任何列的 NULL 都是 `None`，整数列含 NULL 时仍为 `int`，NaN 仍是浮点 `nan`（与 `None` 区分），日期和时间戳是 `datetime` 对象（列带时区时为带时区的对象），decimal 是 `Decimal`，列表是 Python list。不需要 pandas
+- **行为**: 将所有行物化为字典列表（与 Polars `to_dicts()` 同名同语义）。值由 pyarrow 转换为 Python 对象（`as_py()`）：任何列的 NULL 都是 `None`，整数列含 NULL 时仍为 `int`，NaN 仍是浮点 `nan`（与 `None` 区分），日期和时间戳是 `datetime` 对象（列带时区时为带时区的对象），decimal 是 `Decimal`，列表是 Python list。不需要 pandas，只有一个例外：安装了 pandas 时纳秒时间戳返回 `pandas.Timestamp`，未安装时带亚微秒精度的值会抛 `ValueError`（`datetime` 无法表示）
 - **参数**: 无
 - **返回**: 行字典列表
 - **异常**: `MemoryError`（数据集过大），`RuntimeError`（执行失败）
@@ -1295,7 +1295,8 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - `//` 的除数为零会报错，浮点数也一样（浮点 `/` 返回 inf）。用 `if_else(r.y != 0, r.x // r.y, 0)` 保护：它只对满足条件的行做除法。`(r.y != 0) & (r.x // r.y > 1)` 和前置的 `.filter(lambda r: r.y != 0)` 起不到保护作用：被它们排除的行仍然会执行除法
   - `/` 和 `%` 遵循 SQL 语义，不是 Python 语义：整数 `/` 向零截断（`-7 / 2 == -3`），`%` 的符号跟随被除数（`-7 % 2 == -1`，浮点数同样如此）
   - `r.x == None` 和 `r.x != None` 就是 `r.x.is_null()` 和 `r.x.is_not_null()`，`None` 来自变量时同样如此（`region = None` 时 `r.region == region` 选出 NULL 行）。其他与 NULL 的比较遵循 SQL：任一侧为 NULL 时 `r.a == r.b` 为 NULL，因此不被选中
-  - 整数溢出会静默回绕（二进制补码，与 NumPy、Polars 相同）：`x = 2**62` 时 `r.x * 4` 为 `0`，`r.x + r.x` 为 `-2**63`。这适用于 `+ - *`、`diff` 以及求和类：`sum`、`g.sum`、`sum_if`、`cum_sum` 和 `rolling(n).sum()`。`avg`/`mean` 以浮点计算，不会回绕。以下例外会抛错：整数 `/` 和 `//` 遇到 `i64::MIN / -1`、`abs()` 遇到 `i64::MIN`，以及 `search_pattern` 谓词中的任何溢出（它运行在独立的求值器上；#221 跟踪各路径对齐以及是否提供检查算术）。数值可能接近 ±9.2e18 时请先转换类型：`r.x.cast("float64") * 4`，或先派生浮点列再聚合（聚合方法只接受裸列）
+  - NaN 是值而不是 NULL：`is_null()` 和 `== None` 不匹配它。比较时 NaN 大于任何数字（包括 `inf`）且等于自身，因此 `NaN > 0` 为真（Python 中为假），`sort()` 把 NaN 排在数字之后、NULL 之前，`max` 返回 NaN
+  - 整数溢出会静默回绕（二进制补码，与 NumPy、Polars 相同）：`x = 2**62` 时 `r.x * 4` 为 `0`，`r.x + r.x` 为 `-2**63`。边界取决于结果类型：两个 Int32 列的运算结果为 Int32，超过 `2**31 - 1` 即回绕；Python int 字面量是 Int64，因此 Int32 列上的 `r.a * 4` 以 Int64 计算。较窄整数列的求和结果为 Int64。这适用于 `+ - *`、`diff` 以及求和类：`sum`、`g.sum`、`sum_if`、`cum_sum` 和 `rolling(n).sum()`。`avg`/`mean` 以浮点计算，不会回绕。以下例外会抛错：整数 `/` 和 `//` 遇到 `i64::MIN / -1`、`abs()` 遇到 `i64::MIN`，以及 `search_pattern` 谓词中的任何溢出（它运行在独立的求值器上；#221 跟踪各路径对齐以及是否提供检查算术）。Int64 数值可能接近 ±9.2e18 时请先转换类型：`r.x.cast("float64") * 4`，或先派生浮点列再聚合（聚合方法只接受裸列）
   - 不支持一元负号和 `**`：请改写为 `0 - r.x` 和 `power(r.x, n)`
 - **参数**: 左右操作数（Expr 或字面量）
 - **返回**: 表达式对象
@@ -1357,7 +1358,7 @@ safe_price = r.price.fill_null(0)
 
 #### `r.col.is_null` / `r.col.is_not_null`
 - **签名**: `r.col.is_null() -> Expr`；`r.col.is_not_null() -> Expr`
-- **行为**: NULL / NOT NULL 判断
+- **行为**: NULL / NOT NULL 判断。浮点 NaN 不是 NULL，因此 `is_null()` 对它为假
 - **示例**:
 ```python
 missing = t.filter(lambda r: r.email.is_null())

@@ -127,6 +127,38 @@ class TestFoldWithNulls:
         out = t.sort("id").fold(lambda s, r: s + 1, init=0, into="n", partition_by="grp")
         assert _by_id(out, "n") == {1: 1, 2: 1, 3: 2, 4: 2, 5: 1, 6: 2}
 
+    def test_fold_keeps_source_column_types(self):
+        # The result is not rebuilt from Python values, so nothing is
+        # re-inferred: an all-NULL Int64 column would otherwise become the
+        # Arrow null type (and SUM over it would fail).
+        from decimal import Decimal
+
+        types = {
+            "i": pa.int64(),
+            "all_null": pa.int64(),
+            "d": pa.decimal128(10, 2),
+            "ts": pa.timestamp("ns"),
+            "u": pa.uint64(),
+        }
+        table = pa.table(
+            {
+                "i": pa.array([1, 2], types["i"]),
+                "all_null": pa.array([None, None], types["all_null"]),
+                "d": pa.array([Decimal("1.10"), None], types["d"]),
+                "ts": pa.array([1, None], types["ts"]),
+                "u": pa.array([2**64 - 1, 1], types["u"]),
+            }
+        )
+        out = LTSeq.from_arrow(table).sort("i").fold(lambda s, r: s + 1, init=0, into="n")
+        arrow = out.to_arrow()
+        assert {f.name: f.type for f in arrow.schema} == {**types, "n": pa.int64()}
+        assert arrow.column("u").to_pylist() == [2**64 - 1, 1]
+        assert out.agg(s=lambda g: g.all_null.sum()).to_dicts() == [{"s": None}]
+
+    def test_into_column_with_no_values_is_float64(self, t):
+        out = t.sort("id").fold(lambda s, r: None, init=None, into="n")
+        assert out.to_arrow().schema.field("n").type == pa.float64()
+
 
 class TestEqNone:
     """`== None` / `!= None` mean `.is_null()` / `.is_not_null()`."""
@@ -214,6 +246,12 @@ class TestEqNoneInGroupPredicates:
         assert self._kept(groups.filter(lambda g: g.first().v.is_null())) == [1, 2, 5]
         assert self._kept(groups.filter(lambda g: g.first().v.is_not_null())) == [3, 4]
         assert self._kept(groups.filter(lambda g: ~g.first().v.is_null())) == [3, 4]
+
+    def test_is_none_points_to_the_null_checks(self, groups):
+        # Group lambdas are not rewritten (#144 covers row lambdas), so
+        # `is None` is a plain Python bool; the error names what works.
+        with pytest.raises(ValueError, match=r"is_null\(\)"):
+            groups.filter(lambda g: g.first().v is None)
 
     def test_aggregate(self, groups):
         # SUM over only NULLs is NULL.
@@ -383,4 +421,9 @@ class TestNanIsNotNull:
         # DataFusion orders NaN above every number, so `NaN > 0` is true,
         # unlike Python where `nan > 0` is False.
         assert _ids(t.filter(lambda r: r.f > 0)) == [1, 3, 4, 6]
-        assert _ids(t.filter(lambda r: r.f > 1e308)) == [3]
+        assert _ids(t.filter(lambda r: r.f > float("inf"))) == [3]
+        assert _ids(t.filter(lambda r: r.f == NAN)) == [3]
+
+    def test_nan_sorts_after_numbers_and_before_null(self, t):
+        assert [r["id"] for r in _rows(t.sort("f", "id"))] == [1, 4, 6, 3, 2, 5]
+        assert math.isnan(t.agg(m=lambda g: g.f.max()).to_dicts()[0]["m"])

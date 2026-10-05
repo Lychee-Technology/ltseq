@@ -20,7 +20,7 @@
 **正确性所需的例外**（记录于 `CLAUDE.md`；不是捷径）：
 
 1. **物理位置操作**（`rvs`、`step`、带键 `distinct`）在分配行位置前，先把表快照为单个按序分区（collect → read_batch），因为对惰性多分区计划做无序/分区窗口不会保持输入顺序（`set_ops.rs::snapshot_single_partition`）。
-2. **`fold()`** 逐行运行用户提供的 Python 回调 `fn(state, row)`；任意 Python 无法表达为 DataFusion 计划，逐行路径（`to_dicts()` → 累加 → `_from_rows()`）是固有属性。docstring 标明这是非惰性慢路径（对比 Polars `cumulative_eval`）。
+2. **`fold()`** 逐行运行用户提供的 Python 回调 `fn(state, row)`；任意 Python 无法表达为 DataFusion 计划，逐行路径（`to_arrow()` → Python 行 → 累加 → 对同一 Arrow 表追加新列后 `from_arrow()`）是固有属性。docstring 标明这是非惰性慢路径（对比 Polars `cumulative_eval`）。
 
 **当前实现中的其他 eager 路径**（专用算法或实现现状，截至本记录时）：
 

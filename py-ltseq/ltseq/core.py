@@ -376,7 +376,9 @@ class LTSeq(
         Values are pyarrow's Python conversions (``as_py()``): NULL is
         ``None`` in every column, integer columns stay ``int`` even when they
         hold NULLs, and NaN stays a float ``nan``, distinct from ``None``.
-        pandas is not needed.
+        pandas is not needed, except that nanosecond timestamps come back as
+        ``pandas.Timestamp`` when it is installed; without it, a value with
+        sub-microsecond precision raises ``ValueError``.
 
         Returns:
             List of row dictionaries, where each dict maps column names to values
