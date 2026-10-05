@@ -8,11 +8,27 @@
 
 use crate::types::{LiteralValue, PyExpr};
 
-/// Extract numeric value from a literal PyExpr (for constant folding)
-fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
+/// A numeric literal operand: the two literal kinds that fold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Num {
+    Int(i64),
+    Float(f64),
+}
+
+impl Num {
+    /// The operand as DataFusion sees it once an Int64 is coerced to Float64.
+    fn as_f64(self) -> f64 {
+        match self {
+            Num::Int(v) => v as f64,
+            Num::Float(v) => v,
+        }
+    }
+}
+
+fn numeric_literal(expr: &PyExpr) -> Option<Num> {
     match expr {
-        PyExpr::Literal(LiteralValue::Int64(v)) => Some(*v as f64),
-        PyExpr::Literal(LiteralValue::Float64(v)) => Some(*v),
+        PyExpr::Literal(LiteralValue::Int64(v)) => Some(Num::Int(*v)),
+        PyExpr::Literal(LiteralValue::Float64(v)) => Some(Num::Float(*v)),
         _ => None,
     }
 }
@@ -25,50 +41,66 @@ fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
     }
 }
 
-/// Create a literal PyExpr from a float value
-fn make_literal_f64(value: f64) -> PyExpr {
-    // If it's a whole number, prefer Int64 representation
-    if value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
-        PyExpr::Literal(LiteralValue::Int64(value as i64))
-    } else {
-        PyExpr::Literal(LiteralValue::Float64(value))
-    }
-}
-
-/// Create a literal PyExpr from a boolean value
 fn make_literal_bool(value: bool) -> PyExpr {
     PyExpr::Literal(LiteralValue::Boolean(value))
 }
 
+/// `l op r` for two numeric literals, with the type and value DataFusion
+/// would compute: two Int64 stay Int64 (`/` and `%` truncate), anything with
+/// a Float64 is Float64. `None` leaves the operation to DataFusion: integer
+/// overflow (an error there), a zero divisor, an operator that is not
+/// arithmetic.
+fn fold_arithmetic(op: &str, l: Num, r: Num) -> Option<LiteralValue> {
+    if let (Num::Int(l), Num::Int(r)) = (l, r) {
+        let value = match op {
+            "Add" => l.checked_add(r),
+            "Sub" => l.checked_sub(r),
+            "Mul" => l.checked_mul(r),
+            "Div" => l.checked_div(r),
+            "Mod" => l.checked_rem(r),
+            _ => None,
+        }?;
+        return Some(LiteralValue::Int64(value));
+    }
+    let (l, r) = (l.as_f64(), r.as_f64());
+    let value = match op {
+        "Add" => l + r,
+        "Sub" => l - r,
+        "Mul" => l * r,
+        "Div" if r != 0.0 => l / r,
+        "Mod" if r != 0.0 => l % r,
+        _ => return None,
+    };
+    Some(LiteralValue::Float64(value))
+}
+
+/// `l op r` for a comparison of two numeric literals: exact for two Int64,
+/// in f64 otherwise. A NaN operand is left to DataFusion, which orders NaN
+/// above every number and equal to itself.
+fn fold_comparison(op: &str, l: Num, r: Num) -> Option<bool> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let ordering = match (l, r) {
+        (Num::Int(l), Num::Int(r)) => l.cmp(&r),
+        _ => l.as_f64().partial_cmp(&r.as_f64())?,
+    };
+    Some(match op {
+        "Eq" => ordering == Equal,
+        "Ne" => ordering != Equal,
+        "Lt" => ordering == Less,
+        "Le" => ordering != Greater,
+        "Gt" => ordering == Greater,
+        "Ge" => ordering != Less,
+        _ => return None,
+    })
+}
+
 /// Try to fold a binary operation on two literals into a single literal
 fn try_fold_binop(op: &str, left: &PyExpr, right: &PyExpr) -> Option<PyExpr> {
-    // Try arithmetic folding
-    if let (Some(l), Some(r)) = (get_literal_f64(left), get_literal_f64(right)) {
-        let result = match op {
-            "Add" => Some(l + r),
-            "Sub" => Some(l - r),
-            "Mul" => Some(l * r),
-            "Div" if r != 0.0 => Some(l / r),
-            "Mod" if r != 0.0 => Some(l % r),
-            _ => None,
-        };
-        if let Some(v) = result {
-            return Some(make_literal_f64(v));
+    if let (Some(l), Some(r)) = (numeric_literal(left), numeric_literal(right)) {
+        if let Some(value) = fold_arithmetic(op, l, r) {
+            return Some(PyExpr::Literal(value));
         }
-
-        // Try comparison folding
-        let cmp_result = match op {
-            "Eq" => Some(l == r),
-            "Ne" => Some(l != r),
-            "Lt" => Some(l < r),
-            "Le" => Some(l <= r),
-            "Gt" => Some(l > r),
-            "Ge" => Some(l >= r),
-            _ => None,
-        };
-        if let Some(b) = cmp_result {
-            return Some(make_literal_bool(b));
-        }
+        return fold_comparison(op, l, r).map(make_literal_bool);
     }
 
     // Try boolean folding
@@ -226,6 +258,18 @@ mod tests {
         PyExpr::Literal(LiteralValue::Null)
     }
 
+    fn decimal(value: i128, precision: u8, scale: i8) -> PyExpr {
+        PyExpr::Literal(LiteralValue::Decimal128 {
+            value,
+            precision,
+            scale,
+        })
+    }
+
+    fn date(days: i32) -> PyExpr {
+        PyExpr::Literal(LiteralValue::Date32(days))
+    }
+
     fn col(name: &str) -> PyExpr {
         PyExpr::Column(name.to_string())
     }
@@ -314,23 +358,24 @@ mod tests {
         }
     }
 
-    // ---- get_literal_f64 / get_literal_bool: what counts as a foldable literal ----
+    // ---- numeric_literal / get_literal_bool: what counts as a foldable literal ----
 
     #[test]
     fn numeric_literal_table() {
         let table = [
-            (int(42), Some(42.0)),
-            (int(-7), Some(-7.0)),
-            (float(2.5), Some(2.5)),
-            (float(f64::INFINITY), Some(f64::INFINITY)),
-            // Booleans, numeric-looking strings and NULL are not numbers.
+            (int(42), Some(Num::Int(42))),
+            (int(-7), Some(Num::Int(-7))),
+            (float(2.5), Some(Num::Float(2.5))),
+            (float(f64::INFINITY), Some(Num::Float(f64::INFINITY))),
+            // Booleans, numeric-looking strings, Decimals and NULL do not fold.
             (boolean(true), None),
             (string("1"), None),
+            (decimal(1, 1, 0), None),
             (null(), None),
             (col("a"), None),
         ];
         for (expr, expected) in table {
-            assert_eq!(get_literal_f64(&expr), expected, "{expr:?}");
+            assert_eq!(numeric_literal(&expr), expected, "{expr:?}");
         }
     }
 
@@ -354,11 +399,17 @@ mod tests {
     #[test]
     fn fold_table() {
         let table = [
-            // Integer results come back as Int64 (make_literal_f64's first branch).
+            // Two Int64 literals fold as integers.
             ("Add", int(2), int(3), int(5)),
             ("Sub", int(2), int(5), int(-3)),
             ("Mul", int(4), int(-3), int(-12)),
             ("Div", int(6), int(3), int(2)),
+            // Integer division truncates, as in DataFusion.
+            ("Div", int(7), int(2), int(3)),
+            ("Div", int(-7), int(2), int(-3)),
+            // Exact beyond f64's 53-bit mantissa.
+            ("Add", int(1 << 53), int(1), int((1 << 53) + 1)),
+            ("Eq", int((1 << 53) + 1), int(1 << 53), folded_bool(false)),
             // The remainder takes the dividend's sign, as in DataFusion
             // (Python's -7 % 3 would be 2).
             ("Mod", int(-7), int(3), int(-1)),
@@ -366,11 +417,12 @@ mod tests {
             ("Sub", float(0.5), float(2.0), float(-1.5)),
             ("Mul", float(2.5), float(0.5), float(1.25)),
             ("Div", float(7.0), float(2.0), float(3.5)),
+            // A whole Float64 result stays Float64.
+            ("Add", float(2.0), float(3.0), float(5.0)),
             ("Mod", float(-5.5), float(2.0), float(-1.5)),
             // Int64 with Float64 widens to Float64, like DataFusion's coercion.
             ("Add", int(1), float(2.5), float(3.5)),
             ("Div", int(7), float(2.0), float(3.5)),
-            // Whole but beyond Int64, and non-finite: make_literal_f64 keeps Float64.
             ("Mul", float(1e19), float(1.0), float(1e19)),
             ("Mul", float(1e308), float(10.0), float(f64::INFINITY)),
             ("Eq", int(1), int(1), folded_bool(true)),
@@ -414,6 +466,19 @@ mod tests {
             ("Div", float(1.0), float(0.0)),
             ("Div", float(1.0), float(-0.0)),
             ("Mod", float(5.5), float(0.0)),
+            // Integer overflow is left for DataFusion to report.
+            ("Add", int(i64::MAX), int(1)),
+            ("Sub", int(i64::MIN), int(1)),
+            ("Mul", int(i64::MAX), int(2)),
+            ("Div", int(i64::MIN), int(-1)),
+            ("Mod", int(i64::MIN), int(-1)),
+            // DataFusion orders NaN above every number and equal to itself.
+            ("Eq", float(f64::NAN), float(f64::NAN)),
+            ("Gt", float(f64::NAN), float(1.0)),
+            ("Lt", int(1), float(f64::NAN)),
+            // Literals other than Int64/Float64/Boolean never fold.
+            ("Add", decimal(15, 2, 1), int(1)),
+            ("Eq", date(1), date(1)),
             // FloorDiv is left to the floor_div kernel: folding through f64
             // would lose integer precision and Python's floor semantics.
             ("FloorDiv", int(7), int(2)),
@@ -583,7 +648,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "constant folding goes through f64 (#193)"]
     fn numeric_folding_keeps_datafusion_semantics() {
         let rows = vec![
             // Int64 / Int64 is integer division in DataFusion.

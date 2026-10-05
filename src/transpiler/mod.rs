@@ -24,7 +24,7 @@ pub(crate) mod window_native;
 pub use optimization::optimize_expr;
 pub use window_native::pyexpr_to_window_expr;
 
-use crate::types::PyExpr;
+use crate::types::{arg, Arg, PyExpr};
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 use datafusion::prelude::*;
@@ -213,6 +213,20 @@ fn parse_call_null_ops(
     }
 }
 
+/// The `decimals` argument of `round`: 0 when absent, an integer literal, or
+/// an expression lowered by `lower` (the row and window planners each pass
+/// their own lowering).
+pub(crate) fn round_decimals(
+    decimals: Arg<'_>,
+    lower: impl FnOnce(&PyExpr) -> Result<Expr, String>,
+) -> Result<Expr, String> {
+    match decimals {
+        Arg::Absent => Ok(lit(0i64)),
+        Arg::Literal(value) => Ok(lit(value.require_i64("round() decimals")?)),
+        Arg::Expr(expr) => lower(expr),
+    }
+}
+
 /// Handle math operations (abs, ceil, floor, round, sqrt, power, sign, log, etc.)
 fn parse_call_math(
     func: &str,
@@ -239,22 +253,12 @@ fn parse_call_math(
         "round" => {
             use datafusion::functions::math::expr_fn::round;
             let input = resolve_on_or_args(on, args, schema, "round")?;
-            let decimals_expr = if on.is_none() {
-                // Standalone: round(expr, decimals) — decimals is args[1] if present
-                if args.len() > 1 {
-                    pyexpr_to_datafusion_inner(args[1].clone(), schema)?
-                } else {
-                    lit(0i64)
-                }
-            } else {
-                // Method: expr.round(decimals) — decimals is args[0] if present
-                if args.is_empty() {
-                    lit(0i64)
-                } else {
-                    pyexpr_to_datafusion_inner(args[0].clone(), schema)?
-                }
-            };
-            Ok(round(vec![input, decimals_expr]))
+            // Standalone round(expr, decimals) has decimals in args[1];
+            // the method form expr.round(decimals) in args[0].
+            let decimals = round_decimals(arg(args, usize::from(on.is_none())), |e| {
+                pyexpr_to_datafusion_inner(e.clone(), schema)
+            })?;
+            Ok(round(vec![input, decimals]))
         }
         "math_sqrt" => {
             use datafusion::functions::math::expr_fn::sqrt;
@@ -291,18 +295,13 @@ fn parse_call_math(
         "math_log" => {
             // log(x) → ln(x), log(x, 10) → log10(x), log(x, 2) → log2(x), else log(base, x)
             let input = resolve_on_or_args(on, args, schema, "log")?;
-            // Look for optional base argument
-            let base_arg = if on.is_none() {
-                args.get(1)
-            } else {
-                args.first()
-            };
-            match base_arg {
-                None => {
+            // The optional base: args[1] standalone, args[0] as a method.
+            match arg(args, usize::from(on.is_none())) {
+                Arg::Absent => {
                     use datafusion::functions::math::expr_fn::ln;
                     Ok(ln(input))
                 }
-                Some(PyExpr::Literal(value)) => {
+                Arg::Literal(value) => {
                     let base_val = value.require_f64("log() base")?;
                     if (base_val - 10.0_f64).abs() < 1e-9 {
                         use datafusion::functions::math::expr_fn::log10;
@@ -315,7 +314,7 @@ fn parse_call_math(
                         Ok(log(lit(base_val), input))
                     }
                 }
-                Some(other) => {
+                Arg::Expr(other) => {
                     let base_expr = pyexpr_to_datafusion_inner(other.clone(), schema)?;
                     use datafusion::functions::math::expr_fn::log;
                     Ok(log(base_expr, input))
@@ -433,12 +432,10 @@ fn parse_call_type_ops(
     match func {
         "cast" => {
             let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            if args.is_empty() {
-                return Err("cast requires a target type argument".to_string());
-            }
-            let target_type = match &args[0] {
-                PyExpr::Literal(value) => value.require_str("cast() target type")?.to_string(),
-                _ => return Err("cast target type must be a string literal".to_string()),
+            let target_type = match arg(&args, 0) {
+                Arg::Absent => return Err("cast requires a target type argument".to_string()),
+                Arg::Literal(value) => value.require_str("cast() target type")?.to_string(),
+                Arg::Expr(_) => return Err("cast target type must be a string literal".to_string()),
             };
             let arrow_type = match target_type.to_lowercase().as_str() {
                 "int32" | "i32" => DataType::Int32,
@@ -764,20 +761,22 @@ fn parse_call_temporal(
             }
             let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
 
-            let parse_lit_i64 = |arg: &PyExpr, name: &str| -> Result<i64, String> {
-                match arg {
-                    PyExpr::Literal(value) => value.require_i64(&format!("dt_add {name}")),
-                    _ => Err(format!("dt_add {name} must be a literal integer")),
+            // An absent field is 0; a present one must be a literal integer.
+            let field = |i: usize, name: &str| -> Result<i64, String> {
+                match arg(args, i) {
+                    Arg::Absent => Ok(0),
+                    Arg::Literal(value) => value.require_i64(&format!("dt_add {name}")),
+                    Arg::Expr(_) => Err(format!("dt_add {name} must be a literal integer")),
                 }
             };
 
-            let days = parse_lit_i64(&args[0], "days")?;
-            let months = parse_lit_i64(&args[1], "months")?;
-            let years = parse_lit_i64(&args[2], "years")?;
-            let hours = if args.len() > 3 { parse_lit_i64(&args[3], "hours")? } else { 0 };
-            let minutes = if args.len() > 4 { parse_lit_i64(&args[4], "minutes")? } else { 0 };
-            let seconds = if args.len() > 5 { parse_lit_i64(&args[5], "seconds")? } else { 0 };
-            let weeks = if args.len() > 6 { parse_lit_i64(&args[6], "weeks")? } else { 0 };
+            let days = field(0, "days")?;
+            let months = field(1, "months")?;
+            let years = field(2, "years")?;
+            let hours = field(3, "hours")?;
+            let minutes = field(4, "minutes")?;
+            let seconds = field(5, "seconds")?;
+            let weeks = field(6, "weeks")?;
 
             let total_months = (years * 12 + months) as i32;
             let total_days = (days + weeks * 7) as i32;
@@ -798,13 +797,10 @@ fn parse_call_temporal(
             let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
             let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
 
-            let unit = if args.len() > 1 {
-                match &args[1] {
-                    PyExpr::Literal(value) => value.require_str("dt_diff unit")?.to_lowercase(),
-                    _ => "day".to_string(),
-                }
-            } else {
-                "day".to_string()
+            let unit = match arg(args, 1) {
+                Arg::Absent => "day".to_string(),
+                Arg::Literal(value) => value.require_str("dt_diff unit")?.to_lowercase(),
+                Arg::Expr(_) => return Err("dt_diff unit must be a literal string".to_string()),
             };
 
             match unit.as_str() {

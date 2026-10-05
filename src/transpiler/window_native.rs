@@ -19,7 +19,7 @@
 //! When `partition_by` is specified, any sort expression that matches a partition
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
-use crate::types::{LiteralValue, PyExpr};
+use crate::types::{arg, Arg, LiteralValue, PyExpr};
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
@@ -253,23 +253,17 @@ fn convert_shift(
         let col_expr =
             pyexpr_to_datafusion(super::require_on(on.as_deref(), "shift")?.clone(), schema)?;
 
-        // Get offset (default 1)
-        let offset: i64 = if args.is_empty() {
-            1
-        } else if let PyExpr::Literal(value) = &args[0] {
-            value.require_i64("shift() offset")?
-        } else {
-            return Err("shift() offset must be a literal integer".to_string());
+        let offset = match arg(args, 0) {
+            Arg::Absent => 1,
+            Arg::Literal(value) => value.require_i64("shift() offset")?,
+            Arg::Expr(_) => return Err("shift() offset must be a literal integer".to_string()),
         };
 
-        // Get optional default value
-        let default_value = if let Some(default_expr) = kwargs.get("default") {
-            match default_expr {
-                PyExpr::Literal(value) => Some(value.to_scalar_value()),
-                _ => None,
-            }
-        } else {
-            None
+        // lag/lead take the default as a scalar, so only a literal can be one.
+        let default_value = match kwargs.get("default") {
+            None => None,
+            Some(PyExpr::Literal(value)) => Some(value.to_scalar_value()),
+            Some(_) => return Err("shift() default must be a literal value".to_string()),
         };
 
         // Extract partition_by from kwargs
@@ -302,13 +296,10 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
         let col_expr =
             pyexpr_to_datafusion(super::require_on(on.as_deref(), "diff")?.clone(), schema)?;
 
-        // Get periods (default 1)
-        let periods: i64 = if args.is_empty() {
-            1
-        } else if let PyExpr::Literal(value) = &args[0] {
-            value.require_i64("diff() periods")?
-        } else {
-            return Err("diff() periods must be a literal integer".to_string());
+        let periods = match arg(args, 0) {
+            Arg::Absent => 1,
+            Arg::Literal(value) => value.require_i64("diff() periods")?,
+            Arg::Expr(_) => return Err("diff() periods must be a literal integer".to_string()),
         };
 
         // Extract partition_by from kwargs
@@ -378,12 +369,12 @@ fn convert_rolling_agg(
         }) = on.as_deref()
         {
             // Get window size from rolling() args
-            let window_size: i64 = if inner_args.is_empty() {
-                return Err("rolling() requires a window size".to_string());
-            } else if let PyExpr::Literal(value) = &inner_args[0] {
-                value.require_i64("rolling() window size")?
-            } else {
-                return Err("rolling() window size must be a literal integer".to_string());
+            let window_size = match arg(inner_args, 0) {
+                Arg::Absent => return Err("rolling() requires a window size".to_string()),
+                Arg::Literal(value) => value.require_i64("rolling() window size")?,
+                Arg::Expr(_) => {
+                    return Err("rolling() window size must be a literal integer".to_string())
+                }
             };
 
             // A window size below 1 used to be silently clamped to a
@@ -498,16 +489,15 @@ fn convert_window_ranking(
             "row_number" => row_number(),
             "rank" => rank(),
             "dense_rank" => dense_rank(),
-            "ntile" => {
-                if args.is_empty() {
-                    return Err("ntile() requires a bucket count argument".to_string());
+            "ntile" => match arg(args, 0) {
+                Arg::Absent => {
+                    return Err("ntile() requires a bucket count argument".to_string())
                 }
-                if let PyExpr::Literal(value) = &args[0] {
-                    ntile(lit(value.require_i64("ntile() bucket count")?))
-                } else {
-                    return Err("ntile() bucket count must be a literal integer".to_string());
+                Arg::Literal(value) => ntile(lit(value.require_i64("ntile() bucket count")?)),
+                Arg::Expr(_) => {
+                    return Err("ntile() bucket count must be a literal integer".to_string())
                 }
-            }
+            },
             _ => return Err(format!("Unsupported window function: {}", func_name)),
         };
 
@@ -776,13 +766,10 @@ fn convert_expr_with_window_children(
                         "abs" => abs(input),
                         "ceil" => ceil(input),
                         "floor" => floor(input),
-                        _ => {
-                            let decimals = match rest.first() {
-                                Some(d) => lower(d.clone())?,
-                                None => lit(0i64),
-                            };
-                            round(vec![input, decimals])
-                        }
+                        _ => round(vec![
+                            input,
+                            super::round_decimals(arg(rest, 0), |d| lower(d.clone()))?,
+                        ]),
                     })
                 }
                 _ => {

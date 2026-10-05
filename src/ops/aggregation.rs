@@ -13,7 +13,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::types::{dict_to_py_expr, PyExpr};
+use crate::types::{arg, dict_to_py_expr, Arg, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -85,10 +85,10 @@ fn pyexpr_to_agg_plan(
             };
             // The default applies only when p is absent; a supplied argument
             // that is not a number in [0, 1] is an error, never the median.
-            let p = match args.first() {
-                None => 0.5,
-                Some(PyExpr::Literal(value)) => value.require_f64("percentile() p")?,
-                Some(_) => return Err("percentile() p must be a literal number".to_string()),
+            let p = match arg(args, 0) {
+                Arg::Absent => 0.5,
+                Arg::Literal(value) => value.require_f64("percentile() p")?,
+                Arg::Expr(_) => return Err("percentile() p must be a literal number".to_string()),
             };
             if !(0.0..=1.0).contains(&p) {
                 return Err(format!("percentile() p must be between 0 and 1, got {p}"));
@@ -210,10 +210,10 @@ fn pyexpr_to_agg_plan(
             };
             // The default applies only when k is absent; a supplied argument
             // that is not a positive integer is an error, never 10.
-            let k = match args.first() {
-                None => 10,
-                Some(PyExpr::Literal(value)) => value.require_i64("top_k() k")?,
-                Some(_) => return Err("top_k() k must be a literal integer".to_string()),
+            let k = match arg(args, 0) {
+                Arg::Absent => 10,
+                Arg::Literal(value) => value.require_i64("top_k() k")?,
+                Arg::Expr(_) => return Err("top_k() k must be a literal integer".to_string()),
             };
             if k < 1 {
                 return Err(format!("top_k() k must be >= 1, got {k}"));
