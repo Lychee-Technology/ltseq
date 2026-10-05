@@ -37,13 +37,16 @@ class FilterExpr:
         "AND": "And", "OR": "Or",
         "+": "Add", "-": "Sub", "*": "Mul", "/": "Div",
     }
+    # Unary ops take only `left`. The group dialect has no method calls, so
+    # the null tests are unary operators here, not `is_null` calls.
+    _UNARY_OP_NAMES = {"NOT": "Not", "IS NULL": "IsNull", "IS NOT NULL": "IsNotNull"}
 
     def serialize(self) -> dict:
         """Serialize to the group dialect consumed by Rust filter_group_window."""
-        if self.op == "NOT":
+        if self.op in self._UNARY_OP_NAMES:
             return {
                 "type": "UnaryOp",
-                "op": "Not",
+                "op": self._UNARY_OP_NAMES[self.op],
                 "operand": self._serialize_operand(self.left),
             }
         return {
@@ -99,10 +102,23 @@ class _ComparableGroupExpr(GroupExpr):
         return FilterExpr(self, "<=", other)
 
     def __eq__(self, other) -> FilterExpr:  # type: ignore[override]
+        # Same rule as the row dialect: `== None` is a null test, not SQL `= NULL`.
+        if other is None:
+            return self.is_null()
         return FilterExpr(self, "=", other)
 
     def __ne__(self, other) -> FilterExpr:  # type: ignore[override]
+        if other is None:
+            return self.is_not_null()
         return FilterExpr(self, "!=", other)
+
+    def is_null(self) -> FilterExpr:
+        """True for groups where this value is NULL, e.g. g.first().email.is_null()."""
+        return FilterExpr(self, "IS NULL", None)
+
+    def is_not_null(self) -> FilterExpr:
+        """True for groups where this value is not NULL."""
+        return FilterExpr(self, "IS NOT NULL", None)
 
 
 class QuantifierFilterExpr(FilterExpr):

@@ -59,12 +59,10 @@ pub fn sort_impl(
         let df_expr = pyexpr_to_datafusion(py_expr, schema)
             .map_err(LtseqError::Validation)?;
 
-        // Create SortExpr with asc = !is_desc
-        // For descending, nulls_first = true by default
         df_sort_exprs.push(SortExpr {
             expr: df_expr,
             asc: !is_desc,
-            nulls_first: is_desc,
+            nulls_first: crate::metadata::nulls_first(is_desc),
         });
     }
 

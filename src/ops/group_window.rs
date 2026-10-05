@@ -7,7 +7,9 @@
 //! `group_id_impl` produces: `__group_id__` (partition key) and `__rn__`
 //! (in-group row order). The plan stays lazy throughout.
 //!
-//! Group dialect nodes (BinOp/UnaryOp/Literal reuse the row-dialect shapes):
+//! Group dialect nodes (BinOp/UnaryOp/Literal reuse the row-dialect shapes;
+//! having no method calls, the dialect spells null tests as the unary ops
+//! `IsNull` / `IsNotNull` next to `Not`):
 //! - `{"type": "GroupCount"}`
 //! - `{"type": "GroupAgg", "func": "max|min|sum|avg|mean|median|std|var|percentile", "column": c, "arg": p?}`
 //! - `{"type": "GroupRowColumn", "row": "first|last", "column": c}`
@@ -259,6 +261,8 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
             let operand_expr = group_node_to_expr(*operand, schema)?;
             match op.as_str() {
                 "Not" => Ok(Expr::Not(Box::new(operand_expr))),
+                "IsNull" => Ok(operand_expr.is_null()),
+                "IsNotNull" => Ok(operand_expr.is_not_null()),
                 other => Err(format!("Unknown group unary operator: '{}'", other)),
             }
         }

@@ -7,6 +7,9 @@ NOTE: Temporal operations currently require the SQL context path. These tests
 document expected behavior but are skipped until DataFusion path support is added.
 """
 
+import datetime as dt
+
+import pyarrow as pa
 import pytest
 from ltseq import LTSeq
 from ltseq.expr import ColumnExpr
@@ -373,3 +376,65 @@ class TestDtDiffEndToEnd:
             assert vals[2] == 0
         finally:
             os.unlink(path)
+
+
+class TestTimezoneAware:
+    """Timezone-aware timestamps (#154): the zone survives every step,
+    fields are read in the column's zone, comparisons are by instant."""
+
+    INSTANTS = [
+        dt.datetime(2024, 1, 1, 23, 30, tzinfo=dt.timezone.utc),
+        dt.datetime(2024, 1, 2, 5, 0, tzinfo=dt.timezone.utc),
+    ]
+
+    @pytest.fixture
+    def t(self):
+        # The same two instants stored in UTC and in America/New_York.
+        return LTSeq.from_arrow(
+            pa.table(
+                {
+                    "id": [1, 2],
+                    "utc": pa.array(self.INSTANTS, pa.timestamp("us", tz="UTC")),
+                    "ny": pa.array(self.INSTANTS, pa.timestamp("us", tz="America/New_York")),
+                }
+            )
+        )
+
+    @staticmethod
+    def _col(table, name):
+        return table.to_arrow().column(name).to_pylist()
+
+    def test_zone_survives_round_trip(self, t):
+        schema = t.to_arrow().schema
+        assert schema.field("utc").type == pa.timestamp("us", tz="UTC")
+        assert schema.field("ny").type == pa.timestamp("us", tz="America/New_York")
+        rows = t.to_dicts()
+        assert [r["ny"] for r in rows] == self.INSTANTS
+        assert all(r["ny"].tzinfo is not None for r in rows)
+
+    def test_fields_use_the_column_zone(self, t):
+        out = t.derive(
+            utc_hour=lambda r: r.utc.dt.hour(),
+            ny_hour=lambda r: r.ny.dt.hour(),
+            utc_day=lambda r: r.utc.dt.day(),
+            ny_day=lambda r: r.ny.dt.day(),
+        )
+        assert self._col(out, "utc_hour") == [23, 5]
+        assert self._col(out, "ny_hour") == [18, 0]
+        assert self._col(out, "utc_day") == [1, 2]
+        assert self._col(out, "ny_day") == [1, 2]
+
+    def test_comparisons_are_by_instant(self, t):
+        jst = dt.timezone(dt.timedelta(hours=9))
+        cutoff = dt.datetime(2024, 1, 2, 9, 0, tzinfo=jst)  # 2024-01-02 00:00 UTC
+        assert self._col(t.filter(lambda r: r.utc > cutoff), "id") == [2]
+        assert self._col(t.filter(lambda r: r.ny > cutoff), "id") == [2]
+        assert self._col(t.filter(lambda r: r.utc == r.ny), "id") == [1, 2]
+
+    def test_sort_aggregate_and_add_keep_the_zone(self, t):
+        assert self._col(t.sort("ny", desc=True), "id") == [2, 1]
+        extremes = t.agg(lo=lambda g: g.ny.min(), hi=lambda g: g.ny.max()).to_dicts()
+        assert extremes == [{"lo": self.INSTANTS[0], "hi": self.INSTANTS[1]}]
+        shifted = self._col(t.derive(n=lambda r: r.ny.dt.add(days=1)), "n")
+        assert shifted == [i + dt.timedelta(days=1) for i in self.INSTANTS]
+        assert str(shifted[0].tzinfo) == "America/New_York"

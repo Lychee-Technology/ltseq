@@ -308,7 +308,7 @@ rows = result.to_dicts()
 
 ### `LTSeq.to_dicts`
 - **Signature**: `LTSeq.to_dicts() -> list[dict[str, Any]]`
-- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`)
+- **Behavior**: Materialize all rows as a list of dictionaries (same name and semantics as Polars `to_dicts()`). Values are pyarrow's Python conversions (`as_py()`), so NULL is `None` in every column, an integer column stays `int` even when it holds NULLs, NaN stays a float `nan` (distinct from `None`), dates and timestamps are `datetime` objects (timezone-aware when the column has a zone), decimals are `Decimal`, and lists are Python lists. pandas is not required
 - **Parameters**: none
 - **Returns**: list of row dictionaries
 - **Exceptions**: `MemoryError` (dataset too large), `RuntimeError` (execution failure)
@@ -477,7 +477,7 @@ t.drop("tmp", "debug_flag")
 
 ### `LTSeq.sort`
 - **Signature**: `LTSeq.sort(*keys: str | Callable, desc: bool | list[bool] = False, descending: bool | list[bool] | None = None) -> LTSeq`
-- **Behavior**: Sort by one or more keys; required for window/ordered computing. Also populates `sort_keys` for sort order tracking. `descending` is an alias for `desc` (Polars naming) and takes precedence when both are given
+- **Behavior**: Sort by one or more keys; required for window/ordered computing. Also populates `sort_keys` for sort order tracking. `descending` is an alias for `desc` (Polars naming) and takes precedence when both are given. NULL sorts as the largest value: last in ascending order, first in descending order. There is no option to change this; ranking functions and `.over(order_by=...)` windows place NULLs the same way
 - **Parameters**: `keys` column names or expressions; `desc`/`descending` global or per-key descending flags
 - **Returns**: sorted `LTSeq` with tracked sort keys
 - **Exceptions**: `ValueError` (schema not initialized or desc length mismatch), `TypeError` (invalid key type), `AttributeError` (column not found)
@@ -650,7 +650,7 @@ with_cum = t.sort("date").cum_sum("volume", "amount")
 
 #### `LTSeq.fold` (ordered stateful accumulation)
 - **Signature**: `LTSeq.fold(fn: Callable[[state, row], state], *, init, into: str, partition_by: str | None = None) -> LTSeq`
-- **Behavior**: Walk rows in their current order, threading a running `state` through `fn(state, row)` and appending the result as column `into`. Expresses compounding, running balances, and small state machines that window functions cannot (the SPL-style capability). The first-match `row` is a read-only dict of the current row; the returned value is both stored in `into` and carried forward. `partition_by` resets `state` to `init` at the start of each partition (first-seen order)
+- **Behavior**: Walk rows in their current order, threading a running `state` through `fn(state, row)` and appending the result as column `into`. Expresses compounding, running balances, and small state machines that window functions cannot (the SPL-style capability). The first-match `row` is a read-only dict of the current row, with values as `to_dicts()` returns them (NULL is `None`); the returned value is both stored in `into` and carried forward. `partition_by` resets `state` to `init` at the start of each partition (first-seen order); rows with a NULL key share one partition
 - **Execution path**: unlike expressions (`cum_sum`/`shift`/`when`, which push down to the Rust engine), `fold` runs a **Python callback per row**, so it materializes the whole table into Python and is **not lazy**. Prefer expression forms where they can express the computation, and reach for `fold` only when genuinely sequential state is required. It is a slow path on large tables (compare Polars `cumulative_eval`, which carries the same warning)
 - **Requires**: a prior `.sort()` / `.assume_sorted()` so the accumulation order is defined
 - **Returns**: a new in-memory `LTSeq` with the original rows in order, plus `into` (sort metadata preserved, so window ops still chain)
@@ -741,7 +741,7 @@ t.derive(decile=lambda r: ntile(10).over(partition_by=r.group, order_by=r.value)
 
 #### `CallExpr.over` (Window Specification)
 - **Signature**: `expr.over(partition_by: Expr | None = None, order_by: Expr | None = None, descending: bool | None = None, desc: bool | None = None) -> WindowExpr`
-- **Behavior**: Apply a window specification to a window expression, either a ranking function (`row_number`/`rank`/`dense_rank`/`ntile`) or a sequence window (`shift`/`rolling`/`diff`/`cum_*`). `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`. For sequence windows `order_by` is optional (falls back to the table sort); for ranking functions it is required
+- **Behavior**: Apply a window specification to a window expression, either a ranking function (`row_number`/`rank`/`dense_rank`/`ntile`) or a sequence window (`shift`/`rolling`/`diff`/`cum_*`). `partition_by` and `order_by` each take a **single column expression**; `descending` is a single bool applied to `order_by`. For sequence windows `order_by` is optional (falls back to the table sort); for ranking functions it is required. NULLs in `order_by` go where `sort()` puts them (last ascending, first descending), so tied NULLs share the last ranks of an ascending `rank()`. NULL `partition_by` values form one partition
 - **Parameters**:
   - `partition_by` column to partition by (optional)
   - `order_by` column to order by (required for ranking functions; optional for sequence windows)
@@ -960,6 +960,15 @@ groups.filter(lambda g: g.std("amount") > 5)
 - **Example**:
 ```python
 groups.derive(lambda g: {"start": g.first().date, "end": g.last().date})
+```
+
+#### Null checks (filter only): `.is_null()`, `.is_not_null()`, `== None`, `!= None`
+- **Signature**: `x.is_null() -> Expr`; `x.is_not_null() -> Expr`, where `x` is `g.first().col`, `g.last().col`, `g.count()` or an aggregation such as `g.sum("col")`
+- **Behavior**: True for groups where the value is NULL / not NULL. As in row lambdas, `x == None` and `x != None` are the same checks, not SQL `= NULL`. An aggregation over only NULLs (`g.sum("col")` of an all-NULL group) is NULL
+- **Example**:
+```python
+groups.filter(lambda g: g.first().email.is_null())
+groups.filter(lambda g: g.last().closed_at != None)
 ```
 
 #### Quantifiers (filter only): `g.all()`, `g.any()`, `g.none()`
@@ -1288,10 +1297,12 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
   - `//` is floor division with Python's semantics. Integer operands floor exactly (`-7 // 2 == -4`, also beyond 2^53) and give Int64, or UInt64 when both are unsigned. A Python int literal counts as signed, so `r.u // 3` on a UInt64 column gives Int64: every UInt64 value divides, and only a quotient above `i64::MAX` (`r.u // 1`) overflows. A float operand gives Float64, computed as Python's float `//` (`1.0 // 0.1 == 9.0`). NULL in either operand gives NULL. Decimal and non-numeric operands are rejected; cast decimals to float first
   - A zero `//` divisor raises, for floats too (`/` on floats returns inf). Guard it with `if_else(r.y != 0, r.x // r.y, 0)`, which divides only the rows that pass the condition. `(r.y != 0) & (r.x // r.y > 1)` and an earlier `.filter(lambda r: r.y != 0)` are not guards: the division still runs on the rows they reject
   - `/` and `%` follow SQL semantics, not Python's: on integers `/` truncates (`-7 / 2 == -3`), and `%` takes the sign of the dividend (`-7 % 2 == -1`, also for floats)
+  - `r.x == None` and `r.x != None` are `r.x.is_null()` and `r.x.is_not_null()`, also when the `None` comes from a variable (`r.region == region` with `region = None` selects the NULL rows). Any other comparison with NULL follows SQL: `r.a == r.b` is NULL, so not selected, when either side is NULL
+  - Integer overflow wraps around silently (two's complement, as in NumPy and Polars): with `x = 2**62`, `r.x * 4` is `0` and `r.x + r.x` is `-2**63`. This holds for `+ - *`, for `diff`, and for the sums: `sum`, `g.sum`, `sum_if`, `cum_sum` and `rolling(n).sum()`. `avg`/`mean` is computed in floating point and does not wrap. The exceptions raise instead: integer `/` and `//` on `i64::MIN / -1`, `abs()` on `i64::MIN`, and any overflow inside a `search_pattern` predicate, which runs on a separate evaluator (#221 tracks aligning the paths and whether to offer checked arithmetic). When values can approach ±9.2e18, cast first: `r.x.cast("float64") * 4`, or derive a float column and aggregate that, since aggregate methods take a bare column
   - Unary minus and `**` are not supported: write `0 - r.x` and `power(r.x, n)`
 - **Parameters**: left/right operands (Expr or literals)
 - **Returns**: expression object
-- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected (`RuntimeError` from `search_pattern`), for a zero `//` divisor (integer or float, as Python raises) or an integer overflow such as `i64::MIN // -1`
+- **Exceptions**: `TypeError` (type mismatch); `NotImplementedError` (unary minus, `**`); `ValueError` when the result is collected (`RuntimeError` from `search_pattern`), for a zero `//` divisor (integer or float, as Python raises) or one of the overflows listed above that raise, such as `i64::MIN // -1`
 - **Example**:
 ```python
 expr = (r.price * r.qty) > 100
@@ -1355,7 +1366,7 @@ safe_price = r.price.fill_null(0)
 missing = t.filter(lambda r: r.email.is_null())
 valid = t.filter(lambda r: r.email.is_not_null())
 ```
-- **Note**: inside a lambda, `r.col is None` / `r.col is not None` are rewritten to the same expressions (`IS NULL` / `IS NOT NULL`, never `= NULL`), and the lambda keeps its module globals and closure variables. The rewrite needs the lambda's source, and also applies to a `functools.partial` of such a lambda. In a REPL, in `exec`/`eval` strings, in plain `def` functions, and behind other wrappers (a decorator, `functools.lru_cache`, ...), any `is None` / `is not None` (even on a Python value) raises a `TypeError` that explains the spelling instead of running unrewritten, so use the methods there and test Python values before building the function. Neither the rewrite nor that check reaches helper functions the lambda calls: in `lambda r: missing(r) or (r.a > 1)` with `def missing(r): return r.b is None`, `missing(r)` is the Python bool `False`, so the captured predicate is only `r.a > 1`. Use `.is_null()` / `.is_not_null()` in helpers. `r.col == None` is not rewritten and compares against SQL `NULL`.
+- **Note**: inside a lambda, `r.col is None` / `r.col is not None` are rewritten to the same expressions (`IS NULL` / `IS NOT NULL`, never `= NULL`), and the lambda keeps its module globals and closure variables. The rewrite needs the lambda's source, and also applies to a `functools.partial` of such a lambda. In a REPL, in `exec`/`eval` strings, in plain `def` functions, and behind other wrappers (a decorator, `functools.lru_cache`, ...), any `is None` / `is not None` (even on a Python value) raises a `TypeError` that explains the spelling instead of running unrewritten, so use the methods there and test Python values before building the function. Neither the rewrite nor that check reaches helper functions the lambda calls: in `lambda r: missing(r) or (r.a > 1)` with `def missing(r): return r.b is None`, `missing(r)` is the Python bool `False`, so the captured predicate is only `r.a > 1`. Use `.is_null()` / `.is_not_null()` in helpers. `r.col == None` / `r.col != None` need no rewrite: the operators themselves build `.is_null()` / `.is_not_null()`, so they also work in a REPL, in `exec`/`eval` strings and in helpers.
 
 #### `r.col.is_in`
 - **Signature**: `r.col.is_in(values: list[Any]) -> Expr`

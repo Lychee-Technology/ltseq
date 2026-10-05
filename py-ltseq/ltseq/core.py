@@ -373,6 +373,11 @@ class LTSeq(
         """
         Materialize all rows as a list of dictionaries.
 
+        Values are pyarrow's Python conversions (``as_py()``): NULL is
+        ``None`` in every column, integer columns stay ``int`` even when they
+        hold NULLs, and NaN stays a float ``nan``, distinct from ``None``.
+        pandas is not needed.
+
         Returns:
             List of row dictionaries, where each dict maps column names to values
 
@@ -386,8 +391,7 @@ class LTSeq(
             >>> for row in rows:
             ...     print(row["name"])
         """
-        df = self.to_pandas()
-        return df.to_dict("records")
+        return self.to_arrow().to_pylist()
 
     @property
     def schema(self) -> dict[str, str]:

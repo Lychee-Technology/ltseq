@@ -26,14 +26,21 @@ pub(crate) struct SortSpec {
     pub nulls_first: bool,
 }
 
+/// LTSeq's one null placement: NULL sorts as the largest value, so an
+/// ascending order puts NULLs last and a descending order puts them first
+/// (the DataFusion and PostgreSQL default). `sort()`, the sort metadata and
+/// `.over(order_by=...)` windows all order through this, so ranking a column
+/// agrees with sorting by it.
+pub(crate) fn nulls_first(descending: bool) -> bool {
+    descending
+}
+
 impl SortSpec {
-    /// `nulls_first = descending` matches the historical `sort_impl` behavior
-    /// (DESC sorts put nulls first, ASC sorts put nulls last).
     pub fn new(column: String, descending: bool) -> Self {
         SortSpec {
             column,
             descending,
-            nulls_first: descending,
+            nulls_first: nulls_first(descending),
         }
     }
 

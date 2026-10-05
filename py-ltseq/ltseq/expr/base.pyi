@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, overload
 
 if TYPE_CHECKING:
     from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
@@ -19,7 +19,14 @@ class Expr:
     def __mod__(self, other: Expr | Any) -> BinOpExpr: ...
 
     # Comparison
+    # `== None` / `!= None` are `is_null()` / `is_not_null()`.
+    @overload
+    def __eq__(self, other: None) -> CallExpr: ...  # type: ignore[override]
+    @overload
     def __eq__(self, other: Expr | Any) -> BinOpExpr: ...  # type: ignore[override]
+    @overload
+    def __ne__(self, other: None) -> CallExpr: ...  # type: ignore[override]
+    @overload
     def __ne__(self, other: Expr | Any) -> BinOpExpr: ...  # type: ignore[override]
     def __lt__(self, other: Expr | Any) -> BinOpExpr: ...
     def __le__(self, other: Expr | Any) -> BinOpExpr: ...

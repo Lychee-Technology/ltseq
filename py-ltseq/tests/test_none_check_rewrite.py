@@ -534,8 +534,8 @@ class TestFallbacks:
     def test_methods_and_eq_none_without_source_still_work(self, t):
         assert a_values(t.filter(eval("lambda r: r.b.is_not_null() & (r.a > 1)"))) == [2, 4]
         assert a_values(t.filter(eval("lambda r: r.a > 1"))) == [2, 3, 4]
-        # `== None` is an ordinary comparison (SQL `= NULL`), not an identity check
-        assert a_values(t.filter(eval("lambda r: r.b == None"))) == []
+        # `== None` needs no rewrite: the operator itself builds `.is_null()` (#154)
+        assert a_values(t.filter(eval("lambda r: r.b == None"))) == [1, 3]
 
     def test_plain_def_gives_guidance(self, t):
         def pred(r):
