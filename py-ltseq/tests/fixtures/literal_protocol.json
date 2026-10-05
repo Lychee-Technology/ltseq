@@ -1,0 +1,1963 @@
+{
+ "encode": [
+  {
+   "id": "none",
+   "python": "None",
+   "payload": {
+    "dtype": "Null",
+    "value": null
+   },
+   "arrow": {
+    "type": "null",
+    "value": null
+   }
+  },
+  {
+   "id": "bool-true",
+   "python": "True",
+   "payload": {
+    "dtype": "Boolean",
+    "value": true
+   },
+   "arrow": {
+    "type": "bool",
+    "value": true
+   }
+  },
+  {
+   "id": "bool-false",
+   "python": "False",
+   "payload": {
+    "dtype": "Boolean",
+    "value": false
+   },
+   "arrow": {
+    "type": "bool",
+    "value": false
+   }
+  },
+  {
+   "id": "np-bool-true",
+   "python": "np.bool_(True)",
+   "payload": {
+    "dtype": "Boolean",
+    "value": true
+   },
+   "arrow": {
+    "type": "bool",
+    "value": true
+   }
+  },
+  {
+   "id": "np-bool-false",
+   "python": "np.bool_(False)",
+   "payload": {
+    "dtype": "Boolean",
+    "value": false
+   },
+   "arrow": {
+    "type": "bool",
+    "value": false
+   }
+  },
+  {
+   "id": "int-0",
+   "python": "0",
+   "payload": {
+    "dtype": "Int64",
+    "value": 0
+   },
+   "arrow": {
+    "type": "int64",
+    "value": 0
+   }
+  },
+  {
+   "id": "int-neg1",
+   "python": "-1",
+   "payload": {
+    "dtype": "Int64",
+    "value": -1
+   },
+   "arrow": {
+    "type": "int64",
+    "value": -1
+   }
+  },
+  {
+   "id": "int-i64max",
+   "python": "2**63 - 1",
+   "payload": {
+    "dtype": "Int64",
+    "value": 9223372036854775807
+   },
+   "arrow": {
+    "type": "int64",
+    "value": 9223372036854775807
+   }
+  },
+  {
+   "id": "int-i64min",
+   "python": "-(2**63)",
+   "payload": {
+    "dtype": "Int64",
+    "value": -9223372036854775808
+   },
+   "arrow": {
+    "type": "int64",
+    "value": -9223372036854775808
+   }
+  },
+  {
+   "id": "np-int32",
+   "python": "np.int32(7)",
+   "payload": {
+    "dtype": "Int64",
+    "value": 7
+   },
+   "arrow": {
+    "type": "int64",
+    "value": 7
+   }
+  },
+  {
+   "id": "np-uint8",
+   "python": "np.uint8(255)",
+   "payload": {
+    "dtype": "Int64",
+    "value": 255
+   },
+   "arrow": {
+    "type": "int64",
+    "value": 255
+   }
+  },
+  {
+   "id": "intenum",
+   "python": "Color.RED",
+   "payload": {
+    "dtype": "Int64",
+    "value": 1
+   },
+   "arrow": {
+    "type": "int64",
+    "value": 1
+   }
+  },
+  {
+   "id": "int-2^63",
+   "python": "2**63",
+   "error": {
+    "type": "ValueError",
+    "match": "outside the Int64 range"
+   }
+  },
+  {
+   "id": "int-neg-2^63-1",
+   "python": "-(2**63) - 1",
+   "error": {
+    "type": "ValueError",
+    "match": "outside the Int64 range"
+   }
+  },
+  {
+   "id": "np-uint64-max",
+   "python": "np.uint64(2**64 - 1)",
+   "error": {
+    "type": "ValueError",
+    "match": "outside the Int64 range"
+   }
+  },
+  {
+   "id": "float-0",
+   "python": "0.0",
+   "payload": {
+    "dtype": "Float64",
+    "value": 0.0
+   },
+   "arrow": {
+    "type": "double",
+    "value": 0.0
+   }
+  },
+  {
+   "id": "float-neg0",
+   "python": "-0.0",
+   "payload": {
+    "dtype": "Float64",
+    "value": -0.0
+   },
+   "arrow": {
+    "type": "double",
+    "value": -0.0
+   }
+  },
+  {
+   "id": "float-1.5",
+   "python": "1.5",
+   "payload": {
+    "dtype": "Float64",
+    "value": 1.5
+   },
+   "arrow": {
+    "type": "double",
+    "value": 1.5
+   }
+  },
+  {
+   "id": "float-nan",
+   "python": "float('nan')",
+   "payload": {
+    "dtype": "Float64",
+    "value": NaN
+   },
+   "arrow": {
+    "type": "double",
+    "value": NaN
+   }
+  },
+  {
+   "id": "float-inf",
+   "python": "float('inf')",
+   "payload": {
+    "dtype": "Float64",
+    "value": Infinity
+   },
+   "arrow": {
+    "type": "double",
+    "value": Infinity
+   }
+  },
+  {
+   "id": "float-neginf",
+   "python": "float('-inf')",
+   "payload": {
+    "dtype": "Float64",
+    "value": -Infinity
+   },
+   "arrow": {
+    "type": "double",
+    "value": -Infinity
+   }
+  },
+  {
+   "id": "np-float32",
+   "python": "np.float32(0.5)",
+   "payload": {
+    "dtype": "Float64",
+    "value": 0.5
+   },
+   "arrow": {
+    "type": "double",
+    "value": 0.5
+   }
+  },
+  {
+   "id": "np-float16",
+   "python": "np.float16(1.5)",
+   "payload": {
+    "dtype": "Float64",
+    "value": 1.5
+   },
+   "arrow": {
+    "type": "double",
+    "value": 1.5
+   }
+  },
+  {
+   "id": "np-float64",
+   "python": "np.float64(2.25)",
+   "payload": {
+    "dtype": "Float64",
+    "value": 2.25
+   },
+   "arrow": {
+    "type": "double",
+    "value": 2.25
+   }
+  },
+  {
+   "id": "str-empty",
+   "python": "''",
+   "payload": {
+    "dtype": "String",
+    "value": ""
+   },
+   "arrow": {
+    "type": "string",
+    "value": ""
+   }
+  },
+  {
+   "id": "str-abc",
+   "python": "'abc'",
+   "payload": {
+    "dtype": "String",
+    "value": "abc"
+   },
+   "arrow": {
+    "type": "string",
+    "value": "abc"
+   }
+  },
+  {
+   "id": "str-unicode",
+   "python": "'h\\u00e9llo\\u2192\\u4e16\\u754c'",
+   "payload": {
+    "dtype": "String",
+    "value": "héllo→世界"
+   },
+   "arrow": {
+    "type": "string",
+    "value": "héllo→世界"
+   }
+  },
+  {
+   "id": "str-nul",
+   "python": "'a\\x00b'",
+   "payload": {
+    "dtype": "String",
+    "value": "a\u0000b"
+   },
+   "arrow": {
+    "type": "string",
+    "value": "a\u0000b"
+   }
+  },
+  {
+   "id": "str-subclass",
+   "python": "S('sub')",
+   "payload": {
+    "dtype": "String",
+    "value": "sub"
+   },
+   "arrow": {
+    "type": "string",
+    "value": "sub"
+   }
+  },
+  {
+   "id": "dec-0",
+   "python": "Decimal('0')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 0,
+    "precision": 1,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(1, 0)",
+    "value": "0"
+   }
+  },
+  {
+   "id": "dec-neg0",
+   "python": "Decimal('-0')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 0,
+    "precision": 1,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(1, 0)",
+    "value": "0"
+   }
+  },
+  {
+   "id": "dec-0E+5000",
+   "python": "Decimal('0E+5000')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 0,
+    "precision": 1,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(1, 0)",
+    "value": "0"
+   }
+  },
+  {
+   "id": "dec-0E-5",
+   "python": "Decimal('0E-5')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 0,
+    "precision": 5,
+    "scale": 5
+   },
+   "arrow": {
+    "type": "decimal128(5, 5)",
+    "value": "0.00000"
+   }
+  },
+  {
+   "id": "dec-1",
+   "python": "Decimal('1')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 1,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(1, 0)",
+    "value": "1"
+   }
+  },
+  {
+   "id": "dec-1.0",
+   "python": "Decimal('1.0')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 10,
+    "precision": 2,
+    "scale": 1
+   },
+   "arrow": {
+    "type": "decimal128(2, 1)",
+    "value": "1.0"
+   }
+  },
+  {
+   "id": "dec-1.50",
+   "python": "Decimal('1.50')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 150,
+    "precision": 3,
+    "scale": 2
+   },
+   "arrow": {
+    "type": "decimal128(3, 2)",
+    "value": "1.50"
+   }
+  },
+  {
+   "id": "dec-neg0.05",
+   "python": "Decimal('-0.05')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": -5,
+    "precision": 2,
+    "scale": 2
+   },
+   "arrow": {
+    "type": "decimal128(2, 2)",
+    "value": "-0.05"
+   }
+  },
+  {
+   "id": "dec-1E+3",
+   "python": "Decimal('1E+3')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1000,
+    "precision": 4,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(4, 0)",
+    "value": "1000"
+   }
+  },
+  {
+   "id": "dec-1E-38",
+   "python": "Decimal('1E-38')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 38,
+    "scale": 38
+   },
+   "arrow": {
+    "type": "decimal128(38, 38)",
+    "value": "1E-38"
+   }
+  },
+  {
+   "id": "dec-38-nines",
+   "python": "Decimal('9' * 38)",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 99999999999999999999999999999999999999,
+    "precision": 38,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(38, 0)",
+    "value": "99999999999999999999999999999999999999"
+   }
+  },
+  {
+   "id": "dec-neg-38-nines",
+   "python": "-Decimal('9' * 38)",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": -99999999999999999999999999999999999999,
+    "precision": 38,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(38, 0)",
+    "value": "-99999999999999999999999999999999999999"
+   }
+  },
+  {
+   "id": "dec-12345.678",
+   "python": "Decimal('12345.678')",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 12345678,
+    "precision": 8,
+    "scale": 3
+   },
+   "arrow": {
+    "type": "decimal128(8, 3)",
+    "value": "12345.678"
+   }
+  },
+  {
+   "id": "dec-1E+5000",
+   "python": "Decimal('1E+5000')",
+   "error": {
+    "type": "ValueError",
+    "match": "needs precision 5001"
+   }
+  },
+  {
+   "id": "dec-1E-39",
+   "python": "Decimal('1E-39')",
+   "error": {
+    "type": "ValueError",
+    "match": "needs precision 39"
+   }
+  },
+  {
+   "id": "dec-39-digits",
+   "python": "Decimal('1' * 39)",
+   "error": {
+    "type": "ValueError",
+    "match": "needs precision 39"
+   }
+  },
+  {
+   "id": "dec-nan",
+   "python": "Decimal('NaN')",
+   "error": {
+    "type": "ValueError",
+    "match": "not finite"
+   }
+  },
+  {
+   "id": "dec-snan",
+   "python": "Decimal('sNaN')",
+   "error": {
+    "type": "ValueError",
+    "match": "not finite"
+   }
+  },
+  {
+   "id": "dec-inf",
+   "python": "Decimal('Infinity')",
+   "error": {
+    "type": "ValueError",
+    "match": "not finite"
+   }
+  },
+  {
+   "id": "date-2024",
+   "python": "date(2024, 1, 1)",
+   "payload": {
+    "dtype": "Date32",
+    "value": 19723
+   },
+   "arrow": {
+    "type": "date32[day]",
+    "value": 19723
+   }
+  },
+  {
+   "id": "date-1969",
+   "python": "date(1969, 12, 31)",
+   "payload": {
+    "dtype": "Date32",
+    "value": -1
+   },
+   "arrow": {
+    "type": "date32[day]",
+    "value": -1
+   }
+  },
+  {
+   "id": "date-min",
+   "python": "date(1, 1, 1)",
+   "payload": {
+    "dtype": "Date32",
+    "value": -719162
+   },
+   "arrow": {
+    "type": "date32[day]",
+    "value": -719162
+   }
+  },
+  {
+   "id": "date-max",
+   "python": "date(9999, 12, 31)",
+   "payload": {
+    "dtype": "Date32",
+    "value": 2932896
+   },
+   "arrow": {
+    "type": "date32[day]",
+    "value": 2932896
+   }
+  },
+  {
+   "id": "dt-naive",
+   "python": "datetime(2024, 1, 1, 6, 0, 0, 123456)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800123456,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": 1704088800123456
+   }
+  },
+  {
+   "id": "dt-naive-2300",
+   "python": "datetime(2300, 1, 1)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 10413792000000000,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": 10413792000000000
+   }
+  },
+  {
+   "id": "dt-naive-1600",
+   "python": "datetime(1600, 1, 1)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": -11676096000000000,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": -11676096000000000
+   }
+  },
+  {
+   "id": "dt-naive-min",
+   "python": "datetime(1, 1, 1)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": -62135596800000000,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": -62135596800000000
+   }
+  },
+  {
+   "id": "dt-naive-pre-epoch-us",
+   "python": "datetime(1969, 12, 31, 23, 59, 59, 999999)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": -1,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": -1
+   }
+  },
+  {
+   "id": "dt-utc",
+   "python": "datetime(2024, 1, 1, 6, tzinfo=timezone.utc)",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": "UTC"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=UTC]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "dt-offset-plus2",
+   "python": "datetime(2024, 1, 1, 8, tzinfo=timezone(timedelta(hours=2)))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": "+02:00"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=+02:00]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "dt-offset-minus0330",
+   "python": "datetime(2024, 1, 1, 2, 30, tzinfo=timezone(-timedelta(hours=3, minutes=30)))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": "-03:30"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=-03:30]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "dt-offset-zero",
+   "python": "datetime(2024, 1, 1, 6, tzinfo=timezone(timedelta(0)))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": "UTC"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=UTC]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "dt-zoneinfo-ny",
+   "python": "datetime(2024, 1, 1, 1, tzinfo=ZoneInfo('America/New_York'))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": "America/New_York"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=America/New_York]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "dt-zoneinfo-fold0",
+   "python": "datetime(2024, 11, 3, 1, 30, fold=0, tzinfo=ZoneInfo('America/New_York'))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1730611800000000,
+    "unit": "us",
+    "tz": "America/New_York"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=America/New_York]",
+    "value": 1730611800000000
+   }
+  },
+  {
+   "id": "dt-zoneinfo-fold1",
+   "python": "datetime(2024, 11, 3, 1, 30, fold=1, tzinfo=ZoneInfo('America/New_York'))",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1730615400000000,
+    "unit": "us",
+    "tz": "America/New_York"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=America/New_York]",
+    "value": 1730615400000000
+   }
+  },
+  {
+   "id": "dt-offset-seconds",
+   "python": "datetime(2024, 1, 1, tzinfo=timezone(timedelta(seconds=30)))",
+   "error": {
+    "type": "ValueError",
+    "match": "not a whole number of minutes"
+   }
+  },
+  {
+   "id": "pdts-ns",
+   "python": "pd.Timestamp('1970-01-01 00:00:01.000000500')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1000000500,
+    "unit": "ns",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ns]",
+    "value": 1000000500
+   }
+  },
+  {
+   "id": "pdts-tokyo",
+   "python": "pd.Timestamp('2024-01-01', tz='Asia/Tokyo')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704034800000000,
+    "unit": "us",
+    "tz": "Asia/Tokyo"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=Asia/Tokyo]",
+    "value": 1704034800000000
+   }
+  },
+  {
+   "id": "pdts-unit-s",
+   "python": "pd.Timestamp('2024-01-01 06:00').as_unit('s')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800,
+    "unit": "s",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[s]",
+    "value": 1704088800
+   }
+  },
+  {
+   "id": "pdts-unit-ms",
+   "python": "pd.Timestamp('2024-01-01 06:00').as_unit('ms')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000,
+    "unit": "ms",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ms]",
+    "value": 1704088800000
+   }
+  },
+  {
+   "id": "pdts-unit-us",
+   "python": "pd.Timestamp('2024-01-01 06:00').as_unit('us')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000,
+    "unit": "us",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[us]",
+    "value": 1704088800000000
+   }
+  },
+  {
+   "id": "pdts-unit-ns",
+   "python": "pd.Timestamp('2024-01-01 06:00').as_unit('ns')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000000,
+    "unit": "ns",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ns]",
+    "value": 1704088800000000000
+   }
+  },
+  {
+   "id": "pdts-ny-ns",
+   "python": "pd.Timestamp('2024-07-01 12:00:00.000000001', tz='America/New_York')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1719849600000000001,
+    "unit": "ns",
+    "tz": "America/New_York"
+   },
+   "arrow": {
+    "type": "timestamp[ns, tz=America/New_York]",
+    "value": 1719849600000000001
+   }
+  },
+  {
+   "id": "pd-nat",
+   "python": "pd.NaT",
+   "error": {
+    "type": "ValueError",
+    "match": "use None"
+   }
+  },
+  {
+   "id": "pd-na",
+   "python": "pd.NA",
+   "error": {
+    "type": "ValueError",
+    "match": "use None"
+   }
+  },
+  {
+   "id": "np-dt64-day",
+   "python": "np.datetime64('2024-01-01')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704067200,
+    "unit": "s",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[s]",
+    "value": 1704067200
+   }
+  },
+  {
+   "id": "np-dt64-minute",
+   "python": "np.datetime64('2024-01-01T06:00', 'm')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800,
+    "unit": "s",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[s]",
+    "value": 1704088800
+   }
+  },
+  {
+   "id": "np-dt64-month",
+   "python": "np.datetime64('2024-02', 'M')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1706745600,
+    "unit": "s",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[s]",
+    "value": 1706745600
+   }
+  },
+  {
+   "id": "np-dt64-ns",
+   "python": "np.datetime64('2024-01-01T06:00:00.000000500')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800000000500,
+    "unit": "ns",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ns]",
+    "value": 1704088800000000500
+   }
+  },
+  {
+   "id": "np-dt64-ms",
+   "python": "np.datetime64('2024-01-01T06:00:00.123', 'ms')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1704088800123,
+    "unit": "ms",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ms]",
+    "value": 1704088800123
+   }
+  },
+  {
+   "id": "np-dt64-ps-exact",
+   "python": "np.datetime64(2000, 'ps')",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 2,
+    "unit": "ns",
+    "tz": null
+   },
+   "arrow": {
+    "type": "timestamp[ns]",
+    "value": 2
+   }
+  },
+  {
+   "id": "np-dt64-ps-inexact",
+   "python": "np.datetime64(1500, 'ps')",
+   "error": {
+    "type": "ValueError",
+    "match": "nanoseconds"
+   }
+  },
+  {
+   "id": "np-dt64-nat",
+   "python": "np.datetime64('NaT')",
+   "error": {
+    "type": "ValueError",
+    "match": "use None"
+   }
+  },
+  {
+   "id": "rej-timedelta",
+   "python": "timedelta(days=1)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type datetime.timedelta"
+   }
+  },
+  {
+   "id": "rej-pd-timedelta",
+   "python": "pd.Timedelta(days=1)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type pandas"
+   }
+  },
+  {
+   "id": "rej-np-timedelta64",
+   "python": "np.timedelta64(1, 'D')",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type numpy.timedelta64"
+   }
+  },
+  {
+   "id": "rej-time",
+   "python": "time(6, 0)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type datetime.time"
+   }
+  },
+  {
+   "id": "rej-bytes",
+   "python": "b'raw'",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type bytes"
+   }
+  },
+  {
+   "id": "rej-bytearray",
+   "python": "bytearray(b'x')",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type bytearray"
+   }
+  },
+  {
+   "id": "rej-list",
+   "python": "[1, 2]",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type list"
+   }
+  },
+  {
+   "id": "rej-tuple",
+   "python": "(1, 2)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type tuple"
+   }
+  },
+  {
+   "id": "rej-dict",
+   "python": "{'k': 1}",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type dict"
+   }
+  },
+  {
+   "id": "rej-set",
+   "python": "{1}",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type set"
+   }
+  },
+  {
+   "id": "rej-fraction",
+   "python": "Fraction(1, 3)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type fractions.Fraction"
+   }
+  },
+  {
+   "id": "rej-complex",
+   "python": "1 + 2j",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type complex"
+   }
+  },
+  {
+   "id": "rej-np-complex",
+   "python": "np.complex128(1 + 2j)",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type numpy.complex128"
+   }
+  },
+  {
+   "id": "rej-object",
+   "python": "object()",
+   "error": {
+    "type": "TypeError",
+    "match": "Unsupported literal type object"
+   }
+  }
+ ],
+ "decode": [
+  {
+   "id": "ts-tz-plus0200",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": "+02:00"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=+02:00]",
+    "value": 0
+   }
+  },
+  {
+   "id": "ts-tz-named",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": "America/New_York"
+   },
+   "arrow": {
+    "type": "timestamp[us, tz=America/New_York]",
+    "value": 0
+   }
+  },
+  {
+   "id": "dec-p38-s0-max",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 99999999999999999999999999999999999999,
+    "precision": 38,
+    "scale": 0
+   },
+   "arrow": {
+    "type": "decimal128(38, 0)",
+    "value": "99999999999999999999999999999999999999"
+   }
+  },
+  {
+   "id": "Null-value-wrongtype-0",
+   "payload": {
+    "dtype": "Null",
+    "value": 0
+   },
+   "error": "Null literal field 'value' must be"
+  },
+  {
+   "id": "Null-value-wrongtype-1",
+   "payload": {
+    "dtype": "Null",
+    "value": false
+   },
+   "error": "Null literal field 'value' must be"
+  },
+  {
+   "id": "Null-value-wrongtype-2",
+   "payload": {
+    "dtype": "Null",
+    "value": "None"
+   },
+   "error": "Null literal field 'value' must be"
+  },
+  {
+   "id": "Boolean-value-wrongtype-0",
+   "payload": {
+    "dtype": "Boolean",
+    "value": 1
+   },
+   "error": "Boolean literal field 'value' must be"
+  },
+  {
+   "id": "Boolean-value-wrongtype-1",
+   "payload": {
+    "dtype": "Boolean",
+    "value": "true"
+   },
+   "error": "Boolean literal field 'value' must be"
+  },
+  {
+   "id": "Boolean-value-wrongtype-2",
+   "payload": {
+    "dtype": "Boolean",
+    "value": null
+   },
+   "error": "Boolean literal field 'value' must be"
+  },
+  {
+   "id": "Int64-value-wrongtype-0",
+   "payload": {
+    "dtype": "Int64",
+    "value": true
+   },
+   "error": "Int64 literal field 'value' must be"
+  },
+  {
+   "id": "Int64-value-wrongtype-1",
+   "payload": {
+    "dtype": "Int64",
+    "value": 1.0
+   },
+   "error": "Int64 literal field 'value' must be"
+  },
+  {
+   "id": "Int64-value-wrongtype-2",
+   "payload": {
+    "dtype": "Int64",
+    "value": "1"
+   },
+   "error": "Int64 literal field 'value' must be"
+  },
+  {
+   "id": "Int64-value-wrongtype-3",
+   "payload": {
+    "dtype": "Int64",
+    "value": null
+   },
+   "error": "Int64 literal field 'value' must be"
+  },
+  {
+   "id": "Float64-value-wrongtype-0",
+   "payload": {
+    "dtype": "Float64",
+    "value": 1
+   },
+   "error": "Float64 literal field 'value' must be"
+  },
+  {
+   "id": "Float64-value-wrongtype-1",
+   "payload": {
+    "dtype": "Float64",
+    "value": true
+   },
+   "error": "Float64 literal field 'value' must be"
+  },
+  {
+   "id": "Float64-value-wrongtype-2",
+   "payload": {
+    "dtype": "Float64",
+    "value": "1.5"
+   },
+   "error": "Float64 literal field 'value' must be"
+  },
+  {
+   "id": "Float64-value-wrongtype-3",
+   "payload": {
+    "dtype": "Float64",
+    "value": null
+   },
+   "error": "Float64 literal field 'value' must be"
+  },
+  {
+   "id": "String-value-wrongtype-0",
+   "payload": {
+    "dtype": "String",
+    "value": 1
+   },
+   "error": "String literal field 'value' must be"
+  },
+  {
+   "id": "String-value-wrongtype-1",
+   "payload": {
+    "dtype": "String",
+    "value": null
+   },
+   "error": "String literal field 'value' must be"
+  },
+  {
+   "id": "String-value-wrongtype-2",
+   "payload": {
+    "dtype": "String",
+    "value": 1.5
+   },
+   "error": "String literal field 'value' must be"
+  },
+  {
+   "id": "String-value-wrongtype-3",
+   "payload": {
+    "dtype": "String",
+    "value": true
+   },
+   "error": "String literal field 'value' must be"
+  },
+  {
+   "id": "Decimal128-value-wrongtype-0",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": "15",
+    "precision": 2,
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'value' must be"
+  },
+  {
+   "id": "Decimal128-value-wrongtype-1",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1.5,
+    "precision": 2,
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'value' must be"
+  },
+  {
+   "id": "Decimal128-value-wrongtype-2",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": true,
+    "precision": 2,
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'value' must be"
+  },
+  {
+   "id": "Decimal128-precision-wrongtype-0",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": "2",
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'precision' must be"
+  },
+  {
+   "id": "Decimal128-precision-wrongtype-1",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": true,
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'precision' must be"
+  },
+  {
+   "id": "Decimal128-precision-wrongtype-2",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2.0,
+    "scale": 1
+   },
+   "error": "Decimal128 literal field 'precision' must be"
+  },
+  {
+   "id": "Decimal128-scale-wrongtype-0",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2,
+    "scale": "1"
+   },
+   "error": "Decimal128 literal field 'scale' must be"
+  },
+  {
+   "id": "Decimal128-scale-wrongtype-1",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2,
+    "scale": true
+   },
+   "error": "Decimal128 literal field 'scale' must be"
+  },
+  {
+   "id": "Decimal128-scale-wrongtype-2",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2,
+    "scale": 1.0
+   },
+   "error": "Decimal128 literal field 'scale' must be"
+  },
+  {
+   "id": "Date32-value-wrongtype-0",
+   "payload": {
+    "dtype": "Date32",
+    "value": "2024-01-01"
+   },
+   "error": "Date32 literal field 'value' must be"
+  },
+  {
+   "id": "Date32-value-wrongtype-1",
+   "payload": {
+    "dtype": "Date32",
+    "value": 1.0
+   },
+   "error": "Date32 literal field 'value' must be"
+  },
+  {
+   "id": "Date32-value-wrongtype-2",
+   "payload": {
+    "dtype": "Date32",
+    "value": true
+   },
+   "error": "Date32 literal field 'value' must be"
+  },
+  {
+   "id": "Timestamp-value-wrongtype-0",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": "0",
+    "unit": "us",
+    "tz": null
+   },
+   "error": "Timestamp literal field 'value' must be"
+  },
+  {
+   "id": "Timestamp-value-wrongtype-1",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 1.0,
+    "unit": "us",
+    "tz": null
+   },
+   "error": "Timestamp literal field 'value' must be"
+  },
+  {
+   "id": "Timestamp-value-wrongtype-2",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": true,
+    "unit": "us",
+    "tz": null
+   },
+   "error": "Timestamp literal field 'value' must be"
+  },
+  {
+   "id": "Timestamp-unit-wrongtype-0",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": 1,
+    "tz": null
+   },
+   "error": "Timestamp literal field 'unit' must be"
+  },
+  {
+   "id": "Timestamp-unit-wrongtype-1",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": null,
+    "tz": null
+   },
+   "error": "Timestamp literal field 'unit' must be"
+  },
+  {
+   "id": "Timestamp-unit-wrongtype-2",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": true,
+    "tz": null
+   },
+   "error": "Timestamp literal field 'unit' must be"
+  },
+  {
+   "id": "Timestamp-tz-wrongtype-0",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": 1
+   },
+   "error": "Timestamp literal field 'tz' must be"
+  },
+  {
+   "id": "Timestamp-tz-wrongtype-1",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": true
+   },
+   "error": "Timestamp literal field 'tz' must be"
+  },
+  {
+   "id": "Null-value-missing",
+   "payload": {
+    "dtype": "Null"
+   },
+   "error": "Null literal is missing field 'value'"
+  },
+  {
+   "id": "Null-unknown-key",
+   "payload": {
+    "dtype": "Null",
+    "value": null,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Null literal"
+  },
+  {
+   "id": "Boolean-value-missing",
+   "payload": {
+    "dtype": "Boolean"
+   },
+   "error": "Boolean literal is missing field 'value'"
+  },
+  {
+   "id": "Boolean-unknown-key",
+   "payload": {
+    "dtype": "Boolean",
+    "value": true,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Boolean literal"
+  },
+  {
+   "id": "Int64-value-missing",
+   "payload": {
+    "dtype": "Int64"
+   },
+   "error": "Int64 literal is missing field 'value'"
+  },
+  {
+   "id": "Int64-unknown-key",
+   "payload": {
+    "dtype": "Int64",
+    "value": 1,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Int64 literal"
+  },
+  {
+   "id": "Float64-value-missing",
+   "payload": {
+    "dtype": "Float64"
+   },
+   "error": "Float64 literal is missing field 'value'"
+  },
+  {
+   "id": "Float64-unknown-key",
+   "payload": {
+    "dtype": "Float64",
+    "value": 1.5,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Float64 literal"
+  },
+  {
+   "id": "String-value-missing",
+   "payload": {
+    "dtype": "String"
+   },
+   "error": "String literal is missing field 'value'"
+  },
+  {
+   "id": "String-unknown-key",
+   "payload": {
+    "dtype": "String",
+    "value": "x",
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for String literal"
+  },
+  {
+   "id": "Decimal128-value-missing",
+   "payload": {
+    "dtype": "Decimal128",
+    "precision": 2,
+    "scale": 1
+   },
+   "error": "Decimal128 literal is missing field 'value'"
+  },
+  {
+   "id": "Decimal128-precision-missing",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "scale": 1
+   },
+   "error": "Decimal128 literal is missing field 'precision'"
+  },
+  {
+   "id": "Decimal128-scale-missing",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2
+   },
+   "error": "Decimal128 literal is missing field 'scale'"
+  },
+  {
+   "id": "Decimal128-unknown-key",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 15,
+    "precision": 2,
+    "scale": 1,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Decimal128 literal"
+  },
+  {
+   "id": "Date32-value-missing",
+   "payload": {
+    "dtype": "Date32"
+   },
+   "error": "Date32 literal is missing field 'value'"
+  },
+  {
+   "id": "Date32-unknown-key",
+   "payload": {
+    "dtype": "Date32",
+    "value": 0,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Date32 literal"
+  },
+  {
+   "id": "Timestamp-value-missing",
+   "payload": {
+    "dtype": "Timestamp",
+    "unit": "us",
+    "tz": null
+   },
+   "error": "Timestamp literal is missing field 'value'"
+  },
+  {
+   "id": "Timestamp-unit-missing",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "tz": null
+   },
+   "error": "Timestamp literal is missing field 'unit'"
+  },
+  {
+   "id": "Timestamp-tz-missing",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us"
+   },
+   "error": "Timestamp literal is missing field 'tz'"
+  },
+  {
+   "id": "Timestamp-unknown-key",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": null,
+    "extra": 1
+   },
+   "error": "unknown field 'extra' for Timestamp literal"
+  },
+  {
+   "id": "Int64-unknown-precision",
+   "payload": {
+    "dtype": "Int64",
+    "value": 1,
+    "precision": 3
+   },
+   "error": "unknown field 'precision' for Int64 literal"
+  },
+  {
+   "id": "Int64-2^63",
+   "payload": {
+    "dtype": "Int64",
+    "value": 9223372036854775808
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Int64-neg-2^63-1",
+   "payload": {
+    "dtype": "Int64",
+    "value": -9223372036854775809
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Date32-2^40",
+   "payload": {
+    "dtype": "Date32",
+    "value": 1099511627776
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Timestamp-2^63",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 9223372036854775808,
+    "unit": "us",
+    "tz": null
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Decimal128-p0",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 0,
+    "precision": 0,
+    "scale": 0
+   },
+   "error": "precision 0 is outside 1..=38"
+  },
+  {
+   "id": "Decimal128-p39",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 39,
+    "scale": 0
+   },
+   "error": "precision 39 is outside 1..=38"
+  },
+  {
+   "id": "Decimal128-p300",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 300,
+    "scale": 0
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Decimal128-s-neg",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 2,
+    "scale": -1
+   },
+   "error": "scale -1 is outside 0..=2"
+  },
+  {
+   "id": "Decimal128-s-gt-p",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 1,
+    "precision": 2,
+    "scale": 3
+   },
+   "error": "scale 3 is outside 0..=2"
+  },
+  {
+   "id": "Decimal128-v-too-wide",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 100,
+    "precision": 2,
+    "scale": 0
+   },
+   "error": "value 100 does not fit precision 2"
+  },
+  {
+   "id": "Decimal128-v-neg-too-wide",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": -100,
+    "precision": 2,
+    "scale": 0
+   },
+   "error": "value -100 does not fit precision 2"
+  },
+  {
+   "id": "Decimal128-v-2^127",
+   "payload": {
+    "dtype": "Decimal128",
+    "value": 170141183460469231731687303715884105728,
+    "precision": 38,
+    "scale": 0
+   },
+   "error": "out of range"
+  },
+  {
+   "id": "Timestamp-unit-min",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "min",
+    "tz": null
+   },
+   "error": "unit must be one of s, ms, us, ns"
+  },
+  {
+   "id": "Timestamp-unit-ns-space",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "ns ",
+    "tz": null
+   },
+   "error": "unit must be one of s, ms, us, ns"
+  },
+  {
+   "id": "Timestamp-unit-upper",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "US",
+    "tz": null
+   },
+   "error": "unit must be one of s, ms, us, ns"
+  },
+  {
+   "id": "Timestamp-tz-empty",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": ""
+   },
+   "error": "is not a valid time zone"
+  },
+  {
+   "id": "Timestamp-tz-bogus",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": "Not/AZone"
+   },
+   "error": "is not a valid time zone"
+  },
+  {
+   "id": "Timestamp-tz-utc-offset",
+   "payload": {
+    "dtype": "Timestamp",
+    "value": 0,
+    "unit": "us",
+    "tz": "UTC+02:00"
+   },
+   "error": "is not a valid time zone"
+  },
+  {
+   "id": "dtype-TimestampMicrosecond",
+   "payload": {
+    "dtype": "TimestampMicrosecond",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-TimestampNanosecond",
+   "payload": {
+    "dtype": "TimestampNanosecond",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-Int32",
+   "payload": {
+    "dtype": "Int32",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-Float32",
+   "payload": {
+    "dtype": "Float32",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-Utf8",
+   "payload": {
+    "dtype": "Utf8",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-Bool",
+   "payload": {
+    "dtype": "Bool",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-int",
+   "payload": {
+    "dtype": "int",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-empty",
+   "payload": {
+    "dtype": "",
+    "value": 1
+   },
+   "error": "Unknown literal dtype"
+  },
+  {
+   "id": "dtype-missing",
+   "payload": {
+    "value": 1
+   },
+   "error": "literal is missing field 'dtype'"
+  },
+  {
+   "id": "dtype-not-str",
+   "payload": {
+    "dtype": 1,
+    "value": 1
+   },
+   "error": "literal field 'dtype' must be a str"
+  }
+ ],
+ "dtype_fields": {
+  "Null": [
+   "value"
+  ],
+  "Boolean": [
+   "value"
+  ],
+  "Int64": [
+   "value"
+  ],
+  "Float64": [
+   "value"
+  ],
+  "String": [
+   "value"
+  ],
+  "Decimal128": [
+   "precision",
+   "scale",
+   "value"
+  ],
+  "Date32": [
+   "value"
+  ],
+  "Timestamp": [
+   "tz",
+   "unit",
+   "value"
+  ]
+ }
+}
