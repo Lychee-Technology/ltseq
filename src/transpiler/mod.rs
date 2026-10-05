@@ -57,48 +57,6 @@ fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, String> {
     Ok(Expr::Column(Column::new_unqualified(name)))
 }
 
-/// Parse a literal value based on its dtype into a DataFusion expression
-fn parse_literal_expr(value: &str, dtype: &str) -> Result<Expr, String> {
-    match dtype {
-        "Int64" => {
-            let int_val = value
-                .parse::<i64>()
-                .map_err(|_| format!("Failed to parse '{}' as Int64", value))?;
-            Ok(lit(int_val))
-        }
-        "Int32" => {
-            let int_val = value
-                .parse::<i32>()
-                .map_err(|_| format!("Failed to parse '{}' as Int32", value))?;
-            Ok(lit(int_val))
-        }
-        "Float64" => {
-            let float_val = value
-                .parse::<f64>()
-                .map_err(|_| format!("Failed to parse '{}' as Float64", value))?;
-            Ok(lit(float_val))
-        }
-        "Float32" => {
-            let float_val = value
-                .parse::<f32>()
-                .map_err(|_| format!("Failed to parse '{}' as Float32", value))?;
-            Ok(lit(float_val))
-        }
-        "String" | "Utf8" => Ok(lit(value)),
-        "Boolean" | "Bool" => {
-            // Python uses "True"/"False" (capitalized), Rust expects "true"/"false"
-            let bool_val = match value.to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
-            };
-            Ok(lit(bool_val))
-        }
-        "Null" => Ok(lit(ScalarValue::Null)),
-        _ => Err(format!("Unknown dtype: {}", dtype)),
-    }
-}
-
 /// A serialized binary operator. Floor division has no DataFusion
 /// `Operator` (`/` truncates toward zero), so it is its own variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,10 +302,8 @@ fn parse_call_math(
                     use datafusion::functions::math::expr_fn::ln;
                     Ok(ln(input))
                 }
-                Some(PyExpr::Literal { value, .. }) => {
-                    let base_val = value
-                        .parse::<f64>()
-                        .map_err(|_| format!("log() base must be a number, got '{}'", value))?;
+                Some(PyExpr::Literal(value)) => {
+                    let base_val = value.require_f64("log() base")?;
                     if (base_val - 10.0_f64).abs() < 1e-9 {
                         use datafusion::functions::math::expr_fn::log10;
                         Ok(log10(input))
@@ -481,7 +437,7 @@ fn parse_call_type_ops(
                 return Err("cast requires a target type argument".to_string());
             }
             let target_type = match &args[0] {
-                PyExpr::Literal { value, .. } => value.clone(),
+                PyExpr::Literal(value) => value.require_str("cast() target type")?.to_string(),
                 _ => return Err("cast target type must be a string literal".to_string()),
             };
             let arrow_type = match target_type.to_lowercase().as_str() {
@@ -810,9 +766,7 @@ fn parse_call_temporal(
 
             let parse_lit_i64 = |arg: &PyExpr, name: &str| -> Result<i64, String> {
                 match arg {
-                    PyExpr::Literal { value, .. } => value
-                        .parse::<i64>()
-                        .map_err(|_| format!("dt_add {name} must be a literal integer")),
+                    PyExpr::Literal(value) => value.require_i64(&format!("dt_add {name}")),
                     _ => Err(format!("dt_add {name} must be a literal integer")),
                 }
             };
@@ -846,7 +800,7 @@ fn parse_call_temporal(
 
             let unit = if args.len() > 1 {
                 match &args[1] {
-                    PyExpr::Literal { value, .. } => value.to_lowercase(),
+                    PyExpr::Literal(value) => value.require_str("dt_diff unit")?.to_lowercase(),
                     _ => "day".to_string(),
                 }
             } else {
@@ -980,7 +934,7 @@ pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Exp
 fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, schema),
-        PyExpr::Literal { value, dtype } => parse_literal_expr(&value, &dtype),
+        PyExpr::Literal(value) => Ok(lit(value.to_scalar_value())),
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
         PyExpr::Call { func, on, args, .. } => {
@@ -1272,6 +1226,7 @@ fn validate_temporal_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::LiteralValue;
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::Column;
 
@@ -1288,11 +1243,8 @@ mod tests {
         PyExpr::Column(name.to_string())
     }
 
-    fn lit_expr(value: &str, dtype: &str) -> PyExpr {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: dtype.to_string(),
-        }
+    fn int_lit(value: i64) -> PyExpr {
+        PyExpr::Literal(LiteralValue::Int64(value))
     }
 
     fn call_expr(func: &str, on: PyExpr, args: Vec<PyExpr>) -> PyExpr {
@@ -1346,47 +1298,53 @@ mod tests {
         }
     }
 
-    // ---- parse_literal_expr: every dtype branch ----
+    // ---- literals: each LiteralValue transpiles to its own scalar ----
 
     #[test]
-    fn literal_dtype_table() {
+    fn literal_transpiles_to_its_scalar() {
+        use datafusion::arrow::datatypes::TimeUnit;
+        let schema = test_schema();
         let table = [
-            ("42", "Int64", lit(42_i64)),
-            ("-7", "Int32", lit(-7_i32)),
-            ("2.5", "Float64", lit(2.5_f64)),
-            ("1.5", "Float32", lit(1.5_f32)),
-            ("hello", "String", lit("hello")),
-            ("hello", "Utf8", lit("hello")),
-            ("True", "Boolean", lit(true)),
-            ("False", "Boolean", lit(false)),
-            ("true", "Bool", lit(true)),
-            ("false", "Bool", lit(false)),
-            ("", "Null", lit(ScalarValue::Null)),
+            (LiteralValue::Null, ScalarValue::Null),
+            (LiteralValue::Boolean(true), ScalarValue::Boolean(Some(true))),
+            (LiteralValue::Int64(42), ScalarValue::Int64(Some(42))),
+            (LiteralValue::Float64(2.5), ScalarValue::Float64(Some(2.5))),
+            (
+                LiteralValue::String("hello".to_string()),
+                ScalarValue::Utf8(Some("hello".to_string())),
+            ),
+            (
+                LiteralValue::Decimal128 {
+                    value: 150,
+                    precision: 3,
+                    scale: 2,
+                },
+                ScalarValue::Decimal128(Some(150), 3, 2),
+            ),
+            (LiteralValue::Date32(19723), ScalarValue::Date32(Some(19723))),
+            (
+                LiteralValue::Timestamp {
+                    value: 1_000_000_500,
+                    unit: TimeUnit::Nanosecond,
+                    tz: None,
+                },
+                ScalarValue::TimestampNanosecond(Some(1_000_000_500), None),
+            ),
+            (
+                LiteralValue::Timestamp {
+                    value: 7,
+                    unit: TimeUnit::Second,
+                    tz: Some("Asia/Tokyo".into()),
+                },
+                ScalarValue::TimestampSecond(Some(7), Some("Asia/Tokyo".into())),
+            ),
         ];
-        for (value, dtype, expected) in table {
+        for (value, expected) in table {
             assert_eq!(
-                parse_literal_expr(value, dtype),
-                Ok(expected),
-                "literal {value}:{dtype}"
+                pyexpr_to_datafusion(PyExpr::Literal(value.clone()), &schema),
+                Ok(lit(expected)),
+                "{value:?}"
             );
-        }
-    }
-
-    #[test]
-    fn literal_parse_failures() {
-        let table = [
-            ("abc", "Int64", "Failed to parse"),
-            ("1.5", "Int64", "Failed to parse"),
-            ("abc", "Int32", "Failed to parse"),
-            ("abc", "Float64", "Failed to parse"),
-            ("abc", "Float32", "Failed to parse"),
-            ("maybe", "Boolean", "Failed to parse"),
-            ("1", "Decimal128", "Unknown dtype"),
-            ("x", "", "Unknown dtype"),
-        ];
-        for (value, dtype, expected_msg) in table {
-            let err = parse_literal_expr(value, dtype).unwrap_err();
-            assert!(err.contains(expected_msg), "literal {value}:{dtype}: {err}");
         }
     }
 
@@ -1413,7 +1371,7 @@ mod tests {
             PyExpr::BinOp {
                 op: "Gt".to_string(),
                 left: Box::new(col_expr("a")),
-                right: Box::new(lit_expr("5", "Int64")),
+                right: Box::new(int_lit(5)),
             },
             &schema,
         )
@@ -1429,7 +1387,7 @@ mod tests {
             PyExpr::BinOp {
                 op: "FloorDiv".to_string(),
                 left: Box::new(col_expr("a")),
-                right: Box::new(lit_expr("2", "Int64")),
+                right: Box::new(int_lit(2)),
             },
             &schema,
         )
@@ -1571,7 +1529,7 @@ mod tests {
         );
         assert_eq!(
             pyexpr_to_datafusion(
-                standalone_call("coalesce", vec![col_expr("a"), lit_expr("0", "Int64")]),
+                standalone_call("coalesce", vec![col_expr("a"), int_lit(0)]),
                 &schema
             ),
             Ok(coalesce(vec![a(), lit(0_i64)]))
@@ -1598,7 +1556,7 @@ mod tests {
 
     #[test]
     fn standalone_aggregate_is_not_a_rolling_window() {
-        let rolling = call_expr("rolling", col_expr("a"), vec![lit_expr("3", "Int64")]);
+        let rolling = call_expr("rolling", col_expr("a"), vec![int_lit(3)]);
         assert!(is_window_call("mean", Some(&rolling)));
         assert!(!is_window_call("mean", None));
     }

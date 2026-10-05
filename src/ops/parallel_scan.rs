@@ -869,10 +869,7 @@ mod tests {
     fn shift1(name: &str) -> PyExpr {
         PyExpr::Call {
             func: "shift".to_string(),
-            args: vec![PyExpr::Literal {
-                value: "1".to_string(),
-                dtype: "Int64".to_string(),
-            }],
+            args: vec![PyExpr::Literal(crate::types::LiteralValue::Int64(1))],
             kwargs: HashMap::new(),
             on: Some(Box::new(col(name))),
         }
@@ -883,10 +880,7 @@ mod tests {
         let gap = binop(
             "Gt",
             binop("Sub", col("t"), shift1("t")),
-            PyExpr::Literal {
-                value: "4".to_string(),
-                dtype: "Int64".to_string(),
-            },
+            PyExpr::Literal(crate::types::LiteralValue::Int64(4)),
         );
         binop("Or", binop("Ne", col("u"), shift1("u")), gap)
     }

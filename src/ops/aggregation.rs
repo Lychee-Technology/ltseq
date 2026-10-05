@@ -87,9 +87,7 @@ fn pyexpr_to_agg_plan(
             // that is not a number in [0, 1] is an error, never the median.
             let p = match args.first() {
                 None => 0.5,
-                Some(PyExpr::Literal { value, .. }) => value
-                    .parse::<f64>()
-                    .map_err(|_| format!("percentile() p must be a number, got '{value}'"))?,
+                Some(PyExpr::Literal(value)) => value.require_f64("percentile() p")?,
                 Some(_) => return Err("percentile() p must be a literal number".to_string()),
             };
             if !(0.0..=1.0).contains(&p) {
@@ -214,9 +212,7 @@ fn pyexpr_to_agg_plan(
             // that is not a positive integer is an error, never 10.
             let k = match args.first() {
                 None => 10,
-                Some(PyExpr::Literal { value, .. }) => value
-                    .parse::<i64>()
-                    .map_err(|_| format!("top_k() k must be an integer, got '{value}'"))?,
+                Some(PyExpr::Literal(value)) => value.require_i64("top_k() k")?,
                 Some(_) => return Err("top_k() k must be a literal integer".to_string()),
             };
             if k < 1 {

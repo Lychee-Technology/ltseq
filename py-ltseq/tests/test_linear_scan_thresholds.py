@@ -43,10 +43,25 @@ def test_kernel_keeps_integral_float_thresholds(steps):
     assert steps._inner.group_ordered_count(expr) == 2
 
 
-@pytest.mark.parametrize("threshold", ["1", Decimal("1")])
-def test_kernel_keeps_int_parsing_string_and_decimal_thresholds(steps, threshold):
+@pytest.mark.parametrize("threshold", [Decimal("1"), Decimal("1.00")])
+def test_kernel_keeps_integral_decimal_thresholds(steps, threshold):
     expr = steps._capture_expr(lambda r: (r.x - r.x.shift(1)) > threshold)
     assert steps._inner.group_ordered_count(expr) == 3
+
+
+def test_kernel_refuses_non_integral_decimal_thresholds(steps):
+    expr = steps._capture_expr(lambda r: (r.x - r.x.shift(1)) > Decimal("1.5"))
+    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
+        steps._inner.group_ordered_count(expr)
+
+
+def test_string_threshold_is_not_a_number_for_the_kernel(steps):
+    """A string literal is a string (#145, P5): the kernel declines it, and the
+    DataFusion path, which coerces the string, counts the groups."""
+    pred = lambda r: (r.x - r.x.shift(1)) > "1"  # noqa: E731
+    with pytest.raises(RuntimeError, match="unsupported types Int64 and Utf8"):
+        steps._inner.group_ordered_count(steps._capture_expr(pred))
+    assert steps.group_ordered(pred).first().count() == _reference(steps, pred) == 3
 
 
 # Beyond 2**53 the Float64 reference rounds the Int64 diff before comparing, so an

@@ -29,7 +29,7 @@ use datafusion::prelude::*;
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::linear_scan::{build_sort_exprs, extract_referenced_columns};
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 use crate::LTSeqTable;
 
 /// Evaluate a predicate PyExpr against a RecordBatch, returning a BooleanArray.
@@ -73,41 +73,19 @@ fn eval_expr(
             Ok(Arc::clone(batch.column(*idx)))
         }
 
-        PyExpr::Literal { value, dtype } => {
+        PyExpr::Literal(value) => {
             let n = batch.num_rows();
-            match dtype.as_str() {
-                "bool" | "Bool" => {
-                    let v = value == "True" || value == "true" || value == "1";
-                    let arr = BooleanArray::from(vec![v; n]);
-                    Ok(Arc::new(arr))
-                }
-                "Int64" | "int" => {
-                    let v: i64 = value
-                        .parse()
-                        .map_err(|_| format!("Cannot parse '{}' as i64", value))?;
-                    let arr = Int64Array::from(vec![v; n]);
-                    Ok(Arc::new(arr))
-                }
-                "Float64" | "float" => {
-                    let v: f64 = value
-                        .parse()
-                        .map_err(|_| format!("Cannot parse '{}' as f64", value))?;
-                    let arr =
-                        datafusion::arrow::array::Float64Array::from(vec![v; n]);
-                    Ok(Arc::new(arr))
-                }
-                "Utf8" | "str" | "String" => {
-                    let arr = StringArray::from(vec![value.as_str(); n]);
-                    Ok(Arc::new(arr))
-                }
-                "None" | "NoneType" => {
-                    let arr = datafusion::arrow::array::new_null_array(
-                        &DataType::Boolean,
-                        n,
-                    );
-                    Ok(arr)
-                }
-                _ => Err(format!("Unsupported literal dtype: {}", dtype)),
+            match value {
+                // A bare NULL has no type of its own; a Boolean null array
+                // lets it combine with the predicate's boolean operators.
+                LiteralValue::Null => Ok(datafusion::arrow::array::new_null_array(
+                    &DataType::Boolean,
+                    n,
+                )),
+                _ => value
+                    .to_scalar_value()
+                    .to_array_of_size(n)
+                    .map_err(|e| format!("Cannot build literal array: {e}")),
             }
         }
 
@@ -281,16 +259,9 @@ fn eval_call(
 /// Extract a literal string value from a PyExpr.
 fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
     match expr {
-        PyExpr::Literal { value, dtype } => {
-            if dtype == "Utf8" || dtype == "str" || dtype == "String" {
-                Ok(value.clone())
-            } else {
-                Err(format!(
-                    "Expected string literal, got dtype '{}'",
-                    dtype
-                ))
-            }
-        }
+        PyExpr::Literal(value) => value
+            .require_str("search_pattern string argument")
+            .map(str::to_string),
         _ => Err("Expected literal string argument".to_string()),
     }
 }
@@ -326,13 +297,10 @@ pub(crate) fn same_string_column_starts_with_plan(
         let Some(PyExpr::Column(name)) = on.as_deref() else {
             return None;
         };
-        let PyExpr::Literal { value, dtype } = &args[0] else {
+        let PyExpr::Literal(LiteralValue::String(prefix)) = &args[0] else {
             return None;
         };
-        if dtype != "Utf8" && dtype != "str" && dtype != "String" {
-            return None;
-        }
-        let prefix = value.clone();
+        let prefix = prefix.clone();
 
         match &column_name {
             Some(existing) if existing != name => return None,
@@ -1025,10 +993,7 @@ mod tests {
     fn string_call(func: &str, column: &str, arg: &str) -> PyExpr {
         PyExpr::Call {
             func: func.to_string(),
-            args: vec![PyExpr::Literal {
-                value: arg.to_string(),
-                dtype: "Utf8".to_string(),
-            }],
+            args: vec![PyExpr::Literal(LiteralValue::String(arg.to_string()))],
             kwargs: HashMap::new(),
             on: Some(Box::new(PyExpr::Column(column.to_string()))),
         }

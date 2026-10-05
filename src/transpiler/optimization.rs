@@ -6,16 +6,13 @@
 //! - **Boolean Simplification**: Trivial boolean expressions are simplified
 //!   (e.g., `x & True` → `x`, `x | False` → `x`)
 
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 
 /// Extract numeric value from a literal PyExpr (for constant folding)
 fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
     match expr {
-        PyExpr::Literal { value, dtype } => match dtype.as_str() {
-            "Int64" | "Int32" => value.parse::<i64>().ok().map(|v| v as f64),
-            "Float64" | "Float32" => value.parse::<f64>().ok(),
-            _ => None,
-        },
+        PyExpr::Literal(LiteralValue::Int64(v)) => Some(*v as f64),
+        PyExpr::Literal(LiteralValue::Float64(v)) => Some(*v),
         _ => None,
     }
 }
@@ -23,14 +20,7 @@ fn get_literal_f64(expr: &PyExpr) -> Option<f64> {
 /// Extract boolean value from a literal PyExpr
 fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
     match expr {
-        PyExpr::Literal { value, dtype } => match dtype.as_str() {
-            "Boolean" | "Bool" => match value.to_lowercase().as_str() {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            },
-            _ => None,
-        },
+        PyExpr::Literal(LiteralValue::Boolean(v)) => Some(*v),
         _ => None,
     }
 }
@@ -39,24 +29,15 @@ fn get_literal_bool(expr: &PyExpr) -> Option<bool> {
 fn make_literal_f64(value: f64) -> PyExpr {
     // If it's a whole number, prefer Int64 representation
     if value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
-        PyExpr::Literal {
-            value: (value as i64).to_string(),
-            dtype: "Int64".to_string(),
-        }
+        PyExpr::Literal(LiteralValue::Int64(value as i64))
     } else {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: "Float64".to_string(),
-        }
+        PyExpr::Literal(LiteralValue::Float64(value))
     }
 }
 
 /// Create a literal PyExpr from a boolean value
 fn make_literal_bool(value: bool) -> PyExpr {
-    PyExpr::Literal {
-        value: value.to_string(),
-        dtype: "Boolean".to_string(),
-    }
+    PyExpr::Literal(LiteralValue::Boolean(value))
 }
 
 /// Try to fold a binary operation on two literals into a single literal
@@ -220,33 +201,29 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn lit(value: &str, dtype: &str) -> PyExpr {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: dtype.to_string(),
-        }
-    }
-
     fn int(value: i64) -> PyExpr {
-        lit(&value.to_string(), "Int64")
+        PyExpr::Literal(LiteralValue::Int64(value))
     }
 
     fn float(value: f64) -> PyExpr {
-        lit(&value.to_string(), "Float64")
+        PyExpr::Literal(LiteralValue::Float64(value))
     }
 
-    /// A boolean as Python serializes it (`str(True)`).
+    fn string(value: &str) -> PyExpr {
+        PyExpr::Literal(LiteralValue::String(value.to_string()))
+    }
+
     fn boolean(value: bool) -> PyExpr {
-        lit(if value { "True" } else { "False" }, "Boolean")
+        PyExpr::Literal(LiteralValue::Boolean(value))
     }
 
     /// A boolean as the optimizer builds it.
     fn folded_bool(value: bool) -> PyExpr {
-        lit(if value { "true" } else { "false" }, "Boolean")
+        boolean(value)
     }
 
     fn null() -> PyExpr {
-        lit("None", "Null")
+        PyExpr::Literal(LiteralValue::Null)
     }
 
     fn col(name: &str) -> PyExpr {
@@ -344,16 +321,11 @@ mod tests {
         let table = [
             (int(42), Some(42.0)),
             (int(-7), Some(-7.0)),
-            (lit("7", "Int32"), Some(7.0)),
             (float(2.5), Some(2.5)),
-            (lit("1.5", "Float32"), Some(1.5)),
-            (lit("inf", "Float64"), Some(f64::INFINITY)),
-            // An unparseable payload is left for the transpiler to report.
-            (lit("1.5", "Int64"), None),
-            (lit("abc", "Float64"), None),
+            (float(f64::INFINITY), Some(f64::INFINITY)),
             // Booleans, numeric-looking strings and NULL are not numbers.
             (boolean(true), None),
-            (lit("1", "String"), None),
+            (string("1"), None),
             (null(), None),
             (col("a"), None),
         ];
@@ -367,11 +339,7 @@ mod tests {
         let table = [
             (boolean(true), Some(true)),
             (boolean(false), Some(false)),
-            (lit("true", "Boolean"), Some(true)),
-            (lit("FALSE", "Bool"), Some(false)),
-            (lit("yes", "Boolean"), None),
-            (lit("1", "Boolean"), None),
-            (lit("true", "String"), None),
+            (string("true"), None),
             (int(1), None),
             (null(), None),
             (col("p"), None),
@@ -435,11 +403,10 @@ mod tests {
             ("And", int(1), boolean(true)),
             ("Add", boolean(true), boolean(true)),
             ("Eq", boolean(true), boolean(true)),
-            ("Add", lit("a", "String"), lit("b", "String")),
-            ("Eq", lit("1", "String"), int(1)),
+            ("Add", string("a"), string("b")),
+            ("Eq", string("1"), int(1)),
             ("Add", null(), int(1)),
             ("And", null(), boolean(false)),
-            ("Add", lit("abc", "Int64"), int(1)),
             // A zero divisor stays for DataFusion: an error for integers,
             // inf/NaN for floats.
             ("Div", int(1), int(0)),
@@ -505,7 +472,7 @@ mod tests {
             // Literals that are not booleans: p AND NULL is NULL or false,
             // depending on p.
             ("And", p(), int(1)),
-            ("Or", p(), lit("true", "String")),
+            ("Or", p(), string("true")),
             ("And", p(), null()),
             ("Or", null(), p()),
             // Only And/Or have identities here.
@@ -572,7 +539,6 @@ mod tests {
             col("a"),
             int(1),
             null(),
-            lit("abc", "Int64"),
             // No reassociation: (a + 1) + 2 does not become a + 3.
             binop("Add", binop("Add", col("a"), int(1)), int(2)),
             binop("FloorDiv", int(7), int(2)),
@@ -633,9 +599,6 @@ mod tests {
             // DataFusion compares NaN as equal to itself and above every number.
             binop("Eq", float(f64::NAN), float(f64::NAN)),
             binop("Gt", float(f64::NAN), float(1.0)),
-            // Int32/Float32 operands fold to 64-bit literals.
-            binop("Add", lit("2", "Int32"), lit("3", "Int32")),
-            binop("Add", lit("0.1", "Float32"), lit("0.2", "Float32")),
         ];
         let diffs = diverging(rows);
         assert!(diffs.is_empty(), "{}", diffs.join("\n"));

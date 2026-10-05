@@ -53,6 +53,10 @@ pub enum PyExprError {
     MissingField(String),
     InvalidType(String),
     UnknownVariant(String),
+    /// A Literal payload that does not match the wire contract. Python's
+    /// encoder never produces one, so reaching this means an LTSeq bug or a
+    /// hand-built payload, not a user typo.
+    InvalidLiteral(String),
 }
 
 impl fmt::Display for PyExprError {
@@ -61,6 +65,7 @@ impl fmt::Display for PyExprError {
             PyExprError::MissingField(field) => write!(f, "Missing field: {}", field),
             PyExprError::InvalidType(msg) => write!(f, "Invalid type: {}", msg),
             PyExprError::UnknownVariant(var) => write!(f, "Unknown expression type: {}", var),
+            PyExprError::InvalidLiteral(msg) => write!(f, "Malformed literal payload: {}", msg),
         }
     }
 }

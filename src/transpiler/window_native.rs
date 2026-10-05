@@ -19,7 +19,7 @@
 //! When `partition_by` is specified, any sort expression that matches a partition
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
@@ -55,9 +55,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
         _ => return vec![],
     };
     match kwargs.get("partition_by") {
-        Some(PyExpr::Literal { value, dtype }) if dtype == "String" || dtype == "Utf8" => {
-            vec![value.clone()]
-        }
+        Some(PyExpr::Literal(LiteralValue::String(name))) => vec![name.clone()],
         Some(PyExpr::Column(name)) => vec![name.clone()],
         _ => vec![],
     }
@@ -66,7 +64,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
 /// Extract `partition_by` from kwargs and convert to `Vec<Expr>`.
 ///
 /// Handles these forms from the Python side:
-/// - `partition_by="col"` → `PyExpr::Literal { value: "col", dtype: "String" }` → `col("col")`
+/// - `partition_by="col"` → a `String` literal → `col("col")`
 /// - `partition_by=r.col` → `PyExpr::Column("col")` → `col("col")`
 ///
 /// Returns an empty Vec if no `partition_by` kwarg is present.
@@ -80,9 +78,7 @@ fn extract_partition_by(
     };
     match pb {
         // partition_by="col_name" — string literal used as column name
-        PyExpr::Literal { value, dtype } if dtype == "String" || dtype == "Utf8" => {
-            Ok(vec![col(value)])
-        }
+        PyExpr::Literal(LiteralValue::String(name)) => Ok(vec![col(name)]),
         // partition_by=r.col — column expression
         PyExpr::Column(name) => Ok(vec![col(name)]),
         // Any other expression — try converting through the standard path
@@ -260,10 +256,8 @@ fn convert_shift(
         // Get offset (default 1)
         let offset: i64 = if args.is_empty() {
             1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
-            value
-                .parse::<i64>()
-                .map_err(|_| "shift() offset must be an integer".to_string())?
+        } else if let PyExpr::Literal(value) = &args[0] {
+            value.require_i64("shift() offset")?
         } else {
             return Err("shift() offset must be a literal integer".to_string());
         };
@@ -271,10 +265,7 @@ fn convert_shift(
         // Get optional default value
         let default_value = if let Some(default_expr) = kwargs.get("default") {
             match default_expr {
-                PyExpr::Literal { value, dtype } => {
-                    let sv = literal_to_scalar_value(value, dtype)?;
-                    Some(sv)
-                }
+                PyExpr::Literal(value) => Some(value.to_scalar_value()),
                 _ => None,
             }
         } else {
@@ -314,10 +305,8 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
         // Get periods (default 1)
         let periods: i64 = if args.is_empty() {
             1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
-            value
-                .parse::<i64>()
-                .map_err(|_| "diff() periods must be an integer".to_string())?
+        } else if let PyExpr::Literal(value) = &args[0] {
+            value.require_i64("diff() periods")?
         } else {
             return Err("diff() periods must be a literal integer".to_string());
         };
@@ -391,10 +380,8 @@ fn convert_rolling_agg(
             // Get window size from rolling() args
             let window_size: i64 = if inner_args.is_empty() {
                 return Err("rolling() requires a window size".to_string());
-            } else if let PyExpr::Literal { value, .. } = &inner_args[0] {
-                value
-                    .parse::<i64>()
-                    .map_err(|_| "rolling() window size must be an integer".to_string())?
+            } else if let PyExpr::Literal(value) = &inner_args[0] {
+                value.require_i64("rolling() window size")?
             } else {
                 return Err("rolling() window size must be a literal integer".to_string());
             };
@@ -515,11 +502,8 @@ fn convert_window_ranking(
                 if args.is_empty() {
                     return Err("ntile() requires a bucket count argument".to_string());
                 }
-                if let PyExpr::Literal { value, .. } = &args[0] {
-                    let n = value
-                        .parse::<i64>()
-                        .map_err(|_| "ntile() bucket count must be an integer".to_string())?;
-                    ntile(lit(n))
+                if let PyExpr::Literal(value) = &args[0] {
+                    ntile(lit(value.require_i64("ntile() bucket count")?))
                 } else {
                     return Err("ntile() bucket count must be a literal integer".to_string());
                 }
@@ -816,46 +800,5 @@ fn convert_expr_with_window_children(
         }
         // For non-window expressions, use the standard converter
         other => pyexpr_to_datafusion(other, schema),
-    }
-}
-
-/// Convert literal value string + dtype to ScalarValue
-fn literal_to_scalar_value(value: &str, dtype: &str) -> Result<ScalarValue, String> {
-    match dtype {
-        "Int64" => {
-            let v = value
-                .parse::<i64>()
-                .map_err(|_| format!("Failed to parse '{}' as Int64", value))?;
-            Ok(ScalarValue::Int64(Some(v)))
-        }
-        "Int32" => {
-            let v = value
-                .parse::<i32>()
-                .map_err(|_| format!("Failed to parse '{}' as Int32", value))?;
-            Ok(ScalarValue::Int32(Some(v)))
-        }
-        "Float64" => {
-            let v = value
-                .parse::<f64>()
-                .map_err(|_| format!("Failed to parse '{}' as Float64", value))?;
-            Ok(ScalarValue::Float64(Some(v)))
-        }
-        "Float32" => {
-            let v = value
-                .parse::<f32>()
-                .map_err(|_| format!("Failed to parse '{}' as Float32", value))?;
-            Ok(ScalarValue::Float32(Some(v)))
-        }
-        "String" | "Utf8" => Ok(ScalarValue::Utf8(Some(value.to_string()))),
-        "Boolean" | "Bool" => {
-            let b = match value.to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
-            };
-            Ok(ScalarValue::Boolean(Some(b)))
-        }
-        "Null" => Ok(ScalarValue::Null),
-        _ => Err(format!("Unknown dtype for ScalarValue: {}", dtype)),
     }
 }
