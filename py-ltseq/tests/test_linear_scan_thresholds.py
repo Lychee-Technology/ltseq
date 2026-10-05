@@ -43,16 +43,26 @@ def test_kernel_keeps_integral_float_thresholds(steps):
     assert steps._inner.group_ordered_count(expr) == 2
 
 
-@pytest.mark.parametrize("threshold", [Decimal("1"), Decimal("1.00")])
-def test_kernel_keeps_integral_decimal_thresholds(steps, threshold):
-    expr = steps._capture_expr(lambda r: (r.x - r.x.shift(1)) > threshold)
-    assert steps._inner.group_ordered_count(expr) == 3
-
-
-def test_kernel_refuses_non_integral_decimal_thresholds(steps):
-    expr = steps._capture_expr(lambda r: (r.x - r.x.shift(1)) > Decimal("1.5"))
+@pytest.mark.parametrize(
+    "threshold, expected", [(Decimal("1"), 3), (Decimal("1.00"), 3), (Decimal("1.5"), 3), (Decimal("0.5"), 4)]
+)
+def test_decimal_thresholds_take_the_datafusion_path(steps, threshold, expected):
+    """The kernel has no decimal arithmetic, so it declines every Decimal
+    literal up front, integral ones included, and the count falls back."""
+    pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
     with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        steps._inner.group_ordered_count(expr)
+        steps._inner.group_ordered_count(steps._capture_expr(pred))
+    assert steps.group_ordered(pred).first().count() == _reference(steps, pred) == expected
+
+
+@pytest.mark.parametrize("divisor", [Decimal("2"), Decimal("2.0")])
+def test_decimal_arithmetic_count_matches_reference(divisor):
+    """`x / Decimal("2")` keeps the fraction: as an integer the kernel would
+    compare the quotients [1, 1, 2, 2] and count 2 groups instead of 4."""
+    t = LTSeq.from_arrow(pa.table({"k": range(4), "x": [2, 3, 4, 5]})).sort("k")
+    pred = lambda r: (r.x / divisor) > (r.x.shift(1) / divisor)  # noqa: E731
+    assert t.derive(v=pred).to_arrow().column("v").to_pylist() == [None, True, True, True]
+    assert t.group_ordered(pred).first().count() == _reference(t, pred) == 4
 
 
 def test_string_threshold_is_not_a_number_for_the_kernel(steps):

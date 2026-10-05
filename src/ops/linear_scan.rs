@@ -143,8 +143,9 @@ enum Value {
 }
 
 /// The evaluator's value for a literal, or `None` for the kinds it has no
-/// value for. An integral Decimal that fits i64 is that integer (comparing
-/// it as one is exact); other Decimals, dates and timestamps are `None`.
+/// value for: Decimals, dates and timestamps. An integral Decimal is not
+/// an `Int64` here: the evaluator would divide by it as integers, where
+/// DataFusion keeps the fraction (`x / Decimal("2")`).
 fn literal_to_value(value: &LiteralValue) -> Option<Value> {
     match value {
         LiteralValue::Null => Some(Value::Null),
@@ -152,8 +153,7 @@ fn literal_to_value(value: &LiteralValue) -> Option<Value> {
         LiteralValue::Int64(v) => Some(Value::Int64(*v)),
         LiteralValue::Float64(v) => Some(Value::Float64(*v)),
         LiteralValue::String(v) => Some(Value::Str(v.clone())),
-        LiteralValue::Decimal128 { .. } => value.require_i64("").ok().map(Value::Int64),
-        LiteralValue::Date32(_) | LiteralValue::Timestamp { .. } => None,
+        LiteralValue::Decimal128 { .. } | LiteralValue::Date32(_) | LiteralValue::Timestamp { .. } => None,
     }
 }
 
@@ -341,12 +341,12 @@ fn shifted_column<'a>(left: &'a PyExpr, right: &PyExpr) -> Option<&'a str> {
     }
 }
 
-/// An integer threshold for the fused evaluator: an `Int64`, a `Float64`
+/// An integer threshold for the fused evaluator: an `Int64`, or a `Float64`
 /// that is a finite integer below 2^53 in magnitude (truncating -0.5 to 0
 /// would change `diff > -0.5`, NaN/Inf have no integer meaning, and from 2^53
 /// on the Float64 reference rounds the Int64 diff, so an exact i64
-/// comparison would disagree with it), or an integral `Decimal128` that fits.
-/// A string is not a number, so `> "1"` has no fused form.
+/// comparison would disagree with it). A string is not a number, so `> "1"`
+/// has no fused form; a Decimal never reaches here (`can_linear_scan`).
 fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
     match expr {
         PyExpr::Literal(LiteralValue::Int64(v)) => Some(*v),
@@ -354,7 +354,6 @@ fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
             (f.is_finite() && f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0)
                 .then_some(*f as i64)
         }
-        PyExpr::Literal(value @ LiteralValue::Decimal128 { .. }) => value.require_i64("").ok(),
         _ => None,
     }
 }
@@ -1349,5 +1348,21 @@ mod tests {
                 "expr={expr:?}"
             );
         }
+    }
+
+    /// A Decimal literal anywhere in a predicate sends it to the DataFusion
+    /// path, integral or not: as an `Int64`, `x / Decimal("2")` would divide
+    /// as integers here.
+    #[test]
+    fn decimal_literals_are_not_linear_scan_values() {
+        let two = |scale: i8| {
+            lit(LiteralValue::Decimal128 { value: 2 * 10i128.pow(scale as u32), precision: 2, scale })
+        };
+        for scale in [0, 1] {
+            let halves = binop("Gt", binop("Div", col("x"), two(scale)), binop("Div", shift1("x"), two(scale)));
+            assert!(!can_linear_scan(&halves), "scale {scale}");
+            assert!(!can_linear_scan(&binop("Gt", binop("Sub", col("x"), shift1("x")), two(scale))));
+        }
+        assert!(can_linear_scan(&binop("Gt", binop("Div", col("x"), lit(LiteralValue::Int64(2))), shift1("x"))));
     }
 }
