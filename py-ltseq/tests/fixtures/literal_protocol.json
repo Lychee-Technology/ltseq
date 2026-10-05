@@ -492,7 +492,7 @@
   },
   {
    "id": "dec-neg-38-nines",
-   "python": "-Decimal('9' * 38)",
+   "python": "Decimal('-' + '9' * 38)",
    "payload": {
     "dtype": "Decimal128",
     "value": -99999999999999999999999999999999999999,
@@ -998,7 +998,7 @@
   },
   {
    "id": "np-dt64-nat",
-   "python": "np.datetime64('NaT')",
+   "python": "np.datetime64('NaT', 'ns')",
    "error": {
     "type": "ValueError",
     "match": "use None"

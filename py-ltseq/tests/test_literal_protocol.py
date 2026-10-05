@@ -12,6 +12,9 @@ on one side only fails a row.
 
 import json
 import math
+import subprocess
+import sys
+import textwrap
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import IntEnum
@@ -144,6 +147,31 @@ def test_unsupported_literal_fails_inside_the_lambda():
         table.filter(lambda r: r.a + [1, 2] > 0)
     with pytest.raises(TypeError, match=r"use \.is_in\(\[\.\.\.\]\) for membership"):
         table.filter(lambda r: r.a == [1, 2])
+
+
+def test_plain_literals_encode_without_numpy_or_pandas():
+    """numpy and pandas are optional: the encoder only touches them for their own scalars."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        class Block:
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in ("numpy", "pandas"):
+                    raise ImportError(name)
+                return None
+
+        sys.meta_path.insert(0, Block())
+        from datetime import date, datetime
+        from decimal import Decimal
+        from ltseq.expr import LiteralExpr
+
+        for value in [1, 1.5, "a", None, True, Decimal("1.5"), date(2024, 1, 1), datetime(2024, 1, 1)]:
+            LiteralExpr(value).serialize()
+        assert "numpy" not in sys.modules and "pandas" not in sys.modules
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True, cwd=Path(__file__).parents[1])
 
 
 def test_fixture_coverage():
