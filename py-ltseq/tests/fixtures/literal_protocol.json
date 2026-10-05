@@ -791,6 +791,38 @@
    }
   },
   {
+   "id": "dt-offset-subsecond",
+   "python": "datetime(2024, 1, 1, tzinfo=timezone(timedelta(microseconds=500000)))",
+   "error": {
+    "type": "ValueError",
+    "match": "not a whole number of minutes"
+   }
+  },
+  {
+   "id": "dt-offset-minus-subsecond",
+   "python": "datetime(2024, 1, 1, tzinfo=timezone(timedelta(microseconds=-500000)))",
+   "error": {
+    "type": "ValueError",
+    "match": "not a whole number of minutes"
+   }
+  },
+  {
+   "id": "dt-offset-minute-plus-1us",
+   "python": "datetime(2024, 1, 1, tzinfo=timezone(timedelta(minutes=1, microseconds=1)))",
+   "error": {
+    "type": "ValueError",
+    "match": "not a whole number of minutes"
+   }
+  },
+  {
+   "id": "dt-offset-minus-minute-minus-1us",
+   "python": "datetime(2024, 1, 1, tzinfo=timezone(-timedelta(minutes=1, microseconds=1)))",
+   "error": {
+    "type": "ValueError",
+    "match": "not a whole number of minutes"
+   }
+  },
+  {
    "id": "pdts-ns",
    "python": "pd.Timestamp('1970-01-01 00:00:01.000000500')",
    "payload": {

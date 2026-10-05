@@ -2,7 +2,7 @@
 
 import numbers
 import reprlib
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, cast
 
@@ -77,13 +77,13 @@ def _timezone_name(value: datetime) -> str:
     # this instant can travel.
     offset = value.utcoffset()
     assert offset is not None
-    seconds = int(offset.total_seconds())
-    if seconds % 60:
+    minutes, rest = divmod(offset, timedelta(minutes=1))
+    if rest:
         raise ValueError(
             f"time zone offset {offset} of {value!r} is not a whole number of minutes"
         )
-    sign = "-" if seconds < 0 else "+"
-    minutes = abs(seconds) // 60
+    sign = "-" if minutes < 0 else "+"
+    minutes = abs(minutes)
     return f"{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
 
