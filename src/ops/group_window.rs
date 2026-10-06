@@ -262,7 +262,7 @@ fn lower_group_node(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> 
         GroupNode::BinOp { op, left, right } => {
             let left_expr = lower_group_node(*left, rx)?;
             let right_expr = lower_group_node(*right, rx)?;
-            crate::transpiler::binary_expr(&op, left_expr, right_expr)
+            crate::transpiler::binary_expr(&op, left_expr, right_expr, rx)
         }
         GroupNode::UnaryOp { op, operand } => {
             let operand_expr = lower_group_node(*operand, rx)?;

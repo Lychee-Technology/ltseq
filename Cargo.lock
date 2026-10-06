@@ -1978,6 +1978,7 @@ name = "ltseq_core"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "datafusion",
  "futures-util",
  "parquet",

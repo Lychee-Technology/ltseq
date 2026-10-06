@@ -17,7 +17,10 @@
 //! - **Boolean Simplification**: Trivial boolean expressions are simplified
 //!   (e.g., `x & True` → `x`, `x | False` → `x`)
 
+mod exact;
 pub(crate) mod floor_div;
+mod literal_policy;
+mod literals;
 mod optimization;
 mod resolve;
 pub(crate) mod window_native;
@@ -92,9 +95,41 @@ pub(crate) fn parse_binary_op(op: &str) -> Result<BinaryOp, String> {
 
 /// `left <op> right` for a serialized operator name. The row, window and
 /// group transpilers all build binary expressions here, so an operator is
-/// either executable in every dialect or rejected by name in every one.
-pub(crate) fn binary_expr(op: &str, left: Expr, right: Expr) -> Result<Expr, String> {
-    Ok(match parse_binary_op(op)? {
+/// either executable in every dialect or rejected by name in every one, and
+/// a literal operand of a comparison or arithmetic operator is read next to
+/// the other operand the same way in each (`literals::binary_operands`).
+pub(crate) fn binary_expr(
+    op: &str,
+    left: Expr,
+    right: Expr,
+    rx: &Resolver<'_>,
+) -> Result<Expr, String> {
+    use literal_policy::Position;
+    let op = parse_binary_op(op)?;
+    let position = match op {
+        BinaryOp::FloorDiv
+        | BinaryOp::Native(
+            Operator::Plus
+            | Operator::Minus
+            | Operator::Multiply
+            | Operator::Divide
+            | Operator::Modulo,
+        ) => Some(Position::Arithmetic),
+        BinaryOp::Native(
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq,
+        ) => Some(Position::Comparison),
+        BinaryOp::Native(_) => None,
+    };
+    let (left, right) = match position {
+        Some(position) => literals::binary_operands(left, right, position, rx)?,
+        None => (left, right),
+    };
+    Ok(match op {
         BinaryOp::Native(operator) => {
             Expr::BinaryExpr(BinaryExpr::new(Box::new(left), operator, Box::new(right)))
         }
@@ -111,7 +146,7 @@ fn parse_binop_expr(
 ) -> Result<Expr, String> {
     let left_expr = pyexpr_to_datafusion_inner(left, rx)?;
     let right_expr = pyexpr_to_datafusion_inner(right, rx)?;
-    binary_expr(op, left_expr, right_expr)
+    binary_expr(op, left_expr, right_expr, rx)
 }
 
 /// Parse a unary operation into a DataFusion expression
@@ -166,12 +201,7 @@ fn parse_call_conditional(
             let cond_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let true_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
             let false_expr = pyexpr_to_datafusion_inner(args[2].clone(), rx)?;
-
-            use datafusion::logical_expr::case;
-            Ok(case(cond_expr)
-                .when(lit(true), true_expr)
-                .otherwise(false_expr)
-                .map_err(|e| format!("Failed to create CASE expression: {}", e))?)
+            literals::if_else(cond_expr, true_expr, false_expr, rx)
         }
         _ => Err(format!("Not a conditional function: {}", func)),
     }
@@ -191,7 +221,7 @@ fn parse_call_null_ops(
             }
             let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
             let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
-            Ok(coalesce(vec![on_expr, default_expr]))
+            literals::coalesce_values(vec![on_expr, default_expr], rx)
         }
         "is_null" => {
             let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
@@ -209,7 +239,7 @@ fn parse_call_null_ops(
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(coalesce(coalesce_args))
+            literals::coalesce_values(coalesce_args, rx)
         }
         _ => Err(format!("Not a null operation: {}", func)),
     }
@@ -463,7 +493,7 @@ fn parse_call_type_ops(
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(on_expr.in_list(list_exprs, false))
+            literals::in_list(on_expr, list_exprs, rx)
         }
         _ => Err(format!("Not a type operation: {}", func)),
     }
@@ -798,6 +828,7 @@ fn parse_call_temporal(
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+            let other_expr = literals::dt_diff_other(&on_expr, other_expr, rx)?;
 
             let unit = match arg(args, 1) {
                 Arg::Absent => "day".to_string(),

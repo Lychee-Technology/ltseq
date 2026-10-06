@@ -31,6 +31,10 @@ arrow = { version = "59.2.0", default-features = false, features = ["pyarrow"] }
 
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 
+# Wall-clock ↔ instant conversion for timestamp literals against zoned
+# columns. Already in the tree through arrow; the version follows it.
+chrono = { version = "0.4.45", default-features = false }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

@@ -263,7 +263,11 @@ fn convert_shift(
         // lag/lead take the default as a scalar, so only a literal can be one.
         let default_value = match kwargs.get("default") {
             None => None,
-            Some(PyExpr::Literal(value)) => Some(value.to_scalar_value()),
+            Some(PyExpr::Literal(value)) => Some(super::literals::shift_default(
+                &col_expr,
+                value.to_scalar_value(),
+                rx,
+            )?),
             Some(_) => return Err("shift() default must be a literal value".to_string()),
         };
 
@@ -655,7 +659,7 @@ fn convert_expr_with_window_children(
                 super::lower_expr(*right, rx)?
             };
 
-            crate::transpiler::binary_expr(&op, left_expr, right_expr)
+            crate::transpiler::binary_expr(&op, left_expr, right_expr, rx)
         }
         PyExpr::UnaryOp { op, operand } => {
             let operand_expr = if contains_window_function(&operand) {
@@ -694,7 +698,7 @@ fn convert_expr_with_window_children(
                     } else {
                         super::lower_expr(args[0].clone(), rx)?
                     };
-                    Ok(coalesce(vec![on_expr, default_expr]))
+                    super::literals::coalesce_values(vec![on_expr, default_expr], rx)
                 }
                 "is_null" => {
                     let on = super::require_on(on, &func)?;
@@ -733,12 +737,7 @@ fn convert_expr_with_window_children(
                     } else {
                         super::lower_expr(args[2].clone(), rx)?
                     };
-
-                    use datafusion::logical_expr::case;
-                    case(cond_expr)
-                        .when(lit(true), true_expr)
-                        .otherwise(false_expr)
-                        .map_err(|e| format!("Failed to create CASE expression: {}", e))
+                    super::literals::if_else(cond_expr, true_expr, false_expr, rx)
                 }
                 "abs" | "ceil" | "floor" | "round" => {
                     use datafusion::functions::math::expr_fn::{abs, ceil, floor, round};
