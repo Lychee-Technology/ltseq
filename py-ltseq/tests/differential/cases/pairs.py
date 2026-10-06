@@ -127,3 +127,5 @@ def case_fine_decimal_literal(): return wide().derive(v=lambda r: r.p == Decimal
 def case_fine_decimal_column(): return wide().derive(v=lambda r: r.p == r.fine).select("v")
 def case_big_integer_literal(): return wide().derive(v=lambda r: r.w == 10**18).select("v")
 def case_big_integer_column(): return wide().derive(v=lambda r: r.w == r.big).select("v")
+def case_big_integer_is_in(): return wide().derive(v=lambda r: r.w.is_in([5, 10**18])).select("v")
+def case_big_integer_fill_null(): return wide().derive(v=lambda r: r.w.fill_null(10**18)).select("v")

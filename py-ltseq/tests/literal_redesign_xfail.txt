@@ -4,46 +4,9 @@
 # makes a test pass removes its line. The list is empty after Phase 7.
 
 # The operand-rule tests of the earlier #225 branch (characterization).
-P4 py-ltseq/tests/test_literal_column_rules.py::test_decimal_values_are_fitted_together
-P4 py-ltseq/tests/test_literal_column_rules.py::test_values_are_typed_by_every_column[decimals]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_values_no_common_column_type_holds[decimals]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_values_no_common_column_type_holds[timestamps]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_negative_scale_column_value_positions
-P4 py-ltseq/tests/test_literal_column_rules.py::test_wide_decimal_value_is_rescaled_only_when_exact
-P4 py-ltseq/tests/test_literal_column_rules.py::test_midnight_datetime_value_with_date_column_is_a_date
-P4 py-ltseq/tests/test_literal_column_rules.py::test_datetime_value_with_time_of_day_for_date_column_is_an_error
-P4 py-ltseq/tests/test_literal_column_rules.py::test_date_value_with_naive_timestamp_column_keeps_the_column_unit
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_must_fit_the_column_exactly
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype0-1.5-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype2-default2-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype5-default5-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype7--1-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype8-300-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype10-1.236-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype12-1000-ValueError]
-P4 py-ltseq/tests/test_literal_column_rules.py::test_shift_default_is_exact_for_the_column_type[dtype13-default13-ValueError]
 
 # Review regression cases.
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_lossy_float_default_rejected[dtype0-values0-1.5]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_lossy_float_default_rejected[dtype1-values1-1.236]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype0-9.223372036854776e+18]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype1-1.8446744073709552e+19]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype2-128.0]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_nary_decimal_values_include_all_column_types
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-False]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-True]
-P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[2.5-False]
 
 # Metamorphic properties.
 
 # Differential cases.
-P4 py-ltseq/tests/differential/test_differential.py::test_case[composition::decimal_fill]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[composition::decimal_fill_sw]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::float_then_fine]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::fine_then_float]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::small_float_then_fine]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::int_then_fine]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::two_decimals_too_wide]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::float32_column_and_fine]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::uint64_column_and_fine]
-P4 py-ltseq/tests/differential/test_differential.py::test_case[widening::uint64_column_first_and_fine]

@@ -34,3 +34,5 @@
 {"id": "fine_decimal_column", "result": {"v": {"type": "bool", "values": [true, false]}}}
 {"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "big_integer_literal"}
 {"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Invalid argument error: 1000000000000000000.00000000000000000000 is too large to store in a Decimal128 of precision 38. Max is 999999999999999999.99999999999999999999", "stage": "collect"}, "id": "big_integer_column"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "big_integer_is_in"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "big_integer_fill_null"}

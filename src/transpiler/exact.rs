@@ -1,6 +1,8 @@
 //! Exact arithmetic on literal values: moving a value between the units or
-//! scales of two types without losing anything, or saying it cannot be done,
-//! and [`place`], which finds where a value falls among the values of a type.
+//! scales of two types without losing anything, or saying it cannot be done
+//! ([`exact_cast`]); judging what a cast between two types can lose
+//! ([`cast_loss`]); and [`place`], which finds where a value falls among the
+//! values of a type.
 
 use std::cmp::Ordering;
 
@@ -76,6 +78,166 @@ pub(crate) fn place_instant(ticks: i128, unit: TimeUnit, operand: &DataType) -> 
         })),
         _ => None,
     }
+}
+
+/// What a cast from one type to another can lose, for every value of the
+/// first type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Loss {
+    /// Nothing: every value comes through unchanged.
+    None,
+    /// Only values outside the target's range (a timestamp or date cast to
+    /// a finer timestamp unit, whose `i64` covers fewer years).
+    Range,
+    /// Digits or fractions (a decimal to fewer integer digits or a smaller
+    /// scale, a timestamp to a coarser unit, a float to an exact type).
+    Precision,
+}
+
+/// What casting a value of `from` to `to` can lose. A cast to a float type
+/// counts as lossless: a float result holds the nearest float, which is
+/// what DataFusion computes for a float column. Pairs this does not judge
+/// count as lossless too, leaving them to DataFusion.
+pub(crate) fn cast_loss(from: &DataType, to: &DataType) -> Loss {
+    use DataType as T;
+    if from == to || from == &T::Null || to.is_floating() {
+        return Loss::None;
+    }
+    let digits = |t: &DataType| -> Option<i32> {
+        Some(match t {
+            T::Int8 | T::UInt8 => 3,
+            T::Int16 | T::UInt16 => 5,
+            T::Int32 | T::UInt32 => 10,
+            T::Int64 => 19,
+            T::UInt64 => 20,
+            T::Decimal128(precision, scale) => i32::from(*precision) - i32::from(*scale),
+            _ => return None,
+        })
+    };
+    let scale = |t: &DataType| match t {
+        T::Decimal128(_, scale) => i32::from(*scale),
+        _ => 0,
+    };
+    let rank = |unit: &TimeUnit| ticks_per_second(*unit);
+    match (from, to) {
+        (f, t) if f.is_integer() && t.is_integer() => {
+            if int_range_within(f, t) {
+                Loss::None
+            } else {
+                Loss::Precision
+            }
+        }
+        // An integer or decimal and a decimal: enough integer digits and scale.
+        (f, t) if digits(f).is_some() && digits(t).is_some() => {
+            if digits(t) >= digits(f) && scale(t) >= scale(f) {
+                Loss::None
+            } else {
+                Loss::Precision
+            }
+        }
+        (f, _) if f.is_floating() => Loss::Precision,
+        (T::Timestamp(from_unit, _), T::Timestamp(to_unit, _)) => {
+            match rank(to_unit).cmp(&rank(from_unit)) {
+                Ordering::Greater => Loss::Range,
+                Ordering::Less => Loss::Precision,
+                Ordering::Equal => Loss::None,
+            }
+        }
+        (T::Date32 | T::Date64, T::Timestamp(TimeUnit::Nanosecond, _)) => Loss::Range,
+        (T::Timestamp(..) | T::Date64, T::Date32) | (T::Timestamp(..), T::Date64) => {
+            Loss::Precision
+        }
+        _ => Loss::None,
+    }
+}
+
+/// Whether every value of integer type `from` is a value of integer type `to`.
+fn int_range_within(from: &DataType, to: &DataType) -> bool {
+    use DataType as T;
+    let range = |t: &DataType| -> (i128, i128) {
+        match t {
+            T::Int8 => (i8::MIN.into(), i8::MAX.into()),
+            T::Int16 => (i16::MIN.into(), i16::MAX.into()),
+            T::Int32 => (i32::MIN.into(), i32::MAX.into()),
+            T::Int64 => (i64::MIN.into(), i64::MAX.into()),
+            T::UInt8 => (0, u8::MAX.into()),
+            T::UInt16 => (0, u16::MAX.into()),
+            T::UInt32 => (0, u32::MAX.into()),
+            _ => (0, u64::MAX.into()),
+        }
+    };
+    let ((from_min, from_max), (to_min, to_max)) = (range(from), range(to));
+    to_min <= from_min && from_max <= to_max
+}
+
+/// `value` as a value of `to`, when the cast keeps it: an integer, decimal,
+/// date or timestamp that comes back unchanged from the cast. A float with
+/// a fraction is the number its shortest decimal text names (`0.1` is
+/// 0.1), and an integral float its exact integer (`2.0**63` is 2^63); a
+/// round trip would not do, since Arrow's float-to-decimal cast can turn
+/// `2.5` at scale 33 into 2.50000000000000015216… and read it back as 2.5.
+/// A cast to a float keeps the nearest float.
+pub(crate) fn exact_cast(value: &ScalarValue, to: &DataType) -> Option<ScalarValue> {
+    use ScalarValue as S;
+    if &value.data_type() == to {
+        return Some(value.clone());
+    }
+    // A number at a number type: placed exactly, since Arrow cannot rescale a
+    // decimal across a gap of more than 38 digits (scale 38 to scale -1).
+    if decimal_of(value).is_some() && (to.is_integer() || matches!(to, DataType::Decimal128(..))) {
+        return match place(value, to)? {
+            Placement::Exact(exact) => Some(exact),
+            Placement::Between(_) | Placement::Beyond(_) => None,
+        };
+    }
+    let cast = value.cast_to(to).ok().filter(|cast| !cast.is_null())?;
+    if to.is_floating() {
+        return Some(cast);
+    }
+    let kept = match value {
+        S::Float32(Some(v)) => float_is(f64::from(*v), &v.to_string(), &cast),
+        S::Float64(Some(v)) => float_is(*v, &v.to_string(), &cast),
+        _ => cast.cast_to(&value.data_type()).ok().as_ref() == Some(value),
+    };
+    kept.then_some(cast)
+}
+
+/// Whether the float `float` (whose shortest decimal text is `text`) is the
+/// integer or decimal `value`.
+fn float_is(float: f64, text: &str, value: &ScalarValue) -> bool {
+    if float.is_finite() && float.fract() == 0.0 && float.abs() < 2f64.powi(127) {
+        // An integral float below 2^127 converts to i128 exactly.
+        return same_number(&(float as i128).to_string(), value);
+    }
+    same_number(text, value)
+}
+
+/// Whether the decimal text `text` (no exponent) and the integer or decimal
+/// `value` are the same number.
+fn same_number(text: &str, value: &ScalarValue) -> bool {
+    let Some((value, value_scale)) = decimal_of(value) else {
+        return false;
+    };
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let Ok(unscaled) = format!("{whole}{fraction}").parse::<i128>() else {
+        return false;
+    };
+    let unscaled = if negative { -unscaled } else { unscaled };
+    let Ok(text_scale) = i32::try_from(fraction.len()) else {
+        return false;
+    };
+    // Compare at the larger scale.
+    let scale = text_scale.max(i32::from(value_scale));
+    let at = |v: i128, s: i32| {
+        10i128
+            .checked_pow((scale - s).unsigned_abs())
+            .and_then(|f| v.checked_mul(f))
+    };
+    matches!((at(unscaled, text_scale), at(value, i32::from(value_scale))), (Some(a), Some(b)) if a == b)
 }
 
 /// An integer or decimal value as an unscaled integer and its scale.
@@ -392,6 +554,130 @@ mod tests {
         ];
         for (operand, value, expected) in table {
             assert_eq!(place(&value, &operand), expected, "{value:?} at {operand}");
+        }
+    }
+
+    #[test]
+    fn cast_losses() {
+        use DataType as T;
+        use Loss::{Precision, Range};
+        let table = [
+            (T::Decimal128(5, 2), T::Decimal128(36, 33), Loss::None),
+            (T::Decimal128(5, 2), T::Decimal128(38, 33), Loss::None),
+            (T::Decimal128(38, 10), T::Decimal128(38, 20), Precision),
+            (T::Decimal128(38, -1), T::Decimal128(38, 38), Precision),
+            (T::Decimal128(14, 7), T::Decimal128(38, 33), Precision),
+            (T::Int64, T::Decimal128(20, 0), Loss::None),
+            (T::Int64, T::Decimal128(38, 33), Precision),
+            (T::UInt64, T::Decimal128(22, 2), Loss::None),
+            (T::Int32, T::Int64, Loss::None),
+            (T::Int64, T::UInt64, Precision),
+            (T::Int64, T::Float64, Loss::None),
+            (T::Float64, T::Decimal128(30, 15), Precision),
+            (
+                T::Timestamp(Second, None),
+                T::Timestamp(Microsecond, None),
+                Range,
+            ),
+            (
+                T::Timestamp(Nanosecond, None),
+                T::Timestamp(Second, None),
+                Precision,
+            ),
+            (T::Date32, T::Timestamp(Nanosecond, None), Range),
+            (T::Date32, T::Timestamp(Second, None), Loss::None),
+            (T::Timestamp(Second, None), T::Date32, Precision),
+            (T::Utf8, T::Utf8View, Loss::None),
+        ];
+        for (from, to, expected) in table {
+            assert_eq!(cast_loss(&from, &to), expected, "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn exact_casts() {
+        use ScalarValue as S;
+        let table = [
+            // Arrow's cast gives 2.50000000000000015216… at scale 33.
+            (S::Float64(Some(2.5)), DataType::Decimal128(38, 33), None),
+            (
+                S::Float64(Some(2.5)),
+                DataType::Decimal128(30, 15),
+                Some(dec(25 * 10i128.pow(14), 30, 15)),
+            ),
+            (
+                S::Float64(Some(0.1)),
+                DataType::Decimal128(30, 15),
+                Some(dec(10i128.pow(14), 30, 15)),
+            ),
+            (
+                S::Float64(Some(2f64.powi(63))),
+                DataType::UInt64,
+                Some(S::UInt64(Some(1 << 63))),
+            ),
+            (S::Float64(Some(1.5)), DataType::Int64, None),
+            (
+                S::Float64(Some(2.0)),
+                DataType::Int64,
+                Some(S::Int64(Some(2))),
+            ),
+            (
+                S::Float64(Some(-0.0)),
+                DataType::Int64,
+                Some(S::Int64(Some(0))),
+            ),
+            (S::Float64(Some(f64::NAN)), DataType::Int64, None),
+            (S::Float64(Some(1.236)), DataType::Decimal128(5, 2), None),
+            (
+                S::Float64(Some(1.1)),
+                DataType::Decimal128(5, 2),
+                Some(dec(110, 5, 2)),
+            ),
+            (
+                S::Float64(Some(0.1)),
+                DataType::Float32,
+                Some(S::Float32(Some(0.1))),
+            ),
+            (dec(15, 2, 1), DataType::Int64, None),
+            (
+                dec(1 << 63, 19, 0),
+                DataType::UInt64,
+                Some(S::UInt64(Some(1 << 63))),
+            ),
+            (dec(1 << 63, 19, 0), DataType::Int64, None),
+            (S::Int64(Some(-1)), DataType::UInt64, None),
+            (S::Int64(Some(300)), DataType::Int8, None),
+            (dec(15, 2, 1), DataType::Decimal128(10, -1), None),
+            (
+                dec(20, 2, 0),
+                DataType::Decimal128(10, -1),
+                Some(dec(2, 10, -1)),
+            ),
+            // 39 digits between the scales: past what Arrow can rescale.
+            (
+                dec(0, 1, 38),
+                DataType::Decimal128(38, -1),
+                Some(dec(0, 38, -1)),
+            ),
+            (dec(1, 1, 38), DataType::Decimal128(38, -1), None),
+            (
+                timestamp_scalar(Microsecond, Some(86_400_000_000), None),
+                DataType::Date32,
+                Some(S::Date32(Some(1))),
+            ),
+            (
+                timestamp_scalar(Microsecond, Some(86_400_000_001), None),
+                DataType::Date32,
+                None,
+            ),
+            (
+                timestamp_scalar(Microsecond, Some(1_500_000), None),
+                DataType::Timestamp(Second, None),
+                None,
+            ),
+        ];
+        for (value, to, expected) in table {
+            assert_eq!(exact_cast(&value, &to), expected, "{value:?} as {to}");
         }
     }
 

@@ -174,18 +174,21 @@ def test_decimal_in_list_mixing_wide_and_fine_items(t):
 
 def test_decimal_values_are_fitted_together(t):
     """`coalesce` unifies all its values at once: two Decimals that each share a
-    type with decimal(5, 2) need 69 digits together, which used to overflow at collect."""
+    type with decimal(5, 2) need 69 digits together, which used to overflow at
+    collect. A literal the column's type holds exactly takes that type (D-b)."""
     kind, _ = _typed(t, lambda r: coalesce(r.p, FINE_123))
     assert kind == "decimal128(36, 33)"
-    with pytest.raises(ValueError, match="does not fit column 'p'.*38 digits"):
-        t.derive(v=lambda r: coalesce(r.p, BIG, FINE_123))
+    # 1.23 takes decimal(5, 2), and the 36-digit integer then shares
+    # decimal(38, 2) with the column exactly.
+    kind, values = _typed(t, lambda r: coalesce(r.p, BIG, FINE_123))
+    assert (kind, values[3]) == ("decimal128(38, 2)", BIG)
     # An integer widens as decimal(20, 0); 1.23 then takes the column's type.
     kind, values = _typed(t, lambda r: coalesce(r.p, 10**18, FINE_123))
     assert (kind, values[3]) == ("decimal128(22, 2)", Decimal(10**18))
-    # Next to an integer column, which DataFusion widens as decimal(20, 0):
-    # placed exactly, or an error instead of an overflow on large values.
+    # Next to an integer column: an integral Decimal takes the column's own
+    # type, a fractional one is an error instead of an overflow on large values.
     kind, values = _typed(t, lambda r: coalesce(r.i, Decimal("2." + "0" * 33)))
-    assert (kind, values[0]) == ("decimal128(20, 0)", Decimal(1))
+    assert (kind, values[0]) == ("int64", 1)
     with pytest.raises(ValueError, match="does not fit column 'i'"):
         t.derive(v=lambda r: coalesce(r.i, FINE_123))
 
@@ -298,7 +301,7 @@ def test_negative_scale_column_against_a_finer_literal(neg_scale, lit):
 def test_negative_scale_column_value_positions(neg_scale):
     with pytest.raises(ValueError, match="does not fit column 'x'"):
         neg_scale.derive(v=lambda r: r.x.fill_null(Decimal("1E-38")))
-    with pytest.raises(ValueError, match="does not fit column 'x'"):
+    with pytest.raises(ValueError, match=r"column 'x' cannot hold the shift\(\) default"):
         neg_scale.derive(v=lambda r: r.x.shift(1, default=Decimal("1E-38")))
     kind, values = _typed(neg_scale, lambda r: r.x.fill_null(Decimal("0E-38")))
     assert (kind, values) == ("decimal128(38, -1)", [10, -10, 0, 0])

@@ -140,6 +140,18 @@ ref = "#227 (D-e)"
 note = "no decimal(38, 20) value equals 10**18; the widened cast overflowed at collect"
 expect = '{"result": {"v": {"type": "bool", "values": [false, false]}}}'
 
+["pairs::big_integer_is_in"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "is_in agrees with the == disjunction; 10**18 equals no decimal(38, 20) value"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true]}}}'
+
+["pairs::big_integer_fill_null"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "a plan-time error naming the column instead of an overflow at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
 ["pairs::big_integer_column"]
 status = "PREEXISTING_BUG"
 ref = "#227 (column pair, not covered)"
@@ -171,6 +183,12 @@ status = "PREEXISTING_BUG"
 ref = "design review F9"
 
 # --- widening ------------------------------------------------------------------
+
+["widening::small_float_then_fine"]
+status = "INTENDED_CHANGE"
+ref = "D-b, design review F7"
+note = "both literals are exact at the column's decimal(5, 2) and take it; main gave decimal(30, 15)"
+expect = '{"result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(2.50)", "Decimal(1.23)"]}}}'
 
 ["widening::fine_alone"]
 status = "INTENDED_CHANGE"
