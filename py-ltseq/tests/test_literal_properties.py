@@ -391,7 +391,7 @@ def _encode(array, encoding):
 ])
 def test_encoded_column_reads_literals_like_the_decoded_column(column, case, encoding):
     if encoding == "run_end" and case.startswith("shift"):
-        pytest.skip("Arrow cannot shift a run-end encoded array, with or without a default")
+        pytest.skip("Arrow cannot shift a run-end encoded array, with or without a default (#239)")
     expr = ENCODED_CASES[column][case]
     plain = ENCODED_COLUMNS[column]
 

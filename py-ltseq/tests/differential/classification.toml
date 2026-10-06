@@ -184,16 +184,16 @@ note = "DataFusion compares a date and a timestamp column in nanoseconds; year 2
 
 ["pairs::decimal_gt_negative_tiny_float"]
 status = "PREEXISTING_BUG"
-ref = "design review F9"
+ref = "#240 (design review F9)"
 note = "a float literal next to a decimal column is rounded to Decimal(30, 15)"
 
 ["pairs::decimal_eq_tiny_float"]
 status = "PREEXISTING_BUG"
-ref = "design review F9"
+ref = "#240 (design review F9)"
 
 ["pairs::decimal_ne_tiny_float"]
 status = "PREEXISTING_BUG"
-ref = "design review F9"
+ref = "#240 (design review F9)"
 
 # --- widening ------------------------------------------------------------------
 
