@@ -1,0 +1,36 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "unit_literal_eq", "result": {"v": {"type": "bool", "values": [true, true, null]}}}
+{"id": "unit_column_eq", "result": {"v": {"type": "bool", "values": [false, false, null]}}}
+{"id": "unit_columns_eq", "result": {"v": {"type": "bool", "values": [false, true, null]}}}
+{"id": "unit_columns_lt", "result": {"v": {"type": "bool", "values": [true, false, null]}}}
+{"id": "unit_columns_subtract", "result": {"v": {"type": "duration[us]", "values": ["datetime.timedelta(microseconds=1)", "datetime.timedelta(0)", null]}}}
+{"id": "unit_columns_case", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 0, 5)"]}}}
+{"id": "unit_columns_coalesce", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 0, 5)"]}}}
+{"id": "unit_folded_literal_eq", "result": {"v": {"type": "bool", "values": [true, true, null]}}}
+{"id": "float_gt_decimal_literal", "result": {"v": {"type": "bool", "values": [true, true, true, null]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast to Decimal128(30, 15). Overflowing on NaN", "stage": "collect"}, "id": "float_gt_decimal_column"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Cannot coerce arithmetic expression Float64 + Utf8 to valid types", "stage": "plan"}, "id": "float_plus_decimal_literal"}
+{"id": "float_plus_decimal_column", "result": {"v": {"type": "double", "values": ["NaN", 2.0, 1e-16, null]}}}
+{"id": "float_fill_decimal_literal", "result": {"v": {"type": "double", "values": ["NaN", 2.0, 1e-16, 1.0]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast to Decimal128(30, 15). Overflowing on NaN", "stage": "collect"}, "id": "float_fill_decimal_column"}
+{"id": "decimal_gt_float_literal", "result": {"v": {"type": "bool", "values": [true, true, false, true]}}}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Cannot coerce arithmetic expression Utf8 + Int64 to valid types", "stage": "plan"}, "id": "float_gt_decimal_expression"}
+{"id": "decimal_gt_negative_tiny_float", "result": {"v": {"type": "bool", "values": [false, null]}}}
+{"id": "decimal_eq_tiny_float", "result": {"v": {"type": "bool", "values": [true, null]}}}
+{"id": "decimal_ne_tiny_float", "result": {"v": {"type": "bool", "values": [false, null]}}}
+{"id": "zoned_eq_naive_literal", "result": {"v": {"type": "bool", "values": [true]}}}
+{"id": "zoned_eq_naive_column", "result": {"v": {"type": "bool", "values": [true]}}}
+{"id": "zoned_eq_date_literal", "result": {"v": {"type": "bool", "values": [true]}}}
+{"id": "zoned_eq_date_column", "result": {"v": {"type": "bool", "values": [false]}}}
+{"id": "naive_eq_aware_literal", "result": {"v": {"type": "bool", "values": [false]}}}
+{"id": "naive_eq_zoned_column", "result": {"v": {"type": "bool", "values": [true]}}}
+{"id": "far_date_eq_literal", "result": {"v": {"type": "bool", "values": [true, false]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Execution error: Cannot cast Date32 value 120530 to Timestamp(ns): converted value exceeds the representable i64 range", "stage": "collect"}, "id": "far_date_eq_column"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "integer_eq_date_literal"}
+{"id": "integer_eq_date_column", "result": {"v": {"type": "bool", "values": [true, true]}}}
+{"id": "string_eq_date_literal", "result": {"v": {"type": "bool", "values": [true, false]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast string 'x' to value of Date32 type", "stage": "collect"}, "id": "string_eq_date_column"}
+{"id": "fine_decimal_literal", "result": {"v": {"type": "bool", "values": [true, false]}}}
+{"id": "fine_decimal_column", "result": {"v": {"type": "bool", "values": [true, false]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "big_integer_literal"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Invalid argument error: 1000000000000000000.00000000000000000000 is too large to store in a Decimal128 of precision 38. Max is 999999999999999999.99999999999999999999", "stage": "collect"}, "id": "big_integer_column"}

@@ -1,0 +1,185 @@
+# Cases whose outcome on this branch is not main's recorded outcome, or
+# whose recorded outcome is wrong. A case not listed here is UNCHANGED:
+# it must reproduce expected/<module>.jsonl (recorded on main 68d6114).
+#
+# status:
+#   INTENDED_CHANGE  a deliberate behavior change; `expect` is the new outcome
+#   BUG_FIXED        main is wrong; `expect` is the right outcome
+#   PREEXISTING_BUG  main is wrong and this branch keeps main's outcome; `ref` tracks the fix
+#   REGRESSION       never allowed in a merged state
+#   UNDECIDED        never allowed in a merged state
+# `expect` is the outcome as JSON (see harness.comparable: errors compare
+# by class and stage only). `ref` points to the issue, decision or finding.
+
+# --- composition: a CASE receiver, dt.diff and subtraction -------------------
+
+["composition::dt_diff_column"]
+status = "BUG_FIXED"
+ref = "design review F3"
+note = "dt.diff read the CASE as timestamp[s] while it runs as timestamp[us], reporting 10^6 times the elapsed seconds"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::dt_diff_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached dt.diff as a string"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::dt_diff_literal_sw"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached dt.diff as a string"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::subtract_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached the subtraction as a string"
+expect = '{"result": {"v": {"type": "duration[us]", "values": ["datetime.timedelta(seconds=1, microseconds=250000)", "datetime.timedelta(seconds=1)", "datetime.timedelta(seconds=1, microseconds=500000)", null]}}}'
+
+["composition::subtract_literal_sw"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached the subtraction as a string"
+expect = '{"result": {"v": {"type": "duration[us]", "values": ["datetime.timedelta(seconds=1, microseconds=250000)", "datetime.timedelta(seconds=1)", "datetime.timedelta(seconds=1, microseconds=500000)", null]}}}'
+
+["composition::empty_result_type"]
+status = "BUG_FIXED"
+ref = "design review F10"
+note = "an empty result took the projection's pre-coercion type"
+expect = '{"result": {"v": {"type": "timestamp[us]", "values": []}}}'
+
+["composition::empty_sorted_result_type"]
+status = "BUG_FIXED"
+ref = "design review F10"
+note = "an empty result took the projection's pre-coercion type"
+expect = '{"result": {"v": {"type": "timestamp[us]", "values": []}}}'
+
+# --- folding -------------------------------------------------------------------
+
+["folding_and_scan::fold_int"]
+status = "BUG_FIXED"
+ref = "#193"
+note = "folding went through f64 and lost a unit above 2^53"
+expect = '{"result": {"v": {"type": "int64", "values": [9007199254740993, 9007199254740993]}}}'
+
+["folding_and_scan::fold_int_compare"]
+status = "BUG_FIXED"
+ref = "#193"
+expect = '{"result": {"v": {"type": "bool", "values": [true, false]}}}'
+
+["folding_and_scan::fold_float"]
+status = "BUG_FIXED"
+ref = "#193"
+note = "2.0 + 3.0 folded to an Int64"
+expect = '{"result": {"v": {"type": "double", "values": [5.0, 5.0]}}}'
+
+["folding_and_scan::fold_div"]
+status = "INTENDED_CHANGE"
+ref = "#193"
+note = "a folded Int64 / Int64 is what DataFusion computes for the same arithmetic on a column (column_div)"
+expect = '{"result": {"v": {"type": "int64", "values": [3, 3]}}}'
+
+["folding_and_scan::fold_overflow"]
+status = "INTENDED_CHANGE"
+ref = "#193"
+note = "equals DataFusion's evaluation of the same arithmetic on a column (column_overflow), where Int64 wraps"
+expect = '{"result": {"v": {"type": "int64", "values": [0, 0]}}}'
+
+["folding_and_scan::boolean_identity_on_integer"]
+status = "PREEXISTING_BUG"
+ref = "#209 (D-f, Phase 6)"
+note = "x & True rewritten to x without a type check; reclassify when the PyExpr identities are deleted"
+
+# --- pairs ---------------------------------------------------------------------
+
+["pairs::unit_literal_eq"]
+status = "BUG_FIXED"
+ref = "#200, D8/P7/P8"
+note = "unwrap_cast truncated the microsecond literal to seconds"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["pairs::unit_folded_literal_eq"]
+status = "BUG_FIXED"
+ref = "design review F8"
+note = "a constant DataFusion folds to the same literal must compare like the literal"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["pairs::float_plus_decimal_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 design §2.6 (Decimal next to a float is that float)"
+note = "the Decimal reached the arithmetic as a string"
+expect = '{"result": {"v": {"type": "double", "values": ["NaN", 2.0, 1e-16, null]}}}'
+
+["pairs::float_gt_decimal_expression"]
+status = "BUG_FIXED"
+ref = "design review F8, #145 design §2.6"
+note = "a constant Decimal expression next to a float column compares like the Decimal literal 1.5"
+expect = '{"result": {"v": {"type": "bool", "values": [true, true, false, null]}}}'
+
+["pairs::naive_eq_aware_literal"]
+status = "INTENDED_CHANGE"
+ref = "D5"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::integer_eq_date_literal"]
+status = "INTENDED_CHANGE"
+ref = "pre-PR review I-3"
+note = "a plan-time error naming the column instead of an optimizer error at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::string_eq_date_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 design §2.6, plan change 4 (D-h)"
+note = "main compared the string column with the date's text"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::big_integer_literal"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "no decimal(38, 20) value equals 10**18; the widened cast overflowed at collect"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false]}}}'
+
+["pairs::big_integer_column"]
+status = "PREEXISTING_BUG"
+ref = "#227 (column pair, not covered)"
+
+["pairs::float_gt_decimal_column"]
+status = "PREEXISTING_BUG"
+ref = "#228"
+
+["pairs::float_fill_decimal_column"]
+status = "PREEXISTING_BUG"
+ref = "#228"
+
+["pairs::far_date_eq_column"]
+status = "PREEXISTING_BUG"
+ref = "design review Part V, column pairs"
+note = "DataFusion compares a date and a timestamp column in nanoseconds; year 2300 overflows"
+
+["pairs::decimal_gt_negative_tiny_float"]
+status = "PREEXISTING_BUG"
+ref = "design review F9"
+note = "a float literal next to a decimal column is rounded to Decimal(30, 15)"
+
+["pairs::decimal_eq_tiny_float"]
+status = "PREEXISTING_BUG"
+ref = "design review F9"
+
+["pairs::decimal_ne_tiny_float"]
+status = "PREEXISTING_BUG"
+ref = "design review F9"
+
+# --- widening ------------------------------------------------------------------
+
+["widening::fine_alone"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "a Decimal value keeps its digits when the column widens to them exactly"
+expect = '{"result": {"v": {"type": "decimal128(36, 33)", "values": ["Decimal(1.230000000000000000000000000000000)", "Decimal(1.230000000000000000000000000000000)"]}}}'
+
+["widening::two_decimals_too_wide"]
+status = "INTENDED_CHANGE"
+ref = "D-b, #145 design §1.3"
+note = "a plan-time error naming the literal instead of an overflow at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
