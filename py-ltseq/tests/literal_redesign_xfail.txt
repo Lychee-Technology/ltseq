@@ -260,3 +260,16 @@ P4 py-ltseq/tests/test_literal_review_regressions.py::test_case_float_decimal_fi
 P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-False]
 P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-True]
 P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[2.5-False]
+
+# Metamorphic properties.
+P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[d-u]
+P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[s-u]
+P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[u-n]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[s-u]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[u-n]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[i-f]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[p-w]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[i-p]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[d-u]
+P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[f-p]
+P2 py-ltseq/tests/test_literal_properties.py::test_linear_scan_count_matches_reference[step_gt_dec-y]
