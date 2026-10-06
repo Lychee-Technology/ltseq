@@ -125,9 +125,12 @@ pub(crate) fn binary_expr(
         ) => Some(Position::Comparison),
         BinaryOp::Native(_) => None,
     };
-    let (left, right) = match position {
-        Some(position) => literals::binary_operands(left, right, position, rx)?,
-        None => (left, right),
+    let (left, right) = match (position, op) {
+        (Some(Position::Comparison), BinaryOp::Native(operator)) => {
+            return literals::comparison(operator, left, right, rx)
+        }
+        (Some(_), _) => literals::arithmetic_operands(left, right, rx)?,
+        (None, _) => (left, right),
     };
     Ok(match op {
         BinaryOp::Native(operator) => {

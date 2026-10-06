@@ -27,6 +27,20 @@ use datafusion::scalar::ScalarValue;
 use super::exact::{exact_ticks, ticks_per_second};
 use crate::types::{decimal_text, decimal_to_f64, timestamp_scalar};
 
+/// How ltseq reads a literal next to a value of some type.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Reading {
+    /// DataFusion reads the literal as ltseq does: keep it.
+    Keep,
+    /// Use this literal instead.
+    Value(ScalarValue),
+    /// The instant a naive or date literal means in a zone, as ticks of
+    /// `unit`, when it is exact in no unit whose `i64` range holds it. Only
+    /// a comparison can use it, by placing it among the operand's values; in
+    /// any other position such a literal is an error.
+    Instant(i128, TimeUnit),
+}
+
 /// Where a literal meets the value it is read against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Position {
@@ -39,15 +53,14 @@ pub(crate) enum Position {
     Value,
 }
 
-/// The literal to use instead of `literal` next to a value of type
-/// `context`, `None` to keep it (DataFusion reads it as ltseq does), or an
-/// error. `name` describes the value in errors ("column 'x'").
+/// How to read `literal` next to a value of type `context` in `position`,
+/// or an error. `name` describes the value in errors ("column 'x'").
 pub(crate) fn interpret(
     literal: &ScalarValue,
     context: &DataType,
     position: Position,
     name: &str,
-) -> Result<Option<ScalarValue>, String> {
+) -> Result<Reading, String> {
     use DataType as T;
     use ScalarValue as S;
     let context = match context {
@@ -55,21 +68,21 @@ pub(crate) fn interpret(
         other => other,
     };
     if literal.is_null() {
-        return Ok(None);
+        return Ok(Reading::Keep);
     }
     let timestamp = timestamp_literal(literal);
     let temporal = timestamp.is_some() || matches!(literal, S::Date32(_));
     let kinds_checked = position != Position::Arithmetic;
     match (context, literal) {
-        (T::Float64, S::Decimal128(Some(value), _, scale)) => {
-            Ok(Some(S::Float64(Some(decimal_to_f64(*value, *scale)))))
-        }
+        (T::Float64, S::Decimal128(Some(value), _, scale)) => Ok(Reading::Value(S::Float64(Some(
+            decimal_to_f64(*value, *scale),
+        )))),
         (T::Float32, S::Decimal128(Some(value), _, scale)) => {
             // Parsed from the decimal text, so it is the correctly rounded float32.
             let float = decimal_text(*value, *scale)
                 .parse::<f32>()
                 .map_err(|e| format!("Decimal literal as float32: {e}"))?;
-            Ok(Some(S::Float32(Some(float))))
+            Ok(Reading::Value(S::Float32(Some(float))))
         }
         (T::Utf8 | T::LargeUtf8 | T::Utf8View, _)
             if kinds_checked && (temporal || matches!(literal, S::Decimal128(..))) =>
@@ -88,8 +101,8 @@ pub(crate) fn interpret(
                 "{name} is a date or timestamp ({context}); it cannot hold a Decimal literal"
             ))
         }
-        (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), name),
-        _ => Ok(None),
+        (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), position, name),
+        _ => Ok(Reading::Keep),
     }
 }
 
@@ -99,8 +112,18 @@ fn zoned(
     literal: &ScalarValue,
     unit: TimeUnit,
     zone: Option<&str>,
+    position: Position,
     name: &str,
-) -> Result<Option<ScalarValue>, String> {
+) -> Result<Reading, String> {
+    let beyond = |zone: &str, instant: i128, instant_unit: TimeUnit| {
+        if position == Position::Comparison {
+            Ok(Reading::Instant(instant, instant_unit))
+        } else {
+            Err(format!(
+                "{literal} in {zone} is outside the range of {name}"
+            ))
+        }
+    };
     match (timestamp_literal(literal), literal, zone) {
         (Some((_, _, Some(lit_zone))), _, None) => Err(format!(
             "{name} is timezone-naive, but the literal is timezone-aware ({lit_zone}); \
@@ -111,23 +134,28 @@ fn zoned(
             // At the literal's own unit, keeping its precision, or at the
             // operand's when the zone offset moved the instant past the range
             // of the literal's unit.
-            [lit_unit, unit]
-                .into_iter()
-                .find_map(|to| {
-                    exact_ticks(instant, lit_unit, to)
-                        .map(|ticks| timestamp_scalar(to, Some(ticks), Some(zone.into())))
-                })
-                .map(Some)
-                .ok_or_else(|| format!("{literal} in {zone} is outside the range of {name}"))
+            let exact = [lit_unit, unit].into_iter().find_map(|to| {
+                exact_ticks(instant, lit_unit, to)
+                    .map(|ticks| timestamp_scalar(to, Some(ticks), Some(zone.into())))
+            });
+            match exact {
+                Some(value) => Ok(Reading::Value(value)),
+                None => beyond(zone, instant, lit_unit),
+            }
         }
         (None, ScalarValue::Date32(Some(days)), Some(zone)) => {
             let midnight = i128::from(*days) * i128::from(86_400 * ticks_per_second(unit));
             let instant = local_to_utc(midnight, unit, zone)?;
-            i64::try_from(instant)
-                .map(|ticks| Some(timestamp_scalar(unit, Some(ticks), Some(zone.into()))))
-                .map_err(|_| format!("{literal} in {zone} is outside the range of {name}"))
+            match i64::try_from(instant) {
+                Ok(ticks) => Ok(Reading::Value(timestamp_scalar(
+                    unit,
+                    Some(ticks),
+                    Some(zone.into()),
+                ))),
+                Err(_) => beyond(zone, instant, unit),
+            }
         }
-        _ => Ok(None),
+        _ => Ok(Reading::Keep),
     }
 }
 
@@ -258,6 +286,10 @@ mod tests {
             (dec(25, 2, 1), T::Date32, Comparison, None),
         ];
         for (literal, context, position, expected) in table {
+            let expected = match expected {
+                Some(value) => Reading::Value(value),
+                None => Reading::Keep,
+            };
             assert_eq!(
                 interpret(&literal, &context, position, "column 'x'").unwrap(),
                 expected,
@@ -328,18 +360,25 @@ mod tests {
     fn a_zone_offset_can_move_an_instant_past_the_literal_unit() {
         // pandas.Timestamp.max as a naive literal is 2262-04-11 23:47:16.854775807;
         // New York is west of UTC, so as wall-clock time there it is an
-        // instant past the nanosecond range. It is not exact at microseconds,
-        // so it has no reading here (comparisons place it exactly).
+        // instant past the nanosecond range. It is not exact at microseconds:
+        // a comparison places the instant, any other position refuses it.
         let max = S::TimestampNanosecond(Some(i64::MAX), None);
         let us_ny = T::Timestamp(TimeUnit::Microsecond, Some(Arc::from(NY)));
-        assert!(interpret(&max, &us_ny, Comparison, "x")
+        assert!(matches!(
+            interpret(&max, &us_ny, Comparison, "x").unwrap(),
+            Reading::Instant(instant, TimeUnit::Nanosecond) if instant > i128::from(i64::MAX)
+        ));
+        assert!(interpret(&max, &us_ny, Value, "x")
             .unwrap_err()
             .contains("outside the range"));
-        // A whole microsecond before it is exact at microseconds.
+        // A whole second earlier it is exact at microseconds.
         let late = S::TimestampNanosecond(Some(i64::MAX - 854_775_807), None);
-        let read = interpret(&late, &us_ny, Value, "x").unwrap().unwrap();
+        let read = interpret(&late, &us_ny, Value, "x").unwrap();
         assert!(
-            matches!(read, S::TimestampMicrosecond(Some(_), Some(_))),
+            matches!(
+                read,
+                Reading::Value(S::TimestampMicrosecond(Some(_), Some(_)))
+            ),
             "{read:?}"
         );
     }

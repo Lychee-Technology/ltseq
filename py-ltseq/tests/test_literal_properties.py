@@ -248,6 +248,35 @@ def test_mirror(operand, op, lit):
 
 
 # ---------------------------------------------------------------------------
+# Membership is equality: is_in agrees with the == disjunction
+# ---------------------------------------------------------------------------
+
+MEMBERSHIP = {
+    "i": [1, 2.0, D("2.5"), 2**53 + 1, D("123456789012345678901234567890")],
+    "p": [D("1.23"), D("1.230000000000000000000000000000000"), D("123456789012345678901234567890123456"), 2],
+    "w": [FINE20, 10**18, D("2.5")],
+    "s": [CUT, NS_FINE, datetime(1970, 1, 1, 0, 0, 2)],
+    "u": [CUT, NS_FINE, datetime(2300, 1, 1)],
+    "d": [datetime(1970, 1, 1, 6), date(1970, 1, 2), datetime(2024, 1, 1)],
+    "z": [datetime(1970, 1, 1, 0, 0, 1), date(1970, 1, 1), _utc(18000)],
+}
+
+
+@pytest.mark.parametrize("name", list(MEMBERSHIP))
+def test_is_in_agrees_with_the_equality_disjunction(name):
+    items = MEMBERSHIP[name]
+
+    def disjunction(r):
+        column = getattr(r, name)
+        out = column == items[0]
+        for item in items[1:]:
+            out = out | (column == item)
+        return out
+
+    assert derived(lambda r: getattr(r, name).is_in(items)) == derived(disjunction)
+
+
+# ---------------------------------------------------------------------------
 # Coalesce permutation (the arguments are never both set on a row)
 # ---------------------------------------------------------------------------
 

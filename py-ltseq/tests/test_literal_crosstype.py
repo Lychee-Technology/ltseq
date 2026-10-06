@@ -225,18 +225,8 @@ def table():
     return LTSeq.from_arrow(pa.table({"k": pa.array(range(5), pa.int64()), **COLUMNS}))
 
 
-# DataFusion's unwrap_cast simplifier panics planning a float literal against a
-# negative-scale decimal column (#226, apache/datafusion#24896).
-KNOWN_PANICS = {("decneg", "float"), ("decneg_narrow", "float")}
-
-
 def _param(column, lname, op, expected):
-    marks = (
-        [pytest.mark.xfail(strict=True, reason="#226: DataFusion's unwrap_cast panics")]
-        if (column, lname) in KNOWN_PANICS
-        else []
-    )
-    return pytest.param(column, lname, op, expected, marks=marks, id=f"{column}-{op}-{lname}")
+    return pytest.param(column, lname, op, expected, id=f"{column}-{op}-{lname}")
 
 
 @pytest.mark.parametrize("column, lname, op, expected", [_param(*cell) for cell in CELLS])
