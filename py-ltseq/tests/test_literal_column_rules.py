@@ -309,6 +309,63 @@ def test_negative_scale_column_value_positions(neg_scale):
     assert (kind, values) == ("decimal128(38, -1)", [0, 10, -10, None])
 
 
+# ---- Decimal columns of every Arrow width ----
+
+
+DECIMAL_WIDTHS = [
+    pa.decimal32(9, 2),
+    pa.decimal64(18, 2),
+    pa.decimal128(20, 2),
+    pa.decimal256(20, 2),
+    pa.decimal256(76, 20),
+]
+
+
+@pytest.mark.parametrize("dtype", DECIMAL_WIDTHS, ids=str)
+@pytest.mark.parametrize("fill", [1, 1.5, 1.236, Decimal("1.5"), Decimal("1.236")], ids=repr)
+def test_values_keep_a_decimal_column_of_any_width_exact(dtype, fill):
+    """A literal is at most a Decimal128, but a column can be a decimal of any
+    width. Next to one, a fill value the shared type holds exactly is kept,
+    and so are the column's values (review F1 on #225: Decimal256 refused
+    1.5, and `fill_null(1)` rounded Decimal32/64 values to int64)."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.23"), None], dtype)}))
+    for fn in (
+        lambda r: r.x.fill_null(fill),
+        lambda r: coalesce(r.x, fill),
+        lambda r: if_else(r.x.is_null(), fill, r.x),
+    ):
+        kind, values = _typed(t, fn)
+        assert not kind.startswith(("int", "uint")), kind
+        assert [Decimal(str(v)) for v in values] == [Decimal("1.23"), Decimal(str(fill))]
+
+
+@pytest.mark.parametrize(
+    "dtype, tiny",
+    [
+        (pa.decimal32(9, 2), ValueError),
+        (pa.decimal64(18, 2), ValueError),
+        (pa.decimal128(20, 2), ValueError),
+        (pa.decimal256(20, 2), "decimal256(56, 38)"),
+        (pa.decimal256(76, 20), ValueError),
+    ],
+    ids=["decimal32", "decimal64", "decimal128", "decimal256-narrow", "decimal256-wide"],
+)
+def test_values_with_a_scale_38_decimal_at_any_width(dtype, tiny):
+    """1E-38 shares a type with the column only where the width has room for
+    both (a Decimal256(20, 2) does); elsewhere it is refused, also where
+    DataFusion has no common type at all (Decimal32/64 and a scale-38
+    literal). A scale-38 literal the column holds exactly takes its type."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.23"), None], dtype)}))
+    fill_tiny = lambda r: r.x.fill_null(Decimal("1E-38"))  # noqa: E731
+    if tiny is ValueError:
+        with pytest.raises(ValueError, match="does not fit column 'x'"):
+            t.derive(v=fill_tiny)
+    else:
+        assert _typed(t, fill_tiny) == (tiny, [Decimal("1.23"), Decimal("1E-38")])
+    _, values = _typed(t, lambda r: r.x.fill_null(Decimal("0.1" + "0" * 37)))
+    assert values == [Decimal("1.23"), Decimal("0.1")]
+
+
 # ---- Decimal / date / datetime literal against a string operand: an error ----
 
 
@@ -693,6 +750,20 @@ U64_MAX = 2**64 - 1
         (pa.decimal128(5, 2), 1000, ValueError),
         (pa.decimal128(10, -1), Decimal("1.5"), ValueError),
         (pa.decimal128(10, -1), Decimal("20"), Decimal("20")),
+        # decimal columns of the other widths (review F1 on #225)
+        (pa.decimal32(9, 2), 1.5, Decimal("1.50")),
+        (pa.decimal32(9, 2), 1.236, ValueError),
+        (pa.decimal32(9, 2), 10**7, ValueError),
+        (pa.decimal64(18, 2), 1.5, Decimal("1.50")),
+        (pa.decimal64(18, 2), 1.236, ValueError),
+        (pa.decimal64(18, -2), 300, Decimal(300)),
+        (pa.decimal64(18, -2), 1.5, ValueError),
+        (pa.decimal256(20, 2), 1.5, Decimal("1.50")),
+        (pa.decimal256(20, 2), 1.236, ValueError),
+        (pa.decimal256(76, 20), 1.236, Decimal("1.236")),
+        (pa.decimal256(76, 20), Decimal(10**37), Decimal(10**37)),
+        (pa.decimal256(76, 20), 2.0**200, ValueError),
+        (pa.decimal256(76, 0), 2.0**200, Decimal(2**200)),
         # a float column holds the nearest float
         (pa.float32(), 0.1, pytest.approx(0.1)),
     ],

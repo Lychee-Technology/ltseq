@@ -214,3 +214,65 @@ status = "INTENDED_CHANGE"
 ref = "D-b, #145 design §1.3"
 note = "a plan-time error naming the literal instead of an overflow at collect"
 expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+# --- decimal widths ------------------------------------------------------------
+
+["decimal_widths::shift_rounded_float_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-c"
+note = "main rounded the default 1.236 to the column's 1.24"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::shift_rounded_float_d256"]
+status = "INTENDED_CHANGE"
+ref = "D-c"
+note = "main rounded the default 1.236 to the column's 1.24"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::fill_int_d32"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225 (pre-existing gap)"
+note = "DataFusion's common type of decimal32 and Int64 is int64, which rounded 1.23 to 1; the literal now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.23)", "Decimal(1.00)"]}}}'
+
+["decimal_widths::fill_int_d64"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225 (pre-existing gap)"
+note = "DataFusion's common type of decimal64 and Int64 is int64, which rounded 1.23 to 1; the literal now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal64(18, 2)", "values": ["Decimal(1.23)", "Decimal(1.00)"]}}}'
+
+["decimal_widths::fill_rounded_decimal_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "main rounded the literal to the column's scale; the shared type now widens to keep its digits, as for decimal128"
+expect = '{"result": {"v": {"type": "decimal128(10, 3)", "values": ["Decimal(1.230)", "Decimal(1.236)"]}}}'
+
+["decimal_widths::fill_tiny_decimal_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "a plan-time error naming the literal instead of a failure at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::tiny_decimal_d32"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "DataFusion has no common type for decimal32 and a scale-38 literal; the literal is placed among the column's values"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::int_negative_scale_d64"]
+status = "BUG_FIXED"
+ref = "#226, review of 58e4faa on #225"
+note = "DataFusion compares a decimal64 and an Int64 as int64, which panicked for a negative-scale column"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["decimal_widths::decimal_d256"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "main returned 1 >= 1.2345 as true"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::float_d256"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "DataFusion cast the decimal256(76, 0) column to decimal256(76, 15), which overflowed at collect"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'

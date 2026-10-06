@@ -228,18 +228,26 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
 /// operand's values; `None` to leave the comparison to DataFusion.
 ///
 /// DataFusion compares the two at a common type. For an exact operand (an
-/// integer, decimal, date or timestamp) that goes wrong when the common
-/// type is a decimal, date or timestamp type the operand must be cast to:
-/// the cast may not hold every operand value (the 38-digit decimal clamp,
-/// the nanosecond range), and the simplifier moves it onto the literal,
-/// which truncates a finer timestamp (#200) and panics on a negative-scale
-/// decimal (apache/datafusion#24896). It also goes wrong when the literal
-/// does not fit the common type exactly. In both cases the literal is
-/// placed among the operand's own values, so the operand is never cast. An
-/// integer common type is left alone: the simplifier unwraps integer casts
-/// exactly. The value placed is the literal's own, except a float's: that
-/// is DataFusion's reading of it at the common type, so a float literal
-/// keeps DataFusion's semantics.
+/// integer, a decimal of any width, a date or timestamp) that goes wrong
+/// in three ways, and in each the literal is placed among the operand's
+/// own values instead, so the operand is never cast:
+///
+/// - The operand must be cast to the common type. The cast may not hold
+///   every operand value (the 38- and 76-digit decimal clamps, the
+///   nanosecond range, the Int64 DataFusion gives a Decimal32 or Decimal64
+///   next to an Int64), and the simplifier moves it onto the literal, which
+///   truncates a finer timestamp (#200) and panics on a negative-scale
+///   decimal (apache/datafusion#24896). An integer operand at an integer
+///   common type is left alone: the simplifier unwraps integer casts
+///   exactly.
+/// - The literal does not fit the common type exactly.
+/// - There is no common type: a Decimal32, Decimal64 or Decimal256 operand
+///   and a decimal literal with more digits than that width holds together
+///   with the operand's.
+///
+/// The value placed is the literal's own, except a float's: that is
+/// DataFusion's reading of it at the common type, so a float literal keeps
+/// DataFusion's semantics.
 fn placement(
     operand: &Expr,
     op: Operator,
@@ -249,22 +257,24 @@ fn placement(
     let operand_type = rx.value_type(operand).ok()?;
     let exact = |t: &DataType| {
         t.is_integer()
+            || t.is_decimal()
             || matches!(
                 t,
-                DataType::Decimal128(..)
-                    | DataType::Date32
-                    | DataType::Date64
-                    | DataType::Timestamp(..)
+                DataType::Date32 | DataType::Date64 | DataType::Timestamp(..)
             )
     };
     if !exact(&operand_type) {
         return None;
     }
     let literal_type = literal.data_type();
-    let (common, literal_common) = BinaryTypeCoercer::new(&operand_type, &op, &literal_type)
-        .get_input_types()
-        .ok()?;
-    let operand_cast = common != operand_type && exact(&common) && !common.is_integer();
+    let Ok((common, literal_common)) =
+        BinaryTypeCoercer::new(&operand_type, &op, &literal_type).get_input_types()
+    else {
+        return place(literal, &operand_type);
+    };
+    let operand_cast = common != operand_type
+        && exact(&common)
+        && !(common.is_integer() && operand_type.is_integer());
     let reading = literal.cast_to(&literal_common).ok();
     let read_exactly = reading
         .as_ref()
@@ -333,6 +343,13 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 ///    literal widens the unit, as DataFusion does) and refused for a date
 ///    context, whose dates a nanosecond timestamp cannot all hold.
 ///
+/// When DataFusion has no common type in 1, numbers next to a numeric
+/// context still go on to 2: that happens only for a Decimal32, Decimal64
+/// or Decimal256 context and a decimal literal with more digits than that
+/// width holds alongside it, where a literal the context holds exactly is
+/// as good a value as for a Decimal128 context. Other kinds without a
+/// common type (a Boolean and a number) are DataFusion's error.
+///
 /// Losses that the context itself has against the other values (two
 /// columns of different types) are DataFusion's, and are left as they are.
 fn values(
@@ -395,35 +412,45 @@ fn values(
                 .flatten()
                 .all(|literal| exact_cast(literal, result).is_some())
     };
-    let Ok(result) = unified_type(with(&literals, false)) else {
-        return Ok(values);
-    };
-    if !exact(&literals, &result) {
-        // 2. Literals the context holds exactly take its type.
-        for literal in literals.iter_mut().flatten() {
-            if let Some(typed) = exact_cast(literal, &context) {
-                *literal = typed;
-            }
-        }
-        let Ok(result) = unified_type(with(&literals, false)) else {
-            return Ok(values);
-        };
-        let refused = literals
+    let numbers = context.is_numeric()
+        && literals
             .iter()
             .flatten()
-            .find(|literal| {
-                literal.data_type() != context && exact_cast(literal, &result).is_none()
-            })
-            .or_else(|| match cast_loss(&context, &result) {
-                Loss::None => None,
-                Loss::Range if matches!(context, DataType::Timestamp(..)) => None,
-                Loss::Range | Loss::Precision => literals
+            .all(|literal| literal.data_type().is_numeric());
+    match unified_type(with(&literals, false)) {
+        Ok(result) if exact(&literals, &result) => {}
+        Err(_) if !numbers => return Ok(values),
+        _ => {
+            // 2. Literals the context holds exactly take its type.
+            for literal in literals.iter_mut().flatten() {
+                if let Some(typed) = exact_cast(literal, &context) {
+                    *literal = typed;
+                }
+            }
+            let not_context = || {
+                literals
                     .iter()
                     .flatten()
-                    .find(|literal| literal.data_type() != context),
-            });
-        if let Some(literal) = refused {
-            return Err(refusal(literal, &context, &name));
+                    .find(|literal| literal.data_type() != context)
+            };
+            let refused = match unified_type(with(&literals, false)) {
+                Ok(result) => literals
+                    .iter()
+                    .flatten()
+                    .find(|literal| {
+                        literal.data_type() != context && exact_cast(literal, &result).is_none()
+                    })
+                    .or_else(|| match cast_loss(&context, &result) {
+                        Loss::None => None,
+                        Loss::Range if matches!(context, DataType::Timestamp(..)) => None,
+                        Loss::Range | Loss::Precision => not_context(),
+                    }),
+                // Still no common type: a literal the context does not hold.
+                Err(_) => not_context(),
+            };
+            if let Some(literal) = refused {
+                return Err(refusal(literal, &context, &name));
+            }
         }
     }
     Ok(values
