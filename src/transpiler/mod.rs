@@ -19,9 +19,11 @@
 
 pub(crate) mod floor_div;
 mod optimization;
+mod resolve;
 pub(crate) mod window_native;
 
 pub use optimization::optimize_expr;
+pub(crate) use resolve::Resolver;
 pub use window_native::pyexpr_to_window_expr;
 
 use crate::types::{arg, Arg, PyExpr};
@@ -105,16 +107,16 @@ fn parse_binop_expr(
     op: &str,
     left: PyExpr,
     right: PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
-    let left_expr = pyexpr_to_datafusion_inner(left, schema)?;
-    let right_expr = pyexpr_to_datafusion_inner(right, schema)?;
+    let left_expr = pyexpr_to_datafusion_inner(left, rx)?;
+    let right_expr = pyexpr_to_datafusion_inner(right, rx)?;
     binary_expr(op, left_expr, right_expr)
 }
 
 /// Parse a unary operation into a DataFusion expression
-fn parse_unaryop_expr(op: &str, operand: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    let operand_expr = pyexpr_to_datafusion_inner(operand, schema)?;
+fn parse_unaryop_expr(op: &str, operand: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+    let operand_expr = pyexpr_to_datafusion_inner(operand, rx)?;
     match op {
         "Not" => Ok(operand_expr.not()),
         _ => Err(format!("Unknown unary operator: {}", op)),
@@ -132,16 +134,16 @@ pub(crate) fn require_on<T>(on: Option<T>, func: &str) -> Result<T, String> {
 fn resolve_on_or_args(
     on: Option<&PyExpr>,
     args: &[PyExpr],
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     func_name: &str,
 ) -> Result<Expr, String> {
     match on {
-        Some(on) => pyexpr_to_datafusion_inner(on.clone(), schema),
+        Some(on) => pyexpr_to_datafusion_inner(on.clone(), rx),
         None => {
             let input = args
                 .first()
                 .ok_or_else(|| format!("{} requires an argument", func_name))?;
-            pyexpr_to_datafusion_inner(input.clone(), schema)
+            pyexpr_to_datafusion_inner(input.clone(), rx)
         }
     }
 }
@@ -152,7 +154,7 @@ fn resolve_on_or_args(
 fn parse_call_conditional(
     func: &str,
     args: &[PyExpr],
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "if_else" => {
@@ -161,9 +163,9 @@ fn parse_call_conditional(
                     "if_else requires 3 arguments: condition, true_value, false_value".to_string(),
                 );
             }
-            let cond_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-            let true_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
-            let false_expr = pyexpr_to_datafusion_inner(args[2].clone(), schema)?;
+            let cond_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+            let true_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
+            let false_expr = pyexpr_to_datafusion_inner(args[2].clone(), rx)?;
 
             use datafusion::logical_expr::case;
             Ok(case(cond_expr)
@@ -180,23 +182,23 @@ fn parse_call_null_ops(
     func: &str,
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "fill_null" => {
             if args.is_empty() {
                 return Err("fill_null requires a default value argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
-            let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(coalesce(vec![on_expr, default_expr]))
         }
         "is_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
             Ok(on_expr.is_null())
         }
         "is_not_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
             Ok(on_expr.is_not_null())
         }
         "coalesce" => {
@@ -205,7 +207,7 @@ fn parse_call_null_ops(
             }
             let coalesce_args: Vec<Expr> = args
                 .into_iter()
-                .map(|a| pyexpr_to_datafusion_inner(a, schema))
+                .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(coalesce(coalesce_args))
         }
@@ -232,69 +234,69 @@ fn parse_call_math(
     func: &str,
     on: Option<&PyExpr>,
     args: &[PyExpr],
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "abs" => {
             use datafusion::functions::math::expr_fn::abs;
-            let input = resolve_on_or_args(on, args, schema, "abs")?;
+            let input = resolve_on_or_args(on, args, rx, "abs")?;
             Ok(abs(input))
         }
         "ceil" => {
             use datafusion::functions::math::expr_fn::ceil;
-            let input = resolve_on_or_args(on, args, schema, "ceil")?;
+            let input = resolve_on_or_args(on, args, rx, "ceil")?;
             Ok(ceil(input))
         }
         "floor" => {
             use datafusion::functions::math::expr_fn::floor;
-            let input = resolve_on_or_args(on, args, schema, "floor")?;
+            let input = resolve_on_or_args(on, args, rx, "floor")?;
             Ok(floor(input))
         }
         "round" => {
             use datafusion::functions::math::expr_fn::round;
-            let input = resolve_on_or_args(on, args, schema, "round")?;
+            let input = resolve_on_or_args(on, args, rx, "round")?;
             // Standalone round(expr, decimals) has decimals in args[1];
             // the method form expr.round(decimals) in args[0].
             let decimals = round_decimals(arg(args, usize::from(on.is_none())), |e| {
-                pyexpr_to_datafusion_inner(e.clone(), schema)
+                pyexpr_to_datafusion_inner(e.clone(), rx)
             })?;
             Ok(round(vec![input, decimals]))
         }
         "math_sqrt" => {
             use datafusion::functions::math::expr_fn::sqrt;
-            let input = resolve_on_or_args(on, args, schema, "sqrt")?;
+            let input = resolve_on_or_args(on, args, rx, "sqrt")?;
             Ok(sqrt(input))
         }
         "math_power" => {
             use datafusion::functions::math::expr_fn::power;
             // base is first arg (or on), exponent is second arg
-            let base = resolve_on_or_args(on, args, schema, "power")?;
+            let base = resolve_on_or_args(on, args, rx, "power")?;
             let exp_expr = if on.is_none() {
                 if args.len() < 2 {
                     return Err("power() requires two arguments: base and exponent".to_string());
                 }
-                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+                pyexpr_to_datafusion_inner(args[1].clone(), rx)?
             } else {
                 if args.is_empty() {
                     return Err("power() requires an exponent argument".to_string());
                 }
-                pyexpr_to_datafusion_inner(args[0].clone(), schema)?
+                pyexpr_to_datafusion_inner(args[0].clone(), rx)?
             };
             Ok(power(base, exp_expr))
         }
         "math_sign" => {
             use datafusion::functions::math::expr_fn::signum;
-            let input = resolve_on_or_args(on, args, schema, "sign")?;
+            let input = resolve_on_or_args(on, args, rx, "sign")?;
             Ok(signum(input))
         }
         "math_ln" => {
             use datafusion::functions::math::expr_fn::ln;
-            let input = resolve_on_or_args(on, args, schema, "ln")?;
+            let input = resolve_on_or_args(on, args, rx, "ln")?;
             Ok(ln(input))
         }
         "math_log" => {
             // log(x) → ln(x), log(x, 10) → log10(x), log(x, 2) → log2(x), else log(base, x)
-            let input = resolve_on_or_args(on, args, schema, "log")?;
+            let input = resolve_on_or_args(on, args, rx, "log")?;
             // The optional base: args[1] standalone, args[0] as a method.
             match arg(args, usize::from(on.is_none())) {
                 Arg::Absent => {
@@ -315,7 +317,7 @@ fn parse_call_math(
                     }
                 }
                 Arg::Expr(other) => {
-                    let base_expr = pyexpr_to_datafusion_inner(other.clone(), schema)?;
+                    let base_expr = pyexpr_to_datafusion_inner(other.clone(), rx)?;
                     use datafusion::functions::math::expr_fn::log;
                     Ok(log(base_expr, input))
                 }
@@ -323,55 +325,55 @@ fn parse_call_math(
         }
         "math_exp" => {
             use datafusion::functions::math::expr_fn::exp;
-            let input = resolve_on_or_args(on, args, schema, "exp")?;
+            let input = resolve_on_or_args(on, args, rx, "exp")?;
             Ok(exp(input))
         }
         "math_sin" => {
             use datafusion::functions::math::expr_fn::sin;
-            let input = resolve_on_or_args(on, args, schema, "sin")?;
+            let input = resolve_on_or_args(on, args, rx, "sin")?;
             Ok(sin(input))
         }
         "math_cos" => {
             use datafusion::functions::math::expr_fn::cos;
-            let input = resolve_on_or_args(on, args, schema, "cos")?;
+            let input = resolve_on_or_args(on, args, rx, "cos")?;
             Ok(cos(input))
         }
         "math_tan" => {
             use datafusion::functions::math::expr_fn::tan;
-            let input = resolve_on_or_args(on, args, schema, "tan")?;
+            let input = resolve_on_or_args(on, args, rx, "tan")?;
             Ok(tan(input))
         }
         "math_asin" => {
             use datafusion::functions::math::expr_fn::asin;
-            let input = resolve_on_or_args(on, args, schema, "asin")?;
+            let input = resolve_on_or_args(on, args, rx, "asin")?;
             Ok(asin(input))
         }
         "math_acos" => {
             use datafusion::functions::math::expr_fn::acos;
-            let input = resolve_on_or_args(on, args, schema, "acos")?;
+            let input = resolve_on_or_args(on, args, rx, "acos")?;
             Ok(acos(input))
         }
         "math_atan" => {
             use datafusion::functions::math::expr_fn::atan;
-            let input = resolve_on_or_args(on, args, schema, "atan")?;
+            let input = resolve_on_or_args(on, args, rx, "atan")?;
             Ok(atan(input))
         }
         "math_atan2" => {
             use datafusion::functions::math::expr_fn::atan2;
             // atan2(y, x) — y is first arg, x is second
             if let Some(on) = on {
-                let y_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
+                let y_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
                 if args.is_empty() {
                     return Err("atan2() requires x argument".to_string());
                 }
-                let x_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let x_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(atan2(y_expr, x_expr))
             } else {
                 if args.len() < 2 {
                     return Err("atan2() requires two arguments: y and x".to_string());
                 }
-                let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-                let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+                let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+                let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
                 Ok(atan2(y_expr, x_expr))
             }
         }
@@ -385,15 +387,15 @@ fn parse_call_math(
                 if args.is_empty() {
                     return Err("gcd() requires a second argument".to_string());
                 }
-                let a_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
-                let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let a_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
+                let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(gcd(a_expr, b_expr))
             } else {
                 if args.len() < 2 {
                     return Err("gcd() requires two arguments".to_string());
                 }
-                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
                 Ok(gcd(a_expr, b_expr))
             }
         }
@@ -402,20 +404,20 @@ fn parse_call_math(
                 if args.is_empty() {
                     return Err("lcm() requires a second argument".to_string());
                 }
-                let a_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
-                let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+                let a_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
+                let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(lcm(a_expr, b_expr))
             } else {
                 if args.len() < 2 {
                     return Err("lcm() requires two arguments".to_string());
                 }
-                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+                let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+                let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
                 Ok(lcm(a_expr, b_expr))
             }
         }
         "math_factorial" => {
-            let input = resolve_on_or_args(on, args, schema, "factorial")?;
+            let input = resolve_on_or_args(on, args, rx, "factorial")?;
             Ok(factorial(input))
         }
         _ => Err(format!("Not a math function: {}", func)),
@@ -427,11 +429,11 @@ fn parse_call_type_ops(
     func: &str,
     on: PyExpr,
     args: Vec<PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "cast" => {
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let target_type = match arg(&args, 0) {
                 Arg::Absent => return Err("cast requires a target type argument".to_string()),
                 Arg::Literal(value) => value.require_str("cast() target type")?.to_string(),
@@ -453,13 +455,13 @@ fn parse_call_type_ops(
             )))
         }
         "is_in" => {
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             if args.is_empty() {
                 return Err("is_in requires at least one value".to_string());
             }
             let list_exprs: Vec<Expr> = args
                 .into_iter()
-                .map(|a| pyexpr_to_datafusion_inner(a, schema))
+                .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(on_expr.in_list(list_exprs, false))
         }
@@ -473,18 +475,18 @@ fn parse_call_string_standalone(
     func: &str,
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "str_char" => {
             // chr(n) → single-character string from code point; standalone: args[0] is the input
             let n_expr = match on {
-                Some(on) => pyexpr_to_datafusion_inner(on, schema)?,
+                Some(on) => pyexpr_to_datafusion_inner(on, rx)?,
                 None => {
                     let input = args
                         .first()
                         .ok_or("str_char requires a code point argument")?;
-                    pyexpr_to_datafusion_inner(input.clone(), schema)?
+                    pyexpr_to_datafusion_inner(input.clone(), rx)?
                 }
             };
             Ok(chr(n_expr))
@@ -496,11 +498,11 @@ fn parse_call_string_standalone(
                     "str_concat_ws requires a delimiter and at least one string".to_string(),
                 );
             }
-            let delim_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let delim_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let str_exprs: Vec<Expr> = args
                 .into_iter()
                 .skip(1)
-                .map(|a| pyexpr_to_datafusion_inner(a, schema))
+                .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(concat_ws(delim_expr, str_exprs))
         }
@@ -513,138 +515,138 @@ fn parse_call_string(
     func: &str,
     on: PyExpr,
     args: Vec<PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         "str_contains" => {
-            validate_string_column(&on, schema, "str_contains")?;
+            validate_string_column(&on, rx.arrow(), "str_contains")?;
             if args.is_empty() {
                 return Err("str_contains requires a pattern argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(contains(on_expr, pattern_expr))
         }
         "str_starts_with" => {
-            validate_string_column(&on, schema, "str_starts_with")?;
+            validate_string_column(&on, rx.arrow(), "str_starts_with")?;
             if args.is_empty() {
                 return Err("str_starts_with requires a prefix argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let prefix_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let prefix_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(starts_with(on_expr, prefix_expr))
         }
         "str_ends_with" => {
-            validate_string_column(&on, schema, "str_ends_with")?;
+            validate_string_column(&on, rx.arrow(), "str_ends_with")?;
             if args.is_empty() {
                 return Err("str_ends_with requires a suffix argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let suffix_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let suffix_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(ends_with(on_expr, suffix_expr))
         }
         "str_lower" => {
-            validate_string_column(&on, schema, "str_lower")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_lower")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(lower(on_expr))
         }
         "str_upper" => {
-            validate_string_column(&on, schema, "str_upper")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_upper")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(upper(on_expr))
         }
         "str_strip" => {
-            validate_string_column(&on, schema, "str_strip")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_strip")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(btrim(vec![on_expr]))
         }
         "str_len" => {
-            validate_string_column(&on, schema, "str_len")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_len")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(character_length(on_expr))
         }
         "str_slice" => {
-            validate_string_column(&on, schema, "str_slice")?;
+            validate_string_column(&on, rx.arrow(), "str_slice")?;
             if args.len() < 2 {
                 return Err("str_slice requires start and length arguments".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let start_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-            let length_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let start_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+            let length_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
             Ok(substring(on_expr, start_expr + lit(1), length_expr))
         }
         "str_regex_match" => {
-            validate_string_column(&on, schema, "str_regex_match")?;
+            validate_string_column(&on, rx.arrow(), "str_regex_match")?;
             if args.is_empty() {
                 return Err("str_regex_match requires a pattern argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(regexp_like(on_expr, pattern_expr, None))
         }
         "str_replace" => {
-            validate_string_column(&on, schema, "str_replace")?;
+            validate_string_column(&on, rx.arrow(), "str_replace")?;
             if args.len() < 2 {
                 return Err("str_replace requires 'old' and 'new' arguments".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let old_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-            let new_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let old_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+            let new_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
             Ok(replace(on_expr, old_expr, new_expr))
         }
         "str_concat" => {
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let mut all_args = vec![on_expr];
             for arg in args {
-                all_args.push(pyexpr_to_datafusion_inner(arg, schema)?);
+                all_args.push(pyexpr_to_datafusion_inner(arg, rx)?);
             }
             Ok(concat(all_args))
         }
         "str_pad_left" => {
-            validate_string_column(&on, schema, "str_pad_left")?;
+            validate_string_column(&on, rx.arrow(), "str_pad_left")?;
             if args.is_empty() {
                 return Err("str_pad_left requires a width argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let char_expr = if args.len() > 1 {
-                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+                pyexpr_to_datafusion_inner(args[1].clone(), rx)?
             } else {
                 lit(" ")
             };
             Ok(lpad(vec![on_expr, width_expr, char_expr]))
         }
         "str_pad_right" => {
-            validate_string_column(&on, schema, "str_pad_right")?;
+            validate_string_column(&on, rx.arrow(), "str_pad_right")?;
             if args.is_empty() {
                 return Err("str_pad_right requires a width argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let char_expr = if args.len() > 1 {
-                pyexpr_to_datafusion_inner(args[1].clone(), schema)?
+                pyexpr_to_datafusion_inner(args[1].clone(), rx)?
             } else {
                 lit(" ")
             };
             Ok(rpad(vec![on_expr, width_expr, char_expr]))
         }
         "str_split" => {
-            validate_string_column(&on, schema, "str_split")?;
+            validate_string_column(&on, rx.arrow(), "str_split")?;
             if args.len() < 2 {
                 return Err("str_split requires delimiter and index arguments".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let delimiter_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
-            let index_expr = pyexpr_to_datafusion_inner(args[1].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let delimiter_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
+            let index_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
             Ok(split_part(on_expr, delimiter_expr, index_expr))
         }
         "str_like" => {
-            validate_string_column(&on, schema, "str_like")?;
+            validate_string_column(&on, rx.arrow(), "str_like")?;
             if args.is_empty() {
                 return Err("str_like requires a pattern argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             use datafusion::logical_expr::Like;
             Ok(Expr::Like(Like {
                 negated: false,
@@ -655,69 +657,69 @@ fn parse_call_string(
             }))
         }
         "str_isalpha" => {
-            validate_string_column(&on, schema, "str_isalpha")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_isalpha")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(regexp_like(on_expr, lit("^[a-zA-Z]+$"), None))
         }
         "str_isdigit" => {
-            validate_string_column(&on, schema, "str_isdigit")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_isdigit")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(regexp_like(on_expr, lit("^[0-9]+$"), None))
         }
         "str_islower" => {
-            validate_string_column(&on, schema, "str_islower")?;
-            let on_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
-            let on_expr2 = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_islower")?;
+            let on_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
+            let on_expr2 = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(on_expr.eq(lower(on_expr2)))
         }
         "str_isupper" => {
-            validate_string_column(&on, schema, "str_isupper")?;
-            let on_expr = pyexpr_to_datafusion_inner(on.clone(), schema)?;
-            let on_expr2 = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_isupper")?;
+            let on_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
+            let on_expr2 = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(on_expr.eq(upper(on_expr2)))
         }
         "str_pos" => {
             // strpos(str, substr) → 1-based position, 0 if not found
-            validate_string_column(&on, schema, "str_pos")?;
+            validate_string_column(&on, rx.arrow(), "str_pos")?;
             if args.is_empty() {
                 return Err("str_pos requires a substring argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let sub_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let sub_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(strpos(on_expr, sub_expr))
         }
         "str_left" => {
-            validate_string_column(&on, schema, "str_left")?;
+            validate_string_column(&on, rx.arrow(), "str_left")?;
             if args.is_empty() {
                 return Err("str_left requires a length argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(left(on_expr, n_expr))
         }
         "str_right" => {
-            validate_string_column(&on, schema, "str_right")?;
+            validate_string_column(&on, rx.arrow(), "str_right")?;
             if args.is_empty() {
                 return Err("str_right requires a length argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             Ok(right(on_expr, n_expr))
         }
         "str_ltrim" => {
-            validate_string_column(&on, schema, "str_ltrim")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_ltrim")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(ltrim(vec![on_expr]))
         }
         "str_rtrim" => {
-            validate_string_column(&on, schema, "str_rtrim")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_rtrim")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(rtrim(vec![on_expr]))
         }
         "str_asc" => {
             // ascii(str) → Unicode code point of the first character
-            validate_string_column(&on, schema, "str_asc")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_string_column(&on, rx.arrow(), "str_asc")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(ascii(on_expr))
         }
         _ => Err(format!("Not a string function: {}", func)),
@@ -729,29 +731,29 @@ fn parse_call_temporal(
     func: &str,
     on: PyExpr,
     args: &[PyExpr],
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     /// Helper for simple date_part extractions
     fn date_part_extract(
         part: &str,
         func_name: &str,
         on: PyExpr,
-        schema: &ArrowSchema,
+        rx: &Resolver<'_>,
     ) -> Result<Expr, String> {
-        validate_temporal_column(&on, schema, func_name)?;
-        let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+        validate_temporal_column(&on, rx.arrow(), func_name)?;
+        let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
         Ok(date_part(lit(part), on_expr))
     }
 
     match func {
-        "dt_year" => date_part_extract("year", "dt_year", on, schema),
-        "dt_month" => date_part_extract("month", "dt_month", on, schema),
-        "dt_day" => date_part_extract("day", "dt_day", on, schema),
-        "dt_hour" => date_part_extract("hour", "dt_hour", on, schema),
-        "dt_minute" => date_part_extract("minute", "dt_minute", on, schema),
-        "dt_second" => date_part_extract("second", "dt_second", on, schema),
+        "dt_year" => date_part_extract("year", "dt_year", on, rx),
+        "dt_month" => date_part_extract("month", "dt_month", on, rx),
+        "dt_day" => date_part_extract("day", "dt_day", on, rx),
+        "dt_hour" => date_part_extract("hour", "dt_hour", on, rx),
+        "dt_minute" => date_part_extract("minute", "dt_minute", on, rx),
+        "dt_second" => date_part_extract("second", "dt_second", on, rx),
         "dt_add" => {
-            validate_temporal_column(&on, schema, "dt_add")?;
+            validate_temporal_column(&on, rx.arrow(), "dt_add")?;
             // Args: (days, months, years[, hours, minutes, seconds, weeks])
             // Legacy form accepts 3 args; extended form accepts 7 args.
             if args.len() < 3 {
@@ -759,7 +761,7 @@ fn parse_call_temporal(
                     "dt_add requires at least 3 arguments: days, months, years".to_string(),
                 );
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
 
             // An absent field is 0; a present one must be a literal integer.
             let field = |i: usize, name: &str| -> Result<i64, String> {
@@ -790,12 +792,12 @@ fn parse_call_temporal(
         "dt_diff" => {
             // Args: (other_date[, unit_string])
             // unit: "day" (default), "month", "year", "hour", "minute", "second"
-            validate_temporal_column(&on, schema, "dt_diff")?;
+            validate_temporal_column(&on, rx.arrow(), "dt_diff")?;
             if args.is_empty() {
                 return Err("dt_diff requires another date argument".to_string());
             }
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
-            let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), schema)?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
+            let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
 
             let unit = match arg(args, 1) {
                 Arg::Absent => "day".to_string(),
@@ -804,7 +806,7 @@ fn parse_call_temporal(
             };
 
             match unit.as_str() {
-                "day" | "days" => dt_elapsed(on_expr, other_expr, schema, 86_400),
+                "day" | "days" => dt_elapsed(on_expr, other_expr, rx, 86_400),
                 "month" | "months" => {
                     // (year(on) - year(other)) * 12 + (month(on) - month(other))
                     let on_year = date_part(lit("year"), on_expr.clone());
@@ -818,9 +820,9 @@ fn parse_call_temporal(
                     let other_year = date_part(lit("year"), other_expr);
                     Ok(on_year - other_year)
                 }
-                "hour" | "hours" => dt_elapsed(on_expr, other_expr, schema, 3_600),
-                "minute" | "minutes" => dt_elapsed(on_expr, other_expr, schema, 60),
-                "second" | "seconds" => dt_elapsed(on_expr, other_expr, schema, 1),
+                "hour" | "hours" => dt_elapsed(on_expr, other_expr, rx, 3_600),
+                "minute" | "minutes" => dt_elapsed(on_expr, other_expr, rx, 60),
+                "second" | "seconds" => dt_elapsed(on_expr, other_expr, rx, 1),
                 _ => Err(format!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",
                     unit
@@ -830,8 +832,8 @@ fn parse_call_temporal(
         "dt_age" => {
             // Number of complete years between the column date and today
             // Approximation: year(today()) - year(col) - (if month/day of col > today's → 1 else 0)
-            validate_temporal_column(&on, schema, "dt_age")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_temporal_column(&on, rx.arrow(), "dt_age")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let today_expr = current_date();
 
             // year difference, then correct for whether the birthday has passed this year
@@ -854,15 +856,15 @@ fn parse_call_temporal(
         "dt_millisecond" => {
             // date_part("millisecond", col) gives total milliseconds within the second
             // (returns the millisecond sub-second component 0–999)
-            validate_temporal_column(&on, schema, "dt_millisecond")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_temporal_column(&on, rx.arrow(), "dt_millisecond")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(date_part(lit("millisecond"), on_expr) % lit(1000_f64))
         }
         "dt_weekday" => {
             // DataFusion dow: 0=Sunday, 1=Monday, …, 6=Saturday
             // Target: Monday=0 … Sunday=6 → (dow + 6) % 7
-            validate_temporal_column(&on, schema, "dt_weekday")?;
-            let on_expr = pyexpr_to_datafusion_inner(on, schema)?;
+            validate_temporal_column(&on, rx.arrow(), "dt_weekday")?;
+            let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok((date_part(lit("dow"), on_expr) + lit(6_f64)) % lit(7_f64))
         }
         _ => Err(format!("Not a temporal function: {}", func)),
@@ -877,25 +879,25 @@ fn parse_call_expr(
     func: &str,
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
     match func {
         // Conditional
-        "if_else" => parse_call_conditional(func, &args, schema),
+        "if_else" => parse_call_conditional(func, &args, rx),
         // Null handling
         "fill_null" | "is_null" | "is_not_null" | "coalesce" => {
-            parse_call_null_ops(func, on, args, schema)
+            parse_call_null_ops(func, on, args, rx)
         }
         // Math (built-in method-style: abs, ceil, floor, round)
-        "abs" | "ceil" | "floor" | "round" => parse_call_math(func, on.as_ref(), &args, schema),
+        "abs" | "ceil" | "floor" | "round" => parse_call_math(func, on.as_ref(), &args, rx),
         // Extended math functions (math_* prefix from global functions)
-        f if f.starts_with("math_") => parse_call_math(func, on.as_ref(), &args, schema),
+        f if f.starts_with("math_") => parse_call_math(func, on.as_ref(), &args, rx),
         // Standalone math functions without prefix
-        "gcd" => parse_call_math("math_gcd", on.as_ref(), &args, schema),
-        "lcm" => parse_call_math("math_lcm", on.as_ref(), &args, schema),
-        "factorial" => parse_call_math("math_factorial", on.as_ref(), &args, schema),
+        "gcd" => parse_call_math("math_gcd", on.as_ref(), &args, rx),
+        "lcm" => parse_call_math("math_lcm", on.as_ref(), &args, rx),
+        "factorial" => parse_call_math("math_factorial", on.as_ref(), &args, rx),
         // Type / membership
-        "cast" | "is_in" => parse_call_type_ops(func, require_on(on, func)?, args, schema),
+        "cast" | "is_in" => parse_call_type_ops(func, require_on(on, func)?, args, rx),
         // Window functions (must be handled elsewhere)
         "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min" | "mean" | "sum"
         | "min" | "max" | "count" | "std" => Err(format!(
@@ -903,41 +905,65 @@ fn parse_call_expr(
             func
         )),
         // String operations
-        "str_char" | "str_concat_ws" => parse_call_string_standalone(func, on, args, schema),
-        f if f.starts_with("str_") => parse_call_string(func, require_on(on, func)?, args, schema),
+        "str_char" | "str_concat_ws" => parse_call_string_standalone(func, on, args, rx),
+        f if f.starts_with("str_") => parse_call_string(func, require_on(on, func)?, args, rx),
         // Temporal operations
         "dt_now" => Ok(now()),
         "dt_today" => Ok(current_date()),
         f if f.starts_with("dt_") => {
-            parse_call_temporal(func, require_on(on, func)?, &args, schema)
+            parse_call_temporal(func, require_on(on, func)?, &args, rx)
         }
         _ => Err(format!("Method '{}' not yet supported", func)),
     }
 }
 
-/// Convert PyExpr to DataFusion Expr
+/// Convert PyExpr to DataFusion Expr, resolved against `schema`: coerced as
+/// DataFusion's analyzer will coerce it, so the type DataFusion reports for
+/// it (and stores for a projection of it) is the type it executes as.
 ///
 /// This function first applies expression optimization (constant folding,
 /// boolean simplification) before converting to DataFusion expressions.
 pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    // Apply optimization pass first
-    let optimized = optimize_expr(py_expr);
+    let rx = Resolver::new(schema)?;
+    Ok(rx.resolve(lower_expr(py_expr, &rx)?))
+}
 
-    pyexpr_to_datafusion_inner(optimized, schema)
+/// [`pyexpr_to_datafusion`] for an expression whose name becomes an output
+/// column name (an unaliased `select` item, a group key). Coercion inserts
+/// casts, which change the name DataFusion derives from an expression, so
+/// the resolved expression keeps the name of the expression as written, as
+/// DataFusion's analyzer does when it coerces a projection.
+pub fn pyexpr_to_named_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
+    let rx = Resolver::new(schema)?;
+    let lowered = lower_expr(py_expr, &rx)?;
+    let name = lowered.schema_name().to_string();
+    let resolved = rx.resolve(lowered);
+    Ok(if resolved.schema_name().to_string() == name {
+        resolved
+    } else {
+        resolved.alias(name)
+    })
+}
+
+/// Optimize and lower `py_expr` without resolving it: the row-level part
+/// of an expression that the window and group dialects lower, resolve as a
+/// whole, and ask `rx` about.
+pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+    pyexpr_to_datafusion_inner(optimize_expr(py_expr), rx)
 }
 
 /// Internal conversion without optimization (used after optimization pass)
-fn pyexpr_to_datafusion_inner(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
+fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
     match py_expr {
-        PyExpr::Column(name) => parse_column_expr(&name, schema),
+        PyExpr::Column(name) => parse_column_expr(&name, rx.arrow()),
         PyExpr::Literal(value) => Ok(lit(value.to_scalar_value())),
-        PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, schema),
-        PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, schema),
+        PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, rx),
+        PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, rx),
         PyExpr::Call { func, on, args, .. } => {
-            parse_call_expr(&func, on.map(|on| *on), args, schema)
+            parse_call_expr(&func, on.map(|on| *on), args, rx)
         }
         PyExpr::Alias { expr, alias } => {
-            let inner = pyexpr_to_datafusion_inner(*expr, schema)?;
+            let inner = pyexpr_to_datafusion_inner(*expr, rx)?;
             Ok(inner.alias(alias))
         }
         PyExpr::Window { .. } => {
@@ -1070,31 +1096,37 @@ fn validate_string_column(
 
 /// Elapsed time `on - other` in a fixed-length unit of `unit_seconds`, as Float64.
 ///
-/// The operands are coerced with DataFusion's own rule first (a mixed
-/// Date32/Date64 pair becomes two Date64, a date and a timestamp become two
-/// timestamps), then the subtraction is typed: two dates give an Int64 day
-/// count, two timestamps give a Duration in the coerced time unit. The tick
-/// length is read from that type, so a date pair and a timestamp pair both
-/// report the unit asked for. The integer factor between tick and unit keeps
-/// whole-day date differences exact.
+/// The operand types are the types they execute as (`Resolver::data_type`).
+/// A date and a timestamp become two naive timestamps at the timestamp's
+/// unit; otherwise the operands are coerced with DataFusion's own rule (a
+/// mixed Date32/Date64 pair becomes two Date64). Then the subtraction is
+/// typed: two dates give an Int64 day count, two timestamps give a Duration
+/// in the coerced time unit. The tick length is read from that type, so a
+/// date pair and a timestamp pair both report the unit asked for. The
+/// integer factor between tick and unit keeps whole-day date differences
+/// exact.
 fn dt_elapsed(
     on_expr: Expr,
     other_expr: Expr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     unit_seconds: i64,
 ) -> Result<Expr, String> {
     use datafusion::arrow::datatypes::TimeUnit;
-    use datafusion::common::DFSchema;
     use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
-    use datafusion::logical_expr::ExprSchemable;
 
-    let df_schema = DFSchema::try_from(schema.clone()).map_err(|e| format!("dt_diff: {e}"))?;
-    let on_type = on_expr
-        .get_type(&df_schema)
-        .map_err(|e| format!("dt_diff: {e}"))?;
-    let other_type = other_expr
-        .get_type(&df_schema)
-        .map_err(|e| format!("dt_diff: {e}"))?;
+    let type_of = |expr: &Expr| rx.data_type(expr).map_err(|e| format!("dt_diff: {e}"));
+    // `Expr::cast_to` compares against the type DataFusion reports before
+    // coercion and can skip a needed cast (a CASE reports its first branch),
+    // so casts are explicit, decided from the resolved types.
+    let cast = |expr: Expr, from: &DataType, to: &DataType| {
+        if from == to {
+            expr
+        } else {
+            Expr::Cast(datafusion::logical_expr::Cast::new(Box::new(expr), to.clone()))
+        }
+    };
+    let on_type = type_of(&on_expr)?;
+    let other_type = type_of(&other_expr)?;
     // A naive and a zoned timestamp have no single meaning: DataFusion reads the naive
     // side as UTC when the units match and as wall-clock time in the other zone when
     // they differ, so the elapsed time would depend on the column units. Refuse the
@@ -1126,16 +1158,32 @@ fn dt_elapsed(
         },
         _ => None,
     };
+    // A date against a timestamp is read as DataFusion reads the pair: both
+    // naive, the date at UTC midnight and a zoned timestamp at its UTC
+    // instant (decision P10 on #145). The pair is cast at the timestamp's own
+    // unit rather than DataFusion's nanoseconds, which cannot hold dates
+    // outside 1677-2262.
+    let is_date = |t: &DataType| matches!(t, DataType::Date32 | DataType::Date64);
+    let (on_expr, other_expr, on_type, other_type) = match (&on_type, &other_type) {
+        (date, DataType::Timestamp(unit, _)) | (DataType::Timestamp(unit, _), date)
+            if is_date(date) =>
+        {
+            let naive = DataType::Timestamp(*unit, None);
+            (
+                cast(on_expr, &on_type, &naive),
+                cast(other_expr, &other_type, &naive),
+                naive.clone(),
+                naive,
+            )
+        }
+        _ => (on_expr, other_expr, on_type, other_type),
+    };
     let (on_expr, other_expr, on_type, other_type) = match zoned_pair_unit {
         Some(unit) => {
             let utc = DataType::Timestamp(unit, Some("UTC".into()));
             (
-                on_expr
-                    .cast_to(&utc, &df_schema)
-                    .map_err(|e| format!("dt_diff: {e}"))?,
-                other_expr
-                    .cast_to(&utc, &df_schema)
-                    .map_err(|e| format!("dt_diff: {e}"))?,
+                cast(on_expr, &on_type, &utc),
+                cast(other_expr, &other_type, &utc),
                 utc.clone(),
                 utc,
             )
@@ -1159,16 +1207,10 @@ fn dt_elapsed(
                      both sides must be dates or timestamps"
                 )
             })?;
-    let on_expr = on_expr
-        .cast_to(&on_coerced, &df_schema)
-        .map_err(|e| format!("dt_diff: {e}"))?;
-    let other_expr = other_expr
-        .cast_to(&other_coerced, &df_schema)
-        .map_err(|e| format!("dt_diff: {e}"))?;
+    let on_expr = cast(on_expr, &on_type, &on_coerced);
+    let other_expr = cast(other_expr, &other_type, &other_coerced);
     let diff_expr = on_expr - other_expr;
-    let diff_type = diff_expr
-        .get_type(&df_schema)
-        .map_err(|e| format!("dt_diff: {e}"))?;
+    let diff_type = type_of(&diff_expr)?;
     let tick_nanos: i64 = match diff_type {
         DataType::Int64 => 86_400 * 1_000_000_000,
         DataType::Duration(TimeUnit::Second) => 1_000_000_000,

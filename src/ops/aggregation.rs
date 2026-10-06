@@ -344,7 +344,7 @@ fn parse_group_exprs(
     let py_expr = dict_to_py_expr(&group_expr_dict)
         .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
-    let df_expr = crate::transpiler::pyexpr_to_datafusion(py_expr, schema)
+    let df_expr = crate::transpiler::pyexpr_to_named_datafusion(py_expr, schema)
         .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
 
     Ok(vec![df_expr])

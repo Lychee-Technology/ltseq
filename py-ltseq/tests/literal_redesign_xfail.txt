@@ -67,7 +67,6 @@ P4 py-ltseq/tests/test_literal_column_rules.py::test_midnight_datetime_value_wit
 P4 py-ltseq/tests/test_literal_column_rules.py::test_datetime_value_with_time_of_day_for_date_column_is_an_error
 P4 py-ltseq/tests/test_literal_column_rules.py::test_date_value_with_naive_timestamp_column_keeps_the_column_unit
 P2 py-ltseq/tests/test_literal_column_rules.py::test_dt_diff_reads_a_literal_like_a_comparison
-P1 py-ltseq/tests/test_literal_column_rules.py::test_dt_diff_between_a_date_and_a_far_datetime
 P2 py-ltseq/tests/test_literal_column_rules.py::test_timestamp_arithmetic_reads_a_literal_like_a_comparison
 P2 py-ltseq/tests/test_literal_column_rules.py::test_date_literal_against_numeric_column_is_an_error[eq]
 P2 py-ltseq/tests/test_literal_column_rules.py::test_date_literal_against_numeric_column_is_an_error[gt-datetime]
@@ -220,12 +219,10 @@ P2 py-ltseq/tests/test_literal_crosstype.py::test_comparison_matches_oracle[ts_n
 P2 py-ltseq/tests/test_literal_crosstype.py::test_comparison_matches_oracle[ts_ns-gt-aware-ny]
 P2 py-ltseq/tests/test_literal_crosstype.py::test_comparison_matches_oracle[ts_ns-eq-aware-ny]
 P3 py-ltseq/tests/test_literal_crosstype.py::test_comparison_matches_oracle[ts_utc-eq-pd-ns]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[America/New_York--5.0-date32]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[America/New_York--5.0-date64]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[Asia/Tokyo-9.0-date32]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[Asia/Tokyo-9.0-date64]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_outside_nanoseconds[date32]
-P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_outside_nanoseconds[date64]
+P2 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[America/New_York--5.0-date32]
+P2 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[America/New_York--5.0-date64]
+P2 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[Asia/Tokyo-9.0-date32]
+P2 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[Asia/Tokyo-9.0-date64]
 
 # Review regression cases.
 P3 py-ltseq/tests/test_literal_review_regressions.py::test_negative_scale_does_not_panic
@@ -262,20 +259,9 @@ P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_litera
 P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[2.5-False]
 
 # Metamorphic properties.
-P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[d-u]
-P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[s-u]
-P1 py-ltseq/tests/test_literal_properties.py::test_branch_swap_in_dt_diff[u-n]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[s-u]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[u-n]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[i-f]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[p-w]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[i-p]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[d-u]
-P1 py-ltseq/tests/test_literal_properties.py::test_dtype_does_not_depend_on_row_count[f-p]
 P2 py-ltseq/tests/test_literal_properties.py::test_linear_scan_count_matches_reference[step_gt_dec-y]
 
 # Differential cases.
-P1 py-ltseq/tests/differential/test_differential.py::test_case[composition::dt_diff_column]
 P2 py-ltseq/tests/differential/test_differential.py::test_case[composition::number_fill]
 P2 py-ltseq/tests/differential/test_differential.py::test_case[composition::number_fill_sw]
 P2 py-ltseq/tests/differential/test_differential.py::test_case[composition::number_fill_staged]
@@ -285,8 +271,6 @@ P2 py-ltseq/tests/differential/test_differential.py::test_case[composition::numb
 P2 py-ltseq/tests/differential/test_differential.py::test_case[composition::number_gt_sw]
 P4 py-ltseq/tests/differential/test_differential.py::test_case[composition::decimal_fill]
 P4 py-ltseq/tests/differential/test_differential.py::test_case[composition::decimal_fill_sw]
-P1 py-ltseq/tests/differential/test_differential.py::test_case[composition::empty_result_type]
-P1 py-ltseq/tests/differential/test_differential.py::test_case[composition::empty_sorted_result_type]
 P3 py-ltseq/tests/differential/test_differential.py::test_case[pairs::unit_literal_eq]
 P3 py-ltseq/tests/differential/test_differential.py::test_case[pairs::unit_folded_literal_eq]
 P2 py-ltseq/tests/differential/test_differential.py::test_case[pairs::float_gt_decimal_literal]

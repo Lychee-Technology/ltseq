@@ -225,7 +225,7 @@ pub fn optimize_expr(expr: PyExpr) -> PyExpr {
 mod tests {
     use super::*;
     use crate::engine::{create_session_context, RUNTIME};
-    use crate::transpiler::pyexpr_to_datafusion_inner;
+    use crate::transpiler::{pyexpr_to_datafusion_inner, Resolver};
     use datafusion::arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
     use datafusion::arrow::compute::concat_batches;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -326,7 +326,8 @@ mod tests {
     /// result is what DataFusion makes of the tree as written.
     fn evaluate(expr: PyExpr) -> Result<ArrayRef, String> {
         let batch = reference_batch();
-        let df_expr = pyexpr_to_datafusion_inner(expr, &batch.schema())?;
+        let schema = batch.schema();
+        let df_expr = pyexpr_to_datafusion_inner(expr, &Resolver::new(&schema)?)?;
         let ctx = create_session_context();
         RUNTIME.block_on(async {
             let df = ctx

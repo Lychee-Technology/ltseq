@@ -18,7 +18,7 @@
 //! - **materialize_impl**: Execute the lazy plan and snapshot the result into memory
 
 use crate::error::LtseqError;
-use crate::transpiler::pyexpr_to_datafusion;
+use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::dict_to_py_expr;
 use crate::LTSeqTable;
 use pyo3::prelude::*;
@@ -86,7 +86,7 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         let py_expr = dict_to_py_expr(&expr_dict)?;
 
         // Transpile
-        let df_expr = pyexpr_to_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
+        let df_expr = pyexpr_to_named_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
 
         df_exprs.push(df_expr);
     }
