@@ -33,6 +33,13 @@ LTSeq 是面向有序序列的 Python 数据处理库，底层由 Rust/DataFusio
 | `SortRequiredError: merge strategy requires sorted tables` | 对未排序的表调用 `join(..., strategy="merge")` | 先对双方调用 `.sort(join_key)` |
 | `TypeError: predicate not boolean Expr` | filter lambda 返回非布尔值 | 确保谓词使用比较运算符（`>`、`==` 等）|
 | `TypeError: LTSeq expressions cannot be used in a boolean context` | 对行表达式或组谓词使用了 `and`/`or`/`not`/`in`/三元/链式比较，如 `(r.a > 2) and (r.b < 1.5)` 或 `(g.count() > 2) and (g.sum("x") > 0)` | 用 `&` `\|` `~` 组合条件，如 `(r.a > 2) & (r.b < 1.5)` 或 `(g.count() > 2) & (g.sum("x") > 0)`。`in` 的替代：行表达式改用 `.is_in([...])`；组谓词没有 `is_in`，用 `\|` 组合多个 `==` 比较，如 `(g.count() == 1) \| (g.count() == 2)` |
+| `TypeError: Unsupported literal type list` | lambda 中使用了不支持类型的值，例如 `r.a == [1, 2]`、`bytes`、`timedelta` | 成员判断请用 `.is_in([...])`；支持的类型见[字面量](#字面量) |
+| `ValueError: shift() offset must be an integer, got a String literal '1'` | 把数字以字符串形式传给 `shift`/`rolling`/`top_k`/`percentile` 等 | 直接传入数字 |
+| `ValueError: column 'ts' is timezone-naive, but the literal is timezone-aware` | 带时区的 `datetime` 与不带时区的时间戳列比较 | 改用不带时区的 `datetime`，或让列带上时区 |
+| `ValueError: ... does not exist in America/New_York (a daylight-saving gap)` | 不带时区的 `datetime` 落在夏令时缺口或重叠中，并与带时区的列比较 | 改用带时区的 `datetime` |
+| `ValueError: column 's' is a string; use a string literal, or cast it to the literal's type first` | `Decimal`、`date` 或 `datetime` 与字符串列比较 | 用字符串比较，或先转换列 |
+| `ValueError: Decimal literal 0.123456789012 does not fit column 'x' (Decimal128(38, 10)) without rounding` | `fill_null`/`coalesce`/`if_else` 中的 `Decimal` 位数多于与列共用的任何 38 位类型所能容纳的 | 把字面量取整到列的标度，或先转换列 |
+| `ValueError: column 'x' cannot hold the shift() default 1.5 exactly (Int64)` | 列无法精确容纳的 `shift(default=)` | 使用列类型的默认值，或先转换列 |
 | `ValueError: desc length mismatch` | `desc` 列表长度与排序键数量不匹配 | 为每个排序键提供一个布尔值，或使用单个布尔值 |
 | `ValueError: Schema not initialized` | 对空的 `LTSeq()` 调用操作 | 先加载数据（`read_csv`、`from_pandas` 等）|
 
@@ -1206,7 +1213,7 @@ total = t.agg(total=lambda g: g.sales.sum())
 
 ### 聚合列方法（`agg` / `group_by().agg()` 的 lambda 内）
 - **签名**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p) / .top_k(k)`
-- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0 到 1（近似分位数）；传入的 `p` 超出该范围、无法解析为数字或不是字面量时，`agg()` 抛出 `ValueError`，默认值（中位数）仅在省略 `p` 时生效。`top_k(k)` 返回最大的 `k` 个值（以 `;` 连接的字符串）；`k` 必须是能解析为整数且 `>= 1` 的字面量（否则 `agg()` 抛出 `ValueError`），默认值 10 仅在省略 `k` 时生效
+- **行为**: 聚合上下文可用的列聚合。`mean` 是 `avg` 的别名（Pandas/Polars 动词，与 rolling 聚合同名）；`var`/`variance` 为样本方差；`std`/`stddev` 为样本标准差；`percentile(p)` 的 `p` 取 0 到 1（近似分位数）；传入的 `p` 超出该范围、不是数字（字符串不算数字）或不是字面量时，`agg()` 抛出 `ValueError`，默认值（中位数）仅在省略 `p` 时生效。`top_k(k)` 返回最大的 `k` 个值（以 `;` 连接的字符串）；`k` 必须是 `>= 1` 的整数字面量（整数值的 `Decimal` 可以，字符串和浮点数不行；否则 `agg()` 抛出 `ValueError`），默认值 10 仅在省略 `k` 时生效
 - **示例**:
 ```python
 stats = t.group_by("region").agg(
@@ -1305,6 +1312,49 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 ```python
 expr = (r.price * r.qty) > 100
 bucket = r.minutes // 15
+```
+
+### 字面量
+
+lambda 中写出的 Python 值会成为带类型的字面量。类型在捕获 lambda 时由值本身决定，不会先转成字符串再解析回来。
+
+| Python 值 | 字面量 |
+|---|---|
+| `None` | NULL |
+| `bool`、`numpy.bool_` | Boolean |
+| `int`、`IntEnum`、numpy 整数 | Int64（`-2**63` 到 `2**63 - 1`） |
+| `float`、numpy 浮点数 | Float64（允许 NaN 和 ±inf） |
+| `str` | Utf8 |
+| `decimal.Decimal` | Decimal128，精度和标度取自其数字，最多 38 位：`Decimal("1.50")` 是 `decimal128(3, 2)`；`Decimal("1")` 与 `Decimal("1.0")` 类型不同，比较时相等 |
+| `datetime.date` | Date32 |
+| `datetime.datetime` | 微秒 Timestamp |
+| `pandas.Timestamp` | 保持自身单位的 Timestamp，纳秒不丢失 |
+| `numpy.datetime64` | 保持自身单位的 Timestamp；比秒更粗的单位转为秒 |
+| 带时区的 `datetime` / `pandas.Timestamp` | 同一时刻的 Timestamp，带上时区：IANA 名称（`zoneinfo`、pandas、pytz），没有名称的时区用 `±HH:MM` 偏移 |
+
+- **捕获时的错误**：在 lambda 内、使用该值的运算符或方法调用处抛出。其他类型抛出 `TypeError`，包括 `list`/`tuple`/`set`（成员判断请用 `.is_in([...])`）、`bytes`、`timedelta` 等时长、`datetime.time`、`Fraction` 和 `complex`；超出 Int64 的整数、非有限或超过 38 位的 `Decimal`、`pandas.NaT`/`pandas.NA`/`numpy.datetime64("NaT")`（请写 `None`）以及带秒的时区偏移抛出 `ValueError`
+- **字面量按它遇到的值理解**：在比较、`is_in`、算术、`dt.diff` 中，以及作为 `fill_null`/`coalesce`/`if_else`/`when` 的取值或 `shift(default=)` 时，另一侧的类型就是它执行时的类型，无论是列还是 CASE、`coalesce` 等计算表达式。字典编码或游程编码的列按其值类型理解。行、窗口、分组表达式规则相同，NULL 操作数保持 NULL：
+  - `Decimal` 遇到浮点数时就是该浮点数：`r.f > Decimal("2")` 即 `r.f > 2.0`，NaN 和无穷大照常比较
+  - 不带时区的 `datetime` 遇到带时区的列时，按该列时区的墙上时间理解；该时区跳过（夏令时缺口）或重复（夏令时重叠）的时间抛出 `ValueError`，并给出时区名。`date` 遇到带时区的列时是该时区的本地午夜。带时区的字面量按时刻比较，与时区无关。减法和 `dt.diff` 对字面量的理解相同：在纽约时区的列上，`r.ts.dt.diff(date(2024, 1, 1), unit="hour")` 从纽约午夜算起
+  - 抛出 `ValueError` 的情况：带时区的字面量遇到不带时区的时间戳列（请用不带时区的 `datetime`）；`Decimal`、`date` 或 `datetime` 遇到字符串列（请用字符串，或先转换列）；`date` 或 `datetime` 遇到数值列
+- **比较是精确的。** DataFusion 在公共类型上比较两个值。当这个类型会转换列（小数被扩宽到超过 38 位、时间戳被转为纳秒）或对字面量取整时，改为把字面量放到列自身的取值之间比较：
+  - `Decimal` 或整数与小数列或整数列精确比较，小数位多于列，或没有任何列值能等于它时也是如此：在 `decimal(5, 2)` 列上，`r.price > Decimal("1.236")` 选出 1.24 及以上；在 `decimal(38, 20)` 列上，`r.w == 10**18` 对每一行都为假
+  - 比列的时间单位更细的时间戳字面量精确比较：在秒级列上，`r.ts < datetime(1970, 1, 1, 0, 0, 1, 500000)` 选出 0 秒和 1 秒，与它 `==` 永远不为真。`datetime` 与日期列按时刻比较：`r.d == datetime(2024, 1, 1, 6)` 不匹配任何日期。1677–2262 年以外的日期和时间也能比较
+  - 浮点字面量沿用 DataFusion 对它的理解：与整数列按浮点数比较（`r.x == 2.0**53` 匹配 `2**53 + 1`），与小数列比较时 DataFusion 先把浮点数取整为 `decimal(30, 15)`（#240）
+  - `is_in` 是对每一项做 `==` 再用 `|` 连接，与 SQL 对 `IN` 的定义相同，因此每一项都按它自己那一对的类型比较，列表中混有不同类型时也是如此：在含 `2**53` 和 `2**53 + 1` 的 Int64 列上，`r.x.is_in([2**53 + 1, 0.5])` 只匹配 `2**53 + 1`。`None` 项使不匹配其他任何项的行为 NULL，与 SQL 的 `= NULL` 相同
+- **共享一个结果列的取值**（`fill_null`、`coalesce`、`if_else`、`when`）：当每个字面量都能精确转换为 DataFusion 给出的所有取值的公共类型，且该类型不损失其他取值类型的任何内容时，结果取该公共类型。整数列的 `Decimal` 填充值得到小数列（`r.i.fill_null(Decimal("1.5"))` 是 `decimal(21, 1)`），`decimal(5, 2)` 列的 `r.price.fill_null(Decimal("1.236"))` 是 `decimal(6, 3)`，而不是取整后的值。否则，其他取值的类型能精确容纳的字面量取该类型，不能容纳的抛出 `ValueError` 并给出该字面量：与 `decimal(5, 2)` 列和 `decimal(38, 10)` 列放在一起时，`coalesce(r.a, r.b, Decimal("0.12345678900000000000"))` 是 `decimal(38, 10)` 的值 `0.1234567890`，与列的先后顺序无关；`Decimal("0.123456789012")` 则抛出错误，因为没有 38 位的类型能同时容纳它和这些列
+  - 时间戳取值能放入列的时间单位时保持该单位；更细的取值会把单位扩宽，与 DataFusion 相同。日期列旁的午夜 `datetime` 就是该日期；带时刻的 `datetime` 抛出错误
+  - 带时区的取值与另一时区的列放在一起时，结果的时区由 DataFusion 决定（取后一个值的时区）：`r.ts_ny.fill_null(datetime(..., tzinfo=timezone.utc))` 是 UTC 列
+  - 同样抛出 `ValueError`：把日期和数值列混在一起，把 `Decimal` 和日期或时间戳列混在一起
+- **`shift(default=)`** 必须是列能精确容纳的字面量：整数列的 `1.5` 或 `Decimal("1.5")`、`uint64` 列的 `-1`、`int8` 列的 `300`、`decimal(5, 2)` 列的 `1.236` 抛出 `ValueError`，不会被截断、回绕或取整。浮点列取最接近的浮点数。`shift(default=<表达式>)` 抛出错误
+- **方法的字面量参数**（`shift(n)`、`diff(n)`、`rolling(n)`、`ntile(n)`、`top_k(k)`、`percentile(p)`、`dt.add(...)`）接受任何数值类型，需要整数时整数值的 `Decimal` 也可以（`round(n)` 只接受 `int`）。字符串不是数字：`shift("1")` 抛出 `ValueError`，并给出方法名。表示名称的参数（`cast("int64")`、`dt.diff(unit="hour")`）是字符串
+- **常量**（不含列的表达式）由 DataFusion 按它自己的类型折叠：`2**53 + 1` 保持精确，两个整数的 `7 / 2` 为 `3`，`2.0 + 3.0` 是浮点数。带字面量的 `&` 和 `|` 遵循另一个操作数的类型：在 Int64 列上，`r.a & True` 与 `r.a & r.flag` 一样抛出错误
+- **注意**：日期*列*与带时区的时间戳列比较，或用 `dt.diff` 相减时，按 UTC 午夜理解（DataFusion 的规则），这与 `date` 字面量取本地午夜不同
+- **示例**：
+```python
+t.filter(lambda r: r.amount > Decimal("99.95"))
+t.filter(lambda r: r.created_at >= date(2024, 1, 1))  # 带时区的列取本地午夜
+t.filter(lambda r: r.status.is_in(["open", "pending"]))
 ```
 
 ### `if_else`

@@ -33,6 +33,13 @@ This document describes the API **as currently implemented**. Every signature be
 | `SortRequiredError: merge strategy requires sorted tables` | `join(..., strategy="merge")` called on unsorted tables | Call `.sort(join_key)` on both tables first |
 | `TypeError: predicate not boolean Expr` | Filter lambda returns non-boolean | Ensure predicate uses comparison operators (`>`, `==`, etc.) |
 | `TypeError: LTSeq expressions cannot be used in a boolean context` | Used `and`/`or`/`not`/`in`/ternary/chained comparison on a row expression or a group predicate, e.g. `(r.a > 2) and (r.b < 1.5)` or `(g.count() > 2) and (g.sum("x") > 0)` | Combine conditions with `&` `\|` `~`, e.g. `(r.a > 2) & (r.b < 1.5)` or `(g.count() > 2) & (g.sum("x") > 0)`. Instead of `in`: row expressions use `.is_in([...])`; group predicates have no `is_in`, so combine `==` comparisons with `\|`, e.g. `(g.count() == 1) \| (g.count() == 2)` |
+| `TypeError: Unsupported literal type list` | A value of an unsupported type in a lambda, such as `r.a == [1, 2]`, `bytes`, `timedelta` | Use `.is_in([...])` for membership; see [Literal values](#literal-values) for the supported types |
+| `ValueError: shift() offset must be an integer, got a String literal '1'` | A number passed as a string to `shift`/`rolling`/`top_k`/`percentile`/... | Pass the number itself |
+| `ValueError: column 'ts' is timezone-naive, but the literal is timezone-aware` | An aware `datetime` compared with a naive timestamp column | Compare with a naive `datetime`, or make the column aware |
+| `ValueError: ... does not exist in America/New_York (a daylight-saving gap)` | A naive `datetime` in a DST gap or fold, against an aware column | Use an aware `datetime` |
+| `ValueError: column 's' is a string; use a string literal, or cast it to the literal's type first` | A `Decimal`, `date` or `datetime` compared with a string column | Compare with a string, or cast the column |
+| `ValueError: Decimal literal 0.123456789012 does not fit column 'x' (Decimal128(38, 10)) without rounding` | A `Decimal` in `fill_null`/`coalesce`/`if_else` with more digits than any 38-digit type shared with the column holds | Round the literal to the column's scale, or cast the column |
+| `ValueError: column 'x' cannot hold the shift() default 1.5 exactly (Int64)` | A `shift(default=)` the column cannot hold | Use a default of the column's type, or cast the column |
 | `ValueError: desc length mismatch` | `desc` list length doesn't match number of sort keys | Provide one bool per sort key, or use single bool for all |
 | `ValueError: Schema not initialized` | Operation called on an empty `LTSeq()` | Load data first (`read_csv`, `from_pandas`, ...) |
 
@@ -1209,7 +1216,7 @@ total = t.agg(total=lambda g: g.sales.sum())
 
 ### Aggregate column methods (inside `agg` / `group_by().agg()` lambdas)
 - **Signature**: `g.col.sum() / .avg() / .mean() / .count() / .min() / .max() / .median() / .var() / .variance() / .std() / .stddev() / .percentile(p) / .top_k(k)`
-- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0 to 1 (approximate percentile); a supplied `p` outside that range, a `p` that does not parse as a number, or a non-literal `p` raises `ValueError` at `agg()` time, and the default (the median) applies only when `p` is omitted. `top_k(k)` returns the `k` largest values as a `;`-joined string; `k` must be a literal that parses as an integer `>= 1` (anything else is a `ValueError` at `agg()` time), and its default 10 applies only when `k` is omitted
+- **Behavior**: Column aggregations available in aggregation context. `mean` is an alias for `avg` (Pandas/Polars verb, same name as the rolling aggregate); `var`/`variance` is sample variance; `std`/`stddev` is sample standard deviation; `percentile(p)` takes `p` in 0 to 1 (approximate percentile); a supplied `p` outside that range, a `p` that is not a number (a string is not), or a non-literal `p` raises `ValueError` at `agg()` time, and the default (the median) applies only when `p` is omitted. `top_k(k)` returns the `k` largest values as a `;`-joined string; `k` must be an integer literal `>= 1` (an integral `Decimal` counts, a string or a float does not; anything else is a `ValueError` at `agg()` time), and its default 10 applies only when `k` is omitted
 - **Example**:
 ```python
 stats = t.group_by("region").agg(
@@ -1308,6 +1315,49 @@ pivoted = t.pivot(index="date", columns="region", values="amount", agg_fn="sum")
 ```python
 expr = (r.price * r.qty) > 100
 bucket = r.minutes // 15
+```
+
+### Literal values
+
+A Python value written in a lambda becomes a typed literal. Its type is decided by the value when the lambda is captured; nothing is converted to a string and parsed back.
+
+| Python value | Literal |
+|---|---|
+| `None` | NULL |
+| `bool`, `numpy.bool_` | Boolean |
+| `int`, `IntEnum`, numpy integers | Int64 (`-2**63` to `2**63 - 1`) |
+| `float`, numpy floats | Float64 (NaN and ±inf allowed) |
+| `str` | Utf8 |
+| `decimal.Decimal` | Decimal128 with the precision and scale of its digits, at most 38 digits: `Decimal("1.50")` is `decimal128(3, 2)`, and `Decimal("1")` and `Decimal("1.0")` stay different types that compare equal |
+| `datetime.date` | Date32 |
+| `datetime.datetime` | Timestamp in microseconds |
+| `pandas.Timestamp` | Timestamp in its own unit, so nanoseconds are kept |
+| `numpy.datetime64` | Timestamp in its unit; units coarser than a second become seconds |
+| aware `datetime` / `pandas.Timestamp` | Timestamp of the same instant with its zone: the IANA name (`zoneinfo`, pandas, pytz), or the `±HH:MM` offset for a zone without a name |
+
+- **Errors at capture**, raised inside the lambda at the operator or method call that uses the value: `TypeError` for any other type, including `list`/`tuple`/`set` (use `.is_in([...])` for membership), `bytes`, `timedelta` and other durations, `datetime.time`, `Fraction` and `complex`; `ValueError` for an int outside Int64, a non-finite `Decimal` or one wider than 38 digits, `pandas.NaT`/`pandas.NA`/`numpy.datetime64("NaT")` (write `None`), and a zone offset with seconds
+- **A literal is read against what it meets**: in a comparison, `is_in`, arithmetic, `dt.diff`, a value of `fill_null`/`coalesce`/`if_else`/`when`, or a `shift(default=)`, the other side's type is the type it executes as, whether it is a column or a computed expression such as a CASE or a `coalesce`. A dictionary- or run-end-encoded column counts as its value type. The rules are the same in row, window and group expressions, and a NULL operand stays NULL:
+  - A `Decimal` next to a float is that float: `r.f > Decimal("2")` is `r.f > 2.0`, NaN and infinity included
+  - A naive `datetime` next to a timezone-aware column is wall-clock time in the column's zone; a time that zone skips (a DST gap) or repeats (a DST fold) raises `ValueError` naming the zone. A `date` next to an aware column is midnight in its zone. Aware literals compare as instants, whatever their zones. Subtraction and `dt.diff` read a literal the same way: on a New York column, `r.ts.dt.diff(date(2024, 1, 1), unit="hour")` counts from New York midnight
+  - Raise `ValueError`: an aware literal next to a naive timestamp column (use a naive `datetime`); a `Decimal`, `date` or `datetime` next to a string column (use a string, or cast the column); a `date` or `datetime` next to a numeric column
+- **Comparisons are exact.** DataFusion compares two values at a common type. When that type would cast the column (a decimal widened past 38 digits, a timestamp moved to nanoseconds) or round the literal, the literal is compared with the column's own values instead:
+  - A `Decimal` or int against a decimal or integer column compares exactly, also with more fractional digits than the column has, or with a value no column value can equal: `r.price > Decimal("1.236")` on `decimal(5, 2)` selects 1.24 and above, and `r.w == 10**18` on `decimal(38, 20)` is false on every row
+  - A timestamp literal finer than the column's unit compares exactly: on a seconds column, `r.ts < datetime(1970, 1, 1, 0, 0, 1, 500000)` selects 0 s and 1 s, and `==` with it is never true. A `datetime` against a date column compares instants: `r.d == datetime(2024, 1, 1, 6)` matches no date. Dates and datetimes outside 1677–2262 compare too
+  - A float literal keeps DataFusion's reading of it: against an integer column the pair compares as floats (`r.x == 2.0**53` matches `2**53 + 1`), and against a decimal column DataFusion rounds the float to `decimal(30, 15)` first (#240)
+  - `is_in` is the `|` of `==` with each item, as SQL defines `IN`, so each item compares at its own pair's type, also in a list of mixed kinds: on an Int64 column holding `2**53` and `2**53 + 1`, `r.x.is_in([2**53 + 1, 0.5])` matches `2**53 + 1` only. A `None` item makes a row that matches no other item NULL, as SQL's `= NULL` does
+- **Values that share a result column** (`fill_null`, `coalesce`, `if_else`, `when`) take DataFusion's common type of all the values when every literal reaches it exactly and it loses nothing of the other values' type. A `Decimal` fill value for an integer column gives a decimal column (`r.i.fill_null(Decimal("1.5"))` is `decimal(21, 1)`), and `r.price.fill_null(Decimal("1.236"))` on `decimal(5, 2)` is `decimal(6, 3)`, not a rounded value. Otherwise a literal that the other values' type holds exactly takes that type, and one it does not hold raises `ValueError` naming the literal: next to a `decimal(5, 2)` and a `decimal(38, 10)` column, `coalesce(r.a, r.b, Decimal("0.12345678900000000000"))` is the `decimal(38, 10)` value `0.1234567890` in either column order, and `Decimal("0.123456789012")` raises, since no 38-digit type holds both it and the columns
+  - A timestamp value keeps the column's unit when it fits that unit; a finer one widens the unit, as DataFusion does. A midnight `datetime` next to a date column is that date; one with a time of day raises
+  - An aware value next to an aware column of another zone gives the zone DataFusion picks (the later value's): `r.ts_ny.fill_null(datetime(..., tzinfo=timezone.utc))` is a UTC column
+  - Also raise `ValueError`: a date mixed with a numeric column, and a `Decimal` with a date or timestamp column
+- **`shift(default=)`** must be a literal the column holds exactly: `1.5` or `Decimal("1.5")` for an integer column, `-1` for `uint64`, `300` for `int8` and `1.236` for `decimal(5, 2)` raise `ValueError` instead of being truncated, wrapped or rounded. A float column holds the nearest float. A `shift(default=<expression>)` raises
+- **Literal arguments of methods** (`shift(n)`, `diff(n)`, `rolling(n)`, `ntile(n)`, `top_k(k)`, `percentile(p)`, `dt.add(...)`) take numbers of any kind, an integral `Decimal` included where an integer is needed (`round(n)` takes an `int`). A string is not a number: `shift("1")` raises `ValueError` naming the method. Arguments that name something (`cast("int64")`, `dt.diff(unit="hour")`) are strings
+- **Constants** (expressions without a column) are folded by DataFusion with its own types: `2**53 + 1` stays exact, `7 / 2` on two ints is `3`, `2.0 + 3.0` is a float. `&` and `|` with a literal follow the other operand's type: `r.a & True` on an Int64 column raises, as `r.a & r.flag` does
+- **Note**: a date *column* compared with an aware timestamp column, or subtracted from one with `dt.diff`, is read as UTC midnight (DataFusion's rule), unlike a `date` literal, which is local midnight
+- **Example**:
+```python
+t.filter(lambda r: r.amount > Decimal("99.95"))
+t.filter(lambda r: r.created_at >= date(2024, 1, 1))  # local midnight for an aware column
+t.filter(lambda r: r.status.is_in(["open", "pending"]))
 ```
 
 ### `if_else`
