@@ -477,6 +477,11 @@ SCAN_PREDICATES = {
     "mod_gt": lambda c: lambda r: getattr(r, c) % 2 > getattr(r, c).shift(1) % 2,
     "floordiv_gt": lambda c: lambda r: getattr(r, c) // 2 > getattr(r, c).shift(1) // 2,
     "big_gt": lambda c: lambda r: getattr(r, c) - getattr(r, c).shift(1) > 2**53,
+    # shift() arguments the kernel does not implement.
+    "ne_prev_default_int": lambda c: lambda r: getattr(r, c) != getattr(r, c).shift(1, default=7),
+    "ne_prev_default_dec": lambda c: lambda r: getattr(r, c) != getattr(r, c).shift(1, default=D("1.5")),
+    "ne_prev_default_str": lambda c: lambda r: getattr(r, c) != getattr(r, c).shift(1, default="a"),
+    "ne_prev_partitioned": lambda c: lambda r: getattr(r, c) != getattr(r, c).shift(1, partition_by="g"),
 }
 
 
@@ -501,7 +506,8 @@ def _count_outcome(compute):
 @pytest.mark.parametrize("column", list(SCAN_COLUMNS))
 @pytest.mark.parametrize("predicate", list(SCAN_PREDICATES))
 def test_linear_scan_count_matches_reference(column, predicate):
-    t = LTSeq.from_arrow(pa.table({"k": list(range(8)), **SCAN_COLUMNS})).sort("k")
+    g = ["a", "b", "a", "b", "a", "a", "b", "b"]
+    t = LTSeq.from_arrow(pa.table({"k": list(range(8)), "g": g, **SCAN_COLUMNS})).sort("k")
     pred = SCAN_PREDICATES[predicate](column)
     reference = _count_outcome(lambda: t.group_ordered(pred).first().to_arrow().num_rows)
     assert _count_outcome(lambda: t.group_ordered(pred).first().count()) == reference

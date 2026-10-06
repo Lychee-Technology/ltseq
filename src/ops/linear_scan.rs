@@ -16,7 +16,7 @@
 //! | PyExpr | Evaluation |
 //! |--------|-----------|
 //! | `Column("x")` | Read column value at current row |
-//! | `Call { func: "shift", on: Column("x"), args: [1] }` | Read column value at previous row |
+//! | `Call { func: "shift", on: Column("x"), args: [1] }`, no kwargs | Read column value at previous row |
 //! | `Call { func: "is_null" / "is_not_null", on: expr }` | Check if evaluated value is (not) null |
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
@@ -50,8 +50,9 @@ use std::sync::Arc;
 /// Returns true if the expression tree:
 /// 1. Contains at least one shift(1) call (otherwise, it's a simple column/expression
 ///    and should use the standard DataFusion IS DISTINCT FROM LAG path)
-/// 2. Only contains operations we support: Column, shift(1), is_null, is_not_null, BinOp,
-///    UnaryOp, and literals of the kinds the evaluator has values for (`Value`)
+/// 2. Only contains operations we support: Column, shift(1) without keyword
+///    arguments, is_null, is_not_null, BinOp, UnaryOp, and literals of the
+///    kinds the evaluator has values for (`Value`)
 /// 3. Computes, at every node, what DataFusion computes for it on these
 ///    column types ([`kernel_type`]), so the count equals the materialized
 ///    reference. NULL handling still differs (#189).
@@ -194,7 +195,7 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
         PyExpr::Call {
             func,
             args,
-            kwargs: _,
+            kwargs,
             on,
         } => {
             match func.as_str() {
@@ -203,8 +204,13 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
                     if !matches!(on.as_deref(), Some(PyExpr::Column(_))) {
                         return false;
                     }
-                    // The only argument must be the integer literal 1
-                    matches!(args.as_slice(), [PyExpr::Literal(LiteralValue::Int64(1))])
+                    // The only argument must be the integer literal 1, with no
+                    // keyword arguments: the evaluator reads the previous row of
+                    // the whole table, so it has no `partition_by`, and it does
+                    // not check a `default` against the column (decision D-c on
+                    // #225). The reference evaluates both.
+                    kwargs.is_empty()
+                        && matches!(args.as_slice(), [PyExpr::Literal(LiteralValue::Int64(1))])
                 }
                 "is_null" | "is_not_null" => {
                     // is_null() / is_not_null() (also what `== None` /
@@ -1248,6 +1254,16 @@ mod tests {
         }
     }
 
+    /// `c.shift(1, key=value)`
+    fn shift_with(name: &str, key: &str, value: PyExpr) -> PyExpr {
+        PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![lit(LiteralValue::Int64(1))],
+            kwargs: HashMap::from([(key.to_string(), value)]),
+            on: Some(Box::new(col(name))),
+        }
+    }
+
     /// `c != c.shift(1)`
     fn changes(name: &str) -> PyExpr {
         binop("Ne", col(name), shift1(name))
@@ -1518,6 +1534,12 @@ mod tests {
             ),
             (binop("Or", changes("i64"), gap("ts", 1800)), false),
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), lit(LiteralValue::Null)), true),
+            // A shift with keyword arguments is the reference's to evaluate.
+            (binop("Ne", col("i64"), shift_with("i64", "default", int(7))), false),
+            (
+                binop("Ne", col("i64"), shift_with("i64", "partition_by", lit(LiteralValue::String("s".into())))),
+                false,
+            ),
         ];
         for (expr, eligible) in table {
             assert_eq!(can_linear_scan(&expr, &schema), eligible, "{expr:?}");
