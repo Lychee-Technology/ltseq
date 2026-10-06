@@ -226,3 +226,37 @@ P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_colum
 P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_is_utc_midnight[Asia/Tokyo-9.0-date64]
 P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_outside_nanoseconds[date32]
 P1 py-ltseq/tests/test_new_functions.py::TestDtDiffElapsed::test_diff_date_column_against_aware_column_outside_nanoseconds[date64]
+
+# Review regression cases.
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_negative_scale_does_not_panic
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_lossy_float_default_rejected[dtype0-values0-1.5]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_lossy_float_default_rejected[dtype1-values1-1.236]
+P2 py-ltseq/tests/test_literal_review_regressions.py::test_local_midnight_near_nanosecond_bounds_is_not_beyond[Asia/Tokyo-day0]
+P2 py-ltseq/tests/test_literal_review_regressions.py::test_local_midnight_near_nanosecond_bounds_is_not_beyond[America/New_York-day1]
+P2 py-ltseq/tests/test_literal_review_regressions.py::test_nanosecond_wall_clock_literal_can_localize_into_microseconds
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_mixed_decimal_membership_agrees_with_equality_disjunction
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype0-9.223372036854776e+18]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype1-1.8446744073709552e+19]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_numeric_default_rejects_upper_boundary[dtype2-128.0]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal0-dtype0]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal0-dtype1]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal0-dtype2]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal0-dtype3]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal0-dtype4]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal1-dtype0]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal1-dtype1]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal1-dtype2]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal1-dtype3]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal1-dtype4]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal2-dtype1]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal3-dtype1]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal4-dtype0]
+P3 py-ltseq/tests/test_literal_review_regressions.py::test_decimal_composition_matches_exact_oracle[literal4-dtype1]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_nary_decimal_values_include_all_column_types
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_case_float_decimal_fill[False-False]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_case_float_decimal_fill[False-True]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_case_float_decimal_fill[True-False]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_case_float_decimal_fill[True-True]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-False]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[1000000.0-True]
+P4 py-ltseq/tests/test_literal_review_regressions.py::test_coalesce_float_literal_decimal_widening[2.5-False]
