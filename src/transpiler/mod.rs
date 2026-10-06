@@ -6,26 +6,22 @@
 //!
 //! ## Module Structure
 //!
-//! - `optimization`: Constant folding and boolean simplification
+//! - `resolve`: expression types, from DataFusion's own coercion
+//! - `literal_policy`, `literals`, `exact`: how a literal is read next to the
+//!   value it meets, and exact comparison and value placement
 //! - `window_native`: Native DataFusion window expression builder (primary path)
 //!
-//! ## Expression Optimization
-//!
-//! This module includes compile-time optimizations:
-//! - **Constant Folding**: Arithmetic operations on literals are evaluated at compile time
-//!   (e.g., `1 + 2 + r.col` → `3 + r.col`)
-//! - **Boolean Simplification**: Trivial boolean expressions are simplified
-//!   (e.g., `x & True` → `x`, `x | False` → `x`)
+//! Constant expressions (`1 + 2 + r.col`, `x & True`) are left to DataFusion's
+//! simplifier, which folds them with DataFusion's own types and checks
+//! (decision D-f on #225).
 
 mod exact;
 pub(crate) mod floor_div;
 mod literal_policy;
 mod literals;
-mod optimization;
 mod resolve;
 pub(crate) mod window_native;
 
-pub use optimization::optimize_expr;
 pub(crate) use resolve::Resolver;
 pub use window_native::pyexpr_to_window_expr;
 
@@ -954,9 +950,6 @@ fn parse_call_expr(
 /// Convert PyExpr to DataFusion Expr, resolved against `schema`: coerced as
 /// DataFusion's analyzer will coerce it, so the type DataFusion reports for
 /// it (and stores for a projection of it) is the type it executes as.
-///
-/// This function first applies expression optimization (constant folding,
-/// boolean simplification) before converting to DataFusion expressions.
 pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
     let rx = Resolver::new(schema)?;
     Ok(rx.resolve(lower_expr(py_expr, &rx)?))
@@ -979,14 +972,14 @@ pub fn pyexpr_to_named_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Resu
     })
 }
 
-/// Optimize and lower `py_expr` without resolving it: the row-level part
-/// of an expression that the window and group dialects lower, resolve as a
-/// whole, and ask `rx` about.
+/// Lower `py_expr` without resolving it: the row-level part of an
+/// expression that the window and group dialects lower, resolve as a whole,
+/// and ask `rx` about.
 pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
-    pyexpr_to_datafusion_inner(optimize_expr(py_expr), rx)
+    pyexpr_to_datafusion_inner(py_expr, rx)
 }
 
-/// Internal conversion without optimization (used after optimization pass)
+/// Lower one PyExpr node, recursively (see `lower_expr`).
 fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, rx.arrow()),

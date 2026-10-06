@@ -87,9 +87,10 @@ note = "equals DataFusion's evaluation of the same arithmetic on a column (colum
 expect = '{"result": {"v": {"type": "int64", "values": [0, 0]}}}'
 
 ["folding_and_scan::boolean_identity_on_integer"]
-status = "PREEXISTING_BUG"
-ref = "#209 (D-f, Phase 6)"
-note = "x & True rewritten to x without a type check; reclassify when the PyExpr identities are deleted"
+status = "BUG_FIXED"
+ref = "#209 (D-f)"
+note = "x & True was rewritten to x without a type check; DataFusion rejects Int64 AND Boolean, as it does for x & a Boolean column"
+expect = '{"error": {"class": "RuntimeError", "stage": "plan"}}'
 
 # --- pairs ---------------------------------------------------------------------
 

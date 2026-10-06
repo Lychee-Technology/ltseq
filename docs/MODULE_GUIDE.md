@@ -356,9 +356,19 @@ Primary `PyExpr` to DataFusion `Expr` transpiler.
 
 Native DataFusion window expression generation.
 
-### `src/transpiler/optimization.rs`
+### `src/transpiler/resolve.rs`
 
-Expression simplification and optimization before execution.
+The type oracle. Applies DataFusion's analyzer coercion to an expression up front, so every type the transpiler asks about is the type the expression executes as, and folds column-free constants with DataFusion's simplifier.
+
+### `src/transpiler/literal_policy.rs`, `literals.rs`, `exact.rs`
+
+How a Python literal is read next to the value it meets (`literal_policy.rs`: the complete list of readings that differ from DataFusion's coercion), where that reading is put in comparisons, `is_in`, `if_else`/`coalesce`/`fill_null` and `shift` defaults (`literals.rs`), and the exact casts and range placement both rely on (`exact.rs`).
+
+### `src/transpiler/floor_div.rs`
+
+Floor division (`//`) with Python's semantics, shared by DataFusion plans and the search_pattern evaluator.
+
+Constant folding and boolean identities are left to DataFusion's own simplifier; there is no PyExpr-level optimizer.
 
 ---
 

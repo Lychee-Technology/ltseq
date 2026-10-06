@@ -55,7 +55,11 @@ src/                           # Rust kernel
 ├── transpiler/               # PyExpr → DataFusion Expr conversion
 │   ├── mod.rs                # Main transpilation logic
 │   ├── window_native.rs      # Native window expression builders
-│   └── optimization.rs       # Expression optimizations
+│   ├── resolve.rs            # Expression types from DataFusion's own coercion
+│   ├── literal_policy.rs     # How a literal reads next to a typed value
+│   ├── literals.rs           # Literal placement in comparisons, is_in and values
+│   ├── exact.rs              # Exact casts and placement of literal values
+│   └── floor_div.rs          # Python floor-division semantics
 └── cursor.rs                 # Streaming cursor for large datasets
 
 py-ltseq/ltseq/               # Python package

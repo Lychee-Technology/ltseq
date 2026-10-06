@@ -163,7 +163,7 @@ t.filter(lambda r: r.age > 18)
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs`（表达式类型）与 `src/transpiler/literals.rs`（字面量放置）
 
 ### 2.4 实际边界
 

@@ -15,6 +15,7 @@ the expression executes as breaks one of them.
 - dialect parity: the row result shifted by one equals the window
   result, and one-row groups keep exactly the rows the row result keeps
 - folding: a constant folded before planning equals the same arithmetic on a column
+- boolean literal: ``e & True`` (and ``|``, ``False``) equals ``e`` next to a constant Boolean column
 - linear scan: ``first().count()`` equals the materialized group count
 """
 
@@ -415,6 +416,50 @@ def test_folded_constant_matches_column_arithmetic(a, op, b):
     folded = outcome(lambda: t.derive(v=lambda r: op(LiteralExpr(a), b)))
     unfolded = outcome(lambda: t.derive(v=lambda r: op(r.z + a, b)))
     assert folded == unfolded
+
+
+# ---------------------------------------------------------------------------
+# A boolean literal equals a constant Boolean column (#209)
+# ---------------------------------------------------------------------------
+
+
+def logic_table():
+    return LTSeq.from_arrow(pa.table({
+        "k": pa.array([0, 1, 2], pa.int64()),
+        "b": pa.array([True, False, None], pa.bool_()),
+        "a": pa.array([1, 5, None], pa.int64()),
+        "s": pa.array(["x", "y", None], pa.string()),
+        "T": pa.array([True] * 3, pa.bool_()),
+        "F": pa.array([False] * 3, pa.bool_()),
+    })).sort("k")
+
+
+LOGIC_OPERANDS = {
+    "bool": lambda r: r.b,
+    "int": lambda r: r.a,
+    "string": lambda r: r.s,
+    "null": lambda r: LiteralExpr(None),
+}
+
+
+@pytest.mark.parametrize("consumer", ["derive", "filter"])
+@pytest.mark.parametrize("op", [operator.and_, operator.or_], ids=["and", "or"])
+@pytest.mark.parametrize("lit", [True, False])
+@pytest.mark.parametrize("operand", list(LOGIC_OPERANDS))
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_boolean_literal_matches_constant_column(side, operand, lit, op, consumer):
+    def build(other):
+        def expr(r):
+            e, o = LOGIC_OPERANDS[operand](r), other(r)
+            return op(e, o) if side == "right" else op(o, e)
+        if consumer == "derive":
+            return lambda: logic_table().derive(v=expr)
+        return lambda: logic_table().filter(expr)
+
+    name = "v" if consumer == "derive" else "k"
+    literal = outcome(build(lambda r: LiteralExpr(lit)), name)
+    column = outcome(build(lambda r: r.T if lit else r.F), name)
+    assert literal == column
 
 
 # ---------------------------------------------------------------------------

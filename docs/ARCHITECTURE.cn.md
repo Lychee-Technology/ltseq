@@ -177,7 +177,7 @@ t.filter(lambda r: r.age > 18)
 
 ### Rust 侧
 
-序列化字典在 `src/types.rs` 中转换为 `PyExpr`，可选地经过优化，然后走以下两类路径之一：
+序列化字典在 `src/types.rs` 中转换为 `PyExpr`，然后走以下两类路径之一：
 
 - 原生 DataFusion `Expr`
 - 原生窗口表达式构造
@@ -186,7 +186,7 @@ t.filter(lambda r: r.age > 18)
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs`（表达式类型）与 `src/transpiler/literals.rs`（字面量放置）
 
 Python 负责表达语法，Rust 负责执行语义。这条分界贯穿整个架构。
 

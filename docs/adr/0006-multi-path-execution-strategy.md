@@ -22,7 +22,7 @@ Sort metadata feeds the strategy choice: `LTSeqTable` carries an optional source
 
 ### Evolution: the retired SQL-fallback path
 
-Earlier, a third strategy existed: generated SQL plus temporary tables (`transpiler/sql_gen.rs`) as "a compatibility and implementation convenience layer" for grouped/window-style transformations awkward to express natively. That path has been removed, precisely because SQL round-trips (`collect → MemTable → session.sql() → collect`) were a materialization sink; `src/transpiler/` today contains only `mod.rs`, `window_native.rs`, and `optimization.rs`, and `test_no_materialization_rule.py` now guards against reintroducing the pattern. `ARCHITECTURE.md`/`DESIGN_SUMMARY.md` still describe the three-path version and are stale on this point.
+Earlier, a third strategy existed: generated SQL plus temporary tables (`transpiler/sql_gen.rs`) as "a compatibility and implementation convenience layer" for grouped/window-style transformations awkward to express natively. That path has been removed, precisely because SQL round-trips (`collect → MemTable → session.sql() → collect`) were a materialization sink; `src/transpiler/` today contains only native lowering (`mod.rs`, `window_native.rs`) and its type and literal helpers, and `test_no_materialization_rule.py` now guards against reintroducing the pattern. `ARCHITECTURE.md`/`DESIGN_SUMMARY.md` still describe the three-path version and are stale on this point.
 
 ## Consequences
 

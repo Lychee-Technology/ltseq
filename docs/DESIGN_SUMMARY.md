@@ -160,7 +160,7 @@ Key files:
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs` (expression types) and `src/transpiler/literals.rs` (literal placement)
 
 ### 2.4 Practical Boundaries
 
