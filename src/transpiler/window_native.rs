@@ -179,8 +179,17 @@ pub fn pyexpr_to_window_expr(
     Ok(rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?))
 }
 
-/// Internal recursive conversion
+/// Internal recursive conversion, one node at a time through
+/// `Resolver::lowering`.
 fn pyexpr_to_window_inner(
+    py_expr: PyExpr,
+    rx: &Resolver<'_>,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    rx.lowering(|| lower_window_node(py_expr, rx, order_by))
+}
+
+fn lower_window_node(
     py_expr: PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],

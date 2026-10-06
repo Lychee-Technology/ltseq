@@ -24,11 +24,24 @@
 //! [`Resolver::literal`] decides what counts as a literal: a literal node,
 //! or a constant expression DataFusion's simplifier folds into one, so the
 //! literal rules see the values DataFusion will.
+//!
+//! Lowering asks about subexpressions bottom-up. Coercing the whole
+//! subexpression for each question coerces a chain like `((x + 1) + 1) +
+//! ...` a quadratic number of nodes, each of which walks its operands'
+//! types, so planning grew cubically with depth (review finding F4 on
+//! #225). [`Resolver::lowering`] remembers each lowered node with its
+//! coerced form while its parent is lowered, and coercion substitutes those
+//! forms instead of coercing them again: lowering coerces each node once,
+//! and planning grows quadratically, as DataFusion's own analysis does.
 
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
-use datafusion::common::tree_node::TreeNode;
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::{Expr, ExprSchemable, Volatility};
@@ -40,6 +53,10 @@ use datafusion::scalar::ScalarValue;
 pub(crate) struct Resolver<'a> {
     arrow: &'a ArrowSchema,
     schema: DFSchemaRef,
+    /// Lowered nodes whose parent is being lowered, with their coerced forms.
+    known: RefCell<Known>,
+    /// Nodes coerced so far (not substituted from `known`).
+    coerced: Cell<usize>,
 }
 
 impl<'a> Resolver<'a> {
@@ -49,6 +66,8 @@ impl<'a> Resolver<'a> {
         Ok(Self {
             arrow,
             schema: Arc::new(schema),
+            known: RefCell::default(),
+            coerced: Cell::new(0),
         })
     }
 
@@ -62,11 +81,58 @@ impl<'a> Resolver<'a> {
     /// DataFusion cannot coerce is returned unchanged: DataFusion then
     /// reports the problem where it always has, when the plan is built or run.
     pub(crate) fn resolve(&self, expr: Expr) -> Expr {
-        let mut rewriter = TypeCoercionRewriter::new(&self.schema);
-        match expr.clone().rewrite(&mut rewriter) {
-            Ok(transformed) => transformed.data,
-            Err(_) => expr,
+        self.coerce(expr.clone())
+            .map_or(expr, |coerced| coerced.data)
+    }
+
+    /// The analyzer's coercion of `expr`, node by node from the leaves up
+    /// (`TypeCoercionRewriter`), except that a subexpression lowering
+    /// remembers is replaced by its coerced form. Coercion is a function of
+    /// the expression and the schema, so that is the form coercing it again
+    /// would give.
+    fn coerce(&self, expr: Expr) -> datafusion::common::Result<Transformed<Expr>> {
+        let known = self.known.borrow();
+        let mut rewriter = Coercion {
+            analyzer: TypeCoercionRewriter::new(&self.schema),
+            known: &known,
+            substituted: false,
+            coerced: &self.coerced,
+        };
+        expr.rewrite(&mut rewriter)
+    }
+
+    /// Lower one node: `lower` builds it, lowering its children through this
+    /// method too. The node and its coerced form are remembered until its
+    /// parent is lowered, which is when lowering asks about it (the type of
+    /// an operand, a value, a list) and coerces the parent around it. A node
+    /// lowering fails on, or DataFusion cannot coerce, is not remembered.
+    pub(crate) fn lowering(
+        &self,
+        lower: impl FnOnce() -> Result<Expr, String>,
+    ) -> Result<Expr, String> {
+        let mark = self.known.borrow().len();
+        let lowered = lower();
+        let coerced = lowered
+            .as_ref()
+            .ok()
+            .and_then(|expr| self.coerce(expr.clone()).ok());
+        let mut known = self.known.borrow_mut();
+        known.truncate(mark);
+        if let (Ok(expr), Some(coerced)) = (&lowered, coerced) {
+            // A coerced form that differs is asked about too: `is_in` builds
+            // its IN from coerced equalities.
+            if coerced.transformed {
+                known.push(coerced.data.clone(), coerced.data.clone(), false);
+            }
+            known.push(expr.clone(), coerced.data, coerced.transformed);
         }
+        lowered
+    }
+
+    /// Nodes coerced by this resolver, not counting substituted ones.
+    #[cfg(test)]
+    pub(crate) fn coerced_nodes(&self) -> usize {
+        self.coerced.get()
     }
 
     /// The type `expr` executes as.
@@ -134,6 +200,109 @@ impl<'a> Resolver<'a> {
             _ => None,
         }
     }
+}
+
+/// The analyzer's coercion, with remembered subexpressions substituted.
+struct Coercion<'r> {
+    analyzer: TypeCoercionRewriter<'r>,
+    known: &'r Known,
+    /// The node `f_down` just replaced, which `f_up` then leaves alone.
+    substituted: bool,
+    coerced: &'r Cell<usize>,
+}
+
+impl TreeNodeRewriter for Coercion<'_> {
+    type Node = Expr;
+
+    fn f_down(&mut self, expr: Expr) -> datafusion::common::Result<Transformed<Expr>> {
+        Ok(match self.known.get(&expr) {
+            Some((coerced, changed)) => {
+                self.substituted = true;
+                Transformed::new(coerced.clone(), changed, TreeNodeRecursion::Jump)
+            }
+            None => Transformed::no(expr),
+        })
+    }
+
+    fn f_up(&mut self, expr: Expr) -> datafusion::common::Result<Transformed<Expr>> {
+        if std::mem::take(&mut self.substituted) {
+            return Ok(Transformed::no(expr));
+        }
+        self.coerced.set(self.coerced.get() + 1);
+        self.analyzer.f_up(expr)
+    }
+}
+
+/// Expressions with their coerced forms (and whether coercion changed
+/// them), as a stack that lowering truncates when it leaves a node, indexed
+/// by hash.
+#[derive(Default)]
+struct Known {
+    by_hash: HashMap<u64, Vec<(Expr, Expr, bool)>>,
+    stack: Vec<u64>,
+}
+
+impl Known {
+    fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn push(&mut self, expr: Expr, coerced: Expr, changed: bool) {
+        let hash = hash_of(&expr);
+        self.by_hash
+            .entry(hash)
+            .or_default()
+            .push((expr, coerced, changed));
+        self.stack.push(hash);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        while self.stack.len() > len {
+            let hash = self.stack.pop().expect("longer than len");
+            let bucket = self.by_hash.get_mut(&hash).expect("pushed with this hash");
+            bucket.pop();
+            if bucket.is_empty() {
+                self.by_hash.remove(&hash);
+            }
+        }
+    }
+
+    fn get(&self, expr: &Expr) -> Option<(&Expr, bool)> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        let bucket = self.by_hash.get(&hash_of(expr))?;
+        bucket
+            .iter()
+            .rev()
+            .find(|(known, ..)| same(known, expr))
+            .map(|(_, coerced, changed)| (coerced, *changed))
+    }
+}
+
+fn hash_of(expr: &Expr) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    expr.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Whether `a` and `b` are the same expression. `Expr`'s equality compares
+/// literals with `ScalarValue`'s, which ignores a timestamp's time zone, and
+/// two literals that differ only there coerce differently; so the literals'
+/// types are compared too.
+fn same(a: &Expr, b: &Expr) -> bool {
+    fn literal_types(expr: &Expr) -> Vec<DataType> {
+        let mut types = Vec::new();
+        expr.apply(|e| {
+            if let Expr::Literal(value, _) = e {
+                types.push(value.data_type());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .expect("collecting literal types does not fail");
+        types
+    }
+    a == b && literal_types(a) == literal_types(b)
 }
 
 #[cfg(test)]

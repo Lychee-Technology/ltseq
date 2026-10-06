@@ -979,8 +979,14 @@ pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, Str
     pyexpr_to_datafusion_inner(py_expr, rx)
 }
 
-/// Lower one PyExpr node, recursively (see `lower_expr`).
+/// Lower one PyExpr node, recursively (see `lower_expr`). Each node is
+/// lowered through `Resolver::lowering`, so questions about it while its
+/// parent is lowered do not coerce it again.
 fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+    rx.lowering(|| lower_node(py_expr, rx))
+}
+
+fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, rx.arrow()),
         PyExpr::Literal(value) => Ok(lit(value.to_scalar_value())),
@@ -1462,6 +1468,39 @@ mod tests {
             lit(2_i64),
         );
         assert_eq!(expr, expected);
+    }
+
+    /// Lowering coerces each node once, however deep the expression: the
+    /// number of nodes coerced grows linearly with the depth, where coercing
+    /// every operand subtree again grew it quadratically (review F4 on #225).
+    #[test]
+    fn lowering_coerces_each_node_once() {
+        let schema = test_schema();
+        let binop = |op: &str, left: PyExpr, right: PyExpr| PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        // `((a + 1) + 1) + ...` and `if_else(a > 1, 1, if_else(a > 2, 2, ...))`
+        let sum = |depth: i64| (0..depth).fold(col_expr("a"), |e, _| binop("Add", e, int_lit(1)));
+        let cases = |depth: i64| {
+            (0..depth).fold(col_expr("b"), |e, i| {
+                let cond = binop("Gt", col_expr("a"), int_lit(i));
+                standalone_call("if_else", vec![cond, int_lit(i), e])
+            })
+        };
+        for build in [&sum as &dyn Fn(i64) -> PyExpr, &cases] {
+            let coerced = |depth: i64| {
+                let rx = Resolver::new(&schema).unwrap();
+                rx.resolve(lower_expr(build(depth), &rx).unwrap());
+                rx.coerced_nodes()
+            };
+            let (shallow, deep) = (coerced(100), coerced(200));
+            assert!(
+                deep <= 2 * shallow + 10,
+                "{shallow} nodes coerced at depth 100, {deep} at depth 200"
+            );
+        }
     }
 
     #[test]

@@ -189,7 +189,12 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
     Ok(rx.resolve(lower_group_node(node, &rx)?))
 }
 
+/// Lower one group-dialect node, through `Resolver::lowering`.
 fn lower_group_node(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
+    rx.lowering(|| lower_group_node_once(node, rx))
+}
+
+fn lower_group_node_once(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
     match node {
         GroupNode::Count => aggregate_to_window(
             agg_fn::count(lit(1i64)),
