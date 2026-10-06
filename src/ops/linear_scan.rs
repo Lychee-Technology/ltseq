@@ -44,15 +44,106 @@ use std::sync::Arc;
 // Expression eligibility check
 // ============================================================================
 
-/// Check if a PyExpr can be evaluated by the linear scan engine.
+/// Check if a PyExpr can be evaluated by the linear scan engine on a table
+/// of `schema`.
 ///
 /// Returns true if the expression tree:
 /// 1. Contains at least one shift(1) call (otherwise, it's a simple column/expression
 ///    and should use the standard DataFusion IS DISTINCT FROM LAG path)
 /// 2. Only contains operations we support: Column, shift(1), is_null, is_not_null, BinOp,
 ///    UnaryOp, and literals of the kinds the evaluator has values for (`Value`)
-pub fn can_linear_scan(expr: &PyExpr) -> bool {
-    is_supported_expr(expr) && contains_shift(expr)
+/// 3. Computes, at every node, what DataFusion computes for it on these
+///    column types ([`kernel_type`]), so the count equals the materialized
+///    reference. NULL handling still differs (#189).
+pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
+    is_supported_expr(expr)
+        && contains_shift(expr)
+        && kernel_type(expr, schema) == Some(DataType::Boolean)
+}
+
+/// The type DataFusion gives `expr` on a table of `schema`, when the kernel
+/// computes the same values for it; `None` when it does not.
+///
+/// The kernel compares and subtracts integers as `i64`, timestamps as raw
+/// ticks, and has no integer/float coercion. DataFusion instead coerces both
+/// operands to a common type (`BinaryTypeCoercer`, the rule its analyzer
+/// uses) and computes there. The two agree when:
+///
+/// - a comparison is between integers that `i64` holds exactly (`Int64`,
+///   `Int32`, `UInt32`), between timestamps of one type, between `UInt64`s
+///   for `==`/`!=` (equal bit patterns), between `Float64`s for the operators
+///   the kernel has float arms for (`==`, `!=`, `>`), or between strings for
+///   `!=`; or an integer is compared `>` with an integral float literal
+///   below 2^53, which the fused path reads as that integer (#145 PR-4),
+///   or with a NULL literal (NULL in both);
+/// - arithmetic is computed by DataFusion in `Int64` (`+ - * /`) or `Float64`
+///   (`-`). `Int32`/`UInt32` arithmetic DataFusion computes in 32 bits,
+///   wrapping (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic
+///   gives a duration, and `UInt64` past `i64::MAX` is negative to the kernel.
+fn kernel_type(expr: &PyExpr, schema: &ArrowSchema) -> Option<DataType> {
+    use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
+    use DataType as T;
+    let exact_integer = |t: &DataType| matches!(t, T::Int64 | T::Int32 | T::UInt32);
+    match expr {
+        PyExpr::Column(name) => {
+            let t = schema.field_with_name(name).ok()?.data_type().clone();
+            let supported = exact_integer(&t)
+                || matches!(t, T::UInt64 | T::Float64 | T::Boolean | T::Utf8 | T::Timestamp(..));
+            supported.then_some(t)
+        }
+        PyExpr::Literal(value) => match value {
+            LiteralValue::Int64(_) => Some(T::Int64),
+            LiteralValue::Float64(_) => Some(T::Float64),
+            LiteralValue::Boolean(_) => Some(T::Boolean),
+            LiteralValue::String(_) => Some(T::Utf8),
+            // `x > None` is NULL in both (#145 R6-14).
+            LiteralValue::Null => Some(T::Null),
+            _ => None,
+        },
+        PyExpr::Call { func, on, .. } => {
+            let on_type = kernel_type(on.as_deref()?, schema)?;
+            match func.as_str() {
+                "shift" => Some(on_type),
+                "is_null" | "is_not_null" => Some(T::Boolean),
+                _ => None,
+            }
+        }
+        PyExpr::UnaryOp { op, operand } => {
+            (op == "Not" && kernel_type(operand, schema)? == T::Boolean).then_some(T::Boolean)
+        }
+        PyExpr::Alias { expr, .. } => kernel_type(expr, schema),
+        PyExpr::Window { .. } => None,
+        PyExpr::BinOp { op, left, right } => {
+            let (l, r) = (kernel_type(left, schema)?, kernel_type(right, schema)?);
+            match op.as_str() {
+                "And" | "Or" => (l == T::Boolean && r == T::Boolean).then_some(T::Boolean),
+                "Eq" | "Ne" | "Gt" | "Lt" | "Ge" | "Le" => {
+                    let same = |t: &DataType| l == *t && r == *t;
+                    let agrees = (exact_integer(&l) && exact_integer(&r))
+                        || (matches!(l, T::Timestamp(..)) && l == r)
+                        || (same(&T::UInt64) && matches!(op.as_str(), "Eq" | "Ne"))
+                        || (same(&T::Float64) && matches!(op.as_str(), "Eq" | "Ne" | "Gt"))
+                        || (same(&T::Utf8) && op == "Ne")
+                        || (exact_integer(&l) && r == T::Null)
+                        || (l == T::Null && exact_integer(&r))
+                        || (exact_integer(&l) && op == "Gt" && get_literal_i64(right).is_some());
+                    agrees.then_some(T::Boolean)
+                }
+                "Add" | "Sub" | "Mul" | "Div" => {
+                    let operator = match crate::transpiler::parse_binary_op(op).ok()? {
+                        crate::transpiler::BinaryOp::Native(operator) => operator,
+                        crate::transpiler::BinaryOp::FloorDiv => return None,
+                    };
+                    match BinaryTypeCoercer::new(&l, &operator, &r).get_input_types().ok()? {
+                        (T::Int64, T::Int64) => Some(T::Int64),
+                        (T::Float64, T::Float64) if op == "Sub" => Some(T::Float64),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Check if the expression tree contains at least one shift() call.
@@ -1358,11 +1449,78 @@ mod tests {
         let two = |scale: i8| {
             lit(LiteralValue::Decimal128 { value: 2 * 10i128.pow(scale as u32), precision: 2, scale })
         };
+        let schema = ArrowSchema::new(vec![Field::new("x", DataType::Int64, true)]);
         for scale in [0, 1] {
             let halves = binop("Gt", binop("Div", col("x"), two(scale)), binop("Div", shift1("x"), two(scale)));
-            assert!(!can_linear_scan(&halves), "scale {scale}");
-            assert!(!can_linear_scan(&binop("Gt", binop("Sub", col("x"), shift1("x")), two(scale))));
+            assert!(!can_linear_scan(&halves, &schema), "scale {scale}");
+            let gap = binop("Gt", binop("Sub", col("x"), shift1("x")), two(scale));
+            assert!(!can_linear_scan(&gap, &schema), "scale {scale}");
         }
-        assert!(can_linear_scan(&binop("Gt", binop("Div", col("x"), lit(LiteralValue::Int64(2))), shift1("x"))));
+        assert!(can_linear_scan(
+            &binop("Gt", binop("Div", col("x"), lit(LiteralValue::Int64(2))), shift1("x")),
+            &schema
+        ));
+    }
+
+    /// The kernel takes a predicate only where it computes what DataFusion
+    /// computes on the column types at hand.
+    #[test]
+    fn eligibility_follows_the_column_types() {
+        use datafusion::arrow::datatypes::TimeUnit;
+        let int = |v| lit(LiteralValue::Int64(v));
+        let float = |v| lit(LiteralValue::Float64(v));
+        let gap = |c: &str, n| binop("Gt", binop("Sub", col(c), shift1(c)), int(n));
+        let types = [
+            ("i64", DataType::Int64),
+            ("i32", DataType::Int32),
+            ("u32", DataType::UInt32),
+            ("u64", DataType::UInt64),
+            ("f64", DataType::Float64),
+            ("ts", DataType::Timestamp(TimeUnit::Second, None)),
+            ("ts_us", DataType::Timestamp(TimeUnit::Microsecond, None)),
+            ("s", DataType::Utf8),
+            ("b", DataType::Boolean),
+            ("d", DataType::Date32),
+        ];
+        let schema = ArrowSchema::new(
+            types.iter().map(|(name, t)| Field::new(*name, t.clone(), true)).collect::<Vec<_>>(),
+        );
+        let table: Vec<(PyExpr, bool)> = vec![
+            // Comparisons of a column with its previous value.
+            (changes("i64"), true),
+            (changes("i32"), true),
+            (changes("u32"), true),
+            (changes("u64"), true),
+            (changes("ts"), true),
+            (changes("f64"), true),
+            (changes("s"), true),
+            (changes("b"), false),
+            (changes("d"), false),
+            (binop("Gt", col("u64"), shift1("u64")), false),
+            (binop("Lt", col("f64"), shift1("f64")), false),
+            (binop("Gt", col("ts"), shift1("ts_us")), false),
+            // Arithmetic: only what DataFusion computes in Int64 or Float64.
+            (gap("i64", 4), true),
+            (gap("i32", 4), false),
+            (gap("u32", 4), false),
+            (gap("u64", 4), false),
+            (gap("ts", 1800), false),
+            (binop("Gt", binop("Sub", col("i32"), int(1)), shift1("i32")), true),
+            (binop("Gt", binop("Sub", col("f64"), shift1("f64")), float(0.5)), true),
+            (binop("Gt", binop("Add", col("f64"), shift1("f64")), float(0.5)), false),
+            // Float thresholds against integers: integral and below 2^53 only.
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(2.0)), true),
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(1.5)), false),
+            (binop("Ge", binop("Sub", col("i64"), shift1("i64")), float(2.0)), false),
+            (
+                binop("Gt", binop("Sub", col("i64"), shift1("i64")), lit(LiteralValue::String("1".into()))),
+                false,
+            ),
+            (binop("Or", changes("i64"), gap("ts", 1800)), false),
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), lit(LiteralValue::Null)), true),
+        ];
+        for (expr, eligible) in table {
+            assert_eq!(can_linear_scan(&expr, &schema), eligible, "{expr:?}");
+        }
     }
 }

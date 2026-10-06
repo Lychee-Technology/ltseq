@@ -36,7 +36,9 @@ def _events() -> pa.Table:
         {
             "i": pa.array(range(len(U)), pa.int64()),
             "u": pa.array(U, pa.int64()),
-            "t": pa.array(T, pa.int32()),
+            # Int64: DataFusion computes Int32 differences in 32 bits, which
+            # the kernel does not, so Int32 arithmetic is not counted there.
+            "t": pa.array(T, pa.int64()),
         }
     )
 
@@ -143,6 +145,27 @@ def test_mod_and_floordiv_count_matches_reference(tmp_path, source, name):
     pred, expected = MOD_FLOORDIV_PREDICATES[name]
     assert t.group_ordered(pred).first().count() == expected
     assert _reference(t, pred) == expected
+
+
+# Integer arithmetic DataFusion computes in fewer than 64 bits, or UInt64
+# values the kernel would read as negative: the kernel declines these, so
+# the count is the reference's (wrapping included).
+NARROW_ARITHMETIC = {
+    "uint32_decreasing": (pa.uint32(), [5, 3, 10], lambda r: (r.v - r.v.shift(1)) > 4),
+    "int32_overflow": (pa.int32(), [2**31 - 1, -(2**31), 0], lambda r: (r.v - r.v.shift(1)) > 4),
+    "uint64_above_i64_max": (pa.uint64(), [2**63, 2**63 + 1, 5, 5, 2**64 - 1, 1], lambda r: r.v > r.v.shift(1)),
+}
+
+
+@pytest.mark.parametrize("name", NARROW_ARITHMETIC)
+def test_kernel_declines_what_it_would_compute_differently(name):
+    dtype, values, pred = NARROW_ARITHMETIC[name]
+    t = LTSeq.from_arrow(
+        pa.table({"i": pa.array(range(len(values)), pa.int64()), "v": pa.array(values, dtype)})
+    ).sort("i")
+    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
+        _kernel(t, pred)
+    assert t.group_ordered(pred).first().count() == _reference(t, pred)
 
 
 # UInt64 values at or above 2^63, which the counting kernel reads as

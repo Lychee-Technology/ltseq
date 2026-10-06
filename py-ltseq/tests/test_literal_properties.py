@@ -435,14 +435,28 @@ SCAN_PREDICATES = {
 }
 
 
-@pytest.mark.parametrize("column", ["x", "y"])
+SCAN_COLUMNS = {
+    "x": pa.array([1, 2, 4, 3, 2**53 + 1, 2**53, 7, 7], pa.int64()),
+    "y": pa.array([1.0, 2.5, 4.0, 3.0, 1e16, 1e16 + 2.0, -0.5, -0.5], pa.float64()),
+    "i32": pa.array([2**31 - 1, -(2**31), 0, 5, 3, 3, 9, 1], pa.int32()),
+    "u32": pa.array([5, 3, 10, 10, 2**32 - 1, 0, 7, 7], pa.uint32()),
+    "u64": pa.array([2**63, 2**63 + 1, 5, 5, 2**64 - 1, 1, 7, 7], pa.uint64()),
+    "ts_s": pa.array([0, 100, 3000, 3100, 9000, 9100, 9100, 20000], pa.timestamp("s")),
+    "ts_us": pa.array([v * 10**6 for v in [0, 100, 3000, 3100, 9000, 9100, 9100, 20000]], pa.timestamp("us")),
+}
+
+
+def _count_outcome(compute):
+    try:
+        return ("ok", compute())
+    except Exception as error:  # the reference refusing a predicate is an outcome too
+        return ("error", type(error).__name__)
+
+
+@pytest.mark.parametrize("column", list(SCAN_COLUMNS))
 @pytest.mark.parametrize("predicate", list(SCAN_PREDICATES))
 def test_linear_scan_count_matches_reference(column, predicate):
-    t = LTSeq.from_arrow(pa.table({
-        "k": list(range(8)),
-        "x": pa.array([1, 2, 4, 3, 2**53 + 1, 2**53, 7, 7], pa.int64()),
-        "y": pa.array([1.0, 2.5, 4.0, 3.0, 1e16, 1e16 + 2.0, -0.5, -0.5], pa.float64()),
-    })).sort("k")
+    t = LTSeq.from_arrow(pa.table({"k": list(range(8)), **SCAN_COLUMNS})).sort("k")
     pred = SCAN_PREDICATES[predicate](column)
-    reference = t.group_ordered(pred).first().to_arrow().num_rows
-    assert t.group_ordered(pred).first().count() == reference
+    reference = _count_outcome(lambda: t.group_ordered(pred).first().to_arrow().num_rows)
+    assert _count_outcome(lambda: t.group_ordered(pred).first().count()) == reference
