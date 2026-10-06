@@ -92,6 +92,12 @@ ref = "#209 (D-f)"
 note = "x & True was rewritten to x without a type check; DataFusion rejects Int64 AND Boolean, as it does for x & a Boolean column"
 expect = '{"error": {"class": "RuntimeError", "stage": "plan"}}'
 
+["folding_and_scan::scan_partitioned"]
+status = "BUG_FIXED"
+ref = "review F3 on #225"
+note = "the counting kernel ignored shift(partition_by=) and lagged across partitions; it now declines shift keyword arguments"
+expect = '{"result": {"count": 4, "rows": 4}}'
+
 # --- pairs ---------------------------------------------------------------------
 
 ["pairs::unit_literal_eq"]
@@ -152,6 +158,12 @@ status = "BUG_FIXED"
 ref = "#227 (D-e)"
 note = "a plan-time error naming the column instead of an overflow at collect"
 expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::mixed_is_in"]
+status = "BUG_FIXED"
+ref = "review F1 on #225"
+note = "a list of an Int64 and a Float64 item compared every item as Float64; is_in now agrees with mixed_disjunction"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, false, null]}}}'
 
 ["pairs::big_integer_column"]
 status = "PREEXISTING_BUG"

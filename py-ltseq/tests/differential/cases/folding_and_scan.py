@@ -2,6 +2,8 @@
 and the linear-scan count against the materialized groups.
 """
 
+from decimal import Decimal
+
 import pyarrow as pa
 
 from ltseq import LTSeq
@@ -31,8 +33,8 @@ def scan_table():
     return LTSeq.from_arrow(pa.table({"k": list(range(6)), "x": [1, 2, 4, 3, 2**53 + 1, 2**53]})).sort("k")
 
 
-def both_counts(pred):
-    t = scan_table()
+def both_counts(pred, t=None):
+    t = scan_table() if t is None else t
     first = t.group_ordered(pred).first()
     return {"count": first.count(), "rows": first.to_arrow().num_rows}
 
@@ -43,3 +45,12 @@ def case_scan_big(): return both_counts(lambda r: r.x != r.x.shift(1))
 def case_scan_mod(): return both_counts(lambda r: (r.x % 2) > (r.x.shift(1) % 2))
 def case_scan_floordiv(): return both_counts(lambda r: (r.x // 2) > (r.x.shift(1) // 2))
 def case_scan_float_multiply(): return both_counts(lambda r: r.x > r.x.shift(1) * 1.0)
+
+
+# shift() keyword arguments the counting kernel does not implement (review F3)
+def partitioned_scan_table():
+    return LTSeq.from_arrow(pa.table({"k": list(range(4)), "g": ["a", "b", "a", "b"], "x": [1, 1, 2, 2]})).sort("k")
+
+
+def case_scan_partitioned(): return both_counts(lambda r: r.x != r.x.shift(1, partition_by="g"), partitioned_scan_table())
+def case_scan_inexact_default(): return both_counts(lambda r: r.x != r.x.shift(1, default=Decimal("1.5")))

@@ -18,3 +18,5 @@
 {"id": "scan_mod", "result": {"count": 2, "rows": 2}}
 {"id": "scan_floordiv", "result": {"count": 4, "rows": 4}}
 {"id": "scan_float_multiply", "result": {"count": 4, "rows": 4}}
+{"id": "scan_partitioned", "result": {"count": 2, "rows": 4}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast string '1.5' to value of Int64 type", "stage": "plan"}, "id": "scan_inexact_default"}

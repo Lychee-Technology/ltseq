@@ -129,3 +129,25 @@ def case_big_integer_literal(): return wide().derive(v=lambda r: r.w == 10**18).
 def case_big_integer_column(): return wide().derive(v=lambda r: r.w == r.big).select("v")
 def case_big_integer_is_in(): return wide().derive(v=lambda r: r.w.is_in([5, 10**18])).select("v")
 def case_big_integer_fill_null(): return wide().derive(v=lambda r: r.w.fill_null(10**18)).select("v")
+
+
+# is_in with items of different kinds next to values a common float type
+# merges: 2^53 and 2^53 + 1 are one Float64 (review F1 on #225)
+def neighbors():
+    return LTSeq.from_arrow(pa.table({"x": pa.array([2**53, 2**53 + 1, 0, None], pa.int64())}))
+
+
+def case_mixed_is_in(): return neighbors().derive(v=lambda r: r.x.is_in([Decimal(2**53 + 1), 0.5])).select("v")
+def case_mixed_disjunction(): return neighbors().derive(v=lambda r: (r.x == Decimal(2**53 + 1)) | (r.x == 0.5)).select("v")
+
+
+# A dictionary-encoded column against the same values decoded (review F2)
+SENTINEL = pa.array([Decimal("1.1234567890"), Decimal("1E27"), None], pa.decimal128(38, 10))
+
+
+def decoded(): return LTSeq.from_arrow(pa.table({"x": SENTINEL}))
+def encoded(): return LTSeq.from_arrow(pa.table({"x": SENTINEL.dictionary_encode()}))
+
+
+def case_decoded_decimal_lt(): return decoded().derive(v=lambda r: r.x < Decimal("1.12345678905")).select("v")
+def case_encoded_decimal_lt(): return encoded().derive(v=lambda r: r.x < Decimal("1.12345678905")).select("v")
