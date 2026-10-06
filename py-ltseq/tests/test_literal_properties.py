@@ -21,6 +21,7 @@ the expression executes as breaks one of them.
 - linear scan: ``first().count()`` equals the materialized group count
 """
 
+import itertools
 import math
 import operator
 import traceback
@@ -283,6 +284,60 @@ def test_is_in_agrees_with_the_equality_disjunction(name):
         return out
 
     assert derived(lambda r: getattr(r, name).is_in(items)) == derived(disjunction)
+
+
+# Mixed lists next to values a common float type would merge: 2^53 and
+# 2^53 + 1 are one Float64. Each list compares like its equalities in every
+# order, and a NULL member is a NULL equality.
+NEIGHBORS = {
+    "x": pa.array([2**53, 2**53 + 1, 0, None, 1, -1], pa.int64()),
+    "p": pa.array([D("1.23"), D("0.10"), None, D("2.50"), D("999.99"), D("0.00")], pa.decimal128(5, 2)),
+    "t": pa.array([1_000_000, 1_000_001, None, 0, 2_000_000, 86_400_000_000], pa.timestamp("us")),
+}
+
+MIXED_MEMBERSHIP = {
+    "x": [
+        [D(2**53 + 1), 0.5],
+        [2**53 + 1, 0.5, 1],
+        [2**53 + 1, 2.0**53],
+        [D("2.5"), 2**53 + 1, -1.0],
+        [D("123456789012345678901234567890"), 0.5, 2**53],
+    ],
+    "p": [
+        [D("1.23"), 0.1, 10**18],
+        [D("2.5"), D("0.105"), 999.99],
+    ],
+    "t": [
+        [datetime(1970, 1, 1, 0, 0, 1, 1), date(1970, 1, 2), NS_FINE],
+        [datetime(1970, 1, 1, 0, 0, 1), datetime(2300, 1, 1)],
+    ],
+}
+
+
+def _membership_cases():
+    for name, lists in MIXED_MEMBERSHIP.items():
+        for i, items in enumerate(lists):
+            for order in itertools.permutations(range(len(items))):
+                yield pytest.param(name, [items[j] for j in order], id=f"{name}-{i}-{''.join(map(str, order))}")
+
+
+@pytest.mark.parametrize("null_member", [False, True], ids=["", "null"])
+@pytest.mark.parametrize("name, items", list(_membership_cases()))
+def test_mixed_is_in_agrees_with_the_equality_disjunction(name, items, null_member):
+    t = LTSeq.from_arrow(pa.table({"k": pa.array(range(6), pa.int64()), name: NEIGHBORS[name]})).sort("k")
+    members = items + [None] if null_member else items
+
+    def disjunction(r):
+        column = getattr(r, name)
+        out = column == items[0]
+        for item in items[1:]:
+            out = out | (column == item)
+        # `== None` is a null check (#154); SQL's `= NULL` is NULL.
+        return out | LiteralExpr(None) if null_member else out
+
+    expected = outcome(lambda: t.derive(v=disjunction))
+    assert expected[0] == "ok"
+    assert outcome(lambda: t.derive(v=lambda r: getattr(r, name).is_in(members))) == expected
 
 
 # ---------------------------------------------------------------------------

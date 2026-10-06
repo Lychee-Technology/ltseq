@@ -13,7 +13,8 @@
 //! Comparisons and `is_in` then check DataFusion's coercion of the pair
 //! ([`placement`]): where it would cast an exact operand or cast the
 //! literal inexactly, the literal is placed among the operand's own values
-//! instead.
+//! instead. An `is_in` list is checked against its equalities as a whole
+//! ([`in_list`]).
 
 use std::cmp::Ordering;
 
@@ -157,29 +158,69 @@ fn compared(
     })
 }
 
-/// `expr IN (list)`, each literal item read next to `expr` and placed among
-/// its values like the operand of `==`: an item placed exactly takes
-/// `expr`'s type, and an item no value of that type equals is dropped. A
-/// list left empty is false (NULL for a NULL `expr`). Placed items all have
-/// `expr`'s type, so DataFusion never has to unify them with each other.
+/// `expr IN (list)`: the disjunction of `expr == item`, which is how SQL
+/// defines IN. Each equality is built like `==` builds it: a literal item
+/// is read next to `expr` and placed among its values ([`compared`]), so an
+/// item placed exactly takes `expr`'s type and an item no value of that
+/// type equals is dropped. A list left empty is false (NULL for a NULL
+/// `expr`).
+///
+/// DataFusion compares an IN list at one type for every item, while each
+/// equality compares at the type of its own pair. The IN is kept as written
+/// when its type is every equality's. Otherwise one item would be compared
+/// at a type its equality does not use (an Int64 item placed exactly next
+/// to a Float64 item: the list's Float64 makes 2^53 equal 2^53 + 1), so the
+/// list is split into one IN per comparison type, joined by OR. All types
+/// come from DataFusion's coercion of the equality and of the IN.
 pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr, String> {
+    // Each kept item, with its equality's two sides as DataFusion coerces them.
     let mut kept = Vec::with_capacity(list.len());
     for item in list {
-        if rx.literal(&item).is_none() {
-            kept.push(item);
-            continue;
-        }
-        match compared(&expr, Operator::Eq, &item, rx)? {
-            (_, Some(Placement::Exact(value))) => kept.push(lit(value)),
-            (_, Some(Placement::Between(_) | Placement::Beyond(_))) => {}
-            (Some(read), None) => kept.push(lit(read)),
-            (None, None) => kept.push(item),
-        }
+        let item = if rx.literal(&item).is_none() {
+            item
+        } else {
+            match compared(&expr, Operator::Eq, &item, rx)? {
+                (_, Some(Placement::Exact(value))) => lit(value),
+                (_, Some(Placement::Between(_) | Placement::Beyond(_))) => continue,
+                (Some(read), None) => lit(read),
+                (None, None) => item,
+            }
+        };
+        let Expr::BinaryExpr(BinaryExpr { left, right, .. }) =
+            rx.resolve(expr.clone().eq(item.clone()))
+        else {
+            return Err("is_in: coercing an equality did not give an equality".to_string());
+        };
+        kept.push((item, *left, *right));
     }
     if kept.is_empty() {
         return Ok(verdict_unless_null(expr, false));
     }
-    Ok(expr.in_list(kept, false))
+    let comparison_type = |side: &Expr| rx.value_type(side).ok();
+    let written = expr.in_list(kept.iter().map(|(item, ..)| item.clone()).collect(), false);
+    let list_type = match rx.resolve(written.clone()) {
+        Expr::InList(resolved) => comparison_type(&resolved.expr),
+        _ => None,
+    };
+    if kept
+        .iter()
+        .all(|(_, left, _)| comparison_type(left) == list_type)
+    {
+        return Ok(written);
+    }
+    let mut groups: Vec<(Option<DataType>, Expr, Vec<Expr>)> = Vec::new();
+    for (_, left, right) in kept {
+        let key = comparison_type(&left);
+        match groups.iter_mut().find(|(group, ..)| *group == key) {
+            Some((_, _, rights)) => rights.push(right),
+            None => groups.push((key, left, vec![right])),
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|(_, left, rights)| left.in_list(rights, false))
+        .reduce(Expr::or)
+        .expect("at least one item is kept"))
 }
 
 /// Where `operand op literal` must be decided by ltseq rather than by
