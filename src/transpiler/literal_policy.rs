@@ -16,8 +16,8 @@
 //! | aware datetime | a naive timestamp | an error (D5) | everywhere |
 //!
 //! "Everywhere" includes arithmetic and `dt.diff` (decision D-d: one literal
-//! has one meaning). The context type comes from `Resolver::data_type`;
-//! nothing here looks at an expression or a schema.
+//! has one meaning). The context type comes from `Resolver::value_type`, so
+//! it is never an encoding; nothing here looks at an expression or a schema.
 
 use chrono::{DateTime, LocalResult, NaiveDateTime, Offset, TimeZone};
 use datafusion::arrow::array::timezone::Tz;
@@ -63,10 +63,6 @@ pub(crate) fn interpret(
 ) -> Result<Reading, String> {
     use DataType as T;
     use ScalarValue as S;
-    let context = match context {
-        T::Dictionary(_, value) => value.as_ref(),
-        other => other,
-    };
     if literal.is_null() {
         return Ok(Reading::Keep);
     }

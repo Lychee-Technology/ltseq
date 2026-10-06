@@ -3,8 +3,9 @@
 //! `if_else`/`coalesce`/`fill_null`, `shift` defaults and the other operand
 //! of `dt.diff`.
 //!
-//! Each place asks the resolver for the type of the value the literal meets
-//! (for values, the type DataFusion gives the other values together), asks
+//! Each place asks the resolver for the value type of the value the literal
+//! meets (for values, the type DataFusion gives the other values together;
+//! a dictionary column's value type, never its encoding), asks
 //! [`interpret`] how to read the literal next to it, and puts that reading
 //! in place. When the resolver cannot type the value, the literal is left
 //! alone and DataFusion reports the problem.
@@ -44,7 +45,7 @@ fn read(
     position: Position,
     rx: &Resolver<'_>,
 ) -> Result<Reading, String> {
-    match rx.data_type(value) {
+    match rx.value_type(value) {
         Ok(context) => interpret(literal, &context, position, &describe(value)),
         Err(_) => Ok(Reading::Keep),
     }
@@ -145,7 +146,7 @@ fn compared(
         }
         Reading::Instant(ticks, unit) => {
             let placed = rx
-                .data_type(operand)
+                .value_type(operand)
                 .ok()
                 .and_then(|operand_type| place_instant(ticks, unit, &operand_type));
             (
@@ -204,7 +205,7 @@ fn placement(
     literal: &ScalarValue,
     rx: &Resolver<'_>,
 ) -> Option<Placement> {
-    let operand_type = rx.data_type(operand).ok()?;
+    let operand_type = rx.value_type(operand).ok()?;
     let exact = |t: &DataType| {
         t.is_integer()
             || matches!(
@@ -318,7 +319,7 @@ fn values(
             })
             .collect()
     };
-    let unified_type = |values: Vec<Expr>| unify(values).and_then(|e| rx.data_type(&e));
+    let unified_type = |values: Vec<Expr>| unify(values).and_then(|e| rx.value_type(&e));
     let Ok(context) = unified_type(with(&literals, true)) else {
         return Ok(values);
     };
@@ -454,7 +455,7 @@ pub(crate) fn shift_default(
         return Ok(default);
     }
     // A column of nulls (a header-only CSV) has no type to fit.
-    let Some(column_type) = rx.data_type(column).ok().filter(|t| t != &DataType::Null) else {
+    let Some(column_type) = rx.value_type(column).ok().filter(|t| t != &DataType::Null) else {
         return Ok(default);
     };
     let name = describe(column);

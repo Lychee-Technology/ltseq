@@ -10,7 +10,9 @@
 //! [`Resolver`] applies the analyzer's expression coercion
 //! (`TypeCoercionRewriter`) eagerly, against the input schema:
 //!
-//! - [`Resolver::data_type`] answers the type questions lowering has to ask;
+//! - [`Resolver::data_type`] answers the type questions lowering has to ask,
+//!   and [`Resolver::value_type`] the same about the values, whatever their
+//!   encoding;
 //! - [`Resolver::resolve`] gives the coerced expression that plan builders
 //!   receive, so the schema DataFusion stores for a projection is the
 //!   schema it executes.
@@ -72,6 +74,24 @@ impl<'a> Resolver<'a> {
         self.resolve(expr.clone())
             .get_type(&self.schema)
             .map_err(|e| e.to_string())
+    }
+
+    /// The type of the values `expr` executes as: [`Resolver::data_type`]
+    /// without dictionary or run-end encoding. DataFusion coerces an encoded
+    /// operand by its value type and decodes it losslessly
+    /// (`dictionary_coercion`, `ree_coercion`), so a rule about values (how a
+    /// literal reads, where it falls among the operand's values, whether a
+    /// cast loses anything) is a rule about this type. Encoding is storage:
+    /// a dictionary column must read a literal as its decoded column does.
+    pub(crate) fn value_type(&self, expr: &Expr) -> Result<DataType, String> {
+        let mut data_type = self.data_type(expr)?;
+        loop {
+            data_type = match data_type {
+                DataType::Dictionary(_, value) => *value,
+                DataType::RunEndEncoded(_, values) => values.data_type().clone(),
+                decoded => return Ok(decoded),
+            };
+        }
     }
 
     /// The non-null value of `expr` when it is a literal, or a constant
@@ -167,6 +187,24 @@ mod tests {
             assert_eq!(rx.data_type(&expr).unwrap(), expected, "{expr}");
             assert_eq!(rx.resolve(expr).get_type(&df_schema).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_value_type_has_no_encoding() {
+        let decimal = DataType::Decimal128(38, 10);
+        let dictionary = DataType::Dictionary(Box::new(DataType::Int8), Box::new(decimal.clone()));
+        let run_end = DataType::RunEndEncoded(
+            Arc::new(Field::new("run_ends", DataType::Int32, false)),
+            Arc::new(Field::new("values", decimal.clone(), true)),
+        );
+        let arrow = ArrowSchema::new(vec![
+            Field::new("dictionary", dictionary.clone(), true),
+            Field::new("run_end", run_end, true),
+        ]);
+        let rx = Resolver::new(&arrow).unwrap();
+        assert_eq!(rx.data_type(&col("dictionary")).unwrap(), dictionary);
+        assert_eq!(rx.value_type(&col("dictionary")).unwrap(), decimal);
+        assert_eq!(rx.value_type(&col("run_end")).unwrap(), decimal);
     }
 
     #[test]

@@ -12,6 +12,8 @@ the expression executes as breaks one of them.
 - coalesce permutation: arguments that are never both set on a row
 - inline vs staged: ``f(e)`` and ``derive(c=e)`` then ``f(c)``
 - row count: a derived column's dtype does not depend on how many rows remain
+- encoding: a dictionary or run-end encoded column reads a literal as the
+  decoded column does
 - dialect parity: the row result shifted by one equals the window
   result, and one-row groups keep exactly the rows the row result keeps
 - folding: a constant folded before planning equals the same arithmetic on a column
@@ -100,8 +102,11 @@ def _stage(error, phase):
     return "capture" if frames and "/ltseq/expr/" in frames[-1].filename else "plan"
 
 
-def outcome(make, name="v"):
-    """('ok', dtype, values) or ('error', class, stage) for the table ``make`` builds."""
+def outcome(make, name="v", decoded=False):
+    """('ok', dtype, values) or ('error', class, stage) for the table ``make`` builds.
+
+    ``decoded`` names a dictionary or run-end encoded dtype by its value type.
+    """
     phase = "plan"
     try:
         result = make()
@@ -112,7 +117,10 @@ def outcome(make, name="v"):
     except BaseException as error:  # a Rust panic is a BaseException
         return ("error", type(error).__name__, _stage(error, phase))
     col = arrow.column(name)
-    return ("ok", str(col.type), [_norm(v) for v in col.to_pylist()])
+    dtype = col.type
+    while decoded and (pa.types.is_dictionary(dtype) or pa.types.is_run_end_encoded(dtype)):
+        dtype = dtype.value_type
+    return ("ok", str(dtype), [_norm(v) for v in col.to_pylist()])
 
 
 def derived(expr):
@@ -275,6 +283,68 @@ def test_is_in_agrees_with_the_equality_disjunction(name):
         return out
 
     assert derived(lambda r: getattr(r, name).is_in(items)) == derived(disjunction)
+
+
+# ---------------------------------------------------------------------------
+# Encoding is storage: a dictionary or run-end encoded column reads a literal
+# as the same column decoded does
+# ---------------------------------------------------------------------------
+
+WIDE = D("1E27")  # fits decimal(38, 10) with no digit to spare
+UNALIGNED = D("1.12345678905")  # one digit finer than decimal(38, 10)
+FINE_DT = datetime(2024, 1, 1, 0, 0, 0, 1)  # a microsecond past a second
+
+ENCODED_COLUMNS = {
+    "dec": pa.array([D("1.1234567890"), WIDE, None], pa.decimal128(38, 10)),
+    "ts": pa.array([datetime(2024, 1, 1), datetime(2024, 1, 2), None], pa.timestamp("s")),
+}
+
+ENCODED_CASES = {
+    "dec": {
+        "lt": lambda r: r.x < UNALIGNED,
+        "eq": lambda r: r.x == UNALIGNED,
+        "ge_wide": lambda r: r.x >= WIDE,
+        "literal_left": lambda r: LiteralExpr(UNALIGNED) > r.x,
+        "is_in": lambda r: r.x.is_in([UNALIGNED, WIDE, 0.5]),
+        "fill_null": lambda r: r.x.fill_null(UNALIGNED),
+        "fill_null_exact": lambda r: r.x.fill_null(2),
+        "if_else": lambda r: if_else(r.k > 0, r.x, D("2.5")),
+        "shift_default": lambda r: r.x.shift(1, default=2),
+        "shift_default_inexact": lambda r: r.x.shift(1, default=UNALIGNED),
+    },
+    "ts": {
+        "eq": lambda r: r.x == FINE_DT,
+        "gt": lambda r: r.x > FINE_DT,
+        "is_in": lambda r: r.x.is_in([FINE_DT, date(2024, 1, 2)]),
+        "fill_null": lambda r: r.x.fill_null(FINE_DT),
+        "if_else": lambda r: if_else(r.k > 0, r.x, date(2024, 1, 3)),
+    },
+}
+
+
+def _encode(array, encoding):
+    indices = pa.array([0, 1, None], pa.int8())
+    if encoding == "dictionary":
+        return pa.DictionaryArray.from_arrays(indices, array.drop_null())
+    return pa.RunEndEncodedArray.from_arrays(pa.array([1, 2, 3], pa.int32()), array)
+
+
+@pytest.mark.parametrize("encoding", ["dictionary", "run_end"])
+@pytest.mark.parametrize("column, case", [
+    pytest.param(column, case, id=f"{column}-{case}")
+    for column, cases in ENCODED_CASES.items() for case in cases
+])
+def test_encoded_column_reads_literals_like_the_decoded_column(column, case, encoding):
+    if encoding == "run_end" and case.startswith("shift"):
+        pytest.skip("Arrow cannot shift a run-end encoded array, with or without a default")
+    expr = ENCODED_CASES[column][case]
+    plain = ENCODED_COLUMNS[column]
+
+    def make(array):
+        t = LTSeq.from_arrow(pa.table({"k": pa.array([0, 1, 2], pa.int64()), "x": array}))
+        return lambda: t.sort("k").derive(v=expr)
+
+    assert outcome(make(_encode(plain, encoding)), decoded=True) == outcome(make(plain))
 
 
 # ---------------------------------------------------------------------------
