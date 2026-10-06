@@ -15,6 +15,7 @@ import math
 import subprocess
 import sys
 import textwrap
+import traceback
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import IntEnum
@@ -147,6 +148,14 @@ def test_unsupported_literal_fails_inside_the_lambda():
         table.filter(lambda r: r.a + [1, 2] > 0)
     with pytest.raises(TypeError, match=r"use \.is_in\(\[\.\.\.\]\) for membership"):
         table.filter(lambda r: r.a == [1, 2])
+
+
+def test_unsupported_method_argument_fails_inside_the_lambda():
+    """Method arguments are checked when the call is written, not when it is serialized."""
+    table = LTSeq.from_arrow(pa.table({"a": pa.array([1, 2], pa.int64())}).sort_by("a")).sort("a")
+    with pytest.raises(TypeError, match="Unsupported literal type bytes") as raised:
+        table.derive(v=lambda r: r.a.shift(1, default=b"x"))
+    assert "<lambda>" in [frame.name for frame in traceback.extract_tb(raised.value.__traceback__)]
 
 
 def test_plain_literals_encode_without_numpy_or_pandas():

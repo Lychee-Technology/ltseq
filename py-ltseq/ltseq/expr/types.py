@@ -125,11 +125,20 @@ class CallExpr(Expr):
         kwargs: dict[str, Any] | None = None,
         on: Any | None = None,
     ):
-        """Initialize a CallExpr with function name, args, kwargs, and target."""
+        """Initialize a CallExpr with function name, args, kwargs, and target.
+
+        Raises:
+            TypeError, ValueError: An argument that is not an expression is
+                not a valid literal; raised here, inside the lambda, rather
+                than when the call is serialized.
+        """
         self.func = func
         self.args = args
         self.kwargs = kwargs if kwargs is not None else {}
         self.on = on
+        for value in (*self.args, *self.kwargs.values()):
+            if not isinstance(value, Expr):
+                LiteralExpr(value)
 
     def serialize(self) -> dict[str, Any]:
         """
