@@ -401,6 +401,52 @@ class TestDtDiffElapsed:
         assert result[0]["a"] == 54
         assert result[0]["b"] == -2.25
 
+    @pytest.mark.parametrize("date_type", ["date32", "date64"])
+    @pytest.mark.parametrize("zone, local_midnight_hours", [("America/New_York", -5.0), ("Asia/Tokyo", 9.0)])
+    def test_diff_date_column_against_aware_column_is_utc_midnight(self, date_type, zone, local_midnight_hours):
+        """A date column is read at UTC midnight against an aware timestamp column, as
+        `==` reads it (decision P10 on #145); only a `date` literal is local midnight."""
+        import datetime
+        import pyarrow as pa
+
+        utc_midnight = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+        t = LTSeq.from_arrow(pa.table({
+            "d": pa.array([datetime.date(2024, 1, 1), None, datetime.date(2024, 1, 1)], getattr(pa, date_type)()),
+            "ts": pa.array([utc_midnight, utc_midnight, None], pa.timestamp("us", zone)),
+        }))
+        out = t.derive(
+            eq=lambda r: r.ts == r.d,
+            forward=lambda r: r.ts.dt.diff(r.d, unit="hour"),
+            reverse=lambda r: r.d.dt.diff(r.ts, unit="hour"),
+            from_literal=lambda r: r.ts.dt.diff(datetime.date(2024, 1, 1), unit="hour"),
+        ).to_arrow()
+        assert out.column("eq").to_pylist() == [True, None, None]
+        assert out.column("forward").to_pylist() == [0.0, None, None]
+        assert out.column("reverse").to_pylist() == [0.0, None, None]
+        assert out.column("from_literal").to_pylist() == [local_midnight_hours, local_midnight_hours, None]
+
+    @pytest.mark.parametrize("date_type", ["date32", "date64"])
+    def test_diff_date_column_against_aware_column_outside_nanoseconds(self, date_type):
+        """Dates outside 1677–2262 keep UTC midnight: the pair is cast at the
+        timestamp's unit, not DataFusion's nanoseconds."""
+        import datetime
+        import pyarrow as pa
+
+        days = [datetime.date(1500, 6, 1), datetime.date(2500, 6, 1)]
+        t = LTSeq.from_arrow(pa.table({
+            "d": pa.array(days, getattr(pa, date_type)()),
+            "ts": pa.array(
+                [datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc) for d in days],
+                pa.timestamp("s", "America/New_York"),
+            ),
+        }))
+        out = t.derive(
+            forward=lambda r: r.ts.dt.diff(r.d, unit="hour"),
+            reverse=lambda r: r.d.dt.diff(r.ts),
+        ).to_arrow()
+        assert out.column("forward").to_pylist() == [0.0, 0.0]
+        assert out.column("reverse").to_pylist() == [0.0, 0.0]
+
     def test_diff_zoned_timestamps_subtract_by_instant(self):
         import datetime
         import pyarrow as pa
