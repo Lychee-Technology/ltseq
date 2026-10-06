@@ -26,7 +26,7 @@ use datafusion::prelude::lit;
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{cast_loss, exact_cast, place, place_instant, Loss, Placement};
-use super::literal_policy::{interpret, Position, Reading};
+use super::literal_policy::{interpret, literal_text, Position, Reading};
 use super::Resolver;
 
 /// How errors name the value a literal is read against.
@@ -437,18 +437,18 @@ fn values(
 /// of type `context`.
 fn refusal(literal: &ScalarValue, context: &DataType, name: &str) -> String {
     use DataType as T;
+    let text = literal_text(literal);
     match (literal, context) {
-        (ScalarValue::Decimal128(Some(value), _, scale), _) => format!(
-            "Decimal literal {} does not fit {name} ({context}) without rounding",
-            crate::types::decimal_text(*value, *scale)
-        ),
-        (_, T::Date32 | T::Date64) if literal.data_type().is_temporal() => format!(
-            "{name} is a date; the datetime literal {literal} has a time of day; use a date"
-        ),
-        (_, T::Timestamp(..)) if literal.data_type().is_temporal() => {
-            format!("{literal} is outside the range of {name} ({context})")
+        (ScalarValue::Decimal128(..), _) => {
+            format!("Decimal literal {text} does not fit {name} ({context}) without rounding")
         }
-        _ => format!("{literal} does not fit {name} ({context}) exactly"),
+        (_, T::Date32 | T::Date64) if literal.data_type().is_temporal() => {
+            format!("{name} is a date; the datetime literal {text} has a time of day; use a date")
+        }
+        (_, T::Timestamp(..)) if literal.data_type().is_temporal() => {
+            format!("{text} is outside the range of {name} ({context})")
+        }
+        _ => format!("{text} does not fit {name} ({context}) exactly"),
     }
 }
 
@@ -503,7 +503,10 @@ pub(crate) fn shift_default(
     let read =
         replacement(interpret(&default, &column_type, Position::Value, &name)?).unwrap_or(default);
     exact_cast(&read, &column_type).ok_or_else(|| {
-        format!("{name} cannot hold the shift() default {read} exactly ({column_type})")
+        format!(
+            "{name} cannot hold the shift() default {} exactly ({column_type})",
+            literal_text(&read)
+        )
     })
 }
 

@@ -197,6 +197,25 @@ pub(crate) fn local_to_utc(value: i128, unit: TimeUnit, zone: &str) -> Result<i1
     Ok(value - i128::from(offset_seconds) * i128::from(per_second))
 }
 
+/// How errors write a literal: a Decimal by its digits, a date or a
+/// timestamp as calendar text (with its zone), anything else as DataFusion
+/// displays it.
+pub(crate) fn literal_text(literal: &ScalarValue) -> String {
+    match literal {
+        ScalarValue::Decimal128(Some(value), _, scale) => decimal_text(*value, *scale),
+        ScalarValue::Date32(Some(days)) => naive_datetime(i128::from(*days) * 86_400, 1)
+            .map_or(days.to_string(), |d| d.date().to_string()),
+        _ => match timestamp_literal(literal) {
+            Some((value, unit, zone)) => {
+                let text = naive_datetime(i128::from(value), ticks_per_second(unit))
+                    .map_or(value.to_string(), |naive| naive.to_string());
+                zone.map_or(text.clone(), |zone| format!("{text} {zone}"))
+            }
+            None => literal.to_string(),
+        },
+    }
+}
+
 fn naive_datetime(value: i128, per_second: i64) -> Option<NaiveDateTime> {
     let per_second = i128::from(per_second);
     let seconds = i64::try_from(value.div_euclid(per_second)).ok()?;
@@ -349,6 +368,23 @@ mod tests {
                 err.contains(message),
                 "{literal:?} next to {context}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn errors_write_literals_as_text() {
+        let texts = [
+            (dec(1236, 6, 3), "1.236"),
+            (S::Date32(Some(19724)), "2024-01-02"),
+            (
+                S::TimestampMicrosecond(Some(1_704_175_200_000_001), None),
+                "2024-01-02 06:00:00.000001",
+            ),
+            (ts_us(0, Some(NY)), "1970-01-01 00:00:00 America/New_York"),
+            (S::Int64(Some(-1)), "-1"),
+        ];
+        for (literal, text) in texts {
+            assert_eq!(literal_text(&literal), text);
         }
     }
 
