@@ -10,6 +10,7 @@ typing is held to every case the earlier implementation was. Reviews:
 - b22ecab: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6004458626
 - 414926b: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6026630607
 - f07b855: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6042664484
+- d1eb7b3: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6047435199
 """
 
 import math
@@ -597,3 +598,163 @@ def test_a_time_of_day_past_the_last_date_is_beyond_it(dtype, last_midnight_ms):
 
     assert holds(last_midnight_ms + 1) == ("Beyond", None, "Greater")
     assert holds(last_midnight_ms) == ("Exactly", pa.scalar(last_midnight_ms // 86_400_000, pa.date32()).value if dtype == pa.date32() else last_midnight_ms, None)
+
+
+# ---------------------------------------------------------------------------
+# Review of d1eb7b3
+# ---------------------------------------------------------------------------
+# An aware literal finer than the column and in another zone kept its own
+# zone, so DataFusion's order-dependent unification proposed either zone:
+# fill_null, column-first coalesce and one CASE order were refused as a zone
+# change, the swapped CASE was accepted. A shared value now reads the
+# literal as its instant in the receiver's zone, at its own unit, before
+# anything unifies; D-i and D-m then judge the unit alone.
+
+NY, TOKYO = "America/New_York", "Asia/Tokyo"
+UNITS = ["s", "ms", "us", "ns"]
+NS_PER = {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}
+BASE_NS = 1_704_067_200 * 10**9  # 2024-01-01 00:00:00 UTC, the column's first value
+LITERAL_NS = 1_704_164_645 * 10**9  # 2024-01-02 03:04:05 UTC
+
+
+def _finer(unit):
+    return UNITS[UNITS.index(unit) + 1]
+
+
+def _precision_cases():
+    """(column unit, literal unit, nanoseconds past a whole second, result
+    unit): the literal at the column's unit, at a finer unit the column
+    still holds exactly, one unit finer than the column, and nanoseconds."""
+    for unit in ["s", "ms", "us"]:
+        yield pytest.param(unit, unit, 0, unit, id=f"{unit}-aligned")
+        yield pytest.param(unit, "ns", 0, unit, id=f"{unit}-aligned_ns")
+        finer = _finer(unit)
+        yield pytest.param(unit, finer, NS_PER[finer], finer, id=f"{unit}-finer_{finer}")
+        if finer != "ns":
+            yield pytest.param(unit, "ns", 1, "ns", id=f"{unit}-finer_ns")
+
+
+PRECISIONS = list(_precision_cases())
+
+
+ZONES = [
+    pytest.param(NY, NY, id="same_zone"),
+    pytest.param(NY, "UTC", id="utc_into_ny"),
+    pytest.param("UTC", NY, id="ny_into_utc"),
+    pytest.param(NY, TOKYO, id="tokyo_into_ny"),
+]
+
+# Every form puts the literal on row 0 and the column on rows 1 and 2.
+COLUMN_FIRST = {
+    "fill_null": lambda r, v: r.x.fill_null(v),
+    "coalesce": lambda r, v: coalesce(r.x, v),
+    "if_else": lambda r, v: if_else(r.c, r.x, v),
+    "if_else_negated": lambda r, v: if_else(~r.c, v, r.x),
+    "when": lambda r, v: when(r.c, r.x).otherwise(v),
+    "when_negated": lambda r, v: when(~r.c, v).otherwise(r.x),
+}
+
+
+def zoned_column(unit, zone, first_ns=BASE_NS):
+    first = first_ns // NS_PER[unit]
+    return LTSeq.from_arrow(pa.table({
+        "k": [0, 1, 2],
+        "c": [False, True, True],
+        "x": pa.array([None, first, first + 1], pa.timestamp(unit, zone)),
+    })).sort("k")
+
+
+def aware_literal(unit, zone, past_ns):
+    return pd.Timestamp(LITERAL_NS + past_ns, unit="ns", tz="UTC").tz_convert(zone).as_unit(unit)
+
+
+def ticks(t, fn):
+    out = t.derive(v=fn).to_arrow().column("v")
+    return out.type, out.cast(pa.int64()).to_pylist()
+
+
+def outcome(t, fn):
+    try:
+        return ticks(t, fn)
+    except (ValueError, RuntimeError) as e:
+        return type(e).__name__, str(e)
+
+
+@pytest.mark.parametrize("form", list(COLUMN_FIRST))
+@pytest.mark.parametrize("receiver, literal_zone", ZONES)
+@pytest.mark.parametrize("unit, literal_unit, past_ns, result_unit", PRECISIONS)
+def test_an_aware_value_takes_the_receiver_zone_at_the_unit_it_needs(
+    unit, literal_unit, past_ns, result_unit, receiver, literal_zone, form
+):
+    """The receiver's zone, never the literal's; the receiver's unit when it
+    holds the literal, else the literal's (D-m); every instant exact."""
+    t = zoned_column(unit, receiver)
+    literal = aware_literal(literal_unit, literal_zone, past_ns)
+    first = BASE_NS // NS_PER[result_unit]
+    step = NS_PER[unit] // NS_PER[result_unit]
+    assert ticks(t, lambda r: COLUMN_FIRST[form](r, literal)) == (
+        pa.timestamp(result_unit, receiver),
+        [(LITERAL_NS + past_ns) // NS_PER[result_unit], first, first + step],
+    )
+
+
+@pytest.mark.parametrize("receiver, literal_zone", ZONES)
+@pytest.mark.parametrize("unit, literal_unit, past_ns, result_unit", PRECISIONS)
+def test_a_literal_first_coalesce_is_legal_at_the_same_type(
+    unit, literal_unit, past_ns, result_unit, receiver, literal_zone
+):
+    """A type-legality control: the literal comes first, so it is every
+    row's value, not the column-first result."""
+    t = zoned_column(unit, receiver)
+    literal = aware_literal(literal_unit, literal_zone, past_ns)
+    assert ticks(t, lambda r: coalesce(literal, r.x)) == (
+        pa.timestamp(result_unit, receiver),
+        [(LITERAL_NS + past_ns) // NS_PER[result_unit]] * 3,
+    )
+
+
+@pytest.mark.parametrize("receiver, literal_zone", ZONES)
+@pytest.mark.parametrize("unit, literal_unit, past_ns, result_unit", PRECISIONS)
+@pytest.mark.parametrize("far", [False, True], ids=["2024", "year_3000"])
+def test_every_column_first_form_has_one_outcome(
+    unit, literal_unit, past_ns, result_unit, receiver, literal_zone, far
+):
+    """Legality and result do not depend on the form or on which CASE branch
+    holds the literal, also where widening to nanoseconds puts a year-3000
+    column value out of range (D-m accepts that risk; it is one error)."""
+    first_ns = 32_503_680_000 * 10**9 if far else BASE_NS
+    t = zoned_column(unit, receiver, first_ns)
+    literal = aware_literal(literal_unit, literal_zone, past_ns)
+    outcomes = {form: outcome(t, lambda r: fn(r, literal)) for form, fn in COLUMN_FIRST.items()}
+    assert len({repr(o) for o in outcomes.values()}) == 1, outcomes
+
+
+@pytest.mark.parametrize("receiver, literal_zone", ZONES)
+@pytest.mark.parametrize("unit", ["s", "ms", "us"])
+def test_a_shift_default_of_another_zone_never_widens(unit, receiver, literal_zone):
+    """D-c, not D-m: an aware default the column holds is its instant in the
+    column's zone and unit; one finer than the column is refused."""
+    t = zoned_column(unit, receiver)
+    whole = aware_literal(_finer(unit), literal_zone, 0)
+    assert ticks(t, lambda r: r.x.shift(1, default=whole)) == (
+        pa.timestamp(unit, receiver),
+        [LITERAL_NS // NS_PER[unit], None, BASE_NS // NS_PER[unit]],
+    )
+    finer = aware_literal(_finer(unit), literal_zone, NS_PER[_finer(unit)])
+    with pytest.raises(ValueError, match=r"column 'x' cannot hold the shift\(\) default .* exactly"):
+        t.derive(v=lambda r: r.x.shift(1, default=finer)).to_arrow()
+
+
+def test_two_timestamp_columns_are_datafusions_to_unify():
+    """No literal, no policy: two columns of different zones keep
+    DataFusion's own coercion, operand order and all, as on main (68d6114)."""
+    t = LTSeq.from_arrow(pa.table({
+        "c": [False, True],
+        "a": pa.array([None, 1_704_067_200_000], pa.timestamp("ms", NY)),
+        "b": pa.array([1_704_067_200_000_001, 1_704_067_200_000_002], pa.timestamp("us", "UTC")),
+    }))
+    utc, ny = pa.timestamp("us", "UTC"), pa.timestamp("us", NY)
+    assert ticks(t, lambda r: coalesce(r.a, r.b)) == (utc, [1_704_067_200_000_001, 1_704_067_200_000_000])
+    assert ticks(t, lambda r: coalesce(r.b, r.a)) == (ny, [1_704_067_200_000_001, 1_704_067_200_000_002])
+    assert ticks(t, lambda r: if_else(r.c, r.a, r.b)) == (utc, [1_704_067_200_000_001, 1_704_067_200_000_000])
+    assert ticks(t, lambda r: if_else(~r.c, r.b, r.a)) == (ny, [1_704_067_200_000_001, 1_704_067_200_000_000])

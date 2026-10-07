@@ -14,17 +14,19 @@
 //! | naive datetime | a zoned timestamp | wall-clock time in that zone; a time the zone skips or repeats is an error (design §2.6) | everywhere |
 //! | date | a zoned timestamp | midnight in that zone, at the timestamp's unit (§5 row 5, P10) | everywhere |
 //! | aware datetime | a naive timestamp | an error (D5) | everywhere |
+//! | aware datetime | a timestamp in another zone | the same instant in that zone, at the literal's unit | values |
 //!
 //! "Everywhere" includes arithmetic and `dt.diff` (decision D-d: one literal
 //! has one meaning). The context type comes from `Resolver::value_type`, so
 //! it is never an encoding; nothing here looks at an expression or a schema.
 //!
-//! One more reading is not an exception in [`interpret`] but a consequence
-//! of [`held`]: an aware datetime next to a zoned timestamp of another zone
-//! is the same instant in the column's zone, everywhere. The facts call a
-//! change of zone a change of kind (the review on #225: tz A ↔ tz B is
-//! `Kind` for the facts, the policy decides), so a shared result column
-//! never takes the literal's zone; the literal takes the column's.
+//! The facts call a change of zone a change of kind (the review on #225:
+//! tz A ↔ tz B is `Kind` for the facts, the policy decides), so a shared
+//! result column never takes the literal's zone; the literal takes the
+//! column's. A value reads it there before DataFusion unifies anything, so
+//! a literal finer than the column widens the unit (D-m) the same way in
+//! either operand order. Elsewhere it follows from [`held`]: a comparison
+//! places the same instant among the column's values.
 //!
 //! The rest of the module is the policy over the facts in `exact`: which
 //! operand types ltseq decides comparisons for ([`exact_domain`]), whether a
@@ -181,6 +183,19 @@ fn zoned(
             "{name} is timezone-naive, but the literal is timezone-aware ({lit_zone}); \
              use a naive datetime"
         )),
+        // A shared result column has the receiver's zone: an aware literal of
+        // another zone is its instant there (its ticks are UTC, so they are
+        // unchanged), at its own unit. D-i and D-m then judge the unit alone,
+        // whatever order the values come in.
+        (Some((value, lit_unit, Some(lit_zone))), _, Some(zone))
+            if lit_zone != zone && position == Position::Value =>
+        {
+            Ok(Reading::Value(timestamp_scalar(
+                lit_unit,
+                Some(value),
+                Some(zone.into()),
+            )))
+        }
         (Some((value, lit_unit, None)), _, Some(zone)) => {
             let instant = local_to_utc(i128::from(value), lit_unit, zone)?;
             // At the literal's own unit, keeping its precision, or at the
@@ -640,6 +655,37 @@ mod tests {
         // A finer unit in the same zone is the one widening D-m allows.
         let ns_ny = T::Timestamp(TimeUnit::Nanosecond, Some(Arc::from(NY)));
         assert_eq!(widening(&zoned_us(), &ns_ny), Widening::Finer);
+    }
+
+    #[test]
+    fn a_value_reads_an_aware_literal_in_the_column_zone() {
+        // 2024-01-01 00:00:00.000001 UTC, finer than a millisecond column.
+        let finer = ts_us(JAN_1_2024_US + 1, Some("UTC"));
+        let ms_ny = T::Timestamp(TimeUnit::Millisecond, Some(Arc::from(NY)));
+        let ms_utc = T::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")));
+        // The same ticks at the literal's unit, in the column's zone.
+        assert_eq!(
+            interpret(&finer, &ms_ny, Value, "x").unwrap(),
+            Reading::Value(ts_us(JAN_1_2024_US + 1, Some(NY)))
+        );
+        assert_eq!(
+            interpret(&ts_us(JAN_1_2024_US + 1, Some(NY)), &ms_utc, Value, "x").unwrap(),
+            Reading::Value(finer.clone())
+        );
+        // Comparisons and arithmetic keep it; the same zone needs nothing.
+        for position in [Comparison, Arithmetic] {
+            assert_eq!(interpret(&finer, &ms_ny, position, "x").unwrap(), Reading::Keep);
+        }
+        assert_eq!(interpret(&finer, &ms_utc, Value, "x").unwrap(), Reading::Keep);
+        // The facts are unchanged: the zone stays a change of kind, and the
+        // relabelled literal is judged on its unit alone.
+        let us_ny = zoned_us();
+        let us_utc = T::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC")));
+        assert_eq!(cast_class(&us_utc, &us_ny), CastClass::Kind);
+        let relabelled = ts_us(JAN_1_2024_US + 1, Some(NY));
+        assert_eq!(fit(&relabelled, &ms_ny, &ms_ny), Fit::Inexact);
+        assert_eq!(widening(&ms_ny, &us_ny), Widening::Finer);
+        assert_eq!(widening(&ms_ny, &us_utc), Widening::Lossy);
     }
 
     /// The nearest-float reading belongs to a float context (D-i), not to a
