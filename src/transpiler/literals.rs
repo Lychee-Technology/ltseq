@@ -24,8 +24,8 @@ use datafusion::logical_expr::{case, BinaryExpr, Expr, Operator};
 use datafusion::prelude::lit;
 use datafusion::scalar::ScalarValue;
 
-use super::exact::{cast_loss, exact_cast, place, place_instant, Loss, Placement};
-use super::literal_policy::{interpret, literal_text, Position, Reading};
+use super::exact::{cast_loss, exact_cast, place, place_instant, Cast, Loss, Placement};
+use super::literal_policy::{interpret, literal_text, timestamp_literal, Position, Reading};
 use super::{binary_input_types, Resolver};
 
 /// How errors name the value a literal is read against.
@@ -327,13 +327,16 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 ///
 /// The context is the type DataFusion gives the values that are not
 /// literals: `unify` of the values with every literal replaced by NULL.
-/// Each literal is first read next to it (`interpret`). Then:
+/// Each literal is first read next to it (`interpret`). A literal that
+/// `exact_cast` does not judge next to the context (a string or a Boolean,
+/// a number next to a string column) is left as written for DataFusion to
+/// read, as before #225 (decision D-h), and takes no part in the rule. For
+/// the others:
 ///
 /// 1. DataFusion unifies the values with the literals as they are. That is
-///    kept when it is exact: every literal reaches the result type
-///    unchanged (`exact_cast`) and the result type loses nothing of the
-///    context type (`cast_loss`), so the literal can widen a decimal to
-///    hold its digits.
+///    kept when it is exact: no literal is inexact at the result type
+///    (`exact_cast`) and the result type loses nothing of the context type
+///    (`cast_loss`), so the literal can widen a decimal to hold its digits.
 /// 2. Otherwise each literal the context type holds exactly takes that
 ///    type, and DataFusion unifies again. A literal that does not reach
 ///    the result type, or a result type that loses precision against the
@@ -354,11 +357,12 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 /// Losses that the context itself has against the other values (two
 /// columns of different types) are DataFusion's, and are left as they are.
 fn values(
-    values: Vec<Expr>,
+    mut values: Vec<Expr>,
     unify: impl Fn(Vec<Expr>) -> Result<Expr, String>,
     rx: &Resolver<'_>,
 ) -> Result<Vec<Expr>, String> {
-    let literals: Vec<Option<ScalarValue>> = values.iter().map(|value| rx.literal(value)).collect();
+    let mut literals: Vec<Option<ScalarValue>> =
+        values.iter().map(|value| rx.literal(value)).collect();
     let others: Vec<&Expr> = values
         .iter()
         .zip(&literals)
@@ -367,19 +371,16 @@ fn values(
     if others.is_empty() || others.len() == values.len() {
         return Ok(values);
     }
-    let with = |literals: &[Option<ScalarValue>], null: bool| -> Vec<Expr> {
-        values
-            .iter()
-            .zip(literals)
-            .map(|(value, literal)| match literal {
-                Some(_) if null => lit(ScalarValue::Null),
-                Some(literal) => lit(literal.clone()),
-                None => value.clone(),
-            })
-            .collect()
-    };
     let unified_type = |values: Vec<Expr>| unify(values).and_then(|e| rx.value_type(&e));
-    let Ok(context) = unified_type(with(&literals, true)) else {
+    let nulled = values
+        .iter()
+        .zip(&literals)
+        .map(|(value, literal)| match literal {
+            Some(_) => lit(ScalarValue::Null),
+            None => value.clone(),
+        })
+        .collect();
+    let Ok(context) = unified_type(nulled) else {
         return Ok(values);
     };
     let name = match others.as_slice() {
@@ -394,37 +395,50 @@ fn values(
         ),
         [] => unreachable!("checked above"),
     };
-    // Read each literal next to the context.
-    let mut literals = literals
-        .into_iter()
-        .map(|literal| match literal {
-            Some(literal) => Ok(Some(
-                replacement(interpret(&literal, &context, Position::Value, &name)?)
-                    .unwrap_or(literal),
-            )),
-            None => Ok(None),
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    // Read each literal next to the context. One that is not judged there
+    // becomes a value as written, like the values that are not literals.
+    for (value, literal) in values.iter_mut().zip(literals.iter_mut()) {
+        let Some(written) = literal.take() else {
+            continue;
+        };
+        let read =
+            replacement(interpret(&written, &context, Position::Value, &name)?).unwrap_or(written);
+        if exact_cast(&read, &context) == Cast::Unjudged {
+            *value = lit(read);
+        } else {
+            *literal = Some(read);
+        }
+    }
+    if literals.iter().all(Option::is_none) {
+        return Ok(values);
+    }
+    let with = |literals: &[Option<ScalarValue>]| -> Vec<Expr> {
+        values
+            .iter()
+            .zip(literals)
+            .map(|(value, literal)| literal.clone().map_or_else(|| value.clone(), lit))
+            .collect()
+    };
     // 1. DataFusion's unification, when it is exact.
     let exact = |literals: &[Option<ScalarValue>], result: &DataType| {
         cast_loss(&context, result) == Loss::None
             && literals
                 .iter()
                 .flatten()
-                .all(|literal| exact_cast(literal, result).is_some())
+                .all(|literal| exact_cast(literal, result) != Cast::Inexact)
     };
     let numbers = context.is_numeric()
         && literals
             .iter()
             .flatten()
             .all(|literal| literal.data_type().is_numeric());
-    match unified_type(with(&literals, false)) {
+    match unified_type(with(&literals)) {
         Ok(result) if exact(&literals, &result) => {}
         Err(_) if !numbers => return Ok(values),
         _ => {
             // 2. Literals the context holds exactly take its type.
             for literal in literals.iter_mut().flatten() {
-                if let Some(typed) = exact_cast(literal, &context) {
+                if let Cast::Exact(typed) = exact_cast(literal, &context) {
                     *literal = typed;
                 }
             }
@@ -434,12 +448,13 @@ fn values(
                     .flatten()
                     .find(|literal| literal.data_type() != context)
             };
-            let refused = match unified_type(with(&literals, false)) {
+            let refused = match unified_type(with(&literals)) {
                 Ok(result) => literals
                     .iter()
                     .flatten()
                     .find(|literal| {
-                        literal.data_type() != context && exact_cast(literal, &result).is_none()
+                        literal.data_type() != context
+                            && exact_cast(literal, &result) == Cast::Inexact
                     })
                     .or_else(|| match cast_loss(&context, &result) {
                         Loss::None => None,
@@ -471,7 +486,16 @@ fn refusal(literal: &ScalarValue, context: &DataType, name: &str) -> String {
             format!("Decimal literal {text} does not fit {name} ({context}) without rounding")
         }
         (_, T::Date32 | T::Date64) if literal.data_type().is_temporal() => {
-            format!("{name} is a date; the datetime literal {text} has a time of day; use a date")
+            match timestamp_literal(literal) {
+                // A date is read at UTC midnight, as in comparisons.
+                Some((_, _, Some(_))) => format!(
+                    "{name} is a date; the timezone-aware literal {text} is not a midnight in \
+                     UTC; use a date"
+                ),
+                _ => format!(
+                    "{name} is a date; the datetime literal {text} has a time of day; use a date"
+                ),
+            }
         }
         (_, T::Timestamp(..)) if literal.data_type().is_temporal() => {
             format!("{text} is outside the range of {name} ({context})")
@@ -514,7 +538,9 @@ pub(crate) fn coalesce_values(args: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr
 /// A `shift` default, read next to the shifted values. `lag`/`lead` cast it
 /// to the column's type, so it must survive that cast unchanged
 /// (`exact_cast`): a default the column cannot hold exactly is an error
-/// rather than a truncated, rounded or overflowing value (decision D-c).
+/// rather than a truncated, rounded or overflowing value (decision D-c). A
+/// default `exact_cast` does not judge (a string, a Boolean, a number for a
+/// string column) is left as written for that cast, as before #225 (D-h).
 pub(crate) fn shift_default(
     column: &Expr,
     default: ScalarValue,
@@ -530,12 +556,14 @@ pub(crate) fn shift_default(
     let name = describe(column);
     let read =
         replacement(interpret(&default, &column_type, Position::Value, &name)?).unwrap_or(default);
-    exact_cast(&read, &column_type).ok_or_else(|| {
-        format!(
+    match exact_cast(&read, &column_type) {
+        Cast::Exact(value) => Ok(value),
+        Cast::Unjudged => Ok(read),
+        Cast::Inexact => Err(format!(
             "{name} cannot hold the shift() default {} exactly ({column_type})",
             literal_text(&read)
-        )
-    })
+        )),
+    }
 }
 
 /// The other operand of `dt.diff`, read next to the receiver like an

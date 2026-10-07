@@ -10,7 +10,7 @@
 //! | Decimal | Float32, Float64 | the nearest float of that width (design §2.6) | everywhere |
 //! | Decimal, date, datetime | a string | an error (design §2.6, plan change 4) | comparisons, values |
 //! | date, datetime | a number | an error (pre-PR review I-3) | comparisons, values |
-//! | Decimal | a date or timestamp | an error | values |
+//! | number, Boolean | a date or timestamp | an error (a cast reads `5` as 1970-01-06) | values |
 //! | naive datetime | a zoned timestamp | wall-clock time in that zone; a time the zone skips or repeats is an error (design §2.6) | everywhere |
 //! | date | a zoned timestamp | midnight in that zone, at the timestamp's unit (§5 row 5, P10) | everywhere |
 //! | aware datetime | a naive timestamp | an error (D5) | everywhere |
@@ -90,11 +90,13 @@ pub(crate) fn interpret(
         (t, _) if kinds_checked && temporal && t.is_numeric() => Err(format!(
             "{name} is numeric ({context}); use a number, not a date or datetime"
         )),
-        (T::Date32 | T::Date64 | T::Timestamp(..), S::Decimal128(..))
-            if position == Position::Value =>
+        (T::Date32 | T::Date64 | T::Timestamp(..), _)
+            if position == Position::Value
+                && (literal.data_type().is_numeric() || matches!(literal, S::Boolean(_))) =>
         {
             Err(format!(
-                "{name} is a date or timestamp ({context}); it cannot hold a Decimal literal"
+                "{name} is a date or timestamp ({context}); use a date or datetime, not {}",
+                literal_text(literal)
             ))
         }
         (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), position, name),
@@ -198,8 +200,8 @@ pub(crate) fn local_to_utc(value: i128, unit: TimeUnit, zone: &str) -> Result<i1
 }
 
 /// How errors write a literal: a Decimal by its digits, a date or a
-/// timestamp as calendar text (with its zone), anything else as DataFusion
-/// displays it.
+/// timestamp as calendar text (an aware one as its local time and zone),
+/// anything else as DataFusion displays it.
 pub(crate) fn literal_text(literal: &ScalarValue) -> String {
     match literal {
         ScalarValue::Decimal128(Some(value), _, scale) => decimal_text(*value, *scale),
@@ -207,9 +209,17 @@ pub(crate) fn literal_text(literal: &ScalarValue) -> String {
             .map_or(days.to_string(), |d| d.date().to_string()),
         _ => match timestamp_literal(literal) {
             Some((value, unit, zone)) => {
-                let text = naive_datetime(i128::from(value), ticks_per_second(unit))
-                    .map_or(value.to_string(), |naive| naive.to_string());
-                zone.map_or(text.clone(), |zone| format!("{text} {zone}"))
+                let Some(utc) = naive_datetime(i128::from(value), ticks_per_second(unit)) else {
+                    return value.to_string();
+                };
+                // An aware timestamp's ticks are UTC.
+                match zone.map(|zone| (zone, zone.parse::<Tz>())) {
+                    None => utc.to_string(),
+                    Some((zone, Ok(tz))) => {
+                        format!("{} {zone}", tz.from_utc_datetime(&utc).naive_local())
+                    }
+                    Some(_) => format!("{utc} UTC"),
+                }
             }
             None => literal.to_string(),
         },
@@ -299,6 +309,15 @@ mod tests {
             (S::Int64(Some(1)), T::Utf8, Comparison, None),
             (S::Date32(Some(1)), T::Int64, Arithmetic, None),
             (dec(25, 2, 1), T::Date32, Comparison, None),
+            (S::Int64(Some(5)), T::Date32, Comparison, None),
+            (S::Int64(Some(5)), zoned_us(), Arithmetic, None),
+            // A string is DataFusion's to read, also next to a number.
+            (
+                S::Utf8(Some("1.5".into())),
+                T::Decimal128(5, 2),
+                Value,
+                None,
+            ),
         ];
         for (literal, context, position, expected) in table {
             let expected = match expected {
@@ -343,6 +362,24 @@ mod tests {
                 "column 'x' is a date or timestamp",
             ),
             (
+                S::Int64(Some(5)),
+                T::Date32,
+                Value,
+                "column 'x' is a date or timestamp (Date32); use a date or datetime, not 5",
+            ),
+            (
+                S::Float64(Some(1.5)),
+                T::Date64,
+                Value,
+                "column 'x' is a date or timestamp",
+            ),
+            (
+                S::Boolean(Some(true)),
+                zoned_us(),
+                Value,
+                "column 'x' is a date or timestamp",
+            ),
+            (
                 ts_us(1, Some("UTC")),
                 T::Timestamp(TimeUnit::Microsecond, None),
                 Arithmetic,
@@ -380,7 +417,9 @@ mod tests {
                 S::TimestampMicrosecond(Some(1_704_175_200_000_001), None),
                 "2024-01-02 06:00:00.000001",
             ),
-            (ts_us(0, Some(NY)), "1970-01-01 00:00:00 America/New_York"),
+            // An aware timestamp in its own zone's local time.
+            (ts_us(0, Some(NY)), "1969-12-31 19:00:00 America/New_York"),
+            (ts_us(0, Some("+09:00")), "1970-01-01 09:00:00 +09:00"),
             (S::Int64(Some(-1)), "-1"),
         ];
         for (literal, text) in texts {

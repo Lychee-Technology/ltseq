@@ -1,8 +1,8 @@
-//! Exact arithmetic on literal values: moving a value between the units or
-//! scales of two types without losing anything, or saying it cannot be done
-//! ([`exact_cast`]); judging what a cast between two types can lose
-//! ([`cast_loss`]); and [`place`], which finds where a value falls among the
-//! values of a type.
+//! Exact arithmetic on literal values: moving a number, date or timestamp
+//! between the units or scales of two types without losing anything, or
+//! saying it cannot be done ([`exact_cast`]); judging what a cast between
+//! two types can lose ([`cast_loss`]); and [`place`], which finds where a
+//! value falls among the values of a type.
 //!
 //! A number is an unscaled `i256` and a scale. A literal is at most a
 //! 38-digit Decimal128, but the column it meets can be a decimal of any
@@ -35,27 +35,23 @@ pub(crate) enum Placement {
 /// date at its UTC midnight.
 pub(crate) fn place(value: &ScalarValue, operand: &DataType) -> Option<Placement> {
     use DataType as T;
-    use ScalarValue as S;
     match operand {
         t if t.is_integer() || t.is_decimal() => {
             let (value, value_scale) = decimal_of(value)?;
             place_number(value, i32::from(value_scale), operand)
         }
-        T::Timestamp(..) | T::Date32 | T::Date64 => match (timestamp_of(value), value, operand) {
-            (Some((ticks, unit)), _, _) => place_instant(ticks.into(), unit, operand),
-            // A date at a timestamp type is its (UTC) midnight.
-            (None, S::Date32(Some(days)), T::Timestamp(unit, _)) => {
-                let midnight = i128::from(*days) * i128::from(86_400 * ticks_per_second(*unit));
-                place_instant(midnight, *unit, operand)
-            }
-            _ => None,
-        },
+        T::Timestamp(..) | T::Date32 | T::Date64 => {
+            let (ticks, unit) = instant_of(value)?;
+            place_instant(ticks, unit, operand)
+        }
         _ => None,
     }
 }
 
 /// An instant, `ticks` of `unit` (an `i128`, so it may lie outside the `i64`
 /// range of its unit), placed among the values of a timestamp or date type.
+/// The values of a date type are days, each at its UTC midnight: a Date64
+/// counts milliseconds, but Arrow requires a whole number of days.
 pub(crate) fn place_instant(ticks: i128, unit: TimeUnit, operand: &DataType) -> Option<Placement> {
     use DataType as T;
     use ScalarValue as S;
@@ -63,20 +59,23 @@ pub(crate) fn place_instant(ticks: i128, unit: TimeUnit, operand: &DataType) -> 
         T::Timestamp(to, zone) => Some(place_ticks(ticks, unit, *to, |t| {
             timestamp_scalar(*to, Some(t), zone.clone())
         })),
-        T::Date32 => {
+        T::Date32 | T::Date64 => {
             let per_day = i128::from(86_400 * ticks_per_second(unit));
             let days = ticks.div_euclid(per_day);
             let exact = ticks.rem_euclid(per_day) == 0;
-            Some(match i32::try_from(days) {
-                Ok(days) if exact => Placement::Exact(S::Date32(Some(days))),
-                Ok(days) => Placement::Between(S::Date32(Some(days))),
-                Err(_) => Placement::Beyond(days.cmp(&0)),
+            let date = match operand {
+                T::Date32 => i32::try_from(days).ok().map(|days| S::Date32(Some(days))),
+                _ => days
+                    .checked_mul(86_400_000)
+                    .and_then(|ms| i64::try_from(ms).ok())
+                    .map(|ms| S::Date64(Some(ms))),
+            };
+            Some(match date {
+                Some(date) if exact => Placement::Exact(date),
+                Some(date) => Placement::Between(date),
+                None => Placement::Beyond(days.cmp(&0)),
             })
         }
-        // A Date64 counts milliseconds since the epoch.
-        T::Date64 => Some(place_ticks(ticks, unit, TimeUnit::Millisecond, |ms| {
-            S::Date64(Some(ms))
-        })),
         _ => None,
     }
 }
@@ -173,41 +172,69 @@ fn int_range(t: &DataType) -> (i128, i128) {
     }
 }
 
-/// `value` as a value of `to`, when the cast keeps it: an integer, decimal,
-/// date or timestamp that comes back unchanged from the cast. A float with
-/// a fraction is the number its shortest decimal text names (`0.1` is
-/// 0.1), and an integral float its exact integer (`2.0**63` is 2^63); the
-/// cast keeps it when it gives exactly that number. A round trip would not
-/// do, since Arrow's float-to-decimal cast can turn `2.5` at scale 33 into
-/// 2.50000000000000015216… and read it back as 2.5. A cast to a float
-/// keeps the nearest float.
-pub(crate) fn exact_cast(value: &ScalarValue, to: &DataType) -> Option<ScalarValue> {
+/// What a cast to a type does to a literal's value ([`exact_cast`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Cast {
+    /// The value comes through unchanged, as this value of the type.
+    Exact(ScalarValue),
+    /// The type holds no value equal to it: the cast would round, truncate
+    /// or overflow it.
+    Inexact,
+    /// Not a pair ltseq judges: a string or Boolean value, a value at a type
+    /// of another kind (a number at a string type, at a date type), a NULL.
+    /// What the value means there is DataFusion's reading, so it is left as
+    /// written (decision D-h on #225 for strings).
+    Unjudged,
+}
+
+/// What casting `value` to `to` does. ltseq judges the kinds it has exact
+/// arithmetic for: a number at an integer or decimal type and a date or
+/// timestamp at a date or timestamp type are [`place`]d, so a date type
+/// holds a timestamp's instant only at a UTC midnight, as comparisons read
+/// it. A float with a fraction is the number its shortest decimal text names
+/// (`0.1` is 0.1), and an integral float its exact integer (`2.0**63` is
+/// 2^63); the cast keeps it when it gives exactly that number. A round trip
+/// would not do, since Arrow's float-to-decimal cast can turn `2.5` at scale
+/// 33 into 2.50000000000000015216… and read it back as 2.5, and a round trip
+/// between kinds says nothing: `"1.5"` comes back from a decimal as
+/// `"1.50"`. A number cast to a float keeps the nearest float.
+pub(crate) fn exact_cast(value: &ScalarValue, to: &DataType) -> Cast {
     use ScalarValue as S;
     if &value.data_type() == to {
-        return Some(value.clone());
+        return Cast::Exact(value.clone());
     }
-    // A number at a number type: placed exactly, since Arrow cannot rescale a
-    // decimal across a gap of more than 38 digits (scale 38 to scale -1).
-    if decimal_of(value).is_some() && (to.is_integer() || to.is_decimal()) {
-        return match place(value, to)? {
-            Placement::Exact(exact) => Some(exact),
-            Placement::Between(_) | Placement::Beyond(_) => None,
+    // Placed rather than cast, since Arrow cannot rescale a decimal across a
+    // gap of more than 38 digits (scale 38 to scale -1).
+    if let Some(placed) = place(value, to) {
+        return match placed {
+            Placement::Exact(exact) => Cast::Exact(exact),
+            Placement::Between(_) | Placement::Beyond(_) => Cast::Inexact,
         };
     }
-    let cast = value.cast_to(to).ok().filter(|cast| !cast.is_null())?;
-    if to.is_floating() {
-        return Some(cast);
-    }
-    let number = match value {
-        S::Float32(Some(v)) => float_number(f64::from(*v), &v.to_string()),
-        S::Float64(Some(v)) => float_number(*v, &v.to_string()),
-        _ => {
-            let kept = cast.cast_to(&value.data_type()).ok().as_ref() == Some(value);
-            return kept.then_some(cast);
-        }
+    let float = match value {
+        S::Float32(Some(v)) => Some((f64::from(*v), v.to_string())),
+        S::Float64(Some(v)) => Some((*v, v.to_string())),
+        _ => None,
     };
-    let exact = number.and_then(|(value, scale)| place_number(value, scale, to));
-    (exact == Some(Placement::Exact(cast.clone()))).then_some(cast)
+    let number = float.is_some() || decimal_of(value).is_some();
+    if !number || !(to.is_floating() || to.is_integer() || to.is_decimal()) {
+        return Cast::Unjudged;
+    }
+    let Some(cast) = value.cast_to(to).ok().filter(|cast| !cast.is_null()) else {
+        return Cast::Inexact;
+    };
+    if to.is_floating() {
+        return Cast::Exact(cast);
+    }
+    // A float at an integer or decimal type (any other number was placed).
+    let exact = float
+        .and_then(|(float, text)| float_number(float, &text))
+        .and_then(|(value, scale)| place_number(value, scale, to));
+    if exact == Some(Placement::Exact(cast.clone())) {
+        Cast::Exact(cast)
+    } else {
+        Cast::Inexact
+    }
 }
 
 /// The number a float means, as an unscaled integer and its scale: an
@@ -261,16 +288,20 @@ fn decimal_of(value: &ScalarValue) -> Option<(i256, i8)> {
     })
 }
 
-/// A non-null timestamp value: its ticks and unit.
-fn timestamp_of(value: &ScalarValue) -> Option<(i64, TimeUnit)> {
+/// A non-null date or timestamp value as an instant, in ticks and their
+/// unit: a timestamp's own (UTC, when it has a zone), a date's UTC midnight.
+fn instant_of(value: &ScalarValue) -> Option<(i128, TimeUnit)> {
     use ScalarValue as S;
-    match value {
-        S::TimestampSecond(Some(v), _) => Some((*v, TimeUnit::Second)),
-        S::TimestampMillisecond(Some(v), _) => Some((*v, TimeUnit::Millisecond)),
-        S::TimestampMicrosecond(Some(v), _) => Some((*v, TimeUnit::Microsecond)),
-        S::TimestampNanosecond(Some(v), _) => Some((*v, TimeUnit::Nanosecond)),
-        _ => None,
-    }
+    let (ticks, unit) = match value {
+        S::TimestampSecond(Some(v), _) => (*v, TimeUnit::Second),
+        S::TimestampMillisecond(Some(v), _) => (*v, TimeUnit::Millisecond),
+        S::TimestampMicrosecond(Some(v), _) => (*v, TimeUnit::Microsecond),
+        S::TimestampNanosecond(Some(v), _) => (*v, TimeUnit::Nanosecond),
+        S::Date64(Some(ms)) => (*ms, TimeUnit::Millisecond),
+        S::Date32(Some(days)) => return Some((i128::from(*days) * 86_400, TimeUnit::Second)),
+        _ => return None,
+    };
+    Some((i128::from(ticks), unit))
 }
 
 /// `10^exponent`, when an `i256` holds it (up to 10^76).
@@ -685,7 +716,40 @@ mod tests {
                 ts(Second, 86_400),
                 Some(Exact(S::Date64(Some(86_400_000)))),
             ),
+            // A Date64 holds days too: 06:00 is between two of them.
+            (
+                DataType::Date64,
+                ts(Second, 86_400 + 6 * 3_600),
+                Some(Between(S::Date64(Some(86_400_000)))),
+            ),
+            (
+                DataType::Date64,
+                ts(Millisecond, -1),
+                Some(Between(S::Date64(Some(-86_400_000)))),
+            ),
+            (
+                DataType::Date64,
+                S::Date32(Some(19_723)),
+                Some(Exact(S::Date64(Some(19_723 * 86_400_000)))),
+            ),
+            // An aware timestamp is its instant: midnight in UTC+9 is 15:00
+            // UTC the day before.
+            (
+                DataType::Date32,
+                timestamp_scalar(
+                    Second,
+                    Some(19_723 * 86_400 - 9 * 3_600),
+                    Some("+09:00".into()),
+                ),
+                Some(Between(S::Date32(Some(19_722)))),
+            ),
+            (
+                DataType::Date32,
+                timestamp_scalar(Second, Some(19_723 * 86_400), Some("+09:00".into())),
+                Some(Exact(S::Date32(Some(19_723)))),
+            ),
             (DataType::Utf8, ts(Second, 1), None),
+            (DataType::Date32, S::Int64(Some(5)), None),
         ];
         for (operand, value, expected) in table {
             assert_eq!(place(&value, &operand), expected, "{value:?} at {operand}");
@@ -818,9 +882,67 @@ mod tests {
                 DataType::Timestamp(Second, None),
                 None,
             ),
+            // A Date64 holds only midnights (review of b6cc39f on #225:
+            // 06:00 came back unchanged from Arrow's cast).
+            (
+                timestamp_scalar(Microsecond, Some(86_400_000_000 + 6 * 3_600_000_000), None),
+                DataType::Date64,
+                None,
+            ),
+            (
+                timestamp_scalar(Microsecond, Some(86_400_000_000), None),
+                DataType::Date64,
+                Some(S::Date64(Some(86_400_000))),
+            ),
+            (
+                S::Date32(Some(1)),
+                DataType::Date64,
+                Some(S::Date64(Some(86_400_000))),
+            ),
+            // An aware timestamp is its instant, not its local date: midnight
+            // in UTC+9 is not a UTC midnight, 09:00 there is.
+            (
+                timestamp_scalar(Second, Some(86_400 - 9 * 3_600), Some("+09:00".into())),
+                DataType::Date32,
+                None,
+            ),
+            (
+                timestamp_scalar(Second, Some(86_400), Some("+09:00".into())),
+                DataType::Date32,
+                Some(S::Date32(Some(1))),
+            ),
         ];
         for (value, to, expected) in table {
+            let expected = expected.map_or(Cast::Inexact, Cast::Exact);
             assert_eq!(exact_cast(&value, &to), expected, "{value:?} as {to}");
+        }
+    }
+
+    /// Pairs ltseq has no exact arithmetic for are not judged: a round trip
+    /// through Arrow's cast would refuse `"1.5"` at a decimal type (it comes
+    /// back as `"1.50"`) and read an integer as days at a date type.
+    #[test]
+    fn other_kinds_are_not_judged() {
+        use DataType as T;
+        use ScalarValue as S;
+        let text = |s: &str| S::Utf8(Some(s.to_string()));
+        let table = [
+            (text("1.5"), T::Decimal128(5, 2)),
+            (text("05"), T::Int64),
+            (text("abc"), T::Int64),
+            (text("2024-01-01"), T::Date32),
+            (S::Boolean(Some(true)), T::Int64),
+            (S::Int64(Some(1)), T::Boolean),
+            (S::Int64(Some(0)), T::Utf8),
+            (S::Float64(Some(1.5)), T::Utf8),
+            (S::Int64(Some(5)), T::Date32),
+            (S::Int64(Some(5)), T::Timestamp(Microsecond, None)),
+            (S::Date32(Some(1)), T::Int64),
+            (S::Int64(None), T::Decimal128(5, 2)),
+            (S::Null, T::Int64),
+        ];
+        for (value, to) in table {
+            assert_eq!(exact_cast(&value, &to), Cast::Unjudged, "{value:?} as {to}");
         }
     }
 
@@ -891,6 +1013,7 @@ mod tests {
             (dec(10i128.pow(37), 38, 0), T::Decimal256(76, 40), None),
         ];
         for (value, to, expected) in table {
+            let expected = expected.map_or(Cast::Inexact, Cast::Exact);
             assert_eq!(exact_cast(&value, &to), expected, "{value:?} as {to}");
         }
     }

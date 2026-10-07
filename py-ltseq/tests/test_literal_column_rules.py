@@ -780,3 +780,103 @@ def test_shift_default_is_exact_for_the_column_type(dtype, default, first):
     kind, values = _typed(t, fn)
     assert kind == str(dtype)
     assert values[0] == first
+
+
+# ---- literal kinds ltseq does not judge, dates in value positions (review of b6cc39f) ----
+
+
+@pytest.fixture(scope="module")
+def kinds():
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "k": pa.array([0, 1], pa.int64()),
+                "p": pa.array([Decimal("1.00"), None], pa.decimal128(5, 2)),
+                "x": pa.array([7, None], pa.int64()),
+                "s": pa.array(["a", None]),
+                "d": pa.array([date(2024, 1, 1), None]),
+                "d64": pa.array([date(2024, 1, 1), None], pa.date64()),
+                "ts": pa.array([datetime(2024, 1, 1), None], pa.timestamp("us")),
+            }
+        )
+    ).sort("k")
+
+
+@pytest.mark.parametrize(
+    "fn, kind, values",
+    [
+        (lambda r: r.p.fill_null("1.5"), "decimal128(5, 2)", [Decimal("1.00"), Decimal("1.50")]),
+        (lambda r: r.p.fill_null("2"), "decimal128(5, 2)", [Decimal("1.00"), Decimal("2.00")]),
+        (lambda r: coalesce(r.p, "1.5"), "decimal128(5, 2)", [Decimal("1.00"), Decimal("1.50")]),
+        (lambda r: r.p.shift(1, default="1.5"), "decimal128(5, 2)", [Decimal("1.50"), Decimal("1.00")]),
+        # DataFusion rounds a numeric string to the column's scale; a Decimal is exact.
+        (lambda r: r.p.fill_null("1.236"), "decimal128(5, 2)", [Decimal("1.00"), Decimal("1.24")]),
+        (lambda r: r.p.fill_null(Decimal("1.236")), "decimal128(6, 3)", [Decimal("1.000"), Decimal("1.236")]),
+        (lambda r: r.x.fill_null("05"), "int64", [7, 5]),
+        (lambda r: r.x.fill_null("+5"), "int64", [7, 5]),
+        (lambda r: r.x.shift(1, default="5"), "int64", [5, 7]),
+        (lambda r: r.x.shift(1, default=True), "int64", [1, 7]),
+        (lambda r: r.s.shift(1, default=0), "string", ["0", "a"]),
+        (lambda r: r.s.shift(1, default=1.5), "string", ["1.5", "a"]),
+    ],
+)
+def test_string_and_boolean_literals_in_value_positions_are_datafusions(kinds, fn, kind, values):
+    """A string or Boolean value, or a number next to a string column, is read
+    by DataFusion's cast, as before #225 (decision D-h): `"1.5"` used to be
+    refused for a decimal(5, 2) column because it came back as `"1.50"`."""
+    assert _typed(kinds, fn) == (kind, values)
+
+
+@pytest.mark.parametrize("fn", [lambda r: r.x.fill_null("abc"), lambda r: r.x.shift(1, default="abc")])
+def test_a_string_the_column_cannot_read_is_datafusions_error(kinds, fn):
+    with pytest.raises(ValueError, match="Cannot cast string 'abc' to value of Int64 type"):
+        kinds.derive(v=fn).to_arrow()
+
+
+@pytest.mark.parametrize("column", ["d", "d64", "ts"])
+@pytest.mark.parametrize("literal", [5, 1.5, Decimal("5"), True], ids=repr)
+def test_number_or_boolean_value_for_a_temporal_column_is_an_error(kinds, column, literal):
+    """`shift(1, default=5)` on a date column was 1970-01-06, and 5 µs on a
+    timestamp column; `fill_null(5)` failed planning."""
+    message = f"column '{column}' is a date or timestamp"
+    with pytest.raises(ValueError, match=message):
+        kinds.derive(v=lambda r: getattr(r, column).fill_null(literal))
+    with pytest.raises(ValueError, match=message):
+        kinds.derive(v=lambda r: getattr(r, column).shift(1, default=literal))
+
+
+def _date64_ms(t, fn):
+    return t.derive(v=fn).to_arrow().column("v").cast(pa.int64()).to_pylist()
+
+
+def test_date64_value_holds_only_dates(kinds):
+    """A Date64 counts milliseconds, but its values are days: a datetime with
+    a time of day used to be stored as a Date64 that equals no date."""
+    with pytest.raises(ValueError, match="column 'd64' is a date; .* has a time of day"):
+        kinds.derive(v=lambda r: r.d64.fill_null(datetime(2024, 1, 2, 6)))
+    with pytest.raises(ValueError, match=r"column 'd64' cannot hold the shift\(\) default"):
+        kinds.derive(v=lambda r: r.d64.shift(1, default=datetime(2024, 1, 2, 6)))
+    jan_2 = 19_724 * 86_400_000
+    assert _date64_ms(kinds, lambda r: r.d64.fill_null(datetime(2024, 1, 2)))[1] == jan_2
+    assert _date64_ms(kinds, lambda r: r.d64.fill_null(date(2024, 1, 2)))[1] == jan_2
+    assert _date64_ms(kinds, lambda r: r.d64.shift(1, default=date(2024, 1, 2)))[0] == jan_2
+
+
+TOKYO = timezone(timedelta(hours=9))
+
+
+def test_aware_value_for_a_date_column_is_its_utc_instant(kinds):
+    """As in comparisons (P10), a date column is read at UTC midnight, so an
+    aware literal is that date only at a UTC midnight. Arrow's cast took the
+    literal's local date: midnight in Tokyo, 15:00 UTC the day before, was
+    stored as the Tokyo date."""
+    utc_midnight = datetime(2024, 1, 2, 9, tzinfo=TOKYO)
+    assert _v(kinds, lambda r: r.d.fill_null(utc_midnight)) == [date(2024, 1, 1), date(2024, 1, 2)]
+    assert _v(kinds, lambda r: r.d.shift(1, default=utc_midnight)) == [date(2024, 1, 2), date(2024, 1, 1)]
+    assert _v(kinds, lambda r: r.d == datetime(2024, 1, 1, 9, tzinfo=TOKYO)) == [T, N]
+    assert _v(kinds, lambda r: r.d == datetime(2024, 1, 1, tzinfo=TOKYO)) == [F, N]
+    tokyo_midnight = datetime(2024, 1, 2, tzinfo=TOKYO)
+    with pytest.raises(ValueError, match="2024-01-02 00:00:00 \\+09:00 is not a midnight in UTC"):
+        kinds.derive(v=lambda r: r.d.fill_null(tokyo_midnight))
+    with pytest.raises(ValueError, match=r"column 'd' cannot hold the shift\(\) default"):
+        kinds.derive(v=lambda r: r.d.shift(1, default=tokyo_midnight))
