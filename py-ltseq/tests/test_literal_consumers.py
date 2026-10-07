@@ -157,21 +157,52 @@ def _reference(t, pred):
     return len(t.group_ordered(pred).first().to_pandas())
 
 
-def test_linear_scan_reads_a_none_literal_as_null():
-    """`None` used to reach the kernel as the string "None" (#145 R6-14)."""
-    t = LTSeq.from_arrow(pa.table({"x": pa.array([1, 1, 3, 3, 4], pa.int64())})).sort("x")
-    pred = lambda r: (r.x - r.x.shift(1)) > None  # noqa: E731
-    expected = _reference(t, pred)
-    assert t._inner.group_ordered_count(t._capture_expr(pred)) == expected
-    assert t.group_ordered(pred).first().count() == expected
-
-
-@pytest.mark.parametrize("literal", [date(2024, 1, 1), Decimal("1.5")])
+@pytest.mark.parametrize("literal", [None, date(2024, 1, 1), Decimal("1.5")])
 def test_linear_scan_leaves_other_literal_kinds_to_datafusion(literal):
     t = LTSeq.from_arrow(pa.table({"x": pa.array([1, 1, 3], pa.int64())})).sort("x")
     pred = lambda r: (r.x - r.x.shift(1)) > literal  # noqa: E731
     with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
         t._inner.group_ordered_count(t._capture_expr(pred))
+
+
+@pytest.mark.parametrize(
+    "pred",
+    [
+        lambda r: (r.x - r.x.shift(1)) > None,
+        lambda r: (r.x != r.x.shift(1)) & (r.x > None),
+        lambda r: (r.x != r.x.shift(1)) & ((r.x - None) > 0),
+    ],
+)
+def test_a_none_literal_is_counted_like_the_reference(pred):
+    """`x > None` is NULL on every row, and the kernel's `&` counts
+    `false AND NULL` as a boundary where DataFusion's is false (#189). On
+    `main` `None` was the string "None", which the kernel refused, so these
+    were always counted on the general path (review of b6cc39f on #225)."""
+    t = LTSeq.from_arrow(pa.table({"k": [0, 1, 2], "x": pa.array([1, 1, 2], pa.int64())})).sort("k")
+    assert t.group_ordered(pred).first().count() == _reference(t, pred)
+
+
+@pytest.mark.parametrize(
+    "pred",
+    [
+        lambda r: (r.x != r.x.shift(1)) | (r.x > 2.0),
+        lambda r: ((r.x - r.x.shift(1)) > 1.0) | (r.x > 3),
+    ],
+)
+def test_a_float_threshold_outside_the_fused_shape_is_declined_before_collecting(pred):
+    """Only the fused evaluator reads an integral float as an integer; the
+    multi-pass one has no integer/float comparison. Such a predicate used to
+    be collected and then fail inside the kernel."""
+    t = LTSeq.from_arrow(pa.table({"k": range(5), "x": pa.array([1, 1, 3, 3, 5], pa.int64())})).sort("k")
+    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
+        t._inner.group_ordered_count(t._capture_expr(pred))
+    assert t.group_ordered(pred).first().count() == _reference(t, pred)
+
+
+def test_a_float_threshold_in_the_fused_shape_is_counted_by_the_kernel():
+    t = LTSeq.from_arrow(pa.table({"k": range(5), "x": pa.array([1, 1, 3, 3, 5], pa.int64())})).sort("k")
+    pred = lambda r: (r.x != r.x.shift(1)) | ((r.x - r.x.shift(1)) > 1.0)  # noqa: E731
+    assert t._inner.group_ordered_count(t._capture_expr(pred)) == _reference(t, pred) == 3
 
 
 # ---- literals in search_pattern predicates (design §5 row 20) ----

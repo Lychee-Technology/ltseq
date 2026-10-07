@@ -227,9 +227,11 @@ it computes the way DataFusion does on the columns' types: arithmetic only
 where DataFusion computes it in Int64 (or Float64, for `-`), so not on Int32,
 UInt32, UInt64, or timestamp columns, whose differences DataFusion computes in
 32 bits, past the kernel's `i64` range, or as durations it does not compare
-with a number. Anything else, including a float `N` that condition 3 rejects
-on an integer column, materializes the grouped table and counts its first
-rows; the linear-scan path declines it before collecting. The linear-scan count and the
+with a number. Anything else materializes the grouped table and counts its
+first rows, including a float `N` compared with an integer column anywhere but
+in a predicate made entirely of condition 3's leaves (only that evaluator reads
+an integral float as an integer), and a `None` literal; the linear-scan path
+declines it before collecting. The linear-scan count and the
 DataFusion path currently disagree on NULLs (#189), so a directory passed to
 `read_parquet`, which the kernel cannot read, does not take the linear-scan
 path: its grouped table is materialized.

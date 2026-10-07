@@ -41,4 +41,3 @@ Literal values in lambdas are typed (#145). They used to be sent to the engine a
 - An unsupported value passed to a method (`r.x.shift(1, default=b"x")`) raises inside the lambda, at the call.
 - `shift(default=<expression>)` raises instead of ignoring the default.
 - `search_pattern` predicates accept `True`, `False` and `None` literals.
-- `None` in a `group_ordered` predicate is NULL in the counting kernel; it used to be the string `"None"`.
