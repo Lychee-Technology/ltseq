@@ -22,12 +22,23 @@ def _reference(t, pred):
 @pytest.mark.parametrize(
     "threshold, expected",
     # x = [1, 1, 3, 3, 4, 10, 10]: diffs are [null, 0, 2, 0, 1, 6, 0]; row 0 is always a boundary.
-    [(-0.5, 7), (1.5, 3), (2.0, 2), (2, 2), (math.nan, 1), (math.inf, 1), (-math.inf, 7)],
+    [(-0.5, 7), (1.5, 3), (2.0, 2), (2, 2)],
 )
 def test_first_count_matches_reference_for_float_thresholds(steps, threshold, expected):
     pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
     assert _reference(steps, pred) == expected
     assert steps.group_ordered(pred).first().count() == expected
+
+
+@pytest.mark.parametrize("threshold", [math.nan, math.inf, -math.inf])
+def test_nan_and_infinite_thresholds_are_refused(steps, threshold):
+    """An integer diff has no value for NaN or an infinity (decision D-j on
+    #225): the predicate is a plan-time error on both paths, not a count."""
+    pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
+    with pytest.raises(ValueError, match="has no value for"):
+        _reference(steps, pred)
+    with pytest.raises(ValueError, match="has no value for"):
+        steps.group_ordered(pred).first().count()
 
 
 @pytest.mark.parametrize("threshold", [-0.5, 1.5, math.nan, math.inf, -math.inf])
@@ -76,17 +87,18 @@ def test_string_threshold_is_not_a_number_for_the_kernel(steps):
     assert steps.group_ordered(pred).first().count() == _reference(steps, pred) == 3
 
 
-# Beyond 2**53 the Float64 reference rounds the Int64 diff before comparing, so an
-# i64 comparison on the fast path would count a boundary the reference does not.
+# Beyond 2**53 a float threshold is still the integer its bits encode (decision
+# D-j on #225), so the Int64 diff is compared with it exactly on every path: the
+# diff 2**53 + 1 exceeds 2.0**53, and -(2**53 + 1) falls below -(2.0**53). The
+# kernel declines these thresholds and the general path decides them.
 @pytest.mark.parametrize(
-    "xs, threshold",
-    [([0, 2**53 + 1], 2.0**53), ([0, 10**18 + 1], 1e18), ([2**53 + 1, 0], -(2.0**53))],
+    "xs, threshold, expected",
+    [([0, 2**53 + 1], 2.0**53, 2), ([0, 10**18 + 1], 1e18, 2), ([2**53 + 1, 0], -(2.0**53), 1)],
 )
-def test_first_count_matches_reference_beyond_float_precision(xs, threshold):
+def test_first_count_matches_reference_beyond_float_precision(xs, threshold, expected):
     t = LTSeq.from_arrow(pa.table({"i": pa.array(range(len(xs)), pa.int64()), "x": pa.array(xs, pa.int64())})).sort("i")
     pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
-    expected = _reference(t, pred)
-    assert expected == 1
+    assert _reference(t, pred) == expected
     assert t.group_ordered(pred).first().count() == expected
     with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
         t._inner.group_ordered_count(t._capture_expr(pred))
@@ -103,4 +115,4 @@ def test_parquet_scan_matches_reference_beyond_float_precision(tmp_path):
     pq.write_table(pa.table({"x": pa.array([0, 2**53 + 1], pa.int64())}), path)
     t = LTSeq.read_parquet(path).assume_sorted("x")
     pred = lambda r: (r.x - r.x.shift(1)) > 2.0**53  # noqa: E731
-    assert t.group_ordered(pred).first().count() == _reference(t, pred) == 1
+    assert t.group_ordered(pred).first().count() == _reference(t, pred) == 2

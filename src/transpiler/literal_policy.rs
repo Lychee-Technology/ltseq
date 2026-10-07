@@ -23,13 +23,27 @@
 //! operand types ltseq decides comparisons for ([`exact_domain`]), whether a
 //! type holds a literal ([`held`]), whether a literal fits the type of the
 //! values it shares a result column with ([`fit`], decision D-b) and what a
-//! wider result type does to those values ([`widening`], D-m). Two readings
-//! that predate decisions D-i and D-j on #225 are kept here for now and
-//! marked as such; the commit that applies those decisions removes them.
+//! wider result type does to those values ([`widening`], D-m). The
+//! decisions on #225 this module applies, in one place:
+//!
+//! - D-b/D-i: a literal that shares a result column takes the type of the
+//!   other values when that type holds it exactly; a float literal is no
+//!   exception ([`fit`]).
+//! - D-j: a float literal is the binary value its bits encode. NaN and the
+//!   infinities are values of no exact domain, so next to an integer,
+//!   decimal, date or timestamp they are refused at planning
+//!   ([`interpret`]); a float column keeps DataFusion's float semantics.
+//! - D-k (D-h kept): strings and Booleans, and a number next to a string
+//!   type, are DataFusion's to read (`Unjudged`, never exact).
+//! - D-l: a number or Boolean next to a date or timestamp is refused in
+//!   every position; `dt.add` is the way to add a duration.
+//! - D-m: a shared result column may widen a timestamp to a finer unit,
+//!   on range alone, when a literal needs it ([`widening`]); nothing else
+//!   widens, and a `shift` default never does.
 
 use chrono::{DateTime, LocalResult, NaiveDateTime, Offset, TimeZone};
 use datafusion::arrow::array::timezone::Tz;
-use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{
@@ -97,18 +111,32 @@ pub(crate) fn interpret(
                 "{name} is a string; use a string literal, or cast it to the literal's type first"
             ))
         }
-        (t, _) if kinds_checked && temporal && t.is_numeric() => Err(format!(
+        // D-l, mirrored: a number is no count of days to add to a date.
+        (t, _) if temporal && t.is_numeric() => Err(format!(
             "{name} is numeric ({context}); use a number, not a date or datetime"
         )),
+        // D-l: a number next to a date or timestamp is a type error in
+        // every position; it is not a count of days or seconds.
         (T::Date32 | T::Date64 | T::Timestamp(..), _)
-            if position == Position::Value
-                && (literal.data_type().is_numeric() || matches!(literal, S::Boolean(_))) =>
+            if literal.data_type().is_numeric() || matches!(literal, S::Boolean(_)) =>
         {
+            let hint = if position == Position::Arithmetic {
+                "; dt.add() adds days, months or seconds"
+            } else {
+                ""
+            };
             Err(format!(
-                "{name} is a date or timestamp ({context}); use a date or datetime, not {}",
+                "{name} is a date or timestamp ({context}); use a date or datetime, not {}{hint}",
                 literal_text(literal)
             ))
         }
+        // D-j: no integer or decimal equals, exceeds or falls below NaN or
+        // an infinity; the extended reals are not a rule ltseq adds.
+        (t, _) if kinds_checked && exact_domain(t) && !finite(literal) => Err(format!(
+            "{name} is {context}, which has no value for {}; NaN and infinity meet only float \
+             columns",
+            literal_text(literal)
+        )),
         (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), position, name),
         _ => Ok(Reading::Keep),
     }
@@ -116,6 +144,15 @@ pub(crate) fn interpret(
 
 /// A date or timestamp literal against a timestamp of `unit` in `zone`:
 /// the zone rules of the table above.
+/// Whether a literal is a finite value: false only for a float NaN or infinity.
+fn finite(literal: &ScalarValue) -> bool {
+    match literal {
+        ScalarValue::Float32(Some(v)) => v.is_finite(),
+        ScalarValue::Float64(Some(v)) => v.is_finite(),
+        _ => true,
+    }
+}
+
 fn zoned(
     literal: &ScalarValue,
     unit: TimeUnit,
@@ -289,7 +326,8 @@ pub(crate) enum Fit {
 /// exactly). At a float type a number literal is the nearest float of that
 /// width, which is DataFusion's reading and the one float exception D-i
 /// allows: a float column keeps float semantics. Everywhere else the
-/// literal must be [`held`] exactly.
+/// literal must be [`held`] exactly, a float by its binary value (D-j):
+/// `0.5` fits a `decimal(5, 2)`, `0.1` (0.1000000000000000055…) does not.
 pub(crate) fn fit(literal: &ScalarValue, context: &DataType) -> Fit {
     if literal.is_null() {
         return Fit::Unjudged;
@@ -304,56 +342,11 @@ pub(crate) fn fit(literal: &ScalarValue, context: &DataType) -> Fit {
             },
         };
     }
-    if literal.data_type().is_floating() && (context.is_integer() || context.is_decimal()) {
-        // Pre-D-j: a float is the number its shortest decimal text names,
-        // held when Arrow's cast gives exactly that number (the cast is what
-        // runs on a float DataFusion unifies; at scale 33 it turns 2.5 into
-        // 2.50000000000000015216...).
-        let Some(number) = float_as_decimal(literal) else {
-            return Fit::Inexact;
-        };
-        return match (held(context, &number), literal.cast_to(context)) {
-            (Holding::Exactly(value), Ok(cast)) if cast == value => Fit::Exactly(value),
-            (Holding::Unjudged, _) => Fit::Unjudged,
-            _ => Fit::Inexact,
-        };
-    }
     match held(context, literal) {
         Holding::Exactly(value) => Fit::Exactly(value),
         Holding::Not(_) => Fit::Inexact,
         Holding::Unjudged => Fit::Unjudged,
     }
-}
-
-/// The pre-D-j reading of a float literal at an integer or decimal type,
-/// which the commit applying decision D-j removes: the number its shortest
-/// decimal text names (`0.1` is 0.1, not the binary value
-/// 0.1000000000000000055…), an integral float its exact integer. `None`
-/// leaves the literal as it is: not a float, not at such a type, or a float
-/// no decimal names (NaN, the infinities, more digits than a Decimal256).
-fn float_as_decimal(literal: &ScalarValue) -> Option<ScalarValue> {
-    let (float, text) = match literal {
-        ScalarValue::Float32(Some(v)) => (f64::from(*v), v.to_string()),
-        ScalarValue::Float64(Some(v)) => (*v, v.to_string()),
-        _ => return None,
-    };
-    if !float.is_finite() {
-        return None;
-    }
-    if float.fract() == 0.0 {
-        return i256::from_f64(float).map(|integer| ScalarValue::Decimal256(Some(integer), 76, 0));
-    }
-    let (negative, digits) = match text.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, text.as_str()),
-    };
-    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
-    let unscaled: i256 = format!("{whole}{fraction}").parse().ok()?;
-    let unscaled = if negative { -unscaled } else { unscaled };
-    let scale = i8::try_from(fraction.len())
-        .ok()
-        .filter(|scale| *scale <= 76)?;
-    Some(ScalarValue::Decimal256(Some(unscaled), 76, scale))
 }
 
 /// What DataFusion's unification of a context type into a result type does
@@ -466,10 +459,11 @@ mod tests {
             (ts_us(1, Some("UTC")), zoned_us(), Comparison, None),
             (S::Date32(Some(1)), T::Date32, Comparison, None),
             (S::Int64(Some(1)), T::Utf8, Comparison, None),
-            (S::Date32(Some(1)), T::Int64, Arithmetic, None),
-            (dec(25, 2, 1), T::Date32, Comparison, None),
-            (S::Int64(Some(5)), T::Date32, Comparison, None),
-            (S::Int64(Some(5)), zoned_us(), Arithmetic, None),
+            // NaN and infinity are floats next to a float, in every position.
+            (S::Float64(Some(f64::NAN)), T::Float64, Comparison, None),
+            (S::Float64(Some(f64::INFINITY)), T::Float32, Value, None),
+            // In arithmetic a number next to an integer is DataFusion's float.
+            (S::Float64(Some(f64::NAN)), T::Int64, Arithmetic, None),
             // A string is DataFusion's to read, also next to a number.
             (
                 S::Utf8(Some("1.5".into())),
@@ -537,6 +531,56 @@ mod tests {
                 zoned_us(),
                 Value,
                 "column 'x' is a date or timestamp",
+            ),
+            // D-l: in every position, not only a value, and for every number.
+            (
+                S::Int64(Some(5)),
+                T::Date32,
+                Comparison,
+                "column 'x' is a date or timestamp (Date32); use a date or datetime, not 5",
+            ),
+            (
+                dec(25, 2, 1),
+                T::Date32,
+                Comparison,
+                "use a date or datetime, not 2.5",
+            ),
+            (
+                S::Int64(Some(5)),
+                zoned_us(),
+                Arithmetic,
+                "use a date or datetime, not 5; dt.add() adds days",
+            ),
+            (
+                S::Float64(Some(0.5)),
+                T::Timestamp(TimeUnit::Second, None),
+                Comparison,
+                "column 'x' is a date or timestamp",
+            ),
+            (
+                S::Date32(Some(1)),
+                T::Int64,
+                Arithmetic,
+                "column 'x' is numeric (Int64); use a number, not a date or datetime",
+            ),
+            // D-j: NaN and infinity have no place among integers or decimals.
+            (
+                S::Float64(Some(f64::NAN)),
+                T::Int64,
+                Comparison,
+                "column 'x' is Int64, which has no value for NaN",
+            ),
+            (
+                S::Float64(Some(f64::NEG_INFINITY)),
+                T::Decimal128(5, 2),
+                Value,
+                "column 'x' is Decimal128(5, 2), which has no value for -inf",
+            ),
+            (
+                S::Float32(Some(f32::INFINITY)),
+                T::UInt8,
+                Comparison,
+                "has no value for inf",
             ),
             (
                 ts_us(1, Some("UTC")),

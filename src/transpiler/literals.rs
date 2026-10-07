@@ -10,14 +10,14 @@
 //! in place. When the resolver cannot type the value, the literal is left
 //! alone and DataFusion reports the problem.
 //!
-//! Comparisons and `is_in` then check DataFusion's coercion of the pair
-//! ([`placement`]): where it would cast an exact operand or cast the
-//! literal inexactly, the literal is placed among the operand's own values
-//! instead. An `is_in` list is checked against its equalities as a whole
-//! ([`in_list`]). Values that share a result column are typed by [`fit`]
-//! and [`widening`] ([`values`]). Every judgement of a value at a type is a
-//! fact from `exact`, read as `literal_policy` reads it; nothing here casts
-//! a literal to see what happens.
+//! A comparison or `is_in` with an operand of an exact domain (an integer,
+//! a decimal, a date or timestamp) places the literal among the operand's
+//! own values ([`placement`]), so the operand is never cast and the literal
+//! never rounded. An `is_in` list is checked against its equalities as a
+//! whole ([`in_list`]). Values that share a result column are typed by
+//! [`fit`] and [`widening`] ([`values`]). Every judgement of a value at a
+//! type is a fact from `exact`, read as `literal_policy` reads it; nothing
+//! here casts a literal to see what happens.
 
 use std::cmp::Ordering;
 
@@ -32,7 +32,7 @@ use super::literal_policy::{
     exact_domain, fit, held, interpret, literal_text, timestamp_literal, widening, Fit, Position,
     Reading, Widening,
 };
-use super::{binary_input_types, Resolver};
+use super::Resolver;
 
 /// How errors name the value a literal is read against.
 fn describe(expr: &Expr) -> String {
@@ -66,31 +66,50 @@ fn replacement(reading: Reading) -> Option<ScalarValue> {
     }
 }
 
+/// Which side of `left op right` is the literal read next to the other:
+/// `Some(true)` for the left. A literal is read next to a value; of two
+/// literals (a folded constant, `LiteralExpr(2**53 + 1) > 2.0**53`), the
+/// one whose type is of an exact domain is the value, the left when both
+/// are, so that a constant reads as the column of its type would (the
+/// position parity of decisions D-j and D-l on #225). Two literals of no
+/// exact domain are DataFusion's: `None`.
+fn literal_side(left: &Expr, right: &Expr, rx: &Resolver<'_>) -> Option<bool> {
+    let exact = |expr: &Expr| rx.value_type(expr).is_ok_and(|t| exact_domain(&t));
+    match (rx.literal(left), rx.literal(right)) {
+        (None, Some(_)) => Some(false),
+        (Some(_), None) => Some(true),
+        (Some(_), Some(_)) if exact(left) => Some(false),
+        (Some(_), Some(_)) if exact(right) => Some(true),
+        _ => None,
+    }
+}
+
 /// The operands of an arithmetic operator, with a literal on either side
-/// read next to the other one. Two literals are left to DataFusion.
+/// read next to the other one (see [`literal_side`]).
 pub(crate) fn arithmetic_operands(
     left: Expr,
     right: Expr,
     rx: &Resolver<'_>,
 ) -> Result<(Expr, Expr), String> {
     let arithmetic = Position::Arithmetic;
-    match (rx.literal(&left), rx.literal(&right)) {
-        (Some(literal), None) => {
+    match literal_side(&left, &right, rx) {
+        Some(true) => {
+            let literal = rx.literal(&left).expect("the literal side");
             let left = replacement(read(&literal, &right, arithmetic, rx)?).map_or(left, lit);
             Ok((left, right))
         }
-        (None, Some(literal)) => {
+        Some(false) => {
+            let literal = rx.literal(&right).expect("the literal side");
             let right = replacement(read(&literal, &left, arithmetic, rx)?).map_or(right, lit);
             Ok((left, right))
         }
-        _ => Ok((left, right)),
+        None => Ok((left, right)),
     }
 }
 
 /// `left op right` for a comparison operator. A literal on either side is
-/// read next to the other side, then compared exactly where DataFusion's
-/// coercion of the pair would not be (see [`placement`]). Two literals are
-/// left to DataFusion.
+/// read next to the other side (see [`literal_side`]), then placed among
+/// that side's values when it is of an exact domain (see [`placement`]).
 pub(crate) fn comparison(
     op: Operator,
     left: Expr,
@@ -100,10 +119,8 @@ pub(crate) fn comparison(
     let build = |left: Expr, right: Expr| {
         Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right)))
     };
-    let literal_on_left = match (rx.literal(&left), rx.literal(&right)) {
-        (None, Some(_)) => false,
-        (Some(_), None) => true,
-        _ => return Ok(build(left, right)),
+    let Some(literal_on_left) = literal_side(&left, &right, rx) else {
+        return Ok(build(left, right));
     };
     let (operand, literal_expr) = if literal_on_left {
         (right, left)
@@ -123,7 +140,7 @@ pub(crate) fn comparison(
             build(operand, literal)
         }
     };
-    let (literal_expr, placed) = match compared(&operand, operand_op, &literal_expr, rx)? {
+    let (literal_expr, placed) = match compared(&operand, &literal_expr, rx)? {
         (Some(read), placed) => (lit(read), placed),
         (None, placed) => (literal_expr, placed),
     };
@@ -140,15 +157,14 @@ pub(crate) fn comparison(
 /// (`Unjudged` leaves it to DataFusion).
 fn compared(
     operand: &Expr,
-    op: Operator,
     literal: &Expr,
     rx: &Resolver<'_>,
 ) -> Result<(Option<ScalarValue>, Holding), String> {
     let value = rx.literal(literal).expect("compared with a literal");
     Ok(match read(&value, operand, Position::Comparison, rx)? {
-        Reading::Keep => (None, placement(operand, op, &value, rx)),
+        Reading::Keep => (None, placement(operand, &value, rx)),
         Reading::Value(read) => {
-            let placed = placement(operand, op, &read, rx);
+            let placed = placement(operand, &read, rx);
             (Some(read), placed)
         }
         Reading::Instant(ticks, unit) => {
@@ -186,7 +202,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
         let item = if rx.literal(&item).is_none() {
             item
         } else {
-            match compared(&expr, Operator::Eq, &item, rx)? {
+            match compared(&expr, &item, rx)? {
                 (_, Holding::Exactly(value)) => lit(value),
                 (_, Holding::Not(_)) => continue,
                 (Some(read), Holding::Unjudged) => lit(read),
@@ -230,75 +246,33 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
         .expect("at least one item is kept"))
 }
 
-/// Where `operand op literal` must be decided by ltseq rather than by
-/// DataFusion's coercion of the pair, the literal placed among the
-/// operand's values ([`held`]); `Unjudged` leaves the comparison to
-/// DataFusion.
+/// Where `literal` falls among the values of `operand`'s type, when that
+/// type is of an exact domain ([`exact_domain`]: an integer, a decimal of
+/// any width, a date or timestamp); `Unjudged` leaves the comparison to
+/// DataFusion, which happens for a float or string operand and for a
+/// literal of a kind the facts do not judge (a string, a Boolean).
 ///
-/// DataFusion compares the two at a common type. For an operand of an
-/// exact domain ([`exact_domain`]: an integer, a decimal of any width, a
-/// date or timestamp) that goes wrong in three ways, and in each the
-/// literal is placed among the operand's own values instead, so the
-/// operand is never cast:
-///
-/// - The operand must be cast to a common type of an exact domain. The
-///   cast may not hold every operand value (the 38- and 76-digit decimal
-///   clamps, the nanosecond range, the Int64 DataFusion gives a Decimal32
-///   or Decimal64 next to an Int64), and the simplifier moves it onto the
-///   literal, which truncates a finer timestamp (#200) and panics on a
-///   negative-scale decimal (apache/datafusion#24896). Placing the literal
-///   at the operand's own type is exact whatever the cast would lose, so
-///   no cast is judged here. An integer operand at an integer common type
-///   is left alone, as before #225: the simplifier unwraps integer casts
-///   exactly. A common type outside the exact domains (a float, a string)
-///   is DataFusion's, as before decision D-j; the commit applying D-j
-///   judges it.
-/// - The literal does not fit the common type exactly.
-/// - There is no common type: a Decimal32, Decimal64 or Decimal256 operand
-///   and a decimal literal with more digits than that width holds together
-///   with the operand's, or a pair whose common precision DataFusion
-///   overflows computing (a negative-scale operand and a fine-scale literal,
-///   see `resolve`).
-///
-/// The value placed is the literal's own, except a float's: that is
-/// DataFusion's reading of it at the common type, exact when it reads back
-/// as the literal, so a float literal keeps DataFusion's semantics for now.
-/// The commit applying decision D-j places a float by the binary value its
-/// bits encode.
-fn placement(operand: &Expr, op: Operator, literal: &ScalarValue, rx: &Resolver<'_>) -> Holding {
-    let Ok(operand_type) = rx.value_type(operand) else {
-        return Holding::Unjudged;
-    };
-    if !exact_domain(&operand_type) {
-        return Holding::Unjudged;
+/// DataFusion would compare the two at a common type. For these operands
+/// that can cast the operand, which the simplifier moves onto the literal:
+/// the cast may not hold every operand value (the 38- and 76-digit decimal
+/// clamps, the nanosecond range, the Float64 an Int64 meets a float at,
+/// the Int64 a Decimal32 meets an Int64 at), it truncates a finer timestamp
+/// (#200) and it panics on a negative-scale decimal
+/// (apache/datafusion#24896). Or it can round the literal (a float at
+/// `decimal(30, 15)`, #240), or there is no common type (a Decimal256
+/// operand and a literal with more digits than 76 holds alongside it, a
+/// pair whose common precision overflows, see `resolve`). Placing the
+/// literal at the operand's own type is exact in every one of these cases,
+/// so this gate never asks what the cast would lose: the operand keeps its
+/// type and the comparison is decided on the literal's exact value, a
+/// float's being the binary value its bits encode (decision D-j on #225:
+/// `r.x == 2.0**53` on an Int64 column matches 2^53 alone). NaN and the
+/// infinities are refused before this by [`interpret`].
+fn placement(operand: &Expr, literal: &ScalarValue, rx: &Resolver<'_>) -> Holding {
+    match rx.value_type(operand) {
+        Ok(operand_type) if exact_domain(&operand_type) => held(&operand_type, literal),
+        _ => Holding::Unjudged,
     }
-    let literal_type = literal.data_type();
-    let Ok((common, literal_common)) = binary_input_types(&operand_type, &op, &literal_type) else {
-        return held(&operand_type, literal);
-    };
-    // Pre-#225: an integer operand at an integer common type is DataFusion's.
-    let operand_cast = common != operand_type
-        && exact_domain(&common)
-        && !(common.is_integer() && operand_type.is_integer());
-    let literal = if literal_type.is_floating() {
-        // Pre-D-j: a float is DataFusion's reading of it at the common type.
-        let Ok(reading) = literal.cast_to(&literal_common) else {
-            return Holding::Unjudged;
-        };
-        let read_exactly = reading
-            .cast_to(&literal_type)
-            .is_ok_and(|back| &back == literal);
-        if !operand_cast && read_exactly {
-            return Holding::Unjudged;
-        }
-        reading
-    } else {
-        if !operand_cast && matches!(held(&literal_common, literal), Holding::Exactly(_)) {
-            return Holding::Unjudged;
-        }
-        literal.clone()
-    };
-    held(&operand_type, &literal)
 }
 
 /// `operand op literal` for a literal placed strictly between two values of
@@ -320,7 +294,9 @@ fn exact_comparison(operand: Expr, op: Operator, placed: Placement) -> Expr {
         Placement::Beyond(_) => {
             verdict_unless_null(operand, matches!(op, Gt | GtEq | Operator::NotEq))
         }
-        // Nothing is ordered against NaN; only `!=` holds.
+        // Nothing is ordered against NaN; only `!=` holds. `interpret`
+        // refuses NaN next to an exact domain, so this is the fact's
+        // meaning should a caller place one.
         Placement::NotANumber => verdict_unless_null(operand, op == Operator::NotEq),
     }
 }
@@ -349,9 +325,13 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 ///    kept when it is exact: no literal is inexact at the result type
 ///    (`fit`) and the result type holds every value of the context type
 ///    ([`widening`]), so the literal can widen a decimal to hold its
-///    digits. A float result type is accepted for any context for now, the
-///    reading that predates decision D-i; the commit applying D-i judges it
-///    like any other.
+///    digits, or an `int32` column to the `float64` that holds every
+///    `int32`. Each literal then takes its value at the result type, so
+///    Arrow never casts a float at execution (at scale 33 its cast turns
+///    2.5 into 2.50000000000000015216…). A float result type for a context
+///    it does not hold (an `int64`, a decimal with a scale) is no
+///    exception (decision D-i on #225): `r.i64.fill_null(0.0)` stays
+///    Int64, and `r.i64.fill_null(1.5)` is an error.
 /// 2. Otherwise each literal the context type holds exactly takes that
 ///    type, and DataFusion unifies again. A literal that does not reach
 ///    the result type, or a result type that loses values of the context
@@ -437,8 +417,7 @@ fn values(
     };
     // 1. DataFusion's unification, when it is exact.
     let exact = |literals: &[Option<ScalarValue>], result: &DataType| {
-        // Pre-D-i: a float result keeps DataFusion's float semantics.
-        (result.is_floating() || widening(&context, result) == Widening::Exact)
+        widening(&context, result) == Widening::Exact
             && literals
                 .iter()
                 .flatten()
@@ -450,7 +429,13 @@ fn values(
             .flatten()
             .all(|literal| literal.data_type().is_numeric());
     match unified_type(with(&literals)) {
-        Ok(result) if exact(&literals, &result) => {}
+        Ok(result) if exact(&literals, &result) => {
+            for literal in literals.iter_mut().flatten() {
+                if let Fit::Exactly(typed) = fit(literal, &result) {
+                    *literal = typed;
+                }
+            }
+        }
         Err(_) if !numbers => return Ok(values),
         _ => {
             // 2. Literals the context holds exactly take its type.
@@ -554,9 +539,10 @@ pub(crate) fn coalesce_values(args: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr
 /// A `shift` default, read next to the shifted values. `lag`/`lead` cast it
 /// to the column's type, so it must be a value of that type ([`fit`]): a
 /// default the column cannot hold exactly is an error rather than a
-/// truncated, rounded or overflowing value (decision D-c). A default `fit`
-/// does not judge (a string, a Boolean, a number for a string column) is
-/// left as written for that cast, as before #225 (D-h).
+/// truncated, rounded or overflowing value (decision D-c), and the column
+/// is never widened for it, not even to a finer timestamp unit (D-m). A
+/// default `fit` does not judge (a string, a Boolean, a number for a
+/// string column) is left as written for that cast, as before #225 (D-h).
 pub(crate) fn shift_default(
     column: &Expr,
     default: ScalarValue,
@@ -583,9 +569,15 @@ pub(crate) fn shift_default(
 }
 
 /// The other operand of `dt.diff`, read next to the receiver like an
-/// arithmetic operand (decision D-d).
+/// arithmetic operand (decision D-d). A number or Boolean is left as it
+/// is: `dt.diff` refuses it itself, in its own words.
 pub(crate) fn dt_diff_other(on: &Expr, other: Expr, rx: &Resolver<'_>) -> Result<Expr, String> {
     match rx.literal(&other) {
+        Some(literal)
+            if literal.data_type().is_numeric() || matches!(literal, ScalarValue::Boolean(_)) =>
+        {
+            Ok(other)
+        }
         Some(literal) => {
             Ok(replacement(read(&literal, on, Position::Arithmetic, rx)?).map_or(other, lit))
         }

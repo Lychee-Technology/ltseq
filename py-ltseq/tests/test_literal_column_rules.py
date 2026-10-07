@@ -322,7 +322,7 @@ DECIMAL_WIDTHS = [
 
 
 @pytest.mark.parametrize("dtype", DECIMAL_WIDTHS, ids=str)
-@pytest.mark.parametrize("fill", [1, 1.5, 1.236, Decimal("1.5"), Decimal("1.236")], ids=repr)
+@pytest.mark.parametrize("fill", [1, 1.5, Decimal("1.5"), Decimal("1.236")], ids=repr)
 def test_values_keep_a_decimal_column_of_any_width_exact(dtype, fill):
     """A literal is at most a Decimal128, but a column can be a decimal of any
     width. Next to one, a fill value the shared type holds exactly is kept,
@@ -337,6 +337,24 @@ def test_values_keep_a_decimal_column_of_any_width_exact(dtype, fill):
         kind, values = _typed(t, fn)
         assert not kind.startswith(("int", "uint")), kind
         assert [Decimal(str(v)) for v in values] == [Decimal("1.23"), Decimal(str(fill))]
+
+
+@pytest.mark.parametrize("dtype", DECIMAL_WIDTHS, ids=str)
+def test_values_hold_a_float_by_its_binary_value(dtype):
+    """A float literal is the value its bits encode (decision D-j on #225):
+    1.236 is 1.2359999999999999875655…, 52 digits no column here has, so it
+    is refused rather than rounded to 1.236; a decimal256(76, 52) holds it."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.23"), None], dtype)}))
+    for fn in (
+        lambda r: r.x.fill_null(1.236),
+        lambda r: coalesce(r.x, 1.236),
+        lambda r: if_else(r.x.is_null(), 1.236, r.x),
+    ):
+        with pytest.raises(ValueError, match="1.236 does not fit column 'x'"):
+            t.derive(v=fn)
+    wide = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.23"), None], pa.decimal256(76, 52))}))
+    kind, values = _typed(wide, lambda r: r.x.fill_null(1.236))
+    assert (kind, values) == ("decimal256(76, 52)", [Decimal("1.23"), Decimal(1.236)])
 
 
 @pytest.mark.parametrize(
@@ -776,9 +794,11 @@ U64_MAX = 2**64 - 1
         (pa.uint64(), -1, ValueError),
         (pa.int8(), 300, ValueError),
         (pa.int8(), -128, -128),
-        # the column's scale and precision
+        # the column's scale and precision; a float is the value its bits
+        # encode (decision D-j on #225), so 1.1 has more digits than 1.25
         (pa.decimal128(5, 2), 1.236, ValueError),
-        (pa.decimal128(5, 2), 1.1, Decimal("1.10")),
+        (pa.decimal128(5, 2), 1.1, ValueError),
+        (pa.decimal128(5, 2), 1.25, Decimal("1.25")),
         (pa.decimal128(5, 2), 1000, ValueError),
         (pa.decimal128(10, -1), Decimal("1.5"), ValueError),
         (pa.decimal128(10, -1), Decimal("20"), Decimal("20")),
@@ -792,7 +812,8 @@ U64_MAX = 2**64 - 1
         (pa.decimal64(18, -2), 1.5, ValueError),
         (pa.decimal256(20, 2), 1.5, Decimal("1.50")),
         (pa.decimal256(20, 2), 1.236, ValueError),
-        (pa.decimal256(76, 20), 1.236, Decimal("1.236")),
+        (pa.decimal256(76, 20), 1.236, ValueError),
+        (pa.decimal256(76, 52), 1.236, Decimal(1.236)),
         (pa.decimal256(76, 20), Decimal(10**37), Decimal(10**37)),
         (pa.decimal256(76, 20), 2.0**200, ValueError),
         (pa.decimal256(76, 0), 2.0**200, Decimal(2**200)),
