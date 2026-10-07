@@ -19,6 +19,13 @@
 //! has one meaning). The context type comes from `Resolver::value_type`, so
 //! it is never an encoding; nothing here looks at an expression or a schema.
 //!
+//! One more reading is not an exception in [`interpret`] but a consequence
+//! of [`held`]: an aware datetime next to a zoned timestamp of another zone
+//! is the same instant in the column's zone, everywhere. The facts call a
+//! change of zone a change of kind (the review on #225: tz A ↔ tz B is
+//! `Kind` for the facts, the policy decides), so a shared result column
+//! never takes the literal's zone; the literal takes the column's.
+//!
 //! The rest of the module is the policy over the facts in `exact`: which
 //! operand types ltseq decides comparisons for ([`exact_domain`]), whether a
 //! type holds a literal ([`held`]), whether a literal fits the type of the
@@ -365,7 +372,9 @@ pub(crate) enum Widening {
 
 /// How `result` widens `context` ([`cast_class`], read as D-b and D-m read
 /// it): a finer timestamp unit is accepted on range alone, every other
-/// range or precision loss, and every change of kind, is lossy.
+/// range or precision loss, and every change of kind, is lossy. A change
+/// of zone is a change of kind, so a result column never takes a literal's
+/// zone over the column's.
 pub(crate) fn widening(context: &DataType, result: &DataType) -> Widening {
     match cast_class(context, result) {
         CastClass::Exact => Widening::Exact,
@@ -609,6 +618,28 @@ mod tests {
                 "{literal:?} next to {context}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_zone_change_is_lossy_but_the_column_zone_holds_the_instant() {
+        // tz A to tz B is a change of kind for the facts (review on #225),
+        // so a shared result column never widens to the literal's zone; the
+        // literal fits the column's zone as the same instant instead.
+        let utc = T::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC")));
+        assert_eq!(widening(&zoned_us(), &utc), Widening::Lossy);
+        assert_eq!(widening(&utc, &zoned_us()), Widening::Lossy);
+        assert_eq!(widening(&zoned_us(), &zoned_us()), Widening::Exact);
+        assert_eq!(
+            fit(&ts_us(JAN_1_2024_US, Some("UTC")), &zoned_us()),
+            Fit::Exactly(ts_us(JAN_1_2024_US, Some(NY)))
+        );
+        assert_eq!(
+            fit(&ts_us(JAN_1_2024_US, Some(NY)), &utc),
+            Fit::Exactly(ts_us(JAN_1_2024_US, Some("UTC")))
+        );
+        // A finer unit in the same zone is the one widening D-m allows.
+        let ns_ny = T::Timestamp(TimeUnit::Nanosecond, Some(Arc::from(NY)));
+        assert_eq!(widening(&zoned_us(), &ns_ny), Widening::Finer);
     }
 
     #[test]

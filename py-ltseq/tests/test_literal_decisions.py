@@ -59,6 +59,7 @@ def temporal():
         "d": pa.array([datetime.date(1970, 1, 6), None, datetime.date(2024, 1, 1)], pa.date32()),
         "ts": pa.array([datetime.datetime(2024, 1, 1), None, datetime.datetime(3000, 1, 1)], pa.timestamp("s")),
         "tsz": pa.array([datetime.datetime(2024, 1, 1, tzinfo=UTC), None, None], pa.timestamp("us", tz="UTC")),
+        "tsny": pa.array([datetime.datetime(2024, 1, 1, tzinfo=UTC), None, None], pa.timestamp("us", tz="America/New_York")),
     })).sort("k")
 
 
@@ -277,6 +278,33 @@ def test_widening_does_not_cross_kinds_or_zones(temporal):
     assert _typed(temporal, lambda r: r.d.fill_null(datetime.datetime(2024, 1, 1)))[0] == "date32[day]"
     with pytest.raises(ValueError, match="column 'ts' is timezone-naive, but the literal is timezone-aware"):
         temporal.derive(v=lambda r: r.ts.fill_null(datetime.datetime(2024, 1, 1, tzinfo=UTC)))
+
+
+NOON_UTC = datetime.datetime(2024, 1, 2, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "share",
+    [
+        pytest.param(lambda col, lit: col.fill_null(lit), id="fill_null"),
+        pytest.param(lambda col, lit: coalesce(col, lit), id="coalesce"),
+        pytest.param(lambda col, lit: coalesce(lit, col), id="coalesce_rev"),
+        pytest.param(lambda col, lit: if_else(col.is_null(), lit, col), id="if_else"),
+    ],
+)
+@pytest.mark.parametrize("name", ["tsny", "tsz"])
+def test_an_aware_value_of_another_zone_keeps_the_column_zone(temporal, name, share):
+    """A change of zone is a change of kind, so a shared result column never
+    takes the literal's zone: the literal is the same instant in the
+    column's zone. (The literal's zone is whichever the column is not.)"""
+    column_zone = {"tsny": "America/New_York", "tsz": "UTC"}[name]
+    literal = NOON_UTC if name == "tsny" else NOON_UTC.astimezone(datetime.timezone(datetime.timedelta(hours=9)))
+    typ, values = _typed(temporal, lambda r: share(getattr(r, name), literal))
+    assert typ == f"timestamp[us, tz={column_zone}]"
+    # `coalesce(literal, column)` is the literal on every row.
+    assert values[1:] == [NOON_UTC, NOON_UTC]
+    assert values[0] in (datetime.datetime(2024, 1, 1, tzinfo=UTC), NOON_UTC)
+    assert {str(v.tzinfo) for v in values} == {column_zone}
 
 
 def test_a_comparison_never_widens_the_column(temporal):

@@ -119,8 +119,9 @@ pub(crate) enum CastClass {
     Precision,
     RangeAndPrecision,
     /// The types are of different kinds (a number and a string, a number
-    /// and a date, a naive and a zoned timestamp): the cast changes what
-    /// the value is, not only how it is stored.
+    /// and a date, a naive and a zoned timestamp, two zones of a
+    /// timestamp): the cast changes what the value is, not only how it is
+    /// stored.
     Kind,
     /// Two types of a kind this module does not judge (strings, booleans,
     /// lists, ...).
@@ -498,9 +499,14 @@ fn int_bounds(signed: bool, bits: u32) -> (BigInt, BigInt) {
 }
 
 fn instant_cast(from: &Instant, to: &Instant) -> CastClass {
-    // A naive timestamp is a wall-clock time and a zoned one an instant;
-    // Arrow's cast between them reads the one as the other in some zone.
-    if zoned(from) != zoned(to) {
+    // A naive timestamp is a wall-clock time and a zoned one an instant
+    // shown in its zone. Arrow's cast between a naive and a zoned
+    // timestamp reads the one as the other in some zone, and its cast
+    // between two zones keeps the instant but changes the wall-clock
+    // reading of every value: both change what a value means, so both are
+    // a change of kind here, and what a zone means for a literal is
+    // `literal_policy`'s to decide.
+    if zone(from) != zone(to) {
         return CastClass::Kind;
     }
     let precision = resolution(from) > resolution(to);
@@ -508,8 +514,11 @@ fn instant_cast(from: &Instant, to: &Instant) -> CastClass {
     classify(range, precision)
 }
 
-fn zoned(instant: &Instant) -> bool {
-    matches!(instant, Instant::Timestamp(_, Some(_)))
+fn zone(instant: &Instant) -> Option<&str> {
+    match instant {
+        Instant::Timestamp(_, zone) => zone.as_deref(),
+        Instant::Date32 | Instant::Date64 => None,
+    }
 }
 
 /// Finer units rank higher; a Date64 counts milliseconds.
@@ -1141,8 +1150,8 @@ mod tests {
     }
 
     /// Dates and timestamps: range at the coarser unit's reach, precision at
-    /// the finer unit's resolution; a naive and a zoned timestamp are of
-    /// different kinds.
+    /// the finer unit's resolution; a naive and a zoned timestamp, and two
+    /// zones, are of different kinds.
     #[test]
     fn cast_classes_between_instants() {
         use CastClass::{Exact, Kind, Precision, RangeAndPrecision, RangeOnly};
@@ -1175,7 +1184,12 @@ mod tests {
             (
                 T::Timestamp(Microsecond, Some("UTC".into())),
                 T::Timestamp(Microsecond, Some("+09:00".into())),
-                Exact,
+                Kind,
+            ),
+            (
+                T::Timestamp(Microsecond, Some("+09:00".into())),
+                T::Timestamp(Nanosecond, Some("UTC".into())),
+                Kind,
             ),
             (
                 T::Timestamp(Second, Some("UTC".into())),

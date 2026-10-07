@@ -345,6 +345,7 @@ def test_cast_class_boundary_witnesses(
         (pa.list_(pa.int64()), pa.int64(), "Kind"),
         (pa.timestamp("us"), pa.timestamp("us", tz="UTC"), "Kind"),
         (pa.timestamp("us", tz="UTC"), pa.timestamp("us"), "Kind"),
+        (pa.timestamp("us", tz="UTC"), pa.timestamp("us", tz="+09:00"), "Kind"),
         (pa.date32(), pa.timestamp("s", tz="UTC"), "Kind"),
     ],
 )
@@ -373,8 +374,10 @@ def instant_reach_ns(t: pa.DataType) -> int:
 def oracle_instant_cast_class(from_type: pa.DataType, to_type: pa.DataType) -> str:
     if from_type == to_type:
         return "Exact"
-    zoned = lambda t: pa.types.is_timestamp(t) and t.tz is not None  # noqa: E731
-    if zoned(from_type) != zoned(to_type):
+    # A zone is a reading of the instant, not a cast: naive to zoned, and one
+    # zone to another, change what every value means.
+    zone = lambda t: t.tz if pa.types.is_timestamp(t) else None  # noqa: E731
+    if zone(from_type) != zone(to_type):
         return "Kind"
     unit, reach = instant_unit_ns(from_type), instant_reach_ns(from_type)
     to_unit, to_reach = instant_unit_ns(to_type), instant_reach_ns(to_type)
