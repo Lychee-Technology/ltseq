@@ -55,7 +55,6 @@ pub(crate) fn _holds<'py>(
             ("Beyond".into(), None, Some(side.into()))
         }
         Holding::Not(Placement::NotANumber) => ("NotANumber".into(), None, None),
-        Holding::Not(Placement::Exact(held)) => ("Exactly".into(), Some(array(held)?), None),
         Holding::Unjudged => ("Unjudged".into(), None, None),
     })
 }

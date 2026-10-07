@@ -18,13 +18,23 @@
 //! "Everywhere" includes arithmetic and `dt.diff` (decision D-d: one literal
 //! has one meaning). The context type comes from `Resolver::value_type`, so
 //! it is never an encoding; nothing here looks at an expression or a schema.
+//!
+//! The rest of the module is the policy over the facts in `exact`: which
+//! operand types ltseq decides comparisons for ([`exact_domain`]), whether a
+//! type holds a literal ([`held`]), whether a literal fits the type of the
+//! values it shares a result column with ([`fit`], decision D-b) and what a
+//! wider result type does to those values ([`widening`], D-m). Two readings
+//! that predate decisions D-i and D-j on #225 are kept here for now and
+//! marked as such; the commit that applies those decisions removes them.
 
 use chrono::{DateTime, LocalResult, NaiveDateTime, Offset, TimeZone};
 use datafusion::arrow::array::timezone::Tz;
-use datafusion::arrow::datatypes::{DataType, TimeUnit};
+use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
 use datafusion::scalar::ScalarValue;
 
-use super::exact::{exact_ticks, ticks_per_second};
+use super::exact::{
+    cast_class, exact_ticks, hold_instant, holds, ticks_per_second, CastClass, Holding,
+};
 use crate::types::{decimal_text, decimal_to_f64, timestamp_scalar};
 
 /// How ltseq reads a literal next to a value of some type.
@@ -231,6 +241,155 @@ fn naive_datetime(value: i128, per_second: i64) -> Option<NaiveDateTime> {
     let seconds = i64::try_from(value.div_euclid(per_second)).ok()?;
     let nanos = value.rem_euclid(per_second) * (1_000_000_000 / per_second);
     DateTime::from_timestamp(seconds, u32::try_from(nanos).ok()?).map(|utc| utc.naive_utc())
+}
+
+/// The types whose comparisons ltseq decides for itself: integers, decimals
+/// of any width, dates and timestamps, which hold each of their values
+/// exactly. A float operand keeps DataFusion's float semantics (decision
+/// D-j on #225); strings, Booleans and the other kinds keep DataFusion's
+/// reading (D-h).
+pub(crate) fn exact_domain(t: &DataType) -> bool {
+    t.is_integer()
+        || t.is_decimal()
+        || matches!(
+            t,
+            DataType::Date32 | DataType::Date64 | DataType::Timestamp(..)
+        )
+}
+
+/// Whether `context` holds `literal`: [`holds`], plus the one zone reading
+/// the facts leave to policy. The days of a date type are UTC midnights, as
+/// comparisons have always read them (P10 on #145), so a zoned timestamp is
+/// held by a date type at its UTC instant. (A naive literal next to a zoned
+/// type is given its zone by [`interpret`] before it gets here.)
+pub(crate) fn held(context: &DataType, literal: &ScalarValue) -> Holding {
+    match (context, timestamp_literal(literal)) {
+        (DataType::Date32 | DataType::Date64, Some((ticks, unit, Some(_)))) => {
+            hold_instant(i128::from(ticks), unit, context)
+        }
+        _ => holds(context, literal),
+    }
+}
+
+/// Whether a literal fits a type it shares a result column with: a branch
+/// of `if_else`, an argument of `coalesce`/`fill_null`, a `shift` default.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Fit {
+    /// The literal as a value of the type.
+    Exactly(ScalarValue),
+    /// The type holds no value equal to the literal.
+    Inexact,
+    /// Not a pair ltseq judges (a string, a Boolean, a number at a string
+    /// type): the literal is DataFusion's to read, as before #225 (D-h).
+    Unjudged,
+}
+
+/// How `literal` fits `context` (decision D-b on #225: a literal takes the
+/// type of the values it shares a column with when that type holds it
+/// exactly). At a float type a number literal is the nearest float of that
+/// width, which is DataFusion's reading and the one float exception D-i
+/// allows: a float column keeps float semantics. Everywhere else the
+/// literal must be [`held`] exactly.
+pub(crate) fn fit(literal: &ScalarValue, context: &DataType) -> Fit {
+    if literal.is_null() {
+        return Fit::Unjudged;
+    }
+    if context.is_floating() {
+        return match held(context, literal) {
+            Holding::Unjudged => Fit::Unjudged,
+            Holding::Exactly(value) => Fit::Exactly(value),
+            Holding::Not(_) => match literal.cast_to(context) {
+                Ok(nearest) if !nearest.is_null() => Fit::Exactly(nearest),
+                _ => Fit::Inexact,
+            },
+        };
+    }
+    if literal.data_type().is_floating() && (context.is_integer() || context.is_decimal()) {
+        // Pre-D-j: a float is the number its shortest decimal text names,
+        // held when Arrow's cast gives exactly that number (the cast is what
+        // runs on a float DataFusion unifies; at scale 33 it turns 2.5 into
+        // 2.50000000000000015216...).
+        let Some(number) = float_as_decimal(literal) else {
+            return Fit::Inexact;
+        };
+        return match (held(context, &number), literal.cast_to(context)) {
+            (Holding::Exactly(value), Ok(cast)) if cast == value => Fit::Exactly(value),
+            (Holding::Unjudged, _) => Fit::Unjudged,
+            _ => Fit::Inexact,
+        };
+    }
+    match held(context, literal) {
+        Holding::Exactly(value) => Fit::Exactly(value),
+        Holding::Not(_) => Fit::Inexact,
+        Holding::Unjudged => Fit::Unjudged,
+    }
+}
+
+/// The pre-D-j reading of a float literal at an integer or decimal type,
+/// which the commit applying decision D-j removes: the number its shortest
+/// decimal text names (`0.1` is 0.1, not the binary value
+/// 0.1000000000000000055…), an integral float its exact integer. `None`
+/// leaves the literal as it is: not a float, not at such a type, or a float
+/// no decimal names (NaN, the infinities, more digits than a Decimal256).
+fn float_as_decimal(literal: &ScalarValue) -> Option<ScalarValue> {
+    let (float, text) = match literal {
+        ScalarValue::Float32(Some(v)) => (f64::from(*v), v.to_string()),
+        ScalarValue::Float64(Some(v)) => (*v, v.to_string()),
+        _ => return None,
+    };
+    if !float.is_finite() {
+        return None;
+    }
+    if float.fract() == 0.0 {
+        return i256::from_f64(float).map(|integer| ScalarValue::Decimal256(Some(integer), 76, 0));
+    }
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.as_str()),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    let unscaled: i256 = format!("{whole}{fraction}").parse().ok()?;
+    let unscaled = if negative { -unscaled } else { unscaled };
+    let scale = i8::try_from(fraction.len())
+        .ok()
+        .filter(|scale| *scale <= 76)?;
+    Some(ScalarValue::Decimal256(Some(unscaled), 76, scale))
+}
+
+/// What DataFusion's unification of a context type into a result type does
+/// to the context's values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Widening {
+    /// The result type holds every value of the context type.
+    Exact,
+    /// A finer timestamp, which holds every instant of the context type
+    /// that lies in its range: the widening a finer literal asks for
+    /// (decision D-m on #225).
+    Finer,
+    /// Some values of the context type are lost.
+    Lossy,
+}
+
+/// How `result` widens `context` ([`cast_class`], read as D-b and D-m read
+/// it): a finer timestamp unit is accepted on range alone, every other
+/// range or precision loss, and every change of kind, is lossy.
+pub(crate) fn widening(context: &DataType, result: &DataType) -> Widening {
+    match cast_class(context, result) {
+        CastClass::Exact => Widening::Exact,
+        CastClass::RangeOnly
+            if matches!(
+                (context, result),
+                (DataType::Timestamp(..), DataType::Timestamp(..))
+            ) =>
+        {
+            Widening::Finer
+        }
+        CastClass::RangeOnly
+        | CastClass::Precision
+        | CastClass::RangeAndPrecision
+        | CastClass::Kind
+        | CastClass::Unjudged => Widening::Lossy,
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,10 @@
 //! ([`placement`]): where it would cast an exact operand or cast the
 //! literal inexactly, the literal is placed among the operand's own values
 //! instead. An `is_in` list is checked against its equalities as a whole
-//! ([`in_list`]).
+//! ([`in_list`]). Values that share a result column are typed by [`fit`]
+//! and [`widening`] ([`values`]). Every judgement of a value at a type is a
+//! fact from `exact`, read as `literal_policy` reads it; nothing here casts
+//! a literal to see what happens.
 
 use std::cmp::Ordering;
 
@@ -24,8 +27,11 @@ use datafusion::logical_expr::{case, BinaryExpr, Expr, Operator};
 use datafusion::prelude::lit;
 use datafusion::scalar::ScalarValue;
 
-use super::exact::{cast_loss, exact_cast, place, place_instant, Cast, Loss, Placement};
-use super::literal_policy::{interpret, literal_text, timestamp_literal, Position, Reading};
+use super::exact::{hold_instant, Holding, Placement};
+use super::literal_policy::{
+    exact_domain, fit, held, interpret, literal_text, timestamp_literal, widening, Fit, Position,
+    Reading, Widening,
+};
 use super::{binary_input_types, Resolver};
 
 /// How errors name the value a literal is read against.
@@ -122,21 +128,22 @@ pub(crate) fn comparison(
         (None, placed) => (literal_expr, placed),
     };
     Ok(match placed {
-        Some(Placement::Exact(value)) => rebuild(operand, lit(value)),
-        Some(placed) => exact_comparison(operand, operand_op, placed),
-        None => rebuild(operand, literal_expr),
+        Holding::Exactly(value) => rebuild(operand, lit(value)),
+        Holding::Not(placed) => exact_comparison(operand, operand_op, placed),
+        Holding::Unjudged => rebuild(operand, literal_expr),
     })
 }
 
 /// The literal `literal` (a literal or a constant) compared with `operand`:
 /// the literal to use instead of it, if its reading changes it, and where
-/// it is placed among the operand's values, if ltseq decides the comparison.
+/// it is placed among the operand's values, if ltseq decides the comparison
+/// (`Unjudged` leaves it to DataFusion).
 fn compared(
     operand: &Expr,
     op: Operator,
     literal: &Expr,
     rx: &Resolver<'_>,
-) -> Result<(Option<ScalarValue>, Option<Placement>), String> {
+) -> Result<(Option<ScalarValue>, Holding), String> {
     let value = rx.literal(literal).expect("compared with a literal");
     Ok(match read(&value, operand, Position::Comparison, rx)? {
         Reading::Keep => (None, placement(operand, op, &value, rx)),
@@ -147,12 +154,13 @@ fn compared(
         Reading::Instant(ticks, unit) => {
             let placed = rx
                 .value_type(operand)
-                .ok()
-                .and_then(|operand_type| place_instant(ticks, unit, &operand_type));
-            (
-                None,
-                Some(placed.ok_or("an instant compares only with a timestamp")?),
-            )
+                .map_or(Holding::Unjudged, |operand_type| {
+                    hold_instant(ticks, unit, &operand_type)
+                });
+            if matches!(placed, Holding::Unjudged) {
+                return Err("an instant compares only with a timestamp".to_string());
+            }
+            (None, placed)
         }
     })
 }
@@ -179,12 +187,10 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
             item
         } else {
             match compared(&expr, Operator::Eq, &item, rx)? {
-                (_, Some(Placement::Exact(value))) => lit(value),
-                (_, Some(Placement::Between(_) | Placement::Beyond(_) | Placement::NotANumber)) => {
-                    continue
-                }
-                (Some(read), None) => lit(read),
-                (None, None) => item,
+                (_, Holding::Exactly(value)) => lit(value),
+                (_, Holding::Not(_)) => continue,
+                (Some(read), Holding::Unjudged) => lit(read),
+                (None, Holding::Unjudged) => item,
             }
         };
         let Expr::BinaryExpr(BinaryExpr { left, right, .. }) =
@@ -226,21 +232,27 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
 
 /// Where `operand op literal` must be decided by ltseq rather than by
 /// DataFusion's coercion of the pair, the literal placed among the
-/// operand's values; `None` to leave the comparison to DataFusion.
+/// operand's values ([`held`]); `Unjudged` leaves the comparison to
+/// DataFusion.
 ///
-/// DataFusion compares the two at a common type. For an exact operand (an
-/// integer, a decimal of any width, a date or timestamp) that goes wrong
-/// in three ways, and in each the literal is placed among the operand's
-/// own values instead, so the operand is never cast:
+/// DataFusion compares the two at a common type. For an operand of an
+/// exact domain ([`exact_domain`]: an integer, a decimal of any width, a
+/// date or timestamp) that goes wrong in three ways, and in each the
+/// literal is placed among the operand's own values instead, so the
+/// operand is never cast:
 ///
-/// - The operand must be cast to the common type. The cast may not hold
-///   every operand value (the 38- and 76-digit decimal clamps, the
-///   nanosecond range, the Int64 DataFusion gives a Decimal32 or Decimal64
-///   next to an Int64), and the simplifier moves it onto the literal, which
-///   truncates a finer timestamp (#200) and panics on a negative-scale
-///   decimal (apache/datafusion#24896). An integer operand at an integer
-///   common type is left alone: the simplifier unwraps integer casts
-///   exactly.
+/// - The operand must be cast to a common type of an exact domain. The
+///   cast may not hold every operand value (the 38- and 76-digit decimal
+///   clamps, the nanosecond range, the Int64 DataFusion gives a Decimal32
+///   or Decimal64 next to an Int64), and the simplifier moves it onto the
+///   literal, which truncates a finer timestamp (#200) and panics on a
+///   negative-scale decimal (apache/datafusion#24896). Placing the literal
+///   at the operand's own type is exact whatever the cast would lose, so
+///   no cast is judged here. An integer operand at an integer common type
+///   is left alone, as before #225: the simplifier unwraps integer casts
+///   exactly. A common type outside the exact domains (a float, a string)
+///   is DataFusion's, as before decision D-j; the commit applying D-j
+///   judges it.
 /// - The literal does not fit the common type exactly.
 /// - There is no common type: a Decimal32, Decimal64 or Decimal256 operand
 ///   and a decimal literal with more digits than that width holds together
@@ -249,47 +261,44 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
 ///   see `resolve`).
 ///
 /// The value placed is the literal's own, except a float's: that is
-/// DataFusion's reading of it at the common type, so a float literal keeps
-/// DataFusion's semantics.
-fn placement(
-    operand: &Expr,
-    op: Operator,
-    literal: &ScalarValue,
-    rx: &Resolver<'_>,
-) -> Option<Placement> {
-    let operand_type = rx.value_type(operand).ok()?;
-    let exact = |t: &DataType| {
-        t.is_integer()
-            || t.is_decimal()
-            || matches!(
-                t,
-                DataType::Date32 | DataType::Date64 | DataType::Timestamp(..)
-            )
+/// DataFusion's reading of it at the common type, exact when it reads back
+/// as the literal, so a float literal keeps DataFusion's semantics for now.
+/// The commit applying decision D-j places a float by the binary value its
+/// bits encode.
+fn placement(operand: &Expr, op: Operator, literal: &ScalarValue, rx: &Resolver<'_>) -> Holding {
+    let Ok(operand_type) = rx.value_type(operand) else {
+        return Holding::Unjudged;
     };
-    if !exact(&operand_type) {
-        return None;
+    if !exact_domain(&operand_type) {
+        return Holding::Unjudged;
     }
     let literal_type = literal.data_type();
     let Ok((common, literal_common)) = binary_input_types(&operand_type, &op, &literal_type) else {
-        return place(literal, &operand_type);
+        return held(&operand_type, literal);
     };
+    // Pre-#225: an integer operand at an integer common type is DataFusion's.
     let operand_cast = common != operand_type
-        && exact(&common)
+        && exact_domain(&common)
         && !(common.is_integer() && operand_type.is_integer());
-    let reading = literal.cast_to(&literal_common).ok();
-    let read_exactly = reading
-        .as_ref()
-        .and_then(|read| read.cast_to(&literal_type).ok())
-        .is_some_and(|back| &back == literal);
-    if !operand_cast && read_exactly {
-        return None;
-    }
-    let value = if literal_type.is_floating() {
-        reading?
+    let literal = if literal_type.is_floating() {
+        // Pre-D-j: a float is DataFusion's reading of it at the common type.
+        let Ok(reading) = literal.cast_to(&literal_common) else {
+            return Holding::Unjudged;
+        };
+        let read_exactly = reading
+            .cast_to(&literal_type)
+            .is_ok_and(|back| &back == literal);
+        if !operand_cast && read_exactly {
+            return Holding::Unjudged;
+        }
+        reading
     } else {
+        if !operand_cast && matches!(held(&literal_common, literal), Holding::Exactly(_)) {
+            return Holding::Unjudged;
+        }
         literal.clone()
     };
-    place(&value, &operand_type)
+    held(&operand_type, &literal)
 }
 
 /// `operand op literal` for a literal placed strictly between two values of
@@ -313,7 +322,6 @@ fn exact_comparison(operand: Expr, op: Operator, placed: Placement) -> Expr {
         }
         // Nothing is ordered against NaN; only `!=` holds.
         Placement::NotANumber => verdict_unless_null(operand, op == Operator::NotEq),
-        Placement::Exact(_) => unreachable!("an exact placement is an ordinary comparison"),
     }
 }
 
@@ -332,22 +340,26 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 /// The context is the type DataFusion gives the values that are not
 /// literals: `unify` of the values with every literal replaced by NULL.
 /// Each literal is first read next to it (`interpret`). A literal that
-/// `exact_cast` does not judge next to the context (a string or a Boolean,
-/// a number next to a string column) is left as written for DataFusion to
+/// [`fit`] does not judge next to the context (a string or a Boolean, a
+/// number next to a string column) is left as written for DataFusion to
 /// read, as before #225 (decision D-h), and takes no part in the rule. For
 /// the others:
 ///
 /// 1. DataFusion unifies the values with the literals as they are. That is
 ///    kept when it is exact: no literal is inexact at the result type
-///    (`exact_cast`) and the result type loses nothing of the context type
-///    (`cast_loss`), so the literal can widen a decimal to hold its digits.
+///    (`fit`) and the result type holds every value of the context type
+///    ([`widening`]), so the literal can widen a decimal to hold its
+///    digits. A float result type is accepted for any context for now, the
+///    reading that predates decision D-i; the commit applying D-i judges it
+///    like any other.
 /// 2. Otherwise each literal the context type holds exactly takes that
 ///    type, and DataFusion unifies again. A literal that does not reach
-///    the result type, or a result type that loses precision against the
-///    context type, is now a planning error naming the literal. A result
-///    type that loses only range is kept when both are timestamps (a finer
-///    literal widens the unit, as DataFusion does) and refused for a date
-///    context, whose dates a nanosecond timestamp cannot all hold.
+///    the result type, or a result type that loses values of the context
+///    type, is now a planning error naming the literal. A timestamp unit
+///    widened for a literal the context does not hold is kept (decision
+///    D-m: a finer literal widens the unit, as DataFusion does, and only
+///    then); a nanosecond timestamp for a date context is refused, since it
+///    cannot hold every date.
 ///
 /// When DataFusion has no common type in 1, numbers next to a numeric
 /// context still go on to 2: that happens only for a Decimal32, Decimal64
@@ -407,7 +419,7 @@ fn values(
         };
         let read =
             replacement(interpret(&written, &context, Position::Value, &name)?).unwrap_or(written);
-        if exact_cast(&read, &context) == Cast::Unjudged {
+        if matches!(fit(&read, &context), Fit::Unjudged) {
             *value = lit(read);
         } else {
             *literal = Some(read);
@@ -425,11 +437,12 @@ fn values(
     };
     // 1. DataFusion's unification, when it is exact.
     let exact = |literals: &[Option<ScalarValue>], result: &DataType| {
-        cast_loss(&context, result) == Loss::None
+        // Pre-D-i: a float result keeps DataFusion's float semantics.
+        (result.is_floating() || widening(&context, result) == Widening::Exact)
             && literals
                 .iter()
                 .flatten()
-                .all(|literal| exact_cast(literal, result) != Cast::Inexact)
+                .all(|literal| !matches!(fit(literal, result), Fit::Inexact))
     };
     let numbers = context.is_numeric()
         && literals
@@ -442,7 +455,7 @@ fn values(
         _ => {
             // 2. Literals the context holds exactly take its type.
             for literal in literals.iter_mut().flatten() {
-                if let Cast::Exact(typed) = exact_cast(literal, &context) {
+                if let Fit::Exactly(typed) = fit(literal, &context) {
                     *literal = typed;
                 }
             }
@@ -458,12 +471,11 @@ fn values(
                     .flatten()
                     .find(|literal| {
                         literal.data_type() != context
-                            && exact_cast(literal, &result) == Cast::Inexact
+                            && matches!(fit(literal, &result), Fit::Inexact)
                     })
-                    .or_else(|| match cast_loss(&context, &result) {
-                        Loss::None => None,
-                        Loss::Range if matches!(context, DataType::Timestamp(..)) => None,
-                        Loss::Range | Loss::Precision => not_context(),
+                    .or_else(|| match widening(&context, &result) {
+                        Widening::Exact | Widening::Finer => None,
+                        Widening::Lossy => not_context(),
                     }),
                 // Still no common type: a literal the context does not hold.
                 Err(_) => not_context(),
@@ -540,11 +552,11 @@ pub(crate) fn coalesce_values(args: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr
 }
 
 /// A `shift` default, read next to the shifted values. `lag`/`lead` cast it
-/// to the column's type, so it must survive that cast unchanged
-/// (`exact_cast`): a default the column cannot hold exactly is an error
-/// rather than a truncated, rounded or overflowing value (decision D-c). A
-/// default `exact_cast` does not judge (a string, a Boolean, a number for a
-/// string column) is left as written for that cast, as before #225 (D-h).
+/// to the column's type, so it must be a value of that type ([`fit`]): a
+/// default the column cannot hold exactly is an error rather than a
+/// truncated, rounded or overflowing value (decision D-c). A default `fit`
+/// does not judge (a string, a Boolean, a number for a string column) is
+/// left as written for that cast, as before #225 (D-h).
 pub(crate) fn shift_default(
     column: &Expr,
     default: ScalarValue,
@@ -560,10 +572,10 @@ pub(crate) fn shift_default(
     let name = describe(column);
     let read =
         replacement(interpret(&default, &column_type, Position::Value, &name)?).unwrap_or(default);
-    match exact_cast(&read, &column_type) {
-        Cast::Exact(value) => Ok(value),
-        Cast::Unjudged => Ok(read),
-        Cast::Inexact => Err(format!(
+    match fit(&read, &column_type) {
+        Fit::Exactly(value) => Ok(value),
+        Fit::Unjudged => Ok(read),
+        Fit::Inexact => Err(format!(
             "{name} cannot hold the shift() default {} exactly ({column_type})",
             literal_text(&read)
         )),
