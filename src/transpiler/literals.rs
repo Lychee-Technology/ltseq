@@ -23,7 +23,7 @@ use std::cmp::Ordering;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::functions::core::expr_fn::coalesce;
-use datafusion::logical_expr::{case, BinaryExpr, Expr, Operator};
+use datafusion::logical_expr::{case, BinaryExpr, Case, Expr, Operator};
 use datafusion::prelude::lit;
 use datafusion::scalar::ScalarValue;
 
@@ -355,6 +355,9 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 ///
 /// Losses that the context itself has against the other values (two
 /// columns of different types) are DataFusion's, and are left as they are.
+/// So is the reading of values that are all literals, which have no
+/// context: `if_else(c, 2**53 + 1, 1.5)` is the double DataFusion folds
+/// them to (decision D-f), as `coalesce(2**53 + 1, 1.5)` always was.
 fn values(
     mut values: Vec<Expr>,
     unify: impl Fn(Vec<Expr>) -> Result<Expr, String>,
@@ -516,14 +519,19 @@ pub(crate) fn if_else(
     false_expr: Expr,
     rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
+    // Built as the SQL planner builds a CASE, not through `CaseBuilder`,
+    // which refuses two literal branches of different types (`Decimal("1.5")`
+    // and `Decimal("2.25")`, `1` and `2.5`) before DataFusion's coercion,
+    // the one type authority (D-a), gets to unify them (D-f).
     let build = |cond: Expr, branches: Vec<Expr>| -> Result<Expr, String> {
         let [true_expr, false_expr]: [Expr; 2] = branches
             .try_into()
             .map_err(|_| "if_else has two branches".to_string())?;
-        case(cond)
-            .when(lit(true), true_expr)
-            .otherwise(false_expr)
-            .map_err(|e| format!("Failed to create CASE expression: {e}"))
+        Ok(Expr::Case(Case::new(
+            Some(Box::new(cond)),
+            vec![(Box::new(lit(true)), Box::new(true_expr))],
+            Some(Box::new(false_expr)),
+        )))
     };
     let branches = values(
         vec![true_expr, false_expr],

@@ -23,7 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, coalesce, if_else, ltseq_core
+from ltseq import LTSeq, coalesce, if_else, ltseq_core, when
 from ltseq.expr import LiteralExpr
 
 
@@ -410,7 +410,9 @@ def test_a_type_datafusion_cannot_compute_is_an_ordinary_error():
 # ---------------------------------------------------------------------------
 # A float type that DataFusion proposes for an exact context (an int32 next
 # to 2**53 + 1 and 1.5) grants no nearest-float reading; only a float
-# context does (D-i).
+# context does (D-i). Branches that are all literals go to DataFusion's
+# coercion, not to the CaseBuilder's equality check that refused Decimal
+# branches of different scales (D-a, D-f).
 
 PAST_53 = 2**53 + 1
 
@@ -500,3 +502,80 @@ def test_heterogeneous_literals_next_to_a_decimal_are_exact_or_refused():
         assert out.to_pylist() == [Decimal(literals[0]), Decimal("1.23")]
     with pytest.raises(ValueError, match="0.1 does not fit column 'x'"):
         t.derive(v=lambda r: coalesce(r.x, PAST_53, 0.1))
+
+
+def _wire(value):
+    """The type a literal is sent as (#145)."""
+    if isinstance(value, Decimal):
+        sign, digits, exponent = value.as_tuple()
+        scale = max(-exponent, 0)
+        return pa.decimal128(max(len(digits) + max(exponent, 0), scale), scale)
+    return pa.int64() if isinstance(value, int) else pa.float64()
+
+
+@pytest.mark.parametrize("branches, dtype", [
+    ((Decimal("1.5"), Decimal("2.25")), pa.decimal128(3, 2)),
+    ((Decimal("1.5"), Decimal("1.50")), pa.decimal128(3, 2)),
+    ((Decimal("-1.5"), Decimal("2.25")), pa.decimal128(3, 2)),
+    ((Decimal("1.5"), Decimal("1234567890.123456789")), pa.decimal128(19, 9)),
+    ((1, Decimal("2.25")), pa.decimal128(22, 2)),
+    ((1, 2.5), pa.float64()),
+    ((1, 2), pa.int64()),
+], ids=lambda x: str(x) if isinstance(x, tuple) else "")
+def test_pure_literal_case_branches_take_datafusions_type(branches, dtype):
+    """The review's reproducer, and the control it named: the same CASE over
+    columns of the literals' own types gives the same type and values."""
+    a, b = branches
+    t = LTSeq.from_arrow(pa.table({
+        "k": [0, 1],
+        "a": pa.array([a, a], _wire(a)),
+        "b": pa.array([b, b], _wire(b)),
+    }))
+    out = t.derive(v=lambda r: if_else(r.k == 0, a, b)).to_arrow().column("v")
+    control = t.derive(v=lambda r: if_else(r.k == 0, r.a, r.b)).to_arrow().column("v")
+    assert out.type == dtype
+    assert control.type == dtype
+    assert out.to_pylist() == control.to_pylist() == [a, b]
+
+
+def test_a_null_branch_takes_the_other_branch_type():
+    t = LTSeq.from_arrow(pa.table({"k": [0, 1]}))
+    out = t.derive(v=lambda r: if_else(r.k == 0, None, Decimal("2.25"))).to_arrow().column("v")
+    assert out.type == pa.decimal128(3, 2)
+    assert out.to_pylist() == [None, Decimal("2.25")]
+
+
+def test_when_tails_of_pure_literals_unify():
+    t = LTSeq.from_arrow(pa.table({"k": [0, 1, 2]}))
+    scales = (Decimal("1.5"), Decimal("2.25"), Decimal("3.125"))
+    for fn in (
+        lambda r: if_else(r.k == 0, scales[0], if_else(r.k == 1, scales[1], scales[2])),
+        lambda r: when(r.k == 0, scales[0]).when(r.k == 1, scales[1]).otherwise(scales[2]),
+    ):
+        out = t.derive(v=fn).to_arrow().column("v")
+        assert out.type == pa.decimal128(4, 3)
+        assert out.to_pylist() == list(scales)
+    # A column at the head: the tail is one typed value next to it.
+    out = t.derive(
+        v=lambda r: if_else(r.k == 0, r.k, if_else(r.k == 1, scales[1], scales[2]))
+    ).to_arrow().column("v")
+    assert out.type == pa.decimal128(23, 3)
+    assert out.to_pylist() == [Decimal(0), scales[1], scales[2]]
+
+
+def test_branches_that_are_all_literals_have_no_context():
+    """Two literals share no column with a value, so they keep DataFusion's
+    reading (D-f): 2**53 + 1 and 1.5 fold to the double 2**53 and 1.5, as
+    ``coalesce(2**53 + 1, 1.5)`` always did; main refused the CASE only
+    through the CaseBuilder. Nested under an int32, that double is one
+    typed value, which the int32 widens to exactly."""
+    t, _ = int32_receiver("plain")
+    for fn in (
+        lambda r: if_else(r.k == 0, PAST_53, 1.5),
+        lambda r: coalesce(PAST_53, 1.5),
+    ):
+        out = t.derive(v=fn).to_arrow().column("v")
+        assert out.type == pa.float64()
+        assert out.to_pylist()[0] == float(2**53)
+    out = t.derive(v=lambda r: if_else(r.k == 0, r.i, if_else(r.k == 1, PAST_53, 1.5)))
+    assert column(out) == [1.0, float(2**53)]
