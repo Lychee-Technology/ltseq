@@ -662,6 +662,54 @@ def test_holds_instants_and_other_kinds(
         assert array[0].as_py() == expected_value
 
 
+DAY_MS = 86_400_000
+LAST_DATE32_MS = (2**31 - 1) * DAY_MS
+FIRST_DATE32_MS = -(2**31) * DAY_MS
+LAST_DATE64_MS = ((2**63 - 1) // DAY_MS) * DAY_MS
+
+
+@pytest.mark.parametrize(
+    ("to_type", "value", "unit", "expected"),
+    [
+        # Either side of the first and last day a date type holds. A time
+        # of day on the last day has no next day to lie before, so it is
+        # beyond the type; one on the first day lies between that day and
+        # the next.
+        (pa.date32(), LAST_DATE32_MS - 1, "ms", ("Between", 2**31 - 2, None)),
+        (pa.date32(), LAST_DATE32_MS, "ms", ("Exactly", 2**31 - 1, None)),
+        (pa.date32(), LAST_DATE32_MS + 1, "ms", ("Beyond", None, "Greater")),
+        (pa.date32(), LAST_DATE32_MS + DAY_MS, "ms", ("Beyond", None, "Greater")),
+        (pa.date32(), FIRST_DATE32_MS - 1, "ms", ("Beyond", None, "Less")),
+        (pa.date32(), FIRST_DATE32_MS, "ms", ("Exactly", -(2**31), None)),
+        (pa.date32(), FIRST_DATE32_MS + 1, "ms", ("Between", -(2**31), None)),
+        (pa.date64(), LAST_DATE64_MS - 1, "ms", ("Between", LAST_DATE64_MS - DAY_MS, None)),
+        (pa.date64(), LAST_DATE64_MS, "ms", ("Exactly", LAST_DATE64_MS, None)),
+        (pa.date64(), LAST_DATE64_MS + 1, "ms", ("Beyond", None, "Greater")),
+        (pa.date64(), 2**63 - 1, "ms", ("Beyond", None, "Greater")),
+        (pa.date64(), -LAST_DATE64_MS - 1, "ms", ("Beyond", None, "Less")),
+        (pa.date64(), -LAST_DATE64_MS, "ms", ("Exactly", -LAST_DATE64_MS, None)),
+        (pa.date64(), -LAST_DATE64_MS + 1, "ms", ("Between", -LAST_DATE64_MS, None)),
+        # A fraction of a tick short of a unit's last tick still lies
+        # between ticks; the last tick itself is held.
+        (pa.timestamp("ms"), 2**63 - 1, "us", ("Between", (2**63 - 1) // 1000, None)),
+        (pa.timestamp("ms"), 2**63 - 1, "ms", ("Exactly", 2**63 - 1, None)),
+        # numpy keeps i64::MIN for NaT, so the smallest millisecond is the
+        # next one; at seconds it lies between two ticks the type holds.
+        (pa.timestamp("s"), -(2**63) + 1, "ms", ("Between", -(2**63) // 1000, None)),
+        (pa.timestamp("ms"), -(2**63) + 1, "ms", ("Exactly", -(2**63) + 1, None)),
+    ],
+    ids=lambda x: str(x) if isinstance(x, (pa.DataType, str)) else "",
+)
+def test_holds_instants_at_the_extrema(
+    to_type: pa.DataType, value: int, unit: str, expected: tuple[str, int | None, str | None]
+) -> None:
+    kind, array, side = holds(to_type, np.datetime64(value, unit))
+    held = None if array is None else array[0].value
+    assert (kind, held, side) == expected
+    if array is not None:
+        assert array.type == to_type
+
+
 def test_probe_rejects_a_non_literal() -> None:
     with pytest.raises(ValueError, match="literal"):
         ltseq_core._holds(pa.int64(), {"type": "Column", "name": "x"})

@@ -19,6 +19,7 @@ from decimal import Decimal
 from fractions import Fraction
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
@@ -412,7 +413,8 @@ def test_a_type_datafusion_cannot_compute_is_an_ordinary_error():
 # to 2**53 + 1 and 1.5) grants no nearest-float reading; only a float
 # context does (D-i). Branches that are all literals go to DataFusion's
 # coercion, not to the CaseBuilder's equality check that refused Decimal
-# branches of different scales (D-a, D-f).
+# branches of different scales (D-a, D-f). A time of day on the last day a
+# date type holds lies beyond the type, not between it and a next day.
 
 PAST_53 = 2**53 + 1
 
@@ -579,3 +581,18 @@ def test_branches_that_are_all_literals_have_no_context():
         assert out.to_pylist()[0] == float(2**53)
     out = t.derive(v=lambda r: if_else(r.k == 0, r.i, if_else(r.k == 1, PAST_53, 1.5)))
     assert column(out) == [1.0, float(2**53)]
+
+
+@pytest.mark.parametrize("dtype, last_midnight_ms", [
+    (pa.date32(), (2**31 - 1) * 86_400_000),
+    (pa.date64(), ((2**63 - 1) // 86_400_000) * 86_400_000),
+], ids=str)
+def test_a_time_of_day_past_the_last_date_is_beyond_it(dtype, last_midnight_ms):
+    """The review's reproducer: one millisecond into the last day has no
+    next day to lie before."""
+    def holds(ms):
+        kind, array, side = ltseq_core._holds(dtype, LiteralExpr(np.datetime64(ms, "ms")).serialize())
+        return kind, None if array is None else array[0].value, side
+
+    assert holds(last_midnight_ms + 1) == ("Beyond", None, "Greater")
+    assert holds(last_midnight_ms) == ("Exactly", pa.scalar(last_midnight_ms // 86_400_000, pa.date32()).value if dtype == pa.date32() else last_midnight_ms, None)

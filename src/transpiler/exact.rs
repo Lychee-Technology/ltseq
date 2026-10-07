@@ -748,16 +748,19 @@ pub(crate) fn hold_instant(ticks: i128, unit: TimeUnit, to: &DataType) -> Holdin
             let per_day = i128::from(86_400 * ticks_per_second(unit));
             let days = ticks.div_euclid(per_day);
             let exact = ticks.rem_euclid(per_day) == 0;
-            let date = match to {
+            let day = |days: i128| match to {
                 T::Date32 => i32::try_from(days).ok().map(|days| S::Date32(Some(days))),
                 _ => days
                     .checked_mul(86_400_000)
                     .and_then(|ms| i64::try_from(ms).ok())
                     .map(|ms| S::Date64(Some(ms))),
             };
-            match date {
+            match day(days) {
                 Some(date) if exact => Holding::Exactly(date),
-                Some(date) => Holding::Not(Placement::Between(date)),
+                // A time of day lies between its date and the next, unless
+                // the date is the last one the type holds.
+                Some(date) if day(days + 1).is_some() => Holding::Not(Placement::Between(date)),
+                Some(_) => Holding::Not(Placement::Beyond(Ordering::Greater)),
                 None => Holding::Not(Placement::Beyond(days.cmp(&0))),
             }
         }
@@ -783,7 +786,9 @@ fn hold_ticks(
     };
     match i64::try_from(ticks) {
         Ok(ticks) if exact => Holding::Exactly(bound(ticks)),
-        Ok(floor) => Holding::Not(Placement::Between(bound(floor))),
+        // A fraction of a tick past the last tick lies beyond the type.
+        Ok(floor) if floor < i64::MAX => Holding::Not(Placement::Between(bound(floor))),
+        Ok(_) => Holding::Not(Placement::Beyond(Ordering::Greater)),
         Err(_) => Holding::Not(Placement::Beyond(ticks.cmp(&0))),
     }
 }
@@ -1824,6 +1829,75 @@ mod tests {
         }
     }
 
+    /// The first and last UTC midnights a date type holds, in milliseconds.
+    const LAST_DATE32_MS: i64 = i32::MAX as i64 * 86_400_000;
+    const FIRST_DATE32_MS: i64 = i32::MIN as i64 * 86_400_000;
+    const LAST_DATE64_MS: i64 = (i64::MAX / 86_400_000) * 86_400_000;
+    const FIRST_DATE64_MS: i64 = -LAST_DATE64_MS;
+
+    #[test]
+    fn date64_extrema_have_no_neighbouring_day() {
+        assert!(i128::from(LAST_DATE64_MS) + 86_400_000 > i128::from(i64::MAX));
+        assert!(i128::from(FIRST_DATE64_MS) - 86_400_000 < i128::from(i64::MIN));
+    }
+
+    /// A tick past the last tick of a unit has no next tick to lie before:
+    /// an instant (`i128` ticks, so past `i64`) that floors to `i64::MAX`
+    /// with a remainder is beyond the type, as a date past the last day is.
+    #[test]
+    fn instants_past_the_last_tick() {
+        use DataType as T;
+        let ts = |unit, v| timestamp_scalar(unit, Some(v), None);
+        let last_ms_in_us = i128::from(i64::MAX) * 1_000;
+        let table = [
+            (
+                last_ms_in_us - 1,
+                Microsecond,
+                T::Timestamp(Millisecond, None),
+                between(ts(Millisecond, i64::MAX - 1)),
+            ),
+            (
+                last_ms_in_us,
+                Microsecond,
+                T::Timestamp(Millisecond, None),
+                exactly(ts(Millisecond, i64::MAX)),
+            ),
+            (
+                last_ms_in_us + 1,
+                Microsecond,
+                T::Timestamp(Millisecond, None),
+                beyond(Greater),
+            ),
+            (
+                last_ms_in_us + 1_000,
+                Microsecond,
+                T::Timestamp(Millisecond, None),
+                beyond(Greater),
+            ),
+            (
+                -last_ms_in_us - 1_001,
+                Microsecond,
+                T::Timestamp(Millisecond, None),
+                beyond(Less),
+            ),
+            (
+                i128::from(i32::MAX) * 86_400 * 1_000_000 + 1,
+                Microsecond,
+                T::Date32,
+                beyond(Greater),
+            ),
+            (
+                i128::from(i64::MAX) + 1,
+                Nanosecond,
+                T::Timestamp(Nanosecond, None),
+                beyond(Greater),
+            ),
+        ];
+        for (ticks, unit, to, expected) in table {
+            assert_eq!(hold_instant(ticks, unit, &to), expected, "{ticks} {unit:?} at {to}");
+        }
+    }
+
     /// A timestamp is its instant (or wall-clock time, when both it and the
     /// type are naive); a date is its UTC midnight; a Date64 holds only
     /// midnights.
@@ -1923,6 +1997,53 @@ mod tests {
             ),
             (S::Date64(Some(1)), T::Date32, between(S::Date32(Some(0)))),
             (S::Date64(Some(i64::MAX)), T::Date32, beyond(Greater)),
+            // Either side of the first and last day a date type holds: a
+            // time of day on the last day has no next day to lie before.
+            (
+                ts(Millisecond, LAST_DATE32_MS - 1),
+                T::Date32,
+                between(S::Date32(Some(i32::MAX - 1))),
+            ),
+            (
+                ts(Millisecond, LAST_DATE32_MS),
+                T::Date32,
+                exactly(S::Date32(Some(i32::MAX))),
+            ),
+            (ts(Millisecond, LAST_DATE32_MS + 1), T::Date32, beyond(Greater)),
+            (ts(Millisecond, FIRST_DATE32_MS - 1), T::Date32, beyond(Less)),
+            (
+                ts(Millisecond, FIRST_DATE32_MS),
+                T::Date32,
+                exactly(S::Date32(Some(i32::MIN))),
+            ),
+            (
+                ts(Millisecond, FIRST_DATE32_MS + 1),
+                T::Date32,
+                between(S::Date32(Some(i32::MIN))),
+            ),
+            (
+                ts(Millisecond, LAST_DATE64_MS - 1),
+                T::Date64,
+                between(S::Date64(Some(LAST_DATE64_MS - 86_400_000))),
+            ),
+            (
+                ts(Millisecond, LAST_DATE64_MS),
+                T::Date64,
+                exactly(S::Date64(Some(LAST_DATE64_MS))),
+            ),
+            (ts(Millisecond, LAST_DATE64_MS + 1), T::Date64, beyond(Greater)),
+            (ts(Millisecond, i64::MAX), T::Date64, beyond(Greater)),
+            (ts(Millisecond, FIRST_DATE64_MS - 1), T::Date64, beyond(Less)),
+            (
+                ts(Millisecond, FIRST_DATE64_MS),
+                T::Date64,
+                exactly(S::Date64(Some(FIRST_DATE64_MS))),
+            ),
+            (
+                ts(Millisecond, FIRST_DATE64_MS + 1),
+                T::Date64,
+                between(S::Date64(Some(FIRST_DATE64_MS))),
+            ),
             // An aware timestamp is its instant: midnight in UTC+9 is 15:00
             // UTC the day before.
             (
