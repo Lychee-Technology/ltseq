@@ -798,3 +798,43 @@ fn convert_expr_with_window_children(
         other => super::lower_expr(other, rx),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{DataType, Field};
+
+    /// The window dialect lowers through `Resolver::lowering` like the row
+    /// dialect, so it too coerces each node once: a chain rooted at a
+    /// `shift` grows linearly with its depth (review of b6cc39f on #225).
+    /// Its recursion is deeper per level than the row dialect's, so the
+    /// depths are kept within a test thread's stack.
+    #[test]
+    fn window_lowering_coerces_each_node_once() {
+        let schema = ArrowSchema::new(vec![Field::new("a", DataType::Int64, false)]);
+        let shifted = PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![PyExpr::Literal(LiteralValue::Int64(1))],
+            kwargs: Default::default(),
+            on: Some(Box::new(PyExpr::Column("a".to_string()))),
+        };
+        let chain = |depth: i64| {
+            (0..depth).fold(shifted.clone(), |e, i| PyExpr::BinOp {
+                op: "Add".to_string(),
+                left: Box::new(e),
+                right: Box::new(PyExpr::Literal(LiteralValue::Int64(i))),
+            })
+        };
+        let coerced = |depth: i64| {
+            let rx = Resolver::new(&schema).unwrap();
+            rx.resolve(pyexpr_to_window_inner(chain(depth), &rx, &[]).unwrap())
+                .unwrap();
+            rx.coerced_nodes()
+        };
+        let (shallow, deep) = (coerced(50), coerced(100));
+        assert!(
+            deep <= 2 * shallow + 10,
+            "{shallow} nodes coerced at depth 50, {deep} at depth 100"
+        );
+    }
+}

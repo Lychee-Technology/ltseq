@@ -306,3 +306,89 @@ status = "BUG_FIXED"
 ref = "review of 414926b on #225"
 note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the item is placed exactly at the column's type"
 expect = '{"result": {"v": {"type": "bool", "values": [false, null]}}}'
+
+# --- value_kinds: literal kinds in value positions, NULL and float literals in the kernel ---
+
+["value_kinds::int_shift_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main read the int default as days since 1970 (1970-01-06); a number next to a date or timestamp is refused, as fill_null(5) was"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_shift_timestamp"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main read the int default as 5 microseconds since 1970; a number next to a date or timestamp is refused"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::float_shift_timestamp"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main truncated the float default to 1 microsecond since 1970"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::bool_shift_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main failed at collect in Arrow's cast; a Boolean next to a date is refused when the query is built"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_fill_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main's error was DataFusion's coalesce planning error; a number next to a date is ltseq's ValueError"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_fill_time_of_day"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; a datetime with a time of day is refused for a date column, Date64 included"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_shift_time_of_day"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main stored 06:00 in a Date64, which equals no date"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_fill_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type for a Date64 and a datetime"
+expect = '{"result": {"ms": {"type": "int64", "values": [1704067200000, 1704153600000]}}}'
+
+["value_kinds::date64_fill_date"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type for a Date64 and a date"
+expect = '{"result": {"ms": {"type": "int64", "values": [1704067200000, 1704153600000]}}}'
+
+["value_kinds::aware_fill_date_local_midnight"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; an aware datetime next to a date column is its UTC instant, as in comparisons (P10), and Tokyo midnight is 15:00 UTC"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::aware_fill_date_utc_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; an aware datetime at a UTC midnight is that date"
+expect = '{"result": {"v": {"type": "date32[day]", "values": ["datetime.date(2024, 1, 1)", "datetime.date(2024, 1, 2)"]}}}'
+
+["value_kinds::aware_shift_date_local_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main stored 2024-01-01 for midnight 2024-01-02 in Tokyo (15:00 UTC on 2024-01-01), dropping the time of day"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_fill_decimal64_19_digits"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "DataFusion's int64 common type does not hold every 19-digit value; the column keeps its type"
+expect = '{"result": {"v": {"type": "decimal64(18, -1)", "values": ["Decimal(9.99999999999999999E+18)", "Decimal(0E+1)"]}}}'
+
+["value_kinds::int_fill_decimal32_negative_scale"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "Arrow casts a negative-scale Decimal32 to int64 in an i32, which overflowed; the column keeps its type"
+expect = '{"result": {"v": {"type": "decimal32(9, -1)", "values": ["Decimal(9.99999999E+9)", "Decimal(0E+1)"]}}}'

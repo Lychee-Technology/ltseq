@@ -394,11 +394,11 @@ def test_a_type_datafusion_cannot_compute_is_an_ordinary_error():
     error, not a panic. Its class is the build's: a debug build reports the
     panic DataFusion's coercion raises as a planning ValueError, and a
     release build, whose i8 arithmetic wraps instead, reports DataFusion's
-    own planning error."""
+    own planning error (a RuntimeError). A PanicException is neither."""
     t = LTSeq.from_arrow(pa.table({
         "x": pa.array([Decimal("1E14"), None], pa.decimal256(76, -14)),
         "y": pa.array([Decimal("1E-38"), None], pa.decimal128(38, 38)),
     }))
     for fn in (lambda r: r.x + Decimal("1E-38"), lambda r: r.x + r.y, lambda r: coalesce(r.x, r.y)):
-        with pytest.raises(Exception):
+        with pytest.raises((ValueError, RuntimeError)):
             t.derive(v=fn).to_arrow()

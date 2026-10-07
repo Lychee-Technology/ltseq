@@ -1,0 +1,38 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "string_fill_decimal", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.00)", "Decimal(1.50)"]}}}
+{"id": "string_fill_decimal_integral", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.00)", "Decimal(2.00)"]}}}
+{"id": "string_fill_decimal_rounded", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.00)", "Decimal(1.24)"]}}}
+{"id": "string_coalesce_decimal", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.00)", "Decimal(1.50)"]}}}
+{"id": "string_if_else_decimal", "result": {"v": {"type": "string", "values": ["1.00", "1.5"]}}}
+{"id": "string_shift_decimal", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.50)", "Decimal(1.00)"]}}}
+{"id": "string_fill_int_padded", "result": {"v": {"type": "int64", "values": [7, 5]}}}
+{"id": "string_shift_int", "result": {"v": {"type": "int64", "values": [5, 7]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "string_fill_int_unreadable"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast string 'abc' to value of Int64 type", "stage": "collect"}, "id": "string_shift_int_unreadable"}
+{"id": "bool_shift_int", "result": {"v": {"type": "int64", "values": [1, 7]}}}
+{"id": "int_shift_bool", "result": {"v": {"type": "bool", "values": [true, true]}}}
+{"id": "int_shift_string", "result": {"v": {"type": "string", "values": ["0", "a"]}}}
+{"id": "float_shift_string", "result": {"v": {"type": "string", "values": ["1.5", "a"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast string 'a' to value of Int64 type", "stage": "collect"}, "id": "int_fill_string"}
+{"id": "int_shift_date", "result": {"v": {"type": "date32[day]", "values": ["datetime.date(1970, 1, 6)", "datetime.date(2024, 1, 1)"]}}}
+{"id": "int_shift_timestamp", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 0, 5)", "datetime.datetime(2024, 1, 1, 0, 0)"]}}}
+{"id": "float_shift_timestamp", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 0, 1)", "datetime.datetime(2024, 1, 1, 0, 0)"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Casting from Boolean to Date32 not supported", "stage": "collect"}, "id": "bool_shift_date"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date32. No function matches the given name and argument types 'coalesce(Date32", "stage": "plan"}, "id": "int_fill_date"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date64. No function matches the given name and argument types 'coalesce(Date64", "stage": "plan"}, "id": "date64_fill_time_of_day"}
+{"id": "date64_shift_time_of_day", "result": {"ms": {"type": "int64", "values": [1704175200000, 1704067200000]}}}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date64. No function matches the given name and argument types 'coalesce(Date64", "stage": "plan"}, "id": "date64_fill_midnight"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date64. No function matches the given name and argument types 'coalesce(Date64", "stage": "plan"}, "id": "date64_fill_date"}
+{"id": "date64_shift_date", "result": {"ms": {"type": "int64", "values": [1704153600000, 1704067200000]}}}
+{"id": "date64_gt_time_of_day", "result": {"v": {"type": "bool", "values": [true, null]}}}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date32. No function matches the given name and argument types 'coalesce(Date32", "stage": "plan"}, "id": "aware_fill_date_local_midnight"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Execution error: Function 'coalesce' user-defined coercion failed with: Execution error: Fail to find the coerced type, errors: Execution error: Expect to get struct but got Date32. No function matches the given name and argument types 'coalesce(Date32", "stage": "plan"}, "id": "aware_fill_date_utc_midnight"}
+{"id": "aware_shift_date_local_midnight", "result": {"v": {"type": "date32[day]", "values": ["datetime.date(2024, 1, 1)", "datetime.date(2024, 1, 1)"]}}}
+{"id": "aware_eq_date_utc_midnight", "result": {"v": {"type": "bool", "values": [true, null]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Arithmetic overflow: Overflow happened on: 999999999999999999 * 10", "stage": "collect"}, "id": "int_fill_decimal64_19_digits"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Arithmetic overflow: Overflow happened on: 999999999 * 10", "stage": "collect"}, "id": "int_fill_decimal32_negative_scale"}
+{"id": "int_fill_decimal64_18_digits", "result": {"v": {"type": "int64", "values": [999999999999999990, 0]}}}
+{"id": "count_null_comparison_and", "result": [4, 4]}
+{"id": "count_null_arithmetic_and", "result": [4, 4]}
+{"id": "count_float_outside_fused", "result": [4, 4]}
+{"id": "count_float_fused", "result": [4, 4]}

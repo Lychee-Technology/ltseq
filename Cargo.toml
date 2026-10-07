@@ -35,6 +35,8 @@ tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 # columns. Already in the tree through arrow; the version follows it.
 chrono = { version = "0.4.45", default-features = false }
 
+# No profile may set `panic = "abort"`: `transpiler::resolve` catches a panic
+# in DataFusion's type coercion (#242) and reads it as "no common type".
 [profile.release]
 lto = "fat"
 codegen-units = 1
