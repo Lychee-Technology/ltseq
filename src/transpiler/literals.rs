@@ -180,7 +180,9 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
         } else {
             match compared(&expr, Operator::Eq, &item, rx)? {
                 (_, Some(Placement::Exact(value))) => lit(value),
-                (_, Some(Placement::Between(_) | Placement::Beyond(_))) => continue,
+                (_, Some(Placement::Between(_) | Placement::Beyond(_) | Placement::NotANumber)) => {
+                    continue
+                }
                 (Some(read), None) => lit(read),
                 (None, None) => item,
             }
@@ -309,6 +311,8 @@ fn exact_comparison(operand: Expr, op: Operator, placed: Placement) -> Expr {
         Placement::Beyond(_) => {
             verdict_unless_null(operand, matches!(op, Gt | GtEq | Operator::NotEq))
         }
+        // Nothing is ordered against NaN; only `!=` holds.
+        Placement::NotANumber => verdict_unless_null(operand, op == Operator::NotEq),
         Placement::Exact(_) => unreachable!("an exact placement is an ordinary comparison"),
     }
 }

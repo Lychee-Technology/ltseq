@@ -1,6 +1,12 @@
 from typing import Any
 
 
+# Test probes into the exactness facts of `src/transpiler/exact.rs`: the
+# arguments and the held value are pyarrow types and arrays.
+def _cast_class(from_type: Any, to_type: Any) -> str: ...
+def _holds(to_type: Any, literal: dict[str, Any]) -> tuple[str, Any | None, str | None]: ...
+
+
 class LTSeqCursor:
     def next_batch(self) -> Any | None: ...  # pyarrow.RecordBatch
     def get_schema(self) -> list[tuple[str, str]]: ...

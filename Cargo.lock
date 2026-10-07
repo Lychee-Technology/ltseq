@@ -1981,6 +1981,8 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures-util",
+ "num-bigint 0.4.8",
+ "num-traits",
  "parquet",
  "pyo3",
  "rayon",
