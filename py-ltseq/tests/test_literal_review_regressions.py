@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from ltseq import LTSeq, coalesce, if_else, ltseq_core, when
