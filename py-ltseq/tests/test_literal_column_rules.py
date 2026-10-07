@@ -366,6 +366,38 @@ def test_values_with_a_scale_38_decimal_at_any_width(dtype, tiny):
     assert values == [Decimal("1.23"), Decimal("0.1")]
 
 
+@pytest.mark.parametrize(
+    "dtype, kind",
+    [
+        # 19 integer digits: past what an Int64 holds of every value
+        (pa.decimal64(18, -1), "decimal64(18, -1)"),
+        (pa.decimal32(9, -10), "decimal32(9, -10)"),
+        # Arrow scales a Decimal32 up in an i32 when casting it to Int64
+        (pa.decimal32(9, -1), "decimal32(9, -1)"),
+        # an Int64 holds every value: DataFusion's common type stays
+        (pa.decimal64(17, -1), "int64"),
+        (pa.decimal32(8, -1), "int64"),
+    ],
+    ids=str,
+)
+def test_integer_fill_for_a_negative_scale_decimal_column(dtype, kind):
+    """DataFusion's common type of a Decimal32/64 and an Int64 is int64. It
+    is kept only when an Int64 holds every value of the column: `fill_null(0)`
+    on `decimal64(18, -1)` used to fail at collect on a value past `i64::MAX`
+    (review of b6cc39f on #225)."""
+    precision, scale = dtype.precision, dtype.scale
+    largest = Decimal(10**precision - 1).scaleb(-scale)
+    storage = pa.decimal128(precision, scale)
+    column = pa.array([largest, None], storage).cast(dtype)
+    t = LTSeq.from_arrow(pa.table({"x": column}))
+    out = t.derive(v=lambda r: r.x.fill_null(0)).to_arrow().column("v")
+    assert str(out.type) == kind
+    assert [Decimal(str(v)) if v is not None else v for v in out.cast(pa.decimal128(38, 0)).to_pylist()] == [
+        largest,
+        0,
+    ]
+
+
 # ---- Decimal / date / datetime literal against a string operand: an error ----
 
 

@@ -89,8 +89,9 @@ pub(crate) enum Loss {
     /// Only values outside the target's range (a timestamp or date cast to
     /// a finer timestamp unit, whose `i64` covers fewer years).
     Range,
-    /// Digits or fractions (a decimal to fewer integer digits or a smaller
-    /// scale, a timestamp to a coarser unit, a float to an exact type).
+    /// Digits or fractions (a decimal to fewer integer digits, a smaller
+    /// scale or an unsigned type, a timestamp to a coarser unit, a float to
+    /// an exact type).
     Precision,
 }
 
@@ -103,19 +104,7 @@ pub(crate) fn cast_loss(from: &DataType, to: &DataType) -> Loss {
     if from == to || from == &T::Null || to.is_floating() {
         return Loss::None;
     }
-    let digits = |t: &DataType| -> Option<i32> {
-        Some(match t {
-            T::Int8 | T::UInt8 => 3,
-            T::Int16 | T::UInt16 => 5,
-            T::Int32 | T::UInt32 => 10,
-            T::Int64 => 19,
-            T::UInt64 => 20,
-            t => {
-                let (precision, scale) = decimal_parts(t)?;
-                i32::from(precision) - i32::from(scale)
-            }
-        })
-    };
+    let number = |t: &DataType| t.is_integer() || t.is_decimal();
     let scale = |t: &DataType| decimal_parts(t).map_or(0, |(_, scale)| i32::from(scale));
     let rank = |unit: &TimeUnit| ticks_per_second(*unit);
     match (from, to) {
@@ -126,9 +115,23 @@ pub(crate) fn cast_loss(from: &DataType, to: &DataType) -> Loss {
                 Loss::Precision
             }
         }
-        // An integer or decimal and a decimal: enough integer digits and scale.
-        (f, t) if digits(f).is_some() && digits(t).is_some() => {
-            if digits(t) >= digits(f) && scale(t) >= scale(f) {
+        // An integer or decimal and a decimal: enough integer digits and
+        // scale, and no negative values for an unsigned type.
+        (f, t) if number(f) && number(t) => {
+            let (digits, _) = integer_digits(f);
+            let (_, mut holds) = integer_digits(t);
+            // Arrow casts a negative-scale decimal to an integer by scaling
+            // it up in the decimal's own storage, so a Decimal32 value past
+            // `i32` fails even for an Int64 (`decimal32(9, -1)`).
+            if t.is_integer() && scale(f) < 0 {
+                let storage = match f {
+                    T::Decimal32(..) => T::Int32,
+                    T::Decimal64(..) => T::Int64,
+                    _ => t.clone(),
+                };
+                holds = holds.min(integer_digits(&storage).1);
+            }
+            if holds >= digits && scale(t) >= scale(f) && !t.is_unsigned_integer() {
                 Loss::None
             } else {
                 Loss::Precision
@@ -169,6 +172,27 @@ fn int_range(t: &DataType) -> (i128, i128) {
         T::UInt16 => (0, u16::MAX.into()),
         T::UInt32 => (0, u32::MAX.into()),
         _ => (0, u64::MAX.into()),
+    }
+}
+
+/// The integer digits of an integer or decimal type: the most a value of
+/// the type can have, and the most of which the type holds every value.
+/// A decimal's are the same; an Int64's are 19 (`i64::MAX` has 19 digits)
+/// and 18 (it does not hold every 19-digit number).
+fn integer_digits(t: &DataType) -> (i32, i32) {
+    use DataType as T;
+    match t {
+        T::Int8 | T::UInt8 => (3, 2),
+        T::Int16 | T::UInt16 => (5, 4),
+        T::Int32 | T::UInt32 => (10, 9),
+        T::Int64 => (19, 18),
+        T::UInt64 => (20, 19),
+        t => {
+            let digits = decimal_parts(t).map_or(0, |(precision, scale)| {
+                i32::from(precision) - i32::from(scale)
+            });
+            (digits, digits)
+        }
     }
 }
 
@@ -795,6 +819,20 @@ mod tests {
             (T::Decimal128(38, 10), T::Decimal256(76, 10), Loss::None),
             (T::Int64, T::Decimal256(76, 20), Loss::None),
             (T::Int64, T::Decimal32(9, 0), Precision),
+            // An Int64 holds every 18-digit integer, not every 19-digit one.
+            (T::Decimal64(18, 0), T::Int64, Loss::None),
+            (T::Decimal64(17, -1), T::Int64, Loss::None),
+            (T::Decimal64(18, -1), T::Int64, Precision),
+            (T::Decimal32(9, -10), T::Int64, Precision),
+            (T::Decimal128(19, 0), T::Int64, Precision),
+            (T::Decimal128(19, 0), T::UInt64, Precision),
+            (T::Int64, T::Decimal64(18, 0), Precision),
+            (T::Int64, T::Decimal128(19, 0), Loss::None),
+            (T::Int64, T::Decimal64(18, -1), Precision),
+            // Arrow scales a negative-scale Decimal32 up in an i32.
+            (T::Decimal32(8, -1), T::Int64, Loss::None),
+            (T::Decimal32(9, -1), T::Int64, Precision),
+            (T::Decimal128(37, -1), T::Decimal128(38, 0), Loss::None),
         ];
         for (from, to, expected) in table {
             assert_eq!(cast_loss(&from, &to), expected, "{from} -> {to}");
