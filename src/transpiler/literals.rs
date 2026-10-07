@@ -331,7 +331,10 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 ///    2.5 into 2.50000000000000015216…). A float result type for a context
 ///    it does not hold (an `int64`, a decimal with a scale) is no
 ///    exception (decision D-i on #225): `r.i64.fill_null(0.0)` stays
-///    Int64, and `r.i64.fill_null(1.5)` is an error.
+///    Int64, and `r.i64.fill_null(1.5)` is an error. Nor is a float result
+///    type that holds the context but not a literal: `coalesce(r.i32,
+///    2**53 + 1, 1.5)` is an error, not the rounded `2**53`. Only a float
+///    context reads a number as the nearest float (`fit`).
 /// 2. Otherwise each literal the context type holds exactly takes that
 ///    type, and DataFusion unifies again. A literal that does not reach
 ///    the result type, or a result type that loses values of the context
@@ -399,7 +402,7 @@ fn values(
         };
         let read =
             replacement(interpret(&written, &context, Position::Value, &name)?).unwrap_or(written);
-        if matches!(fit(&read, &context), Fit::Unjudged) {
+        if matches!(fit(&read, &context, &context), Fit::Unjudged) {
             *value = lit(read);
         } else {
             *literal = Some(read);
@@ -421,7 +424,7 @@ fn values(
             && literals
                 .iter()
                 .flatten()
-                .all(|literal| !matches!(fit(literal, result), Fit::Inexact))
+                .all(|literal| !matches!(fit(literal, result, &context), Fit::Inexact))
     };
     let numbers = context.is_numeric()
         && literals
@@ -431,7 +434,7 @@ fn values(
     match unified_type(with(&literals)) {
         Ok(result) if exact(&literals, &result) => {
             for literal in literals.iter_mut().flatten() {
-                if let Fit::Exactly(typed) = fit(literal, &result) {
+                if let Fit::Exactly(typed) = fit(literal, &result, &context) {
                     *literal = typed;
                 }
             }
@@ -440,7 +443,7 @@ fn values(
         _ => {
             // 2. Literals the context holds exactly take its type.
             for literal in literals.iter_mut().flatten() {
-                if let Fit::Exactly(typed) = fit(literal, &context) {
+                if let Fit::Exactly(typed) = fit(literal, &context, &context) {
                     *literal = typed;
                 }
             }
@@ -456,7 +459,7 @@ fn values(
                     .flatten()
                     .find(|literal| {
                         literal.data_type() != context
-                            && matches!(fit(literal, &result), Fit::Inexact)
+                            && matches!(fit(literal, &result, &context), Fit::Inexact)
                     })
                     .or_else(|| match widening(&context, &result) {
                         Widening::Exact | Widening::Finer => None,
@@ -558,7 +561,7 @@ pub(crate) fn shift_default(
     let name = describe(column);
     let read =
         replacement(interpret(&default, &column_type, Position::Value, &name)?).unwrap_or(default);
-    match fit(&read, &column_type) {
+    match fit(&read, &column_type, &column_type) {
         Fit::Exactly(value) => Ok(value),
         Fit::Unjudged => Ok(read),
         Fit::Inexact => Err(format!(

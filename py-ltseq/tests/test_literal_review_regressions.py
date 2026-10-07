@@ -9,6 +9,7 @@ typing is held to every case the earlier implementation was. Reviews:
 - e4217f4: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6002117054
 - b22ecab: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6004458626
 - 414926b: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6026630607
+- f07b855: https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6042664484
 """
 
 import math
@@ -22,7 +23,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, coalesce, if_else
+from ltseq import LTSeq, coalesce, if_else, ltseq_core
 from ltseq.expr import LiteralExpr
 
 
@@ -402,3 +403,100 @@ def test_a_type_datafusion_cannot_compute_is_an_ordinary_error():
     for fn in (lambda r: r.x + Decimal("1E-38"), lambda r: r.x + r.y, lambda r: coalesce(r.x, r.y)):
         with pytest.raises((ValueError, RuntimeError)):
             t.derive(v=fn).to_arrow()
+
+
+# ---------------------------------------------------------------------------
+# Review of f07b855
+# ---------------------------------------------------------------------------
+# A float type that DataFusion proposes for an exact context (an int32 next
+# to 2**53 + 1 and 1.5) grants no nearest-float reading; only a float
+# context does (D-i).
+
+PAST_53 = 2**53 + 1
+
+
+def _plain(dtype):
+    """The value type under a dictionary or run-end encoding."""
+    while pa.types.is_dictionary(dtype) or pa.types.is_run_end_encoded(dtype):
+        dtype = dtype.value_type
+    return dtype
+
+
+def int32_receiver(shape):
+    """An int32 value [1, NULL] next to a key, as a plain, dictionary or
+    run-end-encoded column, or computed by a CASE over the plain one."""
+    i = pa.array([1, None], pa.int32())
+    encoded = {"plain": i, "dictionary": i.dictionary_encode(), "run_end": pc.run_end_encode(i)}
+    table = pa.table({"k": [0, 1], "i": encoded.get(shape, i)})
+    value = (lambda r: if_else(r.k == 0, r.i, r.i)) if shape == "case" else (lambda r: r.i)
+    return LTSeq.from_arrow(table), value
+
+
+@pytest.mark.parametrize("shape", ["plain", "dictionary", "run_end", "case"])
+@pytest.mark.parametrize("literals", [
+    (PAST_53, 1.5),
+    (1.5, PAST_53),
+    (-PAST_53, 1.5),
+    (PAST_53, 1.5, 7),
+    (PAST_53, 7, 0.5),
+], ids=lambda ls: "_".join(str(l) for l in ls))
+def test_heterogeneous_literals_in_an_exact_context_are_not_rounded(shape, literals):
+    """The review's reproducer: DataFusion proposes Float64 for an int32
+    next to an Int64 and a Float64 literal, and 2**53 + 1 is not a double.
+    Without the float, the exact fallback keeps the integer at Int64."""
+    t, value = int32_receiver(shape)
+    with pytest.raises(ValueError, match=r"does not fit .* exactly"):
+        t.derive(v=lambda r: coalesce(value(r), *literals))
+    integers = [x for x in literals if isinstance(x, int)]
+    out = t.derive(v=lambda r: coalesce(value(r), *integers)).to_arrow().column("v")
+    assert _plain(out.type) == pa.int64()
+    assert out.to_pylist() == [1, integers[0]]
+
+
+def test_a_staged_exact_context_reads_as_the_flat_one():
+    t, _ = int32_receiver("plain")
+    staged = t.derive(c=lambda r: coalesce(r.i, PAST_53))
+    assert staged.to_arrow().column("c").type == pa.int64()
+    assert column(staged, "c") == [1, PAST_53]
+    for table, fn in [
+        (t, lambda r: coalesce(coalesce(r.i, PAST_53), 1.5)),
+        (t, lambda r: r.i.fill_null(PAST_53).fill_null(1.5)),
+        (staged, lambda r: coalesce(r.c, 1.5)),
+        (staged, lambda r: r.c.fill_null(1.5)),
+    ]:
+        with pytest.raises(ValueError, match=r"does not fit .* \(Int64\) exactly"):
+            table.derive(v=fn)
+
+
+def test_a_float_context_reads_the_nearest_float_however_it_was_staged():
+    """D-i's exception belongs to the context: next to a double, 2**53 + 1
+    is 2**53, whether the double is a column, an arithmetic result, or an
+    int32 already widened by an earlier float literal."""
+    t = LTSeq.from_arrow(pa.table({
+        "f": pa.array([1.0, None], pa.float64()),
+        "i": pa.array([1, None], pa.int32()),
+    }))
+    for table, fn in [
+        (t, lambda r: coalesce(r.f, PAST_53, 1.5)),
+        (t, lambda r: coalesce(r.i * 1.0, PAST_53, 1.5)),
+        (t, lambda r: coalesce(coalesce(r.i, 0.5), PAST_53)),
+        (t.derive(c=lambda r: coalesce(r.i, 0.5)), lambda r: coalesce(r.c, PAST_53)),
+    ]:
+        out = table.derive(v=fn).to_arrow().column("v")
+        assert out.type == pa.float64()
+        assert out.to_pylist()[0] == 1.0
+    assert column(t.derive(v=lambda r: coalesce(r.f, PAST_53, 1.5))) == [1.0, float(2**53)]
+
+
+def test_heterogeneous_literals_next_to_a_decimal_are_exact_or_refused():
+    """DataFusion widens decimal(5, 2) to decimal(35, 15) for an Int64 and
+    a Float64 literal; that holds 2**53 + 1 and 1.5 exactly, and the result
+    is kept with those values. 0.1 (0.1000000000000000055…) is not exact
+    anywhere a decimal is proposed, so it is refused (D-j)."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([None, Decimal("1.23")], pa.decimal128(5, 2))}))
+    for literals in [(PAST_53, 1.5), (1.5, PAST_53)]:
+        out = t.derive(v=lambda r: coalesce(r.x, *literals)).to_arrow().column("v")
+        assert out.type == pa.decimal128(35, 15)
+        assert out.to_pylist() == [Decimal(literals[0]), Decimal("1.23")]
+    with pytest.raises(ValueError, match="0.1 does not fit column 'x'"):
+        t.derive(v=lambda r: coalesce(r.x, PAST_53, 0.1))

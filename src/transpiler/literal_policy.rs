@@ -328,31 +328,31 @@ pub(crate) enum Fit {
     Unjudged,
 }
 
-/// How `literal` fits `context` (decision D-b on #225: a literal takes the
-/// type of the values it shares a column with when that type holds it
-/// exactly). At a float type a number literal is the nearest float of that
-/// width, which is DataFusion's reading and the one float exception D-i
-/// allows: a float column keeps float semantics. Everywhere else the
-/// literal must be [`held`] exactly, a float by its binary value (D-j):
-/// `0.5` fits a `decimal(5, 2)`, `0.1` (0.1000000000000000055…) does not.
-pub(crate) fn fit(literal: &ScalarValue, context: &DataType) -> Fit {
+/// How `literal` fits `at`, a type it would share a result column with
+/// (decision D-b on #225: a literal takes the type of the values it shares
+/// a column with when that type holds it exactly). `context` is the type
+/// of the values that are not literals. When that is a float type, a
+/// number literal at a float type is the nearest float of that width,
+/// which is DataFusion's reading and the one float exception D-i allows: a
+/// float column keeps float semantics. A float type that DataFusion only
+/// proposes for an exact context (an `int32` next to `2**53 + 1` and
+/// `1.5`) grants no such reading: there, as everywhere else, the literal
+/// must be [`held`] exactly, a float by its binary value (D-j): `0.5` fits
+/// a `decimal(5, 2)`, `0.1` (0.1000000000000000055…) does not.
+pub(crate) fn fit(literal: &ScalarValue, at: &DataType, context: &DataType) -> Fit {
     if literal.is_null() {
         return Fit::Unjudged;
     }
-    if context.is_floating() {
-        return match held(context, literal) {
-            Holding::Unjudged => Fit::Unjudged,
-            Holding::Exactly(value) => Fit::Exactly(value),
-            Holding::Not(_) => match literal.cast_to(context) {
+    match held(at, literal) {
+        Holding::Exactly(value) => Fit::Exactly(value),
+        Holding::Unjudged => Fit::Unjudged,
+        Holding::Not(_) if context.is_floating() && at.is_floating() => {
+            match literal.cast_to(at) {
                 Ok(nearest) if !nearest.is_null() => Fit::Exactly(nearest),
                 _ => Fit::Inexact,
-            },
-        };
-    }
-    match held(context, literal) {
-        Holding::Exactly(value) => Fit::Exactly(value),
+            }
+        }
         Holding::Not(_) => Fit::Inexact,
-        Holding::Unjudged => Fit::Unjudged,
     }
 }
 
@@ -630,16 +630,46 @@ mod tests {
         assert_eq!(widening(&utc, &zoned_us()), Widening::Lossy);
         assert_eq!(widening(&zoned_us(), &zoned_us()), Widening::Exact);
         assert_eq!(
-            fit(&ts_us(JAN_1_2024_US, Some("UTC")), &zoned_us()),
+            fit(&ts_us(JAN_1_2024_US, Some("UTC")), &zoned_us(), &zoned_us()),
             Fit::Exactly(ts_us(JAN_1_2024_US, Some(NY)))
         );
         assert_eq!(
-            fit(&ts_us(JAN_1_2024_US, Some(NY)), &utc),
+            fit(&ts_us(JAN_1_2024_US, Some(NY)), &utc, &utc),
             Fit::Exactly(ts_us(JAN_1_2024_US, Some("UTC")))
         );
         // A finer unit in the same zone is the one widening D-m allows.
         let ns_ny = T::Timestamp(TimeUnit::Nanosecond, Some(Arc::from(NY)));
         assert_eq!(widening(&zoned_us(), &ns_ny), Widening::Finer);
+    }
+
+    /// The nearest-float reading belongs to a float context (D-i), not to a
+    /// float type DataFusion proposes for an exact context.
+    #[test]
+    fn a_float_proposal_for_an_exact_context_grants_no_rounding() {
+        let past_53 = S::Int64(Some(1 << 53 | 1));
+        assert_eq!(
+            fit(&past_53, &T::Float64, &T::Float64),
+            Fit::Exactly(S::Float64(Some(9_007_199_254_740_992.0)))
+        );
+        assert_eq!(fit(&past_53, &T::Float64, &T::Int32), Fit::Inexact);
+        assert_eq!(fit(&past_53, &T::Float64, &T::Int64), Fit::Inexact);
+        assert_eq!(fit(&past_53, &T::Float64, &dec(0, 5, 2).data_type()), Fit::Inexact);
+        // A literal the proposed float holds fits it from any context.
+        assert_eq!(
+            fit(&S::Float64(Some(1.5)), &T::Float64, &T::Int32),
+            Fit::Exactly(S::Float64(Some(1.5)))
+        );
+        assert_eq!(
+            fit(&S::Int64(Some(1 << 24 | 1)), &T::Float32, &T::Float32),
+            Fit::Exactly(S::Float32(Some(16_777_216.0)))
+        );
+        // The reading is at a float type only: 0.1 at a decimal stays inexact
+        // whatever the context.
+        let d30 = T::Decimal128(30, 15);
+        assert_eq!(fit(&S::Float64(Some(0.1)), &d30, &T::Float64), Fit::Inexact);
+        assert_eq!(fit(&S::Float64(Some(0.1)), &d30, &d30), Fit::Inexact);
+        assert_eq!(fit(&S::Null, &T::Float64, &T::Int32), Fit::Unjudged);
+        assert_eq!(fit(&S::Utf8(Some("1".into())), &T::Float64, &T::Float64), Fit::Unjudged);
     }
 
     #[test]
