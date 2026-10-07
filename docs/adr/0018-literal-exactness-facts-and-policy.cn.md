@@ -15,9 +15,9 @@
 
 **事实与策略放在不同模块，且没有任何事实默认为"精确"。**
 
-`src/transpiler/exact.rs` 只陈述关于 Arrow 类型和值的事实，不含策略。`cast_class(from, to)` 把一次转换归为 `Exact`、`RangeOnly`、`Precision`、`RangeAndPrecision`、`Kind` 或 `Unjudged`；`holds(to, value)` 回答某类型是否精确容纳某值，返回该类型下的值，或者它落在哪里（`Between` 该类型的两个值之间、`Beyond` 其范围之外、`NotANumber`），或者 `Unjudged`。两者都是全函数：每个分支都写出来，模块没有判断过的组合是 `Unjudged`，任何调用方都不得把 `Unjudged` 或 `Kind` 读作精确。这些是可表示性的事实，而不是 DataFusion 的转换行为：整数类型的量级放得进尾数（11、24 或 53 位）时才被浮点类型容纳，小数按位数和小数位判断，浮点数按其精确的二进制值判断（一个精确的有理数，所以 `0.1` 是 0.1000000000000000055511151231257827…），时刻按更细单位下的刻度判断，Date64 既按天也按毫秒判断。
+`src/transpiler/exact.rs` 只陈述关于 Arrow 类型和值的事实，不含策略。`cast_class(from, to)` 把一次转换归为 `Exact`、`RangeOnly`、`Precision`、`RangeAndPrecision`、`Kind` 或 `Unjudged`；`holds(to, value)` 回答某类型是否精确容纳某值，返回该类型下的值，或者它落在哪里（`Between` 该类型的两个值之间、`Beyond` 其范围之外、`NotANumber`），或者 `Unjudged`。两者都是全函数：每个分支都写出来，模块没有判断过的组合是 `Unjudged`，任何调用方都不得把 `Unjudged` 或 `Kind` 读作精确。`holds` 陈述的是可表示性，而不是 DataFusion 的转换行为：整数类型的量级放得进尾数（11、24 或 53 位）时才被浮点类型容纳，小数按位数和小数位判断，浮点数按其精确的二进制值判断（一个精确的有理数，所以 `0.1` 是 0.1000000000000000055511151231257827…），时刻按更细单位下的刻度判断，Date64 只按整天判断。`cast_class` 描述的是 Arrow 的转换实际计算什么，有两处比可表示性更窄或更宽：负小数位的小数在变成整数之前先在它自己的存储整数里放大，所以放得进目标类型的值仍可能在途中溢出；Date64 与毫秒时间戳之间按原始毫秒互转，不强制整天。两条事实都写在模块里，Date64 的按天读法来自 `holds`。
 
-`src/transpiler/literal_policy.rs` 是唯一决定 LTSeq 判断什么、把什么交给 DataFusion 的地方。`interpret` 读取字面量遇到某类型时的含义（`Decimal` 遇到浮点数就是该浮点数，不带时区的 `datetime` 遇到带时区的列是该时区的墙上时间，字符串沿用 DataFusion 的理解）；`exact_domain` 列出 LTSeq 亲自放置其值的类型（整数、小数、日期、时间戳）；`held` 和 `fit` 实施 D-b 与 D-i；`widening` 实施 D-m。`src/transpiler/literals.rs` 中的各道门（比较、`is_in`、`fill_null`/`coalesce`/`if_else`/`when` 的共享取值、`shift(default=)`、`dt.diff`、算术）只咨询策略，从不直接调用 `exact.rs`，因此新增一种字面量或一种上下文类型只是一条策略条目，而不是每道门里的一个新分支。
+`src/transpiler/literal_policy.rs` 是唯一决定 LTSeq 判断什么、把什么交给 DataFusion 的地方。`interpret` 读取字面量遇到某类型时的含义（`Decimal` 遇到浮点数就是该浮点数，不带时区的 `datetime` 遇到带时区的列是该时区的墙上时间，字符串沿用 DataFusion 的理解）；`exact_domain` 列出 LTSeq 亲自放置其值的类型（整数、小数、日期、时间戳）；`held` 和 `fit` 实施 D-b 与 D-i；`widening` 实施 D-m。`src/transpiler/literals.rs` 中的各道门（比较、`is_in`、`fill_null`/`coalesce`/`if_else`/`when` 的共享取值、`shift(default=)`、`dt.diff`、算术）每一次判断都咨询策略，因此新增一种字面量或一种上下文类型只是一条策略条目，而不是每道门里的一个新分支。门里唯一直接调用 `exact.rs` 的地方是比较放置中的 `hold_instant`，它询问 `interpret` 已经读出的时刻落在列的单位的哪里；这是对策略产出的值做事实查询，不是第二个决定判断什么的权威。
 
 策略编码的规则：
 
@@ -30,9 +30,9 @@
 | D-e | 整数和 `Decimal` 字面量在比较和 `is_in` 中精确放置，超过 38 位也是如此（#227）。 |
 | D-f | 常量由 DataFusion 的简化器按它的类型折叠（#193、#209）。 |
 | D-h、D-k | 计划期的字面量错误是 `ValueError`。字符串，以及遇到字符串列的布尔值和数字，沿用 DataFusion 的理解；改变种类的转换是 `Kind` 或 `Unjudged`，绝不是精确。 |
-| D-j | Python `float` 表示其 binary64 值。遇到整数列或小数列时精确比较（`r.x == 2.0**53` 只匹配 `2**53`；`r.p == 0.1` 在任何小数列上都为假）。遇到浮点列时沿用 DataFusion 的浮点语义。NaN 和无穷大遇到整数、小数、日期或时间戳列时在计划期抛出 `ValueError`。 |
+| D-j | Python `float` 表示其 binary64 值。遇到整数列或小数列时精确比较（`r.x == 2.0**53` 只匹配 `2**53`；`r.p == 0.1` 不匹配任何小数 `0.1`，只匹配容纳 0.1000000000000000055511151231257827021181583404541015625 的 `decimal256(76, 55)`）。遇到浮点列时沿用 DataFusion 的浮点语义。NaN 和无穷大遇到整数、小数、日期或时间戳列时在计划期抛出 `ValueError`。 |
 | D-l | 数字或布尔值遇到日期或时间戳操作数时，在任何位置都在计划期抛出 `ValueError`；`dt.add` 用于加时长。 |
-| D-m | 仅在共享取值中，比列更细的时间戳字面量扩宽单位并保持时区（只有范围风险）。日期列绝不变成时间戳，时区绝不被重新标记，`shift(default=)` 绝不扩宽。 |
+| D-m | 仅在共享取值中，比列更细的时间戳字面量扩宽单位并保持时区（只有范围风险）。日期列绝不变成时间戳，时区绝不被重新标记，`shift(default=)` 绝不扩宽。这取代了 #145 设计的后操作数时区规则（§2.2 D2(b) 与兼容性表第 7 行），按该规则 `r.ts_ny.fill_null(aware_utc)` 会变成 UTC 列；自 `370d7e6` 起时区变化对事实层是 `Kind` 转换，字面量是它在列时区下的时刻，列保持纽约时区。两列之间的时区选择与 `main` 一样由 DataFusion 决定。 |
 
 **字面量网格是合并门。** `py-ltseq/tests/literal_grid/` 记录每个（上下文，字面量，位置）单元：32 个上下文（每种数值、小数、日期、时间戳、字符串和布尔列，一个字典编码的 Int64，以及六个混合类型的 CASE 表达式）、49 个字面量、14 个位置，共 20,874 个单元。基线是 `68d6114` 处的 `main`，作为 `expected/main.jsonl` 提交，绝不由测试重新生成。当前构建改变的每个单元都必须匹配一条给出决策（INTENDED_CHANGE）或 issue（PREEXISTING_BUG）的分类规则，或者是独立 oracle 确认的 BUG_FIXED 单元；REGRESSION 和 UNDECIDED 使测试套件失败。设计所依赖的不变量以生成的属性而非例子来测试：报告的类型就是 DataFusion 的类型；字面量内联、在分阶段的惰性计划中、在物化的表上读法相同；CASE 分支、`coalesce` 顺序和 n 元组合一致；`L < x` 与 `x > L` 互为镜像；`x.is_in([L])` 就是 `x == L`；上下文能容纳的数在每种写法下含义相同；数字遇到时间列时在每个位置都被拒绝；线性扫描内核的计数与物化计数一致，除钉在 #189 和 #244 上的单元之外。
 
@@ -47,17 +47,17 @@
 
 ## 影响
 
-- 相对 `main` 的行为变化全部列在 changelog 中：Int64、UInt64 或窄小数上下文的取值位置中的非整浮点数抛出错误而不是扩宽列；整数值的浮点数保持上下文类型而不是 Float64；NaN 和无穷大遇到精确列时抛出错误而不是比较为假或扩宽；数字遇到日期或时间戳时在每个位置都抛出错误而不是从纪元起算；浮点字面量与整数列和小数列精确比较（#240）。网格中 9,977 个单元不变，9,949 个按决策改变，947 个是修复的 bug，1 个是既有 bug（#245）；没有单元回归或未裁定。
+- 相对 `main` 的行为变化全部列在 changelog 中：Int64、UInt64 或窄小数上下文的取值位置中的非整浮点数抛出错误而不是扩宽列；整数值的浮点数保持上下文类型而不是 Float64；NaN 和无穷大遇到精确列时抛出错误而不是比较为假或扩宽；数字遇到日期或时间戳时在每个位置都抛出错误而不是从纪元起算；浮点字面量与整数列和小数列精确比较（#240）。网格中 9,917 个单元不变，9,949 个按决策改变，947 个是修复的 bug，61 个是既有 bug（60 个属于 #241，1 个属于 #245）；没有单元回归或未裁定。
 - 每道门先向 DataFusion 要统一类型，再对它分类。代价在计划期按字面量付一次；执行计划不变。
 - 改变类型强制规则的 DataFusion 升级会改变提出的统一类型。网格把每个受影响的单元报告为 REGRESSION 或 UNDECIDED，由升级者逐个分类；不会为了让套件通过而重新生成基线。
-- 按决策留给 DataFusion 的部分：浮点上下文（`r.f32 == 2**24 + 1` 匹配 `2**24`，因为整数被强制为 float32，而 `2.0**24 + 1` 按 float64 比较）、字符串和布尔值（D-h），以及列表超过三项时按位比较浮点数的 `IN` 列表哈希集（#245）。
+- 按决策留给 DataFusion 的部分：浮点上下文（`r.f32 == 2**24 + 1` 匹配 `2**24`，因为整数被强制为 float32，而 `2.0**24 + 1` 按 float64 比较）、字符串和布尔值（D-h），以及按位比较浮点数的 `IN` 列表哈希集（#245）：DataFusion 在列上超过三项、在计算表达式上两项或更多时构建它，所以 `(r.f + 0.0).is_in([-0.0, 1.0])` 不匹配 `0.0`，而 `r.f.is_in([-0.0, 1.0])` 匹配。更短的列表展开为 `==`。
 - 已知的内核分歧被钉住而不是隐藏：线性扫描内核对精确整数列上 `>` 的 NULL 语义（#189）及其按位的 Float64 比较（#244）。修复或新的分歧都会使一致性测试失败。
 - 仍然开放且不在本次范围内：#228（浮点列遇到小数列被转换为 `decimal(30, 15)`）、#241（decimal32/64 遇到整数列）、#242（负小数位的类型强制在 debug 和 release 构建间不同）。
 - 测试套件增加约四分钟：网格针对当前构建实时运行其 20,874 个单元。
 
 ## 来源
 
-- PR #225：[设计评审](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6007628376)、[决策记录 D-a–D-h](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6008650391)、[对 `35c07e8` 的架构评审](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6032928492)、[决策记录 D-i–D-m](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6039847840)
-- Issue #145、#240、#243（网格）、#189、#244、#245
+- PR #225：[设计评审](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6007628376)、[决策记录 D-a–D-h](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6008650391)、[对 `35c07e8` 的架构评审](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6032928492)、[决策记录 D-i–D-m](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6039847840)、[对 `f07b855` 的合并门评审](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6042664484)
+- Issue #145、#240、#243（网格）、#189、#241、#244、#245
 - `src/transpiler/exact.rs`、`src/transpiler/literal_policy.rs`、`src/transpiler/literals.rs`、`src/transpiler/resolve.rs`
 - `py-ltseq/tests/literal_grid/`、`docs/api.md` § "Literal values"
