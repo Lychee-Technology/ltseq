@@ -38,6 +38,15 @@ HEADER, MAIN = grid.load(BASELINE)
 PREEXISTING = {
     # DataFusion's static in-list filter hashes floats bitwise: 0.0 is not in [-0.0, 1].
     "case_i64_f64/fm0/isin2": "#245",
+    # DataFusion has no decimal32/64 type for an Int64, so a decimal32/64 column plus an
+    # integer is computed at Int64 with the column truncated toward zero.
+    **{
+        cell_id(ctx, lit, pos): "#241"
+        for ctx in ("d32", "d64")
+        for lit in literals()
+        if oracle.literal_kind(lit) == "int"
+        for pos in grid.ARITHMETIC_POSITIONS
+    },
 }
 
 CONTEXTS = list(grid.CONTEXTS)

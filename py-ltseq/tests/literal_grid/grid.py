@@ -258,7 +258,7 @@ def outcome(derive):
 def comparable(outcome):
     """The part of an outcome that must match: everything but the error message."""
     if "error" in outcome:
-        return {"error": {"class": outcome["error"]["class"], "stage": outcome["error"]["stage"]}}
+        return {"error": {"class": outcome["error"].get("class"), "stage": outcome["error"].get("stage")}}
     return outcome
 
 

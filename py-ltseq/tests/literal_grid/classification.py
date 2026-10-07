@@ -6,17 +6,19 @@ PREEXISTING_BUG rule must name the issue that tracks it. A cell whose
 outcome differs needs a rule from ``RULES``: the first rule whose ``when``
 holds gives the status and the decision, issue or review finding it rests
 on. A rule's status is fixed, or ``BY_MAIN``: BUG_FIXED when main returned
-values the oracle's exact model says are wrong (a lost column value, a
-rounded literal, a Boolean from a truncated comparison), INTENDED_CHANGE
-when main errored or was exact in another type.
+values the oracle's expectation for the cell says are wrong (a lost column
+value, a rounded literal, a Boolean from a truncated comparison, a missing
+row), INTENDED_CHANGE when main errored or was exact in another type.
 
 The oracle has the last word on this branch's outcome: a changed cell it
-calls a violation is a REGRESSION whatever rule matches, one it calls ok is
-accepted by its rule, and one it has no opinion on (a string or Boolean
-reading, float arithmetic, DataFusion's own overflow) must satisfy the
-rule's ``expect``, or it is UNDECIDED. A changed cell no rule covers is a
-REGRESSION when the oracle objects and UNDECIDED otherwise. The merge gate
-in ``test_literal_grid.py`` fails every REGRESSION and UNDECIDED cell.
+calls a violation is a REGRESSION whatever rule matches, and one it calls
+ok is accepted by its rule. A rule's ``expect`` is a further condition on
+this branch's outcome that must hold whenever the rule matches; it is the
+only check on a cell the oracle has no opinion on (a string or Boolean
+reading), so such a cell under a rule without one is UNDECIDED. A changed
+cell no rule covers is a REGRESSION when the oracle objects and UNDECIDED
+otherwise. The merge gate in ``test_literal_grid.py`` fails every
+REGRESSION and UNDECIDED cell.
 
 Compare two recorded runs without ltseq installed:
 
@@ -25,7 +27,6 @@ Compare two recorded runs without ltseq installed:
 """
 
 import re
-import struct
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -71,6 +72,9 @@ def cell(ctx, lit, pos, main, head):
 
 @dataclass(frozen=True)
 class Rule:
+    """``when`` selects the cells; ``expect``, if given, must hold on this branch's
+    outcome for every cell the rule classifies, over and above the oracle's verdict."""
+
     name: str
     status: str
     ref: str
@@ -116,55 +120,22 @@ def _head_values(c, values):
     return _has_values(c.head) and c.head["values"] == values
 
 
-def exact_rows(c):
-    """The exact value each row must show, where the decisions fix one; None otherwise."""
-    if c.ck in ("str", "bool") or c.lk in ("str", "bool", "none", "special"):
-        return None
-    if (c.ck in oracle.TEMPORAL) != (c.lk in TEMPORAL_LITERALS):
-        return None
-    if c.ck == "ts" and c.lk == "dt_aware":
-        return None
-    zone = oracle.context_zone(c.ctx)
-    if c.pos in grid.COMPARISON_POSITIONS:
-        literal = oracle.literal_exact(c.lit, zone)
-        column = oracle.context_exact(c.ctx)
-        return [None if x is None else ("bool", oracle.compare(c.pos, x, literal)) for x in column]
-    if c.pos in grid.VALUE_POSITIONS or c.pos == "shift_def":
-        return oracle.expected_values(c.ctx, c.lit, c.pos, zone)
-    return None
-
-
 def main_wrong(c):
-    """Main returned values that the exact model says are wrong."""
+    """Main returned values the oracle says are wrong: neither the cell's exact reading
+    nor the expectation's rows, a missing row, or a value its type cannot render. Main's
+    type is not held against it: exact values in another type are an intended change,
+    and so is a value this branch rounds (an int in a float column) where main was exact."""
     if not _has_values(c.main):
         return False
-    rows = exact_rows(c)
-    if rows is None:
+    e = oracle.expectation(c.ctx, c.lit, c.pos)
+    accepted = [rows for rows in (oracle.exact_rows(c.ctx, c.lit, c.pos), e.rows if e.kind == "values" else None) if rows is not None]
+    if not accepted:
         return False
-    got = oracle.outcome_values(c.main)
-    return not all(oracle.same(e, g) for e, g in zip(rows, got))
-
-
-def _float32(value):
-    return struct.unpack("f", struct.pack("f", value))[0]
-
-
-def _float_arithmetic(c):
-    """DataFusion's float arithmetic on the context with the Decimal read as a float."""
-    if not _has_values(c.head) or oracle.parse_type(c.head["type"])[0] != "float":
-        return False
-    bits = oracle.parse_type(c.head["type"])[1]
-    literal = float(grid.literals()[c.lit])
-    expected = []
-    for x in oracle.context_exact(c.ctx):
-        if x is None:
-            expected.append(None)
-            continue
-        value = float(x[1]) if bits == 64 else _float32(float(x[1]))
-        lit = literal if bits == 64 else _float32(literal)
-        result = value + lit if c.pos == "add" else value - lit
-        expected.append(grid.normalize(result if bits == 64 else _float32(result)))
-    return c.head["values"] == expected
+    try:
+        got = oracle.outcome_values(c.main)
+    except ValueError:
+        return True
+    return not any(len(got) == len(rows) and all(oracle.same(w, g) for w, g in zip(rows, got)) for rows in accepted)
 
 
 def _in_list_with_string(c):
@@ -207,6 +178,13 @@ RULES = [
         _is(ck="float", lit="fm0", pos="isin2"),
     ),
     Rule(
+        "decimal32_64_integer_arithmetic", "PREEXISTING_BUG", "#241",
+        "DataFusion has no decimal32/64 type for an Int64, so it computes the sum at Int64 "
+        "and truncates the column toward zero (9999999.99 + 1 is 10000000); main and this "
+        "branch agree",
+        lambda c: c.ctx in ("d32", "d64") and c.lk == "int" and c.pos in grid.ARITHMETIC_POSITIONS,
+    ),
+    Rule(
         "temporal_vs_number", "INTENDED_CHANGE", "D-l (U4)",
         "a number or Boolean next to a date or timestamp is a plan-time type error in every "
         "position; `isin2` carries the int 1. Main cast the number to an instant (5 reads as "
@@ -224,7 +202,6 @@ RULES = [
         "a Decimal, date or datetime next to a string column is refused at planning; main "
         "compared or stored the literal's text",
         _all(_is(ck="str", lk={"decimal"} | TEMPORAL_LITERALS), lambda c: c.pos not in grid.ARITHMETIC_POSITIONS),
-        expect=lambda c: _plan_value_error(c.head, "is a string"),
     ),
     Rule(
         "nan_inf_in_exact_domain", "INTENDED_CHANGE", "D-j (U2)",
@@ -239,7 +216,7 @@ RULES = [
         "with the literal; the literal now reads exactly, and a string in the in-list follows "
         "DataFusion's reading (D-h), whose cast to decimal(10, -2) fails at collect",
         lambda c: c.ctx == "dneg" and _error(c.main, cls="PanicException"),
-        expect=lambda c: _head_values(c, [None] * grid.ROWS) if c.lk == "none" else _collect_error(c.head),
+        expect=lambda c: c.lk != "str" or _in_list_with_string(c),
     ),
     Rule(
         "aware_vs_naive_timestamp", "INTENDED_CHANGE", "D5",
@@ -332,7 +309,6 @@ RULES = [
         "a Decimal literal next to a float column is the nearest float; main passed it as a "
         "string: CASE unified the branches at Utf8 and arithmetic had no common type",
         lambda c: c.ck == "float" and c.lk == "decimal",
-        expect=_float_arithmetic,
     ),
     Rule(
         "decimal_literal_typed", BY_MAIN, TYPED,
@@ -341,7 +317,6 @@ RULES = [
         "type fails at collect; main passed it as a string, which failed in the optimizer "
         "or had no common type",
         lambda c: c.ck in oracle.EXACT_NUMERIC and c.lk == "decimal",
-        expect=lambda c: _collect_error(c.head, "overflow"),
     ),
     Rule(
         "in_list_with_string", "INTENDED_CHANGE", TYPED + ", D-h",
@@ -378,11 +353,10 @@ def classify(c):
         return Classification("REGRESSION", rule.name, "the outcome changed under a pre-existing-bug rule")
     if kind == "violation":
         return Classification("REGRESSION", rule.name, reason)
-    if kind == "skip":
-        if rule.expect is None:
-            return Classification("UNDECIDED", rule.name, f"the oracle has no opinion ({reason}) and the rule no expectation")
-        if not rule.expect(c):
-            return Classification("REGRESSION", rule.name, f"the rule's expectation does not hold ({reason})")
+    if rule.expect is not None and not rule.expect(c):
+        return Classification("REGRESSION", rule.name, f"the rule's expectation does not hold ({reason or 'oracle ok'})")
+    if kind == "skip" and rule.expect is None:
+        return Classification("UNDECIDED", rule.name, f"the oracle has no opinion ({reason}) and the rule no expectation")
     return Classification(_resolve(rule, c), rule.name, rule.note)
 
 
