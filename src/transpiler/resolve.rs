@@ -36,16 +36,19 @@
 //!
 //! Every question to DataFusion's coercion (and to its simplifier, for a
 //! constant) is asked here ([`ask`]), and a panic while answering it is an
-//! answer too: there is none. DataFusion 55
-//! computes a common decimal precision in `i8` (`get_wider_decimal_type`),
-//! so a valid pair can overflow it: a `decimal256(76, -14)` column next to
-//! a scale-38 literal needs 76 + 14 + 38 = 128 digits. A debug build panics
-//! there. A release build wraps to a type that loses range, or to none.
-//! Either way the pair has no usable common type, and the literal rules
-//! fall back as they do for any pair DataFusion cannot coerce (review of
-//! 414926b on #225). An expression whose coercion panics would panic again
-//! when DataFusion builds its plan, so [`Resolver::resolve`] reports it as
-//! an error instead of handing it on.
+//! answer too: there is none. DataFusion 55 computes a common decimal
+//! precision in `i8` (`get_wider_decimal_type`), so a valid pair can
+//! overflow it: a `decimal256(76, -14)` column next to a scale-38 literal
+//! needs 76 + 14 + 38 = 128 digits. A debug build panics there. A release
+//! build wraps to a type that loses range, or to none. Either way the pair
+//! has no usable common type, and the literal rules fall back as they do
+//! for any pair DataFusion cannot coerce (review of 414926b on #225). An
+//! expression whose coercion panics would panic again when DataFusion
+//! builds its plan, so [`Resolver::resolve`] reports it as an error instead
+//! of handing it on. DataFusion's main branch computes the precision in
+//! `i32` (apache/datafusion#24851, in no 55.x release so far); until ltseq
+//! adopts it, a pair ltseq leaves to DataFusion behaves differently in debug
+//! and release builds (#242).
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
