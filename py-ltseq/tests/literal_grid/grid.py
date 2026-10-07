@@ -11,8 +11,10 @@ membership (``isin`` alone, ``isin2`` beside the int ``1``), arithmetic
 
 ``run_cell`` derives the expression as column ``v`` and collects it. The
 outcome is the Arrow type and the normalized values, or the error class, the
-stage it was raised at and its first line. ``comparable`` drops the message;
-it is what the gate in ``test_literal_grid.py`` compares.
+stage it was raised at and its first line, followed by the cause a DataFusion
+error chain ends with. ``comparable`` drops the message; it is what the gate
+in ``test_literal_grid.py`` compares. ``exposed_panic`` tells a Rust panic
+from an ordinary error.
 
 The module imports ltseq only inside the functions that run cells, so
 
@@ -25,6 +27,7 @@ line of the output names that build.
 import datetime as dt
 import json
 import math
+import re
 import sys
 import traceback
 from decimal import Decimal
@@ -249,10 +252,37 @@ def outcome(derive):
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as error:  # a Rust panic is a BaseException
-        message = str(error).splitlines()[0][:160] if str(error) else ""
-        return {"error": {"class": type(error).__name__, "stage": _stage(error, phase), "msg": message}}
+        return {"error": {"class": type(error).__name__, "stage": _stage(error, phase), "msg": _message(error)}}
     # Round-trip through JSON so a live outcome compares equal to a recorded one.
     return json.loads(json.dumps(outcome))
+
+
+def _message(error):
+    """The error's first line. The first line of a DataFusion error chain
+    ("Optimizer rule ... failed", "caused by", ...) names only the step that
+    failed, so the chain's last line, the cause, follows it."""
+    lines = str(error).splitlines()
+    if not lines:
+        return ""
+    if "caused by" in lines[1:]:
+        return f"{lines[0][:160]} caused by {lines[-1][:160]}"
+    return lines[0][:160]
+
+
+# A Rust panic reaches Python as pyo3's PanicException, or as an ordinary
+# error whose message says so where ltseq catches one: the resolver's
+# coercion questions at plan (`resolve::ask`) and the Arrow stream at collect
+# (`arrow_ffi`).
+PANIC_CLASSES = {"PanicException"}
+_PANICKED = re.compile(r"\bpanicked\b")
+
+
+def exposed_panic(outcome):
+    """Whether a recorded outcome is a Rust panic rather than a value or an ordinary error."""
+    error = outcome.get("error")
+    if not isinstance(error, dict):
+        return False
+    return error.get("class") in PANIC_CLASSES or _PANICKED.search(error.get("msg") or "") is not None
 
 
 def comparable(outcome):

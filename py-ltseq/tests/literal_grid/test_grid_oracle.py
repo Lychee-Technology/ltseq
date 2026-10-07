@@ -4,9 +4,10 @@ Each test invents an outcome for a cell, sets it beside the recorded main
 baseline, and checks the status the gate would give it. Together they show
 that every way a cell can go wrong is a REGRESSION: a wrong row, a lost
 NULL, a type the policy does not authorize, a missing row, a refusal the
-decisions do not justify, an error of the wrong shape, and an outcome the
-grid could not have recorded. The positive controls show the same paths
-accept a correct outcome. Nothing here runs ltseq.
+decisions do not justify, an error of the wrong shape, stage, class or
+cause, a panic, and an outcome the grid could not have recorded. The
+positive controls, recorded from the live build, show the same paths accept
+a correct outcome. Nothing here runs ltseq.
 """
 
 import math
@@ -94,17 +95,41 @@ CONTROLS = [
     ("ts_ny/pd_ns/fill", TS_NY_PD_NS_FILL),
     ("i8/finf/sub", I8_FINF_SUB),
     ("i8/s1/isin2", I8_S1_ISIN2),
-    ("d38/D38nines/add", error("collect", msg="Arrow error: Arithmetic overflow: Overflow happened on: 9 * 10")),
-    ("ts_ns/dt_1500/sub", error("collect", msg="Cannot cast Date32 value")),
-    ("i64/Dfine33/fill", error(msg="does not fit column 'i64' (Int64) without rounding")),
-    ("i8/i256/shift_def", error(msg="cannot hold the shift() default")),
-    ("str/D1_5/eq", error(msg="column 'str' is a string; use a string literal")),
-    ("date32/i5/eq", error(msg="is a date or timestamp")),
-    ("ts_s/dt_utc/fill", error(msg="is timezone-naive, but the literal is timezone-aware")),
-    ("i8/fnan/eq", error(msg="NaN and infinity meet only float columns")),
+    ("d38/D38nines/add", error("collect", msg="Failed to collect results: Arrow error: Arithmetic overflow: Overflow happened on: 99999999999999999999999999999999999999 * 10000000000")),
+    ("i64/Dfine33/fill", error(msg="Decimal literal 0.111111111111111111111111111111111 does not fit column 'i64' (Int64) without rounding")),
+    ("i8/i256/shift_def", error(msg="Transpilation error: column 'i8' cannot hold the shift() default 256 exactly (Int8)")),
+    ("str/D1_5/eq", error(msg="column 'str' is a string; use a string literal, or cast it to the literal's type first")),
+    ("date32/i5/eq", error(msg="column 'date32' is a date or timestamp (Date32); use a date or datetime, not 5")),
+    ("date32/i0/dtdiff", error(msg="dt_diff cannot subtract Int64 from Date32; both sides must be dates or timestamps")),
+    ("ts_s/dt_utc/fill", error(msg="column 'ts_s' is timezone-naive, but the literal is timezone-aware (UTC); use a naive datetime")),
+    ("ts_s/dt_utc/isin2", error(msg="column 'ts_s' is timezone-naive, but the literal is timezone-aware (UTC); use a naive datetime")),
+    ("date32/dt_1_5s/fill", error(msg="column 'date32' is a date; the datetime literal 1970-01-01 00:00:01.500 has a time of day; use a date")),
+    ("ts_ns/date2300/fill", error(msg="2300-01-01 is outside the range of column 'ts_ns' (Timestamp(ns))")),
+    ("ts_s/dt_1_5s/shift_def", error(msg="Transpilation error: column 'ts_s' cannot hold the shift() default 1970-01-01 00:00:01.500 exactly (Timestamp(s))")),
+    ("i8/fnan/eq", error(msg="column 'i8' is Int8, which has no value for NaN; NaN and infinity meet only float columns")),
+    ("d32/D38nines/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot coerce arithmetic expression Decimal32(9, 2) + Decimal128(38, 0) to valid types")),
     ("i8/none/add", values("int8", [NULL] * 6)),
-    ("date32/none/add", error("plan", "RuntimeError", "Cannot get result type")),
+    ("date32/none/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot coerce arithmetic expression Date32 + Null to valid types")),
+    ("ts_ms/none/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot get result type for temporal operation Timestamp(ms) + Timestamp(ms): Invalid argument error: Invalid tim")),
 ]
+
+# The live outcomes of the cells of R2 in the review of d1eb7b3 on #225, and
+# their neighbours: an instant plus an instant has no type (DataFusion's
+# planning error), and DataFusion cannot subtract where an operand lies
+# outside the nanosecond range (a cast that fails while collecting, found by
+# the simplifier or by execution).
+CAST_FAILED = "Failed to collect results: Optimizer rule 'simplify_expressions' failed caused by Execution error: "
+TEMPORAL_ERRORS = {
+    "ts_ns/date2300/sub": error("collect", msg=CAST_FAILED + "Cannot cast Date32 value 120530 to Timestamp(ns): converted value exceeds the representable i64 range"),
+    "ts_ns/dt_1500/sub": error("collect", msg=CAST_FAILED + "Cannot cast Timestamp(µs) value -14831769600000000 to Timestamp(ns): converted value exceeds the representable i64 range"),
+    "date32/dt_1500/sub": error("collect", msg=CAST_FAILED + "Cannot cast Timestamp(µs) value -14831769600000000 to Timestamp(ns): converted value exceeds the representable i64 range"),
+    "ts_ns/dt_1500/dtdiff": error("collect", msg=CAST_FAILED + "Cannot cast Timestamp(µs) value -14831769600000000 to Timestamp(ns): converted value exceeds the representable i64 range"),
+    "date32/dt_mid/sub": error("collect", msg="Failed to collect results: Execution error: Cannot cast Date32 value 120530 to Timestamp(ns): converted value exceeds the representable i64 range"),
+    "date32/date2024/add": error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot coerce arithmetic expression Date32 + Date32 to valid types"),
+    "ts_ny/dt_utc/add": error(cls="RuntimeError", msg='Derive execution failed: Error during planning: Cannot coerce arithmetic expression Timestamp(µs, "America/New_York") + Timestamp(µs, "UTC") to valid types'),
+    "date32/dt_mid/add": error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot get result type for temporal operation Timestamp(ns) + Timestamp(ns): Invalid argument error: Invalid tim"),
+}
+CONTROLS += list(TEMPORAL_ERRORS.items())
 
 
 @pytest.mark.parametrize("cell,head", CONTROLS, ids=[c for c, _ in CONTROLS])
@@ -174,6 +199,82 @@ MUTANTS = [
 def test_a_wrong_outcome_is_a_regression(cell, head, why):
     k = classified(cell, head)
     assert k.status == "REGRESSION", (why, k)
+
+
+def _with(outcome, **changes):
+    return {"error": {**outcome["error"], **changes}}
+
+
+PANIC = "called `Option::unwrap()` on a `None` value"
+COLLECT_PANIC = "Failed to collect results: External error: Execution panicked: attempt to multiply with overflow"
+
+
+def _error_mutants(cell, live):
+    """Every way to get the error of ``cell`` wrong while keeping parts of the live one."""
+    e = live["error"]
+    other_stage = "plan" if e["stage"] == "collect" else "collect"
+    other_class = "RuntimeError" if e["class"] == "ValueError" else "ValueError"
+    return [
+        (cell, error("plan", "PanicException", PANIC), "a panic at plan"),
+        (cell, error("collect", "PanicException", PANIC), "a panic at collect"),
+        (cell, _with(live, **{"class": "PanicException"}), "a panic with the live stage and cause"),
+        (cell, _with(live, msg=COLLECT_PANIC), "a panic ltseq caught and reported as the live error"),
+        (cell, error("plan", "TypeError", "unrelated failure"), "an unrelated TypeError"),
+        (cell, error(e["stage"], "RuntimeError", "unrelated failure"), "an unrelated RuntimeError at the live stage"),
+        (cell, _with(live, stage=other_stage), "the live error at the wrong stage"),
+        (cell, _with(live, stage="capture"), "the live error at capture"),
+        (cell, _with(live, **{"class": other_class}), "the live cause with the wrong class"),
+        (cell, _with(live, **{"class": "TypeError"}), "the live cause as a TypeError"),
+        (cell, _with(live, msg="unrelated failure"), "the live class and stage with an unrelated cause"),
+        (cell, _with(live, msg=e["msg"].split(" caused by ")[0] if " caused by " in e["msg"] else "Derive execution failed: Error during planning: no"), "the live failure without its cause"),
+    ]
+
+
+ERROR_MUTANTS = [m for cell, live in TEMPORAL_ERRORS.items() for m in _error_mutants(cell, live)]
+ERROR_MUTANTS += [
+    m for m in _error_mutants("date32/none/add", dict(CONTROLS)["date32/none/add"])
+] + [
+    ("i8/none/add", error("plan", "PanicException", PANIC), "a panic where NULL arithmetic is NULL"),
+    ("i8/none/add", error("plan", "TypeError", "unrelated failure"), "an unrelated error where NULL arithmetic is NULL"),
+    ("i8/none/add", error("plan", "RuntimeError", "unrelated failure"), "an unrelated planning error for NULL arithmetic"),
+    ("i8/none/add", values("int8", [NULL] * 5), "a missing row of NULL arithmetic"),
+    # values next to the same cells
+    ("date32/date2024/sub", retyped(DATE32_DATE2024_SUB, "int32"), "a day count in another type"),
+    ("date32/date2024/sub", values("int64", DATE32_DATE2024_SUB["values"][:5]), "a missing day count"),
+    ("date32/date2024/sub", mutate(DATE32_DATE2024_SUB, 1, 0), "a lost NULL in a day count"),
+    ("ts_s/dt_mid/sub", retyped(TS_S_DT_MID_SUB, "duration[s]"), "a difference at a unit DataFusion does not compute at"),
+    ("ts_s/dt_mid/sub", mutate(TS_S_DT_MID_SUB, 4, "timedelta(0, 0, 0)"), "a lost NULL in a difference"),
+    ("ts_ns/dt_1500/sub", values("duration[ns]", [NULL] * 6), "NULLs where DataFusion cannot subtract"),
+    ("date32/date2024/add", values("date32", [NULL] * 6), "a type for an instant plus an instant"),
+    ("i8/s1/isin2", error("plan", "PanicException", PANIC), "a panic where the oracle has no opinion"),
+]
+
+
+@pytest.mark.parametrize("cell,head,why", ERROR_MUTANTS, ids=[f"{c}: {w}" for c, _, w in ERROR_MUTANTS])
+def test_an_unjustified_error_fails_the_gate(cell, head, why):
+    """The oracle rejects it whatever rule covers the cell. A mutant with main's class and
+    stage counts as unchanged, so it is UNDECIDED rather than a REGRESSION; both fail the gate."""
+    assert judged(cell, head)[0] == "violation", why
+    assert classified(cell, head).status in ("REGRESSION", "UNDECIDED"), (why, classified(cell, head))
+
+
+def test_a_panic_fails_the_gate_in_every_cell():
+    """No expectation or rule authorizes a panic: the oracle rejects one before
+    reading the cell's expectation, so no rule can classify it as intended."""
+    for ctx, lit, pos in grid.cells():
+        cell = grid.cell_id(ctx, lit, pos)
+        for head in (error("plan", "PanicException", PANIC), error("collect", "ValueError", COLLECT_PANIC)):
+            verdict = judged(cell, head)
+            assert verdict[0] == "violation" and "panic" in verdict[1], (cell, verdict)
+            assert classified(cell, head).status in ("REGRESSION", "UNDECIDED"), cell
+
+
+def test_every_expected_error_names_its_stage_an_ordinary_class_and_its_cause():
+    for ctx, lit, pos in grid.cells():
+        e = oracle.expectation(ctx, lit, pos)
+        if e.kind in ("error", "null_arithmetic"):
+            assert e.stage in oracle.STAGES and e.cls and e.msg, (ctx, lit, pos, e)
+            assert not set(e.cls) & grid.PANIC_CLASSES, (ctx, lit, pos, e)
 
 
 SAME_AS_MAIN = [

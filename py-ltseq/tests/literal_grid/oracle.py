@@ -15,13 +15,15 @@ to D-m hold, and ``judge`` grades an outcome against it:
 An expectation is one of: the exact value of every row in one type, which
 is DataFusion's own result type for the cell (the model ports the coercion
 rules of DataFusion 55 that the grid exercises, so an exact result in a type
-DataFusion would not propose is a violation); an error, narrowed to a stage,
-class or message where a decision fixes them; or, for arithmetic with a NULL
-literal, every row NULL in whatever type a NULL operand gets. A refusal is
+DataFusion would not propose is a violation); an error at one stage, of an
+ordinary class, whose message names the cause that justifies it; or, for
+arithmetic with a NULL literal, every row NULL in whatever type a NULL
+operand gets, or DataFusion's planning error for the pair. A refusal is
 accepted only where the model finds no exact type, so an unjustified
 ``ValueError`` is a violation like a wrong value. Before any of that, every
 outcome must have the shape the grid records (an error with a class and a
-stage, or a known type with one value of that type per row), and a
+stage, or a known type with one value of that type per row), and no outcome
+is a Rust panic: no expectation authorizes one. A
 dictionary-encoded result is allowed only on a dictionary-encoded context:
 ``fill_null`` and ``coalesce`` keep the encoding and CASE drops it, which is
 DataFusion's business, so types compare modulo the wrapper there.
@@ -630,18 +632,19 @@ class Expectation:
 
     ``kind`` is ``values`` (``type`` is the parsed result type and ``rows``
     the exact value of every row; ``type`` is None only where the authorized
-    type is itself an open issue, #241), ``error`` (``stage``, ``cls`` and
-    ``msg`` narrow it where a decision fixes them; None means any),
+    type is itself an open issue, #241), ``error`` (raised at ``stage``, of
+    a class in ``cls``, with a message ``msg`` matches: the cause),
     ``null_arithmetic`` (every row NULL in whatever type DataFusion gives a
-    NULL operand, or its planning error) or ``skip`` (no opinion).
-    ``reason`` names the decision the expectation rests on."""
+    NULL operand, or the planning error ``stage``, ``cls`` and ``msg``
+    describe) or ``skip`` (no opinion). ``reason`` names the decision the
+    expectation rests on."""
 
     kind: str
     reason: str
     type: Optional[tuple] = None
     rows: Optional[tuple] = None
     stage: Optional[str] = None
-    cls: Optional[str] = None
+    cls: Optional[tuple] = None
     msg: Optional[str] = None
 
 
@@ -651,12 +654,48 @@ def _values(t, rows, reason):
     return Expectation("values", reason, type=None if t is None else _parsed(t), rows=rows)
 
 
-def _error(reason, stage=None, cls=None, msg=None):
-    return Expectation("error", reason, stage=stage, cls=cls, msg=msg)
+# What justifies an error. ltseq refuses a literal at plan with a ValueError
+# that words the decision behind it; DataFusion's planning errors reach Python
+# as RuntimeErrors, and a failure while collecting as a ValueError carrying
+# DataFusion's cause. Each pattern matches the message a debug build and a
+# build without overflow checks give alike.
+NOT_A_NUMBER_FOR_A_DATE = (
+    r"is a date or timestamp \(.*\); use a date or datetime, not "
+    r"|dt_diff cannot subtract .*; both sides must be dates or timestamps"
+)
+NOT_A_DATE_FOR_A_NUMBER = r"is numeric \(.*\); use a number, not a date or datetime"
+AWARE_NEXT_TO_NAIVE = r"is timezone-naive, but the literal is timezone-aware"
+NOT_FOR_A_STRING = r"is a string"
+NO_NAN_OR_INFINITY = r"which has no value for -?(NaN|inf); NaN and infinity meet only float columns"
+NO_EXACT_FIT = r"does not fit .* (exactly|without rounding)"
+NO_EXACT_SHIFT_DEFAULT = r"cannot hold the shift\(\) default .* exactly"
+OUT_OF_RANGE = r"is outside the range of"
+NOT_A_WHOLE_DAY = r"is a date; the .*literal .* (has a time of day|is not a midnight)"
+NO_ARITHMETIC_TYPE = (
+    r"Error during planning: Cannot (coerce arithmetic expression"
+    r"|get result type for (arithmetic|temporal) operation) "
+)
+CAST_OUT_OF_RANGE = r"Cannot cast \w+(\(.*?\))? value -?\d+ to Timestamp\(.*?\): converted value exceeds the representable i64 range"
+DECIMAL_OVERFLOW = r"Arithmetic overflow"
 
 
-def _plan_value_error(reason, msg=None):
-    return _error(reason, stage="plan", cls="ValueError", msg=msg)
+def _error(reason, stage, cls, msg):
+    return Expectation("error", reason, stage=stage, cls=(cls,) if isinstance(cls, str) else tuple(cls), msg=msg)
+
+
+def _plan_value_error(reason, msg):
+    """ltseq's own refusal."""
+    return _error(reason, "plan", "ValueError", msg)
+
+
+def _planning_error(reason, msg):
+    """DataFusion's refusal to plan the expression."""
+    return _error(reason, "plan", "RuntimeError", msg)
+
+
+def _collect_error(reason, msg):
+    """A failure while DataFusion computes the values."""
+    return _error(reason, "collect", "ValueError", msg)
 
 
 def _skip(reason):
@@ -724,19 +763,24 @@ def expectation(ctx, lit, pos):
     # D-l: a number or Boolean next to a date or timestamp is a plan-time type
     # error in every position; `isin2` carries the int 1.
     if ck in TEMPORAL and (lk in ("int", "float", "special", "decimal", "bool") or pos == "isin2"):
-        return _plan_value_error("D-l: a number or Boolean next to a date or timestamp")
+        cause = NOT_A_NUMBER_FOR_A_DATE
+        if lk in TEMPORAL_LITERALS:
+            # `isin2` refuses the 1, or first the literal where it alone is refused.
+            alone = expectation(ctx, lit, "isin")
+            cause = cause if alone.kind != "error" else f"{cause}|{alone.msg}"
+        return _plan_value_error("D-l: a number or Boolean next to a date or timestamp", cause)
     if ck in NUMERIC and lk in TEMPORAL_LITERALS:
-        return _plan_value_error("D-l (mirrored): a date or datetime next to a number")
+        return _plan_value_error("D-l (mirrored): a date or datetime next to a number", NOT_A_DATE_FOR_A_NUMBER)
     if ck == "ts" and lk == "dt_aware":
-        return _plan_value_error("D5: an aware datetime next to a naive timestamp")
+        return _plan_value_error("D5: an aware datetime next to a naive timestamp", AWARE_NEXT_TO_NAIVE)
     if ck == "str" and lk in {"decimal"} | TEMPORAL_LITERALS and pos not in grid.ARITHMETIC_POSITIONS:
-        return _plan_value_error("D-h: a Decimal, date or datetime next to a string column", msg="is a string")
+        return _plan_value_error("D-h: a Decimal, date or datetime next to a string column", NOT_FOR_A_STRING)
     if lk == "none":
         return _null_expectation(ctx, pos)
     if ck in ("str", "bool") or lk in ("str", "bool"):
         return _skip("D-h: strings and Booleans keep DataFusion's reading")
     if lk == "special" and ck in EXACT_NUMERIC and pos not in grid.ARITHMETIC_POSITIONS:
-        return _plan_value_error("D-j: NaN and infinity have no value in an integer or decimal column")
+        return _plan_value_error("D-j: NaN and infinity have no value in an integer or decimal column", NO_NAN_OR_INFINITY)
     if ck == "float":
         return _float_expectation(ctx, lit, pos)
     if ck in EXACT_NUMERIC:
@@ -765,7 +809,10 @@ def _null_expectation(ctx, pos):
         return _values(t, rows, "a NULL branch of a CASE keeps the column's type")
     if pos == "shift_def":
         return _values(t, [None] + column[:-1], "a NULL shift default keeps the column's type")
-    return Expectation("null_arithmetic", "arithmetic with NULL is NULL in DataFusion's type, or its planning error")
+    return Expectation(
+        "null_arithmetic", "arithmetic with NULL is NULL in DataFusion's type, or its planning error",
+        stage="plan", cls=("RuntimeError",), msg=NO_ARITHMETIC_TYPE,
+    )
 
 
 def _special_result(special, pos):
@@ -837,13 +884,13 @@ def _exact_expectation(ctx, lit, pos):
     if pos == "shift_def":
         if holds(t, literal):
             return _values(t, _placed(column, literal, pos), "D-c: a shift default in the column's type")
-        return _plan_value_error("D-c: the column cannot hold the shift default exactly")
+        return _plan_value_error("D-c: the column cannot hold the shift default exactly", NO_EXACT_SHIFT_DEFAULT)
     proposed = unify(t, literal_wire(lit))
     if proposed and widens_exactly(t, proposed) and holds(proposed, literal):
         return _values(proposed, _placed(column, literal, pos), "D-i: DataFusion's unification is exact for the column and holds the literal")
     if holds(t, literal):
         return _values(t, _placed(column, literal, pos), "D-i: the literal-free context type holds the literal")
-    return _plan_value_error("D-i: no exact type for the shared value")
+    return _plan_value_error("D-i: no exact type for the shared value", NO_EXACT_FIT)
 
 
 def _wrap_i64(value):
@@ -910,7 +957,7 @@ def _exact_arithmetic(t, lit, pos, column, literal):
     width = 256 if t[3] == 256 else 128
     required = max(t[1] - t[2], wire[1] - wire[2]) + max(t[2], wire[2])
     if required > _DECIMAL_CAP[width]:
-        return _error("no decimal type of one width holds both sides", stage="plan", msg="Cannot coerce arithmetic expression")
+        return _planning_error("no decimal type of one width holds both sides", NO_ARITHMETIC_TYPE)
     common = ("decimal", required, max(t[2], wire[2]), width)
     return _decimal_arithmetic(common, common, column, literal, sign)
 
@@ -938,7 +985,7 @@ def _decimal_arithmetic(a, b, column, literal, sign):
             overflow = True
         rows.append(num(Fraction(total, 10**scale)))
     if overflow:
-        return _error("Arrow's checked decimal arithmetic overflows the native integer", stage="collect", cls="ValueError", msg="(?i)overflow")
+        return _collect_error("Arrow's checked decimal arithmetic overflows the native integer", DECIMAL_OVERFLOW)
     return _values(("decimal", precision, scale, width), rows, "decimal arithmetic, exact at DataFusion's result scale")
 
 
@@ -956,7 +1003,7 @@ def _temporal_expectation(ctx, lit, pos):
     if pos in grid.COMPARISON_POSITIONS:
         return _values(("bool",), _bools([compare(pos, x, literal) for x in column]), "#200: an exact comparison of instants")
     if pos == "add":
-        return _error("an instant plus an instant has no type", stage="plan")
+        return _planning_error("an instant plus an instant has no type", NO_ARITHMETIC_TYPE)
     if pos == "sub":
         return _temporal_sub(t, lk, unit, column, literal)
     if pos == "dtdiff":
@@ -965,15 +1012,16 @@ def _temporal_expectation(ctx, lit, pos):
     if t[0] == "date":
         if holds(t, literal):
             return _values(t, rows, "a midnight instant is the date")
-        return _plan_value_error("a date column holds whole days only and never becomes a timestamp (D-m)")
+        cause = NO_EXACT_SHIFT_DEFAULT if pos == "shift_def" else NOT_A_WHOLE_DAY
+        return _plan_value_error("a date column holds whole days only and never becomes a timestamp (D-m)", cause)
     if holds(t, literal):
         return _values(t, rows, "the column's unit holds the instant")
     widened = ("ts", unit, zone)
     if pos != "shift_def" and _finer(t[1], unit) == unit and unit != t[1] and holds(widened, literal):
         return _values(widened, rows, "D-m: a shared value widens to the literal's finer unit, keeping the zone")
     if pos == "shift_def":
-        return _plan_value_error("D-c, D-m: a shift default never widens the column")
-    return _plan_value_error("D-m: no unit of the column's zone holds the instant")
+        return _plan_value_error("D-c, D-m: a shift default never widens the column", NO_EXACT_SHIFT_DEFAULT)
+    return _plan_value_error("D-m: no unit of the column's zone holds the instant", OUT_OF_RANGE)
 
 
 def _computing_unit(t, lk, unit, for_diff):
@@ -1000,7 +1048,7 @@ def _temporal_sub(t, lk, unit, column, literal):
         rows = [None if x is None else num(Fraction(x[1] - literal[1], DAY_NS)) for x in column]
         return _values(("int", 64, True), rows, "a date minus a date is a day count")
     if _unrepresentable(computing, column, literal):
-        return _error(f"DataFusion subtracts at {computing}, where an operand is out of range")
+        return _collect_error(f"DataFusion subtracts at {computing}, where an operand is out of range", CAST_OUT_OF_RANGE)
     rows = [None if x is None else ("dur", x[1] - literal[1]) for x in column]
     return _values(("dur", computing), rows, f"an exact difference at {computing}")
 
@@ -1008,7 +1056,7 @@ def _temporal_sub(t, lk, unit, column, literal):
 def _temporal_diff(t, lk, unit, column, literal):
     computing = _computing_unit(t, lk, unit, for_diff=True)
     if _unrepresentable(computing, column, literal):
-        return _error(f"dt.diff subtracts at {computing}, where an operand is out of range")
+        return _collect_error(f"dt.diff subtracts at {computing}, where an operand is out of range", CAST_OUT_OF_RANGE)
     ticks = DAY_NS if computing == "day" else TICKS[computing]
     factor = ticks / NS  # the elapsed seconds per tick, applied in Float64
     rows = []
@@ -1051,10 +1099,11 @@ def _fmt(value):
 
 
 def _describe(e):
-    parts = [e.cls or "an error", f"at {e.stage}" if e.stage else "at any stage"]
-    if e.msg:
-        parts.append(f"matching /{e.msg}/")
-    return " ".join(parts)
+    return f"{' or '.join(e.cls)} at {e.stage} matching /{e.msg}/"
+
+
+def _expected_error(e, error):
+    return error["stage"] == e.stage and error["class"] in e.cls and re.search(e.msg, error.get("msg", "")) is not None
 
 
 def judge(ctx, lit, pos, outcome):
@@ -1063,21 +1112,22 @@ def judge(ctx, lit, pos, outcome):
         check_structure(ctx, outcome)
     except ValueError as error:
         return _violation(f"malformed outcome: {error}")
+    # Before any expectation, and whatever the cell: a panic is an internal
+    # failure, which no decision authorizes (review of d1eb7b3 on #225, R2).
+    if grid.exposed_panic(outcome):
+        return _violation(f"an exposed panic is never an authorized outcome: {_show(outcome)}")
     e = expectation(ctx, lit, pos)
     if e.kind == "skip":
         return ("skip", e.reason)
     if e.kind == "error":
-        if "error" not in outcome:
-            return _violation(f"{e.reason}: expected {_describe(e)}, got {_show(outcome)}")
-        error = outcome["error"]
-        if (e.stage and error["stage"] != e.stage) or (e.cls and error["class"] != e.cls) or (e.msg and not re.search(e.msg, error.get("msg", ""))):
+        if "error" not in outcome or not _expected_error(e, outcome["error"]):
             return _violation(f"{e.reason}: expected {_describe(e)}, got {_show(outcome)}")
         return _ok()
     if e.kind == "null_arithmetic":
         if "error" in outcome:
-            if outcome["error"]["stage"] == "plan":
+            if _expected_error(e, outcome["error"]):
                 return _ok()
-            return _violation(f"{e.reason}: got {_show(outcome)}")
+            return _violation(f"{e.reason}: expected NULL values or {_describe(e)}, got {_show(outcome)}")
         if any(v is not None for v in outcome["values"]):
             return _violation(f"{e.reason}: expected NULL in every row, got {_show(outcome)}")
         return _ok()

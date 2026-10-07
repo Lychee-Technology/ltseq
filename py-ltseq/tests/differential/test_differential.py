@@ -3,8 +3,10 @@
 Every case in ``cases/`` runs on the current build. An unlisted case must
 reproduce main's outcome from ``expected/``; a case listed in
 ``classification.toml`` must produce its ``expect`` outcome (an intended
-change or a fixed bug) or main's outcome (a known pre-existing bug). To
-see two builds side by side, use ``tools/diffprobe/diffprobe.py``.
+change or a fixed bug) or main's outcome (a known pre-existing bug). No
+case may expose a Rust panic unless it is a pinned pre-existing bug: errors
+compare by class and stage only, so the panic is checked apart from them.
+To see two builds side by side, use ``tools/diffprobe/diffprobe.py``.
 """
 
 import json
@@ -13,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from ..literal_grid.grid import exposed_panic
 from . import harness
 
 STATUSES = {"INTENDED_CHANGE", "BUG_FIXED", "PREEXISTING_BUG", "REGRESSION", "UNDECIDED"}
@@ -52,7 +55,7 @@ def test_classification_names_known_cases():
         assert entry["status"] in STATUSES, name
         assert entry.get("ref"), name
         if entry["status"] in {"INTENDED_CHANGE", "BUG_FIXED"}:
-            json.loads(entry["expect"])
+            assert not exposed_panic(json.loads(entry["expect"])), name
 
 
 def test_every_case_has_a_recorded_outcome():
@@ -69,4 +72,13 @@ def test_case(name, fn):
         expected = json.loads(entry["expect"])
     else:
         expected = harness.comparable(RECORDED[name])
-    assert harness.comparable(harness.run_case(fn)) == expected
+    outcome = harness.run_case(fn)
+    if status != "PREEXISTING_BUG":
+        assert not exposed_panic(outcome), f"{name} panicked: {outcome}"
+    assert harness.comparable(outcome) == expected
+
+
+def test_the_panic_check_recognizes_what_main_recorded():
+    """Main panicked here; the check must see it, or a live panic would pass as an error."""
+    assert exposed_panic(RECORDED["decimal_widths::int_negative_scale_d64"])
+    assert not exposed_panic(RECORDED["decimal_widths::int_negative_scale_d64"] | {"error": {"class": "ValueError", "stage": "collect", "msg": "Cannot cast"}})
