@@ -93,6 +93,12 @@ COLUMNS = {
     "dec256w": pa.array(
         [Decimal(1), Decimal(10) ** 35, None, Decimal("0.1234567891"), Decimal(2)], pa.decimal256(76, 40)
     ),
+    # Next to a scale-38 literal this needs 76 + 14 + 38 = 128 digits, which
+    # overflows the i8 DataFusion computes a common precision in (review of
+    # 414926b on #225).
+    "dec256neg": pa.array(
+        [Decimal("1E14"), Decimal("-1E14"), None, Decimal(0), Decimal("9E75")], pa.decimal256(76, -14)
+    ),
     "utf8": pa.array(["a", "b", None, "c", "B"]),
     "large_utf8": pa.array(["a", "b", None, "c", "B"], pa.large_string()),
     "bool": pa.array([True, False, None, True, False]),

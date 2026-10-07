@@ -22,7 +22,7 @@ mod literals;
 mod resolve;
 pub(crate) mod window_native;
 
-pub(crate) use resolve::Resolver;
+pub(crate) use resolve::{binary_input_types, Resolver};
 pub use window_native::pyexpr_to_window_expr;
 
 use crate::types::{arg, Arg, PyExpr};
@@ -952,7 +952,7 @@ fn parse_call_expr(
 /// it (and stores for a projection of it) is the type it executes as.
 pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
     let rx = Resolver::new(schema)?;
-    Ok(rx.resolve(lower_expr(py_expr, &rx)?))
+    rx.resolve(lower_expr(py_expr, &rx)?)
 }
 
 /// [`pyexpr_to_datafusion`] for an expression whose name becomes an output
@@ -964,7 +964,7 @@ pub fn pyexpr_to_named_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Resu
     let rx = Resolver::new(schema)?;
     let lowered = lower_expr(py_expr, &rx)?;
     let name = lowered.schema_name().to_string();
-    let resolved = rx.resolve(lowered);
+    let resolved = rx.resolve(lowered)?;
     Ok(if resolved.schema_name().to_string() == name {
         resolved
     } else {
@@ -1145,7 +1145,6 @@ fn dt_elapsed(
     unit_seconds: i64,
 ) -> Result<Expr, String> {
     use datafusion::arrow::datatypes::TimeUnit;
-    use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
 
     let type_of = |expr: &Expr| rx.data_type(expr).map_err(|e| format!("dt_diff: {e}"));
     // `Expr::cast_to` compares against the type DataFusion reports before
@@ -1230,8 +1229,7 @@ fn dt_elapsed(
     let is_temporal =
         |t: &DataType| matches!(t, DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _));
     let (on_coerced, other_coerced) =
-        BinaryTypeCoercer::new(&on_type, &Operator::Minus, &other_type)
-            .get_input_types()
+        binary_input_types(&on_type, &Operator::Minus, &other_type)
             .ok()
             .filter(|(l, r)| is_temporal(l) && is_temporal(r))
             .ok_or_else(|| {
@@ -1492,7 +1490,7 @@ mod tests {
         for build in [&sum as &dyn Fn(i64) -> PyExpr, &cases] {
             let coerced = |depth: i64| {
                 let rx = Resolver::new(&schema).unwrap();
-                rx.resolve(lower_expr(build(depth), &rx).unwrap());
+                rx.resolve(lower_expr(build(depth), &rx).unwrap()).unwrap();
                 rx.coerced_nodes()
             };
             let (shallow, deep) = (coerced(100), coerced(200));

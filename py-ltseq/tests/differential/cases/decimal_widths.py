@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-from ltseq import LTSeq
+from ltseq import LTSeq, coalesce, if_else
 
 
 def column(dtype):
@@ -59,3 +59,19 @@ def case_tiny_decimal_d32(): return wide().derive(v=lambda r: r.d32 > Decimal("1
 def case_int_negative_scale_d64(): return wide().derive(v=lambda r: r.d64n == 7).select("v")
 def case_decimal_d256(): return wide().derive(v=lambda r: r.d256 >= Decimal("1.2345")).select("v")
 def case_float_d256(): return wide().derive(v=lambda r: r.d256 > 1.5).select("v")
+
+
+# A coarse column next to a scale-38 literal needs 76 + 14 + 38 = 128
+# digits, which overflows the i8 DataFusion computes a common precision in
+# (review of 414926b on #225).
+def coarse():
+    return LTSeq.from_arrow(pa.table({
+        "x": pa.array([Decimal("1E14"), None], pa.decimal256(76, -14)),
+    }))
+
+
+def case_coarse_fill_zero(): return coarse().derive(v=lambda r: r.x.fill_null(Decimal("0E-38"))).select("v")
+def case_coarse_coalesce_zero(): return coarse().derive(v=lambda r: coalesce(r.x, Decimal("0E-38"))).select("v")
+def case_coarse_if_else_zero(): return coarse().derive(v=lambda r: if_else(r.x.is_null(), Decimal("0E-38"), r.x)).select("v")
+def case_coarse_gt_tiny(): return coarse().derive(v=lambda r: r.x > Decimal("1E-38")).select("v")
+def case_coarse_is_in_zero(): return coarse().derive(v=lambda r: r.x.is_in([Decimal("0E-38")])).select("v")

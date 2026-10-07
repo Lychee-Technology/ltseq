@@ -33,21 +33,87 @@
 //! coerced form while its parent is lowered, and coercion substitutes those
 //! forms instead of coercing them again: lowering coerces each node once,
 //! and planning grows quadratically, as DataFusion's own analysis does.
+//!
+//! Every question to DataFusion's coercion (and to its simplifier, for a
+//! constant) is asked here ([`ask`]), and a panic while answering it is an
+//! answer too: there is none. DataFusion 55
+//! computes a common decimal precision in `i8` (`get_wider_decimal_type`),
+//! so a valid pair can overflow it: a `decimal256(76, -14)` column next to
+//! a scale-38 literal needs 76 + 14 + 38 = 128 digits. A debug build panics
+//! there. A release build wraps to a type that loses range, or to none.
+//! Either way the pair has no usable common type, and the literal rules
+//! fall back as they do for any pair DataFusion cannot coerce (review of
+//! 414926b on #225). An expression whose coercion panics would panic again
+//! when DataFusion builds its plan, so [`Resolver::resolve`] reports it as
+//! an error instead of handing it on.
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef, DataFusionError};
 use datafusion::logical_expr::simplify::SimplifyContext;
-use datafusion::logical_expr::{Expr, ExprSchemable, Volatility};
+use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
+use datafusion::logical_expr::{Expr, ExprSchemable, Operator, Volatility};
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercionRewriter;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::scalar::ScalarValue;
+
+/// Why DataFusion did not answer a type question.
+enum Unanswered {
+    /// Its error, which it reports again when the plan is built.
+    Error(DataFusionError),
+    /// The message of a panic, which it would raise again.
+    Panic(String),
+}
+
+impl fmt::Display for Unanswered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unanswered::Error(e) => write!(f, "{e}"),
+            Unanswered::Panic(message) => write!(f, "DataFusion panicked: {message}"),
+        }
+    }
+}
+
+/// Ask DataFusion's coercion `question`, a panic giving no answer (see the
+/// module documentation). Nothing a question touches outlives a panic in
+/// it: the expression and rewriter are dropped, and the memo is only read.
+fn ask<T>(question: impl FnOnce() -> datafusion::common::Result<T>) -> Result<T, Unanswered> {
+    match catch_unwind(AssertUnwindSafe(question)) {
+        Ok(answer) => answer.map_err(Unanswered::Error),
+        Err(payload) => Err(Unanswered::Panic(panic_message(payload.as_ref()))),
+    }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    match (
+        payload.downcast_ref::<&str>(),
+        payload.downcast_ref::<String>(),
+    ) {
+        (Some(message), _) => (*message).to_string(),
+        (_, Some(message)) => message.clone(),
+        _ => "no message".to_string(),
+    }
+}
+
+/// DataFusion's coercion of the operands of `left op right`
+/// (`BinaryTypeCoercer`, the analyzer's rule for a binary pair), asked
+/// before the expression is built.
+pub(crate) fn binary_input_types(
+    left: &DataType,
+    op: &Operator,
+    right: &DataType,
+) -> Result<(DataType, DataType), String> {
+    ask(|| BinaryTypeCoercer::new(left, op, right).get_input_types()).map_err(|e| e.to_string())
+}
 
 /// The input schema of one transpilation, and DataFusion's coercion over it.
 pub(crate) struct Resolver<'a> {
@@ -80,9 +146,14 @@ impl<'a> Resolver<'a> {
     /// resolving a resolved expression changes nothing. An expression
     /// DataFusion cannot coerce is returned unchanged: DataFusion then
     /// reports the problem where it always has, when the plan is built or run.
-    pub(crate) fn resolve(&self, expr: Expr) -> Expr {
-        self.coerce(expr.clone())
-            .map_or(expr, |coerced| coerced.data)
+    /// One whose coercion panics is an error, since building its plan would
+    /// panic again.
+    pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
+        match self.coerce(expr.clone()) {
+            Ok(coerced) => Ok(coerced.data),
+            Err(Unanswered::Error(_)) => Ok(expr),
+            Err(panic) => Err(format!("Cannot type {expr}: {panic}")),
+        }
     }
 
     /// The analyzer's coercion of `expr`, node by node from the leaves up
@@ -90,7 +161,7 @@ impl<'a> Resolver<'a> {
     /// remembers is replaced by its coerced form. Coercion is a function of
     /// the expression and the schema, so that is the form coercing it again
     /// would give.
-    fn coerce(&self, expr: Expr) -> datafusion::common::Result<Transformed<Expr>> {
+    fn coerce(&self, expr: Expr) -> Result<Transformed<Expr>, Unanswered> {
         let known = self.known.borrow();
         let mut rewriter = Coercion {
             analyzer: TypeCoercionRewriter::new(&self.schema),
@@ -98,7 +169,7 @@ impl<'a> Resolver<'a> {
             substituted: false,
             coerced: &self.coerced,
         };
-        expr.rewrite(&mut rewriter)
+        ask(|| expr.rewrite(&mut rewriter))
     }
 
     /// Lower one node: `lower` builds it, lowering its children through this
@@ -137,9 +208,8 @@ impl<'a> Resolver<'a> {
 
     /// The type `expr` executes as.
     pub(crate) fn data_type(&self, expr: &Expr) -> Result<DataType, String> {
-        self.resolve(expr.clone())
-            .get_type(&self.schema)
-            .map_err(|e| e.to_string())
+        let resolved = self.resolve(expr.clone())?;
+        ask(|| resolved.get_type(&self.schema)).map_err(|e| e.to_string())
     }
 
     /// The type of the values `expr` executes as: [`Resolver::data_type`]
@@ -195,7 +265,8 @@ impl<'a> Resolver<'a> {
         let context = SimplifyContext::builder()
             .with_schema(Arc::clone(&self.schema))
             .build();
-        match ExprSimplifier::new(context).simplify(self.resolve(expr.clone())) {
+        let resolved = self.resolve(expr.clone()).ok()?;
+        match ask(|| ExprSimplifier::new(context).simplify(resolved)) {
             Ok(Expr::Literal(value, _)) if !value.is_null() => Some(value),
             _ => None,
         }
@@ -354,7 +425,10 @@ mod tests {
         ];
         for (expr, expected) in cases {
             assert_eq!(rx.data_type(&expr).unwrap(), expected, "{expr}");
-            assert_eq!(rx.resolve(expr).get_type(&df_schema).unwrap(), expected);
+            assert_eq!(
+                rx.resolve(expr).unwrap().get_type(&df_schema).unwrap(),
+                expected
+            );
         }
     }
 
@@ -380,8 +454,8 @@ mod tests {
     fn resolving_is_idempotent() {
         let arrow = schema();
         let rx = Resolver::new(&arrow).unwrap();
-        let once = rx.resolve(when("i", "f") + col("d"));
-        assert_eq!(rx.resolve(once.clone()), once);
+        let once = rx.resolve(when("i", "f") + col("d")).unwrap();
+        assert_eq!(rx.resolve(once.clone()).unwrap(), once);
     }
 
     #[test]
@@ -405,11 +479,21 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_in_a_type_question_is_no_answer() {
+        let answer = ask::<DataType>(|| panic!("attempt to add with overflow"));
+        assert!(
+            matches!(&answer, Err(Unanswered::Panic(message)) if message == "attempt to add with overflow")
+        );
+        let error = ask::<DataType>(|| Err(DataFusionError::Plan("no common type".into())));
+        assert!(matches!(error, Err(Unanswered::Error(_))));
+    }
+
+    #[test]
     fn an_expression_datafusion_cannot_coerce_is_left_for_datafusion_to_report() {
         let arrow = schema();
         let rx = Resolver::new(&arrow).unwrap();
         let expr = col("b") + col("s");
-        assert_eq!(rx.resolve(expr.clone()), expr);
+        assert_eq!(rx.resolve(expr.clone()).unwrap(), expr);
         assert!(rx.data_type(&expr).is_err());
     }
 }

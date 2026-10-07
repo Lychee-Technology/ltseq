@@ -186,7 +186,7 @@ fn rn_order() -> Vec<Sort> {
 /// `transpiler::Resolver`).
 fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, String> {
     let rx = Resolver::new(schema)?;
-    Ok(rx.resolve(lower_group_node(node, &rx)?))
+    rx.resolve(lower_group_node(node, &rx)?)
 }
 
 /// Lower one group-dialect node, through `Resolver::lowering`.

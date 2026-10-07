@@ -82,7 +82,7 @@ pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
 ///   wrapping (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic
 ///   gives a duration, and `UInt64` past `i64::MAX` is negative to the kernel.
 fn kernel_type(expr: &PyExpr, schema: &ArrowSchema) -> Option<DataType> {
-    use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
+    use crate::transpiler::binary_input_types;
     use DataType as T;
     let exact_integer = |t: &DataType| matches!(t, T::Int64 | T::Int32 | T::UInt32);
     match expr {
@@ -135,7 +135,7 @@ fn kernel_type(expr: &PyExpr, schema: &ArrowSchema) -> Option<DataType> {
                         crate::transpiler::BinaryOp::Native(operator) => operator,
                         crate::transpiler::BinaryOp::FloorDiv => return None,
                     };
-                    match BinaryTypeCoercer::new(&l, &operator, &r).get_input_types().ok()? {
+                    match binary_input_types(&l, &operator, &r).ok()? {
                         (T::Int64, T::Int64) => Some(T::Int64),
                         (T::Float64, T::Float64) if op == "Sub" => Some(T::Float64),
                         _ => None,

@@ -176,7 +176,7 @@ pub fn pyexpr_to_window_expr(
         .collect();
 
     let rx = Resolver::new(schema)?;
-    Ok(rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?))
+    rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?)
 }
 
 /// Internal recursive conversion, one node at a time through

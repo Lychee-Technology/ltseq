@@ -11,12 +11,13 @@ not affected.)
 ltseq also computes no common or widened type of its own. DataFusion's
 helpers that compute one (`comparison_coercion`, `type_union_resolution`,
 `get_coerce_type_for_*`, ...) are not called. Two `type_coercion` items are
-allowed:
-- `TypeCoercionRewriter`, the analyzer's expression coercion, which the
-  resolver applies;
+allowed, both only in the resolver, which turns a panic in them into "no
+answer" (DataFusion's decimal precision arithmetic overflows on valid
+types):
+- `TypeCoercionRewriter`, the analyzer's expression coercion;
 - `BinaryTypeCoercer`, the analyzer's rule for one binary pair, which literal
-  placement, `dt.diff` and the linear-scan eligibility check ask what
-  DataFusion does with a pair before the expression exists.
+  placement, `dt.diff` and the linear-scan eligibility check ask about
+  through `binary_input_types` before the expression exists.
 """
 
 import re
@@ -27,7 +28,7 @@ SRC = REPO_ROOT / "src"
 RESOLVER = SRC / "transpiler" / "resolve.rs"
 
 ALLOWED_TYPE_COERCION = {
-    "BinaryTypeCoercer": None,  # anywhere
+    "BinaryTypeCoercer": RESOLVER,
     "TypeCoercionRewriter": RESOLVER,
 }
 
@@ -68,7 +69,7 @@ def _violations() -> list[str]:
 
 
 def test_only_the_resolver_asks_expressions_for_their_types():
-    # The guard looks at real code: the resolver itself uses both.
+    # The guard looks at real code: the resolver itself uses all three.
     resolver = RESOLVER.read_text()
-    assert "ExprSchemable" in resolver and "TypeCoercionRewriter" in resolver
+    assert all(name in resolver for name in ("ExprSchemable", *ALLOWED_TYPE_COERCION))
     assert _violations() == []

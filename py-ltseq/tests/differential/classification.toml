@@ -276,3 +276,33 @@ status = "BUG_FIXED"
 ref = "review of 58e4faa on #225"
 note = "DataFusion cast the decimal256(76, 0) column to decimal256(76, 15), which overflowed at collect"
 expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::coarse_fill_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_coalesce_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_if_else_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main unified the string literal with the column as strings; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_gt_tiny"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; DataFusion's common type overflows, so the literal is placed among the column's values"
+expect = '{"result": {"v": {"type": "bool", "values": [true, null]}}}'
+
+["decimal_widths::coarse_is_in_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the item is placed exactly at the column's type"
+expect = '{"result": {"v": {"type": "bool", "values": [false, null]}}}'

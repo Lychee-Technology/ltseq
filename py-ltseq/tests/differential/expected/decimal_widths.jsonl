@@ -17,3 +17,8 @@
 {"error": {"class": "PanicException", "msg": "attempt to multiply with overflow", "stage": "collect"}, "id": "int_negative_scale_d64"}
 {"id": "decimal_d256", "result": {"v": {"type": "bool", "values": [true, true, null]}}}
 {"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast to Decimal256(76, 15). Overflowing on 1000000000000000000000000000000000000000000000000000000000000000000000000000", "stage": "collect"}, "id": "float_d256"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_fill_zero"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_coalesce_zero"}
+{"id": "coarse_if_else_zero", "result": {"v": {"type": "string", "values": ["100000000000000", "0E-38"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_gt_tiny"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_is_in_zero"}

@@ -20,14 +20,13 @@ use std::cmp::Ordering;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::functions::core::expr_fn::coalesce;
-use datafusion::logical_expr::type_coercion::binary::BinaryTypeCoercer;
 use datafusion::logical_expr::{case, BinaryExpr, Expr, Operator};
 use datafusion::prelude::lit;
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{cast_loss, exact_cast, place, place_instant, Loss, Placement};
 use super::literal_policy::{interpret, literal_text, Position, Reading};
-use super::Resolver;
+use super::{binary_input_types, Resolver};
 
 /// How errors name the value a literal is read against.
 fn describe(expr: &Expr) -> String {
@@ -187,7 +186,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
             }
         };
         let Expr::BinaryExpr(BinaryExpr { left, right, .. }) =
-            rx.resolve(expr.clone().eq(item.clone()))
+            rx.resolve(expr.clone().eq(item.clone()))?
         else {
             return Err("is_in: coercing an equality did not give an equality".to_string());
         };
@@ -198,7 +197,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
     }
     let comparison_type = |side: &Expr| rx.value_type(side).ok();
     let written = expr.in_list(kept.iter().map(|(item, ..)| item.clone()).collect(), false);
-    let list_type = match rx.resolve(written.clone()) {
+    let list_type = match rx.resolve(written.clone())? {
         Expr::InList(resolved) => comparison_type(&resolved.expr),
         _ => None,
     };
@@ -243,7 +242,9 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
 /// - The literal does not fit the common type exactly.
 /// - There is no common type: a Decimal32, Decimal64 or Decimal256 operand
 ///   and a decimal literal with more digits than that width holds together
-///   with the operand's.
+///   with the operand's, or a pair whose common precision DataFusion
+///   overflows computing (a negative-scale operand and a fine-scale literal,
+///   see `resolve`).
 ///
 /// The value placed is the literal's own, except a float's: that is
 /// DataFusion's reading of it at the common type, so a float literal keeps
@@ -267,9 +268,7 @@ fn placement(
         return None;
     }
     let literal_type = literal.data_type();
-    let Ok((common, literal_common)) =
-        BinaryTypeCoercer::new(&operand_type, &op, &literal_type).get_input_types()
-    else {
+    let Ok((common, literal_common)) = binary_input_types(&operand_type, &op, &literal_type) else {
         return place(literal, &operand_type);
     };
     let operand_cast = common != operand_type
@@ -346,9 +345,11 @@ fn verdict_unless_null(expr: Expr, verdict: bool) -> Expr {
 /// When DataFusion has no common type in 1, numbers next to a numeric
 /// context still go on to 2: that happens only for a Decimal32, Decimal64
 /// or Decimal256 context and a decimal literal with more digits than that
-/// width holds alongside it, where a literal the context holds exactly is
-/// as good a value as for a Decimal128 context. Other kinds without a
-/// common type (a Boolean and a number) are DataFusion's error.
+/// width holds alongside it, or for a pair whose common precision DataFusion
+/// overflows computing (a negative-scale context and a fine-scale literal,
+/// see `resolve`). There a literal the context holds exactly is as good a
+/// value as anywhere else. Other kinds without a common type (a Boolean and
+/// a number) are DataFusion's error.
 ///
 /// Losses that the context itself has against the other values (two
 /// columns of different types) are DataFusion's, and are left as they are.
