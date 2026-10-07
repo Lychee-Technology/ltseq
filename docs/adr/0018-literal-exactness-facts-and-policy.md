@@ -1,0 +1,63 @@
+# ADR 0018: Literal Exactness: Facts, Policy, and One Type Authority
+
+- Status: Accepted
+- Decision date: 2026-10-06 (D-a–D-h) and 2026-10-07 (D-i–D-m), PR #225 · Recorded: 2026-10-07
+
+[中文版](0018-literal-exactness-facts-and-policy.cn.md)
+
+## Context
+
+Until #145 a Python value in a lambda reached the kernel as a string and was parsed back, so `Decimal("1.236")` lost its digits, `2**53 + 1` became a float and dates were read by whatever DataFusion inferred from the text. PR #225 made literals typed at capture. Its first design predicted the type a literal would meet, which kept producing composition bugs: a CASE of two column types, a `coalesce`, or a window argument reached the literal with a type the prediction had not seen. The design review and the decision record of 2026-10-06 (D-a to D-h) rebuilt the pipeline around one rule: DataFusion's own per-node coercion is the only source of types (`transpiler::Resolver`), and LTSeq keeps only a table that says how a literal reads next to a type and a check that DataFusion's result is exact.
+
+That exactness check was the part still wrong at `35c07e8`. One module answered both "does type T hold every value of type S" and "which kinds does LTSeq judge at all", and it answered the second question in the vocabulary of the first. `cast_loss(_, floating) = Loss::None` meant "float results are DataFusion's business" but read as "Int64 → Float64 loses nothing"; the default arm `_ => Loss::None` meant "other pairs are not ours" but read as "Date32 → Timestamp(µs) and Int64 → Utf8 are lossless"; `exact_cast(number, float) = Exact` meant "a number next to a float is the nearest float" but read as "0.1 is a double". The value gate consumed these as facts, so `coalesce(r.x, 0.0)` on an Int64 column became Float64 and stored `2**53 + 1` as `9007199254740992.0`, which D-b forbids. The architecture review of `35c07e8` traced the exactness findings of five earlier review rounds, three of them in that module, and its own new findings to the same conflation, and recommended refactoring the layer instead of patching the float arm. The five questions it could not settle were decided by the owner on 2026-10-07 (D-i to D-m).
+
+## Decision
+
+**Facts and policy live in different modules, and no fact defaults to "exact".**
+
+`src/transpiler/exact.rs` states facts about Arrow types and values and holds no policy. `cast_class(from, to)` classifies a cast as `Exact`, `RangeOnly`, `Precision`, `RangeAndPrecision`, `Kind` or `Unjudged`; `holds(to, value)` says whether a type holds a value exactly and returns the value in that type, or where it falls (`Between` two values of the type, `Beyond` its range, `NotANumber`), or `Unjudged`. Both are total: every arm is written out, a pair the module has not judged is `Unjudged`, and no caller may read `Unjudged` or `Kind` as exact. The facts are the representability facts, not DataFusion's cast behavior: an integer type is held by a float when its magnitude fits the significand (11, 24 or 53 bits), a decimal by its digits and scale, a float by its exact binary value (an exact rational, so `0.1` is 0.1000000000000000055511151231257827…), an instant by its ticks at the finer unit, and Date64 both as a day and as milliseconds.
+
+`src/transpiler/literal_policy.rs` is the only place that decides what LTSeq judges and what it leaves to DataFusion. `interpret` reads a literal next to a type (a `Decimal` next to a float is that float, a naive `datetime` next to an aware column is wall-clock time there, a string keeps DataFusion's reading); `exact_domain` names the types whose values LTSeq places itself (integers, decimals, dates, timestamps); `held` and `fit` apply D-b and D-i; `widening` applies D-m. The gates in `src/transpiler/literals.rs` (comparison, `is_in`, the shared values of `fill_null`/`coalesce`/`if_else`/`when`, `shift(default=)`, `dt.diff`, arithmetic) consult policy and never `exact.rs` directly, so a new kind of literal or a new context type is one policy entry, not a new arm in every gate.
+
+The rules the policy encodes:
+
+| Decision | Rule |
+|---|---|
+| D-a | Expressions are resolved bottom-up and DataFusion's coercion is the only source of types. LTSeq computes no common types. |
+| D-b, D-i | Values that share a result column take DataFusion's unification when every cast of an existing value is type-level exact and every literal is value-level exact in that type. Otherwise a literal that the literal-free context type holds exactly adopts it; anything still inexact is a plan-time `ValueError` naming the literal. Floats are no exception: `r.i.fill_null(0.0)` on Int64 stays Int64, `fill_null(1.5)` raises, and on `int32`, which Float64 holds, both are Float64. |
+| D-c | `shift(default=)` is exact or an error; it never widens the column. |
+| D-d | In `dt.diff` and subtraction, a naive literal against an aware column is wall-clock time in the column's zone; a `date` is local midnight. |
+| D-e | Integer and `Decimal` literals are placed exactly in comparisons and `is_in`, also past 38 digits (#227). |
+| D-f | Constants are folded by DataFusion's simplifier, with its types (#193, #209). |
+| D-h, D-k | Plan-time literal errors are `ValueError`. Strings, and Booleans and numbers next to a string column, keep DataFusion's reading; a kind-changing cast is `Kind` or `Unjudged`, never exact. |
+| D-j | A Python `float` denotes its binary64 value. Next to an integer or decimal column it compares exactly (`r.x == 2.0**53` matches `2**53` only; `r.p == 0.1` is false on every decimal column). Next to a float column DataFusion's float semantics stand. NaN and infinities next to an integer, decimal, date or timestamp column are a plan-time `ValueError`. |
+| D-l | A number or Boolean next to a date or timestamp operand is a plan-time `ValueError` in every position; `dt.add` adds a duration. |
+| D-m | In shared values only, a timestamp literal finer than the column widens the unit, keeping the zone (range-only risk). A date column never becomes a timestamp, a zone is never relabelled, and `shift(default=)` never widens. |
+
+**The literal grid is the merge gate.** `py-ltseq/tests/literal_grid/` records every (context, literal, position) cell: 32 contexts (every numeric, decimal, date, timestamp, string and Boolean column, a dictionary-encoded Int64 and six CASE expressions that mix types), 49 literals and 14 positions, 20,874 cells. The baseline is `main` at `68d6114`, committed as `expected/main.jsonl` and never regenerated by a test. Every cell the live build changes must match a classification rule that names the decision (INTENDED_CHANGE) or the issue (PREEXISTING_BUG), or must be a BUG_FIXED cell an independent oracle confirms; REGRESSION and UNDECIDED fail the suite. The invariants the design rests on are tested as generated properties rather than examples: DataFusion's type is the type reported; a literal reads the same inline, in a staged lazy plan and on a materialized table; CASE branches, `coalesce` orders and n-ary compositions agree; `L < x` mirrors `x > L`; `x.is_in([L])` is `x == L`; a number means the same in every spelling the context holds; a number next to a temporal column is refused in every position; and the linear-scan kernel's count agrees with the materialized count except in the cells pinned to #189 and #244.
+
+## Alternatives Considered
+
+- *Patch the float arm (c27 F1 only).* Removes one wrong fact and leaves the default arm and the number-to-float arm in place; the next literal kind or context type would have reopened the same class of bug. Rejected by the review and the owner.
+- *A float-domain exception (U1 option b): a float in a value position reads as DataFusion reads it.* Keeps `main`'s Float64 result for `coalesce(r.i64, 0.0)` and documents that D-b does not hold for floats. Rejected: it silently rounds Int64 values past `2**53` on the way into the common type, which is the defect D-b exists to stop.
+- *A float literal denotes its `repr` decimal (`0.1` reads as `Decimal("0.1")`).* Friendlier next to decimal columns, but it makes a literal's meaning depend on Python's shortest round-trip printing and differ from the same literal's meaning next to a float column. Rejected; a user who means the decimal writes `Decimal`.
+- *Position-dependent temporal rule: refuse a number in values, keep DataFusion's epoch reading in comparisons.* Rejected for position parity (D-l); `r.d > 5` reading as "after 1970-01-06" was never asked for.
+- *Accept Date32 → Timestamp in shared values as a widening.* It is a kind change, not a range change: pyarrow overflows it at day 109,000,000. Rejected (D-m).
+- *A special case for `Int64 -> Float64` in the gate.* Special cases in gates are what produced the conflation. Rejected.
+
+## Consequences
+
+- Behavior changes from `main`, all listed in the changelog: a fractional float in a value position of an Int64, UInt64 or narrow decimal context raises instead of widening the column; an integral float keeps the context type instead of Float64; NaN and infinities next to an exact column raise instead of comparing false or widening; a number next to a date or timestamp raises in every position instead of being read from the epoch; a float literal compares exactly with integer and decimal columns (#240). In the grid, 9,977 cells are unchanged, 9,949 change by decision, 947 are fixed bugs and 1 is a pre-existing bug (#245); no cell regressed or is undecided.
+- Every gate first asks DataFusion for the unified type, then classifies it. The cost is paid once per literal at planning; execution plans are unchanged.
+- A DataFusion upgrade that changes a coercion rule changes proposed unifications. The grid reports each affected cell as REGRESSION or UNDECIDED, and the person upgrading classifies it by hand; the baseline is not regenerated to make the suite pass.
+- What stays with DataFusion, by decision: float contexts (`r.f32 == 2**24 + 1` matches `2**24` because the int is coerced to float32, while `2.0**24 + 1` compares in float64), strings and Booleans (D-h), and the `IN`-list hash set that compares floats bitwise when a list has more than three items (#245).
+- Known kernel disagreements are pinned, not hidden: the linear-scan kernel's NULL semantics for `>` on exact integer columns (#189) and its bitwise Float64 comparison (#244). A fix or a new divergence both fail the parity test.
+- Open and out of scope here: #228 (a float column next to a decimal column is cast to `decimal(30, 15)`), #241 (decimal32/64 next to an integer column), #242 (negative-scale coercion differs between debug and release builds).
+- The test suite grows by about four minutes: the grid runs its 20,874 cells live against the build.
+
+## Sources
+
+- PR #225: [design review](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6007628376), [decision record D-a–D-h](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6008650391), [architecture review of `35c07e8`](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6032928492), [decision record D-i–D-m](https://github.com/Lychee-Technology/ltseq/pull/225#issuecomment-6039847840)
+- Issues #145, #240, #243 (the grid), #189, #244, #245
+- `src/transpiler/exact.rs`, `src/transpiler/literal_policy.rs`, `src/transpiler/literals.rs`, `src/transpiler/resolve.rs`
+- `py-ltseq/tests/literal_grid/`, `docs/api.md` § "Literal values"
