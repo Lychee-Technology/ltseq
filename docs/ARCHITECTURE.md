@@ -195,7 +195,7 @@ Key files:
 
 ### Rust side
 
-The serialized dictionary is converted into `PyExpr` in `src/types.rs`, optionally optimized, then transpiled via one of two paths:
+The serialized dictionary is converted into `PyExpr` in `src/types.rs`, then transpiled via one of two paths:
 
 - native DataFusion `Expr`
 - native window expression construction
@@ -204,7 +204,7 @@ Key files:
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs` (expression types) and `src/transpiler/literals.rs` (literal placement)
 
 Python owns the expressive syntax, Rust owns the execution semantics. That split runs through the whole architecture.
 

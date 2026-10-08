@@ -1,0 +1,60 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "case_type", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", null]}}}
+{"id": "eq", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "eq_sw", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "lt", "result": {"v": {"type": "bool", "values": [true, true, false, null]}}}
+{"id": "lt_sw", "result": {"v": {"type": "bool", "values": [true, true, false, null]}}}
+{"id": "literal_left", "result": {"v": {"type": "bool", "values": [true, true, false, null]}}}
+{"id": "literal_left_sw", "result": {"v": {"type": "bool", "values": [true, true, false, null]}}}
+{"id": "inverted", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "isin", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "isin_sw", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "filter", "result": {"k": {"type": "int64", "values": [0, 1]}}}
+{"id": "filter_sw", "result": {"k": {"type": "int64", "values": [0, 1]}}}
+{"id": "staged", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "staged_sw", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "nested", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "case_in_coalesce", "result": {"v": {"type": "bool", "values": [false, false, true, false]}}}
+{"id": "case_in_coalesce_sw", "result": {"v": {"type": "bool", "values": [false, false, true, false]}}}
+{"id": "coalesce_in_case", "result": {"v": {"type": "bool", "values": [false, false, true, null]}}}
+{"id": "case_in_fill_null", "result": {"v": {"type": "bool", "values": [false, false, true, false]}}}
+{"id": "window_branch", "result": {"v": {"type": "bool", "values": [false, true, null, false]}}}
+{"id": "window_branch_sw", "result": {"v": {"type": "bool", "values": [false, true, null, false]}}}
+{"id": "shift_default", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", null]}}}
+{"id": "shift_default_sw", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", null]}}}
+{"id": "lag_of_case", "result": {"v": {"type": "bool", "values": [null, true, false, false]}}}
+{"id": "lag_of_case_sw", "result": {"v": {"type": "bool", "values": [null, true, false, false]}}}
+{"id": "dt_diff_column", "result": {"v": {"type": "double", "values": [1250000.0, 1000000.0, 1500000.0, null]}}}
+{"id": "dt_diff_column_sw", "result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}
+{"error": {"class": "ValueError", "msg": "dt_diff cannot subtract Utf8 from Timestamp(Second, None); both sides must be dates or timestamps", "stage": "plan"}, "id": "dt_diff_literal"}
+{"error": {"class": "ValueError", "msg": "dt_diff cannot subtract Utf8 from Timestamp(Microsecond, None); both sides must be dates or timestamps", "stage": "plan"}, "id": "dt_diff_literal_sw"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Cannot coerce arithmetic expression Timestamp(s) - Utf8 to valid types", "stage": "plan"}, "id": "subtract_literal"}
+{"error": {"class": "RuntimeError", "msg": "Derive execution failed: Error during planning: Cannot coerce arithmetic expression Timestamp(\u00b5s) - Utf8 to valid types", "stage": "plan"}, "id": "subtract_literal_sw"}
+{"id": "date_timestamp_type", "result": {"v": {"type": "timestamp[ns]", "values": ["Timestamp('2024-01-01 06:00:00')", "Timestamp('2024-01-01 00:00:00')", null]}}}
+{"id": "date_timestamp_eq", "result": {"v": {"type": "bool", "values": [true, false, null]}}}
+{"id": "date_timestamp_eq_sw", "result": {"v": {"type": "bool", "values": [true, false, null]}}}
+{"id": "number_type", "result": {"v": {"type": "double", "values": ["NaN", 1.0, 1e-16, null]}}}
+{"id": "number_fill", "result": {"v": {"type": "double", "values": ["NaN", 1.0, 1e-16, 2.5]}}}
+{"id": "number_fill_sw", "result": {"v": {"type": "double", "values": ["NaN", 1.0, 1e-16, 2.5]}}}
+{"id": "number_fill_staged", "result": {"v": {"type": "double", "values": ["NaN", 1.0, 1e-16, 2.5]}}}
+{"id": "number_gt_with_nan", "result": {"v": {"type": "bool", "values": [true, true, true, null]}}}
+{"id": "number_gt_with_nan_sw", "result": {"v": {"type": "bool", "values": [true, true, true, null]}}}
+{"id": "number_gt", "result": {"v": {"type": "bool", "values": [true, true, true]}}}
+{"id": "number_gt_sw", "result": {"v": {"type": "bool", "values": [true, true, true]}}}
+{"id": "number_eq", "result": {"v": {"type": "bool", "values": [false, false, true]}}}
+{"id": "number_isin", "result": {"v": {"type": "bool", "values": [false, false, true]}}}
+{"id": "number_isin_sw", "result": {"v": {"type": "bool", "values": [false, false, true]}}}
+{"id": "decimal_eq", "result": {"v": {"type": "bool", "values": [false, false, null]}}}
+{"id": "decimal_eq_sw", "result": {"v": {"type": "bool", "values": [false, false, null]}}}
+{"id": "decimal_eq_wide", "result": {"v": {"type": "bool", "values": [false, true, null]}}}
+{"id": "decimal_fill", "result": {"v": {"type": "decimal128(38, 10)", "values": ["Decimal(1000000000000000000000000000.0000000000)", "Decimal(0.1234567890)", "Decimal(0.1234567890)"]}}}
+{"id": "decimal_fill_sw", "result": {"v": {"type": "decimal128(38, 10)", "values": ["Decimal(1000000000000000000000000000.0000000000)", "Decimal(0.1234567890)", "Decimal(0.1234567890)"]}}}
+{"id": "group_avg_decimal", "result": {"k": {"type": "int64", "values": [0, 1, 2, 3]}}}
+{"id": "group_max_seconds", "result": {"k": {"type": "int64", "values": [2, 3]}}}
+{"id": "group_max_micros", "result": {"k": {"type": "int64", "values": [0, 1]}}}
+{"id": "empty_result_type", "result": {"v": {"type": "timestamp[s]", "values": []}}}
+{"id": "empty_sorted_result_type", "result": {"v": {"type": "timestamp[s]", "values": []}}}
+{"id": "reverse_derived", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1)", null, "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)"]}}}
+{"id": "distinct_derived", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", null]}}}
+{"id": "round_trip_derived", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)", null]}}}
+{"id": "slice_derived", "result": {"v": {"type": "timestamp[us]", "values": ["datetime.datetime(1970, 1, 1, 0, 0, 1, 250000)", "datetime.datetime(1970, 1, 1, 0, 0, 1, 500000)"]}}}

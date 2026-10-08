@@ -207,14 +207,14 @@ of these hold:
    Any other use of `first()` materializes the grouped table through
    DataFusion window functions.
 3. `cond` combines leaves with `|` and `&`, and every leaf is exactly
-   `r.c != r.c.shift(1)` or `(r.c - r.c.shift(1)) > N`, where `c` is an
-   Int32, Int64, UInt32, UInt64, or timestamp column and `N` is an integer
-   literal, or a float literal that is finite, integral, and smaller than
-   `2**53` in magnitude. The
+   `r.c != r.c.shift(1)`, where `c` is an Int32, Int64, UInt32, UInt64, or
+   timestamp column, or `(r.c - r.c.shift(1)) > N`, where `c` is an Int64
+   column and `N` is an integer literal, or a float literal that is finite,
+   integral, and smaller than `2**53` in magnitude. The
    benchmark's `(r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)`
-   has this shape. Swapped operands (`r.c.shift(1) != r.c`), other
-   comparisons (`>=`, `<`, `==`), `shift(n)` with `n != 1`, string columns,
-   and `is_null()` all fall outside it.
+   has this shape (both columns are Int64). Swapped operands
+   (`r.c.shift(1) != r.c`), other comparisons (`>=`, `<`, `==`), `shift(n)`
+   with `n != 1`, string columns, and `is_null()` all fall outside it.
 
 When condition 1 or 3 fails, the count takes the general linear-scan path: it
 collects the predicate's columns plus every sort key in the declared order
@@ -222,11 +222,16 @@ collects the predicate's columns plus every sort key in the declared order
 predicate with intermediate arrays, builds three per-row arrays, and counts
 through DataFusion. That path still requires a
 predicate built from columns, literals, `shift(1)`, `is_null()`, comparisons,
-arithmetic, `&`, `|`, and `~` that contains at least one `shift(1)`. Anything
-else materializes the grouped table and counts its first rows. A float `N`
-that condition 3 rejects, on an integer column, is materialized too, but only
-after the linear-scan path has collected: that path's evaluator has no
-integer/float coercion and raises (#189). The linear-scan count and the
+arithmetic, `&`, `|`, and `~` that contains at least one `shift(1)`, and one
+it computes the way DataFusion does on the columns' types: arithmetic only
+where DataFusion computes it in Int64 (or Float64, for `-`), so not on Int32,
+UInt32, UInt64, or timestamp columns, whose differences DataFusion computes in
+32 bits, past the kernel's `i64` range, or as durations it does not compare
+with a number. Anything else materializes the grouped table and counts its
+first rows, including a float `N` compared with an integer column anywhere but
+in a predicate made entirely of condition 3's leaves (only that evaluator reads
+an integral float as an integer), and a `None` literal; the linear-scan path
+declines it before collecting. The linear-scan count and the
 DataFusion path currently disagree on NULLs (#189), so a directory passed to
 `read_parquet`, which the kernel cannot read, does not take the linear-scan
 path: its grouped table is materialized.

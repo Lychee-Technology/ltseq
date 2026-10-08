@@ -144,10 +144,16 @@ Examples:
 
 ```python
 {"type": "Column", "name": "age"}
-{"type": "Literal", "value": 18, "dtype": "Int64"}
+{"type": "Literal", "dtype": "Int64", "value": 18}
+{"type": "Literal", "dtype": "Decimal128", "value": 150, "precision": 3, "scale": 2}
+{"type": "Literal", "dtype": "Timestamp", "value": 1000000500, "unit": "ns", "tz": None}
 ```
 
 On the Rust side, these become `PyExpr` values in `src/types.rs`.
+
+Literals are typed on both sides of the boundary (#145). `LiteralExpr` encodes a value when the lambda is captured, so an unsupported value raises inside the lambda. The wire contract is one table, `py-ltseq/tests/fixtures/literal_protocol.json`, which drives the encoder tests and, through the real decoder, the decoder tests. `types.rs` checks each payload's fields against it and builds `LiteralValue`, the only mapping to DataFusion's `ScalarValue`. Consumers read literal arguments through `arg()` and `require_*`, which separate "absent" from "wrong", so a wrong argument cannot fall back to a default.
+
+Expression types come from DataFusion's own coercion (#225). `src/transpiler/resolve.rs` coerces each lowered expression the way DataFusion's analyzer will, so a CASE or a `coalesce` has the type it executes as, and nothing else in the transpiler computes a common type; `test_type_authority_rule.py` checks that. The literal rules then read a literal against the type of the value it meets (`literal_policy.rs`) and, where DataFusion's coercion of the pair would cast the column or round the literal, compare it with the column's own values instead (`literals.rs`, `exact.rs`).
 
 ### 2.3 Transpilation Paths
 
@@ -160,7 +166,7 @@ Key files:
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs` (expression types) and `src/transpiler/literals.rs` (literal placement)
 
 ### 2.4 Practical Boundaries
 

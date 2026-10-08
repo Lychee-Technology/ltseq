@@ -1,0 +1,405 @@
+# Cases whose outcome on this branch is not main's recorded outcome, or
+# whose recorded outcome is wrong. A case not listed here is UNCHANGED:
+# it must reproduce expected/<module>.jsonl (recorded on main 68d6114).
+#
+# status:
+#   INTENDED_CHANGE  a deliberate behavior change; `expect` is the new outcome
+#   BUG_FIXED        main is wrong; `expect` is the right outcome
+#   PREEXISTING_BUG  main is wrong and this branch keeps main's outcome; `ref` tracks the fix
+#   REGRESSION       never allowed in a merged state
+#   UNDECIDED        never allowed in a merged state
+# `expect` is the outcome as JSON (see harness.comparable: errors compare
+# by class and stage only). `ref` points to the issue, decision or finding.
+# No status admits a Rust panic, not even one main recorded.
+
+# --- composition: a CASE receiver, dt.diff and subtraction -------------------
+
+["composition::dt_diff_column"]
+status = "BUG_FIXED"
+ref = "design review F3"
+note = "dt.diff read the CASE as timestamp[s] while it runs as timestamp[us], reporting 10^6 times the elapsed seconds"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::dt_diff_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached dt.diff as a string"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::dt_diff_literal_sw"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached dt.diff as a string"
+expect = '{"result": {"v": {"type": "double", "values": [1.25, 1.0, 1.5, null]}}}'
+
+["composition::subtract_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached the subtraction as a string"
+expect = '{"result": {"v": {"type": "duration[us]", "values": ["datetime.timedelta(seconds=1, microseconds=250000)", "datetime.timedelta(seconds=1)", "datetime.timedelta(seconds=1, microseconds=500000)", null]}}}'
+
+["composition::subtract_literal_sw"]
+status = "INTENDED_CHANGE"
+ref = "#145 (typed literals)"
+note = "a datetime literal reached the subtraction as a string"
+expect = '{"result": {"v": {"type": "duration[us]", "values": ["datetime.timedelta(seconds=1, microseconds=250000)", "datetime.timedelta(seconds=1)", "datetime.timedelta(seconds=1, microseconds=500000)", null]}}}'
+
+["composition::empty_result_type"]
+status = "BUG_FIXED"
+ref = "design review F10"
+note = "an empty result took the projection's pre-coercion type"
+expect = '{"result": {"v": {"type": "timestamp[us]", "values": []}}}'
+
+["composition::empty_sorted_result_type"]
+status = "BUG_FIXED"
+ref = "design review F10"
+note = "an empty result took the projection's pre-coercion type"
+expect = '{"result": {"v": {"type": "timestamp[us]", "values": []}}}'
+
+# --- folding -------------------------------------------------------------------
+
+["folding_and_scan::fold_int"]
+status = "BUG_FIXED"
+ref = "#193"
+note = "folding went through f64 and lost a unit above 2^53"
+expect = '{"result": {"v": {"type": "int64", "values": [9007199254740993, 9007199254740993]}}}'
+
+["folding_and_scan::fold_int_compare"]
+status = "BUG_FIXED"
+ref = "#193"
+expect = '{"result": {"v": {"type": "bool", "values": [true, false]}}}'
+
+["folding_and_scan::fold_float"]
+status = "BUG_FIXED"
+ref = "#193"
+note = "2.0 + 3.0 folded to an Int64"
+expect = '{"result": {"v": {"type": "double", "values": [5.0, 5.0]}}}'
+
+["folding_and_scan::fold_div"]
+status = "INTENDED_CHANGE"
+ref = "#193"
+note = "a folded Int64 / Int64 is what DataFusion computes for the same arithmetic on a column (column_div)"
+expect = '{"result": {"v": {"type": "int64", "values": [3, 3]}}}'
+
+["folding_and_scan::fold_overflow"]
+status = "INTENDED_CHANGE"
+ref = "#193"
+note = "equals DataFusion's evaluation of the same arithmetic on a column (column_overflow), where Int64 wraps"
+expect = '{"result": {"v": {"type": "int64", "values": [0, 0]}}}'
+
+["folding_and_scan::boolean_identity_on_integer"]
+status = "BUG_FIXED"
+ref = "#209 (D-f)"
+note = "x & True was rewritten to x without a type check; DataFusion rejects Int64 AND Boolean, as it does for x & a Boolean column"
+expect = '{"error": {"class": "RuntimeError", "stage": "plan"}}'
+
+["folding_and_scan::scan_partitioned"]
+status = "BUG_FIXED"
+ref = "review F3 on #225"
+note = "the counting kernel ignored shift(partition_by=) and lagged across partitions; it now declines shift keyword arguments"
+expect = '{"result": {"count": 4, "rows": 4}}'
+
+# --- pairs ---------------------------------------------------------------------
+
+["pairs::unit_literal_eq"]
+status = "BUG_FIXED"
+ref = "#200, D8/P7/P8"
+note = "unwrap_cast truncated the microsecond literal to seconds"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["pairs::unit_folded_literal_eq"]
+status = "BUG_FIXED"
+ref = "design review F8"
+note = "a constant DataFusion folds to the same literal must compare like the literal"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["pairs::float_plus_decimal_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 design §2.6 (Decimal next to a float is that float)"
+note = "the Decimal reached the arithmetic as a string"
+expect = '{"result": {"v": {"type": "double", "values": ["NaN", 2.0, 1e-16, null]}}}'
+
+["pairs::float_gt_decimal_expression"]
+status = "BUG_FIXED"
+ref = "design review F8, #145 design §2.6"
+note = "a constant Decimal expression next to a float column compares like the Decimal literal 1.5"
+expect = '{"result": {"v": {"type": "bool", "values": [true, true, false, null]}}}'
+
+["pairs::naive_eq_aware_literal"]
+status = "INTENDED_CHANGE"
+ref = "D5"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::integer_eq_date_literal"]
+status = "INTENDED_CHANGE"
+ref = "pre-PR review I-3"
+note = "a plan-time error naming the column instead of an optimizer error at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::string_eq_date_literal"]
+status = "INTENDED_CHANGE"
+ref = "#145 design §2.6, plan change 4 (D-h)"
+note = "main compared the string column with the date's text"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::big_integer_literal"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "no decimal(38, 20) value equals 10**18; the widened cast overflowed at collect"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false]}}}'
+
+["pairs::big_integer_is_in"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "is_in agrees with the == disjunction; 10**18 equals no decimal(38, 20) value"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true]}}}'
+
+["pairs::big_integer_fill_null"]
+status = "BUG_FIXED"
+ref = "#227 (D-e)"
+note = "a plan-time error naming the column instead of an overflow at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["pairs::mixed_is_in"]
+status = "BUG_FIXED"
+ref = "review F1 on #225"
+note = "a list of an Int64 and a Float64 item compared every item as Float64; is_in now agrees with mixed_disjunction"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, false, null]}}}'
+
+["pairs::big_integer_column"]
+status = "PREEXISTING_BUG"
+ref = "#227 (column pair, not covered)"
+
+["pairs::float_gt_decimal_column"]
+status = "PREEXISTING_BUG"
+ref = "#228"
+
+["pairs::float_fill_decimal_column"]
+status = "PREEXISTING_BUG"
+ref = "#228"
+
+["pairs::far_date_eq_column"]
+status = "PREEXISTING_BUG"
+ref = "design review Part V, column pairs"
+note = "DataFusion compares a date and a timestamp column in nanoseconds; year 2300 overflows"
+
+["pairs::decimal_gt_negative_tiny_float"]
+status = "BUG_FIXED"
+ref = "#240 (design review F9), D-j"
+note = "main rounded the float to Decimal(30, 15), which is 0; the literal is its exact binary value, below 0.00"
+expect = '{"result": {"v": {"type": "bool", "values": [true, null]}}}'
+
+["pairs::decimal_eq_tiny_float"]
+status = "BUG_FIXED"
+ref = "#240 (design review F9), D-j"
+note = "1e-16 is not 0.00; main rounded it to Decimal(30, 15)"
+expect = '{"result": {"v": {"type": "bool", "values": [false, null]}}}'
+
+["pairs::decimal_ne_tiny_float"]
+status = "BUG_FIXED"
+ref = "#240 (design review F9), D-j"
+expect = '{"result": {"v": {"type": "bool", "values": [true, null]}}}'
+
+# --- widening ------------------------------------------------------------------
+
+["widening::small_float_then_fine"]
+status = "INTENDED_CHANGE"
+ref = "D-i, design review F7"
+note = "DataFusion's decimal128(38, 33) holds the column and both literals exactly, so it stands (D-i step 1) and 2.5 is placed there as a decimal, not cast at execution as main did (2.500000000000000152…); the precision is 38 where fine_alone gets 36 because DataFusion unifies the float as decimal(30, 15)"
+expect = '{"result": {"v": {"type": "decimal128(38, 33)", "values": ["Decimal(2.500000000000000000000000000000000)", "Decimal(1.230000000000000000000000000000000)"]}}}'
+
+["widening::fine_alone"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "a Decimal value keeps its digits when the column widens to them exactly"
+expect = '{"result": {"v": {"type": "decimal128(36, 33)", "values": ["Decimal(1.230000000000000000000000000000000)", "Decimal(1.230000000000000000000000000000000)"]}}}'
+
+["widening::two_decimals_too_wide"]
+status = "INTENDED_CHANGE"
+ref = "D-b, #145 design §1.3"
+note = "a plan-time error naming the literal instead of an overflow at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+# --- decimal widths ------------------------------------------------------------
+
+["decimal_widths::shift_fine_float_d256w"]
+status = "INTENDED_CHANGE"
+ref = "D-j, D-c"
+note = "1.236 is 1.2359999999999999875655…, which no scale of 20 holds; main rounded it to the column's scale"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::shift_rounded_float_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-c"
+note = "main rounded the default 1.236 to the column's 1.24"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::shift_rounded_float_d256"]
+status = "INTENDED_CHANGE"
+ref = "D-c"
+note = "main rounded the default 1.236 to the column's 1.24"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::fill_int_d32"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225 (pre-existing gap)"
+note = "DataFusion's common type of decimal32 and Int64 is int64, which rounded 1.23 to 1; the literal now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.23)", "Decimal(1.00)"]}}}'
+
+["decimal_widths::fill_int_d64"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225 (pre-existing gap)"
+note = "DataFusion's common type of decimal64 and Int64 is int64, which rounded 1.23 to 1; the literal now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal64(18, 2)", "values": ["Decimal(1.23)", "Decimal(1.00)"]}}}'
+
+["decimal_widths::fill_rounded_decimal_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "main rounded the literal to the column's scale; the shared type now widens to keep its digits, as for decimal128"
+expect = '{"result": {"v": {"type": "decimal128(10, 3)", "values": ["Decimal(1.230)", "Decimal(1.236)"]}}}'
+
+["decimal_widths::fill_tiny_decimal_d32"]
+status = "INTENDED_CHANGE"
+ref = "D-b"
+note = "a plan-time error naming the literal instead of a failure at collect"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["decimal_widths::tiny_decimal_d32"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "DataFusion has no common type for decimal32 and a scale-38 literal; the literal is placed among the column's values"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::int_negative_scale_d64"]
+status = "BUG_FIXED"
+ref = "#226, review of 58e4faa on #225"
+note = "DataFusion compares a decimal64 and an Int64 as int64, which panicked for a negative-scale column"
+expect = '{"result": {"v": {"type": "bool", "values": [false, false, null]}}}'
+
+["decimal_widths::decimal_d256"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "main returned 1 >= 1.2345 as true"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::float_d256"]
+status = "BUG_FIXED"
+ref = "review of 58e4faa on #225"
+note = "DataFusion cast the decimal256(76, 0) column to decimal256(76, 15), which overflowed at collect"
+expect = '{"result": {"v": {"type": "bool", "values": [false, true, null]}}}'
+
+["decimal_widths::coarse_fill_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_coalesce_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_if_else_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main unified the string literal with the column as strings; the exact zero now takes the column's type"
+expect = '{"result": {"v": {"type": "decimal256(76, -14)", "values": ["Decimal(1E+14)", "Decimal(0E+14)"]}}}'
+
+["decimal_widths::coarse_gt_tiny"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; DataFusion's common type overflows, so the literal is placed among the column's values"
+expect = '{"result": {"v": {"type": "bool", "values": [true, null]}}}'
+
+["decimal_widths::coarse_is_in_zero"]
+status = "BUG_FIXED"
+ref = "review of 414926b on #225"
+note = "main sent the literal as a string, which DataFusion could not cast to a negative scale; the item is placed exactly at the column's type"
+expect = '{"result": {"v": {"type": "bool", "values": [false, null]}}}'
+
+# --- value_kinds: literal kinds in value positions, NULL and float literals in the kernel ---
+
+["value_kinds::int_shift_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main read the int default as days since 1970 (1970-01-06); a number next to a date or timestamp is refused, as fill_null(5) was"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_shift_timestamp"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main read the int default as 5 microseconds since 1970; a number next to a date or timestamp is refused"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::float_shift_timestamp"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main truncated the float default to 1 microsecond since 1970"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::bool_shift_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main failed at collect in Arrow's cast; a Boolean next to a date is refused when the query is built"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_fill_date"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main's error was DataFusion's coalesce planning error; a number next to a date is ltseq's ValueError"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_fill_time_of_day"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; a datetime with a time of day is refused for a date column, Date64 included"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_shift_time_of_day"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main stored 06:00 in a Date64, which equals no date"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::date64_fill_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type for a Date64 and a datetime"
+expect = '{"result": {"ms": {"type": "int64", "values": [1704067200000, 1704153600000]}}}'
+
+["value_kinds::date64_fill_date"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type for a Date64 and a date"
+expect = '{"result": {"ms": {"type": "int64", "values": [1704067200000, 1704153600000]}}}'
+
+["value_kinds::aware_fill_date_local_midnight"]
+status = "INTENDED_CHANGE"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; an aware datetime next to a date column is its UTC instant, as in comparisons (P10), and Tokyo midnight is 15:00 UTC"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::aware_fill_date_utc_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main had no common type; an aware datetime at a UTC midnight is that date"
+expect = '{"result": {"v": {"type": "date32[day]", "values": ["datetime.date(2024, 1, 1)", "datetime.date(2024, 1, 2)"]}}}'
+
+["value_kinds::aware_shift_date_local_midnight"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "main stored 2024-01-01 for midnight 2024-01-02 in Tokyo (15:00 UTC on 2024-01-01), dropping the time of day"
+expect = '{"error": {"class": "ValueError", "stage": "plan"}}'
+
+["value_kinds::int_fill_decimal64_19_digits"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "DataFusion's int64 common type does not hold every 19-digit value; the column keeps its type"
+expect = '{"result": {"v": {"type": "decimal64(18, -1)", "values": ["Decimal(9.99999999999999999E+18)", "Decimal(0E+1)"]}}}'
+
+["value_kinds::int_fill_decimal32_negative_scale"]
+status = "BUG_FIXED"
+ref = "review of b6cc39f on #225"
+note = "Arrow casts a negative-scale Decimal32 to int64 in an i32, which overflowed; the column keeps its type"
+expect = '{"result": {"v": {"type": "decimal32(9, -1)", "values": ["Decimal(9.99999999E+9)", "Decimal(0E+1)"]}}}'

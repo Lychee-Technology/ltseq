@@ -22,7 +22,7 @@ SQL 的使用只留下一处有意的残余：`filter_where`（`src/ops/aggregat
 
 ### 演进：已退役的 SQL fallback 路径
 
-早期存在第三条策略：生成 SQL + 临时表（`transpiler/sql_gen.rs`），作为对原生表达别扭的分组/窗口式变换的“兼容与实现便利层”。该路径已被移除，原因正是 SQL 往返（`collect → MemTable → session.sql() → collect`）是物化黑洞；如今 `src/transpiler/` 只剩 `mod.rs`、`window_native.rs`、`optimization.rs`，`test_no_materialization_rule.py` 现在专门防止该模式回归。`ARCHITECTURE.md`/`DESIGN_SUMMARY.md` 仍在描述三路径版本，在这一点上已经过时。
+早期存在第三条策略：生成 SQL + 临时表（`transpiler/sql_gen.rs`），作为对原生表达别扭的分组/窗口式变换的“兼容与实现便利层”。该路径已被移除，原因正是 SQL 往返（`collect → MemTable → session.sql() → collect`）是物化黑洞；如今 `src/transpiler/` 只剩原生 lowering（`mod.rs`、`window_native.rs`）及其类型与字面量 helper，`test_no_materialization_rule.py` 现在专门防止该模式回归。`ARCHITECTURE.md`/`DESIGN_SUMMARY.md` 仍在描述三路径版本，在这一点上已经过时。
 
 ## 影响与取舍
 

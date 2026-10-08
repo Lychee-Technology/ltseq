@@ -1,0 +1,22 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "fold_int", "result": {"v": {"type": "int64", "values": [9007199254740992, 9007199254740992]}}}
+{"id": "fold_int_compare", "result": {"v": {"type": "bool", "values": [false, false]}}}
+{"id": "fold_div", "result": {"v": {"type": "double", "values": [3.5, 3.5]}}}
+{"id": "column_div", "result": {"v": {"type": "int64", "values": [3, 3]}}}
+{"id": "fold_floordiv", "result": {"v": {"type": "int64", "values": [-4, -4]}}}
+{"id": "column_floordiv", "result": {"v": {"type": "int64", "values": [-4, -4]}}}
+{"id": "fold_mod", "result": {"v": {"type": "int64", "values": [-1, -1]}}}
+{"id": "column_mod", "result": {"v": {"type": "int64", "values": [-1, -1]}}}
+{"id": "fold_overflow", "result": {"v": {"type": "double", "values": [1.8446744073709552e+19, 1.8446744073709552e+19]}}}
+{"id": "column_overflow", "result": {"v": {"type": "int64", "values": [0, 0]}}}
+{"id": "fold_float", "result": {"v": {"type": "int64", "values": [5, 5]}}}
+{"id": "boolean_identity", "result": {"v": {"type": "bool", "values": [true, false]}}}
+{"id": "boolean_identity_on_integer", "result": {"v": {"type": "int64", "values": [9007199254740993, 1]}}}
+{"id": "scan_int_div", "result": {"count": 4, "rows": 4}}
+{"id": "scan_float_add", "result": {"count": 4, "rows": 4}}
+{"id": "scan_big", "result": {"count": 6, "rows": 6}}
+{"id": "scan_mod", "result": {"count": 2, "rows": 2}}
+{"id": "scan_floordiv", "result": {"count": 4, "rows": 4}}
+{"id": "scan_float_multiply", "result": {"count": 4, "rows": 4}}
+{"id": "scan_partitioned", "result": {"count": 2, "rows": 4}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast string '1.5' to value of Int64 type", "stage": "plan"}, "id": "scan_inexact_default"}

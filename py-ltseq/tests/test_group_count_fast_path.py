@@ -7,6 +7,8 @@ kernel (`_inner.group_ordered_count`, which raises instead of falling back to
 Python) with the DataFusion path, `len(group_ordered(pred).first().to_pandas())`.
 """
 
+from decimal import Decimal
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -36,7 +38,9 @@ def _events() -> pa.Table:
         {
             "i": pa.array(range(len(U)), pa.int64()),
             "u": pa.array(U, pa.int64()),
-            "t": pa.array(T, pa.int32()),
+            # Int64: DataFusion computes Int32 differences in 32 bits, which
+            # the kernel does not, so Int32 arithmetic is not counted there.
+            "t": pa.array(T, pa.int64()),
         }
     )
 
@@ -143,6 +147,69 @@ def test_mod_and_floordiv_count_matches_reference(tmp_path, source, name):
     pred, expected = MOD_FLOORDIV_PREDICATES[name]
     assert t.group_ordered(pred).first().count() == expected
     assert _reference(t, pred) == expected
+
+
+# Integer arithmetic DataFusion computes in fewer than 64 bits, or UInt64
+# values the kernel would read as negative: the kernel declines these, so
+# the count is the reference's (wrapping included).
+NARROW_ARITHMETIC = {
+    "uint32_decreasing": (pa.uint32(), [5, 3, 10], lambda r: (r.v - r.v.shift(1)) > 4),
+    "int32_overflow": (pa.int32(), [2**31 - 1, -(2**31), 0], lambda r: (r.v - r.v.shift(1)) > 4),
+    "uint64_above_i64_max": (pa.uint64(), [2**63, 2**63 + 1, 5, 5, 2**64 - 1, 1], lambda r: r.v > r.v.shift(1)),
+}
+
+
+@pytest.mark.parametrize("name", NARROW_ARITHMETIC)
+def test_kernel_declines_what_it_would_compute_differently(name):
+    dtype, values, pred = NARROW_ARITHMETIC[name]
+    t = LTSeq.from_arrow(
+        pa.table({"i": pa.array(range(len(values)), pa.int64()), "v": pa.array(values, dtype)})
+    ).sort("i")
+    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
+        _kernel(t, pred)
+    assert t.group_ordered(pred).first().count() == _reference(t, pred)
+
+
+# shift() keyword arguments the kernel does not implement: it reads the
+# previous row of the whole table (no partitions) and never sees the
+# default, which the reference checks against the column (D-c on #225).
+# The kernel declines them, so count() is the reference's count or error.
+SHIFT_KWARGS = {
+    "partition_by_name": lambda r: r.x != r.x.shift(1, partition_by="g"),
+    "partition_by_column": lambda r: r.x != r.x.shift(1, partition_by=r.g),
+    "default_exact": lambda r: r.x != r.x.shift(1, default=7),
+    "default_decimal": lambda r: r.x != r.x.shift(1, default=Decimal("1.5")),
+    "default_float": lambda r: r.x != r.x.shift(1, default=1.5),
+    "default_string": lambda r: r.x != r.x.shift(1, default="a"),
+}
+
+
+def _count_outcome(compute):
+    try:
+        return ("ok", compute())
+    except Exception as error:  # the reference refusing a predicate is an outcome too
+        return ("error", type(error).__name__)
+
+
+@pytest.mark.parametrize("name", SHIFT_KWARGS)
+@pytest.mark.parametrize("source", ["memory", "parquet"])
+def test_kernel_declines_shift_keyword_arguments(tmp_path, source, name):
+    events = pa.table({
+        "i": pa.array(range(4), pa.int64()),
+        "g": ["a", "b", "a", "b"],
+        "x": pa.array([1, 1, 2, 2], pa.int64()),
+    })
+    if source == "memory":
+        t = LTSeq.from_arrow(events).sort("i")
+    else:
+        path = str(tmp_path / "events.parquet")
+        pq.write_table(events, path, row_group_size=2)
+        t = LTSeq.read_parquet(path).assume_sorted("i")
+    pred = SHIFT_KWARGS[name]
+    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
+        _kernel(t, pred)
+    reference = _count_outcome(lambda: _reference(t, pred))
+    assert _count_outcome(lambda: t.group_ordered(pred).first().count()) == reference
 
 
 # UInt64 values at or above 2^63, which the counting kernel reads as

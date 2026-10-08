@@ -16,17 +16,17 @@
 //! | PyExpr | Evaluation |
 //! |--------|-----------|
 //! | `Column("x")` | Read column value at current row |
-//! | `Call { func: "shift", on: Column("x"), args: [1] }` | Read column value at previous row |
+//! | `Call { func: "shift", on: Column("x"), args: [1] }`, no kwargs | Read column value at previous row |
 //! | `Call { func: "is_null" / "is_not_null", on: expr }` | Check if evaluated value is (not) null |
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
 //! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
-//! | `Literal { value, dtype }` | Constant value |
+//! | `Literal` (Null, Boolean, Int64, Float64, String) | Constant value |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::types::PyExpr;
+use crate::types::{LiteralValue, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
@@ -44,15 +44,115 @@ use std::sync::Arc;
 // Expression eligibility check
 // ============================================================================
 
-/// Check if a PyExpr can be evaluated by the linear scan engine.
+/// Check if a PyExpr can be evaluated by the linear scan engine on a table
+/// of `schema`.
 ///
 /// Returns true if the expression tree:
 /// 1. Contains at least one shift(1) call (otherwise, it's a simple column/expression
 ///    and should use the standard DataFusion IS DISTINCT FROM LAG path)
-/// 2. Only contains operations we support: Column, shift(1), is_null, is_not_null, BinOp,
-///    UnaryOp, Literal
-pub fn can_linear_scan(expr: &PyExpr) -> bool {
-    is_supported_expr(expr) && contains_shift(expr)
+/// 2. Only contains operations we support: Column, shift(1) without keyword
+///    arguments, is_null, is_not_null, BinOp, UnaryOp, and literals of the
+///    kinds the evaluator has values for (`Value`)
+/// 3. Computes, at every node, what DataFusion computes for it on these
+///    column types ([`kernel_type`]), so the count equals the materialized
+///    reference. NULL handling still differs (#189).
+pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
+    is_supported_expr(expr)
+        && contains_shift(expr)
+        && kernel_type(expr, schema, has_fused_form(expr, schema)) == Some(DataType::Boolean)
+}
+
+/// The type DataFusion gives `expr` on a table of `schema`, when the kernel
+/// computes the same values for it; `None` when it does not. `fused` says
+/// whether the fused evaluator takes the whole predicate ([`has_fused_form`])
+/// rather than the multi-pass one.
+///
+/// The kernel compares and subtracts integers as `i64`, timestamps as raw
+/// ticks, and has no integer/float coercion. DataFusion instead coerces both
+/// operands to a common type (`BinaryTypeCoercer`, the rule its analyzer
+/// uses) and computes there. The two agree when:
+///
+/// - a comparison is between integers that `i64` holds exactly (`Int64`,
+///   `Int32`, `UInt32`), between timestamps of one type, between `UInt64`s
+///   for `==`/`!=` (equal bit patterns), between `Float64`s for the operators
+///   the kernel has float arms for (`==`, `!=`, `>`), or between strings for
+///   `!=`; or, in a fused predicate, an integer is compared `>` with an
+///   integral float literal below 2^53, which the fused evaluator reads as
+///   that integer (#145 PR-4) and the multi-pass one cannot compare;
+/// - arithmetic is computed by DataFusion in `Int64` (`+ - * /`) or `Float64`
+///   (`-`). `Int32`/`UInt32` arithmetic DataFusion computes in 32 bits,
+///   wrapping (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic
+///   gives a duration, and `UInt64` past `i64::MAX` is negative to the kernel.
+///
+/// A NULL literal is declined: it makes its comparison or arithmetic NULL
+/// on every row, and the multi-pass evaluator's `&` turns `false AND NULL`
+/// into a boundary where DataFusion's is false (#189).
+fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataType> {
+    use crate::transpiler::binary_input_types;
+    use DataType as T;
+    let exact_integer = |t: &DataType| matches!(t, T::Int64 | T::Int32 | T::UInt32);
+    let type_of = |expr: &PyExpr| kernel_type(expr, schema, fused);
+    match expr {
+        PyExpr::Column(name) => {
+            let t = schema.field_with_name(name).ok()?.data_type().clone();
+            let supported = exact_integer(&t)
+                || matches!(t, T::UInt64 | T::Float64 | T::Boolean | T::Utf8 | T::Timestamp(..));
+            supported.then_some(t)
+        }
+        PyExpr::Literal(value) => match value {
+            LiteralValue::Int64(_) => Some(T::Int64),
+            LiteralValue::Float64(_) => Some(T::Float64),
+            LiteralValue::Boolean(_) => Some(T::Boolean),
+            LiteralValue::String(_) => Some(T::Utf8),
+            // NULL (see above); Decimal, date and timestamp literals have no
+            // kernel value.
+            _ => None,
+        },
+        PyExpr::Call { func, on, .. } => {
+            let on_type = type_of(on.as_deref()?)?;
+            match func.as_str() {
+                "shift" => Some(on_type),
+                "is_null" | "is_not_null" => Some(T::Boolean),
+                _ => None,
+            }
+        }
+        PyExpr::UnaryOp { op, operand } => {
+            (op == "Not" && type_of(operand)? == T::Boolean).then_some(T::Boolean)
+        }
+        PyExpr::Alias { expr, .. } => type_of(expr),
+        PyExpr::Window { .. } => None,
+        PyExpr::BinOp { op, left, right } => {
+            let (l, r) = (type_of(left)?, type_of(right)?);
+            match op.as_str() {
+                "And" | "Or" => (l == T::Boolean && r == T::Boolean).then_some(T::Boolean),
+                "Eq" | "Ne" | "Gt" | "Lt" | "Ge" | "Le" => {
+                    let same = |t: &DataType| l == *t && r == *t;
+                    let agrees = (exact_integer(&l) && exact_integer(&r))
+                        || (matches!(l, T::Timestamp(..)) && l == r)
+                        || (same(&T::UInt64) && matches!(op.as_str(), "Eq" | "Ne"))
+                        || (same(&T::Float64) && matches!(op.as_str(), "Eq" | "Ne" | "Gt"))
+                        || (same(&T::Utf8) && op == "Ne")
+                        || (fused
+                            && exact_integer(&l)
+                            && op == "Gt"
+                            && get_literal_i64(right).is_some());
+                    agrees.then_some(T::Boolean)
+                }
+                "Add" | "Sub" | "Mul" | "Div" => {
+                    let operator = match crate::transpiler::parse_binary_op(op).ok()? {
+                        crate::transpiler::BinaryOp::Native(operator) => operator,
+                        crate::transpiler::BinaryOp::FloorDiv => return None,
+                    };
+                    match binary_input_types(&l, &operator, &r).ok()? {
+                        (T::Int64, T::Int64) => Some(T::Int64),
+                        (T::Float64, T::Float64) if op == "Sub" => Some(T::Float64),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Check if the expression tree contains at least one shift() call.
@@ -91,7 +191,9 @@ const SUPPORTED_BINARY_OPS: [&str; 12] = [
 fn is_supported_expr(expr: &PyExpr) -> bool {
     match expr {
         PyExpr::Column(_) => true,
-        PyExpr::Literal { .. } => true,
+        // Decimal, date and timestamp literals have no `Value`; the
+        // DataFusion path evaluates predicates that use them.
+        PyExpr::Literal(value) => literal_to_value(value).is_some(),
         PyExpr::BinOp { op, left, right } => {
             SUPPORTED_BINARY_OPS.contains(&op.as_str())
                 && is_supported_expr(left)
@@ -101,7 +203,7 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
         PyExpr::Call {
             func,
             args,
-            kwargs: _,
+            kwargs,
             on,
         } => {
             match func.as_str() {
@@ -110,24 +212,13 @@ fn is_supported_expr(expr: &PyExpr) -> bool {
                     if !matches!(on.as_deref(), Some(PyExpr::Column(_))) {
                         return false;
                     }
-                    // First arg must be literal integer 1
-                    if args.len() != 1 {
-                        return false;
-                    }
-                    match &args[0] {
-                        PyExpr::Literal { value, dtype } => {
-                            // Accept shift(1) only
-                            if value != "1" {
-                                return false;
-                            }
-                            // Must be integer type
-                            matches!(
-                                dtype.as_str(),
-                                "Int64" | "Int32" | "int" | "UInt64" | "UInt32"
-                            )
-                        }
-                        _ => false,
-                    }
+                    // The only argument must be the integer literal 1, with no
+                    // keyword arguments: the evaluator reads the previous row of
+                    // the whole table, so it has no `partition_by`, and it does
+                    // not check a `default` against the column (decision D-c on
+                    // #225). The reference evaluates both.
+                    kwargs.is_empty()
+                        && matches!(args.as_slice(), [PyExpr::Literal(LiteralValue::Int64(1))])
                 }
                 "is_null" | "is_not_null" => {
                     // is_null() / is_not_null() (also what `== None` /
@@ -156,33 +247,18 @@ enum Value {
     Str(String),
 }
 
-/// Parse a literal PyExpr into a Value
-fn literal_to_value(value: &str, dtype: &str) -> Value {
-    match dtype {
-        "Int64" | "Int32" | "int" | "UInt64" | "UInt32" => {
-            value.parse::<i64>().map(Value::Int64).unwrap_or(Value::Null)
-        }
-        "Float64" | "Float32" | "float" => value
-            .parse::<f64>()
-            .map(Value::Float64)
-            .unwrap_or(Value::Null),
-        "Utf8" | "str" | "String" => Value::Str(value.to_string()),
-        "Boolean" | "bool" => match value {
-            "True" | "true" | "1" => Value::Bool(true),
-            "False" | "false" | "0" => Value::Bool(false),
-            _ => Value::Null,
-        },
-        "NoneType" | "null" | "None" => Value::Null,
-        _ => {
-            // Try numeric parsing as fallback
-            if let Ok(v) = value.parse::<i64>() {
-                Value::Int64(v)
-            } else if let Ok(v) = value.parse::<f64>() {
-                Value::Float64(v)
-            } else {
-                Value::Str(value.to_string())
-            }
-        }
+/// The evaluator's value for a literal, or `None` for the kinds it has no
+/// value for: Decimals, dates and timestamps. An integral Decimal is not
+/// an `Int64` here: the evaluator would divide by it as integers, where
+/// DataFusion keeps the fraction (`x / Decimal("2")`).
+fn literal_to_value(value: &LiteralValue) -> Option<Value> {
+    match value {
+        LiteralValue::Null => Some(Value::Null),
+        LiteralValue::Boolean(v) => Some(Value::Bool(*v)),
+        LiteralValue::Int64(v) => Some(Value::Int64(*v)),
+        LiteralValue::Float64(v) => Some(Value::Float64(*v)),
+        LiteralValue::String(v) => Some(Value::Str(v.clone())),
+        LiteralValue::Decimal128 { .. } | LiteralValue::Date32(_) | LiteralValue::Timestamp { .. } => None,
     }
 }
 
@@ -253,6 +329,43 @@ pub(crate) fn fused_boundaries(
     }
     let mut out = vec![false; batch.num_rows()];
     fuse_eval(expr, batch, name_to_idx, prev, &mut out).then_some(out)
+}
+
+/// Whether [`fused_boundaries`] evaluates `expr` on batches of `schema`:
+/// `|` and `&` of its two leaf shapes, on columns it reads as `i64`
+/// ([`coerce_to_i64`]). Eligibility needs it before anything is collected;
+/// `fuse_eval` is the evaluator it describes.
+fn has_fused_form(expr: &PyExpr, schema: &ArrowSchema) -> bool {
+    use DataType as T;
+    let as_i64 = |name: &str| {
+        schema.field_with_name(name).is_ok_and(|field| {
+            matches!(
+                field.data_type(),
+                T::Int64 | T::UInt64 | T::Int32 | T::UInt32 | T::Timestamp(..)
+            )
+        })
+    };
+    match expr {
+        PyExpr::BinOp { op, left, right } if op == "Or" || op == "And" => {
+            has_fused_form(left, schema) && has_fused_form(right, schema)
+        }
+        PyExpr::BinOp { op, left, right } if op == "Ne" => {
+            shifted_column(left, right).is_some_and(as_i64)
+        }
+        PyExpr::BinOp { op, left, right } if op == "Gt" => match left.as_ref() {
+            PyExpr::BinOp {
+                op: sub_op,
+                left: sub_left,
+                right: sub_right,
+            } => {
+                sub_op == "Sub"
+                    && shifted_column(sub_left, sub_right).is_some_and(as_i64)
+                    && get_literal_i64(right).is_some()
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Recursively fuse-evaluate `expr` into `out` (one flag per row of `batch`).
@@ -370,24 +483,18 @@ fn shifted_column<'a>(left: &'a PyExpr, right: &PyExpr) -> Option<&'a str> {
     }
 }
 
-/// Extract an i64 literal value from a PyExpr::Literal
+/// An integer threshold for the fused evaluator: an `Int64`, or a `Float64`
+/// that is a finite integer below 2^53 in magnitude (truncating -0.5 to 0
+/// would change `diff > -0.5`, NaN/Inf have no integer meaning, and from 2^53
+/// on the Float64 reference rounds the Int64 diff, so an exact i64
+/// comparison would disagree with it). A string is not a number, so `> "1"`
+/// has no fused form; a Decimal never reaches here (`can_linear_scan`).
 fn get_literal_i64(expr: &PyExpr) -> Option<i64> {
     match expr {
-        PyExpr::Literal { value, dtype } => {
-            // value is a String representation; parse based on dtype
-            match dtype.as_str() {
-                "Int64" | "Int32" | "Int16" | "Int8" => value.parse::<i64>().ok(),
-                "Float64" | "Float32" => value.parse::<f64>().ok().and_then(|f| {
-                    // A float qualifies only when it is a finite integer below
-                    // 2^53 in magnitude: truncating -0.5 to 0 would change
-                    // `diff > -0.5`, NaN/Inf have no integer meaning, and from
-                    // 2^53 on the Float64 reference rounds the Int64 diff, so
-                    // an exact i64 comparison would disagree with it.
-                    (f.is_finite() && f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0)
-                        .then_some(f as i64)
-                }),
-                _ => value.parse::<i64>().ok(),
-            }
+        PyExpr::Literal(LiteralValue::Int64(v)) => Some(*v),
+        PyExpr::Literal(LiteralValue::Float64(f)) => {
+            (f.is_finite() && f.fract() == 0.0 && f.abs() < 9_007_199_254_740_992.0)
+                .then_some(*f as i64)
         }
         _ => None,
     }
@@ -442,9 +549,10 @@ fn vectorized_eval_expr(
             Ok(Arc::clone(batch.column(*idx)))
         }
         
-        PyExpr::Literal { value, dtype } => {
+        PyExpr::Literal(value) => {
             let n = batch.num_rows();
-            let val = literal_to_value(value, dtype);
+            let val = literal_to_value(value)
+                .ok_or_else(|| format!("Unsupported literal in linear scan: {value}"))?;
             match val {
                 Value::Int64(v) => Ok(Arc::new(Int64Array::from(vec![v; n])) as ArrayRef),
                 Value::Float64(v) => Ok(Arc::new(Float64Array::from(vec![v; n])) as ArrayRef),
@@ -1011,18 +1119,12 @@ mod tests {
                 left: Box::new(PyExpr::Column("eventtime".to_string())),
                 right: Box::new(PyExpr::Call {
                     func: "shift".to_string(),
-                    args: vec![PyExpr::Literal {
-                        value: "1".to_string(),
-                        dtype: "Int64".to_string(),
-                    }],
+                    args: vec![PyExpr::Literal(LiteralValue::Int64(1))],
                     kwargs: HashMap::new(),
                     on: Some(Box::new(PyExpr::Column("eventtime".to_string()))),
                 }),
             }),
-            right: Box::new(PyExpr::Literal {
-                value: "10".to_string(),
-                dtype: "Int64".to_string(),
-            }),
+            right: Box::new(PyExpr::Literal(LiteralValue::Int64(10))),
         }
     }
 
@@ -1176,11 +1278,8 @@ mod tests {
         PyExpr::Column(name.to_string())
     }
 
-    fn lit(value: &str, dtype: &str) -> PyExpr {
-        PyExpr::Literal {
-            value: value.to_string(),
-            dtype: dtype.to_string(),
-        }
+    fn lit(value: LiteralValue) -> PyExpr {
+        PyExpr::Literal(value)
     }
 
     fn binop(op: &str, left: PyExpr, right: PyExpr) -> PyExpr {
@@ -1194,8 +1293,18 @@ mod tests {
     fn shift1(name: &str) -> PyExpr {
         PyExpr::Call {
             func: "shift".to_string(),
-            args: vec![lit("1", "Int64")],
+            args: vec![lit(LiteralValue::Int64(1))],
             kwargs: HashMap::new(),
+            on: Some(Box::new(col(name))),
+        }
+    }
+
+    /// `c.shift(1, key=value)`
+    fn shift_with(name: &str, key: &str, value: PyExpr) -> PyExpr {
+        PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![lit(LiteralValue::Int64(1))],
+            kwargs: HashMap::from([(key.to_string(), value)]),
             on: Some(Box::new(col(name))),
         }
     }
@@ -1206,11 +1315,11 @@ mod tests {
     }
 
     /// `(c - c.shift(1)) > threshold`
-    fn gap_over(name: &str, threshold: &str) -> PyExpr {
+    fn gap_over(name: &str, threshold: i64) -> PyExpr {
         binop(
             "Gt",
             binop("Sub", col(name), shift1(name)),
-            lit(threshold, "Int64"),
+            lit(LiteralValue::Int64(threshold)),
         )
     }
 
@@ -1218,13 +1327,13 @@ mod tests {
     fn fusable_predicates() -> Vec<PyExpr> {
         vec![
             changes("u"),
-            gap_over("t", "4"),
-            gap_over("ts", "50"),
-            binop("Or", changes("u"), gap_over("t", "4")),
-            binop("And", changes("u"), gap_over("ts", "50")),
+            gap_over("t", 4),
+            gap_over("ts", 50),
+            binop("Or", changes("u"), gap_over("t", 4)),
+            binop("And", changes("u"), gap_over("ts", 50)),
             binop(
                 "Or",
-                binop("And", changes("u"), gap_over("t", "4")),
+                binop("And", changes("u"), gap_over("t", 4)),
                 changes("t"),
             ),
         ]
@@ -1360,6 +1469,18 @@ mod tests {
 
     /// Shapes outside the fused set are declined, with or without a previous
     /// row, so the caller falls back instead of getting a guessed answer.
+    /// Eligibility tells from the schema alone, before anything is
+    /// collected, which predicates the fused evaluator takes.
+    #[test]
+    fn fused_form_is_known_from_the_schema() {
+        let batch = boundary_batch(false);
+        let idx = name_index(&batch);
+        for expr in fusable_predicates() {
+            assert!(has_fused_form(&expr, &batch.schema()), "expr={expr:?}");
+            assert!(fused_boundaries(&expr, &batch, &idx, None).is_some(), "expr={expr:?}");
+        }
+    }
+
     #[test]
     fn fused_evaluator_declines_unsupported_shapes() {
         let mut batch = boundary_batch(false);
@@ -1379,17 +1500,123 @@ mod tests {
             binop("Ne", shift1("u"), col("u")),                  // swapped operands
             binop("Ne", col("u"), shift1("t")),                  // different columns
             changes("s"),                                        // not i64-coercible
-            binop("Gt", binop("Sub", col("t"), shift1("t")), lit("1.5", "Float64")),
-            binop("Ge", binop("Sub", col("t"), shift1("t")), lit("4", "Int64")),
+            binop("Gt", binop("Sub", col("t"), shift1("t")), lit(LiteralValue::Float64(1.5))),
+            binop("Ge", binop("Sub", col("t"), shift1("t")), lit(LiteralValue::Int64(4))),
+            binop("Gt", col("u"), lit(LiteralValue::Float64(2.0))), // not a gap
             binop("Or", changes("u"), changes("s")),             // one leaf unsupported
         ];
         for expr in unsupported {
+            assert!(!has_fused_form(&expr, &batch.schema()), "expr={expr:?}");
             assert_eq!(fused_boundaries(&expr, &batch, &idx, None), None, "expr={expr:?}");
             assert_eq!(
                 fused_boundaries(&expr, &batch, &idx, Some(&prev)),
                 None,
                 "expr={expr:?}"
             );
+        }
+    }
+
+    /// A Decimal literal anywhere in a predicate sends it to the DataFusion
+    /// path, integral or not: as an `Int64`, `x / Decimal("2")` would divide
+    /// as integers here.
+    #[test]
+    fn decimal_literals_are_not_linear_scan_values() {
+        let two = |scale: i8| {
+            lit(LiteralValue::Decimal128 { value: 2 * 10i128.pow(scale as u32), precision: 2, scale })
+        };
+        let schema = ArrowSchema::new(vec![Field::new("x", DataType::Int64, true)]);
+        for scale in [0, 1] {
+            let halves = binop("Gt", binop("Div", col("x"), two(scale)), binop("Div", shift1("x"), two(scale)));
+            assert!(!can_linear_scan(&halves, &schema), "scale {scale}");
+            let gap = binop("Gt", binop("Sub", col("x"), shift1("x")), two(scale));
+            assert!(!can_linear_scan(&gap, &schema), "scale {scale}");
+        }
+        assert!(can_linear_scan(
+            &binop("Gt", binop("Div", col("x"), lit(LiteralValue::Int64(2))), shift1("x")),
+            &schema
+        ));
+    }
+
+    /// The kernel takes a predicate only where it computes what DataFusion
+    /// computes on the column types at hand.
+    #[test]
+    fn eligibility_follows_the_column_types() {
+        use datafusion::arrow::datatypes::TimeUnit;
+        let int = |v| lit(LiteralValue::Int64(v));
+        let float = |v| lit(LiteralValue::Float64(v));
+        let gap = |c: &str, n| binop("Gt", binop("Sub", col(c), shift1(c)), int(n));
+        let float_gap = |c: &str, v| binop("Gt", binop("Sub", col(c), shift1(c)), float(v));
+        let null = || lit(LiteralValue::Null);
+        let types = [
+            ("i64", DataType::Int64),
+            ("i32", DataType::Int32),
+            ("u32", DataType::UInt32),
+            ("u64", DataType::UInt64),
+            ("f64", DataType::Float64),
+            ("ts", DataType::Timestamp(TimeUnit::Second, None)),
+            ("ts_us", DataType::Timestamp(TimeUnit::Microsecond, None)),
+            ("s", DataType::Utf8),
+            ("b", DataType::Boolean),
+            ("d", DataType::Date32),
+        ];
+        let schema = ArrowSchema::new(
+            types.iter().map(|(name, t)| Field::new(*name, t.clone(), true)).collect::<Vec<_>>(),
+        );
+        let table: Vec<(PyExpr, bool)> = vec![
+            // Comparisons of a column with its previous value.
+            (changes("i64"), true),
+            (changes("i32"), true),
+            (changes("u32"), true),
+            (changes("u64"), true),
+            (changes("ts"), true),
+            (changes("f64"), true),
+            (changes("s"), true),
+            (changes("b"), false),
+            (changes("d"), false),
+            (binop("Gt", col("u64"), shift1("u64")), false),
+            (binop("Lt", col("f64"), shift1("f64")), false),
+            (binop("Gt", col("ts"), shift1("ts_us")), false),
+            // Arithmetic: only what DataFusion computes in Int64 or Float64.
+            (gap("i64", 4), true),
+            (gap("i32", 4), false),
+            (gap("u32", 4), false),
+            (gap("u64", 4), false),
+            (gap("ts", 1800), false),
+            (binop("Gt", binop("Sub", col("i32"), int(1)), shift1("i32")), true),
+            (binop("Gt", binop("Sub", col("f64"), shift1("f64")), float(0.5)), true),
+            (binop("Gt", binop("Add", col("f64"), shift1("f64")), float(0.5)), false),
+            // Float thresholds against integers: integral and below 2^53 only.
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(2.0)), true),
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(1.5)), false),
+            (binop("Ge", binop("Sub", col("i64"), shift1("i64")), float(2.0)), false),
+            (
+                binop("Gt", binop("Sub", col("i64"), shift1("i64")), lit(LiteralValue::String("1".into()))),
+                false,
+            ),
+            // Only the fused evaluator reads a float threshold as an integer,
+            // so the whole predicate must be fused (review of b6cc39f on #225).
+            (binop("Or", changes("i64"), float_gap("i64", 2.0)), true),
+            (binop("Or", changes("i64"), binop("Gt", col("i64"), float(2.0))), false),
+            (binop("Or", float_gap("i64", 2.0), binop("Gt", col("i64"), int(3))), false),
+            (binop("Or", changes("i64"), binop("Gt", col("i64"), int(3))), true),
+            (binop("Or", changes("i64"), gap("ts", 1800)), false),
+            // A NULL literal is NULL on every row, which the multi-pass `&`
+            // counts differently (#189).
+            (binop("Gt", binop("Sub", col("i64"), shift1("i64")), null()), false),
+            (binop("And", changes("i64"), binop("Gt", col("i64"), null())), false),
+            (
+                binop("And", changes("i64"), binop("Gt", binop("Sub", col("i64"), null()), int(0))),
+                false,
+            ),
+            // A shift with keyword arguments is the reference's to evaluate.
+            (binop("Ne", col("i64"), shift_with("i64", "default", int(7))), false),
+            (
+                binop("Ne", col("i64"), shift_with("i64", "partition_by", lit(LiteralValue::String("s".into())))),
+                false,
+            ),
+        ];
+        for (expr, eligible) in table {
+            assert_eq!(can_linear_scan(&expr, &schema), eligible, "{expr:?}");
         }
     }
 }

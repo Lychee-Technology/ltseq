@@ -1,0 +1,24 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "shift_float_d32", "result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.50)", "Decimal(1.23)"]}}}
+{"id": "shift_float_d64", "result": {"v": {"type": "decimal64(18, 2)", "values": ["Decimal(1.50)", "Decimal(1.23)"]}}}
+{"id": "shift_float_d256", "result": {"v": {"type": "decimal256(20, 2)", "values": ["Decimal(1.50)", "Decimal(1.23)"]}}}
+{"id": "shift_float_d256w", "result": {"v": {"type": "decimal256(76, 20)", "values": ["Decimal(1.50000000000000000000)", "Decimal(1.23000000000000000000)"]}}}
+{"id": "shift_rounded_float_d32", "result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.24)", "Decimal(1.23)"]}}}
+{"id": "shift_rounded_float_d256", "result": {"v": {"type": "decimal256(20, 2)", "values": ["Decimal(1.24)", "Decimal(1.23)"]}}}
+{"id": "shift_fine_float_d256w", "result": {"v": {"type": "decimal256(76, 20)", "values": ["Decimal(1.23600000000000000000)", "Decimal(1.23000000000000000000)"]}}}
+{"id": "fill_float_d256", "result": {"v": {"type": "decimal256(33, 15)", "values": ["Decimal(1.230000000000000)", "Decimal(1.500000000000000)"]}}}
+{"id": "fill_float_d256w", "result": {"v": {"type": "decimal256(76, 20)", "values": ["Decimal(1.23000000000000000000)", "Decimal(1.50000000000000000000)"]}}}
+{"id": "fill_int_d32", "result": {"v": {"type": "int64", "values": [1, 1]}}}
+{"id": "fill_int_d64", "result": {"v": {"type": "int64", "values": [1, 1]}}}
+{"id": "fill_rounded_decimal_d32", "result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.23)", "Decimal(1.24)"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "fill_tiny_decimal_d32"}
+{"id": "fill_exact_scale38_d32", "result": {"v": {"type": "decimal32(9, 2)", "values": ["Decimal(1.23)", "Decimal(0.10)"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "tiny_decimal_d32"}
+{"error": {"class": "PanicException", "msg": "attempt to multiply with overflow", "stage": "collect"}, "id": "int_negative_scale_d64"}
+{"id": "decimal_d256", "result": {"v": {"type": "bool", "values": [true, true, null]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Arrow error: Cast error: Cannot cast to Decimal256(76, 15). Overflowing on 1000000000000000000000000000000000000000000000000000000000000000000000000000", "stage": "collect"}, "id": "float_d256"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_fill_zero"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_coalesce_zero"}
+{"id": "coarse_if_else_zero", "result": {"v": {"type": "string", "values": ["100000000000000", "0E-38"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_gt_tiny"}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "coarse_is_in_zero"}

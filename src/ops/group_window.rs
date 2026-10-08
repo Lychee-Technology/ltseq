@@ -17,6 +17,7 @@
 
 use crate::error::LtseqError;
 use crate::transpiler::window_native::aggregate_to_window;
+use crate::transpiler::Resolver;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -181,8 +182,19 @@ fn rn_order() -> Vec<Sort> {
 }
 
 /// Convert a group-dialect node into a native DataFusion expression over the
-/// internal grouping columns.
+/// internal grouping columns, resolved against `schema` (see
+/// `transpiler::Resolver`).
 fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, String> {
+    let rx = Resolver::new(schema)?;
+    rx.resolve(lower_group_node(node, &rx)?)
+}
+
+/// Lower one group-dialect node, through `Resolver::lowering`.
+fn lower_group_node(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
+    rx.lowering(|| lower_group_node_once(node, rx))
+}
+
+fn lower_group_node_once(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
     match node {
         GroupNode::Count => aggregate_to_window(
             agg_fn::count(lit(1i64)),
@@ -236,7 +248,7 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
                         .to_string(),
                 );
             }
-            let inner = crate::transpiler::pyexpr_to_datafusion(pred, schema)?;
+            let inner = crate::transpiler::lower_expr(pred, rx)?;
             let case_expr = case(inner)
                 .when(lit(true), lit(1i64))
                 .otherwise(lit(0i64))
@@ -253,12 +265,12 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
             Ok(window.eq(lit(expected)))
         }
         GroupNode::BinOp { op, left, right } => {
-            let left_expr = group_node_to_expr(*left, schema)?;
-            let right_expr = group_node_to_expr(*right, schema)?;
-            crate::transpiler::binary_expr(&op, left_expr, right_expr)
+            let left_expr = lower_group_node(*left, rx)?;
+            let right_expr = lower_group_node(*right, rx)?;
+            crate::transpiler::binary_expr(&op, left_expr, right_expr, rx)
         }
         GroupNode::UnaryOp { op, operand } => {
-            let operand_expr = group_node_to_expr(*operand, schema)?;
+            let operand_expr = lower_group_node(*operand, rx)?;
             match op.as_str() {
                 "Not" => Ok(Expr::Not(Box::new(operand_expr))),
                 "IsNull" => Ok(operand_expr.is_null()),
@@ -266,7 +278,7 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
                 other => Err(format!("Unknown group unary operator: '{}'", other)),
             }
         }
-        GroupNode::Literal(py_expr) => crate::transpiler::pyexpr_to_datafusion(py_expr, schema),
+        GroupNode::Literal(py_expr) => crate::transpiler::lower_expr(py_expr, rx),
     }
 }
 

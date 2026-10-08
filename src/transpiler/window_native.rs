@@ -19,7 +19,7 @@
 //! When `partition_by` is specified, any sort expression that matches a partition
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
-use crate::types::PyExpr;
+use crate::types::{arg, Arg, LiteralValue, PyExpr};
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
@@ -41,7 +41,7 @@ use datafusion::logical_expr::WindowFrameUnits;
 
 use std::collections::HashMap;
 
-use super::pyexpr_to_datafusion;
+use super::Resolver;
 
 /// Peek at partition_by column names from a PyExpr's kwargs without full conversion.
 ///
@@ -55,9 +55,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
         _ => return vec![],
     };
     match kwargs.get("partition_by") {
-        Some(PyExpr::Literal { value, dtype }) if dtype == "String" || dtype == "Utf8" => {
-            vec![value.clone()]
-        }
+        Some(PyExpr::Literal(LiteralValue::String(name))) => vec![name.clone()],
         Some(PyExpr::Column(name)) => vec![name.clone()],
         _ => vec![],
     }
@@ -66,13 +64,13 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
 /// Extract `partition_by` from kwargs and convert to `Vec<Expr>`.
 ///
 /// Handles these forms from the Python side:
-/// - `partition_by="col"` → `PyExpr::Literal { value: "col", dtype: "String" }` → `col("col")`
+/// - `partition_by="col"` → a `String` literal → `col("col")`
 /// - `partition_by=r.col` → `PyExpr::Column("col")` → `col("col")`
 ///
 /// Returns an empty Vec if no `partition_by` kwarg is present.
 fn extract_partition_by(
     kwargs: &HashMap<String, PyExpr>,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Vec<Expr>, String> {
     let pb = match kwargs.get("partition_by") {
         Some(pb) => pb,
@@ -80,14 +78,12 @@ fn extract_partition_by(
     };
     match pb {
         // partition_by="col_name" — string literal used as column name
-        PyExpr::Literal { value, dtype } if dtype == "String" || dtype == "Utf8" => {
-            Ok(vec![col(value)])
-        }
+        PyExpr::Literal(LiteralValue::String(name)) => Ok(vec![col(name)]),
         // partition_by=r.col — column expression
         PyExpr::Column(name) => Ok(vec![col(name)]),
         // Any other expression — try converting through the standard path
         other => {
-            let expr = pyexpr_to_datafusion(other.clone(), schema)?;
+            let expr = super::lower_expr(other.clone(), rx)?;
             Ok(vec![expr])
         }
     }
@@ -179,21 +175,31 @@ pub fn pyexpr_to_window_expr(
         .map(|spec| spec.to_window_sort())
         .collect();
 
-    pyexpr_to_window_inner(py_expr, schema, &order_by)
+    let rx = Resolver::new(schema)?;
+    rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?)
 }
 
-/// Internal recursive conversion
+/// Internal recursive conversion, one node at a time through
+/// `Resolver::lowering`.
 fn pyexpr_to_window_inner(
     py_expr: PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    rx.lowering(|| lower_window_node(py_expr, rx, order_by))
+}
+
+fn lower_window_node(
+    py_expr: PyExpr,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     match &py_expr {
         PyExpr::Call { func, .. } => match func.as_str() {
-            "shift" => convert_shift(&py_expr, schema, order_by),
-            "diff" => convert_diff(&py_expr, schema, order_by),
+            "shift" => convert_shift(&py_expr, rx, order_by),
+            "diff" => convert_diff(&py_expr, rx, order_by),
             "cum_sum" | "cum_max" | "cum_min" => {
-                convert_cum_agg(func.clone(), &py_expr, schema, order_by)
+                convert_cum_agg(func.clone(), &py_expr, rx, order_by)
             }
             // Aggregation functions applied to rolling()
             "mean" | "sum" | "min" | "max" | "count" | "std" => {
@@ -204,7 +210,7 @@ fn pyexpr_to_window_inner(
                     }) = on.as_deref()
                     {
                         if inner_func == "rolling" {
-                            return convert_rolling_agg(&py_expr, schema, order_by);
+                            return convert_rolling_agg(&py_expr, rx, order_by);
                         }
                     }
                 }
@@ -215,7 +221,7 @@ fn pyexpr_to_window_inner(
                 ))
             }
             // Non-window functions that might contain window sub-expressions
-            _ => convert_expr_with_window_children(py_expr, schema, order_by),
+            _ => convert_expr_with_window_children(py_expr, rx, order_by),
         },
         // `.over()` wraps either a ranking function or a sequence window.
         // Ranking funcs keep the dedicated ranking path; sequence windows route
@@ -224,10 +230,10 @@ fn pyexpr_to_window_inner(
             PyExpr::Call { func, .. }
                 if matches!(func.as_str(), "row_number" | "rank" | "dense_rank" | "ntile") =>
             {
-                convert_window_ranking(&py_expr, schema, order_by)
+                convert_window_ranking(&py_expr, rx, order_by)
             }
             PyExpr::Call { func, on, .. } if super::is_window_call(func, on.as_deref()) => {
-                convert_window_sequence(&py_expr, schema, order_by)
+                convert_window_sequence(&py_expr, rx, order_by)
             }
             _ => Err(
                 ".over() must wrap a ranking or sequence window function".to_string(),
@@ -235,10 +241,10 @@ fn pyexpr_to_window_inner(
         },
         // BinOp, UnaryOp might contain window functions in their children
         PyExpr::BinOp { .. } | PyExpr::UnaryOp { .. } => {
-            convert_expr_with_window_children(py_expr, schema, order_by)
+            convert_expr_with_window_children(py_expr, rx, order_by)
         }
         // Simple expressions (Column, Literal) - use the standard converter
-        _ => pyexpr_to_datafusion(py_expr, schema),
+        _ => super::lower_expr(py_expr, rx),
     }
 }
 
@@ -247,7 +253,7 @@ fn pyexpr_to_window_inner(
 /// Supports `partition_by` kwarg: `shift(n, partition_by="col")` or `shift(n, partition_by=r.col)`
 fn convert_shift(
     py_expr: &PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Call {
@@ -255,34 +261,27 @@ fn convert_shift(
     } = py_expr
     {
         let col_expr =
-            pyexpr_to_datafusion(super::require_on(on.as_deref(), "shift")?.clone(), schema)?;
+            super::lower_expr(super::require_on(on.as_deref(), "shift")?.clone(), rx)?;
 
-        // Get offset (default 1)
-        let offset: i64 = if args.is_empty() {
-            1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
-            value
-                .parse::<i64>()
-                .map_err(|_| "shift() offset must be an integer".to_string())?
-        } else {
-            return Err("shift() offset must be a literal integer".to_string());
+        let offset = match arg(args, 0) {
+            Arg::Absent => 1,
+            Arg::Literal(value) => value.require_i64("shift() offset")?,
+            Arg::Expr(_) => return Err("shift() offset must be a literal integer".to_string()),
         };
 
-        // Get optional default value
-        let default_value = if let Some(default_expr) = kwargs.get("default") {
-            match default_expr {
-                PyExpr::Literal { value, dtype } => {
-                    let sv = literal_to_scalar_value(value, dtype)?;
-                    Some(sv)
-                }
-                _ => None,
-            }
-        } else {
-            None
+        // lag/lead take the default as a scalar, so only a literal can be one.
+        let default_value = match kwargs.get("default") {
+            None => None,
+            Some(PyExpr::Literal(value)) => Some(super::literals::shift_default(
+                &col_expr,
+                value.to_scalar_value(),
+                rx,
+            )?),
+            Some(_) => return Err("shift() default must be a literal value".to_string()),
         };
 
         // Extract partition_by from kwargs
-        let partition_by_exprs = extract_partition_by(kwargs, schema)?;
+        let partition_by_exprs = extract_partition_by(kwargs, rx)?;
 
         // Build the window function expression
         let window_expr = if offset >= 0 {
@@ -303,27 +302,22 @@ fn convert_shift(
 /// Convert diff(n) to col - lag(col, n) with ORDER BY
 ///
 /// Supports `partition_by` kwarg: `diff(n, partition_by="col")`
-fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Result<Expr, String> {
+fn convert_diff(py_expr: &PyExpr, rx: &Resolver<'_>, order_by: &[Sort]) -> Result<Expr, String> {
     if let PyExpr::Call {
         on, args, kwargs, ..
     } = py_expr
     {
         let col_expr =
-            pyexpr_to_datafusion(super::require_on(on.as_deref(), "diff")?.clone(), schema)?;
+            super::lower_expr(super::require_on(on.as_deref(), "diff")?.clone(), rx)?;
 
-        // Get periods (default 1)
-        let periods: i64 = if args.is_empty() {
-            1
-        } else if let PyExpr::Literal { value, .. } = &args[0] {
-            value
-                .parse::<i64>()
-                .map_err(|_| "diff() periods must be an integer".to_string())?
-        } else {
-            return Err("diff() periods must be a literal integer".to_string());
+        let periods = match arg(args, 0) {
+            Arg::Absent => 1,
+            Arg::Literal(value) => value.require_i64("diff() periods")?,
+            Arg::Expr(_) => return Err("diff() periods must be a literal integer".to_string()),
         };
 
         // Extract partition_by from kwargs
-        let partition_by_exprs = extract_partition_by(kwargs, schema)?;
+        let partition_by_exprs = extract_partition_by(kwargs, rx)?;
 
         // Build: col - lag(col, periods) with ORDER BY and optional PARTITION BY
         let lag_expr = lag(col_expr.clone(), Some(periods), None);
@@ -342,15 +336,15 @@ fn convert_diff(py_expr: &PyExpr, schema: &ArrowSchema, order_by: &[Sort]) -> Re
 fn convert_cum_agg(
     func: String,
     py_expr: &PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Call { on, kwargs, .. } = py_expr {
         let col_expr =
-            pyexpr_to_datafusion(super::require_on(on.as_deref(), &func)?.clone(), schema)?;
+            super::lower_expr(super::require_on(on.as_deref(), &func)?.clone(), rx)?;
 
         // Extract partition_by from kwargs
-        let partition_by_exprs = extract_partition_by(kwargs, schema)?;
+        let partition_by_exprs = extract_partition_by(kwargs, rx)?;
 
         let agg_expr = match func.as_str() {
             "cum_sum" => sum(col_expr),
@@ -376,7 +370,7 @@ fn convert_cum_agg(
 /// `r.col.rolling(3, partition_by="group").mean()`
 fn convert_rolling_agg(
     py_expr: &PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Call { func, on, .. } = py_expr {
@@ -389,14 +383,12 @@ fn convert_rolling_agg(
         }) = on.as_deref()
         {
             // Get window size from rolling() args
-            let window_size: i64 = if inner_args.is_empty() {
-                return Err("rolling() requires a window size".to_string());
-            } else if let PyExpr::Literal { value, .. } = &inner_args[0] {
-                value
-                    .parse::<i64>()
-                    .map_err(|_| "rolling() window size must be an integer".to_string())?
-            } else {
-                return Err("rolling() window size must be a literal integer".to_string());
+            let window_size = match arg(inner_args, 0) {
+                Arg::Absent => return Err("rolling() requires a window size".to_string()),
+                Arg::Literal(value) => value.require_i64("rolling() window size")?,
+                Arg::Expr(_) => {
+                    return Err("rolling() window size must be a literal integer".to_string())
+                }
             };
 
             // A window size below 1 used to be silently clamped to a
@@ -434,13 +426,13 @@ fn convert_rolling_agg(
             }
 
             // Get the column being aggregated
-            let col_expr = pyexpr_to_datafusion(
+            let col_expr = super::lower_expr(
                 super::require_on(inner_on.as_deref(), "rolling")?.clone(),
-                schema,
+                rx,
             )?;
 
             // Extract partition_by from the rolling() call's kwargs
-            let partition_by_exprs = extract_partition_by(inner_kwargs, schema)?;
+            let partition_by_exprs = extract_partition_by(inner_kwargs, rx)?;
 
             // Build the appropriate aggregate function
             let agg_expr = match func.as_str() {
@@ -478,10 +470,10 @@ fn convert_rolling_agg(
 fn over_order_by(
     order_by: &PyExpr,
     descending: bool,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
 ) -> Result<Sort, String> {
     Ok(Sort {
-        expr: pyexpr_to_datafusion(order_by.clone(), schema)?,
+        expr: super::lower_expr(order_by.clone(), rx)?,
         asc: !descending,
         nulls_first: crate::metadata::nulls_first(descending),
     })
@@ -490,7 +482,7 @@ fn over_order_by(
 /// Convert PyExpr::Window (row_number, rank, dense_rank, ntile) to native window expressions
 fn convert_window_ranking(
     py_expr: &PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Window {
@@ -511,32 +503,28 @@ fn convert_window_ranking(
             "row_number" => row_number(),
             "rank" => rank(),
             "dense_rank" => dense_rank(),
-            "ntile" => {
-                if args.is_empty() {
-                    return Err("ntile() requires a bucket count argument".to_string());
+            "ntile" => match arg(args, 0) {
+                Arg::Absent => {
+                    return Err("ntile() requires a bucket count argument".to_string())
                 }
-                if let PyExpr::Literal { value, .. } = &args[0] {
-                    let n = value
-                        .parse::<i64>()
-                        .map_err(|_| "ntile() bucket count must be an integer".to_string())?;
-                    ntile(lit(n))
-                } else {
-                    return Err("ntile() bucket count must be a literal integer".to_string());
+                Arg::Literal(value) => ntile(lit(value.require_i64("ntile() bucket count")?)),
+                Arg::Expr(_) => {
+                    return Err("ntile() bucket count must be a literal integer".to_string())
                 }
-            }
+            },
             _ => return Err(format!("Unsupported window function: {}", func_name)),
         };
 
         // Build PARTITION BY
         let partition_by_exprs = if let Some(pb) = partition_by {
-            vec![pyexpr_to_datafusion(*pb.clone(), schema)?]
+            vec![super::lower_expr(*pb.clone(), rx)?]
         } else {
             vec![]
         };
 
         // Build ORDER BY - prefer the window's own order_by, fall back to table sort_exprs
         let window_order: Vec<Sort> = if let Some(ob) = window_order_by {
-            vec![over_order_by(ob, *descending, schema)?]
+            vec![over_order_by(ob, *descending, rx)?]
         } else if !order_by.is_empty() {
             order_by.to_vec()
         } else {
@@ -567,7 +555,7 @@ fn convert_window_ranking(
 /// no changes needed in convert_shift/diff/cum_agg/rolling_agg.
 fn convert_window_sequence(
     py_expr: &PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     table_order_by: &[Sort],
 ) -> Result<Expr, String> {
     if let PyExpr::Window {
@@ -580,7 +568,7 @@ fn convert_window_sequence(
         // Effective ORDER BY: the wrapper's own single order_by key if given,
         // else fall back to the table sort. Mirrors convert_window_ranking.
         let effective_order_by: Vec<Sort> = if let Some(ob) = order_by {
-            vec![over_order_by(ob, *descending, schema)?]
+            vec![over_order_by(ob, *descending, rx)?]
         } else {
             table_order_by.to_vec()
         };
@@ -588,7 +576,7 @@ fn convert_window_sequence(
         // Fold the wrapper's partition_by into the inner call's kwargs so the
         // existing converters pick it up via extract_partition_by.
         let synthesized = synthesize_seq_call(expr.as_ref(), partition_by.as_deref())?;
-        pyexpr_to_window_inner(synthesized, schema, &effective_order_by)
+        pyexpr_to_window_inner(synthesized, rx, &effective_order_by)
     } else {
         Err("Expected Window expression for sequence window".to_string())
     }
@@ -658,7 +646,7 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
 /// Handle expressions that contain window functions in their children (e.g., BinOp, if_else wrapping shift)
 fn convert_expr_with_window_children(
     py_expr: PyExpr,
-    schema: &ArrowSchema,
+    rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
     use crate::transpiler::contains_window_function;
@@ -669,24 +657,24 @@ fn convert_expr_with_window_children(
             let right_has_window = contains_window_function(&right);
 
             let left_expr = if left_has_window {
-                pyexpr_to_window_inner(*left, schema, order_by)?
+                pyexpr_to_window_inner(*left, rx, order_by)?
             } else {
-                pyexpr_to_datafusion(*left, schema)?
+                super::lower_expr(*left, rx)?
             };
 
             let right_expr = if right_has_window {
-                pyexpr_to_window_inner(*right, schema, order_by)?
+                pyexpr_to_window_inner(*right, rx, order_by)?
             } else {
-                pyexpr_to_datafusion(*right, schema)?
+                super::lower_expr(*right, rx)?
             };
 
-            crate::transpiler::binary_expr(&op, left_expr, right_expr)
+            crate::transpiler::binary_expr(&op, left_expr, right_expr, rx)
         }
         PyExpr::UnaryOp { op, operand } => {
             let operand_expr = if contains_window_function(&operand) {
-                pyexpr_to_window_inner(*operand, schema, order_by)?
+                pyexpr_to_window_inner(*operand, rx, order_by)?
             } else {
-                pyexpr_to_datafusion(*operand, schema)?
+                super::lower_expr(*operand, rx)?
             };
             match op.as_str() {
                 "Not" => Ok(operand_expr.not()),
@@ -707,35 +695,35 @@ fn convert_expr_with_window_children(
                 "fill_null" => {
                     let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
+                        pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(*on, schema)?
+                        super::lower_expr(*on, rx)?
                     };
                     if args.is_empty() {
                         return Err("fill_null requires a default value".to_string());
                     }
                     let default_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
+                        pyexpr_to_window_inner(args[0].clone(), rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
+                        super::lower_expr(args[0].clone(), rx)?
                     };
-                    Ok(coalesce(vec![on_expr, default_expr]))
+                    super::literals::coalesce_values(vec![on_expr, default_expr], rx)
                 }
                 "is_null" => {
                     let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
+                        pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(*on, schema)?
+                        super::lower_expr(*on, rx)?
                     };
                     Ok(on_expr.is_null())
                 }
                 "is_not_null" => {
                     let on = super::require_on(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
-                        pyexpr_to_window_inner(*on, schema, order_by)?
+                        pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(*on, schema)?
+                        super::lower_expr(*on, rx)?
                     };
                     Ok(on_expr.is_not_null())
                 }
@@ -744,26 +732,21 @@ fn convert_expr_with_window_children(
                         return Err("if_else requires 3 arguments".to_string());
                     }
                     let cond_expr = if contains_window_function(&args[0]) {
-                        pyexpr_to_window_inner(args[0].clone(), schema, order_by)?
+                        pyexpr_to_window_inner(args[0].clone(), rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(args[0].clone(), schema)?
+                        super::lower_expr(args[0].clone(), rx)?
                     };
                     let true_expr = if contains_window_function(&args[1]) {
-                        pyexpr_to_window_inner(args[1].clone(), schema, order_by)?
+                        pyexpr_to_window_inner(args[1].clone(), rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(args[1].clone(), schema)?
+                        super::lower_expr(args[1].clone(), rx)?
                     };
                     let false_expr = if contains_window_function(&args[2]) {
-                        pyexpr_to_window_inner(args[2].clone(), schema, order_by)?
+                        pyexpr_to_window_inner(args[2].clone(), rx, order_by)?
                     } else {
-                        pyexpr_to_datafusion(args[2].clone(), schema)?
+                        super::lower_expr(args[2].clone(), rx)?
                     };
-
-                    use datafusion::logical_expr::case;
-                    case(cond_expr)
-                        .when(lit(true), true_expr)
-                        .otherwise(false_expr)
-                        .map_err(|e| format!("Failed to create CASE expression: {}", e))
+                    super::literals::if_else(cond_expr, true_expr, false_expr, rx)
                 }
                 "abs" | "ceil" | "floor" | "round" => {
                     use datafusion::functions::math::expr_fn::{abs, ceil, floor, round};
@@ -782,9 +765,9 @@ fn convert_expr_with_window_children(
                     };
                     let lower = |e: PyExpr| {
                         if contains_window_function(&e) {
-                            pyexpr_to_window_inner(e, schema, order_by)
+                            pyexpr_to_window_inner(e, rx, order_by)
                         } else {
-                            pyexpr_to_datafusion(e, schema)
+                            super::lower_expr(e, rx)
                         }
                     };
                     let input = lower(input)?;
@@ -792,13 +775,10 @@ fn convert_expr_with_window_children(
                         "abs" => abs(input),
                         "ceil" => ceil(input),
                         "floor" => floor(input),
-                        _ => {
-                            let decimals = match rest.first() {
-                                Some(d) => lower(d.clone())?,
-                                None => lit(0i64),
-                            };
-                            round(vec![input, decimals])
-                        }
+                        _ => round(vec![
+                            input,
+                            super::round_decimals(arg(rest, 0), |d| lower(d.clone()))?,
+                        ]),
                     })
                 }
                 _ => {
@@ -810,52 +790,51 @@ fn convert_expr_with_window_children(
                         args,
                         kwargs,
                     };
-                    pyexpr_to_datafusion(reconstructed, schema)
+                    super::lower_expr(reconstructed, rx)
                 }
             }
         }
         // For non-window expressions, use the standard converter
-        other => pyexpr_to_datafusion(other, schema),
+        other => super::lower_expr(other, rx),
     }
 }
 
-/// Convert literal value string + dtype to ScalarValue
-fn literal_to_scalar_value(value: &str, dtype: &str) -> Result<ScalarValue, String> {
-    match dtype {
-        "Int64" => {
-            let v = value
-                .parse::<i64>()
-                .map_err(|_| format!("Failed to parse '{}' as Int64", value))?;
-            Ok(ScalarValue::Int64(Some(v)))
-        }
-        "Int32" => {
-            let v = value
-                .parse::<i32>()
-                .map_err(|_| format!("Failed to parse '{}' as Int32", value))?;
-            Ok(ScalarValue::Int32(Some(v)))
-        }
-        "Float64" => {
-            let v = value
-                .parse::<f64>()
-                .map_err(|_| format!("Failed to parse '{}' as Float64", value))?;
-            Ok(ScalarValue::Float64(Some(v)))
-        }
-        "Float32" => {
-            let v = value
-                .parse::<f32>()
-                .map_err(|_| format!("Failed to parse '{}' as Float32", value))?;
-            Ok(ScalarValue::Float32(Some(v)))
-        }
-        "String" | "Utf8" => Ok(ScalarValue::Utf8(Some(value.to_string()))),
-        "Boolean" | "Bool" => {
-            let b = match value.to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("Failed to parse '{}' as Boolean", value)),
-            };
-            Ok(ScalarValue::Boolean(Some(b)))
-        }
-        "Null" => Ok(ScalarValue::Null),
-        _ => Err(format!("Unknown dtype for ScalarValue: {}", dtype)),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{DataType, Field};
+
+    /// The window dialect lowers through `Resolver::lowering` like the row
+    /// dialect, so it too coerces each node once: a chain rooted at a
+    /// `shift` grows linearly with its depth (review of b6cc39f on #225).
+    /// Its recursion is deeper per level than the row dialect's, so the
+    /// depths are kept within a test thread's stack.
+    #[test]
+    fn window_lowering_coerces_each_node_once() {
+        let schema = ArrowSchema::new(vec![Field::new("a", DataType::Int64, false)]);
+        let shifted = PyExpr::Call {
+            func: "shift".to_string(),
+            args: vec![PyExpr::Literal(LiteralValue::Int64(1))],
+            kwargs: Default::default(),
+            on: Some(Box::new(PyExpr::Column("a".to_string()))),
+        };
+        let chain = |depth: i64| {
+            (0..depth).fold(shifted.clone(), |e, i| PyExpr::BinOp {
+                op: "Add".to_string(),
+                left: Box::new(e),
+                right: Box::new(PyExpr::Literal(LiteralValue::Int64(i))),
+            })
+        };
+        let coerced = |depth: i64| {
+            let rx = Resolver::new(&schema).unwrap();
+            rx.resolve(pyexpr_to_window_inner(chain(depth), &rx, &[]).unwrap())
+                .unwrap();
+            rx.coerced_nodes()
+        };
+        let (shallow, deep) = (coerced(50), coerced(100));
+        assert!(
+            deep <= 2 * shallow + 10,
+            "{shallow} nodes coerced at depth 50, {deep} at depth 100"
+        );
     }
 }

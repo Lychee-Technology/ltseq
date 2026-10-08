@@ -58,7 +58,8 @@ pub fn group_ordered_count_impl(
     py_expr: &PyExpr,
 ) -> Result<usize, LtseqError> {
     // Only works for linear scan predicates (shift-based boundary detection)
-    if !can_linear_scan(py_expr) {
+    // whose result the kernel computes as DataFusion would.
+    if !can_linear_scan(py_expr, table.require_schema()?) {
         return Err(LtseqError::Validation(
             "group_ordered_count only supports shift-based boundary predicates".into(),
         ));

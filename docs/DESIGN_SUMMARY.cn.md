@@ -147,10 +147,16 @@ t.filter(lambda r: r.age > 18)
 
 ```python
 {"type": "Column", "name": "age"}
-{"type": "Literal", "value": 18, "dtype": "Int64"}
+{"type": "Literal", "dtype": "Int64", "value": 18}
+{"type": "Literal", "dtype": "Decimal128", "value": 150, "precision": 3, "scale": 2}
+{"type": "Literal", "dtype": "Timestamp", "value": 1000000500, "unit": "ns", "tz": None}
 ```
 
 在 Rust 侧，这些会在 `src/types.rs` 中被还原为 `PyExpr`。
+
+字面量在边界两侧都带类型（#145）。`LiteralExpr` 在捕获 lambda 时编码取值，不支持的值会在 lambda 内抛错。线上协议是一张表 `py-ltseq/tests/fixtures/literal_protocol.json`，它驱动编码器测试，并通过真实的解码器驱动解码器测试。`types.rs` 按这张表检查每个负载的字段并构造 `LiteralValue`，它是到 DataFusion `ScalarValue` 的唯一映射。使用方通过 `arg()` 和 `require_*` 读取字面量参数，二者区分“缺省”与“错误”，错误的参数不会退回到默认值。
+
+表达式的类型来自 DataFusion 自己的类型转换（#225）。`src/transpiler/resolve.rs` 按 DataFusion 分析器的方式转换每个降级后的表达式，因此 CASE 或 `coalesce` 的类型就是它执行时的类型，转译器中没有别处自行计算公共类型；`test_type_authority_rule.py` 检查这一点。字面量规则随后按字面量所遇到的值的类型理解字面量（`literal_policy.rs`），在 DataFusion 对这一对值的类型转换会转换列或对字面量取整的地方，改为把字面量放到列自身的取值之间比较（`literals.rs`、`exact.rs`）。
 
 ### 2.3 转译路径
 
@@ -163,7 +169,7 @@ t.filter(lambda r: r.age > 18)
 
 - `src/transpiler/mod.rs`
 - `src/transpiler/window_native.rs`
-- `src/transpiler/optimization.rs`
+- `src/transpiler/resolve.rs`（表达式类型）与 `src/transpiler/literals.rs`（字面量放置）
 
 ### 2.4 实际边界
 

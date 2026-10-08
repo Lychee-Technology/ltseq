@@ -34,9 +34,9 @@ CASES = [
     ({"type": "Nope"}, "Unknown expression type: Nope"),
     ({"type": "Column"}, "Missing field: name"),
     ({"type": "Column", "name": 1}, "Invalid type: name must be string"),
-    (_drop(LIT, "value"), "Missing field: value"),
-    (_drop(LIT, "dtype"), "Missing field: dtype"),
-    (_with(LIT, "dtype", 1), "Invalid type: dtype must be string"),
+    (_drop(LIT, "value"), "Malformed literal payload: Int64 literal is missing field 'value'"),
+    (_drop(LIT, "dtype"), "Malformed literal payload: literal is missing field 'dtype'"),
+    (_with(LIT, "dtype", 1), "Malformed literal payload: literal field 'dtype' must be a str, got int"),
     (_drop(BINOP, "op"), "Missing field: op"),
     (_with(BINOP, "op", 1), "Invalid type: op must be string"),
     (_drop(BINOP, "left"), "Missing field: left"),
@@ -87,7 +87,9 @@ def _deserialization_error(table: LTSeq, expr: dict) -> str | None:
     try:
         table._inner.filter(expr)
     except Exception as e:  # noqa: BLE001 - classified by message below
-        if str(e).startswith(("Missing field", "Invalid type", "Unknown expression type")):
+        if str(e).startswith(
+            ("Missing field", "Invalid type", "Unknown expression type", "Malformed literal payload")
+        ):
             return str(e)
     return None
 

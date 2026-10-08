@@ -1,0 +1,14 @@
+{"_meta": {"build": "main", "commit": "68d6114"}}
+{"id": "float_then_fine", "result": {"v": {"type": "decimal128(30, 15)", "values": ["Decimal(1000000.000000000000000)", "Decimal(1.230000000000000)"]}}}
+{"id": "fine_then_float", "result": {"v": {"type": "decimal128(30, 15)", "values": ["Decimal(1.230000000000000)", "Decimal(1.230000000000000)"]}}}
+{"id": "float_alone", "result": {"v": {"type": "decimal128(30, 15)", "values": ["Decimal(1000000.000000000000000)", "Decimal(1.230000000000000)"]}}}
+{"id": "fine_alone", "result": {"v": {"type": "decimal128(5, 2)", "values": ["Decimal(1.23)", "Decimal(1.23)"]}}}
+{"id": "small_float_then_fine", "result": {"v": {"type": "decimal128(30, 15)", "values": ["Decimal(2.500000000000000)", "Decimal(1.230000000000000)"]}}}
+{"id": "int_then_fine", "result": {"v": {"type": "decimal128(22, 2)", "values": ["Decimal(1000000000000000000.00)", "Decimal(1.23)"]}}}
+{"error": {"class": "ValueError", "msg": "Failed to collect results: Optimizer rule 'simplify_expressions' failed", "stage": "collect"}, "id": "two_decimals_too_wide"}
+{"id": "if_else_float", "result": {"v": {"type": "decimal128(30, 15)", "values": ["Decimal(1000000.000000000000000)", "Decimal(1.230000000000000)"]}}}
+{"id": "isin_float_and_fine", "result": {"v": {"type": "bool", "values": [null, true]}}}
+{"id": "isin_fine", "result": {"v": {"type": "bool", "values": [null, true]}}}
+{"id": "float32_column_and_fine", "result": {"v": {"type": "decimal128(14, 7)", "values": ["Decimal(1.2300000)", "Decimal(1.2300000)"]}}}
+{"id": "uint64_column_and_fine", "result": {"v": {"type": "decimal128(22, 2)", "values": ["Decimal(1.23)", "Decimal(1.23)"]}}}
+{"id": "uint64_column_first_and_fine", "result": {"v": {"type": "decimal128(22, 2)", "values": ["Decimal(1.23)", "Decimal(1.23)"]}}}

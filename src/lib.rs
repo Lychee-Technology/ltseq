@@ -1250,6 +1250,8 @@ fn datatype_to_schema_string(data_type: &datafusion::arrow::datatypes::DataType)
 fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LTSeqTable>()?;
     m.add_class::<cursor::LTSeqCursor>()?;
+    m.add_function(wrap_pyfunction!(transpiler::probe::_cast_class, m)?)?;
+    m.add_function(wrap_pyfunction!(transpiler::probe::_holds, m)?)?;
     Ok(())
 }
 
