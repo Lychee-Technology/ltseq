@@ -10,6 +10,7 @@
 #   UNDECIDED        never allowed in a merged state
 # `expect` is the outcome as JSON (see harness.comparable: errors compare
 # by class and stage only). `ref` points to the issue, decision or finding.
+# No status admits a Rust panic, not even one main recorded.
 
 # --- composition: a CASE receiver, dt.diff and subtraction -------------------
 
