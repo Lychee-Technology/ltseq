@@ -26,3 +26,4 @@ build/
 .worktrees/
 .vscode/
 libltseq_core.dylib.dSYM/
+docs/superpowers/
