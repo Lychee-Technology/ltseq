@@ -1,5 +1,10 @@
 # LTSeq API 设计文档
 
+> [!NOTE]
+> **归档：v0.5 之前的 API 参考。** 本文是 `docs/api.cn.md` 在提交 [3041b44](https://github.com/Lychee-Technology/ltseq/blob/3041b444094321b3795e24faa7858e09195e8ef6/docs/api.cn.md)（2026-10-08）时的内容。`docs/api.cn.md` 改为 [API 文档入口页](../api.cn.md) 时，本文原样移到这里，只加了这段说明。它描述的是该提交时已实现的 API，也就是 [v0.5 API 评审](../proposals/v0.5/README.md)所审查的基线。本文仅作记录，不再更新：3041b44 之后合入的代码可能与它不同，请以所用版本中 `py-ltseq/ltseq/` 的源码为准。它也不是 v0.5 契约：v0.5 对其中很多内容做了重命名、合并、重新设计或删除，评审的 [API 清单](../proposals/v0.5/review/inventory.md#b-api-inventory-and-review)（英文）列出了每个名称在 v0.5 中的处理方式。
+>
+> 英文版：[pre-v0.5-api.md](pre-v0.5-api.md)。
+
 相关文档：
 
 - `docs/README.md`：文档索引

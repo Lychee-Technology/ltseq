@@ -1,5 +1,10 @@
 # LTSeq API Design Document
 
+> [!NOTE]
+> **Archived pre-v0.5 API reference.** This is `docs/api.md` as of commit [3041b44](https://github.com/Lychee-Technology/ltseq/blob/3041b444094321b3795e24faa7858e09195e8ef6/docs/api.md) (2026-10-08), moved here unchanged except for this notice when `docs/api.md` became the [API documentation entry page](../api.md). It describes the API as implemented at that commit, the baseline the [v0.5 API review](../proposals/v0.5/README.md) audited. It is a record and is not updated: code merged after 3041b44 may differ from it, so check `py-ltseq/ltseq/` in the version you run. Nor is it the v0.5 contract. v0.5 renames, merges, redesigns or removes much of what it describes, and the review's [API inventory](../proposals/v0.5/review/inventory.md#b-api-inventory-and-review) gives the v0.5 action for each name.
+>
+> The v0.5 review cites this text by line, as `docs/api.md:153`. Those numbers refer to the file at 3041b44, which is this text without the notice. Chinese version: [pre-v0.5-api.cn.md](pre-v0.5-api.cn.md).
+
 Related documents:
 
 - `docs/README.md`: documentation index
