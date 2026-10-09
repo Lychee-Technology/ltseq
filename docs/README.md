@@ -68,8 +68,8 @@ Start here:
 - `docs/MODULE_GUIDE.md`: contributor-oriented codebase tour and file-by-file navigation
 - `docs/USER_MODEL.md`: user-facing mental model for working with LTSeq
 - `docs/DESIGN_SUMMARY.md`: current architecture summary and historical design archive
-- `docs/api.md`: full English API reference
-- `docs/api.cn.md`: full Chinese API reference
+- `docs/api.md`: API documentation entry point, linking the v0.5 API contract (the target API, not yet implemented) and the archived pre-v0.5 API reference
+- `docs/api.cn.md`: the Chinese API documentation entry point
 - `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
 - `docs/BENCHMARK.md`: how to run the core and ClickBench benchmarks (see also `benchmarks/README.md`)
 - `docs/BENCHMARK_AUTORESEARCH.md`: benchmark-gated autoresearch pilot workflow
@@ -81,7 +81,7 @@ Start here:
 - `docs/USER_MODEL.cn.md`：中文用户心智模型
 - `docs/DESIGN_SUMMARY.cn.md`：中文设计摘要与设计归档
 - `docs/DESIGN_SUMMARY.md`：当前架构摘要与设计归档
-- `docs/api.cn.md`：中文 API 文档
+- `docs/api.cn.md`：中文 API 文档入口，链接 v0.5 API 契约（目标 API，尚未实现，仅有英文版）和归档的 v0.5 之前的 API 参考
 - `docs/LINKING_GUIDE.cn.md`：中文 Linking 指南
 - `docs/BENCHMARK.md`：核心基准与 ClickBench 对比的运行说明（另见 `benchmarks/README.md`）
 - `docs/BENCHMARK_AUTORESEARCH.md`：基准门控的 autoresearch 试点工作流
@@ -92,7 +92,7 @@ Start here:
 - Read `ARCHITECTURE.md` to understand how the system is built.
 - Read `MODULE_GUIDE.md` when you need to change code.
 - Read `DESIGN_SUMMARY.md` for rationale, tradeoffs, and design history.
-- Read `api.md` or `api.cn.md` for exact user-facing method behavior.
+- Start at `api.md` or `api.cn.md` for exact user-facing method behavior: the v0.5 contract for the target API, the archived reference for the API before v0.5.
 
 ## 这些文档如何配合使用
 
@@ -100,4 +100,4 @@ Start here:
 - 再读 `ARCHITECTURE.cn.md`，理解系统是如何构建的。
 - 需要改代码时读 `MODULE_GUIDE.cn.md`。
 - 想了解设计取舍和历史决策时读 `DESIGN_SUMMARY.md`。
-- 需要精确确认方法行为时读 `api.md` 或 `api.cn.md`。
+- 需要精确确认方法行为时，从 `api.md` 或 `api.cn.md` 进入：目标 API 看 v0.5 契约，v0.5 之前的 API 看归档参考。
