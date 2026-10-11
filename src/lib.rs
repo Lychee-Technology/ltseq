@@ -1252,6 +1252,8 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<cursor::LTSeqCursor>()?;
     m.add_function(wrap_pyfunction!(transpiler::probe::_cast_class, m)?)?;
     m.add_function(wrap_pyfunction!(transpiler::probe::_holds, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::_set_layout_overrides, m)?)?;
+    m.add_function(wrap_pyfunction!(engine::_engine_config, m)?)?;
     Ok(())
 }
 

@@ -42,3 +42,8 @@ autoresearch = [
 [tool.pytest.ini_options]
 testpaths = ["py-ltseq/tests"]
 pythonpath = ["."] # Ensure tests can find the current directory
+# The memory harness is slow; run it with `-m memory` (CI job memory-harness).
+addopts = ["-m", "not memory"]
+markers = [
+    "memory: peak-memory harness runs (py-ltseq/tests/memory), deselected by default",
+]

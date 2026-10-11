@@ -19,8 +19,14 @@ Each timed call returns its result to the harness, which executes it with
 ``collect()`` (see ``consume``).
 
 Results are printed as one table per group and saved to benchmarks/results.json
+
+``--target-partitions`` and ``--batch-size`` pin the engine layout for the
+whole run through the test-only override of #274 (default: the CPU count and
+the engine's batch size), so partition-scaling measurements such as #251's
+compare runs at fixed layouts. The layout used is saved under ``engine`` in the results.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -35,6 +41,7 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).parent.parent / "py-ltseq"))
 
 from ltseq import LTSeq  # type: ignore
+from ltseq._testing import engine_config, pinned_engine  # type: ignore
 
 OPERATOR = "operator"
 IO = "io"
@@ -684,6 +691,7 @@ def save_results(results: list[BenchmarkResult], path: str) -> None:
     data = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "host": collect_host_info(),
+        "engine": engine_config(),
         "results": [r.to_dict() for r in results],
     }
     with open(path, "w") as f:
@@ -693,10 +701,29 @@ def save_results(results: list[BenchmarkResult], path: str) -> None:
 
 def main():
     """Run all benchmarks."""
+    defaults = engine_config()
+    parser = argparse.ArgumentParser(description="LTSeq core benchmarks")
+    parser.add_argument(
+        "--target-partitions",
+        type=int,
+        help="pin the engine's partition count "
+        f"(default: the CPU count, {defaults['default_target_partitions']})",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help=f"pin the engine's batch size (default: {defaults['default_batch_size']})",
+    )
+    args = parser.parse_args()
+
     print("LTSeq Performance Benchmarks")
     print("=" * 70)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with (
+        pinned_engine(target_partitions=args.target_partitions, batch_size=args.batch_size) as engine,
+        tempfile.TemporaryDirectory() as temp_dir,
+    ):
+        print(f"Engine: {engine['target_partitions']} partitions, batch size {engine['batch_size']}")
         bench = Benchmarks(temp_dir)
         run_suite(bench, small=10_000, medium=100_000, large=1_000_000)
 

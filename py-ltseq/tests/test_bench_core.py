@@ -9,6 +9,7 @@ Pinned down here:
   region; only the read and end-to-end benchmarks may.
 - Order-dependent operators get inputs whose order DataFusion can see, so
   their timed plans do not sort the input again.
+- Saved results name the engine layout they ran at (#274).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
+from ltseq._testing import pinned_engine
 
 
 def load_bench_core():
@@ -193,3 +195,12 @@ def test_groups_and_names_agree(suite_run, tmp_path):
     bench_core.save_results(results, str(out))
     saved = json.loads(out.read_text())["results"]
     assert [row["group"] for row in saved] == [r.group for r in results]
+
+
+def test_saved_results_record_the_pinned_engine_layout(tmp_path):
+    # #251 compares runs at fixed partition counts through the #274 override.
+    out = tmp_path / "results.json"
+    with pinned_engine(target_partitions=3, batch_size=5):
+        bench_core.save_results([], str(out))
+    engine = json.loads(out.read_text())["engine"]
+    assert (engine["target_partitions"], engine["batch_size"]) == (3, 5)
