@@ -12,7 +12,7 @@
 - 合入契约并没有改动代码。评审的[状态说明][review-status]写明："Neither document is implemented. Every v0.5 name and behavior below is proposed contract, not a description of the code."（两份文档都尚未实现；其中的每个 v0.5 名称和行为都是拟议的契约，不是对代码的描述。）实现工作，即[影响图][Deliverable G]中的工作项 M0–M30，在 [#257] 中跟踪。
 - 不要假定你安装的包已经有某个 v0.5 名称，或者其行为已与契约一致。评审基线时的 API 请看[归档的 v0.5 之前的参考文档](archive/pre-v0.5-api.cn.md)；[API 清单][Deliverable B]列出了 v0.5 对此前每个名称的处理。
 - 在 M28 之前，实现 PR 在 `CHANGELOG.md`（Unreleased）、受影响的文档字符串和随包发布的 `.pyi` 存根中记录行为变化，及时更新这两份入口页的实现状态，并保持归档不变（[§1.4]）。过渡期间没有持续更新的完整 API 参考；请结合这些记录和所用版本的源码确认行为。
-- 实现完成后，工作项 M28 会改写本页和 [api.md](api.md)，使其准确描述契约，并让其中的示例作为测试运行（[§24.1] 第 5 条）。
+- 工作项 M1–M27 完成后，M28 会改写本页和 [api.md](api.md)，使其准确描述契约，并让其中的示例作为测试运行（[§24.1] 第 5 条）。
 
 ## v0.5 API 契约
 

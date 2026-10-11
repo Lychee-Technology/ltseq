@@ -12,7 +12,7 @@ This page is the entry point to LTSeq's API documentation. It states no API rule
 - Merging the contract did not change the code. The review's [status block][review-status] says so: "Neither document is implemented. Every v0.5 name and behavior below is proposed contract, not a description of the code." The implementation, work items M0–M30 of the [impact map][Deliverable G], is tracked in [#257].
 - Do not assume that the package you have installed has a given v0.5 name or behaves as the contract says. For the API at the review baseline, use the [archived pre-v0.5 reference](archive/pre-v0.5-api.md); the [API inventory][Deliverable B] lists what v0.5 does with every earlier name.
 - Until M28, implementation PRs record behavior changes in `CHANGELOG.md` (Unreleased), affected docstrings and shipped `.pyi` stubs, keep these entry pages accurate about implementation status, and leave the archives frozen ([§1.4]). There is no continuously updated full API reference during this transition; check those records and the source for the version you run.
-- When the implementation is complete, work item M28 rewrites this page and [api.cn.md](api.cn.md) so that they describe the contract exactly and their examples run as tests ([§24.1], criterion 5).
+- After work items M1–M27, M28 rewrites this page and [api.cn.md](api.cn.md) so that they describe the contract exactly and their examples run as tests ([§24.1], criterion 5).
 
 ## The v0.5 API contract
 
