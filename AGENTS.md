@@ -126,6 +126,8 @@ Tests are in `py-ltseq/tests/`. Key test files:
 
 ## Non-code artifacts
 
+During the v0.5 transition, follow contract §1.4 (`docs/proposals/v0.5/contract/overview.md`): implementation PRs record behavior changes in `CHANGELOG.md` (Unreleased), affected docstrings and shipped `.pyi` stubs. Keep the API entry pages accurate about implementation status; do not update the frozen pre-v0.5 archives. M28 rewrites both entry pages after M1–M27.
+
 Issues, PR descriptions, specs, plans, reviews, and every other non-code artifact give readers the
 context and judgment the diff cannot, not a narrated diff or filler, and are published in full on
 GitHub. The full rules:

@@ -5,7 +5,7 @@
 - `docs/README.md`：文档索引
 - `docs/USER_MODEL.cn.md`：用户心智模型
 - `docs/ARCHITECTURE.cn.md`：系统架构与执行模型
-- `docs/api.cn.md`：中文 API 文档
+- `docs/api.cn.md`：中文 API 文档入口
 - `docs/LINKING_GUIDE.md`：英文原版 Linking 指南
 
 ## 概览

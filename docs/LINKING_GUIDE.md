@@ -5,7 +5,7 @@ Related documents:
 - `docs/README.md`: documentation index
 - `docs/USER_MODEL.md`: user mental model and usage guidance
 - `docs/ARCHITECTURE.md`: system architecture and execution model
-- `docs/api.md`: API reference
+- `docs/api.md`: API documentation entry point
 - `docs/LINKING_GUIDE.cn.md`: Chinese linking guide
 
 ## Overview

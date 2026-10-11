@@ -3,9 +3,10 @@
 Column values and literals become exact numbers (``Fraction``) or instants
 (nanoseconds since the epoch). A float literal is its binary64 value (D-j), a
 naive datetime next to a zoned column is wall-clock time in that zone and a
-date next to one is local midnight, as ``docs/api.md`` documents. From those,
-``expectation`` says what a cell must produce when the decisions D-b and D-i
-to D-m hold, and ``judge`` grades an outcome against it:
+date next to one is local midnight, as ``docs/archive/pre-v0.5-api.md``
+documents. From those, ``expectation`` says what a cell must produce when
+the decisions D-b and D-i to D-m hold, and ``judge`` grades an outcome
+against it:
 
 - ``ok``: the outcome is what the decisions require;
 - ``skip``: the oracle has no opinion (a string or Boolean context or

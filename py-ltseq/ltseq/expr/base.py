@@ -545,7 +545,8 @@ def bool_context_error(example: str) -> TypeError:
 
     Shared by the row dialect (`Expr`) and the group dialect (`GroupExpr`,
     `FilterExpr`) so the guidance stays identical; only the usage example
-    differs. `docs/api.md` documents this error by its message prefix.
+    differs. `docs/archive/pre-v0.5-api.md` documents this error by its
+    message prefix.
     """
     return TypeError(
         "LTSeq expressions cannot be used in a boolean context "

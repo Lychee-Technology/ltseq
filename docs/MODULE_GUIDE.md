@@ -6,7 +6,7 @@ Related documents:
 - `docs/ARCHITECTURE.md`: system architecture
 - `docs/MODULE_GUIDE.cn.md`: Chinese contributor guide
 - `docs/DESIGN_SUMMARY.md`: design history and tradeoffs
-- `docs/api.md`: public API behavior
+- `docs/api.md`: API documentation entry point
 
 ## Purpose
 
@@ -16,7 +16,7 @@ Use this together with:
 
 - `docs/ARCHITECTURE.md` for system structure
 - `docs/DESIGN_SUMMARY.md` for design history
-- `docs/api.md` for public API behavior
+- `docs/api.md` as the API documentation entry point
 
 ---
 

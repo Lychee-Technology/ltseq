@@ -1,8 +1,9 @@
 """Integer overflow policy and Decimal128 coverage (#154).
 
 Integer `+ - *` and the SUM family wrap on overflow (two's complement, as
-in NumPy and Polars) and raise nothing; `docs/api.md` documents this. These
-tests pin that policy per execution path and the documented exceptions:
+in NumPy and Polars) and raise nothing; `docs/archive/pre-v0.5-api.md`
+documents this. These tests pin that policy and the documented exceptions
+per execution path:
 integer `/` and `abs()` raise on `i64::MIN`, `avg` is computed in floating
 point, and `search_pattern` predicates raise because they run on a separate
 evaluator (#221 tracks aligning it and the checked-arithmetic question).

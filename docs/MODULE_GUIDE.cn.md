@@ -6,7 +6,7 @@
 - `docs/ARCHITECTURE.cn.md`：系统架构
 - `docs/MODULE_GUIDE.md`：英文贡献者指南
 - `docs/DESIGN_SUMMARY.md`：设计历史与取舍
-- `docs/api.cn.md`：公开 API 行为
+- `docs/api.cn.md`：中文 API 文档入口
 
 ## 目的
 
@@ -16,7 +16,7 @@
 
 - `docs/ARCHITECTURE.cn.md`：系统结构
 - `docs/DESIGN_SUMMARY.md`：设计历史与关键取舍
-- `docs/api.cn.md`：公开 API 行为
+- `docs/api.cn.md`：中文 API 文档入口
 
 ---
 

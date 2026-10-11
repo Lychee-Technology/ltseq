@@ -10,7 +10,8 @@ This page is the entry point to LTSeq's API documentation. It states no API rule
 
 - The [v0.5 API contract][index] was merged into `main` on 2026-10-09 ([PR #250], then split into topic modules by [PR #279]). It replaces the earlier `docs/api.md` as the normative description of the public API ([§1.4]). Its status block predates the merge and still reads "proposal"; [Deliverable Q] records the owner's decision on every item the review left open, twelve of them deferred to a named gate.
 - Merging the contract did not change the code. The review's [status block][review-status] says so: "Neither document is implemented. Every v0.5 name and behavior below is proposed contract, not a description of the code." The implementation, work items M0–M30 of the [impact map][Deliverable G], is tracked in [#257].
-- Do not assume that the package you have installed has a given v0.5 name or behaves as the contract says. Much of the contract matches the code it was written against, but not all of it; the [API inventory][Deliverable B] lists what v0.5 does with every earlier name.
+- Do not assume that the package you have installed has a given v0.5 name or behaves as the contract says. For the API at the review baseline, use the [archived pre-v0.5 reference](archive/pre-v0.5-api.md); the [API inventory][Deliverable B] lists what v0.5 does with every earlier name.
+- Until M28, implementation PRs record behavior changes in `CHANGELOG.md` (Unreleased), affected docstrings and shipped `.pyi` stubs, keep these entry pages accurate about implementation status, and leave the archives frozen ([§1.4]). There is no continuously updated full API reference during this transition; check those records and the source for the version you run.
 - When the implementation is complete, work item M28 rewrites this page and [api.cn.md](api.cn.md) so that they describe the contract exactly and their examples run as tests ([§24.1], criterion 5).
 
 ## The v0.5 API contract
@@ -53,7 +54,7 @@ The [review modules][review-modules] explain the contract. They are non-normativ
 
 [archive/pre-v0.5-api.md](archive/pre-v0.5-api.md) is the reference this page replaced, moved unchanged apart from an archive notice. It describes the API as implemented at commit 3041b44 (2026-10-08), the baseline the v0.5 review audited. Its signatures and examples are not v0.5's, and many differ materially. It is a record and is not updated as the code changes, so it may not match code merged after 3041b44.
 
-Older documents cite it as `docs/api.md` by section: ADRs (`docs/api.md` §3.2, Appendix A), code comments, and the v0.5 review (`docs/api.md` § "Literal values", `docs/api.md:153`). Section numbers, titles and anchors are unchanged in the archive, so a citation by section finds it there. A citation by line refers to [the file at 3041b44][api-3041b44], which is the archive without its notice. Links to headings of the old page on `main`, such as `docs/api.md#literal-values` in issue comments, cannot be redirected and now land at the top of this page.
+Older documents cite it as `docs/api.md` by section or by line: ADRs (`docs/api.md` §3.2, Appendix A), code comments, and the v0.5 review (`docs/api.md` § "Literal values", `docs/api.md:153`). Section numbers, titles and anchors are unchanged in the archive, so a citation by section finds it there. A citation by line refers to [the file at 3041b44][api-3041b44], which is the archive without its notice. Links to headings of the old page on `main`, such as `docs/api.md#literal-values` in issue comments, cannot be redirected and now land at the top of this page.
 
 ## Chinese documentation
 

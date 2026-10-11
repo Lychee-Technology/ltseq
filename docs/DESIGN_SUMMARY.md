@@ -6,7 +6,7 @@ Related documents:
 - `docs/ARCHITECTURE.md`: full architecture walkthrough
 - `docs/MODULE_GUIDE.md`: contributor codebase tour
 - `docs/USER_MODEL.md`: user-facing design model
-- `docs/api.md`: API reference
+- `docs/api.md`: API documentation entry point
 - `docs/LINKING_GUIDE.md`: focused linking guide
 - `docs/DESIGN_SUMMARY.cn.md`: Chinese design summary
 
@@ -26,7 +26,7 @@ For deeper reading:
 - `docs/ARCHITECTURE.md`: full architecture walkthrough
 - `docs/MODULE_GUIDE.md`: contributor codebase tour
 - `docs/USER_MODEL.md`: user-facing design model
-- `docs/api.md`: API reference
+- `docs/api.md`: API documentation entry point
 - `docs/LINKING_GUIDE.md`: focused linking guide
 
 ---

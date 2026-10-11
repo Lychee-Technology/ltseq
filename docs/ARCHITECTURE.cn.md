@@ -7,7 +7,7 @@
 - `docs/MODULE_GUIDE.cn.md`：面向贡献者的代码导览
 - `docs/USER_MODEL.cn.md`：面向用户的设计理念与使用模型
 - `docs/DESIGN_SUMMARY.cn.md`：中文设计摘要
-- `docs/api.cn.md`：中文 API 参考
+- `docs/api.cn.md`：中文 API 文档入口
 
 ## 概览
 
