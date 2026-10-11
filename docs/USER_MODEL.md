@@ -5,7 +5,7 @@ Related documents:
 - `docs/README.md`: documentation index
 - `docs/USER_MODEL.cn.md`: Chinese user guide
 - `docs/ARCHITECTURE.md`: system architecture and execution model
-- `docs/api.md`: API reference
+- `docs/api.md`: API documentation entry point
 - `docs/LINKING_GUIDE.md`: focused linking guide
 
 ## What LTSeq Is

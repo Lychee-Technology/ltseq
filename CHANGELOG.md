@@ -4,7 +4,7 @@
 
 ### Changed
 
-Literal values in lambdas are typed (#145). They used to be sent to the engine as strings and parsed back, so some queries that ran before now raise, and a few return a different result. Expression types now come from DataFusion's coercion as the expression executes (#225). `docs/api.md` § "Literal values" describes the rules.
+Literal values in lambdas are typed (#145). They used to be sent to the engine as strings and parsed back, so some queries that ran before now raise, and a few return a different result. Expression types now come from DataFusion's coercion as the expression executes (#225). The archived pre-v0.5 reference's ["Literal values" section](docs/archive/pre-v0.5-api.md#literal-values) describes these rules at baseline commit 3041b44.
 
 - An unsupported value in a lambda raises `TypeError` where it is written, instead of being turned into a string: `r.a == [1, 2]` (use `.is_in([...])`), `bytes`, `timedelta`, `datetime.time`, `Fraction`, `complex`. An integer outside Int64, a non-finite `Decimal` or one with more than 38 digits, and `pandas.NaT`/`pandas.NA` raise `ValueError`.
 - A string is not a number for a method argument: `shift("1")`, `diff("1")`, `rolling("3")`, `ntile("4")`, `top_k("3")`, `percentile("0.5")` and `dt.add(days="1")` raise `ValueError` naming the method. Pass the number.

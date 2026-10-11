@@ -7,7 +7,7 @@ Related documents:
 - `docs/MODULE_GUIDE.md`: contributor-oriented codebase tour
 - `docs/USER_MODEL.md`: user-facing design philosophy and working model
 - `docs/DESIGN_SUMMARY.md`: design archive and decision history
-- `docs/api.md`: API reference
+- `docs/api.md`: API documentation entry point
 
 ## Overview
 

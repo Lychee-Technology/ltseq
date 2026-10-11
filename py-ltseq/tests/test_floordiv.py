@@ -160,8 +160,8 @@ class TestErrors:
 
     def test_if_else_guards_a_zero_divisor(self):
         # if_else evaluates a branch only on the rows that take it, which
-        # makes it the guard docs/api.md names. (`&` is not one: both sides
-        # are evaluated on every row.)
+        # makes it the guard docs/archive/pre-v0.5-api.md names. (`&` is not
+        # one: both sides are evaluated on every row.)
         t = LTSeq.from_arrow(pa.table({"x": [7, 8, 9], "y": [2, 0, 3], "f": [7.0, 8.0, 9.0], "g": [2.0, 0.0, 3.0]}))
         assert _col(t.derive(v=lambda r: if_else(r.y != 0, r.x // r.y, 0))) == [3, 0, 3]
         assert _col(t.derive(v=lambda r: if_else(r.g != 0, r.f // r.g, 0.0))) == [3.0, 0.0, 3.0]

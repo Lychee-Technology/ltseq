@@ -6,7 +6,7 @@
 - `docs/ARCHITECTURE.cn.md`：完整架构说明
 - `docs/MODULE_GUIDE.cn.md`：面向贡献者的代码导览
 - `docs/USER_MODEL.cn.md`：面向用户的设计模型
-- `docs/api.cn.md`：中文 API 文档
+- `docs/api.cn.md`：中文 API 文档入口
 - `docs/LINKING_GUIDE.cn.md`：中文 Linking 指南
 - `docs/DESIGN_SUMMARY.md`：英文原版设计摘要
 
@@ -26,7 +26,7 @@ LTSeq 是一个混合式 Python-Rust 库，用于面向顺序语义的数据处�
 - `docs/ARCHITECTURE.cn.md`：完整架构 walkthrough
 - `docs/MODULE_GUIDE.cn.md`：贡献者代码地图
 - `docs/USER_MODEL.cn.md`：面向用户的设计与使用模型
-- `docs/api.cn.md`：API 参考
+- `docs/api.cn.md`：中文 API 文档入口
 - `docs/LINKING_GUIDE.cn.md`：Linking 专题说明
 
 ---

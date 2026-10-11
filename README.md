@@ -449,7 +449,7 @@ Traditional dataframes are set-based (SQL, Pandas). LTSeq adds **sequence awaren
 
 ## API Reference
 
-See [docs/api.md](docs/api.md) for the complete API specification including:
+[docs/api.md](docs/api.md) is the entry point to the API documentation. It links the v0.5 API contract, which specifies the target API and is not yet implemented, and the archived reference for the API before v0.5, which covers:
 - Relational operations (filter, select, derive, sort, distinct, slice)
 - Window functions (shift, rolling, cum_sum, diff)
 - Ranking functions (row_number, rank, dense_rank, ntile)
@@ -555,7 +555,7 @@ MIT License - See LICENSE file for details.
 
 ## Resources
 
-- [Full API Documentation](docs/api.md)
+- [API Documentation](docs/api.md) - v0.5 API contract and the pre-v0.5 API reference
 - [Linking Guide](docs/LINKING_GUIDE.md) - Foreign key relationships and linking
 - [Design Summary](docs/DESIGN_SUMMARY.md) - Architecture and design decisions
 - **Examples** in `examples/` directory:

@@ -53,7 +53,11 @@ These principles decide every case the sections below do not spell out. When two
 
 ### 1.4 Relation to earlier decisions
 
-This contract replaces `docs/api.md` as the normative description of the public API. Implementation PRs update `docs/api.md` to match it. It revises these ADRs; the review document gives the reasons:
+This contract replaces `docs/api.md` as the normative description of the public API.
+
+Until documentation work item M28, implementation PRs record behavior changes in `CHANGELOG.md` (Unreleased), affected docstrings and shipped `.pyi` stubs. `docs/api.md` and `docs/api.cn.md` remain entry pages and are kept accurate about implementation status; `docs/archive/pre-v0.5-api.md` and `docs/archive/pre-v0.5-api.cn.md` remain frozen records of baseline commit 3041b44, not references for the changing implementation. After M1–M27, M28 rewrites both entry pages to describe this contract exactly and runs their examples as tests ([§24.1], criterion 5).
+
+It revises these ADRs; the review document gives the reasons:
 
 | ADR | Change |
 |---|---|
@@ -181,6 +185,7 @@ Each concept below is defined in its owning sections. Other sections apply the r
 [§21.2]: errors-and-performance.md#212-fast-paths
 [§22]: api-reference.md#22-complete-canonical-api-reference
 [§24]: acceptance.md#24-acceptance-criteria-and-contract-test-matrix
+[§24.1]: acceptance.md#241-acceptance-criteria
 [Deliverable A]: ../review/verdict.md#a-executive-verdict
 
 <!-- /v0.5-modular:links -->
