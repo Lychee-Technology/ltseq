@@ -5,8 +5,9 @@ drained by every draining terminal, stays within a fixed memory budget.
 Implementing R3 belongs to M1 and the items that bring v0.5's terminals.
 Until then these tests keep the harness honest: one MUST-stream pipeline
 runs end to end and must stay within the budget, and a pipeline that
-materializes its input must exceed it. The §21.1 SHOULD bounds are measured
-and reported, never failed, since a SHOULD is not a gate.
+materializes its input must exceed it. Each §21.1 SHOULD operation is
+measured against its own state bound (``harness.state_bound``) and reported,
+never failed, since a SHOULD is not a gate.
 """
 
 from __future__ import annotations
@@ -60,8 +61,20 @@ def test_a_materializing_pipeline_exceeds_the_budget(measure):
         harness.assert_within_budget(measurement)
 
 
+def test_the_baseline_stays_within_the_budget(baseline):
+    # A MUST-stream pipeline too, and every state bound starts from its peak.
+    harness.assert_within_budget(baseline)
+
+
+def test_holding_part_of_the_input_exceeds_a_state_bound(measure, state_bound):
+    # It holds less than the budget, so only a bound of its own catches it.
+    measurement = measure("collect_head", "to_batches", state_bound(0))
+    assert not measurement.within_limit
+    assert measurement.peak_above < harness.BUDGET
+
+
 @pytest.mark.parametrize("pipeline", [*catalog.SHOULD, *catalog.U2])
-def test_should_bound_is_reported(measure, pipeline):
-    measurement = measure(pipeline, "to_batches")
-    if not measurement.within_budget:
+def test_should_bound_is_reported(measure, state_bound, pipeline):
+    measurement = measure(pipeline, "to_batches", state_bound(catalog.STATE_ROWS[pipeline]))
+    if not measurement.within_limit:
         warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))

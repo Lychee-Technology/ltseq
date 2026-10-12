@@ -127,9 +127,9 @@ fn process_chunk_session_count(
 /// count) and processes each chunk in parallel.  Each worker opens the file
 /// once and streams its chunk sequentially, carrying the previous row
 /// across batch boundaries within the chunk.  A table read while a test
-/// pinned the layout (`LayoutOverrides`) uses the pinned `target_partitions`
-/// as N and `batch_size` as the read size, so tests reach every layout here
-/// as they do on the DataFusion path.
+/// pinned the layout (`LayoutOverrides`) uses its session's
+/// `target_partitions` as N and `batch_size` as the read size, so tests
+/// reach every layout here as they do on the DataFusion path.
 ///
 /// Algorithm:
 /// 1. Read Parquet metadata; partition row groups into N chunks.
@@ -153,15 +153,16 @@ pub fn parallel_streaming_group_count(
     chunked_group_count(predicate, parquet_path, batch_rows, chunks)
 }
 
-/// Read size and chunk count of a parallel count for `table`: its session's
-/// pinned `LayoutOverrides`, else `COUNT_BATCH_ROWS` and one chunk per rayon
-/// thread (`None`).
+/// Read size and chunk count of a parallel count for `table`. A session
+/// created under a pin counts at its own batch size and partition count, a
+/// part left unpinned included (`LayoutOverrides::pinned`); one created with
+/// nothing pinned reads `COUNT_BATCH_ROWS` with one chunk per rayon thread
+/// (`None`).
 fn count_layout(table: &LTSeqTable) -> (usize, Option<NonZeroUsize>) {
-    let layout = LayoutOverrides::of(&table.session);
-    let batch_rows = layout
-        .batch_size
-        .map_or(COUNT_BATCH_ROWS, NonZeroUsize::get);
-    (batch_rows, layout.target_partitions)
+    match LayoutOverrides::of(&table.session).pinned() {
+        Some((partitions, batch_rows)) => (batch_rows, NonZeroUsize::new(partitions)),
+        None => (COUNT_BATCH_ROWS, None),
+    }
 }
 
 /// Rows per record batch a count worker reads. The worker carries the
@@ -1072,10 +1073,11 @@ mod tests {
         }
     }
 
-    /// A table read while a test pins the layout (#274) counts with the
-    /// pinned chunk count and read size, and still agrees with the general
-    /// path; an unpinned one keeps one chunk per thread and
-    /// `COUNT_BATCH_ROWS`.
+    /// A table read while a test pins the layout (#274) counts at its
+    /// session's partition count and batch size, the DataFusion path's
+    /// layout, also for a part the pin leaves at the engine default, and
+    /// still agrees with the general path. An unpinned one keeps one chunk
+    /// per thread and `COUNT_BATCH_ROWS`.
     #[test]
     fn pinned_layout_sets_chunks_and_read_size() {
         let expr = sessionization();
@@ -1085,15 +1087,21 @@ mod tests {
         let unpinned = sorted_parquet_table(&path);
         assert_eq!(count_layout(&unpinned), (COUNT_BATCH_ROWS, None));
 
-        for (partitions, batch_rows) in [(1, 1), (2, 3), (5, 2), (12, 7)] {
-            let overrides = LayoutOverrides {
+        // Zero leaves that part unpinned.
+        for (partitions, batch_rows) in [(1, 1), (2, 3), (5, 2), (12, 7), (2, 0), (0, 3)] {
+            let session = session_context_with(LayoutOverrides {
                 target_partitions: NonZeroUsize::new(partitions),
                 batch_size: NonZeroUsize::new(batch_rows),
-            };
-            let table = sorted_parquet_table_in(session_context_with(overrides), &path);
+            });
+            let config = session.copied_config();
+            let table = sorted_parquet_table_in(session, &path);
             assert_eq!(
                 count_layout(&table),
-                (batch_rows, NonZeroUsize::new(partitions))
+                (
+                    config.batch_size(),
+                    NonZeroUsize::new(config.target_partitions())
+                ),
+                "partitions={partitions}, batch_rows={batch_rows}"
             );
             let count =
                 parallel_streaming_group_count(&table, &expr, &path).expect("parallel count");

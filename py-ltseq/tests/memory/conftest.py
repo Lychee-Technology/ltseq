@@ -8,9 +8,11 @@ their own.
 
 from __future__ import annotations
 
+import functools
+
 import pytest
 
-from . import harness
+from . import catalog, harness
 
 
 @pytest.fixture(scope="session")
@@ -28,15 +30,42 @@ def harness_inputs(tmp_path_factory) -> tuple[harness.Source, harness.Source]:
 
 @pytest.fixture
 def measure(harness_inputs, tmp_path):
-    """A function that measures one (pipeline, terminal) pair over the input."""
+    """A function that measures one (pipeline, terminal) pair over the input,
+    held to R3's budget unless given another limit."""
     source, warmup = harness_inputs
 
-    def run(pipeline: str, terminal: str) -> harness.Measurement:
+    def run(
+        pipeline: str, terminal: str, limit: harness.Limit = harness.R3_BUDGET
+    ) -> harness.Measurement:
         return harness.measure(
-            source, pipeline, terminal, warmup=warmup, out_dir=tmp_path / "out"
+            source, pipeline, terminal, warmup=warmup, out_dir=tmp_path / "out", limit=limit
         )
 
     return run
+
+
+@pytest.fixture(scope="session")
+def baseline(harness_inputs, tmp_path_factory) -> harness.Measurement:
+    """``catalog.BASELINE`` drained by ``to_batches``, measured once for the
+    SHOULD operations' state bounds."""
+    source, warmup = harness_inputs
+    (pipeline,) = catalog.BASELINE
+    return harness.measure(
+        source,
+        pipeline,
+        "to_batches",
+        warmup=warmup,
+        out_dir=tmp_path_factory.mktemp("baseline") / "out",
+    )
+
+
+@pytest.fixture
+def state_bound(baseline):
+    """``harness.state_bound`` over the session's baseline: a function of an
+    operation's state in input rows."""
+    if not baseline.within_limit:
+        pytest.skip("the baseline is over the budget, so no state bound can start from it")
+    return functools.partial(harness.state_bound, baseline)
 
 
 def pytest_terminal_summary(terminalreporter):

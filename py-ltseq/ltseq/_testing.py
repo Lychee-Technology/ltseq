@@ -5,8 +5,10 @@ CPU count) and batch size are process-wide settings read when a table's
 session is created, at its reader or constructor call (``read_parquet``,
 ``read_csv``, ``from_arrow``, ...). A table keeps the layout in effect at
 that call through every later transform and execution, so pin the layout
-before building the tables a check compares. The parallel Parquet fast path
-follows the same pinned layout.
+before building the tables a check compares. Under a pin, the parallel
+Parquet count runs at the layout ``current_engine_config()`` reports, a
+value left at the default included; with nothing pinned it keeps its own
+read size.
 
 Tests use the ``engine_config`` and ``engine_layout`` fixtures of
 ``py-ltseq/tests/conftest.py``; benchmarks and subprocesses use

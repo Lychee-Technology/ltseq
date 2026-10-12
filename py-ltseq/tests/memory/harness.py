@@ -13,6 +13,12 @@ make the figure depend on the machine: over this input, ``write_parquet`` of
 the MUST pipeline in ``catalog`` peaks at 40 MiB at two partitions and
 102 MiB at twelve, a 12-CPU machine's default.
 
+A §21.1 SHOULD operation is held to its own state bound instead of the
+budget (``state_bound``): the peak of the streaming it shares with the other
+operations (``catalog.BASELINE``), plus the state §21.1 lets it hold
+(``catalog.STATE_ROWS``), plus ``SHOULD_ALLOWANCE`` for what RSS cannot
+resolve.
+
 Linux only: the child resets the kernel's peak counter, which no other
 platform offers.
 """
@@ -49,7 +55,21 @@ class BudgetExceeded(AssertionError):
 
 
 class ShouldBoundExceeded(UserWarning):
-    """A §21.1 SHOULD operation held more than its definition needs."""
+    """A §21.1 SHOULD operation went over its state bound."""
+
+
+@dataclass(frozen=True)
+class Limit:
+    """What a run's peak is held to: R3's budget or a SHOULD state bound."""
+
+    nbytes: int
+    name: str
+
+    def __str__(self) -> str:
+        return f"the {self.nbytes / MiB:.1f} MiB {self.name}"
+
+
+R3_BUDGET = Limit(BUDGET, "budget")
 
 
 @dataclass(frozen=True)
@@ -66,25 +86,22 @@ class Source:
 class Measurement:
     pipeline: str
     terminal: str
-    budget: int
+    limit: Limit
     peak_above: int
     aborted: bool
     drained: int | None
     seconds: float | None
 
     @property
-    def within_budget(self) -> bool:
-        return not self.aborted and self.peak_above <= self.budget
+    def within_limit(self) -> bool:
+        return not self.aborted and self.peak_above <= self.limit.nbytes
 
     def describe(self) -> str:
         peak = f"{self.peak_above / MiB:.1f} MiB"
         if self.aborted:
             peak = f"> {peak} (stopped)"
-        verdict = "within" if self.within_budget else "OVER"
-        return (
-            f"{self.pipeline} -> {self.terminal}: peak {peak}, {verdict} the "
-            f"{self.budget / MiB:.0f} MiB budget"
-        )
+        verdict = "within" if self.within_limit else "OVER"
+        return f"{self.pipeline} -> {self.terminal}: peak {peak}, {verdict} {self.limit}"
 
 
 # Every measurement of the session, for the summary `conftest.py` prints.
@@ -111,6 +128,27 @@ def input_rows(start: int, stop: int) -> pa.Table:
 
 
 ROW_BYTES = input_rows(0, 1).nbytes
+
+# The part of a SHOULD operation's state bound that is neither the baseline
+# nor its state. The state is at most 1,024 rows (40 KiB), below what RSS
+# resolves, so the allowance covers what a measurement cannot tell apart
+# from it: repeated runs of one pair differ by up to about 4 MiB, and the
+# window methods in table order, which stream, peak 7 to 9 MiB above the
+# baseline. An operation holding 16 MiB beyond the baseline and its state
+# is reported; one that holds its input goes over many times.
+SHOULD_ALLOWANCE = 16 * MiB
+
+
+def state_bound(baseline: Measurement, state_rows: int) -> Limit:
+    """A SHOULD operation's limit: ``baseline``'s peak, ``state_rows`` input
+    rows of state and ``SHOULD_ALLOWANCE``."""
+    nbytes = baseline.peak_above + state_rows * ROW_BYTES + SHOULD_ALLOWANCE
+    rows = f"{state_rows:,} row" + ("" if state_rows == 1 else "s")
+    return Limit(
+        nbytes,
+        f"state bound ({baseline.peak_above / MiB:.1f} MiB baseline, {rows} of "
+        f"state, {SHOULD_ALLOWANCE / MiB:.0f} MiB allowance)",
+    )
 
 
 def rows_for(budget: int, *, files: int) -> int:
@@ -154,20 +192,21 @@ def measure(
     *,
     warmup: Source,
     out_dir: Path,
-    budget: int = BUDGET,
+    limit: Limit = R3_BUDGET,
     target_partitions: int = TARGET_PARTITIONS,
     batch_size: int | None = None,
     timeout: float = 1800,
 ) -> Measurement:
     """Run ``pipeline`` and ``terminal`` of ``catalog`` over ``source`` in a
     fresh process and return its peak memory above its level before the
-    reader's call. ``warmup`` is a small input of the same schema the child
-    runs first. A child that fails raises ``RuntimeError``; a run over its
-    budget is a measurement like any other."""
-    if source.nbytes < 10 * budget:
+    reader's call, held to ``limit``. ``warmup`` is a small input of the same
+    schema the child runs first. A child that fails raises ``RuntimeError``;
+    a run over its limit is a measurement like any other."""
+    # Below ten times the limit, a run that holds its input could pass.
+    if source.nbytes < 10 * limit.nbytes:
         raise ValueError(
-            f"R3 needs an input of at least ten budgets: {source.nbytes} bytes "
-            f"against a {budget}-byte budget"
+            f"the input must be at least ten times its limit: {source.nbytes} "
+            f"bytes against {limit}"
         )
     spec = {
         # The child runs in py-ltseq/, so relative paths would not resolve.
@@ -178,7 +217,7 @@ def measure(
         "out_dir": str(out_dir.resolve()),
         "target_partitions": target_partitions,
         "batch_size": batch_size,
-        "abort_above": max(ABORT_ABOVE, 2 * budget),
+        "abort_above": max(ABORT_ABOVE, 2 * limit.nbytes),
     }
     try:
         process = subprocess.run(
@@ -200,7 +239,7 @@ def measure(
     measurement = Measurement(
         pipeline=pipeline,
         terminal=terminal,
-        budget=budget,
+        limit=limit,
         peak_above=result["peak_above"],
         aborted=result["aborted"],
         drained=result["drained"],
@@ -211,5 +250,5 @@ def measure(
 
 
 def assert_within_budget(measurement: Measurement) -> None:
-    if not measurement.within_budget:
+    if not measurement.within_limit:
         raise BudgetExceeded(measurement.describe())

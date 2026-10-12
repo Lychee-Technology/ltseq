@@ -30,9 +30,21 @@ MUST = {
     ),
 }
 
-# The harness's negative control: `collect` holds the whole input.
+# The harness's negative controls. `collect` holds the whole input, over
+# R3's budget; `collect_head` holds 900,000 rows, 34 MiB: under the budget,
+# and over a state bound.
 MATERIALIZING = {
     "collect": lambda t, read: t.collect(),
+    "collect_head": lambda t, read: t.head(900_000).collect(),
+}
+
+# What the SHOULD operations' streaming costs without the operation: the
+# reader and `assume_sorted`, both MUST-stream, over every input column.
+# Each operation's state bound starts from this pipeline's peak
+# (`harness.state_bound`), so the engine's own buffering at the pinned
+# layout does not count as the operation's state.
+BASELINE = {
+    "assume_sorted": lambda t, read: t.assume_sorted("id"),
 }
 
 
@@ -77,7 +89,22 @@ U2 = {
     "tail": lambda t, read: t.tail(10),
 }
 
-PIPELINES = {**MUST, **MATERIALIZING, **SHOULD, **U2}
+# The state §21.1 lets each operation of SHOULD and U2 hold over this input,
+# in input rows.
+STATE_ROWS = {
+    "shift": 1,  # |n| rows
+    "shift_by_key": 8,  # |n| rows in each of the 8 keys' partitions
+    "rolling": 16,  # the window
+    "cum_sum": 1,  # a running value
+    "row_number": 1,  # a count and the last row's sort key and rank
+    "group_ordered": 1024,  # one group: a run
+    "search_pattern": 2,  # the rows one match spans, one per step
+    "asof_join": 8,  # backward: one right row per distinct `by` value
+    "distinct": 8,  # each distinct key
+    "tail": 10,  # the bound U2 would give it: the n rows it returns
+}
+
+PIPELINES = {**MUST, **MATERIALIZING, **BASELINE, **SHOULD, **U2}
 
 
 def _to_batches(table: LTSeq, out_dir: Path) -> int:

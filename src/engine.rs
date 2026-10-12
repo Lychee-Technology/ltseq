@@ -90,6 +90,16 @@ impl LayoutOverrides {
             .map_or_else(LayoutOverrides::default, |overrides| *overrides)
     }
 
+    /// The `(target_partitions, batch_size)` a session with these overrides
+    /// is configured with, as `_engine_config` reports it, if any part of
+    /// the layout is pinned; a part left unpinned is the engine default.
+    /// `None` if nothing is pinned. An evaluator that bypasses DataFusion
+    /// runs at this layout, so a pinned test gets the same layout on both
+    /// paths, and keeps its own tuning when there is none.
+    pub(crate) fn pinned(self) -> Option<(usize, usize)> {
+        (self != LayoutOverrides::default()).then(|| (self.target_partitions(), self.batch_size()))
+    }
+
     fn target_partitions(self) -> usize {
         self.target_partitions.map_or(*NUM_CPUS, NonZeroUsize::get)
     }
@@ -138,12 +148,18 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
 #[pyfunction]
 #[pyo3(signature = (target_partitions=None, batch_size=None))]
 pub(crate) fn _set_layout_overrides(
-    target_partitions: Option<usize>,
-    batch_size: Option<usize>,
+    target_partitions: Option<isize>,
+    batch_size: Option<isize>,
 ) -> PyResult<(Option<usize>, Option<usize>)> {
-    let positive = |name: &str, value: Option<usize>| match value {
-        Some(0) => Err(PyValueError::new_err(format!("{name} must be at least 1"))),
-        value => Ok(value.and_then(NonZeroUsize::new)),
+    // Signed, so that a negative value gets the same `ValueError` as zero
+    // instead of the `OverflowError` of PyO3's conversion to `usize`.
+    let positive = |name: &str, value: Option<isize>| match value {
+        None => Ok(None),
+        Some(n) => usize::try_from(n)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .map(Some)
+            .ok_or_else(|| PyValueError::new_err(format!("{name} must be at least 1, got {n}"))),
     };
     let previous = LayoutOverrides {
         target_partitions: positive("target_partitions", target_partitions)?,
@@ -190,6 +206,17 @@ mod tests {
         assert_eq!(options.target_partitions(), 3);
         assert_eq!(options.batch_size(), 7);
         assert_eq!(LayoutOverrides::of(&session), overrides);
+        assert_eq!(overrides.pinned(), Some((3, 7)));
+    }
+
+    #[test]
+    fn a_part_left_unpinned_is_the_engine_default() {
+        let overrides = LayoutOverrides {
+            target_partitions: NonZeroUsize::new(2),
+            batch_size: None,
+        };
+        assert_eq!(overrides.pinned(), Some((2, DEFAULT_BATCH_SIZE)));
+        assert_eq!(LayoutOverrides::default().pinned(), None);
     }
 
     #[test]

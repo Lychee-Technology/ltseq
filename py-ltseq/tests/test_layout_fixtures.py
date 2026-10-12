@@ -69,11 +69,12 @@ class TestPinnedEngine:
                 raise RuntimeError("inside")
         assert current_engine_config() == before
 
+    @pytest.mark.parametrize("value", [0, -1])
     @pytest.mark.parametrize("argument", ["target_partitions", "batch_size"])
-    def test_refuses_zero_and_keeps_the_layout(self, argument):
+    def test_refuses_values_below_one_and_keeps_the_layout(self, argument, value):
         before = current_engine_config()
-        with pytest.raises(ValueError, match=f"{argument} must be at least 1"):
-            with pinned_engine(**{argument: 0}):
+        with pytest.raises(ValueError, match=f"{argument} must be at least 1, got {value}"):
+            with pinned_engine(**{argument: value}):
                 pass
         assert current_engine_config() == before
 
