@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from ltseq import LTSeq
-from ltseq._testing import engine_config, pinned_engine
+from ltseq._testing import current_engine_config, pinned_engine
 
 from . import layouts
 from .layouts import BATCH_SIZES, CPUS, PARTITION_COUNTS
@@ -49,33 +49,33 @@ def rows_by_key(table: pa.Table) -> list[dict]:
 
 class TestPinnedEngine:
     def test_pins_inside_the_block_and_restores_after(self):
-        before = engine_config()
+        before = current_engine_config()
         with pinned_engine(target_partitions=3, batch_size=5) as config:
-            assert config == engine_config()
+            assert config == current_engine_config()
             assert (config["target_partitions"], config["batch_size"]) == (3, 5)
-        assert engine_config() == before
+        assert current_engine_config() == before
 
     def test_none_is_the_engine_default(self):
         with pinned_engine(target_partitions=3, batch_size=5):
             with pinned_engine(batch_size=7) as config:
                 assert config["target_partitions"] == config["default_target_partitions"]
                 assert config["batch_size"] == 7
-            assert engine_config()["target_partitions"] == 3
+            assert current_engine_config()["target_partitions"] == 3
 
     def test_restores_when_the_block_raises(self):
-        before = engine_config()
+        before = current_engine_config()
         with pytest.raises(RuntimeError, match="inside"):
             with pinned_engine(target_partitions=3):
                 raise RuntimeError("inside")
-        assert engine_config() == before
+        assert current_engine_config() == before
 
     @pytest.mark.parametrize("argument", ["target_partitions", "batch_size"])
     def test_refuses_zero_and_keeps_the_layout(self, argument):
-        before = engine_config()
+        before = current_engine_config()
         with pytest.raises(ValueError, match=f"{argument} must be at least 1"):
             with pinned_engine(**{argument: 0}):
                 pass
-        assert engine_config() == before
+        assert current_engine_config() == before
 
     def test_a_table_keeps_the_layout_of_its_reader_call(self, tmp_path):
         directory = layouts.write_parquet(ROWS, tmp_path / "files", files=3)
@@ -95,7 +95,7 @@ class TestEngineLayoutFixture:
     def test_reaches_the_tables_the_test_builds(self, engine_layout, tmp_path):
         rows = pa.table({"i": pa.array(range(20), pa.int64())})
         table = LTSeq.read_parquet(str(layouts.write_parquet(rows, tmp_path, files=3)))
-        assert engine_layout == engine_config()
+        assert engine_layout == current_engine_config()
         assert file_groups(table) == min(engine_layout["target_partitions"], 3)
         sizes = batch_rows(table)
         assert sum(sizes) == 20
@@ -103,13 +103,16 @@ class TestEngineLayoutFixture:
 
 
 def test_engine_config_fixture_pins_until_the_test_ends(engine_config):
+    # The fixture pins and current_engine_config() reads; one test uses both.
     config = engine_config(target_partitions=3, batch_size=5)
     assert (config["target_partitions"], config["batch_size"]) == (3, 5)
+    assert current_engine_config() == config
     config = engine_config(batch_size=9)
     assert (config["target_partitions"], config["batch_size"]) == (
         config["default_target_partitions"],
         9,
     )
+    assert current_engine_config() == config
 
 
 class TestDataLayouts:

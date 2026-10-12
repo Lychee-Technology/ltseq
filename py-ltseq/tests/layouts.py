@@ -36,9 +36,9 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
 from ltseq import LTSeq
-from ltseq._testing import engine_config
+from ltseq._testing import current_engine_config
 
-CPUS = engine_config()["default_target_partitions"]
+CPUS = current_engine_config()["default_target_partitions"]
 PARTITION_COUNTS = {"p1": 1, "p2": 2, "p2xcpu": 2 * CPUS}
 BATCH_SIZES = {"b1": 1, "b7": 7, "bdefault": None}
 ENGINE_LAYOUTS = {

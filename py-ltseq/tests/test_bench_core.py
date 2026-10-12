@@ -9,7 +9,8 @@ Pinned down here:
   region; only the read and end-to-end benchmarks may.
 - Order-dependent operators get inputs whose order DataFusion can see, so
   their timed plans do not sort the input again.
-- Saved results name the engine layout they ran at (#274).
+- Saved results name the engine layout they ran at, and the layout flags
+  pin the whole run (#274).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
-from ltseq._testing import pinned_engine
+from ltseq._testing import current_engine_config, pinned_engine
 
 
 def load_bench_core():
@@ -204,3 +205,21 @@ def test_saved_results_record_the_pinned_engine_layout(tmp_path):
         bench_core.save_results([], str(out))
     engine = json.loads(out.read_text())["engine"]
     assert (engine["target_partitions"], engine["batch_size"]) == (3, 5)
+
+
+def test_layout_flags_pin_the_run_and_the_saved_layout(monkeypatch):
+    # main() parses the arguments it is given, not pytest's command line.
+    layouts = []
+
+    def record_layout(*args, **kwargs):
+        layouts.append(current_engine_config())
+
+    monkeypatch.setattr(bench_core, "run_suite", record_layout)
+    monkeypatch.setattr(bench_core, "print_results", lambda results: None)
+    monkeypatch.setattr(bench_core, "save_results", record_layout)
+    before = current_engine_config()
+
+    bench_core.main(["--target-partitions", "2", "--batch-size", "7"])
+
+    assert [(c["target_partitions"], c["batch_size"]) for c in layouts] == [(2, 7), (2, 7)]
+    assert current_engine_config() == before

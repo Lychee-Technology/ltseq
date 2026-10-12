@@ -32,7 +32,7 @@ from . import layouts
 @pytest.fixture(params=list(layouts.ENGINE_LAYOUTS.values()), ids=list(layouts.ENGINE_LAYOUTS))
 def engine_layout(request):
     """Run the test at one pinned (partition count, batch size); yields the
-    resulting ``ltseq._testing.engine_config()``."""
+    resulting ``ltseq._testing.current_engine_config()``."""
     target_partitions, batch_size = request.param
     with pinned_engine(target_partitions=target_partitions, batch_size=batch_size) as config:
         yield config
@@ -40,7 +40,8 @@ def engine_layout(request):
 
 @pytest.fixture
 def engine_config():
-    """A function that pins the engine layout until the test ends."""
+    """A function that pins the engine layout until the test ends and
+    returns the resulting ``ltseq._testing.current_engine_config()``."""
     with contextlib.ExitStack() as stack:
 
         def pin(*, target_partitions: int | None = None, batch_size: int | None = None):

@@ -35,13 +35,13 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 # Add py-ltseq to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "py-ltseq"))
 
 from ltseq import LTSeq  # type: ignore
-from ltseq._testing import engine_config, pinned_engine  # type: ignore
+from ltseq._testing import current_engine_config, pinned_engine  # type: ignore
 
 OPERATOR = "operator"
 IO = "io"
@@ -691,7 +691,7 @@ def save_results(results: list[BenchmarkResult], path: str) -> None:
     data = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "host": collect_host_info(),
-        "engine": engine_config(),
+        "engine": current_engine_config(),
         "results": [r.to_dict() for r in results],
     }
     with open(path, "w") as f:
@@ -699,9 +699,9 @@ def save_results(results: list[BenchmarkResult], path: str) -> None:
     print(f"\nResults saved to {path}")
 
 
-def main():
-    """Run all benchmarks."""
-    defaults = engine_config()
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run all benchmarks. ``argv`` defaults to the command line's arguments."""
+    defaults = current_engine_config()
     parser = argparse.ArgumentParser(description="LTSeq core benchmarks")
     parser.add_argument(
         "--target-partitions",
@@ -714,7 +714,7 @@ def main():
         type=int,
         help=f"pin the engine's batch size (default: {defaults['default_batch_size']})",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print("LTSeq Performance Benchmarks")
     print("=" * 70)
