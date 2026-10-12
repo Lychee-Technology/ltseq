@@ -45,3 +45,4 @@ Literal values in lambdas are typed (#145). They used to be sent to the engine a
 - An unsupported value passed to a method (`r.x.shift(1, default=b"x")`) raises inside the lambda, at the call.
 - `shift(default=<expression>)` raises instead of ignoring the default.
 - `search_pattern` predicates accept `True`, `False` and `None` literals.
+- `LTSeq.from_arrow` of a struct-typed `ChunkedArray` with a row that is NULL as a whole raises `ValueError` naming the row, as pyarrow's `pa.table` does (#255). The row used to be read as whatever the struct's fields held under it, typically `0` and `""`. To read such a row's fields as NULL, flatten the input first: `LTSeq.from_arrow(pa.Table.from_struct_array(data))`. The refusal applies to every producer: a polars struct `Series` with a NULL row also raises now. polars 2.0 stores NULL fields under such a row, so it was read with those fields NULL; pass `s.struct.unnest()` instead.

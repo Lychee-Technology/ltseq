@@ -5,6 +5,8 @@ Interface / PyCapsule protocol), not as IPC bytes. These tests pin down:
 
 - round-trips for primitive, temporal, decimal, nested and dictionary types;
 - chunked input preserved in order;
+- a struct ``ChunkedArray`` read as the table of its fields, and a row that is
+  NULL as a whole refused rather than read as its child buffers' values (#255);
 - empty schemas / empty tables in both directions;
 - buffer lifetime: results outlive the objects they were exported from;
 - the ``__arrow_c_stream__`` protocol on ``LTSeq`` (``pa.table(t)`` etc.) and
@@ -108,6 +110,19 @@ class TestRoundTrip:
         t = LTSeq.from_arrow(reader)
         assert t.to_arrow()["x"].to_pylist() == [1, 2, 3]
 
+    def test_reader_failure_carries_producer_message(self):
+        def batches():
+            yield pa.record_batch({"x": [1]})
+            raise RuntimeError("producer failed")
+
+        reader = pa.RecordBatchReader.from_batches(pa.schema([("x", pa.int64())]), batches())
+        with pytest.raises(ValueError, match="producer failed"):
+            LTSeq.from_arrow(reader)
+
+    def test_non_struct_stream_raises(self):
+        with pytest.raises(ValueError):
+            LTSeq.from_arrow(pa.chunked_array([[1, 2]]))
+
     def test_from_pandas_round_trip(self):
         pd = pytest.importorskip("pandas")
         df = pd.DataFrame({"x": [1, 2, 3], "y": ["a", "b", "c"]})
@@ -161,6 +176,75 @@ class TestEmpty:
         assert t.to_arrow().num_rows == 0
         via_protocol = pa.table(t)
         assert via_protocol.num_rows == 0 and via_protocol.num_columns == 0
+
+    def test_batches_without_fields_keep_their_rows(self):
+        no_fields = pa.table({"a": [1, 2, 3]}).select([])
+        batch = no_fields.to_batches()[0]
+        reader = pa.RecordBatchReader.from_batches(batch.schema, [batch, batch])
+        assert LTSeq.from_arrow(no_fields).count() == 3
+        assert LTSeq.from_arrow(batch).count() == 3
+        assert LTSeq.from_arrow(reader).count() == 6
+
+
+# ---------------------------------------------------------------------------
+# Struct input
+# ---------------------------------------------------------------------------
+
+STRUCT = pa.struct([("a", pa.int64()), ("s", pa.string())])
+
+
+def struct_chunks(*chunks: list) -> pa.ChunkedArray:
+    return pa.chunked_array([pa.array(chunk, type=STRUCT) for chunk in chunks], type=STRUCT)
+
+
+class TestStructInput:
+    """A struct ``ChunkedArray`` is read as the table of its fields (#255).
+
+    A row that is NULL as a whole cannot be a table row. Its fields hold whatever
+    the child buffers have under the NULL slot (``0``, ``""``), so it is refused,
+    as pyarrow refuses it, rather than read as data.
+    """
+
+    def test_fields_become_columns(self):
+        data = struct_chunks([{"a": 1, "s": "x"}, {"a": None, "s": None}], [{"a": 3, "s": "z"}])
+        result = LTSeq.from_arrow(data).to_arrow()
+        assert result.schema == pa.schema(list(STRUCT))
+        assert result.to_pydict() == {"a": [1, None, 3], "s": ["x", None, "z"]}
+
+    @pytest.mark.parametrize(
+        ("chunks", "index"),
+        [
+            ([[{"a": 1, "s": "x"}, None, {"a": 3, "s": None}]], 1),
+            # Checking only the first batch would miss this one.
+            ([[{"a": 1, "s": "x"}], [{"a": 2, "s": "y"}, None]], 2),
+        ],
+        ids=["first_chunk", "second_chunk"],
+    )
+    def test_null_row_raises(self, chunks, index):
+        with pytest.raises(ValueError, match=f"row at index {index} .* NULL as a whole"):
+            LTSeq.from_arrow(struct_chunks(*chunks))
+
+    def test_validity_buffer_without_nulls_is_read(self):
+        data = pa.StructArray.from_arrays(
+            [pa.array([1, 2]), pa.array(["x", None])],
+            fields=list(STRUCT),
+            mask=pa.array([False, False]),
+        )
+        assert data.buffers()[0] is not None
+        result = LTSeq.from_arrow(pa.chunked_array([data])).to_arrow()
+        assert result.to_pydict() == {"a": [1, 2], "s": ["x", None]}
+
+    def test_only_the_rows_of_a_slice_are_checked(self):
+        data = struct_chunks([{"a": 1, "s": "x"}, None, {"a": 3, "s": "z"}])
+        assert LTSeq.from_arrow(data.slice(2)).to_arrow().to_pydict() == {"a": [3], "s": ["z"]}
+        with pytest.raises(ValueError, match="row at index 0 "):
+            LTSeq.from_arrow(data.slice(1))
+
+    def test_flattened_input_reads_null_row_as_nulls(self):
+        # The workaround the error names.
+        data = struct_chunks([{"a": 1, "s": "x"}, None])
+        result = LTSeq.from_arrow(pa.Table.from_struct_array(data)).to_arrow()
+        assert result.to_pydict() == {"a": [1, None], "s": ["x", None]}
 
 
 # ---------------------------------------------------------------------------
