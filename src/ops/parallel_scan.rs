@@ -3,13 +3,16 @@
 //! Two strategies for pre-sorted Parquet:
 //!
 //! 1. **Parallel chunk streaming** (R2 group_ordered count): Divide row groups
-//!    into N contiguous chunks (N = CPU threads).  Each thread opens the file
-//!    once and reads its chunk sequentially, carrying the previous row across
-//!    batch boundaries.  N seam checks between chunks.  Only N file opens.
+//!    into N contiguous chunks (N = CPU threads, or a test's pinned
+//!    `target_partitions`, see `engine::LayoutOverrides`).  Each thread opens
+//!    the file once and reads its chunk sequentially, carrying the previous
+//!    row across batch boundaries.  N seam checks between chunks.  Only N file
+//!    opens.
 //!
 //! 2. **Parallel partitioned** (R3 pattern matching): Read row groups in parallel,
 //!    split by partition key, run pattern matching per-partition in parallel.
 
+use crate::engine::LayoutOverrides;
 use crate::error::LtseqError;
 use crate::ops::linear_scan::{extract_referenced_columns, fused_boundaries};
 use crate::ops::pattern_match::{
@@ -28,6 +31,7 @@ use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 // ============================================================================
@@ -122,7 +126,10 @@ fn process_chunk_session_count(
 /// Divides the Parquet row groups into N contiguous chunks (N = rayon thread
 /// count) and processes each chunk in parallel.  Each worker opens the file
 /// once and streams its chunk sequentially, carrying the previous row
-/// across batch boundaries within the chunk.
+/// across batch boundaries within the chunk.  A table read while a test
+/// pinned the layout (`LayoutOverrides`) uses its session's
+/// `target_partitions` as N and `batch_size` as the read size, so tests
+/// reach every layout here as they do on the DataFusion path.
 ///
 /// Algorithm:
 /// 1. Read Parquet metadata; partition row groups into N chunks.
@@ -138,24 +145,39 @@ fn process_chunk_session_count(
 /// counts it through the DataFusion path. The general path could read it,
 /// but for predicates without a fused form it miscounts NULLs (#189).
 pub fn parallel_streaming_group_count(
-    _table: &LTSeqTable,
+    table: &LTSeqTable,
     predicate: &PyExpr,
     parquet_path: &str,
 ) -> Result<usize, LtseqError> {
-    chunked_group_count(predicate, parquet_path, COUNT_BATCH_ROWS)
+    let (batch_rows, chunks) = count_layout(table);
+    chunked_group_count(predicate, parquet_path, batch_rows, chunks)
+}
+
+/// Read size and chunk count of a parallel count for `table`. A session
+/// created under a pin counts at its own batch size and partition count, a
+/// part left unpinned included (`LayoutOverrides::pinned`); one created with
+/// nothing pinned reads `COUNT_BATCH_ROWS` with one chunk per rayon thread
+/// (`None`).
+fn count_layout(table: &LTSeqTable) -> (usize, Option<NonZeroUsize>) {
+    match LayoutOverrides::of(&table.session).pinned() {
+        Some((partitions, batch_rows)) => (batch_rows, NonZeroUsize::new(partitions)),
+        None => (COUNT_BATCH_ROWS, None),
+    }
 }
 
 /// Rows per record batch a count worker reads. The worker carries the
 /// previous row across every batch boundary inside its chunk.
 const COUNT_BATCH_ROWS: usize = 65536;
 
-/// `parallel_streaming_group_count` with the read batch size as a parameter,
-/// so tests can cut a chunk into several batches without writing more than
-/// `COUNT_BATCH_ROWS` rows.
+/// `parallel_streaming_group_count` with the read batch size and the chunk
+/// count as parameters, so tests can cut a chunk into several batches without
+/// writing more than `COUNT_BATCH_ROWS` rows. `chunks: None` makes one chunk
+/// per rayon thread.
 fn chunked_group_count(
     predicate: &PyExpr,
     parquet_path: &str,
     batch_rows: usize,
+    chunks: Option<NonZeroUsize>,
 ) -> Result<usize, LtseqError> {
     // 1. Extract referenced columns for projection pruning.
     let mut needed_cols: HashSet<String> = HashSet::new();
@@ -205,12 +227,16 @@ fn chunked_group_count(
         .map(|(i, f)| (f.name().clone(), i))
         .collect();
 
-    // 4. Partition row groups into N chunks (N = rayon thread count).
-    //    Each chunk is processed by one worker with a single file open.
+    // 4. Partition row groups into N chunks (N = `chunks`, else the rayon
+    //    thread count). Each chunk is processed by one worker with a single
+    //    file open.
     //
     // Safety: PyExpr, ProjectionMask, HashMap<String, usize> are all
     // Send+Sync (pure Rust data, no Py<T> or interior mutability).
-    let num_threads = rayon::current_num_threads().max(1).min(num_row_groups);
+    let num_threads = chunks
+        .map_or_else(rayon::current_num_threads, NonZeroUsize::get)
+        .max(1)
+        .min(num_row_groups);
     let chunk_size = num_row_groups.div_ceil(num_threads);
     let path_str = parquet_path.to_string();
 
@@ -846,11 +872,12 @@ fn count_patterns_in_rg_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{create_session_context, RUNTIME};
+    use crate::engine::{create_session_context, session_context_with, RUNTIME};
     use crate::metadata::SortSpec;
     use crate::ops::grouping::group_ordered_count_impl;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::file_format::options::ParquetReadOptions;
+    use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
 
@@ -955,7 +982,10 @@ mod tests {
 
     /// A table as `read_parquet(path).assume_sorted("i")` builds it.
     fn sorted_parquet_table(path: &str) -> LTSeqTable {
-        let session = create_session_context();
+        sorted_parquet_table_in(create_session_context(), path)
+    }
+
+    fn sorted_parquet_table_in(session: Arc<SessionContext>, path: &str) -> LTSeqTable {
         let df = RUNTIME
             .block_on(session.read_parquet(path, ParquetReadOptions::default()))
             .expect("read parquet");
@@ -1032,7 +1062,7 @@ mod tests {
                 .expect("rayon pool");
             for batch_rows in 1..=5 {
                 let count = pool
-                    .install(|| chunked_group_count(&expr, &path, batch_rows))
+                    .install(|| chunked_group_count(&expr, &path, batch_rows, None))
                     .expect("parallel count");
                 assert_eq!(
                     count, expected,
@@ -1041,6 +1071,46 @@ mod tests {
             }
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// A table read while a test pins the layout (#274) counts at its
+    /// session's partition count and batch size, the DataFusion path's
+    /// layout, also for a part the pin leaves at the engine default, and
+    /// still agrees with the general path. An unpinned one keeps one chunk
+    /// per thread and `COUNT_BATCH_ROWS`.
+    #[test]
+    fn pinned_layout_sets_chunks_and_read_size() {
+        let expr = sessionization();
+        let expected = general_path_count(&expr);
+        let path = write_parquet(&events(), 2, "pinned");
+
+        let unpinned = sorted_parquet_table(&path);
+        assert_eq!(count_layout(&unpinned), (COUNT_BATCH_ROWS, None));
+
+        // Zero leaves that part unpinned.
+        for (partitions, batch_rows) in [(1, 1), (2, 3), (5, 2), (12, 7), (2, 0), (0, 3)] {
+            let session = session_context_with(LayoutOverrides {
+                target_partitions: NonZeroUsize::new(partitions),
+                batch_size: NonZeroUsize::new(batch_rows),
+            });
+            let config = session.copied_config();
+            let table = sorted_parquet_table_in(session, &path);
+            assert_eq!(
+                count_layout(&table),
+                (
+                    config.batch_size(),
+                    NonZeroUsize::new(config.target_partitions())
+                ),
+                "partitions={partitions}, batch_rows={batch_rows}"
+            );
+            let count =
+                parallel_streaming_group_count(&table, &expr, &path).expect("parallel count");
+            assert_eq!(
+                count, expected,
+                "partitions={partitions}, batch_rows={batch_rows}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A predicate with no fused form makes the parallel count fall back, and

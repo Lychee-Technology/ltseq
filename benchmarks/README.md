@@ -47,6 +47,14 @@ uv run --group bench python benchmarks/run_all.py --only vs     # 只跑 ClickBe
 uv run --group bench python benchmarks/run_all.py --prepare     # 运行前显式准备数据（可能下载 ~14GB）
 ```
 
+`bench_core.py` 默认按 CPU 核数分区。`--target-partitions N` 和 `--batch-size N` 通过 #274 的测试专用开关固定整次运行的分区数与批大小，结果 JSON 的 `engine` 字段记录实际取值；按分区数比较扩展性（如 #251）时用它们。
+
+`bench_core.py` runs at the CPU count's partitions by default. `--target-partitions N` and `--batch-size N` pin the partition count and batch size for the whole run through #274's test-only override, and the results JSON records them under `engine`. Use them to compare scaling across partition counts (#251).
+
+```bash
+uv run python benchmarks/bench_core.py --target-partitions 2
+```
+
 `run_all.py` **不会**自动下载约 14GB 的 ClickBench 数据集。若对比所需的 parquet 不存在，`bench_vs` 步骤会被标记为 SKIP 并给出准备数据的指引；只有显式传 `--prepare` 或先手动运行 `prepare_data.py` 才会准备数据。
 
 ## 准备 ClickBench 数据 / Preparing ClickBench data

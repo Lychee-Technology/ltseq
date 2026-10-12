@@ -55,3 +55,40 @@ jobs:
 
       - name: Run tests
         run: uv run pytest py-ltseq/tests/ -v
+
+  memory-harness:
+    # Peak-memory harness (#274): each run reads an input of ten budgets in a
+    # process of its own, so it runs beside the main job, not inside it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install Python dependencies
+        run: uv sync --group dev
+
+      - name: Build Rust extension
+        run: uv run maturin develop
+
+      - name: Run memory harness
+        run: uv run pytest py-ltseq/tests/memory -m memory -v
