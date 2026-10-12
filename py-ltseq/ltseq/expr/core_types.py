@@ -128,11 +128,13 @@ def _encode_datetime64(value: Any) -> dict[str, Any]:
     return {"dtype": "Timestamp", "value": int(converted.view("int64")), "unit": target, "tz": None}
 
 
-def _encode_literal(value: Any) -> dict[str, Any]:
+def _encode_literal(value: Any, *, membership_hint: bool = True) -> dict[str, Any]:
     """Validate a Python constant and encode it as a typed wire payload.
 
     Every payload field is a plain bool/int/float/str/None of the exact type
-    its dtype names, so the Rust side never parses a string.
+    its dtype names, so the Rust side never parses a string. The error for an
+    unsupported type points to ``is_in`` unless ``membership_hint`` is false,
+    as for a value written into a column.
 
     Raises:
         TypeError: the value's type is not a supported literal type.
@@ -154,7 +156,7 @@ def _encode_literal(value: Any) -> dict[str, Any]:
         if name == "datetime64":
             return _encode_datetime64(value)
         if name == "timedelta64":
-            raise _unsupported(value)
+            raise _unsupported(value, membership_hint)
     if isinstance(value, numbers.Integral):  # int, IntEnum, numpy integers
         as_int = int(value)
         if not _INT64_MIN <= as_int <= _INT64_MAX:
@@ -175,14 +177,14 @@ def _encode_literal(value: Any) -> dict[str, Any]:
         return {"dtype": "Date32", "value": (value - _EPOCH_DATE).days}
     if module.startswith("pandas") and type(value).__name__ == "NAType":
         raise _missing_value_error(value)
-    raise _unsupported(value)
+    raise _unsupported(value, membership_hint)
 
 
-def _unsupported(value: Any) -> TypeError:
+def _unsupported(value: Any, membership_hint: bool) -> TypeError:
+    hint = "; use .is_in([...]) for membership" if membership_hint else ""
     return TypeError(
         f"Unsupported literal type {_type_name(value)} ({reprlib.repr(value)}); "
-        f"supported literal types: {_SUPPORTED_LITERAL_TYPES}; "
-        "use .is_in([...]) for membership"
+        f"supported literal types: {_SUPPORTED_LITERAL_TYPES}{hint}"
     )
 
 

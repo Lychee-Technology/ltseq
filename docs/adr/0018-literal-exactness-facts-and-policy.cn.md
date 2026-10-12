@@ -1,7 +1,7 @@
 # ADR 0018：字面量精确性：事实、策略与唯一的类型权威
 
 - 状态：Accepted
-- 决策日期：2026-10-06（D-a–D-h）与 2026-10-07（D-i–D-m），PR #225 · 记录日期：2026-10-07
+- 决策日期：2026-10-06（D-a–D-h）与 2026-10-07（D-i–D-m），PR #225 · 记录日期：2026-10-07 · 修订：2026-10-12（D-c 扩展到写入的值，#194）
 
 [English version](0018-literal-exactness-facts-and-policy.md)
 
@@ -17,7 +17,7 @@
 
 `src/transpiler/exact.rs` 只陈述关于 Arrow 类型和值的事实，不含策略。`cast_class(from, to)` 把一次转换归为 `Exact`、`RangeOnly`、`Precision`、`RangeAndPrecision`、`Kind` 或 `Unjudged`；`holds(to, value)` 回答某类型是否精确容纳某值，返回该类型下的值，或者它落在哪里（`Between` 该类型的两个值之间、`Beyond` 其范围之外、`NotANumber`），或者 `Unjudged`。两者都是全函数：每个分支都写出来，模块没有判断过的组合是 `Unjudged`，任何调用方都不得把 `Unjudged` 或 `Kind` 读作精确。`holds` 陈述的是可表示性，而不是 DataFusion 的转换行为：整数类型的量级放得进尾数（11、24 或 53 位）时才被浮点类型容纳，小数按位数和小数位判断，浮点数按其精确的二进制值判断（一个精确的有理数，所以 `0.1` 是 0.1000000000000000055511151231257827…），时刻按更细单位下的刻度判断，Date64 只按整天判断。`cast_class` 描述的是 Arrow 的转换实际计算什么，有两处比可表示性更窄或更宽：负小数位的小数在变成整数之前先在它自己的存储整数里放大，所以放得进目标类型的值仍可能在途中溢出；Date64 与毫秒时间戳之间按原始毫秒互转，不强制整天。两条事实都写在模块里，Date64 的按天读法来自 `holds`。
 
-`src/transpiler/literal_policy.rs` 是唯一决定 LTSeq 判断什么、把什么交给 DataFusion 的地方。`interpret` 读取字面量遇到某类型时的含义（`Decimal` 遇到浮点数就是该浮点数，不带时区的 `datetime` 遇到带时区的列是该时区的墙上时间，字符串沿用 DataFusion 的理解）；`exact_domain` 列出 LTSeq 亲自放置其值的类型（整数、小数、日期、时间戳）；`held` 和 `fit` 实施 D-b 与 D-i；`widening` 实施 D-m。`src/transpiler/literals.rs` 中的各道门（比较、`is_in`、`fill_null`/`coalesce`/`if_else`/`when` 的共享取值、`shift(default=)`、`dt.diff`、算术）每一次判断都咨询策略，因此新增一种字面量或一种上下文类型只是一条策略条目，而不是每道门里的一个新分支。门里唯一直接调用 `exact.rs` 的地方是比较放置中的 `hold_instant`，它询问 `interpret` 已经读出的时刻落在列的单位的哪里；这是对策略产出的值做事实查询，不是第二个决定判断什么的权威。
+`src/transpiler/literal_policy.rs` 是唯一决定 LTSeq 判断什么、把什么交给 DataFusion 的地方。`interpret` 读取字面量遇到某类型时的含义（`Decimal` 遇到浮点数就是该浮点数，不带时区的 `datetime` 遇到带时区的列是该时区的墙上时间，字符串沿用 DataFusion 的理解）；`exact_domain` 列出 LTSeq 亲自放置其值的类型（整数、小数、日期、时间戳）；`held` 和 `fit` 实施 D-b 与 D-i；`widening` 实施 D-m。`src/transpiler/literals.rs` 中的各道门（比较、`is_in`、`fill_null`/`coalesce`/`if_else`/`when` 的共享取值、`shift(default=)`、`dt.diff`、算术，以及 `insert`、`modify` 和 `update` 写入的值）每一次判断都咨询策略，因此新增一种字面量或一种上下文类型只是一条策略条目，而不是每道门里的一个新分支。门里唯一直接调用 `exact.rs` 的地方是比较放置中的 `hold_instant`，它询问 `interpret` 已经读出的时刻落在列的单位的哪里；这是对策略产出的值做事实查询，不是第二个决定判断什么的权威。
 
 策略编码的规则：
 
@@ -25,7 +25,7 @@
 |---|---|
 | D-a | 表达式自底向上解析，DataFusion 的类型强制是类型的唯一来源。LTSeq 不计算公共类型。 |
 | D-b、D-i | 共享一个结果列的取值：当每个已有取值的转换在类型层面精确、每个字面量在该类型下在值层面精确时，采用 DataFusion 的统一类型。否则，不含字面量的上下文类型能精确容纳的字面量采用该类型；仍不精确的在计划期抛出 `ValueError` 并给出该字面量。浮点数不是例外：Int64 列上的 `r.i.fill_null(0.0)` 保持 Int64，`fill_null(1.5)` 抛出错误；在 Float64 能容纳的 `int32` 列上两者都是 Float64。 |
-| D-c | `shift(default=)` 要么精确要么报错，绝不扩宽列。 |
+| D-c | `shift(default=)` 要么精确要么报错，绝不扩宽列。`insert`、`modify` 或 `update` 写入的值是同一规则下的固定目标（#194）。策略交给 DataFusion 的组合（D-h）在 shift 默认值中由 DataFusion 转换，但写入的值之后没有转换，所以在那里字符串可写入任何字符串类型，其他这类组合一律拒绝。 |
 | D-d | 在 `dt.diff` 和减法中，不带时区的字面量遇到带时区的列是该列时区的墙上时间；`date` 是本地午夜。 |
 | D-e | 整数和 `Decimal` 字面量在比较和 `is_in` 中精确放置，超过 38 位也是如此（#227）。 |
 | D-f | 常量由 DataFusion 的简化器按它的类型折叠（#193、#209）。 |

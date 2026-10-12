@@ -19,6 +19,7 @@ break the invariants its issue describes, and nowhere else.
 from __future__ import annotations
 
 import functools
+import json
 import re
 from pathlib import Path
 
@@ -437,4 +438,59 @@ def test_nary_composition(ctx):
         for pos, out in (("coal", coal3), ("fill", fill2)):
             if comparable(out) != comparable(head[cell_id(ctx, lit, pos)]):
                 offenders.append(f"{ctx}/{lit}/{pos}: n-ary={show(out)} binary={show(head[cell_id(ctx, lit, pos)])}")
+    assert not offenders, report(offenders)
+
+
+# --- values written by insert, modify and update -------------------------------------
+
+
+# Each writes its value into row 1 of the context column; rows 1 and 4 are NULL.
+MUTATIONS = {
+    "insert": lambda t, ctx, value: t.insert(1, {ctx: value}),
+    "modify": lambda t, ctx, value: t.modify(1, **{ctx: value}),
+    "update": lambda t, ctx, value: t.update(lambda r: r.k == 1, **{ctx: value}),
+}
+COLUMN_CONTEXTS = [ctx for ctx in CONTEXTS if ctx not in grid.CASES]
+
+
+def _written(ctx, lit, mutation):
+    """The column's type and the value ``mutation`` wrote, or the class of the error the call raised."""
+    try:
+        result = MUTATIONS[mutation](grid.table(), ctx, literals()[lit])
+    except (TypeError, ValueError) as error:
+        return {"error": type(error).__name__}
+    column = result.to_arrow().column(ctx)
+    return json.loads(json.dumps({"type": str(column.type), "value": grid.normalize(column.to_pylist())[1]}))
+
+
+def _changes_kind(ctx, lit):
+    """A string or Boolean meeting a column of another kind: a pair the policy leaves to DataFusion (D-h)."""
+    lit_kind = oracle.literal_kind(lit)
+    return not in_policy(ctx, lit) and lit_kind not in ("none", oracle.context_kind(ctx))
+
+
+@pytest.mark.parametrize("ctx", COLUMN_CONTEXTS)
+def test_mutations_write_what_a_shift_default_reads(ctx):
+    """insert, modify and update write a literal as ``shift(default=)`` reads it (#194).
+
+    A column is a fixed target for both (D-c), so the written value is the
+    default's and the column keeps its type, or both raise ValueError before
+    anything executes. A pair that changes the value's kind is cast by
+    DataFusion as a shift default (D-h) but refused as a written value,
+    which no cast follows.
+    """
+    column_type = str(grid.arrow_table().schema.field(ctx).type)
+    offenders = []
+    for lit in LITERALS:
+        default = grid.run_cell(ctx, lit, "shift_def")
+        if _changes_kind(ctx, lit):
+            expected = {"error": "ValueError"}
+        elif "error" in default:
+            expected = {"error": default["error"]["class"]}
+        else:
+            expected = {"type": column_type, "value": default["values"][0]}
+        for mutation in MUTATIONS:
+            written = _written(ctx, lit, mutation)
+            if written != expected:
+                offenders.append(f"{ctx}/{lit}/{mutation}: {written} | shift_def={show(default)}")
     assert not offenders, report(offenders)

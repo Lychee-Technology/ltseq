@@ -2,6 +2,9 @@ from typing import Any
 from .base import Expr
 
 
+def _encode_literal(value: Any, *, membership_hint: bool = ...) -> dict[str, Any]: ...
+
+
 class LiteralExpr(Expr):
     value: Any
     def __init__(self, value: Any) -> None: ...

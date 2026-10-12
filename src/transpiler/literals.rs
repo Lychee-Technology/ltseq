@@ -1,7 +1,8 @@
 //! The places a literal meets a value of known type, shared by the row,
 //! window and group dialects: binary operands, `is_in` items, the values of
 //! `if_else`/`coalesce`/`fill_null`, `shift` defaults and the other operand
-//! of `dt.diff`.
+//! of `dt.diff`; and, outside expressions, the values `insert` and `update`
+//! write into a column.
 //!
 //! Each place asks the resolver for the value type of the value the literal
 //! meets (for values, the type DataFusion gives the other values together;
@@ -20,6 +21,7 @@
 //! here casts a literal to see what happens.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::functions::core::expr_fn::coalesce;
@@ -547,13 +549,29 @@ pub(crate) fn coalesce_values(args: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr
     Ok(coalesce(values(args, |args| Ok(coalesce(args)), rx)?))
 }
 
+/// A literal placed into a fixed target, a value of type `target` (never an
+/// encoding) whose type does not change for it: a `shift` default, or a
+/// value `insert` or `update` writes into a column. The literal is read
+/// next to the target ([`interpret`]) and fitted to the target type itself
+/// ([`fit`]), so the target is never widened, not even to a finer
+/// timestamp unit (decisions D-c and D-m). Returns the literal as read and
+/// how it fits.
+fn fixed_target(
+    literal: ScalarValue,
+    target: &DataType,
+    name: &str,
+) -> Result<(ScalarValue, Fit), String> {
+    let read = replacement(interpret(&literal, target, Position::Value, name)?).unwrap_or(literal);
+    let fit = fit(&read, target, target);
+    Ok((read, fit))
+}
+
 /// A `shift` default, read next to the shifted values. `lag`/`lead` cast it
-/// to the column's type, so it must be a value of that type ([`fit`]): a
-/// default the column cannot hold exactly is an error rather than a
-/// truncated, rounded or overflowing value (decision D-c), and the column
-/// is never widened for it, not even to a finer timestamp unit (D-m). A
-/// default `fit` does not judge (a string, a Boolean, a number for a
-/// string column) is left as written for that cast, as before #225 (D-h).
+/// to the column's type, so it must be a value of that type
+/// ([`fixed_target`]): a default the column cannot hold exactly is an
+/// error rather than a truncated, rounded or overflowing value (decision
+/// D-c). A default `fit` does not judge (a string, a Boolean, a number for
+/// a string column) is left as written for that cast, as before #225 (D-h).
 pub(crate) fn shift_default(
     column: &Expr,
     default: ScalarValue,
@@ -567,16 +585,90 @@ pub(crate) fn shift_default(
         return Ok(default);
     };
     let name = describe(column);
-    let read =
-        replacement(interpret(&default, &column_type, Position::Value, &name)?).unwrap_or(default);
-    match fit(&read, &column_type, &column_type) {
-        Fit::Exactly(value) => Ok(value),
-        Fit::Unjudged => Ok(read),
-        Fit::Inexact => Err(format!(
+    match fixed_target(default, &column_type, &name)? {
+        (_, Fit::Exactly(value)) => Ok(value),
+        (read, Fit::Unjudged) => Ok(read),
+        (read, Fit::Inexact) => Err(format!(
             "{name} cannot hold the shift() default {} exactly ({column_type})",
             literal_text(&read)
         )),
     }
+}
+
+/// The value `insert` or `update` writes into a column of `column_type`
+/// (`name` describes the column in errors), as a scalar of exactly that
+/// type. The column is a fixed target ([`fixed_target`]), as a `shift`
+/// default's is: its type never changes, and a literal it cannot hold
+/// exactly is an error naming the literal. A dictionary or run-end-encoded
+/// column takes a value of its value type, in the column's encoding.
+///
+/// A shift default that `fit` does not judge is cast by `lag`/`lead` at
+/// execution. A written value has no such cast after it, so the pairs `fit`
+/// leaves unjudged are decided here: a string is a value of every string
+/// type, and every other such pair (a number for a string column, a string
+/// or Boolean for a number or date column, any literal for a binary, list
+/// or duration column) would change the value's kind and is an error.
+pub(crate) fn column_value(
+    literal: ScalarValue,
+    column_type: &DataType,
+    name: &str,
+) -> Result<ScalarValue, String> {
+    match column_type {
+        DataType::Dictionary(key, values) => {
+            let value = column_value(literal, values, name)?;
+            return Ok(ScalarValue::Dictionary(key.clone(), Box::new(value)));
+        }
+        DataType::RunEndEncoded(run_ends, values) => {
+            let value = column_value(literal, values.data_type(), name)?;
+            return Ok(ScalarValue::RunEndEncoded(
+                Arc::clone(run_ends),
+                Arc::clone(values),
+                Box::new(value),
+            ));
+        }
+        _ => {}
+    }
+    let value = if literal.is_null() {
+        ScalarValue::try_new_null(column_type).ok()
+    } else {
+        match fixed_target(literal, column_type, name)? {
+            (_, Fit::Exactly(value)) => Some(value),
+            (read, Fit::Inexact) => {
+                return Err(format!(
+                    "{name} cannot hold {} exactly ({column_type})",
+                    literal_text(&read)
+                ))
+            }
+            (read, Fit::Unjudged) if is_string(&read.data_type()) && is_string(column_type) => {
+                read.cast_to(column_type).ok()
+            }
+            (read, Fit::Unjudged) => {
+                // Written as Python writes these values.
+                let text = match &read {
+                    ScalarValue::Boolean(Some(true)) => "True".to_string(),
+                    ScalarValue::Boolean(Some(false)) => "False".to_string(),
+                    ScalarValue::Utf8(Some(s)) => format!("'{s}'"),
+                    other => literal_text(other),
+                };
+                return Err(format!(
+                    "{name} ({column_type}) cannot hold the {} value {text}; write a value of \
+                     the column's type",
+                    read.data_type()
+                ));
+            }
+        }
+    };
+    // `fit` gives a value of the type it was asked about; a typed NULL
+    // exists for every type but a few nested ones.
+    value
+        .filter(|value| value.data_type() == *column_type)
+        .ok_or_else(|| {
+            format!("{name} has type {column_type}, which insert and update cannot write")
+        })
+}
+
+fn is_string(t: &DataType) -> bool {
+    matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View)
 }
 
 /// The other operand of `dt.diff`, read next to the receiver like an
@@ -593,5 +685,141 @@ pub(crate) fn dt_diff_other(on: &Expr, other: Expr, rx: &Resolver<'_>) -> Result
             Ok(replacement(read(&literal, on, Position::Arithmetic, rx)?).map_or(other, lit))
         }
         None => Ok(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{Field, TimeUnit};
+    use DataType as T;
+    use ScalarValue as S;
+
+    fn write(literal: S, column_type: &T) -> Result<S, String> {
+        column_value(literal, column_type, "column 'c'")
+    }
+
+    #[test]
+    fn a_written_value_has_the_column_type() {
+        let dictionary = T::Dictionary(Box::new(T::Int8), Box::new(T::LargeUtf8));
+        let table: Vec<(S, T, S)> = vec![
+            (S::Int64(Some(3)), T::UInt8, S::UInt8(Some(3))),
+            (S::Float64(Some(2.0)), T::Int32, S::Int32(Some(2))),
+            (
+                S::Decimal128(Some(150), 3, 2),
+                T::Decimal128(5, 1),
+                S::Decimal128(Some(15), 5, 1),
+            ),
+            // A float column reads a number as the nearest float (D-i).
+            (S::Float64(Some(0.1)), T::Float32, S::Float32(Some(0.1))),
+            (
+                S::Utf8(Some("a".into())),
+                T::Utf8View,
+                S::Utf8View(Some("a".into())),
+            ),
+            (
+                S::Utf8(Some("a".into())),
+                dictionary.clone(),
+                S::Dictionary(Box::new(T::Int8), Box::new(S::LargeUtf8(Some("a".into())))),
+            ),
+            (
+                S::Null,
+                dictionary,
+                S::Dictionary(Box::new(T::Int8), Box::new(S::LargeUtf8(None))),
+            ),
+            (
+                S::Null,
+                T::Timestamp(TimeUnit::Second, Some(Arc::from("UTC"))),
+                S::TimestampSecond(None, Some(Arc::from("UTC"))),
+            ),
+            (S::Date32(Some(1)), T::Date64, S::Date64(Some(86_400_000))),
+        ];
+        for (literal, column_type, expected) in table {
+            assert_eq!(
+                write(literal.clone(), &column_type),
+                Ok(expected),
+                "{literal:?} into {column_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_the_column_cannot_hold_exactly_is_refused() {
+        let table: Vec<(S, T, &str)> = vec![
+            (
+                S::Int64(Some(300)),
+                T::Int8,
+                "column 'c' cannot hold 300 exactly (Int8)",
+            ),
+            (
+                S::Int64(Some(-1)),
+                T::UInt64,
+                "column 'c' cannot hold -1 exactly (UInt64)",
+            ),
+            (
+                S::Float64(Some(1.5)),
+                T::Int64,
+                "column 'c' cannot hold 1.5 exactly (Int64)",
+            ),
+            (
+                S::Decimal128(Some(1234), 4, 3),
+                T::Decimal128(5, 2),
+                "column 'c' cannot hold 1.234 exactly (Decimal128(5, 2))",
+            ),
+            // A finer timestamp never widens the column (D-m).
+            (
+                S::TimestampNanosecond(Some(1_000_000_001), None),
+                T::Timestamp(TimeUnit::Microsecond, None),
+                "column 'c' cannot hold 1970-01-01 00:00:01.000000001 exactly (Timestamp(µs))",
+            ),
+        ];
+        for (literal, column_type, message) in table {
+            assert_eq!(write(literal, &column_type), Err(message.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_value_of_another_kind_is_refused_not_cast() {
+        let table: Vec<(S, T, &str)> = vec![
+            (S::Int64(Some(5)), T::Utf8, "the Int64 value 5"),
+            (S::Utf8(Some("1".into())), T::Int64, "the Utf8 value '1'"),
+            (S::Boolean(Some(true)), T::Int64, "the Boolean value True"),
+            (S::Int64(Some(1)), T::Boolean, "the Int64 value 1"),
+            (
+                S::Utf8(Some("2024-01-01".into())),
+                T::Date32,
+                "the Utf8 value '2024-01-01'",
+            ),
+            (
+                S::Int64(Some(1)),
+                T::Duration(TimeUnit::Second),
+                "the Int64 value 1",
+            ),
+        ];
+        for (literal, column_type, value) in table {
+            let message = write(literal, &column_type).unwrap_err();
+            assert_eq!(
+                message,
+                format!("column 'c' ({column_type}) cannot hold {value}; write a value of the column's type")
+            );
+        }
+    }
+
+    #[test]
+    fn an_encoded_column_takes_a_value_of_its_value_type() {
+        let run_ends = Arc::new(Field::new("run_ends", T::Int32, false));
+        let values = Arc::new(Field::new("values", T::Int64, true));
+        let column_type = T::RunEndEncoded(Arc::clone(&run_ends), Arc::clone(&values));
+        let encoded =
+            |value| S::RunEndEncoded(Arc::clone(&run_ends), Arc::clone(&values), Box::new(value));
+        assert_eq!(
+            write(S::Float64(Some(2.0)), &column_type),
+            Ok(encoded(S::Int64(Some(2))))
+        );
+        assert_eq!(write(S::Null, &column_type), Ok(encoded(S::Int64(None))));
+        assert_eq!(
+            write(S::Float64(Some(2.5)), &column_type),
+            Err("column 'c' cannot hold 2.5 exactly (Int64)".to_string())
+        );
     }
 }

@@ -29,7 +29,7 @@ pub fn insert_row_impl(
     // Same error precedence as before: a table without data fails before
     // the row is even converted.
     let (_, schema) = table.require_df_and_schema()?;
-    let new_batch = row_dict_to_batch(row_dict, schema)?;
+    let new_batch = row_batch(&column_values(row_dict, schema)?, schema)?;
     detached(py, || insert_row_exec(table, pos, new_batch))
 }
 
@@ -177,20 +177,8 @@ pub fn conditional_update_impl(
     )
     .map_err(LtseqError::Validation)?;
 
-    let mut update_map = std::collections::HashMap::<String, ScalarValue>::new();
-    for (key, val) in updates.iter() {
-        let col_name: String = key
-            .extract()
-            .map_err(|e| LtseqError::with_context("Invalid column name", e))?;
-        let field = schema.field_with_name(&col_name).map_err(|e| {
-            LtseqError::Validation(format!("Column '{}' not found: {}", col_name, e))
-        })?;
-        let dt = field.data_type();
-        let scalar = python_value_to_scalar(&val, dt).ok_or_else(|| {
-            LtseqError::Validation(format!("Cannot convert value for column '{}'", col_name))
-        })?;
-        update_map.insert(col_name, scalar);
-    }
+    let update_map: std::collections::HashMap<String, ScalarValue> =
+        column_values(updates, schema)?.into_iter().collect();
 
     // Plan building only; nothing executes here.
     let result_df = {
@@ -246,20 +234,7 @@ pub fn modify_row_impl(
     updates: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (_, schema) = table.require_df_and_schema()?;
-
-    // Python values → typed scalars (needs the GIL). Unknown columns and
-    // unconvertible values are skipped, as before.
-    let update_map: Vec<(String, ScalarValue)> = updates
-        .iter()
-        .filter_map(|(key, val)| {
-            let col_name: String = key.extract().ok()?;
-            let field = schema.field_with_name(&col_name).ok()?;
-            let dt = field.data_type();
-            let scalar = python_value_to_scalar(&val, dt)?;
-            Some((col_name, scalar))
-        })
-        .collect();
-
+    let update_map = column_values(updates, schema)?;
     detached(py, || modify_row_exec(table, pos, &update_map))
 }
 
@@ -396,64 +371,63 @@ fn align_for_splice(
     Ok((batches, schema))
 }
 
-fn row_dict_to_batch(
-    row_dict: &Bound<'_, PyDict>,
-    schema: &Arc<Schema>,
-) -> PyResult<RecordBatch> {
-    let mut arrays: Vec<ArrayRef> = Vec::new();
-    let mut fields: Vec<Field> = Vec::new();
-
-    for field in schema.fields() {
-        let col_name = field.name().as_str();
-        let dt = field.data_type();
-        let val_opt = row_dict.get_item(col_name)?;
-        let scalar = match val_opt {
-            None => ScalarValue::try_from(dt)
-                .map_err(|e| LtseqError::with_context("Failed to create null scalar", e))?,
-            Some(val) => python_value_to_scalar(&val, dt).ok_or_else(|| LtseqError::Validation(
-                format!("Cannot convert Python value for column '{}'", col_name)
-            ))?,
-        };
-        let arr: ArrayRef = scalar.to_array_of_size(1)
-            .map_err(|e| LtseqError::with_context("Failed to create array from scalar", e))?;
-        arrays.push(arr);
-        fields.push((**field).clone());
-    }
-
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| LtseqError::with_context("Failed to create record batch for insert", e).into())
+/// The values a mutation writes, in the order given: each `{column:
+/// payload}` entry decoded as a literal inside an expression is
+/// (`dict_to_literal`; Python encodes it as one) and placed into the
+/// column's type (`transpiler::column_value`). Each scalar has the column's
+/// exact type, encoding included, because `insert` and `modify` splice it
+/// into the collected batches as it is (a Parquet scan yields Utf8View, a
+/// pandas categorical a dictionary). A key that is not a column, or a value
+/// the column cannot hold exactly, is an error: nothing is skipped or
+/// written as NULL instead (#194).
+fn column_values(
+    values: &Bound<'_, PyDict>,
+    schema: &Schema,
+) -> PyResult<Vec<(String, ScalarValue)>> {
+    values
+        .iter()
+        .map(|(key, payload)| {
+            let name: String = key
+                .extract()
+                .map_err(|e| LtseqError::with_context("Invalid column name", e))?;
+            let field = schema
+                .field_with_name(&name)
+                .map_err(|_| LtseqError::ColumnNotFound(name.clone()))?;
+            let payload = payload.cast::<PyDict>().map_err(|_| {
+                LtseqError::Validation(format!(
+                    "the value for column '{name}' must be a Literal payload dict"
+                ))
+            })?;
+            let literal = crate::types::dict_to_literal(payload)?;
+            let value = crate::transpiler::column_value(
+                literal.to_scalar_value(),
+                field.data_type(),
+                &format!("column '{name}'"),
+            )
+            .map_err(LtseqError::Validation)?;
+            Ok((name, value))
+        })
+        .collect()
 }
 
-fn python_value_to_scalar(val: &Bound<'_, PyAny>, dt: &DataType) -> Option<ScalarValue> {
-    if val.is_none() {
-        return ScalarValue::try_from(dt).ok();
+/// The one-row batch `insert` splices in: the given values, and NULL in
+/// every column without one.
+fn row_batch(values: &[(String, ScalarValue)], schema: &Arc<Schema>) -> PyResult<RecordBatch> {
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+    for field in schema.fields() {
+        let scalar = match values.iter().find(|(name, _)| name == field.name()) {
+            Some((_, value)) => value.clone(),
+            None => ScalarValue::try_from(field.data_type())
+                .map_err(|e| LtseqError::with_context("Failed to create null scalar", e))?,
+        };
+        let arr: ArrayRef = scalar
+            .to_array_of_size(1)
+            .map_err(|e| LtseqError::with_context("Failed to create array from scalar", e))?;
+        arrays.push(arr);
     }
-    match dt {
-        DataType::Int64 => val.extract::<i64>().ok().map(|v| ScalarValue::Int64(Some(v))),
-        DataType::Int32 => val.extract::<i32>().ok().map(|v| ScalarValue::Int32(Some(v))),
-        DataType::Int16 => val.extract::<i16>().ok().map(|v| ScalarValue::Int16(Some(v))),
-        DataType::Int8 => val.extract::<i8>().ok().map(|v| ScalarValue::Int8(Some(v))),
-        DataType::Float64 => val.extract::<f64>().ok().map(|v| ScalarValue::Float64(Some(v))),
-        DataType::Float32 => val.extract::<f32>().ok().map(|v| ScalarValue::Float32(Some(v))),
-        // The scalar must carry the column's exact Arrow string layout: the
-        // insert batch is spliced into the collected batches as-is, and a
-        // Parquet scan yields Utf8View.
-        DataType::Utf8 => val.extract::<String>().ok().map(|v| ScalarValue::Utf8(Some(v))),
-        DataType::LargeUtf8 => {
-            val.extract::<String>().ok().map(|v| ScalarValue::LargeUtf8(Some(v)))
-        }
-        DataType::Utf8View => {
-            val.extract::<String>().ok().map(|v| ScalarValue::Utf8View(Some(v)))
-        }
-        // Likewise a dictionary-encoded column: convert to the value type,
-        // then wrap so the scalar keeps the column's key type.
-        DataType::Dictionary(key_type, value_type) => python_value_to_scalar(val, value_type)
-            .map(|v| ScalarValue::Dictionary(key_type.clone(), Box::new(v))),
-        DataType::Boolean => val.extract::<bool>().ok().map(|v| ScalarValue::Boolean(Some(v))),
-        DataType::Date32 => val.extract::<i32>().ok().map(|v| ScalarValue::Date32(Some(v))),
-        DataType::Date64 => val.extract::<i64>().ok().map(|v| ScalarValue::Date64(Some(v))),
-        _ => None,
-    }
+
+    RecordBatch::try_new(Arc::clone(schema), arrays)
+        .map_err(|e| LtseqError::with_context("Failed to create record batch for insert", e).into())
 }
 
 fn compute_replace_at(

@@ -132,6 +132,43 @@ def test_accepted_payload_decodes_to_its_value(row):
     _check_arrow(_derive_literal(row["payload"]), row["arrow"])
 
 
+# Each writes its value into row 1 of column ``v``.
+MUTATIONS = {
+    "insert": lambda t, value: t.insert(1, {"k": 9, "v": value}),
+    "modify": lambda t, value: t.modify(1, v=value),
+    "update": lambda t, value: t.update(lambda r: r.k == 1, v=value),
+}
+REJECTED = [row for row in ENCODE if "error" in row]
+
+
+def _mutation_table(arrow_type: pa.DataType) -> LTSeq:
+    return LTSeq.from_arrow(
+        pa.table({"k": pa.array([0, 1], pa.int64()), "v": pa.array([None, None], arrow_type)})
+    )
+
+
+@pytest.mark.parametrize("mutation", MUTATIONS)
+@pytest.mark.parametrize("row", ACCEPTED, ids=_ids(ACCEPTED))
+def test_accepted_value_written_by_mutations_reads_as_its_literal(row, mutation):
+    """insert, modify and update send a value through the same encoder and decoder
+    as a literal in a lambda (#194), so a column of the literal's own type holds
+    exactly what the literal decodes to."""
+    arrow_type = _derive_literal(row["payload"]).type
+    written = MUTATIONS[mutation](_mutation_table(arrow_type), _evaluate(row["python"]))
+    _check_arrow(written.to_arrow().column("v").slice(1, 1), row["arrow"])
+
+
+@pytest.mark.parametrize("mutation", MUTATIONS)
+@pytest.mark.parametrize("row", REJECTED, ids=_ids(REJECTED))
+def test_rejected_value_is_rejected_by_mutations(row, mutation):
+    error_type = {"TypeError": TypeError, "ValueError": ValueError}[row["error"]["type"]]
+    with pytest.raises(error_type, match=row["error"]["match"]) as raised:
+        MUTATIONS[mutation](_mutation_table(pa.int64()), _evaluate(row["python"]))
+    assert type(raised.value) is error_type
+    assert str(raised.value).startswith("column 'v': ")
+    assert "is_in" not in str(raised.value)
+
+
 @pytest.mark.parametrize("row", DECODE, ids=_ids(DECODE))
 def test_decode(row):
     if "error" in row:

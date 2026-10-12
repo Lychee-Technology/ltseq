@@ -454,9 +454,25 @@ fn parse_time_zone(tz: &str) -> Result<Arc<str>, String> {
         .map_err(|_| format!("Timestamp literal tz '{tz}' is not a valid time zone"))
 }
 
+fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
+    parse_literal(dict).map(PyExpr::Literal)
+}
+
+/// Deserialize a value that `insert` or `update` writes: a Literal
+/// expression, decoded exactly as a literal inside an expression is.
+pub fn dict_to_literal(dict: &Bound<'_, PyDict>) -> Result<LiteralValue, PyExprError> {
+    let expr_type = required_str(dict, "type")?;
+    if expr_type != "Literal" {
+        return Err(PyExprError::InvalidType(format!(
+            "a value to write must be a Literal expression, got {expr_type}"
+        )));
+    }
+    parse_literal(dict)
+}
+
 /// Deserialize a Literal expression: the fields its dtype names, each of the
 /// exact Python type the wire contract gives it, and nothing else.
-fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
+fn parse_literal(dict: &Bound<'_, PyDict>) -> Result<LiteralValue, PyExprError> {
     let mut payload = LiteralPayload::new(dict)?;
     let value = match payload.dtype.as_str() {
         "Null" => {
@@ -491,7 +507,7 @@ fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         other => return Err(invalid(format!("Unknown literal dtype '{other}'"))),
     };
     payload.finish()?;
-    Ok(PyExpr::Literal(value))
+    Ok(value)
 }
 
 /// Deserialize a BinOp expression

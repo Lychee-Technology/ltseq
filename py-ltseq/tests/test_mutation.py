@@ -346,3 +346,85 @@ class TestSplicedBatchSchema:
         t, col = joined
         assert t.modify(0, **{col: None}).to_arrow().column(col).to_pylist() == [None, 20, 30]
         assert t.modify(2, **{col: None}).to_arrow().column(col).to_pylist() == [10, 20, None]
+
+
+# ─── value conversion ────────────────────────────────────────────────────────
+
+
+class TestValueConversion:
+    """Mutation values are typed literals, placed into the column's type as a
+    ``shift`` default is (#194). The literal grid checks every literal kind
+    against every column type; these are the cases reported on the issue."""
+
+    @pytest.fixture
+    def typed(self) -> LTSeq:
+        from decimal import Decimal
+
+        return LTSeq.from_arrow(
+            pa.table(
+                {
+                    "i": pa.array([1, 2], pa.int64()),
+                    "d": pa.array([Decimal("1.50"), Decimal("2.25")], pa.decimal128(5, 2)),
+                    "ts": pa.array([0, 1], pa.timestamp("us")),
+                }
+            )
+        )
+
+    @staticmethod
+    def _col(t: LTSeq, name: str) -> list:
+        return t.to_arrow().column(name).to_pylist()
+
+    def test_decimal_and_datetime_values_are_written(self, typed):
+        from datetime import datetime
+        from decimal import Decimal
+
+        # modify used to leave the decimal unchanged without an error, and
+        # insert and update raised for a Decimal or a datetime.
+        assert self._col(typed.modify(0, d=Decimal("9.99")), "d") == [Decimal("9.99"), Decimal("2.25")]
+        inserted = typed.insert(1, {"i": 9, "d": Decimal("3.75"), "ts": datetime(2024, 1, 1)})
+        assert self._col(inserted, "d") == [Decimal("1.50"), Decimal("3.75"), Decimal("2.25")]
+        assert self._col(inserted, "ts")[1] == datetime(2024, 1, 1)
+        updated = typed.update(lambda r: r.i == 1, d=Decimal("7.77"))
+        assert self._col(updated, "d") == [Decimal("7.77"), Decimal("2.25")]
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda t: t.insert(0, {"d": 9.99}),
+            lambda t: t.modify(0, d=9.99),
+            lambda t: t.update(lambda r: r.i == 1, d=9.99),
+        ],
+        ids=["insert", "modify", "update"],
+    )
+    def test_value_the_column_cannot_hold_exactly_raises(self, typed, write):
+        # The float 9.99 is 9.9900000000000002131…, which decimal(5, 2) does
+        # not hold (D-j); modify used to skip it silently.
+        with pytest.raises(ValueError, match=r"column 'd' cannot hold 9\.99 exactly"):
+            write(typed)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda t: t.insert(0, {"i": 3, "nosuch": 1}),
+            lambda t: t.modify(0, nosuch=1),
+            lambda t: t.update(lambda r: r.i == 1, nosuch=1),
+        ],
+        ids=["insert", "modify", "update"],
+    )
+    def test_unknown_column_raises(self, typed, write):
+        from ltseq import ColumnNotFoundError
+
+        with pytest.raises(ColumnNotFoundError, match="nosuch"):
+            write(typed)
+
+    def test_modify_checks_values_at_any_position(self, typed):
+        with pytest.raises(ValueError, match="column 'd'"):
+            typed.modify(99, d=9.99)
+
+    def test_update_value_must_be_a_literal(self, typed):
+        with pytest.raises(TypeError, match="column 'i': Unsupported literal type"):
+            typed.update(lambda r: r.i == 1, i=lambda r: r.i + 1)
+
+    def test_insert_row_must_be_a_mapping(self, typed):
+        with pytest.raises(TypeError, match="insert\\(\\) takes a dict of column values, got list"):
+            typed.insert(0, [1, 2])
