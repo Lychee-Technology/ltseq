@@ -14,11 +14,10 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
-use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
 
 use crate::arrow_ffi::{
-    check_requested_schema, collect_imported, collected_reader, BoxedBatchReader,
-    DataFrameBatchReader,
+    check_requested_schema, collected_reader, BoxedBatchReader, DataFrameBatchReader,
+    ImportedStream,
 };
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -149,15 +148,15 @@ pub fn write_parquet_impl(
 
 /// Build a table from a stream imported over the Arrow C Data Interface.
 ///
-/// The reader comes from any Python object implementing `__arrow_c_stream__`
+/// The stream comes from any Python object implementing `__arrow_c_stream__`
 /// (`pyarrow.Table`, `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`, ...).
 /// Its buffers are shared, not copied. A stream with a schema but no batches
 /// yields a table backed by one empty batch, so the result has a real plan
 /// and the schema survives (matching a `pyarrow.Table` with zero rows).
-pub fn from_arrow_impl(reader: ArrowArrayStreamReader) -> Result<LTSeqTable, LtseqError> {
+pub fn from_arrow_impl(stream: ImportedStream) -> Result<LTSeqTable, LtseqError> {
     use crate::engine::create_session_context;
 
-    let (schema, mut batches) = collect_imported(reader)?;
+    let (schema, mut batches) = stream.read_all()?;
     if batches.is_empty() {
         batches.push(RecordBatch::new_empty(Arc::clone(&schema)));
     }

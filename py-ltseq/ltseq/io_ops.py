@@ -325,6 +325,10 @@ class IOMixin:
         relation, .... The buffers are shared over the Arrow C Data Interface,
         not copied, and stay valid after the source object is released.
 
+        A struct-typed ``pyarrow.ChunkedArray`` is read as the table of its
+        fields. A row that is NULL as a whole cannot be a table row, so it
+        raises; ``pyarrow.Table.from_struct_array`` reads its fields as NULL.
+
         Args:
             arrow_table: An Arrow-compatible object
 
@@ -333,6 +337,8 @@ class IOMixin:
 
         Raises:
             TypeError: If the object does not implement ``__arrow_c_stream__``
+            ValueError: If a row of a struct input is NULL as a whole, or the
+                stream fails or does not describe a table
 
         Example:
             >>> import pyarrow as pa

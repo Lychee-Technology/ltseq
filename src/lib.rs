@@ -1,7 +1,6 @@
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
-use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
-use datafusion::arrow::pyarrow::{IntoPyArrow, PyArrowType};
+use datafusion::arrow::pyarrow::IntoPyArrow;
 use datafusion::common::DFSchema;
 use datafusion::datasource::MemTable;
 use datafusion::physical_plan::displayable;
@@ -1117,16 +1116,14 @@ impl LTSeqTable {
     ///
     /// `data` is anything implementing `__arrow_c_stream__` (`pyarrow.Table`,
     /// `pyarrow.RecordBatch`, `pyarrow.RecordBatchReader`, polars/duckdb
-    /// objects, ...). Extracting the argument calls that method under the
-    /// GIL; draining the stream and building the in-memory table run
-    /// detached. The batches share the exporter's buffers.
+    /// objects, ...). That method is called under the GIL; draining the
+    /// stream and building the in-memory table run detached. The batches
+    /// share the exporter's buffers. A row that is NULL as a whole (a struct
+    /// `ChunkedArray` can have one) raises `ValueError`.
     #[staticmethod]
-    fn from_arrow(
-        py: Python<'_>,
-        data: PyArrowType<ArrowArrayStreamReader>,
-    ) -> PyResult<LTSeqTable> {
-        let reader = data.0;
-        detached(py, || crate::ops::io::from_arrow_impl(reader))
+    fn from_arrow(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
+        let stream = crate::arrow_ffi::ImportedStream::from_py(data)?;
+        detached(py, || crate::ops::io::from_arrow_impl(stream))
     }
 
     /// Is Subset: Check if this table is a subset of another table
