@@ -8,6 +8,7 @@ import math
 import os
 import tempfile
 
+import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
@@ -262,3 +263,31 @@ class TestShiftDefaultEdgeCases:
             assert df["prev"].iloc[1] == 1.5
         finally:
             os.unlink(csv.name)
+
+    @pytest.mark.parametrize("default", [1e39, -1e39], ids=repr)
+    def test_shift_default_beyond_float32_range_raises(self, default):
+        """A float32 column has no value near 1e39: the default raises
+        instead of becoming an infinity (contract §17.6)."""
+        t = LTSeq.from_arrow(
+            pa.table({"k": [0, 1], "f": pa.array([1.5, 2.5], pa.float32())})
+        ).sort("k")
+        with pytest.raises(
+            ValueError,
+            match=r"column 'f' cannot hold the shift\(\) default \S+ exactly \(Float32\)",
+        ):
+            t.derive(v=lambda r: r.f.shift(1, default=default))
+
+    @pytest.mark.parametrize(
+        "default, expected",
+        [(0.1, pa.scalar(0.1, pa.float32()).as_py()), (math.inf, math.inf)],
+        ids=repr,
+    )
+    def test_shift_default_float32_within_range(self, default, expected):
+        """Within the range a default is the nearest float32 (D-i); an
+        infinity is a float32 value."""
+        t = LTSeq.from_arrow(
+            pa.table({"k": [0, 1], "f": pa.array([1.5, 2.5], pa.float32())})
+        ).sort("k")
+        column = t.derive(v=lambda r: r.f.shift(1, default=default)).to_arrow().column("v")
+        assert column.type == pa.float32()
+        assert column.to_pylist() == [expected, 1.5]

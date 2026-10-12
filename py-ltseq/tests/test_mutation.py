@@ -1,5 +1,7 @@
 """Tests for MutationMixin: insert, delete, update, modify operations."""
 
+import math
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -172,7 +174,7 @@ class TestModify:
 # ─── string column types ─────────────────────────────────────────────────────
 
 # Arrow has three physical string types, each of which can also be
-# dictionary-encoded. `read_parquet` yields string_view (DataFusion 55 scans
+# dictionary- or run-end-encoded. `read_parquet` yields string_view (DataFusion 55 scans
 # Parquet strings as Utf8View) unless the file stores a dictionary-encoded
 # column, e.g. a pandas categorical; `from_arrow` / `from_pandas` keep the
 # source type; `from_rows` gives string.
@@ -182,6 +184,7 @@ STRING_TYPES = [
     pa.string_view(),
     pa.dictionary(pa.int8(), pa.string()),
     pa.dictionary(pa.int8(), pa.large_string()),  # a pandas 3 categorical
+    pa.run_end_encoded(pa.int32(), pa.string()),
 ]
 
 
@@ -346,3 +349,126 @@ class TestSplicedBatchSchema:
         t, col = joined
         assert t.modify(0, **{col: None}).to_arrow().column(col).to_pylist() == [None, 20, 30]
         assert t.modify(2, **{col: None}).to_arrow().column(col).to_pylist() == [10, 20, None]
+
+
+# ─── value conversion ────────────────────────────────────────────────────────
+
+# Each mutation writes ``values`` into the first row of a table whose ``i``
+# is 1 there.
+WRITES = [
+    pytest.param(lambda t, values: t.insert(0, values), id="insert"),
+    pytest.param(lambda t, values: t.modify(0, **values), id="modify"),
+    pytest.param(lambda t, values: t.update(lambda r: r.i == 1, **values), id="update"),
+]
+
+FLOAT32_MAX = (2 - 2.0**-23) * 2.0**127
+
+
+class TestValueConversion:
+    """Mutation values are typed literals, placed into the column's type as a
+    ``shift`` default is (#194). The literal grid checks every literal kind
+    against every column type; these are the cases reported on the issue."""
+
+    @pytest.fixture
+    def typed(self) -> LTSeq:
+        from decimal import Decimal
+
+        return LTSeq.from_arrow(
+            pa.table(
+                {
+                    "i": pa.array([1, 2], pa.int64()),
+                    "d": pa.array([Decimal("1.50"), Decimal("2.25")], pa.decimal128(5, 2)),
+                    "ts": pa.array([0, 1], pa.timestamp("us")),
+                    "f": pa.array([0.0, 1.0], pa.float32()),
+                }
+            )
+        )
+
+    @staticmethod
+    def _col(t: LTSeq, name: str) -> list:
+        return t.to_arrow().column(name).to_pylist()
+
+    def test_decimal_and_datetime_values_are_written(self, typed):
+        from datetime import datetime
+        from decimal import Decimal
+
+        # modify used to leave the decimal unchanged without an error, and
+        # insert and update raised for a Decimal or a datetime.
+        assert self._col(typed.modify(0, d=Decimal("9.99")), "d") == [Decimal("9.99"), Decimal("2.25")]
+        inserted = typed.insert(1, {"i": 9, "d": Decimal("3.75"), "ts": datetime(2024, 1, 1)})
+        assert self._col(inserted, "d") == [Decimal("1.50"), Decimal("3.75"), Decimal("2.25")]
+        assert self._col(inserted, "ts")[1] == datetime(2024, 1, 1)
+        updated = typed.update(lambda r: r.i == 1, d=Decimal("7.77"))
+        assert self._col(updated, "d") == [Decimal("7.77"), Decimal("2.25")]
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda t: t.insert(0, {"d": 9.99}),
+            lambda t: t.modify(0, d=9.99),
+            lambda t: t.update(lambda r: r.i == 1, d=9.99),
+        ],
+        ids=["insert", "modify", "update"],
+    )
+    def test_value_the_column_cannot_hold_exactly_raises(self, typed, write):
+        # The float 9.99 is 9.9900000000000002131…, which decimal(5, 2) does
+        # not hold (D-j); modify used to skip it silently.
+        with pytest.raises(ValueError, match=r"column 'd' cannot hold 9\.99 exactly"):
+            write(typed)
+
+    @pytest.mark.parametrize("write", WRITES)
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"i": 3, "nosuch": 1},
+            {"nosuch": [1]},  # a type no literal has
+            {"nosuch": 2**64},  # an int outside Int64
+            {"i": [1], "nosuch": 1},  # the keys are checked before any value
+        ],
+        ids=["valid", "unsupported", "out-of-range", "bad-value-first"],
+    )
+    def test_unknown_column_raises_whatever_the_values(self, typed, write, values):
+        from ltseq import ColumnNotFoundError
+
+        with pytest.raises(ColumnNotFoundError, match="Column 'nosuch' not found"):
+            write(typed, values)
+
+    @pytest.mark.parametrize("write", WRITES)
+    @pytest.mark.parametrize(
+        "value",
+        # The last two lie just past the greatest float32, where IEEE rounding
+        # would bring them back to it: the range ends there (contract §17.6).
+        [1e39, -1e39, 1.7976931348623157e308, math.nextafter(FLOAT32_MAX, math.inf), math.nextafter(-FLOAT32_MAX, -math.inf)],
+        ids=repr,
+    )
+    def test_finite_value_beyond_float32_range_raises(self, typed, write, value):
+        # No float32 is near it; a cast would write an infinity.
+        with pytest.raises(ValueError, match=r"column 'f' cannot hold \S+ exactly \(Float32\)"):
+            write(typed, {"f": value})
+
+    @pytest.mark.parametrize("write", WRITES)
+    @pytest.mark.parametrize(
+        "value, written",
+        [
+            (0.1, pa.scalar(0.1, pa.float32()).as_py()),
+            (FLOAT32_MAX, FLOAT32_MAX),
+            (-FLOAT32_MAX, -FLOAT32_MAX),
+            (math.inf, math.inf),
+            (-math.inf, -math.inf),
+        ],
+        ids=repr,
+    )
+    def test_float32_column_takes_the_nearest_float32_in_its_range(self, typed, write, value, written):
+        assert self._col(write(typed, {"f": value}), "f")[0] == written
+
+    def test_modify_checks_values_at_any_position(self, typed):
+        with pytest.raises(ValueError, match="column 'd'"):
+            typed.modify(99, d=9.99)
+
+    def test_update_value_must_be_a_literal(self, typed):
+        with pytest.raises(TypeError, match="column 'i': Unsupported literal type"):
+            typed.update(lambda r: r.i == 1, i=lambda r: r.i + 1)
+
+    def test_insert_row_must_be_a_mapping(self, typed):
+        with pytest.raises(TypeError, match="insert\\(\\) takes a dict of column values, got list"):
+            typed.insert(0, [1, 2])

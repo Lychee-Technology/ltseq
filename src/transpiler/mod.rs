@@ -23,6 +23,7 @@ pub(crate) mod probe;
 mod resolve;
 pub(crate) mod window_native;
 
+pub(crate) use literals::column_value;
 pub(crate) use resolve::{binary_input_types, Resolver};
 pub use window_native::pyexpr_to_window_expr;
 

@@ -1167,7 +1167,8 @@ impl LTSeqTable {
 
     /// Insert a row at the given 0-based position (copy-on-write).
     ///
-    /// The row data is provided as a Python dict mapping column names to values.
+    /// The row is a dict mapping column names to Literal payloads (as
+    /// `LiteralExpr.serialize()` gives them); omitted columns are NULL.
     /// Position is clamped: negative → 0, beyond end → append.
     fn insert_row(
         &self,
@@ -1188,7 +1189,7 @@ impl LTSeqTable {
     /// Conditionally update columns where predicate is True (copy-on-write).
     ///
     /// The predicate is the same expression format used by filter().
-    /// Updates is a dict mapping column names to new values (literals only).
+    /// Updates is a dict mapping column names to Literal payloads.
     fn conditional_update(
         &self,
         expr_dict: &Bound<'_, PyDict>,
@@ -1199,7 +1200,7 @@ impl LTSeqTable {
 
     /// Modify specific columns in the row at 0-based position (copy-on-write).
     ///
-    /// Updates is a dict mapping column names to new values.
+    /// Updates is a dict mapping column names to Literal payloads.
     /// Out-of-range positions are silently ignored (no-op).
     fn modify_row(
         &self,
