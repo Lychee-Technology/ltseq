@@ -60,16 +60,24 @@ class ShouldBoundExceeded(UserWarning):
 
 @dataclass(frozen=True)
 class Limit:
-    """What a run's peak is held to: R3's budget or a SHOULD state bound."""
+    """What a run's peak is held to: R3's budget or a SHOULD state bound.
+
+    ``min_input`` is the smallest decoded input, in bytes, the limit can be
+    measured over. R3 asks for ten budgets. A state bound needs only an
+    input larger than itself, so that a run holding its input goes over it.
+    It grows with the baseline, and ten state bounds would outgrow R3's
+    input while the baseline is still within the budget.
+    """
 
     nbytes: int
     name: str
+    min_input: int
 
     def __str__(self) -> str:
         return f"the {self.nbytes / MiB:.1f} MiB {self.name}"
 
 
-R3_BUDGET = Limit(BUDGET, "budget")
+R3_BUDGET = Limit(BUDGET, "budget", min_input=10 * BUDGET)
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,7 @@ def state_bound(baseline: Measurement, state_rows: int) -> Limit:
         nbytes,
         f"state bound ({baseline.peak_above / MiB:.1f} MiB baseline, {rows} of "
         f"state, {SHOULD_ALLOWANCE / MiB:.0f} MiB allowance)",
+        min_input=nbytes + 1,
     )
 
 
@@ -200,13 +209,13 @@ def measure(
     """Run ``pipeline`` and ``terminal`` of ``catalog`` over ``source`` in a
     fresh process and return its peak memory above its level before the
     reader's call, held to ``limit``. ``warmup`` is a small input of the same
-    schema the child runs first. A child that fails raises ``RuntimeError``;
-    a run over its limit is a measurement like any other."""
-    # Below ten times the limit, a run that holds its input could pass.
-    if source.nbytes < 10 * limit.nbytes:
+    schema the child runs first. An input smaller than ``limit.min_input``
+    raises ``ValueError`` and a child that fails raises ``RuntimeError``; a
+    run over its limit is a measurement like any other."""
+    if source.nbytes < limit.min_input:
         raise ValueError(
-            f"the input must be at least ten times its limit: {source.nbytes} "
-            f"bytes against {limit}"
+            f"{limit} needs an input of at least {limit.min_input} bytes, "
+            f"got {source.nbytes}"
         )
     spec = {
         # The child runs in py-ltseq/, so relative paths would not resolve.
