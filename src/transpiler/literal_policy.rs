@@ -56,7 +56,7 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{
-    cast_class, exact_ticks, hold_instant, holds, ticks_per_second, CastClass, Holding,
+    cast_class, exact_ticks, hold_instant, holds, ticks_per_second, CastClass, Holding, Placement,
 };
 use crate::types::{decimal_text, decimal_to_f64, timestamp_scalar};
 
@@ -347,13 +347,16 @@ pub(crate) enum Fit {
 /// (decision D-b on #225: a literal takes the type of the values it shares
 /// a column with when that type holds it exactly). `context` is the type
 /// of the values that are not literals. When that is a float type, a
-/// number literal at a float type is the nearest float of that width,
-/// which is DataFusion's reading and the one float exception D-i allows: a
-/// float column keeps float semantics. A float type that DataFusion only
-/// proposes for an exact context (an `int32` next to `2**53 + 1` and
-/// `1.5`) grants no such reading: there, as everywhere else, the literal
-/// must be [`held`] exactly, a float by its binary value (D-j): `0.5` fits
-/// a `decimal(5, 2)`, `0.1` (0.1000000000000000055…) does not.
+/// number literal within the range of a float type is the nearest float of
+/// that width, which is DataFusion's reading and the one float exception
+/// D-i allows: a float column keeps float semantics. A finite literal
+/// beyond that range has no nearest float, only the infinity a cast would
+/// make of it, so it is inexact (`1e39` at `float32`; contract §17.6). A
+/// float type that DataFusion only proposes for an exact context (an
+/// `int32` next to `2**53 + 1` and `1.5`) grants no such reading: there, as
+/// everywhere else, the literal must be [`held`] exactly, a float by its
+/// binary value (D-j): `0.5` fits a `decimal(5, 2)`, `0.1`
+/// (0.1000000000000000055…) does not.
 pub(crate) fn fit(literal: &ScalarValue, at: &DataType, context: &DataType) -> Fit {
     if literal.is_null() {
         return Fit::Unjudged;
@@ -361,7 +364,7 @@ pub(crate) fn fit(literal: &ScalarValue, at: &DataType, context: &DataType) -> F
     match held(at, literal) {
         Holding::Exactly(value) => Fit::Exactly(value),
         Holding::Unjudged => Fit::Unjudged,
-        Holding::Not(_) if context.is_floating() && at.is_floating() => {
+        Holding::Not(Placement::Between(_)) if context.is_floating() && at.is_floating() => {
             match literal.cast_to(at) {
                 Ok(nearest) if !nearest.is_null() => Fit::Exactly(nearest),
                 _ => Fit::Inexact,
@@ -716,6 +719,36 @@ mod tests {
         assert_eq!(fit(&S::Float64(Some(0.1)), &d30, &d30), Fit::Inexact);
         assert_eq!(fit(&S::Null, &T::Float64, &T::Int32), Fit::Unjudged);
         assert_eq!(fit(&S::Utf8(Some("1".into())), &T::Float64, &T::Float64), Fit::Unjudged);
+    }
+
+    /// The nearest-float reading stops at the float type's range: past it a
+    /// cast makes a finite literal an infinity (contract §17.6).
+    #[test]
+    fn a_finite_literal_beyond_a_float_range_has_no_nearest_float() {
+        let f32_max = f64::from(f32::MAX);
+        let at_f32 = |value: f64| fit(&S::Float64(Some(value)), &T::Float32, &T::Float32);
+        assert_eq!(at_f32(f32_max), Fit::Exactly(S::Float32(Some(f32::MAX))));
+        assert_eq!(at_f32(-f32_max), Fit::Exactly(S::Float32(Some(f32::MIN))));
+        // Even a value IEEE rounding would bring back to the greatest float32
+        // lies beyond the range.
+        for beyond in [
+            1e39,
+            -1e39,
+            f64::MAX,
+            f32_max.next_up(),
+            (-f32_max).next_down(),
+        ] {
+            assert_eq!(at_f32(beyond), Fit::Inexact, "{beyond}");
+        }
+        // The infinities are values of every float type.
+        assert_eq!(
+            at_f32(f64::INFINITY),
+            Fit::Exactly(S::Float32(Some(f32::INFINITY)))
+        );
+        assert_eq!(
+            at_f32(f64::NEG_INFINITY),
+            Fit::Exactly(S::Float32(Some(f32::NEG_INFINITY)))
+        );
     }
 
     #[test]

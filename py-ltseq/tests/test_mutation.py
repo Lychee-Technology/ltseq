@@ -1,5 +1,7 @@
 """Tests for MutationMixin: insert, delete, update, modify operations."""
 
+import math
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -172,7 +174,7 @@ class TestModify:
 # ─── string column types ─────────────────────────────────────────────────────
 
 # Arrow has three physical string types, each of which can also be
-# dictionary-encoded. `read_parquet` yields string_view (DataFusion 55 scans
+# dictionary- or run-end-encoded. `read_parquet` yields string_view (DataFusion 55 scans
 # Parquet strings as Utf8View) unless the file stores a dictionary-encoded
 # column, e.g. a pandas categorical; `from_arrow` / `from_pandas` keep the
 # source type; `from_rows` gives string.
@@ -182,6 +184,7 @@ STRING_TYPES = [
     pa.string_view(),
     pa.dictionary(pa.int8(), pa.string()),
     pa.dictionary(pa.int8(), pa.large_string()),  # a pandas 3 categorical
+    pa.run_end_encoded(pa.int32(), pa.string()),
 ]
 
 
@@ -350,6 +353,16 @@ class TestSplicedBatchSchema:
 
 # ─── value conversion ────────────────────────────────────────────────────────
 
+# Each mutation writes ``values`` into the first row of a table whose ``i``
+# is 1 there.
+WRITES = [
+    pytest.param(lambda t, values: t.insert(0, values), id="insert"),
+    pytest.param(lambda t, values: t.modify(0, **values), id="modify"),
+    pytest.param(lambda t, values: t.update(lambda r: r.i == 1, **values), id="update"),
+]
+
+FLOAT32_MAX = (2 - 2.0**-23) * 2.0**127
+
 
 class TestValueConversion:
     """Mutation values are typed literals, placed into the column's type as a
@@ -366,6 +379,7 @@ class TestValueConversion:
                     "i": pa.array([1, 2], pa.int64()),
                     "d": pa.array([Decimal("1.50"), Decimal("2.25")], pa.decimal128(5, 2)),
                     "ts": pa.array([0, 1], pa.timestamp("us")),
+                    "f": pa.array([0.0, 1.0], pa.float32()),
                 }
             )
         )
@@ -402,20 +416,50 @@ class TestValueConversion:
         with pytest.raises(ValueError, match=r"column 'd' cannot hold 9\.99 exactly"):
             write(typed)
 
+    @pytest.mark.parametrize("write", WRITES)
     @pytest.mark.parametrize(
-        "write",
+        "values",
         [
-            lambda t: t.insert(0, {"i": 3, "nosuch": 1}),
-            lambda t: t.modify(0, nosuch=1),
-            lambda t: t.update(lambda r: r.i == 1, nosuch=1),
+            {"i": 3, "nosuch": 1},
+            {"nosuch": [1]},  # a type no literal has
+            {"nosuch": 2**64},  # an int outside Int64
+            {"i": [1], "nosuch": 1},  # the keys are checked before any value
         ],
-        ids=["insert", "modify", "update"],
+        ids=["valid", "unsupported", "out-of-range", "bad-value-first"],
     )
-    def test_unknown_column_raises(self, typed, write):
+    def test_unknown_column_raises_whatever_the_values(self, typed, write, values):
         from ltseq import ColumnNotFoundError
 
-        with pytest.raises(ColumnNotFoundError, match="nosuch"):
-            write(typed)
+        with pytest.raises(ColumnNotFoundError, match="Column 'nosuch' not found"):
+            write(typed, values)
+
+    @pytest.mark.parametrize("write", WRITES)
+    @pytest.mark.parametrize(
+        "value",
+        # The last two lie just past the greatest float32, where IEEE rounding
+        # would bring them back to it: the range ends there (contract §17.6).
+        [1e39, -1e39, 1.7976931348623157e308, math.nextafter(FLOAT32_MAX, math.inf), math.nextafter(-FLOAT32_MAX, -math.inf)],
+        ids=repr,
+    )
+    def test_finite_value_beyond_float32_range_raises(self, typed, write, value):
+        # No float32 is near it; a cast would write an infinity.
+        with pytest.raises(ValueError, match=r"column 'f' cannot hold \S+ exactly \(Float32\)"):
+            write(typed, {"f": value})
+
+    @pytest.mark.parametrize("write", WRITES)
+    @pytest.mark.parametrize(
+        "value, written",
+        [
+            (0.1, pa.scalar(0.1, pa.float32()).as_py()),
+            (FLOAT32_MAX, FLOAT32_MAX),
+            (-FLOAT32_MAX, -FLOAT32_MAX),
+            (math.inf, math.inf),
+            (-math.inf, -math.inf),
+        ],
+        ids=repr,
+    )
+    def test_float32_column_takes_the_nearest_float32_in_its_range(self, typed, write, value, written):
+        assert self._col(write(typed, {"f": value}), "f")[0] == written
 
     def test_modify_checks_values_at_any_position(self, typed):
         with pytest.raises(ValueError, match="column 'd'"):

@@ -766,6 +766,12 @@ mod tests {
                 T::Decimal128(5, 2),
                 "column 'c' cannot hold 1.234 exactly (Decimal128(5, 2))",
             ),
+            // A float column takes the nearest float within its range only.
+            (
+                S::Float64(Some(1e39)),
+                T::Float32,
+                "column 'c' cannot hold 1000000000000000000000000000000000000000 exactly (Float32)",
+            ),
             // A finer timestamp never widens the column (D-m).
             (
                 S::TimestampNanosecond(Some(1_000_000_001), None),
