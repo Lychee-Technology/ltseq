@@ -874,6 +874,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         Each step predicate is a lambda evaluated against successive rows.
         With partition_by, the pattern cannot cross partition boundaries.
+        A step matches a row where its predicate is TRUE, as in filter():
+        NULL is no match, and &, | and ~ follow SQL's three-valued logic,
+        so NULL | TRUE matches.
 
         Returns the rows where step 1 matched (i.e., row i where
         step1(i), step2(i+1), ..., stepN(i+N-1) all match).

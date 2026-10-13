@@ -41,6 +41,9 @@ use crate::LTSeqTable;
 /// - UnaryOp: Not
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
+///
+/// NULL follows SQL three-valued logic, as in `filter`, and stays NULL in the
+/// returned mask; callers read a NULL slot as no match.
 pub(crate) fn eval_predicate(
     expr: &PyExpr,
     batch: &RecordBatch,
@@ -170,6 +173,9 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
         Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
         Operator::Divide => numeric::div(left, right).map_err(|e| format!("Div failed: {}", e)),
         Operator::Modulo => numeric::rem(left, right).map_err(|e| format!("Mod failed: {}", e)),
+        // `&` and `|` are Kleene, as in `filter`: `NULL AND FALSE` is FALSE
+        // and `NULL OR TRUE` is TRUE. Only the caller's final mask reads NULL
+        // as no match; read earlier, it would be wrong under `~`.
         Operator::And => {
             let l = left
                 .as_any()
@@ -180,7 +186,7 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 .downcast_ref::<BooleanArray>()
                 .ok_or("AND requires boolean operands")?;
             Ok(Arc::new(
-                boolean::and(l, r).map_err(|e| format!("AND failed: {}", e))?,
+                boolean::and_kleene(l, r).map_err(|e| format!("AND failed: {}", e))?,
             ))
         }
         Operator::Or => {
@@ -193,7 +199,7 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
                 .downcast_ref::<BooleanArray>()
                 .ok_or("OR requires boolean operands")?;
             Ok(Arc::new(
-                boolean::or(l, r).map_err(|e| format!("OR failed: {}", e))?,
+                boolean::or_kleene(l, r).map_err(|e| format!("OR failed: {}", e))?,
             ))
         }
         // parse_binary_op yields none of the remaining operators; if it ever
@@ -1045,6 +1051,81 @@ mod tests {
                     "{func}({arg}) on {column}"
                 );
             }
+        }
+    }
+
+    /// `&`, `|` and `~` agree with the Kleene truth tables over every pair of
+    /// {TRUE, FALSE, NULL} (#220), with NULL from a column and from a `None`
+    /// literal. The model ranks FALSE < NULL < TRUE: AND is the minimum, OR
+    /// the maximum, and NOT the reflection.
+    #[test]
+    fn boolean_operators_are_kleene() {
+        const TRUTH: [Option<bool>; 3] = [Some(false), None, Some(true)];
+        fn rank(v: Option<bool>) -> usize {
+            TRUTH.iter().position(|&t| t == v).expect("a truth value")
+        }
+        /// The value of `expr` on a row where `a` is `x` and `b` is `y`.
+        fn model(expr: &PyExpr, x: Option<bool>, y: Option<bool>) -> Option<bool> {
+            match expr {
+                PyExpr::Column(name) if name == "a" => x,
+                PyExpr::Column(_) => y,
+                PyExpr::Literal(LiteralValue::Null) => None,
+                PyExpr::UnaryOp { operand, .. } => TRUTH[2 - rank(model(operand, x, y))],
+                PyExpr::BinOp { op, left, right } => {
+                    let (l, r) = (rank(model(left, x, y)), rank(model(right, x, y)));
+                    TRUTH[if op == "And" { l.min(r) } else { l.max(r) }]
+                }
+                other => panic!("outside the model: {other:?}"),
+            }
+        }
+        fn binop(op: &str, left: PyExpr, right: PyExpr) -> PyExpr {
+            PyExpr::BinOp {
+                op: op.to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
+        let and = |left, right| binop("And", left, right);
+        let or = |left, right| binop("Or", left, right);
+        let not = |operand: PyExpr| PyExpr::UnaryOp {
+            op: "Not".to_string(),
+            operand: Box::new(operand),
+        };
+        let a = || PyExpr::Column("a".to_string());
+        let b = || PyExpr::Column("b".to_string());
+        let null = || PyExpr::Literal(LiteralValue::Null);
+
+        let pairs: Vec<_> = TRUTH
+            .iter()
+            .flat_map(|&x| TRUTH.iter().map(move |&y| (x, y)))
+            .collect();
+        let a_values: BooleanArray = pairs.iter().map(|&(x, _)| x).collect();
+        let b_values: BooleanArray = pairs.iter().map(|&(_, y)| y).collect();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Boolean, true),
+                Field::new("b", DataType::Boolean, true),
+            ])),
+            vec![Arc::new(a_values), Arc::new(b_values)],
+        )
+        .expect("valid boolean batch");
+        let idx = HashMap::from([("a".to_string(), 0), ("b".to_string(), 1)]);
+
+        let cases = [
+            and(a(), b()),
+            or(a(), b()),
+            not(and(a(), b())),
+            not(or(a(), b())),
+            or(not(a()), b()),
+            and(or(a(), b()), not(a())),
+            and(a(), null()),
+            or(null(), b()),
+            not(and(a(), null())),
+        ];
+        for expr in cases {
+            let result = eval_predicate(&expr, &batch, &idx).expect("boolean predicate");
+            let expected: Vec<_> = pairs.iter().map(|&(x, y)| model(&expr, x, y)).collect();
+            assert_eq!(result.iter().collect::<Vec<_>>(), expected, "{expr:?}");
         }
     }
 
