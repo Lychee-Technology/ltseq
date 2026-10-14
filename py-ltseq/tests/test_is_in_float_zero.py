@@ -10,12 +10,18 @@ repeated expression it has made a column of, back into one IN list. So
 `r.x.is_in([-0.0, 1.0, 2.0, 3.0])` missed the 0.0 rows, and so did the
 same four equalities joined by `|`.
 
+A zero that becomes a literal only in the optimizer is merged the same
+way: a value of `now()`, which DataFusion reads when the query runs, or a
+constant ltseq did not take for one. `r.x.is_in([now().dt.diff(now(),
+unit="second"), 1.0, 2.0, 3.0])` missed the -0.0 rows. Negating `!=` gives
+`==`, so `~((r.x != -0.0) & (r.x != 1.0) & ...)` did too.
+
 The lists cross the three-item threshold and hold zeros of both signs, an
-integer zero, NULL, NaN and an item that is not a literal; the receivers
-are a column, a CASE and a computed value, of each float type. The
-reference is SQL's IN over Python's `==` in three-valued logic, with NaN
-equal to NaN: every NaN here has the same bits, and NaNs of different bits
-are #290's.
+integer zero, NULL, NaN, a column and zeros DataFusion folds late; the
+receivers are a column, a CASE and a computed value, of each float type.
+The reference is SQL's IN over Python's `==` in three-valued logic, with
+NaN equal to NaN: every NaN here has the same bits, and NaNs of different
+bits are #290's.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import operator
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, if_else
+from ltseq import LTSeq, if_else, now
 from ltseq.expr.core_types import LiteralExpr
 
 NAN = math.nan
@@ -39,6 +45,23 @@ Y = [-0.0, 0.0, 0.0, 1.0, NAN, None, -0.0, 2.5, INF, -0.0]
 
 # The column `y`, as a list item.
 Y_ITEM = "r.y"
+
+
+def clock_zero():
+    """Zero, from a stable function DataFusion evaluates when the query runs."""
+    return now().dt.diff(now(), unit="second")
+
+
+# Items that are expressions, with their value on row `k`. Besides `y`,
+# zeros DataFusion folds after lowering: from the clock, and a constant
+# holding an IN.
+ITEMS = {
+    Y_ITEM: (lambda r: r.y, lambda k: Y[k]),
+    "now 0": (lambda r: clock_zero(), lambda k: 0.0),
+    "now -0.0": (lambda r: clock_zero() * -1.0, lambda k: -0.0),
+    "constant -0.0": (lambda r: if_else(LiteralExpr(1).is_in([1]), -0.0, 1.0), lambda k: -0.0),
+}
+FOLDED_LATE = ["now 0", "now -0.0", "constant -0.0"]
 
 X_TYPES = {
     "float64": pa.float64(),
@@ -59,16 +82,19 @@ FILLERS = [1.0, 2.5, 7.0]
 
 
 def item_lists() -> list[list]:
-    """Every nonempty subset of the pool, alone and padded past three items,
-    in both orders, and two lists without a zero."""
+    """Every nonempty subset of the pool, each item folded late alone, with
+    one item of the pool and with another, all alone and padded past three
+    items, in both orders; and two lists without a zero."""
     out = [[1.0], [1.0, 2.5, 7.0, 3.0]]
-    for n in range(1, len(POOL) + 1):
-        for subset in itertools.combinations(POOL, n):
-            for pad in (0, 1, 3):
-                items = list(subset) + FILLERS[:pad]
-                out.append(items)
-                if len(items) > 1:
-                    out.append(items[::-1])
+    subsets = [list(s) for n in range(1, len(POOL) + 1) for s in itertools.combinations(POOL, n)]
+    subsets += [[late, *other] for late in FOLDED_LATE for other in ([], *([item] for item in POOL))]
+    subsets += [list(pair) for pair in itertools.combinations(FOLDED_LATE, 2)]
+    for subset in subsets:
+        for pad in (0, 1, 3):
+            items = subset + FILLERS[:pad]
+            out.append(items)
+            if len(items) > 1:
+                out.append(items[::-1])
     return out
 
 
@@ -89,7 +115,11 @@ def table(x_type: pa.DataType) -> LTSeq:
 
 
 def written(r, items: list) -> list:
-    return [r.y if item == Y_ITEM else item for item in items]
+    return [ITEMS[item][0](r) if isinstance(item, str) else item for item in items]
+
+
+def values(k: int, items: list) -> list:
+    return [ITEMS[item][1](k) if isinstance(item, str) else item for item in items]
 
 
 def equal(a, b):
@@ -118,16 +148,21 @@ def negation(value):
 
 def expected(receiver: str, items: list) -> list:
     value = RECEIVERS[receiver][1]
-    return [
-        member(value(k), [Y[k] if item == Y_ITEM else item for item in items])
-        for k in range(len(X))
-    ]
+    return [member(value(k), values(k, items)) for k in range(len(X))]
+
+
+def any_equal(value, items: list):
+    return functools.reduce(operator.or_, [value == item for item in items])
+
+
+def all_unequal(value, items: list):
+    return functools.reduce(operator.and_, [value != item for item in items])
 
 
 def outcomes(x_type: str, receiver: str, lists: list[list]) -> tuple[dict, dict]:
-    """This build's `is_in`, its negation and the `|` of `==` over each list,
-    all in one projection, so DataFusion also shares a computed receiver;
-    and the reference's."""
+    """This build's `is_in`, its negation, the `|` of `==` and the `&` of
+    `!=` and its negation over each list, all in one projection, so
+    DataFusion also shares a computed receiver; and the reference's."""
     recv = RECEIVERS[receiver][0]
     columns, wanted = {}, {}
     for items in lists:
@@ -138,11 +173,17 @@ def outcomes(x_type: str, receiver: str, lists: list[list]) -> tuple[dict, dict]
         columns[f"not in {name}"] = lambda r, items=items: ~recv(r).is_in(written(r, items))
         wanted[f"not in {name}"] = [negation(v) for v in reference]
         # `== None` is IS NULL (#154), not an equality with NULL.
-        if None not in items:
-            columns[f"or {name}"] = lambda r, items=items: functools.reduce(
-                operator.or_, [recv(r) == item for item in written(r, items)]
-            )
-            wanted[f"or {name}"] = reference
+        if None in items:
+            continue
+        columns[f"or {name}"] = lambda r, items=items: any_equal(recv(r), written(r, items))
+        wanted[f"or {name}"] = reference
+        # Negating `!=` gives `==`, which the simplifier merges into a list
+        # it keeps past three items.
+        if len(items) > 3:
+            columns[f"and {name}"] = lambda r, items=items: all_unequal(recv(r), written(r, items))
+            wanted[f"and {name}"] = [negation(v) for v in reference]
+            columns[f"not and {name}"] = lambda r, items=items: ~all_unequal(recv(r), written(r, items))
+            wanted[f"not and {name}"] = reference
     got = table(X_TYPES[x_type]).derive(**columns).to_arrow()
     return {name: got.column(name).to_pylist() for name in columns}, wanted
 
@@ -183,7 +224,14 @@ def test_an_encoded_column_meets_a_column_item_as_the_reference_does(x_type):
 
 @pytest.mark.parametrize(
     "items",
-    [[-0.0, 1.0, 2.5, 7.0], [0.0, 1.0, 2.5, 7.0], [0, 1, 2, 3], [-0.0], [Y_ITEM, 1.0, 2.5, 7.0]],
+    [
+        [-0.0, 1.0, 2.5, 7.0],
+        [0.0, 1.0, 2.5, 7.0],
+        [0, 1, 2, 3],
+        [-0.0],
+        [Y_ITEM, 1.0, 2.5, 7.0],
+        *([late, 1.0, 2.5, 7.0] for late in FOLDED_LATE),
+    ],
     ids=repr,
 )
 @pytest.mark.parametrize("receiver", ["column", "case"])
@@ -195,43 +243,70 @@ def test_filter_keeps_both_zeros(data_layout, receiver, items):
     recv = RECEIVERS[receiver][0]
     reference = expected(receiver, items)
     keep = [k for k, v in enumerate(reference) if v]
-    assert t.filter(lambda r: recv(r).is_in(written(r, items))).to_arrow().column("k").to_pylist() == keep
+
+    def kept(predicate):
+        return t.filter(predicate).to_arrow().column("k").to_pylist()
+
+    assert kept(lambda r: recv(r).is_in(written(r, items))) == keep
     if None not in items:
-        either = lambda r: functools.reduce(operator.or_, [recv(r) == item for item in written(r, items)])
-        assert t.filter(either).to_arrow().column("k").to_pylist() == keep
+        assert kept(lambda r: any_equal(recv(r), written(r, items))) == keep
+        assert kept(lambda r: ~all_unequal(recv(r), written(r, items))) == keep
 
 
+COMBINED_LISTS = {
+    "literal": [[0.0, 1.0, 2.5, 7.0], [-0.0, 2.5, 8.0, 9.0], [-0.0, 3.0, 4.0, 5.0]],
+    "folded late": [
+        ["now 0", 1.0, 2.5, 7.0],
+        ["now -0.0", 2.5, 8.0, 9.0],
+        ["constant -0.0", 3.0, 4.0, 5.0],
+        [0.0, 3.0, 8.0, 9.0],
+    ],
+}
+
+
+@pytest.mark.parametrize("lists", COMBINED_LISTS)
+@pytest.mark.parametrize("form", ["is_in", "|"])
 @pytest.mark.parametrize("combine", ["and", "or"])
 @pytest.mark.parametrize("negate", [(False, False), (False, True), (True, True)], ids=str)
-def test_lists_the_optimizer_combines(combine, negate):
+def test_lists_the_optimizer_combines(combine, negate, form, lists):
     """DataFusion's simplifier intersects, unites and subtracts two lists on
-    one column, comparing their items bitwise."""
-    lists = [[0.0, 1.0, 2.5, 7.0], [-0.0, 2.5, 8.0, 9.0], [-0.0, 3.0, 4.0, 5.0]]
+    one column, comparing their items bitwise, after merging `==` joined by
+    `|` into lists and folding the zeros that come late."""
+    test = {
+        "is_in": lambda r, items: r.x.is_in(written(r, items)),
+        "|": lambda r, items: any_equal(r.x, written(r, items)),
+    }[form]
     join = {"and": operator.and_, "or": operator.or_}[combine]
     # The dominant value of `and` or `or` in three-valued logic.
     dominant = combine == "or"
     columns, wanted = {}, {}
-    for a, b in itertools.permutations(lists, 2):
+    for a, b in itertools.permutations(COMBINED_LISTS[lists], 2):
         sides = list(zip((a, b), negate))
         columns[f"{a} {b}"] = lambda r, sides=sides: join(
-            *[~r.x.is_in(items) if neg else r.x.is_in(items) for items, neg in sides]
+            *[~test(r, items) if neg else test(r, items) for items, neg in sides]
         )
         reference = []
-        for v in X:
-            values = [negation(member(v, items)) if neg else member(v, items) for items, neg in sides]
-            reference.append(dominant if dominant in values else None if None in values else not dominant)
+        for k, v in enumerate(X):
+            each = [member(v, values(k, items)) for items, _ in sides]
+            each = [negation(m) if neg else m for m, (_, neg) in zip(each, sides)]
+            reference.append(dominant if dominant in each else None if None in each else not dominant)
         wanted[f"{a} {b}"] = reference
     got = table(pa.float64()).derive(**columns).to_arrow()
     assert {name: got.column(name).to_pylist() for name in columns} == wanted
 
 
 def test_constant_receiver():
-    """A constant membership test is folded by DataFusion before it runs."""
+    """A membership test of no column is folded by DataFusion before it
+    runs, also when the clock gives its value or an item."""
     t = table(pa.float64())
     got = t.derive(
         a=lambda r: LiteralExpr(0.0).is_in([-0.0, 1.0]),
         b=lambda r: LiteralExpr(-0.0).is_in([0.0, 1.0, 2.0, 3.0]),
         c=lambda r: LiteralExpr(0.0) == -0.0,
+        d=lambda r: (clock_zero() * -1.0).is_in([0.0, 1.0, 2.0, 3.0]),
+        e=lambda r: LiteralExpr(-0.0).is_in([clock_zero() * 1.0, 1.0, 2.0, 3.0]),
+        f=lambda r: (clock_zero() * -1.0) != 0.0,
     ).to_arrow()
-    for name in "abc":
+    assert got.column("f").to_pylist() == [False] * len(X)
+    for name in "abcde":
         assert got.column(name).to_pylist() == [True] * len(X), name
