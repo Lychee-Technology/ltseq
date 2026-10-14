@@ -80,8 +80,8 @@ def test_parquet_count_falls_back_for_unfused_predicate(sorted_parquet):
     assert _kernel(sorted_parquet, pred) == _reference(sorted_parquet, pred)
 
 
-# #189's repro. Except for "changes", these predicates have no fused form, and
-# the general linear-scan path miscounts them because `x` holds a NULL.
+# #189's repro: `x` holds a NULL, and except for "changes" these predicates
+# have no fused form.
 NULL_X = [1, 2, None, 10, 11, 30, 31, 32]
 NULL_Y = [1, 1, 1, 2, 2, 2, 3, 3]
 
@@ -96,8 +96,8 @@ DIRECTORY_PREDICATES = {
 @pytest.mark.parametrize("name", DIRECTORY_PREDICATES)
 def test_parquet_directory_count_matches_reference(tmp_path, name):
     # The direct Parquet reader opens a single file. For a directory the
-    # kernel raises and count() materializes through DataFusion. It must not
-    # answer through the general linear-scan path while #189 is open.
+    # kernel raises and count() materializes through DataFusion; the count
+    # must be the reference's whichever path answers.
     events = pa.table(
         {
             "i": pa.array(range(len(NULL_X)), pa.int64()),
@@ -113,10 +113,10 @@ def test_parquet_directory_count_matches_reference(tmp_path, name):
 
 
 # `%` and `//` in a boundary predicate (#147). The counting kernel does not
-# evaluate them: with #189 open it would miscount every predicate below
-# because `x` holds a NULL. count() must agree with the reference whichever
-# path answers. Each predicate is paired with its group count in SQL
-# three-valued logic, where a NULL result starts a group.
+# evaluate them (`SUPPORTED_BINARY_OPS`). count() must agree with the
+# reference whichever path answers. `x` holds a NULL, and each predicate is
+# paired with its group count in SQL three-valued logic, where a NULL result
+# starts a group.
 MOD_FLOORDIV_PREDICATES = {
     "mod_gap": (lambda r: (r.x % 10 - r.x.shift(1) % 10) > 0, 7),
     "mod_swapped_gap": (lambda r: (r.x.shift(1) % 10 - r.x % 10) > -5, 8),

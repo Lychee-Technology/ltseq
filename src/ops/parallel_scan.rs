@@ -142,8 +142,9 @@ fn process_chunk_session_count(
 /// Returns `Err("PARALLEL_FALLBACK: …")` when the predicate is unsupported;
 /// the caller degrades to the general linear-scan path. A source this reader
 /// cannot read, such as a directory, is a plain error instead, so Python
-/// counts it through the DataFusion path. The general path could read it,
-/// but for predicates without a fused form it miscounts NULLs (#189).
+/// counts it through the DataFusion path. The general path could read it;
+/// sending more inputs to the kernel waits until it agrees with the
+/// reference on Float64 `-0.0` too (#244).
 pub fn parallel_streaming_group_count(
     table: &LTSeqTable,
     predicate: &PyExpr,

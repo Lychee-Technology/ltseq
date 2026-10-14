@@ -174,10 +174,9 @@ def test_linear_scan_leaves_other_literal_kinds_to_datafusion(literal):
     ],
 )
 def test_a_none_literal_is_counted_like_the_reference(pred):
-    """`x > None` is NULL on every row, and the kernel's `&` counts
-    `false AND NULL` as a boundary where DataFusion's is false (#189). On
-    `main` `None` was the string "None", which the kernel refused, so these
-    were always counted on the general path (review of b6cc39f on #225)."""
+    """`x > None` is NULL on every row. The kernel declines a NULL literal,
+    so these are counted on the general path, as they were when `None`
+    reached the kernel as the string "None" (review of b6cc39f on #225)."""
     t = LTSeq.from_arrow(pa.table({"k": [0, 1, 2], "x": pa.array([1, 1, 2], pa.int64())})).sort("k")
     assert t.group_ordered(pred).first().count() == _reference(t, pred)
 

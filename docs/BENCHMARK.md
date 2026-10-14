@@ -231,10 +231,9 @@ with a number. Anything else materializes the grouped table and counts its
 first rows, including a float `N` compared with an integer column anywhere but
 in a predicate made entirely of condition 3's leaves (only that evaluator reads
 an integral float as an integer), and a `None` literal; the linear-scan path
-declines it before collecting. The linear-scan count and the
-DataFusion path currently disagree on NULLs (#189), so a directory passed to
-`read_parquet`, which the kernel cannot read, does not take the linear-scan
-path: its grouped table is materialized.
+declines it before collecting. A directory passed to `read_parquet`, which
+the kernel cannot read, does not take the linear-scan path either: its
+grouped table is materialized.
 
 **Round 3, `search_pattern_count(*steps, partition_by=col)`.** The parallel
 kernel matches each Parquet row group independently and stitches matches that
