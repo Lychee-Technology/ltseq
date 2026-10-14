@@ -1,10 +1,10 @@
-"""The linear-scan kernel against the materialized group count (#189, #244).
+"""The linear-scan kernel against the materialized group count (#244).
 
 ``group_ordered(pred).first().count()`` runs the linear-scan kernel when the
 predicate is eligible and otherwise materializes. The reference is the
 materialized count. Every (table, column, literal, predicate) must agree,
-except the cells of two open issues, which are pinned here so that a fix
-or a new divergence both show.
+except the cells of an open issue, which are pinned here so that a fix or a
+new divergence both show. The NULL cells of #189 agree since its fix.
 """
 
 from __future__ import annotations
@@ -28,14 +28,9 @@ COMPARISONS = {
 }
 PREDICATES = list(COMPARISONS) + ["diff_gt", "ne_or_gt"]
 
-# #189: the kernel's Gt arm on an exact integer column maps a NULL shift to
-# false, where the materialized path starts a group at a NULL predicate.
 # #244: the kernel's Float64 arms compare bit patterns, so -0.0 and 0.0
 # differ in `eq`, `ne` and `gt`.
 KNOWN = {}
-for _col in ("i32", "i64", "u32"):
-    for _lit in ("i0", "i1", "im1", "i2p53", "i2p53p1", "imax"):
-        KNOWN[("nulls", _col, _lit, "gt")] = "#189"
 for _lit, _pred in (("f0", "eq"), ("f0", "ne"), ("fm0", "eq"), ("fm0", "ne"), ("fm0", "gt")):
     KNOWN[("negzero", "f64", _lit, _pred)] = "#244"
 KNOWN[("clean", "f64", "fm0", "diff_gt")] = "#244"

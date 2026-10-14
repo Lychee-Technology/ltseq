@@ -21,8 +21,12 @@
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
 //! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
-//! | `Literal` (Null, Boolean, Int64, Float64, String) | Constant value |
+//! | `Literal` (Boolean, Int64, Float64, String) | Constant value |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
+//!
+//! Evaluation follows SQL three-valued logic, as the DataFusion path does: a
+//! comparison or arithmetic with a NULL operand is NULL, `&` and `|` are
+//! Kleene, and a row whose predicate is NULL starts a group.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -55,7 +59,7 @@ use std::sync::Arc;
 ///    kinds the evaluator has values for (`Value`)
 /// 3. Computes, at every node, what DataFusion computes for it on these
 ///    column types ([`kernel_type`]), so the count equals the materialized
-///    reference. NULL handling still differs (#189).
+///    reference.
 pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
     is_supported_expr(expr)
         && contains_shift(expr)
@@ -84,9 +88,9 @@ pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
 ///   wrapping (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic
 ///   gives a duration, and `UInt64` past `i64::MAX` is negative to the kernel.
 ///
-/// A NULL literal is declined: it makes its comparison or arithmetic NULL
-/// on every row, and the multi-pass evaluator's `&` turns `false AND NULL`
-/// into a boundary where DataFusion's is false (#189).
+/// A NULL literal is declined. Its comparison or arithmetic is NULL on every
+/// row, so the kernel gains nothing from it, and the kernel's NULL is an
+/// `Int64` array where DataFusion's takes the other operand's type.
 fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataType> {
     use crate::transpiler::binary_input_types;
     use DataType as T;
@@ -178,11 +182,11 @@ fn contains_shift(expr: &PyExpr) -> bool {
 /// arm in `vectorized_binop`: an admitted operator the evaluator rejects
 /// fails the whole linear scan at run time.
 ///
-/// `Mod` and `FloorDiv` are left out on purpose. A predicate that is not
-/// admitted is counted by the DataFusion path, which is the reference; one
-/// that is admitted is counted by `vectorized_binop`, whose NULL and UInt64
-/// handling still disagrees with that reference (#189). Admit them once the
-/// evaluator matches it.
+/// `Mod` and `FloorDiv` are left out on purpose: a predicate that is not
+/// admitted is counted by the DataFusion path, which is the reference.
+/// Admitting `//` means evaluating it with `transpiler::floor_div`, as that
+/// path does, and #218 changes the integer semantics of both operators;
+/// #219 records what the evaluator needs.
 const SUPPORTED_BINARY_OPS: [&str; 12] = [
     "Ne", "Eq", "Gt", "Lt", "Ge", "Le", "Or", "And", "Add", "Sub", "Mul", "Div",
 ];
@@ -679,53 +683,35 @@ fn coerce_to_i64(arr: &ArrayRef) -> Option<Int64Array> {
     }
 }
 
-/// Perform a vectorized binary operation on two Arrow arrays.
+/// Perform a vectorized binary operation on two Arrow arrays, in three-valued
+/// logic as DataFusion evaluates it: a comparison or arithmetic result is
+/// NULL where either operand is, and `&`/`|` are Kleene.
 fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::boolean;
     use datafusion::arrow::compute::kernels::numeric;
     
     match op {
+        // Kleene: `NULL AND FALSE` is false and `NULL OR TRUE` is true, as in
+        // DataFusion; `boolean::and`/`or` would make both NULL.
         "Or" => {
             let l = left.as_any().downcast_ref::<BooleanArray>()
                 .ok_or("OR requires boolean arrays")?;
             let r = right.as_any().downcast_ref::<BooleanArray>()
                 .ok_or("OR requires boolean arrays")?;
-            Ok(Arc::new(boolean::or(l, r).map_err(|e| e.to_string())?) as ArrayRef)
+            Ok(Arc::new(boolean::or_kleene(l, r).map_err(|e| e.to_string())?) as ArrayRef)
         }
         "And" => {
             let l = left.as_any().downcast_ref::<BooleanArray>()
                 .ok_or("AND requires boolean arrays")?;
             let r = right.as_any().downcast_ref::<BooleanArray>()
                 .ok_or("AND requires boolean arrays")?;
-            Ok(Arc::new(boolean::and(l, r).map_err(|e| e.to_string())?) as ArrayRef)
+            Ok(Arc::new(boolean::and_kleene(l, r).map_err(|e| e.to_string())?) as ArrayRef)
         }
         "Ne" => {
             // Try i64 comparison first (covers Int64, UInt64, Timestamp)
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                // Fused neq + null-as-true in one pass: avoids double allocation.
-                // NULL != X → true (boundary), non-null uses direct value comparison.
-                let n = l.len();
-                let l_values = l.values();
-                let r_values = r.values();
-                let l_nulls = l.nulls();
-                let r_nulls = r.nulls();
-                let has_any_nulls = l_nulls.is_some() || r_nulls.is_some();
-
-                let mut out = Vec::with_capacity(n);
-                if has_any_nulls {
-                    for i in 0..n {
-                        let l_null = l_nulls.is_some_and(|nb| !nb.is_valid(i));
-                        let r_null = r_nulls.is_some_and(|nb| !nb.is_valid(i));
-                        out.push(if l_null || r_null { true } else { l_values[i] != r_values[i] });
-                    }
-                } else {
-                    // Fast path: no nulls at all — pure value comparison
-                    for i in 0..n {
-                        out.push(l_values[i] != r_values[i]);
-                    }
-                }
-                return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
+                return Ok(Arc::new(cmp::neq(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             // Float64
             if let (Some(l), Some(r)) = (
@@ -760,29 +746,7 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
         }
         "Gt" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                // Check if right is a constant (all same value) — use scalar comparison
-                let n = l.len();
-                if n > 0 && r.null_count() == 0 {
-                    let first_val = r.value(0);
-                    let is_scalar = (1..n).all(|i| r.value(i) == first_val);
-                    if is_scalar {
-                        let l_values = l.values();
-                        let l_nulls = l.nulls();
-                        let mut out = Vec::with_capacity(n);
-                        if let Some(nulls) = l_nulls {
-                            for i in 0..n {
-                                out.push(if !nulls.is_valid(i) { false } else { l_values[i] > first_val });
-                            }
-                        } else {
-                            for i in 0..n {
-                                out.push(l_values[i] > first_val);
-                            }
-                        }
-                        return Ok(Arc::new(BooleanArray::from(out)) as ArrayRef);
-                    }
-                }
-                let result = cmp::gt(&l, &r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
+                return Ok(Arc::new(cmp::gt(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             if let (Some(l), Some(r)) = (
                 left.as_any().downcast_ref::<Float64Array>(),
@@ -1107,6 +1071,51 @@ mod tests {
             let result = vectorized_binop(op, left, right);
             assert!(result.is_ok(), "{op}: {:?}", result.err());
         }
+    }
+
+    /// Every admitted operator evaluates in three-valued logic, as DataFusion
+    /// does (#189): a comparison or arithmetic result is NULL where an
+    /// operand is NULL, and `&`/`|` are Kleene.
+    #[test]
+    fn supported_binary_ops_are_three_valued() {
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(4), None, Some(4), None]));
+        let other: ArrayRef = Arc::new(Int64Array::from(vec![Some(2), Some(2), None, None]));
+        let floats: ArrayRef = Arc::new(Float64Array::from(vec![Some(4.0), None, Some(4.0), None]));
+        let other_floats: ArrayRef =
+            Arc::new(Float64Array::from(vec![Some(2.0), Some(2.0), None, None]));
+        let valid = |result: ArrayRef| {
+            (0..result.len())
+                .map(|i| result.is_valid(i))
+                .collect::<Vec<_>>()
+        };
+        let arithmetic_and_comparisons = SUPPORTED_BINARY_OPS
+            .iter()
+            .filter(|op| !matches!(**op, "And" | "Or"));
+        for op in arithmetic_and_comparisons {
+            let result = vectorized_binop(op, &ints, &other).expect("integer arm");
+            assert_eq!(valid(result), [true, false, false, false], "{op} on Int64");
+            // Operators without a float arm are declined for Float64 by eligibility.
+            if let Ok(result) = vectorized_binop(op, &floats, &other_floats) {
+                assert_eq!(valid(result), [true, false, false, false], "{op} on f64");
+            }
+        }
+
+        // Each pair of the three truth values, left by right.
+        let t = Some(true);
+        let f = Some(false);
+        let left: ArrayRef = Arc::new(BooleanArray::from(vec![t, t, t, f, f, f, None, None, None]));
+        let right: ArrayRef =
+            Arc::new(BooleanArray::from(vec![t, f, None, t, f, None, t, f, None]));
+        let kleene = |op| {
+            let result = vectorized_binop(op, &left, &right).expect("boolean op");
+            let result = result
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("booleans");
+            result.iter().collect::<Vec<_>>()
+        };
+        assert_eq!(kleene("And"), [t, f, None, f, f, f, None, f, None]);
+        assert_eq!(kleene("Or"), [t, t, t, t, f, None, t, None, None]);
     }
 
     /// The issue #141 trigger predicate shape: references only the SECONDARY
@@ -1452,18 +1461,22 @@ mod tests {
         }
     }
 
-    /// On NULL-free data the fused evaluator agrees with the multi-pass one
-    /// (issue #189 tracks where the multi-pass one gets NULLs wrong).
+    /// The fused evaluator agrees with the multi-pass one, NULLs included:
+    /// it maps a NULL leaf to true and combines leaves as plain `bool`s,
+    /// which equals evaluating `&`/`|` in three-valued logic and counting a
+    /// NULL result as a boundary, because both operators are monotone.
     #[test]
-    fn fused_flags_match_vectorized_flags_without_nulls() {
-        let batch = boundary_batch(false);
-        let idx = name_index(&batch);
-        for expr in fusable_predicates() {
-            assert_eq!(
-                fused_boundaries(&expr, &batch, &idx, None),
-                Some(vectorized_boundary_flags(&expr, &batch, &idx).expect("vectorized flags")),
-                "expr={expr:?}"
-            );
+    fn fused_flags_match_vectorized_flags() {
+        for nulls in [false, true] {
+            let batch = boundary_batch(nulls);
+            let idx = name_index(&batch);
+            for expr in fusable_predicates() {
+                assert_eq!(
+                    fused_boundaries(&expr, &batch, &idx, None),
+                    Some(vectorized_boundary_flags(&expr, &batch, &idx).expect("vectorized flags")),
+                    "nulls={nulls}, expr={expr:?}"
+                );
+            }
         }
     }
 
@@ -1600,8 +1613,8 @@ mod tests {
             (binop("Or", float_gap("i64", 2.0), binop("Gt", col("i64"), int(3))), false),
             (binop("Or", changes("i64"), binop("Gt", col("i64"), int(3))), true),
             (binop("Or", changes("i64"), gap("ts", 1800)), false),
-            // A NULL literal is NULL on every row, which the multi-pass `&`
-            // counts differently (#189).
+            // A NULL literal is NULL on every row; the kernel has nothing to
+            // compute.
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), null()), false),
             (binop("And", changes("i64"), binop("Gt", col("i64"), null())), false),
             (
