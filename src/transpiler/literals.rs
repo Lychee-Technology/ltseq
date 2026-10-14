@@ -267,7 +267,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
     // One membership test per comparison type, of `expr` and the items as
     // written when the list's type is every equality's, else of both sides
     // as each equality coerces them; each item with its coerced form.
-    let mut groups: Vec<(Option<DataType>, Expr, Vec<(Expr, Expr)>)> = Vec::new();
+    let mut groups: Vec<(Option<DataType>, Expr, Vec<ListItem>)> = Vec::new();
     for (item, left, right) in kept {
         let key = comparison_type(&left);
         let (value, item) = if as_written {
@@ -287,6 +287,10 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
         .expect("at least one item is kept"))
 }
 
+/// A list item as it is placed in the list, and as DataFusion coerces it
+/// to the comparison type.
+type ListItem = (Expr, Expr);
+
 /// `value IN (items)`, compared at `comparison_type`; each item is paired
 /// with its form coerced to that type.
 ///
@@ -301,7 +305,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
 fn membership(
     comparison_type: Option<&DataType>,
     value: Expr,
-    items: Vec<(Expr, Expr)>,
+    items: Vec<ListItem>,
     rx: &Resolver<'_>,
 ) -> Expr {
     if !comparison_type.is_some_and(DataType::is_floating) {
