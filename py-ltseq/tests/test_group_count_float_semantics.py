@@ -11,13 +11,20 @@ so its count reached the user.
 
 The predicates cover every Float64 shape the kernel admits (`==`, `!=` and
 `>` between a column, its `shift(1)`, a literal and their difference) over
-data where the two zeros meet each other, NULL, NaN of either sign and
-infinity, in both orders.
+data where the two zeros meet each other, NULL, NaN and infinity, in both
+orders.
+
+The NaNs differ in sign and in payload, in the data and in the literals.
+Both paths compare NaNs bit for bit today, while the v0.5 contract (§18)
+makes every NaN one value (#290). The kernel follows the reference only as
+long as that change happens inside `apply_cmp`; if it happens anywhere
+else, these cases fail until the kernel changes too.
 """
 
 from __future__ import annotations
 
 import math
+import struct
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -29,17 +36,33 @@ DECLINED = "only supports shift-based boundary predicates"
 
 NAN = math.nan
 NEG_NAN = math.copysign(math.nan, -1.0)
+# A quiet NaN whose payload is 1 rather than 0.
+OTHER_NAN = struct.unpack("<d", struct.pack("<Q", 0x7FF8_0000_0000_0001))[0]
 INF = math.inf
 
-X = [1.0, -0.0, 0.0, 0.0, -0.0, -0.0, None, 0.0, 2.0, NAN, NAN, NEG_NAN, INF, -0.0, 1.0, 0.0]
-Y = [0.0, 0.0, -0.0, 1.0, 0.0, None, -0.0, -0.0, 2.0, 0.0, NAN, 1.0, -0.0, 0.0, 3.0, -0.0]
+X = [
+    1.0, -0.0, 0.0, 0.0, -0.0, -0.0, None, 0.0, 2.0,
+    NAN, NAN, NEG_NAN, NAN, OTHER_NAN, NAN, INF, -0.0, 1.0, 0.0,
+]
+Y = [
+    0.0, 0.0, -0.0, 1.0, 0.0, None, -0.0, -0.0, 2.0,
+    0.0, NAN, 1.0, OTHER_NAN, NAN, NEG_NAN, -0.0, 0.0, 3.0, -0.0,
+]
 
 COMPARISONS = {
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
     ">": lambda a, b: a > b,
 }
-LITERALS = {"0.0": 0.0, "-0.0": -0.0, "nan": NAN, "inf": INF, "1.0": 1.0}
+LITERALS = {
+    "0.0": 0.0,
+    "-0.0": -0.0,
+    "nan": NAN,
+    "-nan": NEG_NAN,
+    "nan with payload 1": OTHER_NAN,
+    "inf": INF,
+    "1.0": 1.0,
+}
 
 
 def predicates() -> dict:
