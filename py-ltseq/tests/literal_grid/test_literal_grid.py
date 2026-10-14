@@ -37,8 +37,6 @@ HEADER, MAIN = grid.load(BASELINE)
 # pinned: the gate expects exactly these PREEXISTING_BUG cells, and the
 # invariant tests expect exactly these cells to break.
 PREEXISTING = {
-    # DataFusion's static in-list filter hashes floats bitwise: 0.0 is not in [-0.0, 1].
-    "case_i64_f64/fm0/isin2": "#245",
     # DataFusion has no decimal32/64 type for an Int64, so a decimal32/64 column plus an
     # integer is computed at Int64 with the column truncated toward zero.
     **{

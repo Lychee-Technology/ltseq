@@ -233,16 +233,12 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// The non-null value of `expr` when it is a literal, or a constant
-    /// DataFusion folds into one (`if_else(True, a, b)`, `Decimal("1.5") + 0`).
-    /// A constant is an expression with no column and only immutable
-    /// functions: `now()` is left alone, since DataFusion reads it when the
-    /// query runs, not when it is planned.
-    pub(crate) fn literal(&self, expr: &Expr) -> Option<ScalarValue> {
-        if let Expr::Literal(value, _) = expr {
-            return (!value.is_null()).then(|| value.clone());
-        }
-        let constant = !expr
+    /// Whether `expr` is a constant: an expression with no column and only
+    /// immutable functions, whose value DataFusion knows when it plans the
+    /// query. `now()` is not one, since DataFusion reads it when the query
+    /// runs. A NULL constant is a constant.
+    pub(crate) fn constant(expr: &Expr) -> bool {
+        !expr
             .exists(|e| {
                 Ok(match e {
                     Expr::Literal(..)
@@ -261,8 +257,17 @@ impl<'a> Resolver<'a> {
                     _ => true,
                 })
             })
-            .unwrap_or(true);
-        if !constant {
+            .unwrap_or(true)
+    }
+
+    /// The non-null value of `expr` when it is a literal, or a constant
+    /// ([`Resolver::constant`]) DataFusion folds into one (`if_else(True, a,
+    /// b)`, `Decimal("1.5") + 0`).
+    pub(crate) fn literal(&self, expr: &Expr) -> Option<ScalarValue> {
+        if let Expr::Literal(value, _) = expr {
+            return (!value.is_null()).then(|| value.clone());
+        }
+        if !Self::constant(expr) {
             return None;
         }
         let context = SimplifyContext::builder()

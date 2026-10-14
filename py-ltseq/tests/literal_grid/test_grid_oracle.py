@@ -309,15 +309,23 @@ def test_an_exact_value_in_another_type_is_an_intended_change():
     assert classification.main_wrong(classification.cell("i8", "i1", "fill", MAIN["i8/i1/fill"], head)) is False
 
 
-@pytest.mark.parametrize("cell", ["case_i64_f64/fm0/isin2", "d32/i1/add"])
-def test_a_pinned_cell_is_preexisting_and_fixing_it_needs_unpinning(cell):
+def test_a_pinned_cell_is_preexisting_and_fixing_it_needs_unpinning():
+    cell = "d32/i1/add"
     assert judged(cell, MAIN[cell])[0] == "violation"
     assert classified(cell, MAIN[cell]).status == "PREEXISTING_BUG"
-    corrected = {
-        "case_i64_f64/fm0/isin2": values("bool", [False, NULL, False, False, NULL, True]),
-        "d32/i1/add": values("decimal128(11, 2)", ["Decimal(10000000.99)", NULL, "Decimal(0.99)", "Decimal(2.50)", NULL, "Decimal(1.00)"]),
-    }[cell]
+    corrected = values("decimal128(11, 2)", ["Decimal(10000000.99)", NULL, "Decimal(0.99)", "Decimal(2.50)", NULL, "Decimal(1.00)"])
     assert classified(cell, corrected).status == "REGRESSION"
+
+
+def test_the_unpinned_negative_zero_cell_is_a_fixed_bug():
+    """#245 was pinned until a float list held both zeros: main's outcome is now
+    undecided, and the corrected one a fixed bug."""
+    cell = "case_i64_f64/fm0/isin2"
+    assert judged(cell, MAIN[cell])[0] == "violation"
+    assert classified(cell, MAIN[cell]).status == "UNDECIDED"
+    corrected = values("bool", [False, NULL, False, False, NULL, True])
+    k = classified(cell, corrected)
+    assert (k.status, k.rule) == ("BUG_FIXED", "negative_zero_in_list")
 
 
 def test_a_panicked_in_list_string_that_now_fails_at_collect_is_a_fixed_bug():
