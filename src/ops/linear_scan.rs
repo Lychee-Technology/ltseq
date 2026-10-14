@@ -26,7 +26,8 @@
 //!
 //! Evaluation follows SQL three-valued logic, as the DataFusion path does: a
 //! comparison or arithmetic with a NULL operand is NULL, `&` and `|` are
-//! Kleene, and a row whose predicate is NULL starts a group.
+//! Kleene, and a row whose predicate is NULL starts a group. Floats compare
+//! with DataFusion's own comparison, so `-0.0` equals `0.0` here too.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -40,7 +41,8 @@ use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::Column;
-use datafusion::logical_expr::{Expr, SortExpr};
+use datafusion::logical_expr::{ColumnarValue, Expr, Operator, SortExpr};
+use datafusion::physical_expr_common::datum::apply_cmp;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -685,7 +687,8 @@ fn coerce_to_i64(arr: &ArrayRef) -> Option<Int64Array> {
 
 /// Perform a vectorized binary operation on two Arrow arrays, in three-valued
 /// logic as DataFusion evaluates it: a comparison or arithmetic result is
-/// NULL where either operand is, and `&`/`|` are Kleene.
+/// NULL where either operand is, and `&`/`|` are Kleene. Floats compare as
+/// on the DataFusion path ([`compare_floats`]).
 fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::boolean;
@@ -713,13 +716,8 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
                 return Ok(Arc::new(cmp::neq(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
-            // Float64
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                let result = cmp::neq(l, r).map_err(|e| e.to_string())?;
-                return Ok(Arc::new(result) as ArrayRef);
+            if both_float64(left, right) {
+                return compare_floats(Operator::NotEq, left, right);
             }
             // String types
             if let (Some(l), Some(r)) = (
@@ -736,11 +734,8 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
                 let result = cmp::eq(&l, &r).map_err(|e| e.to_string())?;
                 return Ok(Arc::new(result) as ArrayRef);
             }
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                return Ok(Arc::new(cmp::eq(l, r).map_err(|e| e.to_string())?) as ArrayRef);
+            if both_float64(left, right) {
+                return compare_floats(Operator::Eq, left, right);
             }
             Err(format!("Eq: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
@@ -748,11 +743,8 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
                 return Ok(Arc::new(cmp::gt(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
-            if let (Some(l), Some(r)) = (
-                left.as_any().downcast_ref::<Float64Array>(),
-                right.as_any().downcast_ref::<Float64Array>(),
-            ) {
-                return Ok(Arc::new(cmp::gt(l, r).map_err(|e| e.to_string())?) as ArrayRef);
+            if both_float64(left, right) {
+                return compare_floats(Operator::Gt, left, right);
             }
             Err(format!("Gt: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
@@ -835,6 +827,24 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
         }
         _ => Err(format!("Unsupported binary op: {}", op)),
     }
+}
+
+fn both_float64(left: &ArrayRef, right: &ArrayRef) -> bool {
+    *left.data_type() == DataType::Float64 && *right.data_type() == DataType::Float64
+}
+
+/// Compare two float arrays with `apply_cmp`, the function DataFusion's
+/// `BinaryExpr` compares with. It turns `-0.0` into `0.0` and then calls
+/// Arrow's `cmp` kernels, which order floats by IEEE 754 totalOrder. Called
+/// directly, those kernels put `-0.0` below `0.0`, so the kernel counted a
+/// boundary wherever a zero changed sign and the reference did not (#244).
+/// Every other float, NaN included, compares by totalOrder on both paths.
+fn compare_floats(op: Operator, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
+    let left_value = ColumnarValue::Array(Arc::clone(left));
+    let right_value = ColumnarValue::Array(Arc::clone(right));
+    apply_cmp(op, &left_value, &right_value)
+        .and_then(|result| result.into_array(left.len()))
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -1116,6 +1126,28 @@ mod tests {
         };
         assert_eq!(kleene("And"), [t, f, None, f, f, f, None, f, None]);
         assert_eq!(kleene("Or"), [t, t, t, t, f, None, t, None, None]);
+    }
+
+    /// The float comparisons treat `-0.0` and `0.0` as one value, as
+    /// DataFusion's do (#244), and leave NaN as both order it: equal to
+    /// itself and above infinity.
+    #[test]
+    fn float_comparisons_treat_signed_zeros_as_equal() {
+        let nan = f64::NAN;
+        let floats = |values: Vec<f64>| -> ArrayRef { Arc::new(Float64Array::from(values)) };
+        let left = floats(vec![-0.0, 0.0, -0.0, 1.0, nan, nan]);
+        let right = floats(vec![0.0, -0.0, -0.0, -0.0, nan, f64::INFINITY]);
+        let compare = |op| {
+            let result = vectorized_binop(op, &left, &right).expect("float arm");
+            let result = result
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("booleans");
+            result.values().iter().collect::<Vec<_>>()
+        };
+        assert_eq!(compare("Eq"), [true, true, true, false, true, false]);
+        assert_eq!(compare("Ne"), [false, false, false, true, false, true]);
+        assert_eq!(compare("Gt"), [false, false, false, true, false, true]);
     }
 
     /// The issue #141 trigger predicate shape: references only the SECONDARY

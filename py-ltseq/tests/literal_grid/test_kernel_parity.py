@@ -1,10 +1,11 @@
-"""The linear-scan kernel against the materialized group count (#244).
+"""The linear-scan kernel against the materialized group count.
 
 ``group_ordered(pred).first().count()`` runs the linear-scan kernel when the
 predicate is eligible and otherwise materializes. The reference is the
 materialized count. Every (table, column, literal, predicate) must agree,
-except the cells of an open issue, which are pinned here so that a fix or a
-new divergence both show. The NULL cells of #189 agree since its fix.
+except the cells of an open issue, which are pinned in ``KNOWN`` so that a
+fix or a new divergence both show. None is pinned now: the NULL cells agree
+since #189's fix, and the Float64 ``-0.0`` cells since #244's.
 """
 
 from __future__ import annotations
@@ -28,12 +29,8 @@ COMPARISONS = {
 }
 PREDICATES = list(COMPARISONS) + ["diff_gt", "ne_or_gt"]
 
-# #244: the kernel's Float64 arms compare bit patterns, so -0.0 and 0.0
-# differ in `eq`, `ne` and `gt`.
-KNOWN = {}
-for _lit, _pred in (("f0", "eq"), ("f0", "ne"), ("fm0", "eq"), ("fm0", "ne"), ("fm0", "gt")):
-    KNOWN[("negzero", "f64", _lit, _pred)] = "#244"
-KNOWN[("clean", "f64", "fm0", "diff_gt")] = "#244"
+# (table, column, literal, predicate) -> the open issue the cell disagrees under.
+KNOWN: dict[tuple[str, str, str, str], str] = {}
 
 
 def predicates(col, value):
