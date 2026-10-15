@@ -20,7 +20,8 @@ projection. `r.x.is_in([now().dt.diff(now(), unit="second"), 1.0, 2.0,
 
 The lists cross the three-item threshold and hold zeros of both signs, an
 integer zero, NULL, NaN, a column and zeros DataFusion folds late; the
-receivers are a column, a CASE and a computed value, of each float type.
+receivers are a column, a CASE and a computed value, of each float type,
+and values of `rand()`, which must be named once.
 The reference is SQL's IN over Python's `==` in three-valued logic, with
 NaN equal to NaN: every NaN here has the same bits, and NaNs of different
 bits are #290's.
@@ -28,6 +29,7 @@ bits are #290's.
 
 from __future__ import annotations
 
+import collections
 import functools
 import itertools
 import math
@@ -36,7 +38,7 @@ import operator
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, if_else, now
+from ltseq import LTSeq, if_else, now, rand
 from ltseq.expr.core_types import LiteralExpr
 
 NAN = math.nan
@@ -491,6 +493,142 @@ def test_a_stable_value_of_another_type_is_refused_as_its_column_is(x_type, kind
     with pytest.raises(RuntimeError, match="Cannot infer common argument type") as inline:
         t.derive(c=lambda r: compare(r.x, value(r))).to_arrow()
     assert str(inline.value) == str(staged.value)
+
+
+# Values of `rand()`, each with every value it can take. DataFusion
+# evaluates each copy of a volatile expression, so each copy draws again. A
+# test that names its receiver once has one answer over such a domain; one
+# that names it twice tests two draws, which need not give that answer.
+VOLATILE = {
+    "-0.5 or 0.5": (lambda: rand().round(0) - 0.5, [-0.5, 0.5]),
+    "-0.0 or 0.0": (lambda: (rand() - 0.5) * 0.0, [-0.0, 0.0]),
+    "0.0 or 1.0": (lambda: rand().round(0), [0.0, 1.0]),
+    "-0.0, 0.0 or 1.0": (lambda: if_else(rand() < 0.5, (rand() - 0.5) * 0.0, 1.0), [-0.0, 0.0, 1.0]),
+}
+# Items, with their value: float columns holding one value each, and zeros
+# DataFusion folds after lowering.
+VOLATILE_ITEMS = {
+    "r.nz": (lambda r: r.nz, -0.0),
+    "r.z": (lambda r: r.z, 0.0),
+    "r.one": (lambda r: r.one, 1.0),
+    **{late: (ITEMS[late][0], ITEMS[late][1](0)) for late in FOLDED_LATE},
+}
+VOLATILE_COMPARISONS = {
+    "== 0.0": (lambda r, x: x == 0.0, lambda v: equal(v, 0.0)),
+    "== -0.0": (lambda r, x: x == -0.0, lambda v: equal(v, 0.0)),
+    "!= 0.0": (lambda r, x: x != 0.0, lambda v: negation(equal(v, 0.0))),
+    "~(!= -0.0)": (lambda r, x: ~(x != -0.0), lambda v: equal(v, 0.0)),
+    "== now 0": (lambda r, x: x == clock_zero(), lambda v: equal(v, 0.0)),
+    "!= now -0.0": (lambda r, x: x != clock_zero() * -1.0, lambda v: negation(equal(v, 0.0))),
+    "== r.nz": (lambda r, x: x == r.nz, lambda v: equal(v, 0.0)),
+}
+VOLATILE_LISTS = [
+    [0.0],
+    [-0.0, 1.0],
+    [0.0, 1.0, 2.5, 7.0],
+    [-0.0, 1.0, 2.5, 7.0],
+    [0.0, 5.0, 6.0, 7.0],
+    [None, 0.0, 1.0, 2.5],
+    ["r.nz", "r.one"],
+    ["r.z", "r.one", 2.5, 7.0],
+    ["r.nz", 1.0, 2.5, 7.0],
+    *([late, 1.0, 2.5, 7.0] for late in FOLDED_LATE),
+]
+
+
+def volatile_tests() -> dict:
+    """Each test of a value, naming it once, and its reference on a value."""
+    tests = dict(VOLATILE_COMPARISONS)
+    for items in VOLATILE_LISTS:
+
+        def in_list(r, x, items=items):
+            return x.is_in([VOLATILE_ITEMS[i][0](r) if isinstance(i, str) else i for i in items])
+
+        value_items = [VOLATILE_ITEMS[i][1] if isinstance(i, str) else i for i in items]
+        tests[f"in {items}"] = (in_list, lambda v, items=value_items: member(v, items))
+        tests[f"not in {items}"] = (
+            lambda r, x, in_list=in_list: ~in_list(r, x),
+            lambda v, items=value_items: negation(member(v, items)),
+        )
+    return tests
+
+
+VOLATILE_TESTS = volatile_tests()
+VOLATILE_ROWS = 400
+
+
+def decided_by_sign(receiver: str, name: str) -> bool:
+    """A list on a volatile value keeps an item that varies by row as
+    written, so it compares that item with a zero by sign (#298)."""
+    _, domain = VOLATILE[receiver]
+    return 0.0 in domain and ("'r.nz'" in name or "'r.z'" in name)
+
+
+def constant_tests(receiver: str, *, by_sign: bool = False) -> dict:
+    """The tests whose answer is the same for every value `receiver` can
+    take, with that answer; those `decided_by_sign` only when `by_sign`."""
+    _, domain = VOLATILE[receiver]
+    out = {}
+    for name, (test, truth) in VOLATILE_TESTS.items():
+        answers = {truth(v) for v in domain}
+        if len(answers) == 1 and decided_by_sign(receiver, name) == by_sign:
+            out[name] = (test, answers.pop())
+    return out
+
+
+def volatile_table() -> LTSeq:
+    n = VOLATILE_ROWS
+    return LTSeq.from_arrow(
+        pa.table({"k": range(n), "nz": [-0.0] * n, "z": [0.0] * n, "one": [1.0] * n})
+    )
+
+
+def wrong_answers(receiver: str, tests: dict, forms: tuple[str, ...]) -> dict:
+    """The answers other than the one the receiver's domain allows, counted,
+    per test with the receiver inline or staged in a column."""
+    draw, _ = VOLATILE[receiver]
+    built = {
+        "inline": lambda: volatile_table().derive(
+            **{name: lambda r, test=test: test(r, draw()) for name, (test, _) in tests.items()}
+        ),
+        "staged": lambda: volatile_table()
+        .derive(v=lambda r: draw())
+        .derive(**{name: lambda r, test=test: test(r, r.v) for name, (test, _) in tests.items()}),
+    }
+    wrong = {}
+    for form in forms:
+        got = built[form]().to_arrow()
+        for name, (_, answer) in tests.items():
+            counts = {v: n for v, n in collections.Counter(got.column(name).to_pylist()).items() if v != answer}
+            if counts:
+                wrong[f"{form} {name}"] = counts
+    return wrong
+
+
+@pytest.mark.parametrize("receiver", VOLATILE)
+def test_a_volatile_value_is_tested_once(engine_layout, receiver):
+    """A comparison or `is_in` names a volatile receiver once, so each row
+    gives the one answer its domain allows; a range or a test beside the
+    list would name it again and test another draw (`-0.5 or 0.5` is then
+    between -0.0 and 0.0 on a quarter of the rows). The receiver staged in
+    a column, which DataFusion computes once, is the control."""
+    assert wrong_answers(receiver, constant_tests(receiver), ("inline", "staged")) == {}
+
+
+@pytest.mark.xfail(strict=True, reason="#298: a list on a volatile value compares a column item's zeros by sign")
+@pytest.mark.parametrize("receiver", [name for name, (_, domain) in VOLATILE.items() if 0.0 in domain])
+def test_a_volatile_value_meets_a_column_item_as_equality_does(receiver):
+    assert wrong_answers(receiver, constant_tests(receiver, by_sign=True), ("inline",)) == {}
+
+
+@pytest.mark.parametrize("receiver", VOLATILE)
+def test_a_volatile_value_filters_all_rows_or_none(receiver):
+    """The same tests as filters: each keeps every row or none."""
+    draw, _ = VOLATILE[receiver]
+    t = volatile_table()
+    tests = constant_tests(receiver)
+    kept = {name: t.filter(lambda r, test=test: test(r, draw())).count() for name, (test, _) in tests.items()}
+    assert kept == {name: VOLATILE_ROWS if answer else 0 for name, (_, answer) in tests.items()}
 
 
 def test_constant_receiver():

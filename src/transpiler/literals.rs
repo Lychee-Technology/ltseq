@@ -192,6 +192,12 @@ fn query_constant_equality(
 /// but is not a constant (`now()` and what is computed from it) folds only
 /// when the query runs, so lowering cannot tell whether it is a zero; its
 /// bounds are expressions DataFusion folds with it ([`equal_range`]).
+///
+/// A volatile `value` (one holding `rand()`) is left as written: the range
+/// names it twice, and DataFusion evaluates each copy, so the two bounds
+/// would test two different draws. Its `=` already takes the zeros as
+/// equal, and DataFusion merges no `=` on it into a list: the merge takes
+/// only a column, and CSE makes no column of a volatile expression.
 fn float_equality(
     op: Operator,
     value: &Expr,
@@ -203,6 +209,9 @@ fn float_equality(
         Operator::NotEq => true,
         _ => return Ok(None),
     };
+    if value.is_volatile() {
+        return Ok(None);
+    }
     // A pair DataFusion cannot coerce (`bool_col == 0.0`, a float with a
     // Boolean or a timestamp of `now()`) is left for it to reject.
     let Some(Expr::BinaryExpr(BinaryExpr { left, right, .. })) =
@@ -235,7 +244,8 @@ fn float_equality(
 }
 
 /// `low <= value <= high` as `value >= low AND value <= high`, or for
-/// `negated` its complement, `value < low OR value > high`.
+/// `negated` its complement, `value < low OR value > high`. It names
+/// `value` twice, so `value` must not be volatile.
 ///
 /// This is how a float is compared with a zero. DataFusion's comparisons
 /// normalize zeros and then order floats by IEEE 754 totalOrder, which
@@ -246,6 +256,7 @@ fn float_equality(
 /// unfolds it into `=`, so it never meets the simplifier's intersection
 /// and difference of lists, which lose NULL results (#296).
 pub(super) fn within(value: Expr, (low, high): (Expr, Expr), negated: bool) -> Expr {
+    debug_assert!(!value.is_volatile(), "a range names its value twice");
     if negated {
         value.clone().lt(low).or(value.gt(high))
     } else {
@@ -398,7 +409,8 @@ type ListItem = (Expr, Expr);
 /// ([`float_equality`]). NaN is left as both compare it: equal to a NaN of
 /// the same bits. An item DataFusion replaces with a zero only while it
 /// optimizes (a column holding a constant) reaches a list after lowering;
-/// [`super::float_lists`] splits that list.
+/// [`super::float_lists`] splits that list. A volatile `value` is tested
+/// by one list instead ([`listed_once`]).
 fn membership(
     comparison_type: Option<&DataType>,
     value: Expr,
@@ -409,6 +421,9 @@ fn membership(
         let list = items.into_iter().map(|(item, _)| item).collect();
         return Ok(value.in_list(list, false));
     };
+    if value.is_volatile() {
+        return Ok(listed_once(value, items, float_type, rx));
+    }
     let mut list = Vec::with_capacity(items.len());
     let mut zero = false;
     let mut equalities = Vec::new();
@@ -430,6 +445,44 @@ fn membership(
         .chain(equalities)
         .reduce(Expr::or)
         .expect("at least one item"))
+}
+
+/// `value IN (items)` for a volatile float `value` (one holding `rand()`),
+/// which names `value` once. DataFusion evaluates each copy of a volatile
+/// expression, so the tests [`membership`] puts beside the list would each
+/// test another draw.
+///
+/// The one list matches either zero by holding both. A zero item is -0.0
+/// and 0.0, and a zero DataFusion folds later (a value of `now()`, a
+/// column holding a constant) is completed by [`super::float_lists`]. An
+/// item that varies by row is kept as written, so the list decides that
+/// item's zeros by sign (#298): a CASE computing its other zero would be a
+/// list item DataFusion 55 can take for a constant (#297).
+///
+/// A list holding a zero meets DataFusion's intersection and difference
+/// of lists (#296), which the range keeps a zero out of elsewhere. Those
+/// combine two lists on one value, and two lists on a volatile value test
+/// two draws, which they combine wrongly whatever the items (#296).
+fn listed_once(
+    value: Expr,
+    items: Vec<ListItem>,
+    float_type: &DataType,
+    rx: &Resolver<'_>,
+) -> Expr {
+    let mut list = Vec::with_capacity(items.len() + 1);
+    let mut zero = false;
+    for (item, coerced) in items {
+        if rx.literal(&coerced).is_some_and(|v| is_float_zero(&v)) {
+            zero = true;
+        } else {
+            list.push(item);
+        }
+    }
+    if zero {
+        let (negative, zero) = zero_bounds(float_type);
+        list.extend([negative, zero]);
+    }
+    value.in_list(list, false)
 }
 
 /// Whether `value` is a float zero, also a dictionary or run-end encoded

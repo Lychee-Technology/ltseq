@@ -11,6 +11,11 @@
 //! becomes `x = -0.0`, and the simplifier merges it with the equalities
 //! beside it into `x IN (..., -0.0)`. This rule is the last of each
 //! optimizer pass, so the plan the optimizer returns holds no such list.
+//! A list on a volatile value is completed with the other zero instead, as
+//! lowering builds it (`literals::listed_once`): splitting would name the
+//! value twice, and DataFusion evaluates each copy. Lowering keeps a value
+//! of `now()` and a column as written in such a list, so a zero either of
+//! them turns into is completed here.
 //!
 //! It cannot undo what the simplifier did to such a list before: two lists
 //! on one value are intersected and subtracted comparing their items as
@@ -78,21 +83,42 @@ fn item_zeros(item: &Expr) -> Option<(ScalarValue, ScalarValue)> {
 }
 
 /// `value IN (items)` holding a float zero as lowering builds it: the list
-/// without its zeros, ORed with the range of both zeros ([`within`]). The
-/// analyzer has coerced the value and the items to one type, which the
-/// bounds keep, since no coercion follows this rule.
+/// without its zeros, ORed with the range of both zeros ([`within`]), or
+/// for a volatile `value`, the list with both zeros. The analyzer has
+/// coerced the value and the items to one type, which the bounds keep,
+/// since no coercion follows this rule.
 fn split(expr: Expr) -> Result<Transformed<Expr>> {
     let Some((negative, zero)) = list_zeros(&expr) else {
         return Ok(Transformed::no(expr));
     };
     let Expr::InList(InList {
         expr: value,
-        list,
+        mut list,
         negated,
     }) = expr
     else {
         unreachable!("only an IN list holds zeros");
     };
+    if value.is_volatile() {
+        // `ScalarValue` compares floats by their bits.
+        let held = |zero: &ScalarValue| {
+            list.iter()
+                .any(|item| matches!(item, Expr::Literal(v, _) if v == zero))
+        };
+        let missing: Vec<Expr> = [negative, zero]
+            .into_iter()
+            .filter(|zero| !held(zero))
+            .map(lit)
+            .collect();
+        let completed = !missing.is_empty();
+        list.extend(missing);
+        let list = Expr::InList(InList::new(value, list, negated));
+        return Ok(if completed {
+            Transformed::yes(list)
+        } else {
+            Transformed::no(list)
+        });
+    }
     let rest: Vec<Expr> = list
         .into_iter()
         .filter(|item| item_zeros(item).is_none())
@@ -150,6 +176,24 @@ mod tests {
             split_expr(list),
             col("x").in_list(vec![encoded(1.0)], false).or(range)
         );
+    }
+
+    #[test]
+    fn a_list_on_a_volatile_value_holds_both_zeros() {
+        use datafusion::functions::math::expr_fn::random;
+        let list = |items: Vec<f64>| random().in_list(items.into_iter().map(lit).collect(), false);
+        let completed = split(list(vec![1.0, -0.0, 2.0])).unwrap();
+        assert!(completed.transformed);
+        assert_eq!(completed.data, list(vec![1.0, -0.0, 2.0, 0.0]));
+        let negated = random().in_list(vec![lit(0.0)], true);
+        assert_eq!(
+            split_expr(negated),
+            random().in_list(vec![lit(0.0), lit(-0.0)], true)
+        );
+        let complete = list(vec![0.0, 1.0, -0.0]);
+        let result = split(complete.clone()).unwrap();
+        assert!(!result.transformed);
+        assert_eq!(result.data, complete);
     }
 
     #[test]
