@@ -3,6 +3,7 @@
 //! This module provides:
 //! - Global Tokio runtime for async operations
 //! - Configured SessionContext factory for optimal performance
+//! - ltseq's optimizer rule (`FloatListZeros`, #245)
 //! - Test-only overrides of the session layout (`LayoutOverrides`)
 
 use datafusion::execution::config::SessionConfig;
@@ -14,6 +15,8 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::runtime::Runtime;
+
+use crate::transpiler::FloatListZeros;
 
 /// Default batch size for DataFusion operations.
 /// 16384 rows reduces per-batch overhead for large scans while
@@ -118,6 +121,8 @@ impl LayoutOverrides {
 /// - `information_schema`: Disabled (not needed, saves memory)
 /// - `repartition_joins`: Enabled for parallel join execution
 /// - `repartition_aggregations`: Enabled for parallel aggregations
+/// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
+///   -0.0 equal to 0.0 however DataFusion built it (#245)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -140,7 +145,11 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     config.options_mut().execution.parquet.pushdown_filters = true;
     config.options_mut().execution.parquet.reorder_filters = true;
 
-    Arc::new(SessionContext::new_with_config(config))
+    let session = SessionContext::new_with_config(config);
+    // Appended to DataFusion's rules, so it runs after the ones that build
+    // IN lists in every pass.
+    session.add_optimizer_rule(Arc::new(FloatListZeros));
+    Arc::new(session)
 }
 
 /// Set the layout overrides (`None` clears one) and return the previous

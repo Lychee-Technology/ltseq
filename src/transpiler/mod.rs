@@ -16,6 +16,7 @@
 //! (decision D-f on #225).
 
 mod exact;
+mod float_lists;
 pub(crate) mod floor_div;
 mod literal_policy;
 mod literals;
@@ -23,6 +24,7 @@ pub(crate) mod probe;
 mod resolve;
 pub(crate) mod window_native;
 
+pub(crate) use float_lists::FloatListZeros;
 pub(crate) use literals::column_value;
 pub(crate) use resolve::{binary_input_types, Resolver};
 pub use window_native::pyexpr_to_window_expr;

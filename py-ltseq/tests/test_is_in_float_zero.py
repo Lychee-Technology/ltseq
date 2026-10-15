@@ -11,10 +11,12 @@ repeated expression it has made a column of, back into one IN list. So
 same four equalities joined by `|`.
 
 A zero that becomes a literal only in the optimizer is merged the same
-way: a value of `now()`, which DataFusion reads when the query runs, or a
-constant ltseq did not take for one. `r.x.is_in([now().dt.diff(now(),
-unit="second"), 1.0, 2.0, 3.0])` missed the -0.0 rows. Negating `!=` gives
-`==`, so `~((r.x != -0.0) & (r.x != 1.0) & ...)` did too.
+way: a value of `now()`, which DataFusion reads when the query runs, a
+constant ltseq did not take for one, or a derived column, whose value
+DataFusion writes in its place when it moves a filter below the
+projection. `r.x.is_in([now().dt.diff(now(), unit="second"), 1.0, 2.0,
+3.0])` missed the -0.0 rows. Negating `!=` gives `==`, so `~((r.x != -0.0)
+& (r.x != 1.0) & ...)` did too.
 
 The lists cross the three-item threshold and hold zeros of both signs, an
 integer zero, NULL, NaN, a column and zeros DataFusion folds late; the
@@ -390,6 +392,75 @@ def test_filter_with_a_zero_beside_a_list(data_layout, zero_test, items, join, n
     predicate, reference = beside("column", zero_test, items, join, negate_list, negate_all)
     kept = t.filter(predicate).to_arrow().column("k").to_pylist()
     assert kept == [k for k, v in enumerate(reference) if v]
+
+
+# Zeros a derived column `z` holds. DataFusion moves a filter below the
+# projection that computes `z` and writes `z`'s value in its place, so a
+# zero that lowering saw as a column reaches the simplifier's merge of `=`
+# into lists as a literal.
+STAGED = {
+    "-0.0": lambda r: LiteralExpr(-0.0),
+    "0.0": lambda r: LiteralExpr(0.0),
+    "now -0.0": lambda r: clock_zero() * -1.0,
+}
+STAGED_ITEMS = [1.0, 2.5, 7.0]
+STAGED_FORMS = {
+    "x.is_in([z, ...])": lambda r: r.x.is_in([r.z, *STAGED_ITEMS]),
+    "x == z | ...": lambda r: any_equal(r.x, [r.z, *STAGED_ITEMS]),
+    "z == x | ...": lambda r: functools.reduce(operator.or_, [r.z == r.x, *(r.x == v for v in STAGED_ITEMS)]),
+    "~(x != z & ...)": lambda r: ~all_unequal(r.x, [r.z, *STAGED_ITEMS]),
+}
+
+
+def filtered_by_staged_zero(t: LTSeq, staged: str, form: str) -> dict[str, tuple[list, list]]:
+    """The rows a staged-zero predicate keeps and the rows its negation
+    keeps, each with the reference's."""
+    t = t.derive(z=STAGED[staged])
+    predicate = STAGED_FORMS[form]
+
+    def kept(predicate):
+        return t.filter(predicate).to_arrow().column("k").to_pylist()
+
+    reference = [member(v, [0.0, *STAGED_ITEMS]) for v in X]
+    return {
+        "kept": (kept(predicate), [k for k, v in enumerate(reference) if v]),
+        "negated": (kept(lambda r: ~predicate(r)), [k for k, v in enumerate(reference) if v is False]),
+    }
+
+
+@pytest.mark.parametrize("form", STAGED_FORMS)
+@pytest.mark.parametrize("staged", STAGED)
+def test_filter_with_a_zero_a_column_holds(data_layout, staged, form):
+    """The list DataFusion builds itself is split after its other rules,
+    also where the filter reaches the scan."""
+    rows = pa.table({"k": pa.array(range(len(X)), pa.int64()), "x": X, "y": Y})
+    for got, want in filtered_by_staged_zero(data_layout(rows).sort("k"), staged, form).values():
+        assert got == want
+
+
+@pytest.mark.parametrize("x_type", X_TYPES)
+def test_a_zero_a_column_holds_on_each_float_type(x_type):
+    """The bounds that replace a zero keep the list's type, since no type
+    coercion follows the optimizer: a dictionary or run-end encoded column
+    is compared with encoded bounds. Negated, the simplifier moves the zero
+    out of the list into `x != -0.0`, which on an encoded column decides a
+    zero by its sign (#292), so there only the kept rows are checked."""
+    wrong = {}
+    for staged, form in itertools.product(STAGED, STAGED_FORMS):
+        for side, (got, want) in filtered_by_staged_zero(table(X_TYPES[x_type]), staged, form).items():
+            if got != want and not (side == "negated" and x_type in ENCODED):
+                wrong[f"{side} {staged} {form}"] = got
+    assert wrong == {}
+
+
+@pytest.mark.xfail(strict=True, reason="#296: DataFusion intersects lists comparing their items as expressions")
+def test_two_columns_holding_zeros_of_either_sign():
+    """Two lists the optimizer builds, each with a zero, are intersected by
+    the simplifier before they are split, and `-0.0` and `0.0` are different
+    items there."""
+    t = table(pa.float64()).derive(a=lambda r: LiteralExpr(-0.0), b=lambda r: LiteralExpr(0.0))
+    kept = t.filter(lambda r: r.x.is_in([r.a, 1.0, 2.5, 7.0]) & r.x.is_in([r.b, 3.0, 4.0, 5.0]))
+    assert kept.to_arrow().column("k").to_pylist() == [k for k, v in enumerate(X) if v == 0.0]
 
 
 # Values of stable functions that a float has no common type with.

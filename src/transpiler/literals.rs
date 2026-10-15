@@ -245,7 +245,7 @@ fn float_equality(
 /// equal a zero. DataFusion neither merges a range into an IN list nor
 /// unfolds it into `=`, so it never meets the simplifier's intersection
 /// and difference of lists, which lose NULL results (#296).
-fn within(value: Expr, (low, high): (Expr, Expr), negated: bool) -> Expr {
+pub(super) fn within(value: Expr, (low, high): (Expr, Expr), negated: bool) -> Expr {
     if negated {
         value.clone().lt(low).or(value.gt(high))
     } else {
@@ -270,7 +270,7 @@ fn equal_range(value: Expr, float_type: &DataType) -> (Expr, Expr) {
 /// zero is compared as ([`within`]).
 fn zero_bounds(float_type: &DataType) -> (Expr, Expr) {
     let zero = ScalarValue::new_zero(float_type).expect("a float type has a zero");
-    let negative = zero.arithmetic_negate().expect("a float negates");
+    let (negative, zero) = signed_zeros(&zero).expect("a float zero");
     (lit(negative), lit(zero))
 }
 
@@ -396,7 +396,9 @@ type ListItem = (Expr, Expr);
 /// zeros beside the list ([`within`]), as a zero is for `==`, and an item
 /// that is not a constant is compared beside the list as `==` compares it
 /// ([`float_equality`]). NaN is left as both compare it: equal to a NaN of
-/// the same bits.
+/// the same bits. An item DataFusion replaces with a zero only while it
+/// optimizes (a column holding a constant) reaches a list after lowering;
+/// [`super::float_lists`] splits that list.
 fn membership(
     comparison_type: Option<&DataType>,
     value: Expr,
@@ -433,14 +435,32 @@ fn membership(
 /// Whether `value` is a float zero, also a dictionary or run-end encoded
 /// one.
 fn is_float_zero(value: &ScalarValue) -> bool {
+    signed_zeros(value).is_some()
+}
+
+/// -0.0 and 0.0, encoded as `value` is, when `value` is a float zero (also
+/// a dictionary or run-end encoded one); `None` for any other value.
+pub(super) fn signed_zeros(value: &ScalarValue) -> Option<(ScalarValue, ScalarValue)> {
     use ScalarValue as S;
-    match value {
+    let zero = match value {
         S::Float16(Some(v)) => f32::from(*v) == 0.0,
         S::Float32(Some(v)) => *v == 0.0,
         S::Float64(Some(v)) => *v == 0.0,
-        S::Dictionary(_, value) | S::RunEndEncoded(_, _, value) => is_float_zero(value),
+        S::Dictionary(key, value) => {
+            let encode = |v| S::Dictionary(key.clone(), Box::new(v));
+            return signed_zeros(value).map(|(negative, zero)| (encode(negative), encode(zero)));
+        }
+        S::RunEndEncoded(run_ends, values, value) => {
+            let encode = |v| S::RunEndEncoded(run_ends.clone(), values.clone(), Box::new(v));
+            return signed_zeros(value).map(|(negative, zero)| (encode(negative), encode(zero)));
+        }
         _ => false,
-    }
+    };
+    zero.then(|| {
+        let zero = S::new_zero(&value.data_type()).expect("a float type has a zero");
+        let negative = zero.arithmetic_negate().expect("a float negates");
+        (negative, zero)
+    })
 }
 
 /// Where `literal` falls among the values of `operand`'s type, when that
