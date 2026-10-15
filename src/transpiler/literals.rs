@@ -112,8 +112,8 @@ pub(crate) fn arithmetic_operands(
 /// `left op right` for a comparison operator. A literal on either side is
 /// read next to the other side (see [`literal_side`]), then placed among
 /// that side's values when it is of an exact domain (see [`placement`]).
-/// A float `==` or `!=` with a value DataFusion folds into a literal is a
-/// membership test ([`float_equality`]).
+/// A float `==` or `!=` with a value DataFusion may fold into a zero is a
+/// range ([`float_equality`]).
 pub(crate) fn comparison(
     op: Operator,
     left: Expr,
@@ -153,7 +153,7 @@ pub(crate) fn comparison(
         Holding::Exactly(value) => rebuild(operand, lit(value)),
         Holding::Not(placed) => exact_comparison(operand, operand_op, placed),
         Holding::Unjudged => match float_equality(op, &operand, &literal_expr, rx)? {
-            Some(membership) => membership,
+            Some(range) => range,
             None => rebuild(operand, literal_expr),
         },
     })
@@ -178,24 +178,20 @@ fn query_constant_equality(
     }
 }
 
-/// `value == other`, or `value != other` for `NotEq`, when the two
-/// compare as floats and DataFusion could fold the comparison into a list
-/// holding one zero; `None` leaves it as written.
+/// `value == other`, or `value != other` for `NotEq`, when DataFusion
+/// compares the two as floats and `other` may fold into a zero; `None`
+/// leaves the comparison as written.
 ///
-/// DataFusion's simplifier merges `x = a OR x = b OR ...` on a column
-/// into one IN list once each `a` is a literal, also after it has made a
-/// column of a repeated expression, and negating `x != a` gives `x = a`.
-/// A list it builds holds both zeros when each equality it is built from
-/// does. So a comparison with a constant zero is the membership test of
-/// both zeros. A value with one value per query that is not a constant
-/// (`now()` and what is computed from it) folds into a literal only when
-/// the query runs, so lowering cannot tell whether it is a zero; `value`
-/// is compared with it and with its [`zero_twin`], joined by OR (AND for
-/// `!=`), so an equality with a zero never folds without one with the
-/// other zero. They are not a list: the simplifier folds stable functions
-/// in the same pass in which it merges and intersects lists, and its list
-/// algebra compares items that are still expressions as expressions
-/// (#295).
+/// DataFusion's `=` takes -0.0 to equal 0.0, but its simplifier merges
+/// `x = a OR x = b OR ...` on a column into one IN list once each `a` is a
+/// literal, also after it has made a column of a repeated expression, and
+/// negating `x != a` gives `x = a`; the list then decides a zero by its
+/// sign ([`membership`]). So such an equality is the range of the floats
+/// `=` takes to equal `other` ([`within`]). A constant other than a zero
+/// leaves the equality as written. A value that has one value per query
+/// but is not a constant (`now()` and what is computed from it) folds only
+/// when the query runs, so lowering cannot tell whether it is a zero; its
+/// bounds are expressions DataFusion folds with it ([`equal_range`]).
 fn float_equality(
     op: Operator,
     value: &Expr,
@@ -207,54 +203,75 @@ fn float_equality(
         Operator::NotEq => true,
         _ => return Ok(None),
     };
-    let Expr::BinaryExpr(BinaryExpr { left, right, .. }) =
-        rx.resolve(value.clone().eq(other.clone()))?
+    // A pair DataFusion cannot coerce (`bool_col == 0.0`, a float with a
+    // Boolean or a timestamp of `now()`) is left for it to reject.
+    let Some(Expr::BinaryExpr(BinaryExpr { left, right, .. })) =
+        rx.coerced(&value.clone().eq(other.clone()))?
     else {
         return Ok(None);
     };
-    // A pair DataFusion cannot coerce comes back as written, so the float
-    // literal of `bool_col == 0.0` is no float comparison.
-    let Ok(float_type) = rx.value_type(&left) else {
-        return Ok(None);
+    let float_type = match (rx.value_type(&left), rx.value_type(&right)) {
+        (Ok(left), Ok(right)) if left == right && left.is_floating() => left,
+        _ => return Ok(None),
     };
-    if !float_type.is_floating() {
-        return Ok(None);
-    }
-    if Resolver::constant(&right) {
-        let Some(zero) = rx.literal(&right).and_then(|v| float_zero(&v)) else {
+    let bounds = if Resolver::constant(&right) {
+        if !rx.literal(&right).is_some_and(|v| is_float_zero(&v)) {
             return Ok(None);
+        }
+        zero_bounds(&float_type)
+    } else if Resolver::query_constant(&right) {
+        // The value at the comparison's own type, decoded if coercion
+        // encoded it.
+        let plain = if rx.data_type(&right).is_ok_and(|t| t == float_type) {
+            *right
+        } else {
+            cast(*right, float_type.clone())
         };
-        let zeros = both_zeros(zero).map(lit).into();
-        return Ok(Some(value.clone().in_list(zeros, negated)));
-    }
-    if !Resolver::query_constant(&right) {
-        return Ok(None);
-    }
-    // A plain float of the comparison's value type, as a zero added to a
-    // list is ([`float_zero`]).
-    let plain = if rx.data_type(&right).is_ok_and(|t| t == float_type) {
-        *right
+        equal_range(plain, &float_type)
     } else {
-        cast(*right, float_type.clone())
+        return Ok(None);
     };
-    let twin = zero_twin(plain.clone(), &float_type);
-    let compared =
-        |item: Expr| Expr::BinaryExpr(BinaryExpr::new(Box::new(value.clone()), op, Box::new(item)));
-    let join = if negated { Expr::and } else { Expr::or };
-    Ok(Some(join(compared(plain), compared(twin))))
+    Ok(Some(within(value.clone(), bounds, negated)))
 }
 
-/// The other zero where the float `value` is a zero, else `value` itself,
-/// so that the two are both zeros or one value. DataFusion folds it with
-/// `value`, and its `=` compares -0.0 equal to 0.0.
-fn zero_twin(value: Expr, float_type: &DataType) -> Expr {
+/// `low <= value <= high` as `value >= low AND value <= high`, or for
+/// `negated` its complement, `value < low OR value > high`.
+///
+/// This is how a float is compared with a zero. DataFusion's comparisons
+/// normalize zeros and then order floats by IEEE 754 totalOrder, which
+/// puts -0.0 just below 0.0, so the range from -0.0 to 0.0 holds both
+/// zeros and nothing else, also where the zeros are not normalized (an
+/// encoded column, #292); it holds no NaN, as `=` does not take a NaN to
+/// equal a zero. DataFusion neither merges a range into an IN list nor
+/// unfolds it into `=`, so it never meets the simplifier's intersection
+/// and difference of lists, which lose NULL results (#296).
+fn within(value: Expr, (low, high): (Expr, Expr), negated: bool) -> Expr {
+    if negated {
+        value.clone().lt(low).or(value.gt(high))
+    } else {
+        value.clone().gt_eq(low).and(value.lt_eq(high))
+    }
+}
+
+/// The least and the greatest float DataFusion's `=` takes to equal the
+/// float `value`: -0.0 and 0.0 where `value` is a zero, else `value` both
+/// times. DataFusion folds both with `value`.
+fn equal_range(value: Expr, float_type: &DataType) -> (Expr, Expr) {
+    let (negative, zero) = zero_bounds(float_type);
+    let bound = |bound: Expr| {
+        when(value.clone().eq(zero.clone()), bound)
+            .otherwise(value.clone())
+            .expect("a CASE with one branch and an ELSE builds")
+    };
+    (bound(negative), bound(zero.clone()))
+}
+
+/// -0.0 and 0.0 of the float type `float_type`, the bounds of the range a
+/// zero is compared as ([`within`]).
+fn zero_bounds(float_type: &DataType) -> (Expr, Expr) {
     let zero = ScalarValue::new_zero(float_type).expect("a float type has a zero");
-    when(
-        value.clone().eq(lit(zero)),
-        Expr::Negative(Box::new(value.clone())),
-    )
-    .otherwise(value)
-    .expect("a CASE with one branch and an ELSE builds")
+    let negative = zero.arithmetic_negate().expect("a float negates");
+    (lit(negative), lit(zero))
 }
 
 /// The literal `literal` (a literal or a constant) compared with `operand`:
@@ -375,70 +392,55 @@ type ListItem = (Expr, Expr);
 /// list through a hash set or a branchless filter, any other through
 /// Arrow's total-order `eq`. Its `=` compares -0.0 equal to 0.0, as IEEE
 /// 754 does, so the list alone would decide a zero by its sign (#245).
-/// A float list that holds a zero therefore holds both zeros, which adds no
-/// value the list did not already equal, and an item that is not a constant
-/// is compared beside the list, as `==` compares it ([`float_equality`]).
-/// NaN is left as both compare it: equal to a NaN of the same bits.
+/// A float list therefore holds no zero: a zero item is the range of both
+/// zeros beside the list ([`within`]), as a zero is for `==`, and an item
+/// that is not a constant is compared beside the list as `==` compares it
+/// ([`float_equality`]). NaN is left as both compare it: equal to a NaN of
+/// the same bits.
 fn membership(
     comparison_type: Option<&DataType>,
     value: Expr,
     items: Vec<ListItem>,
     rx: &Resolver<'_>,
 ) -> Result<Expr, String> {
-    if !comparison_type.is_some_and(DataType::is_floating) {
+    let Some(float_type) = comparison_type.filter(|t| t.is_floating()) else {
         let list = items.into_iter().map(|(item, _)| item).collect();
         return Ok(value.in_list(list, false));
-    }
+    };
     let mut list = Vec::with_capacity(items.len());
-    let mut zeros = Vec::new();
+    let mut zero = false;
     let mut equalities = Vec::new();
     for (item, coerced) in items {
         if !Resolver::constant(&coerced) {
             let equality = query_constant_equality(Operator::Eq, &value, &item, rx)?;
             equalities.push(equality.unwrap_or_else(|| value.clone().eq(item)));
-            continue;
-        }
-        zeros.extend(rx.literal(&coerced).and_then(|v| float_zero(&v)));
-        list.push(item);
-    }
-    // Every zero of one list has the list's type, so it has two zeros.
-    if let Some(zero) = zeros.first() {
-        for missing in both_zeros(zero.clone())
-            .into_iter()
-            .filter(|z| !zeros.contains(z))
-        {
-            list.push(lit(missing));
+        } else if rx.literal(&coerced).is_some_and(|v| is_float_zero(&v)) {
+            zero = true;
+        } else {
+            list.push(item);
         }
     }
+    let zeros = zero.then(|| within(value.clone(), zero_bounds(float_type), false));
     let list = (!list.is_empty()).then(|| value.clone().in_list(list, false));
     Ok(list
         .into_iter()
+        .chain(zeros)
         .chain(equalities)
         .reduce(Expr::or)
         .expect("at least one item"))
 }
 
-/// The float zero `value` is, as a value of its value type: a dictionary or
-/// run-end encoded zero is decoded, so that a zero added to a list beside
-/// the items as written leaves the type DataFusion coerces the list to as
-/// it was.
-fn float_zero(value: &ScalarValue) -> Option<ScalarValue> {
+/// Whether `value` is a float zero, also a dictionary or run-end encoded
+/// one.
+fn is_float_zero(value: &ScalarValue) -> bool {
     use ScalarValue as S;
     match value {
-        S::Float16(Some(v)) if f32::from(*v) == 0.0 => Some(value.clone()),
-        S::Float32(Some(v)) if *v == 0.0 => Some(value.clone()),
-        S::Float64(Some(v)) if *v == 0.0 => Some(value.clone()),
-        S::Dictionary(_, value) | S::RunEndEncoded(_, _, value) => float_zero(value),
-        _ => None,
+        S::Float16(Some(v)) => f32::from(*v) == 0.0,
+        S::Float32(Some(v)) => *v == 0.0,
+        S::Float64(Some(v)) => *v == 0.0,
+        S::Dictionary(_, value) | S::RunEndEncoded(_, _, value) => is_float_zero(value),
+        _ => false,
     }
-}
-
-/// A float zero and the other zero of its type: 0.0 and -0.0, which
-/// `ScalarValue` equality, being bitwise, tells apart as DataFusion's IN
-/// list does.
-fn both_zeros(zero: ScalarValue) -> [ScalarValue; 2] {
-    let other = zero.arithmetic_negate().expect("a float negates");
-    [zero, other]
 }
 
 /// Where `literal` falls among the values of `operand`'s type, when that

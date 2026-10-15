@@ -269,9 +269,11 @@ COMBINED_LISTS = {
 @pytest.mark.parametrize("combine", ["and", "or"])
 @pytest.mark.parametrize("negate", [(False, False), (False, True), (True, True)], ids=str)
 def test_lists_the_optimizer_combines(combine, negate, form, lists):
-    """DataFusion's simplifier intersects, unites and subtracts two lists on
-    one column, comparing their items bitwise, after merging `==` joined by
-    `|` into lists and folding the zeros that come late."""
+    """Two membership tests on one column, written with `is_in` or with `|`
+    of `==`. DataFusion's simplifier merges `==` joined by `|` into lists,
+    folds the zeros that come late, and intersects, unites and subtracts
+    lists on one column comparing their items bitwise; none of it may decide
+    a zero by its sign."""
     test = {
         "is_in": lambda r, items: r.x.is_in(written(r, items)),
         "|": lambda r, items: any_equal(r.x, written(r, items)),
@@ -293,6 +295,131 @@ def test_lists_the_optimizer_combines(combine, negate, form, lists):
         wanted[f"{a} {b}"] = reference
     got = table(pa.float64()).derive(**columns).to_arrow()
     assert {name: got.column(name).to_pylist() for name in columns} == wanted
+
+
+def both(a, b):
+    """SQL's AND in three-valued logic."""
+    if a is False or b is False:
+        return False
+    return None if a is None or b is None else True
+
+
+def either(a, b):
+    """SQL's OR in three-valued logic."""
+    if a is True or b is True:
+        return True
+    return None if a is None or b is None else False
+
+
+# Tests of a value against a zero: a comparison with a value that is or
+# folds into a zero, or a membership test whose list holds a zero; and
+# their reference on a value.
+ZERO_TESTS = {
+    "== 0.0": (lambda x: x == 0.0, lambda v: equal(v, 0.0)),
+    "== -0.0": (lambda x: x == -0.0, lambda v: equal(v, 0.0)),
+    "!= 0.0": (lambda x: x != 0.0, lambda v: negation(equal(v, 0.0))),
+    "~(!= -0.0)": (lambda x: ~(x != -0.0), lambda v: equal(v, 0.0)),
+    "== now 0": (lambda x: x == clock_zero(), lambda v: equal(v, 0.0)),
+    "!= now -0.0": (lambda x: x != clock_zero() * -1.0, lambda v: negation(equal(v, 0.0))),
+    "in [0.0, 5.0]": (lambda x: x.is_in([0.0, 5.0]), lambda v: member(v, [0.0, 5.0])),
+    "in [-0.0, 5.0, 6.0, 7.0]": (
+        lambda x: x.is_in([-0.0, 5.0, 6.0, 7.0]),
+        lambda v: member(v, [-0.0, 5.0, 6.0, 7.0]),
+    ),
+}
+# Lists that meet the zeros in nothing, in a NULL, in a zero, or in both.
+LISTS_BESIDE = [[1.0, 2.5, 7.0, 8.0], [None, 1.0, 2.5, 7.0], [-0.0, 1.0, 2.5, 7.0], [0.0, None, 2.5, 7.0]]
+JOINS = {"&": (operator.and_, both), "|": (operator.or_, either)}
+
+
+def beside(receiver: str, zero_test: str, items: list, join: str, negate_list: bool, negate_all: bool):
+    """A test against a zero joined to the membership test of `items` on the
+    same receiver, the latter or the whole negated; and the reference."""
+    recv, recv_value = RECEIVERS[receiver]
+    compare, truth = ZERO_TESTS[zero_test]
+    join_exprs, join_values = JOINS[join]
+
+    def predicate(r):
+        test = recv(r).is_in(items)
+        joined = join_exprs(compare(recv(r)), ~test if negate_list else test)
+        return ~joined if negate_all else joined
+
+    reference = []
+    for k in range(len(X)):
+        value = recv_value(k)
+        test = member(value, items)
+        joined = join_values(truth(value), negation(test) if negate_list else test)
+        reference.append(negation(joined) if negate_all else joined)
+    return predicate, reference
+
+
+@pytest.mark.parametrize("receiver", RECEIVERS)
+@pytest.mark.parametrize("x_type", X_TYPES)
+def test_a_zero_beside_a_list(x_type, receiver):
+    """DataFusion's simplifier intersects and subtracts two lists on one
+    value, and loses NULL results doing so (#296): `x IN (0, -0) AND x NOT
+    IN (NULL, 1, ...)` became `x IN (0, -0)`, and `x IN (0, -0) AND x IN
+    (1, ...)` false, also where `x` is NULL. A zero is in no list, so a test
+    against one, a comparison or a list that holds it, is never combined
+    that way, also when its zero folds late."""
+    columns, wanted = {}, {}
+    for zero_test, items, join, negate_list, negate_all in itertools.product(
+        ZERO_TESTS, LISTS_BESIDE, JOINS, [False, True], [False, True]
+    ):
+        name = f"{'~' * negate_all}({zero_test} {join} {'~' * negate_list}in {items})"
+        columns[name], wanted[name] = beside(receiver, zero_test, items, join, negate_list, negate_all)
+    got = table(X_TYPES[x_type]).derive(**columns).to_arrow()
+    assert {name: got.column(name).to_pylist() for name in wanted if got.column(name).to_pylist() != wanted[name]} == {}
+
+
+@pytest.mark.parametrize("negate_all", [False, True], ids=["kept", "negated"])
+@pytest.mark.parametrize(
+    "zero_test, items, join, negate_list",
+    [
+        ("== 0.0", [None, 1.0, 2.5, 7.0], "&", True),
+        ("== 0.0", [1.0, 2.5, 7.0, 8.0], "&", False),
+        ("!= 0.0", [None, 1.0, 2.5, 7.0], "&", False),
+        ("== now 0", [None, 1.0, 2.5, 7.0], "&", True),
+        ("in [0.0, 5.0]", [None, 1.0, 2.5, 7.0], "&", True),
+    ],
+    ids=str,
+)
+def test_filter_with_a_zero_beside_a_list(data_layout, zero_test, items, join, negate_list, negate_all):
+    rows = pa.table({"k": pa.array(range(len(X)), pa.int64()), "x": X, "y": Y})
+    t = data_layout(rows).sort("k")
+    predicate, reference = beside("column", zero_test, items, join, negate_list, negate_all)
+    kept = t.filter(predicate).to_arrow().column("k").to_pylist()
+    assert kept == [k for k, v in enumerate(reference) if v]
+
+
+# Values of stable functions that a float has no common type with.
+STABLE_OF_ANOTHER_TYPE = {
+    "boolean": lambda r: now().dt.year() > 2000,
+    "timestamp": lambda r: now(),
+}
+SPELLINGS = {
+    "x == v": lambda x, v: x == v,
+    "v == x": lambda x, v: v == x,
+    "x != v": lambda x, v: x != v,
+    "v != x": lambda x, v: v != x,
+    "x.is_in([v, ...])": lambda x, v: x.is_in([v, 1.0, 2.5, 7.0]),
+}
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+@pytest.mark.parametrize("kind", STABLE_OF_ANOTHER_TYPE)
+@pytest.mark.parametrize("x_type", ["float64", "float32", "float16"])
+def test_a_stable_value_of_another_type_is_refused_as_its_column_is(x_type, kind, spelling):
+    """A float has no common type with a Boolean or a timestamp, so comparing
+    them fails at planning, whether the value comes from `now()` inline or
+    from a column it was staged in."""
+    t = table(X_TYPES[x_type])
+    value, compare = STABLE_OF_ANOTHER_TYPE[kind], SPELLINGS[spelling]
+    with pytest.raises(RuntimeError, match="Cannot infer common argument type") as staged:
+        t.derive(v=value).derive(c=lambda r: compare(r.x, r.v)).to_arrow()
+    with pytest.raises(RuntimeError, match="Cannot infer common argument type") as inline:
+        t.derive(c=lambda r: compare(r.x, value(r))).to_arrow()
+    assert str(inline.value) == str(staged.value)
 
 
 def test_constant_receiver():

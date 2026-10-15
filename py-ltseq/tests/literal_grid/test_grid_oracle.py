@@ -318,7 +318,7 @@ def test_a_pinned_cell_is_preexisting_and_fixing_it_needs_unpinning():
 
 
 def test_the_unpinned_negative_zero_cell_is_a_fixed_bug():
-    """#245 was pinned until a float list held both zeros: main's outcome is now
+    """#245 was pinned until float zeros were compared as a range: main's outcome is now
     undecided, and the corrected one a fixed bug."""
     cell = "case_i64_f64/fm0/isin2"
     assert judged(cell, MAIN[cell])[0] == "violation"

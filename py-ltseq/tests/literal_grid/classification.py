@@ -174,8 +174,8 @@ RULES = [
     Rule(
         "negative_zero_in_list", "BUG_FIXED", "#245",
         "DataFusion's static in-list filter compares floats bitwise, so main did not find 0.0 "
-        "in a CASE-derived float column among [-0.0, 1]; a float list holding a zero now "
-        "holds both zeros",
+        "in a CASE-derived float column among [-0.0, 1]; a zero item is now compared as the "
+        "range from -0.0 to 0.0 beside the list",
         _is(ck="float", lit="fm0", pos="isin2"),
     ),
     Rule(

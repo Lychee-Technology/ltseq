@@ -152,9 +152,17 @@ impl<'a> Resolver<'a> {
     /// One whose coercion panics is an error, since building its plan would
     /// panic again.
     pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
+        Ok(self.coerced(&expr)?.unwrap_or(expr))
+    }
+
+    /// `expr` coerced as [`Resolver::resolve`] coerces it, or `None` where
+    /// DataFusion cannot coerce it, which `resolve` returns as written. A
+    /// rewrite that builds on the coerced types asks this, so that it leaves
+    /// such an expression as written for DataFusion to reject.
+    pub(crate) fn coerced(&self, expr: &Expr) -> Result<Option<Expr>, String> {
         match self.coerce(expr.clone()) {
-            Ok(coerced) => Ok(coerced.data),
-            Err(Unanswered::Error(_)) => Ok(expr),
+            Ok(coerced) => Ok(Some(coerced.data)),
+            Err(Unanswered::Error(_)) => Ok(None),
             Err(panic) => Err(format!("Cannot type {expr}: {panic}")),
         }
     }
@@ -532,5 +540,9 @@ mod tests {
         let expr = col("b") + col("s");
         assert_eq!(rx.resolve(expr.clone()).unwrap(), expr);
         assert!(rx.data_type(&expr).is_err());
+        // `coerced` tells that apart from an expression coercion leaves alone.
+        assert_eq!(rx.coerced(&expr).unwrap(), None);
+        let coercible = col("f").eq(col("f"));
+        assert_eq!(rx.coerced(&coercible).unwrap(), Some(coercible));
     }
 }
