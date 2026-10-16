@@ -430,3 +430,128 @@ class TestPivotStringColumnTypes:
         assert set(pivoted.schema) == {"userid", "7", "8"}
         rows = {row["userid"]: row for row in pivoted.to_dicts()}
         assert rows[1]["7"] == 1.0 and rows[1]["8"] == 2.0 and rows[2]["7"] == 3.0
+
+
+def _assert_rows_by_column(pivot_values: pa.Array, expected: dict[str, set[int]]) -> None:
+    """Pivot one index group on ``pivot_values`` and check, column by column
+    and in output order, which input rows each output column aggregated.
+
+    Row ``i`` carries ``2**i`` in the value column, so a cell's sum spells out
+    its rows: a row in no column, in two columns, or in the wrong one shows.
+    """
+    n = len(pivot_values)
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "k": pa.array([1] * n, pa.int64()),
+                "p": pivot_values,
+                "v": pa.array([float(2**i) for i in range(n)], pa.float64()),
+            }
+        )
+    )
+    [row] = t.pivot(index="k", columns="p", values="v", agg_fn="sum").to_dicts()
+    del row["k"]
+    rows_by_column = {
+        name: {i for i in range(n) if int(total or 0) >> i & 1} for name, total in row.items()
+    }
+    assert list(rows_by_column.items()) == list(expected.items())
+
+
+# Float bit patterns that compare or display alike: NaNs that differ in sign
+# and in payload, and both zeros.
+FLOAT_BITS = {
+    pa.float32(): {
+        "nan": 0x7FC00000,
+        "neg_nan": 0xFFC00000,
+        "nan_payload": 0x7FC00001,
+        "neg_zero": 0x80000000,
+        "zero": 0,
+        "one": 0x3F800000,
+    },
+    pa.float64(): {
+        "nan": 0x7FF8000000000000,
+        "neg_nan": 0xFFF8000000000000,
+        "nan_payload": 0x7FF8000000000001,
+        "neg_zero": 0x8000000000000000,
+        "zero": 0,
+        "one": 0x3FF0000000000000,
+    },
+}
+
+
+class TestPivotValueTypes:
+    """pivot() compares each pivot value as a literal of the pivot column's own
+    type, and keeps the column names it has always produced (#205)."""
+
+    @pytest.mark.parametrize("url_type", STRING_TYPES, ids=str)
+    @pytest.mark.parametrize(
+        "values",
+        [
+            # Was a cast error: the column was cast to the Int64 of "2023".
+            ["2023", "a"],
+            # Was both rows in both columns: "01" and "1" both cast to 1.
+            ["01", "1"],
+            ["1", "01", "+1", "1.0", "1e0", "0", "-0", "NaN", "nan", "inf"],
+        ],
+        ids=["number-and-word", "leading-zero", "number-spellings"],
+    )
+    def test_numeric_looking_strings_stay_strings(self, url_type, values):
+        expected = {value: {i} for i, value in sorted(enumerate(values), key=lambda iv: iv[1])}
+        _assert_rows_by_column(pa.array(values, url_type), expected)
+
+    @pytest.mark.parametrize("encode", [False, True], ids=["plain", "dictionary"])
+    def test_float32_values_that_are_not_binary_fractions(self, encode):
+        """Was every cell NULL: the value went through its text to the f64
+        0.1, which no f32 widened to f64 equals."""
+        values = pa.array([0.1, 0.2, 0.3, -0.7, 1.5, 2.0], pa.float32())
+        if encode:
+            values = values.dictionary_encode()
+        _assert_rows_by_column(
+            values,
+            {"-0.7": {3}, "0.1": {0}, "0.2": {1}, "0.3": {2}, "1.5": {4}, "2": {5}},
+        )
+
+    @pytest.mark.parametrize(
+        ("values", "expected"),
+        [
+            (pa.array([5, 10, -3], pa.int32()), {"-3": {2}, "10": {1}, "5": {0}}),
+            (pa.array([5, 10, -3], pa.int64()), {"-3": {2}, "10": {1}, "5": {0}}),
+            (
+                pa.array([2**53 + 1, 2**53], pa.int64()),
+                {"9007199254740992": {1}, "9007199254740993": {0}},
+            ),
+            (
+                pa.array([2.0, 0.5, 0.1, 1e20, 1e-7, float("inf"), float("-inf")], pa.float64()),
+                {
+                    "-inf": {6},
+                    "0.0000001": {4},
+                    "0.1": {2},
+                    "0.5": {1},
+                    "100000000000000000000": {3},
+                    "2": {0},
+                    "inf": {5},
+                },
+            ),
+            (pa.array([2.0, 0.5, -0.25], pa.float32()), {"-0.25": {2}, "0.5": {1}, "2": {0}}),
+        ],
+        ids=["int32", "int64", "int64-beyond-f64", "float64", "float32"],
+    )
+    def test_names_and_order_are_unchanged(self, values, expected):
+        """A number's column is named as Rust displays it, and the columns
+        are ordered by name as strings, as before the literals were typed."""
+        _assert_rows_by_column(values, expected)
+
+    @pytest.mark.parametrize("encode", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("float_type", list(FLOAT_BITS), ids=str)
+    def test_every_float_row_lands_in_one_column(self, engine_layout, float_type, encode):
+        """-0.0 and 0.0 share the column "0", and every NaN, whatever its
+        bits, the column "NaN". Was the -0.0 rows and all but one NaN pattern
+        in no column, and on a dictionary column a "-0" column holding the
+        0.0 rows."""
+        bits = FLOAT_BITS[float_type]
+        order = ["neg_zero", "nan", "zero", None, "neg_nan", "one", "nan_payload"]
+        unsigned = pa.uint32() if float_type == pa.float32() else pa.uint64()
+        values = pa.array([None if k is None else bits[k] for k in order], unsigned).view(float_type)
+        if encode:
+            values = values.dictionary_encode()
+        _assert_rows_by_column(values, {"0": {0, 2}, "1": {5}, "NaN": {1, 4, 6}})
