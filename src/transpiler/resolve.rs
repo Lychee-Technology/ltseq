@@ -152,9 +152,17 @@ impl<'a> Resolver<'a> {
     /// One whose coercion panics is an error, since building its plan would
     /// panic again.
     pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
+        Ok(self.coerced(&expr)?.unwrap_or(expr))
+    }
+
+    /// `expr` coerced as [`Resolver::resolve`] coerces it, or `None` where
+    /// DataFusion cannot coerce it, which `resolve` returns as written. A
+    /// rewrite that builds on the coerced types asks this, so that it leaves
+    /// such an expression as written for DataFusion to reject.
+    pub(crate) fn coerced(&self, expr: &Expr) -> Result<Option<Expr>, String> {
         match self.coerce(expr.clone()) {
-            Ok(coerced) => Ok(coerced.data),
-            Err(Unanswered::Error(_)) => Ok(expr),
+            Ok(coerced) => Ok(Some(coerced.data)),
+            Err(Unanswered::Error(_)) => Ok(None),
             Err(panic) => Err(format!("Cannot type {expr}: {panic}")),
         }
     }
@@ -233,36 +241,31 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// Whether `expr` is a constant: an expression DataFusion's simplifier
+    /// evaluates ([`folded`]) whose functions are all immutable, so its
+    /// value is known when the query is planned. `now()` is not one, since
+    /// DataFusion reads it when the query runs. A NULL constant is a
+    /// constant.
+    pub(crate) fn constant(expr: &Expr) -> bool {
+        folded(expr, false)
+    }
+
+    /// Whether `expr` has one value per query: a constant, or an expression
+    /// that is one but for stable functions such as `now()`. DataFusion's
+    /// simplifier folds it into a literal when the query runs, which is
+    /// after lowering, so a rule about literals does not see its value.
+    pub(crate) fn query_constant(expr: &Expr) -> bool {
+        folded(expr, true)
+    }
+
     /// The non-null value of `expr` when it is a literal, or a constant
-    /// DataFusion folds into one (`if_else(True, a, b)`, `Decimal("1.5") + 0`).
-    /// A constant is an expression with no column and only immutable
-    /// functions: `now()` is left alone, since DataFusion reads it when the
-    /// query runs, not when it is planned.
+    /// ([`Resolver::constant`]) DataFusion folds into one (`if_else(True, a,
+    /// b)`, `Decimal("1.5") + 0`).
     pub(crate) fn literal(&self, expr: &Expr) -> Option<ScalarValue> {
         if let Expr::Literal(value, _) = expr {
             return (!value.is_null()).then(|| value.clone());
         }
-        let constant = !expr
-            .exists(|e| {
-                Ok(match e {
-                    Expr::Literal(..)
-                    | Expr::BinaryExpr(_)
-                    | Expr::Not(_)
-                    | Expr::Negative(_)
-                    | Expr::IsNull(_)
-                    | Expr::IsNotNull(_)
-                    | Expr::Case(_)
-                    | Expr::Cast(_)
-                    | Expr::TryCast(_)
-                    | Expr::Alias(_) => false,
-                    Expr::ScalarFunction(f) => {
-                        f.func.signature().volatility != Volatility::Immutable
-                    }
-                    _ => true,
-                })
-            })
-            .unwrap_or(true);
-        if !constant {
+        if !Self::constant(expr) {
             return None;
         }
         let context = SimplifyContext::builder()
@@ -274,6 +277,45 @@ impl<'a> Resolver<'a> {
             _ => None,
         }
     }
+}
+
+/// Whether DataFusion's simplifier evaluates `expr` into a literal: an
+/// expression of the kinds its `ConstEvaluator::can_evaluate` takes, with
+/// no column, and whose functions are immutable, or also stable when
+/// `stable` is set (DataFusion reads `now()` at the start of the query).
+fn folded(expr: &Expr, stable: bool) -> bool {
+    !expr
+        .exists(|e| {
+            Ok(match e {
+                Expr::Literal(..)
+                | Expr::Alias(_)
+                | Expr::BinaryExpr(_)
+                | Expr::Not(_)
+                | Expr::Negative(_)
+                | Expr::IsNull(_)
+                | Expr::IsNotNull(_)
+                | Expr::IsTrue(_)
+                | Expr::IsFalse(_)
+                | Expr::IsUnknown(_)
+                | Expr::IsNotTrue(_)
+                | Expr::IsNotFalse(_)
+                | Expr::IsNotUnknown(_)
+                | Expr::Between(_)
+                | Expr::Like(_)
+                | Expr::SimilarTo(_)
+                | Expr::InList(_)
+                | Expr::Case(_)
+                | Expr::Cast(_)
+                | Expr::TryCast(_) => false,
+                Expr::ScalarFunction(f) => match f.func.signature().volatility {
+                    Volatility::Immutable => false,
+                    Volatility::Stable => !stable,
+                    Volatility::Volatile => true,
+                },
+                _ => true,
+            })
+        })
+        .unwrap_or(true)
 }
 
 /// The analyzer's coercion, with remembered subexpressions substituted.
@@ -498,5 +540,9 @@ mod tests {
         let expr = col("b") + col("s");
         assert_eq!(rx.resolve(expr.clone()).unwrap(), expr);
         assert!(rx.data_type(&expr).is_err());
+        // `coerced` tells that apart from an expression coercion leaves alone.
+        assert_eq!(rx.coerced(&expr).unwrap(), None);
+        let coercible = col("f").eq(col("f"));
+        assert_eq!(rx.coerced(&coercible).unwrap(), Some(coercible));
     }
 }

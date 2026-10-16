@@ -793,7 +793,9 @@ class Expr(ABC):
         """
         Check if the value is contained in a list of values.
 
-        Equivalent to SQL: column IN (val1, val2, val3)
+        Equivalent to SQL: column IN (val1, val2, val3). Each value is
+        compared as ``==`` compares it, so on floats ``-0.0`` matches ``0.0``
+        whatever the list's length.
 
         Args:
             values: A list of values to check membership against
