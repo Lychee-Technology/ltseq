@@ -6,7 +6,7 @@ from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
 
-from .expr import SchemaProxy
+from .expr.transforms import _invoke_condition_lambda
 
 
 def _column_key_dict(name: str) -> dict[str, Any]:
@@ -201,6 +201,8 @@ class JoinMixin(LTSeqLike):
 
         Raises:
             ValueError: If strategy="merge" and tables are not sorted by join keys
+            TypeError: If the on= lambda tests a value against None with
+                ``is`` / ``is not``; filter nulls before or after the join instead
 
         Example:
             >>> users.join(orders, on="id", how="left")
@@ -216,7 +218,7 @@ class JoinMixin(LTSeqLike):
         _validate_join_inputs(self, other, how)
         if callable(on):
             try:
-                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+                _ = _invoke_condition_lambda(on, self._schema, other._schema)
             except Exception as e:
                 raise TypeError(f"Invalid join condition: {e}")
 
@@ -348,6 +350,10 @@ class JoinMixin(LTSeqLike):
         Returns:
             Joined LTSeq
 
+        Raises:
+            TypeError: If the on= lambda tests a value against None with
+                ``is`` / ``is not``; filter nulls before or after the join instead
+
         Example:
             >>> trades.asof_join(quotes, on="time", by="symbol", strategy="backward")
             >>> trades.asof_join(quotes, on=lambda t, q: t.time >= q.time)
@@ -392,7 +398,7 @@ class JoinMixin(LTSeqLike):
                     "on=, or left_on=/right_on= (or a string on=), not both."
                 )
             try:
-                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+                _ = _invoke_condition_lambda(on, self._schema, other._schema)
             except Exception as e:
                 raise TypeError(f"Invalid asof join condition: {e}")
             from .helpers import _extract_asof_keys
@@ -508,7 +514,7 @@ class JoinMixin(LTSeqLike):
 
         if callable(on):
             try:
-                _ = on(SchemaProxy(self._schema), SchemaProxy(other._schema))
+                _ = _invoke_condition_lambda(on, self._schema, other._schema)
             except Exception as e:
                 raise TypeError(f"Invalid join condition: {e}")
 
@@ -545,6 +551,10 @@ class JoinMixin(LTSeqLike):
         Returns:
             LTSeq with rows from left table that have matching keys in right
 
+        Raises:
+            TypeError: If the on= lambda tests a value against None with
+                ``is`` / ``is not``; filter nulls before or after the join instead
+
         Example:
             >>> # Users who have placed at least one order
             >>> active_users = users.semi_join(orders, on=lambda u, o: u.id == o.user_id)
@@ -564,6 +574,10 @@ class JoinMixin(LTSeqLike):
 
         Returns:
             LTSeq with rows from left table that have NO matching keys in right
+
+        Raises:
+            TypeError: If the on= lambda tests a value against None with
+                ``is`` / ``is not``; filter nulls before or after the join instead
 
         Example:
             >>> # Users who have never placed an order

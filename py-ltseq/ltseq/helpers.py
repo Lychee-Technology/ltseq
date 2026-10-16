@@ -2,7 +2,8 @@
 
 from typing import Any, Callable, cast
 
-from .expr import BinOpExpr, ColumnExpr, SchemaProxy
+from .expr import BinOpExpr, ColumnExpr
+from .expr.transforms import _invoke_condition_lambda
 
 
 def _extract_join_keys(
@@ -37,13 +38,9 @@ def _extract_join_keys(
         TypeError: If join condition is not equality comparisons
         ValueError: If columns don't exist in respective schemas
     """
-    # Create proxies for both tables
-    source_proxy = SchemaProxy(source_schema)
-    target_proxy = SchemaProxy(target_schema)
-
     # Call the join function to get the expression tree
     try:
-        expr = join_fn(source_proxy, target_proxy)
+        expr = _invoke_condition_lambda(join_fn, source_schema, target_schema)
     except Exception as e:
         raise TypeError(f"Failed to evaluate join condition: {e}")
 
@@ -217,13 +214,9 @@ def _extract_asof_keys(
         TypeError: If join condition is not an inequality comparison
         ValueError: If columns don't exist in respective schemas
     """
-    # Create proxies for both tables
-    source_proxy = SchemaProxy(source_schema)
-    target_proxy = SchemaProxy(target_schema)
-
     # Call the join function to get the expression tree
     try:
-        expr = join_fn(source_proxy, target_proxy)
+        expr = _invoke_condition_lambda(join_fn, source_schema, target_schema)
     except Exception as e:
         raise TypeError(f"Failed to evaluate asof join condition: {e}")
 
