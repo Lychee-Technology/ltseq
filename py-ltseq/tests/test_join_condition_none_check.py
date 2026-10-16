@@ -44,6 +44,10 @@ def _asof_key(l, r):
     return l.t >= r.t
 
 
+def _nonnull(x):
+    return x is not None
+
+
 # Each public entry point that takes a condition lambda, with the key shape
 # it accepts (equality conjunctions, or one inequality for asof_join).
 ENTRY_POINTS = {
@@ -174,6 +178,16 @@ class TestBoundary:
     def test_none_default_argument_runs(self, left, right):
         joined = left.join(right, on=lambda l, r, unused=None: l.id == r.id)
         assert joined.to_pandas()["id"].tolist() == [1, 2]
+
+    @pytest.mark.xfail(
+        strict=True, reason="#185: the check does not reach functions the condition calls"
+    )
+    @pytest.mark.parametrize("entry", ENTRY_POINTS)
+    def test_null_identity_test_in_a_called_helper_raises(self, left, right, entry):
+        # The helper returns True for a column, so `and` drops the test.
+        call, key = ENTRY_POINTS[entry]
+        with pytest.raises(TypeError, match=GUIDANCE):
+            call(left, right, lambda l, r: _nonnull(r.x) and key(l, r))
 
 
 def test_only_the_capture_helpers_build_schema_proxies():

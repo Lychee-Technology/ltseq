@@ -408,7 +408,11 @@ def _called_code(fn: Callable) -> Iterator[types.CodeType]:
 def _code_testing_identity_with_none(fn: Callable) -> types.CodeType | None:
     """The first code object that calling ``fn`` runs directly (see
     :func:`_called_code`) and that compares a value with ``None`` by
-    identity, or ``None`` if there is none."""
+    identity, or ``None`` if there is none.
+
+    Row and condition lambdas are both checked through this function. It
+    does not reach the functions ``fn`` calls, so a helper's ``x is None``
+    still runs as Python and returns a bool."""
     return next(
         (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
     )
@@ -459,7 +463,10 @@ def _invoke_condition_lambda(
     Unlike :func:`_invoke_row_lambda`, nothing is rewritten: a null test
     selects rows rather than pairing them, so it is never part of a join
     condition. The check reads bytecode, so it cannot tell a column from a
-    Python value and rejects an ``is None`` test on a closure value too.
+    Python value and rejects an ``is None`` test on a closure value too. It
+    does not reach the functions ``fn`` calls: with a helper that returns
+    ``x is not None``, ``helper(r.x) and (l.id == r.id)`` is still captured
+    as ``l.id == r.id``.
 
     Raises:
         TypeError: If ``fn``, or a function it wraps (see
