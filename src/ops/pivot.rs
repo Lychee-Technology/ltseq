@@ -124,7 +124,7 @@ pub fn pivot_impl(
     let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
     // One conditional aggregate per output column:
-    // AGG(CASE WHEN pivot_col = value THEN value_col END)
+    // AGG(CASE WHEN pivot_col IN (values) THEN value_col END)
     let agg_exprs: Vec<Expr> = pivot_columns
         .iter()
         .map(|(name, values)| {
@@ -173,23 +173,27 @@ pub fn pivot_impl(
     )
 }
 
-/// Build `CASE WHEN pivot_col = v1 OR pivot_col = v2 ... THEN value_col END`
-/// for the values of one output column.
+/// Build `CASE WHEN pivot_col IN (v1, v2, ...) THEN value_col END` for the
+/// values of one output column.
 ///
 /// Each value is a literal of the pivot column's own type, so the comparison
 /// needs no coercion between kinds: a string column is never cast to a number
 /// because a value looks numeric, and a `Float32` value is compared as the
-/// `Float32` it is, not as the `f64` its text parses to (#205). The `=` is
-/// DataFusion's, which on a plain float column compares `-0.0` equal to
-/// `0.0`, as the discovery's grouping does there; a simple
-/// `CASE pivot_col WHEN v` compares them bit for bit and misses the `-0.0`
-/// rows. [`pivot_column_name`] covers the dictionary-encoded case.
+/// `Float32` it is, not as the `f64` its text parses to (#205).
+///
+/// The list compares as DataFusion's `=` does: the simplifier turns a list
+/// of one value into `=`, and `FloatListZeros` splits the zeros out of a
+/// float list, whose items DataFusion otherwise compares bit for bit (#245).
+/// So `-0.0` equals `0.0`, as the discovery's grouping on a plain float
+/// column has it (a simple `CASE pivot_col WHEN v` compares them bit for bit
+/// and misses the `-0.0` rows), and a NaN equals only a NaN of the same bits.
+/// The `NaN` column therefore lists every NaN bit pattern the discovery
+/// finds ([`pivot_column_name`]), however many: a list stays one node, where
+/// an OR of equalities nests one level per value and DataFusion plans it
+/// recursively, so 512 patterns overflowed the stack.
 fn build_case_expr(pivot_col: &str, values: &[ScalarValue], value_col: &str) -> Expr {
-    let matches = values
-        .iter()
-        .map(|value| col(pivot_col).eq(lit(value.clone())))
-        .reduce(Expr::or)
-        .expect("every pivot column has at least one value");
+    let list = values.iter().cloned().map(lit).collect();
+    let matches = col(pivot_col).in_list(list, false);
     Expr::Case(Case::new(
         None,
         vec![(Box::new(matches), Box::new(col(value_col)))],

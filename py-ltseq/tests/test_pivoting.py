@@ -4,6 +4,10 @@ Tests the pivot() method which reshapes data from long format to wide format
 (pivot table operation), transforming rows and columns based on grouping keys.
 """
 
+import subprocess
+import sys
+import textwrap
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -555,3 +559,33 @@ class TestPivotValueTypes:
         if encode:
             values = values.dictionary_encode()
         _assert_rows_by_column(values, {"0": {0, 2}, "1": {5}, "NaN": {1, 4, 6}})
+
+    @pytest.mark.parametrize("encode", [False, True], ids=["plain", "dictionary"])
+    @pytest.mark.parametrize("float_type", list(FLOAT_BITS), ids=str)
+    def test_many_nan_bit_patterns_share_one_column(self, float_type, encode):
+        """The "NaN" column's test lists every NaN bit pattern the discovery
+        finds, so it must not nest deeper with their number: as an OR of
+        equalities, 512 patterns overflowed the stack and killed the process.
+        Runs in a subprocess, so a crash fails this test alone."""
+        script = textwrap.dedent(
+            """
+            import sys
+            import pyarrow as pa
+            from ltseq import LTSeq
+            from ltseq._testing import pinned_engine
+
+            float_type = pa.type_for_alias(sys.argv[1])
+            first_nan, n, encode = int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "True"
+            unsigned = pa.uint32() if float_type == pa.float32() else pa.uint64()
+            p = pa.array(range(first_nan, first_nan + n), unsigned).view(float_type)
+            if encode:
+                p = p.dictionary_encode()
+            with pinned_engine(target_partitions=2, batch_size=7):
+                t = LTSeq.from_arrow(pa.table({"k": [1] * n, "p": p, "v": [1] * n}))
+                rows = t.pivot(index="k", columns="p", values="v").to_dicts()
+            assert rows == [{"k": 1, "NaN": n}], rows
+            """
+        )
+        nan = FLOAT_BITS[float_type]["nan"]
+        args = [str(float_type), str(nan), "4096", str(encode)]
+        subprocess.run([sys.executable, "-c", script, *args], check=True)
