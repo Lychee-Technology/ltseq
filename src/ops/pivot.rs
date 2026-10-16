@@ -9,13 +9,20 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
-use datafusion::arrow::array::{Array, ArrayAccessor, AsArray};
+use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Case;
-use datafusion::logical_expr::{case, col, lit, Expr};
-use std::collections::HashSet;
+use datafusion::logical_expr::{col, lit, Expr};
+use datafusion::scalar::ScalarValue;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// The output columns of a pivot, keyed by name, each with the distinct pivot
+/// values whose rows it aggregates. The values keep the pivot column's own
+/// type (its value type when dictionary-encoded), and the map's order is the
+/// output column order: the names sorted as strings.
+type PivotColumns = BTreeMap<String, Vec<ScalarValue>>;
 
 /// Pivot table from long to wide format using native conditional aggregation
 ///
@@ -89,7 +96,7 @@ pub fn pivot_impl(
 
     // Discover distinct pivot values via lazy select + distinct + collect.
     // This only materializes the pivot column, not the entire table.
-    let pivot_values = RUNTIME
+    let pivot_columns = RUNTIME
         .block_on(async {
             let distinct_df = (**df)
                 .clone()
@@ -103,30 +110,26 @@ pub fn pivot_impl(
                 .await
                 .map_err(|e| LtseqError::Runtime(format!("Failed to collect distinct pivot values: {}", e)))?;
 
-            let mut values_set = HashSet::new();
+            let mut columns = PivotColumns::new();
             for batch in &batches {
-                let col_arr = batch.column(0);
-                extract_pivot_values(col_arr, &mut values_set)
-                    .map_err(|e| LtseqError::Runtime(format!("Failed to extract pivot values: {}", e)))?;
+                collect_pivot_values(batch.column(0), &mut columns).map_err(|e| {
+                    LtseqError::Runtime(format!("Failed to extract pivot values: {}", e))
+                })?;
             }
-
-            let mut values: Vec<String> = values_set.into_iter().collect();
-            values.sort();
-            Ok::<_, LtseqError>(values)
+            Ok::<_, LtseqError>(columns)
         })
         .map_err(|e| LtseqError::Runtime(format!("Failed to discover pivot values: {}", e)))?;
 
     // Build group-by expressions for index columns
     let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
-    // Build aggregate expressions with conditional logic:
-    // For each pivot value, create: AGG(CASE WHEN pivot_col = value THEN value_col ELSE NULL END)
-    let agg_exprs: Vec<Expr> = pivot_values
+    // One conditional aggregate per output column:
+    // AGG(CASE WHEN pivot_col IN (values) THEN value_col END)
+    let agg_exprs: Vec<Expr> = pivot_columns
         .iter()
-        .map(|val| {
-            let case_expr = build_case_expr(&pivot_col, val, &value_col);
-            let agg_expr = build_agg_expr(&agg_fn_upper, case_expr);
-            agg_expr.alias(val)
+        .map(|(name, values)| {
+            let case_expr = build_case_expr(&pivot_col, values, &value_col);
+            build_agg_expr(&agg_fn_upper, case_expr).alias(name)
         })
         .collect();
 
@@ -156,8 +159,8 @@ pub fn pivot_impl(
             .filter_map(|c| schema.field_with_name(c).ok())
             .cloned()
             .collect();
-        for val in &pivot_values {
-            fields.push(ArrowField::new(val, DataType::Float64, true));
+        for name in pivot_columns.keys() {
+            fields.push(ArrowField::new(name, DataType::Float64, true));
         }
         Arc::new(ArrowSchema::new(fields))
     };
@@ -170,54 +173,32 @@ pub fn pivot_impl(
     )
 }
 
-/// Build CASE WHEN pivot_col = value THEN value_col ELSE NULL END
-fn build_case_expr(pivot_col: &str, value: &str, value_col: &str) -> Expr {
-    // Try to parse value as numeric for proper literal typing
-    if let Ok(int_val) = value.parse::<i64>() {
-        case(col(pivot_col))
-            .when(lit(int_val), col(value_col))
-            .otherwise(lit(datafusion::scalar::ScalarValue::Null))
-            .unwrap_or_else(|_| {
-                // Fallback if case builder fails
-                Expr::Case(Case {
-                    expr: Some(Box::new(col(pivot_col))),
-                    when_then_expr: vec![(
-                        Box::new(lit(int_val)),
-                        Box::new(col(value_col)),
-                    )],
-                    else_expr: Some(Box::new(lit(datafusion::scalar::ScalarValue::Null))),
-                })
-            })
-    } else if let Ok(float_val) = value.parse::<f64>() {
-        case(col(pivot_col))
-            .when(lit(float_val), col(value_col))
-            .otherwise(lit(datafusion::scalar::ScalarValue::Null))
-            .unwrap_or_else(|_| {
-                Expr::Case(Case {
-                    expr: Some(Box::new(col(pivot_col))),
-                    when_then_expr: vec![(
-                        Box::new(lit(float_val)),
-                        Box::new(col(value_col)),
-                    )],
-                    else_expr: Some(Box::new(lit(datafusion::scalar::ScalarValue::Null))),
-                })
-            })
-    } else {
-        // String value
-        case(col(pivot_col))
-            .when(lit(value), col(value_col))
-            .otherwise(lit(datafusion::scalar::ScalarValue::Null))
-            .unwrap_or_else(|_| {
-                Expr::Case(Case {
-                    expr: Some(Box::new(col(pivot_col))),
-                    when_then_expr: vec![(
-                        Box::new(lit(value)),
-                        Box::new(col(value_col)),
-                    )],
-                    else_expr: Some(Box::new(lit(datafusion::scalar::ScalarValue::Null))),
-                })
-            })
-    }
+/// Build `CASE WHEN pivot_col IN (v1, v2, ...) THEN value_col END` for the
+/// values of one output column.
+///
+/// Each value is a literal of the pivot column's own type, so the comparison
+/// needs no coercion between kinds: a string column is never cast to a number
+/// because a value looks numeric, and a `Float32` value is compared as the
+/// `Float32` it is, not as the `f64` its text parses to (#205).
+///
+/// The list compares as DataFusion's `=` does: the simplifier turns a list
+/// of one value into `=`, and `FloatListZeros` splits the zeros out of a
+/// float list, whose items DataFusion otherwise compares bit for bit (#245).
+/// So `-0.0` equals `0.0`, as the discovery's grouping on a plain float
+/// column has it (a simple `CASE pivot_col WHEN v` compares them bit for bit
+/// and misses the `-0.0` rows), and a NaN equals only a NaN of the same bits.
+/// The `NaN` column therefore lists every NaN bit pattern the discovery
+/// finds ([`pivot_column_name`]), however many: a list stays one node, where
+/// an OR of equalities nests one level per value and DataFusion plans it
+/// recursively, so 512 patterns overflowed the stack.
+fn build_case_expr(pivot_col: &str, values: &[ScalarValue], value_col: &str) -> Expr {
+    let list = values.iter().cloned().map(lit).collect();
+    let matches = col(pivot_col).in_list(list, false);
+    Expr::Case(Case::new(
+        None,
+        vec![(Box::new(matches), Box::new(col(value_col)))],
+        None,
+    ))
 }
 
 /// Build aggregate expression from function name and input expression
@@ -237,80 +218,70 @@ fn build_agg_expr(agg_fn: &str, expr: Expr) -> Expr {
     }
 }
 
-/// Extract pivot values from a column into a HashSet
-fn extract_pivot_values(
-    col_arr: &std::sync::Arc<dyn datafusion::arrow::array::Array>,
-    pivot_values_set: &mut HashSet<String>,
-) -> Result<(), LtseqError> {
-    match col_arr.data_type() {
-        // Arrow has three physical string layouts: a Parquet scan yields
-        // Utf8View, `from_arrow` keeps whatever the caller passed.
-        DataType::Utf8 => insert_string_values(col_arr.as_string::<i32>(), pivot_values_set),
-        DataType::LargeUtf8 => insert_string_values(col_arr.as_string::<i64>(), pivot_values_set),
-        DataType::Utf8View => insert_string_values(col_arr.as_string_view(), pivot_values_set),
+/// Add the non-null values of `arr`, the discovered distinct pivot values, to
+/// `columns`, each under the name of the output column it becomes.
+fn collect_pivot_values(arr: &ArrayRef, columns: &mut PivotColumns) -> Result<(), LtseqError> {
+    match arr.data_type() {
         // A dictionary-encoded column pivots on its value type. Casting
         // decodes only the entries the keys reference, so an unused dictionary
         // value (a pandas category with no rows) does not become a column.
         DataType::Dictionary(_, value_type) => {
-            let decoded = cast(col_arr, value_type).map_err(|e| {
+            let decoded = cast(arr, value_type).map_err(|e| {
                 LtseqError::with_context("Failed to decode dictionary pivot column", e)
             })?;
-            extract_pivot_values(&decoded, pivot_values_set)?;
+            return collect_pivot_values(&decoded, columns);
         }
-        DataType::Int32 => {
-            if let Some(int_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Int32Array>() {
-                for i in 0..int_col.len() {
-                    if !int_col.is_null(i) {
-                        pivot_values_set.insert(int_col.value(i).to_string());
-                    }
-                }
-            }
-        }
-        DataType::Int64 => {
-            if let Some(int_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Int64Array>() {
-                for i in 0..int_col.len() {
-                    if !int_col.is_null(i) {
-                        pivot_values_set.insert(int_col.value(i).to_string());
-                    }
-                }
-            }
-        }
-        DataType::Float32 => {
-            if let Some(float_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Float32Array>() {
-                for i in 0..float_col.len() {
-                    if !float_col.is_null(i) {
-                        pivot_values_set.insert(float_col.value(i).to_string());
-                    }
-                }
-            }
-        }
-        DataType::Float64 => {
-            if let Some(float_col) = col_arr.as_any().downcast_ref::<datafusion::arrow::array::Float64Array>() {
-                for i in 0..float_col.len() {
-                    if !float_col.is_null(i) {
-                        pivot_values_set.insert(float_col.value(i).to_string());
-                    }
-                }
-            }
-        }
+        // Arrow has three physical string layouts: a Parquet scan yields
+        // Utf8View, `from_arrow` keeps whatever the caller passed.
+        DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Utf8View
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Float32
+        | DataType::Float64 => {}
         _ => {
             return Err(LtseqError::Validation(
                 "Pivot column must be string, int, or float type".into(),
             ));
         }
     }
+    for i in 0..arr.len() {
+        if arr.is_null(i) {
+            continue;
+        }
+        let value = ScalarValue::try_from_array(arr, i)
+            .map_err(|e| LtseqError::with_context("Failed to read pivot value", e))?;
+        columns
+            .entry(pivot_column_name(&value))
+            .or_default()
+            .push(value);
+    }
     Ok(())
 }
 
-/// Insert every non-null value of a string array (any of the three Arrow
-/// string layouts) into the pivot value set.
-fn insert_string_values<'a>(
-    arr: impl ArrayAccessor<Item = &'a str>,
-    pivot_values_set: &mut HashSet<String>,
-) {
-    for i in 0..arr.len() {
-        if !arr.is_null(i) {
-            pivot_values_set.insert(arr.value(i).to_string());
-        }
+/// The name of the output column a pivot value becomes: a string as it is, a
+/// number as Rust displays it (`5`, `2` for `2.0`, `0.1` for the `Float32`
+/// nearest 0.1, `NaN`, `inf`).
+///
+/// Values with one name share a column, so every row lands in exactly one.
+/// Every NaN is named `NaN`, and the discovery keeps NaNs with different bits
+/// apart, so the `NaN` column matches each of them. Both zeros are named `0`:
+/// the discovery folds `-0.0` into `0.0` on a plain float column but keeps
+/// them apart on a dictionary-encoded one, and one name gives both layouts
+/// the same single column.
+fn pivot_column_name(value: &ScalarValue) -> String {
+    match value {
+        ScalarValue::Utf8(Some(s))
+        | ScalarValue::LargeUtf8(Some(s))
+        | ScalarValue::Utf8View(Some(s)) => s.clone(),
+        ScalarValue::Int32(Some(v)) => v.to_string(),
+        ScalarValue::Int64(Some(v)) => v.to_string(),
+        ScalarValue::Float32(Some(v)) if *v == 0.0 => "0".into(),
+        ScalarValue::Float32(Some(v)) => v.to_string(),
+        ScalarValue::Float64(Some(v)) if *v == 0.0 => "0".into(),
+        ScalarValue::Float64(Some(v)) => v.to_string(),
+        // collect_pivot_values admits no other type and skips nulls.
+        other => other.to_string(),
     }
 }
