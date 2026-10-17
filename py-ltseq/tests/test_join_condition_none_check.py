@@ -7,7 +7,8 @@ identity test instead of capturing it: a proxy column is never `None`, so
 `and` / `or` / a conditional expression used to drop the test silently. The
 lambda is never rewritten (a null test selects rows rather than pairing
 them); every entry point refuses it with a `TypeError` at the call that
-points to `filter` with `is_null()` / `is_not_null()`.
+points to `filter` with `is_null()` / `is_not_null()`, also when the test is
+in a helper the condition calls by name (#185).
 """
 
 import ast
@@ -18,6 +19,8 @@ import pandas as pd
 import pytest
 
 from ltseq import LTSeq
+
+from .test_none_check_rewrite import _ForwardingProxy, _passthrough
 
 GUIDANCE = r"compares a value with None using 'is' / 'is not'"
 
@@ -129,20 +132,18 @@ class TestEveryCallableFormRejects:
         with pytest.raises(TypeError, match=GUIDANCE):
             left.join(right, on=functools.partial(cond, "x"))
 
-    def test_decorated_function(self, left, right):
-        def passthrough(fn):
-            @functools.wraps(fn)
-            def wrapper(*args):
-                return fn(*args)
-
-            return wrapper
-
-        @passthrough
+    @pytest.mark.parametrize("proxied", [False, True], ids=["function", "proxy"])
+    def test_decorated_function(self, left, right, proxied):
+        # The decorator's closure names what it wraps, so that is reached by
+        # name too; it is still checked as the callable handed to LTSeq,
+        # through a proxy as well. Run unchecked, the decorated proxy joined
+        # on l.id == r.id alone.
         def cond(l, r):
             return (r.x is not None) and (l.id == r.id)
 
-        with pytest.raises(TypeError, match=GUIDANCE):
-            left.join(right, on=cond)
+        target = _ForwardingProxy(cond) if proxied else cond
+        with pytest.raises(TypeError, match=r"condition: '[^']*cond' " + GUIDANCE):
+            left.join(right, on=_passthrough(target))
 
     def test_callable_instance(self, left, right):
         class Cond:
@@ -179,14 +180,13 @@ class TestBoundary:
         joined = left.join(right, on=lambda l, r, unused=None: l.id == r.id)
         assert joined.to_pandas()["id"].tolist() == [1, 2]
 
-    @pytest.mark.xfail(
-        strict=True, reason="#185: the check does not reach functions the condition calls"
-    )
     @pytest.mark.parametrize("entry", ENTRY_POINTS)
     def test_null_identity_test_in_a_called_helper_raises(self, left, right, entry):
-        # The helper returns True for a column, so `and` drops the test.
+        # The helper returns True for a column, so `and` used to drop the
+        # test (#185). The check follows the names the condition calls.
         call, key = ENTRY_POINTS[entry]
-        with pytest.raises(TypeError, match=GUIDANCE):
+        named = r"'_nonnull' \(reached by name from '.*<lambda>'\) "
+        with pytest.raises(TypeError, match=named + GUIDANCE):
             call(left, right, lambda l, r: _nonnull(r.x) and key(l, r))
 
 

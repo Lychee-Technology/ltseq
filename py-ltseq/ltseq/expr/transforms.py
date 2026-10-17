@@ -2,11 +2,15 @@
 
 import __future__
 import ast
+import collections
 import copy
 import dis
 import functools
 import inspect
 import operator
+import os
+import pathlib
+import sysconfig
 import types
 from typing import Any, Callable, Iterator, NamedTuple, cast
 
@@ -290,10 +294,11 @@ _NULL_METHOD_GUIDANCE = (
     "  - r.col.is_not_null()  instead of  r.col is not None\n"
     "LTSeq rewrites 'is None' checks automatically only inside a lambda "
     "(or a functools.partial of one) whose source file is available. In a "
-    "REPL, an exec/eval string, a plain def function or a lambda behind "
-    "another wrapper (a decorator, functools.lru_cache, ...), use the "
-    "methods, and test Python values (such as an optional threshold) before "
-    "building the function."
+    "REPL, an exec/eval string, a plain def function, a helper the lambda "
+    "calls or a lambda behind another wrapper (a decorator, "
+    "functools.lru_cache, ...), use the methods, and test Python values "
+    "(such as an optional threshold) before building the function, or "
+    "against a sentinel object rather than None."
 )
 
 
@@ -365,57 +370,300 @@ def _tests_identity_with_none(code: types.CodeType) -> bool:
     )
 
 
-def _called_code(fn: Callable) -> Iterator[types.CodeType]:
-    """The Python code objects that calling ``fn`` runs directly: a function's
-    or bound method's own, a callable instance's ``__call__``, and those of
-    the functions a wrapper forwards to (``functools.partial``, nested or not,
-    ``staticmethod`` / ``classmethod``, and anything that sets ``__wrapped__``,
-    such as ``functools.wraps`` decorators and ``functools.lru_cache``).
+# The top-level package of this module. Its functions test Python values
+# with `is None` as a matter of course (`log(x, base=None)`).
+_PACKAGE = __name__.partition(".")[0]
+
+# Directories that pip and Linux distributions install packages into.
+_INSTALL_DIR_NAMES = frozenset({"site-packages", "dist-packages"})
+
+
+def _normalized_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
+@functools.cache
+def _stdlib_dirs() -> tuple[str, ...]:
+    paths = sysconfig.get_paths()
+    return tuple(
+        os.path.join(_normalized_path(paths[key]), "")
+        for key in ("stdlib", "platstdlib")
+        if key in paths
+    )
+
+
+@functools.lru_cache(maxsize=1024)
+def _is_library_file(filename: str) -> bool:
+    """Whether code compiled from ``filename`` belongs to the standard
+    library or to an installed distribution rather than to the user."""
+    if filename.startswith("<"):
+        # `<frozen posixpath>` is a standard-library module frozen into the
+        # interpreter; `<string>`, `<stdin>` and the like are user input.
+        return filename.startswith("<frozen ")
+    path = _normalized_path(filename)
+    return bool(
+        _INSTALL_DIR_NAMES.intersection(pathlib.PurePath(path).parts)
+    ) or path.startswith(_stdlib_dirs())
+
+
+def _is_library_function(func: types.FunctionType) -> bool:
+    module = func.__module__
+    if type(module) is str and module.partition(".")[0] == _PACKAGE:
+        return True
+    return _is_library_file(func.__code__.co_filename)
+
+
+@functools.lru_cache(maxsize=1024)
+def _global_names(code: types.CodeType) -> tuple[str, ...]:
+    """The global names that ``code``, or a function nested in it, loads,
+    in order of first use."""
+    names = dict.fromkeys(
+        instr.argval
+        for instr in dis.get_instructions(code)
+        if instr.opname == "LOAD_GLOBAL"
+    )
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names.update(dict.fromkeys(_global_names(const)))
+    return tuple(names)
+
+
+def _named_callables(func: types.FunctionType) -> Iterator[Any]:
+    """The callables ``func`` refers to by name: the globals its code loads,
+    looked up in ``func.__globals__`` and then its builtins as
+    ``LOAD_GLOBAL`` does, and the contents of its closure cells.
+
+    A name counts whatever the code does with it: a callable it passes to
+    another function (``apply(check, r)``) counts like one it calls, because
+    the code does not say whether that function calls it."""
+    values: list[Any] = []
+    for name in _global_names(func.__code__):
+        for namespace in (func.__globals__, func.__builtins__):
+            if name in namespace:
+                values.append(namespace[name])
+                break
+    for cell in func.__closure__ or ():
+        try:
+            values.append(cell.cell_contents)
+        except ValueError:
+            pass  # not bound yet, as for a function defined after the lambda
+    return (value for value in values if callable(value))
+
+
+class _ReachedCode(NamedTuple):
+    code: types.CodeType
+    # Qualified names of the functions it was reached through by name,
+    # outermost first; empty for code that calling the function runs directly.
+    via: tuple[str, ...]
+
+
+# An object for _called_code to visit, with the `via` of _ReachedCode.
+_Visit = tuple[Any, tuple[str, ...]]
+
+
+def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
+    """The Python code objects that calling ``fn`` can run, as far as they
+    are found without running it, those reached through the fewest names
+    first.
+
+    The code ``fn`` runs directly is a function's or bound method's own, a
+    callable instance's ``__call__``, and those of the functions a wrapper
+    forwards to (``functools.partial``, nested or not, ``staticmethod`` /
+    ``classmethod``, and anything that sets ``__wrapped__``, such as
+    ``functools.wraps`` decorators and ``functools.lru_cache``). The code
+    reached by name is that of every user function that a function found
+    either way refers to by name (see :func:`_named_callables`), which is
+    how a helper is usually called, and so on through those functions'
+    names.
 
     Wrappers are followed rather than treated as opaque because the ones
     implemented in C have no code of their own: stopping at them would let
-    the function they call run unchecked. Attributes are read where these
-    wrappers keep them, never through ``__getattr__``, so an object that
-    fabricates attributes on demand (a ``Mock``) cannot make the walk endless.
+    the function they call run unchecked.
+
+    The walk runs no code of the objects it reaches by name, nor of their
+    classes. The user never handed them to LTSeq, and a helper may name one
+    only in a branch that does not run, so they are read statically (see
+    :func:`_read_statically`): a lazy proxy is not resolved, and one that
+    fails outside some context (werkzeug's ``LocalProxy``) does not fail
+    the capture. ``fn`` and the wrappers around it are about to be called,
+    so they are read as Python reads them (see :func:`_read_as_called`),
+    which also follows a proxy that forwards to the function it wraps
+    (wrapt's ``FunctionWrapper``). Either way an object that fabricates
+    attributes on demand (a ``Mock``) cannot make the walk endless: a
+    fabricated ``__code__`` is not a code object, and ``__wrapped__`` is
+    read where wrappers store it, not through ``__getattr__``.
+
+    Names are followed only into user code. Functions of this package, of
+    the standard library and of installed distributions are skipped: they
+    test Python values with ``is None`` routinely, and checking them would
+    refuse ordinary lambdas. A callable reached other than by name is not
+    followed: through an attribute (``helpers.missing(r)``,
+    ``self.check(r)``), or only as the value of a parameter, which no code
+    the walk reaches names (a default value, or an argument that a
+    ``functools.partial`` binds). Nor are the methods of a class, which
+    ``type.__call__``, written in C, runs, or the function behind a proxy
+    reached by name.
     """
-    pending: list[Any] = [fn]
-    # Keyed by id, holding the object so the id cannot be reused mid-walk.
-    seen: dict[int, Any] = {}
+    pending: collections.deque[_Visit] = collections.deque([(fn, ())])
+    # Keyed by id and by how the object is read, holding the object so the
+    # id cannot be reused mid-walk. The same object is often reached both
+    # directly and by name (a decorator's closure names the function it
+    # stores in `__wrapped__`), and is then read both ways, since neither
+    # reading finds all the other does: reading it as called follows a proxy
+    # and checks library code, and reading it statically finds the function
+    # in a wrapper's slot even where a subclass's property answers otherwise.
+    seen: dict[tuple[int, bool], Any] = {}
     while pending:
-        obj = pending.pop()
-        if id(obj) in seen:
+        obj, via = pending.popleft()
+        key = (id(obj), bool(via))
+        if key in seen:
             continue
-        seen[id(obj)] = obj
-        code = getattr(obj, "__code__", None)
-        has_code = isinstance(code, types.CodeType)
-        if has_code:
-            yield code
-        if isinstance(obj, functools.partial):
-            pending.append(obj.func)
-        elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
-            pending.append(obj.__func__)
-        # functools.update_wrapper stores `__wrapped__` in the instance dict.
-        attrs = getattr(obj, "__dict__", None)
-        if isinstance(attrs, dict) and "__wrapped__" in attrs:
-            pending.append(attrs["__wrapped__"])
-        if not has_code:
-            # A C slot (as on functools.partial itself) has no code to follow.
-            call = getattr(type(obj), "__call__", None)
-            if call is not None and not isinstance(call, types.WrapperDescriptorType):
-                pending.append(call)
+        seen[key] = obj
+        reached, forwarded, named = _visit(obj, via)
+        if reached is not None:
+            yield reached
+        # Fewest names first: what obj forwards to is as near as obj, and
+        # what it names is one name further (a 0-1 breadth-first search). So
+        # the code fn runs directly comes before any code reached by name.
+        pending.extendleft(reversed(forwarded))
+        pending.extend(named)
 
 
-def _code_testing_identity_with_none(fn: Callable) -> types.CodeType | None:
-    """The first code object that calling ``fn`` runs directly (see
+class _Parts(NamedTuple):
+    """What :func:`_visit` reads of an object."""
+
+    # Its own code, if it has any.
+    code: types.CodeType | None
+    # Whether it is a function, whose names are followed.
+    is_function: bool
+    # The callables a wrapper forwards to.
+    forwards_to: list[Any]
+    # Its class's `__call__`, read only when it has no code of its own.
+    call: Any
+
+
+def _read_as_called(obj: Any) -> _Parts:
+    """``obj``'s parts, read as Python reads them: through ``isinstance``
+    and ``getattr``, so that a proxy which forwards ``__class__`` and its
+    other attributes to a function is followed to it."""
+    code = getattr(obj, "__code__", None)
+    if not isinstance(code, types.CodeType):
+        code = None
+    forwards_to = []
+    if isinstance(obj, functools.partial):
+        forwards_to.append(obj.func)
+    elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
+        forwards_to.append(obj.__func__)
+    # functools.update_wrapper stores `__wrapped__` in the instance dict.
+    attrs = getattr(obj, "__dict__", None)
+    if isinstance(attrs, dict) and "__wrapped__" in attrs:
+        forwards_to.append(attrs["__wrapped__"])
+    call = getattr(type(obj), "__call__", None) if code is None else None
+    return _Parts(code, isinstance(obj, types.FunctionType), forwards_to, call)
+
+
+# The C wrappers that forward a call to a callable they keep in a slot, with
+# the descriptor of that slot. Reading the slot through the wrapper type's
+# own descriptor, rather than through getattr, runs no `__getattribute__`
+# or property that a subclass defines.
+_FORWARDING_SLOTS = (
+    (functools.partial, vars(functools.partial)["func"]),
+    (types.MethodType, vars(types.MethodType)["__func__"]),
+    (staticmethod, vars(staticmethod)["__func__"]),
+    (classmethod, vars(classmethod)["__func__"]),
+)
+
+
+# The descriptors through which `type` itself reads a class's MRO and
+# namespace. Reading `cls.__mro__` or `cls.__dict__` instead runs the
+# `__getattribute__` of a metaclass, which inspect.getattr_static does.
+_class_mro = vars(type)["__mro__"].__get__
+_class_namespace = vars(type)["__dict__"].__get__
+
+
+def _class_attribute(kind: type, name: str) -> Any:
+    """``name`` as defined by the first class in ``kind``'s MRO that defines
+    it, or ``None``; a descriptor is returned, not run."""
+    for cls in _class_mro(kind):
+        namespace = _class_namespace(cls)
+        if name in namespace:
+            return namespace[name]
+    return None
+
+
+def _read_statically(obj: Any) -> _Parts:
+    """``obj``'s parts, read without running any of its code or of its
+    class's.
+
+    It reads what :func:`_read_as_called` reads, but ``obj`` is told apart
+    by ``type(obj)``, never ``isinstance``, which reads ``obj.__class__``;
+    a wrapper's slot is read through the wrapper type's own descriptor; and
+    the instance dict and ``__call__`` are found in the class namespaces
+    (see :func:`_class_attribute`), where a property or attribute hook that
+    the class defines in their place is found rather than run. A proxy is
+    therefore not followed."""
+    kind = type(obj)
+    is_function = kind is types.FunctionType
+    forwards_to = [
+        slot.__get__(obj, kind)
+        for wrapper, slot in _FORWARDING_SLOTS
+        if issubclass(kind, wrapper)
+    ]
+    # The instance dict's own descriptor is written in C; anything else in
+    # its place is the class's code.
+    dict_slot = _class_attribute(kind, "__dict__")
+    if type(dict_slot) is types.GetSetDescriptorType:
+        attrs = dict_slot.__get__(obj, kind)
+        if type(attrs) is dict and "__wrapped__" in attrs:
+            forwards_to.append(attrs["__wrapped__"])
+    if is_function:
+        return _Parts(obj.__code__, True, forwards_to, None)
+    return _Parts(None, False, forwards_to, _class_attribute(kind, "__call__"))
+
+
+def _visit(
+    obj: Any, via: tuple[str, ...]
+) -> tuple[_ReachedCode | None, list[_Visit], list[_Visit]]:
+    """One step of :func:`_called_code`: ``obj``'s code, unless ``obj`` is
+    library code reached by name; the objects it forwards to; and the
+    objects its code names."""
+    parts = _read_statically(obj) if via else _read_as_called(obj)
+    forwarded: list[_Visit] = [(callee, via) for callee in parts.forwards_to]
+    # A C slot (as on functools.partial itself) has no code to follow.
+    if parts.call is not None and type(parts.call) is not types.WrapperDescriptorType:
+        forwarded.append((parts.call, via))
+    if parts.code is None or (via and _is_library_function(obj)):
+        return None, forwarded, []
+    named: list[_Visit] = []
+    if parts.is_function:
+        inner = via + (obj.__qualname__,)
+        named = [(callee, inner) for callee in _named_callables(obj)]
+    return _ReachedCode(parts.code, via), forwarded, named
+
+
+def _code_testing_identity_with_none(fn: Callable) -> _ReachedCode | None:
+    """The nearest code object that calling ``fn`` can run (see
     :func:`_called_code`) and that compares a value with ``None`` by
     identity, or ``None`` if there is none.
 
-    Row and condition lambdas are both checked through this function. It
-    does not reach the functions ``fn`` calls, so a helper's ``x is None``
-    still runs as Python and returns a bool."""
+    Row and condition lambdas are both checked through this function."""
     return next(
-        (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
+        (reached for reached in _called_code(fn) if _tests_identity_with_none(reached.code)),
+        None,
     )
+
+
+def _describe_reached(reached: _ReachedCode) -> str:
+    """``'name'``, followed for a helper by the functions that lead to it.
+
+    The route names the functions that name the helper, which need not call
+    it (it may be passed on, or named in a branch that does not run)."""
+    name = repr(reached.code.co_qualname)
+    if not reached.via:
+        return name
+    first, *through = reached.via
+    route = f" via {' -> '.join(map(repr, through))}" if through else ""
+    return f"{name} (reached by name from {first!r}{route})"
 
 
 def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
@@ -427,12 +675,14 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     is returned; callers validate its shape (``Expr``, dict, list, ...).
 
     Raises:
-        TypeError: If ``fn``, or a function it wraps (see
-            :func:`_called_code`), still compares a value with ``None`` by
-            identity after the rewrite (source unavailable, a plain ``def``, ...).
-            Such a check is a Python bool, not a null predicate, and
-            ``and`` / ``or`` / conditional expressions would otherwise
-            silently drop part of the captured expression.
+        TypeError: If ``fn``, a function it wraps, or a user function either
+            names (see :func:`_called_code`) still compares a value
+            with ``None`` by identity after the rewrite (source unavailable,
+            a plain ``def``, a helper, ...). Such a check is a Python bool,
+            not a null predicate, and ``and`` / ``or`` / conditional
+            expressions would otherwise silently drop part of the captured
+            expression. Helpers are only checked, never rewritten, so a
+            helper's test on a Python value is refused too.
     """
     # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
     # lambda into explicit null checks before running it against the proxy.
@@ -440,7 +690,7 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     unrewritten = _code_testing_identity_with_none(fn)
     if unrewritten is not None:
         raise TypeError(
-            f"{unrewritten.co_qualname!r} compares a value with None using 'is' / 'is not', "
+            f"{_describe_reached(unrewritten)} compares a value with None using 'is' / 'is not', "
             "which LTSeq could not rewrite into a null check. Unrewritten, "
             "the comparison is a Python bool rather than a column predicate "
             "and would silently change the captured expression.\n\n"
@@ -464,21 +714,22 @@ def _invoke_condition_lambda(
     selects rows rather than pairing them, so it is never part of a join
     condition. The check reads bytecode, so it cannot tell a column from a
     Python value and rejects an ``is None`` test on a closure value too. It
-    does not reach the functions ``fn`` calls: with a helper that returns
-    ``x is not None``, ``helper(r.x) and (l.id == r.id)`` is still captured
-    as ``l.id == r.id``.
+    covers the helpers ``fn`` calls as row lambdas' does (see
+    :func:`_called_code`): a helper named by a global or closure variable is
+    checked, one reached through an attribute is not.
 
     Raises:
-        TypeError: If ``fn``, or a function it wraps (see
-            :func:`_called_code`), compares a value with ``None`` by identity.
-            Python evaluates such a test to a constant bool (a column is
-            never ``None``), and ``and`` / ``or`` / conditional expressions
-            would otherwise silently drop part of the condition.
+        TypeError: If ``fn``, a function it wraps, or a user function either
+            names (see :func:`_called_code`) compares a value with
+            ``None`` by identity. Python evaluates such a test to a constant
+            bool (a column is never ``None``), and ``and`` / ``or`` /
+            conditional expressions would otherwise silently drop part of
+            the condition.
     """
-    code = _code_testing_identity_with_none(fn)
-    if code is not None:
+    reached = _code_testing_identity_with_none(fn)
+    if reached is not None:
         raise TypeError(
-            f"{code.co_qualname!r} compares a value with None using 'is' / 'is not'. "
+            f"{_describe_reached(reached)} compares a value with None using 'is' / 'is not'. "
             "Join conditions support only comparisons between a column of each "
             "table: == (combined with &) for join, semi_join, anti_join and "
             "link, and one of >=, >, <=, < for asof_join. Python evaluates an "
@@ -490,7 +741,7 @@ def _invoke_condition_lambda(
             "  - .filter(lambda r: r.col.is_not_null())  instead of  r.col is not None\n"
             "  - .filter(lambda r: r.col.is_null())      instead of  r.col is None\n"
             "Test Python values (such as an optional parameter) before building "
-            "the condition."
+            "the condition, or against a sentinel object rather than None."
         )
     return fn(SchemaProxy(left_schema), SchemaProxy(right_schema))
 
@@ -498,7 +749,8 @@ def _invoke_condition_lambda(
 def _none_check_hint(result: Any) -> str:
     """Guidance appended to a "lambda returned a non-Expr" error when the
     result looks like an un-rewritten ``is None`` check (a Python bool), for
-    example one made in a helper function that the lambda calls."""
+    example one made in a helper that the lambda calls through an attribute,
+    which :func:`_called_code` does not follow."""
     if result is True or result is False:
         return (
             "\n\nHint: a bool result often comes from an unrewritten "

@@ -14,7 +14,10 @@ The rewrite must:
   wrong or partial result) when a null identity check cannot be rewritten:
   no source, a plain def, or source that no longer matches the lambda;
 - see through wrappers: a functools.partial of a lambda is rewritten, and a
-  check behind partial, lru_cache, staticmethod or a decorator fails closed.
+  check behind partial, lru_cache, staticmethod or a decorator fails closed;
+- refuse, without rewriting it, a null identity check in a user function the
+  lambda calls by name, directly or through other helpers; functions of
+  ltseq, the standard library and installed packages are not checked (#185).
 """
 
 import functools
@@ -23,13 +26,19 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
+from json import loads
 
 import pandas as pd
 import pytest
 
 from ltseq import LTSeq
-from ltseq.expr.base import if_else
-from ltseq.expr.transforms import _NULL_CHECK_HELPER, _transform_lambda_for_none_checks
+from ltseq.expr.base import if_else, log
+from ltseq.expr.transforms import (
+    _NULL_CHECK_HELPER,
+    _tests_identity_with_none,
+    _transform_lambda_for_none_checks,
+)
 
 MODULE_THRESHOLD = 2
 
@@ -43,6 +52,41 @@ MODULE_DERIVE = lambda r: {"missing": r.b is None}  # noqa: E731
 __ltseq_null_check__ = 5
 assert _NULL_CHECK_HELPER == "__ltseq_null_check__"
 MODULE_PRED_WITH_HELPER_NAME = lambda r: (r.b is None) & (__ltseq_null_check__ > 0)  # noqa: E731
+
+
+# Helpers that lambdas call by name (#185). LTSeq never rewrites them, so on
+# an expression `r.b is None` is the Python value False.
+def missing(r):
+    return r.b is None
+
+
+def missing_via_helper(r):
+    return missing(r)
+
+
+def missing_via_two_helpers(r):
+    return missing_via_helper(r)
+
+
+def above_one(r):
+    return r.a > 1
+
+
+def apply(check, r):
+    return check(r)
+
+
+def ignores_check(r, check):
+    return r.a > 1
+
+
+# Recursive in their code, not when called: the walk of names must end.
+def ping(r, depth=0):
+    return pong(r, depth + 1) if depth < 1 else r.a > 2
+
+
+def pong(r, depth):
+    return ping(r, depth)
 
 
 @pytest.fixture
@@ -573,6 +617,27 @@ def _unflattened_partial(fn, *args, **kwargs):
     return outer
 
 
+class _ForwardingProxy:
+    """The shape of wrapt's ``FunctionWrapper``: it reaches the function only
+    through attribute hooks and its own ``__call__``. The callable LTSeq is
+    handed is read as Python reads it, so this proxy is followed there; one
+    that the code names is read statically and is not. With wrapt 1.17.2, a
+    ``FunctionWrapper`` and this class behave alike on both reads."""
+
+    def __init__(self, wrapped):
+        object.__setattr__(self, "_wrapped", wrapped)
+
+    @property
+    def __class__(self):
+        return type(object.__getattribute__(self, "_wrapped"))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+    def __call__(self, *args):
+        return object.__getattribute__(self, "_wrapped")(*args)
+
+
 class TestWrappedCallables:
     """A wrapper implemented in C (``functools.partial``, ``lru_cache``,
     ``staticmethod``) has no code of its own. The fail-closed check must look
@@ -660,6 +725,402 @@ class TestWrappedCallables:
 
         assert a_values(t.filter(Anything())) == [3, 4]
 
+    @pytest.mark.parametrize("decorated", [False, True], ids=["proxy", "decorated-proxy"])
+    def test_proxy_of_function_fails_closed(self, t, decorated):
+        # A proxy that the code names is not followed
+        # (TestCalledHelpers.test_helper_reached_other_than_by_name_is_not_checked).
+        # A decorator's closure names the proxy it wraps, which must not make
+        # it one: run unchecked, the decorated proxy returned [2, 3, 4].
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        fn = _ForwardingProxy(pred)
+        if decorated:
+            fn = _passthrough(fn)
+        with pytest.raises(TypeError, match=r"^'[^']*pred' compares a value with None"):
+            t.filter(fn)
+
     def test_partial_without_null_check_is_returned_unchanged(self):
         p = functools.partial(lambda r, th: r.a > th, th=1)
         assert _transform_lambda_for_none_checks(p) is p
+
+
+def _passthrough(fn):
+    @functools.wraps(fn)
+    def wrapper(*args):
+        return fn(*args)
+
+    return wrapper
+
+
+def _bound_method(fn):
+    class Holder:
+        def check(self, r):
+            return fn(r)
+
+    return Holder().check
+
+
+def _callable_instance(fn):
+    class Check:
+        def __call__(self, r):
+            return fn(r)
+
+    return Check()
+
+
+def _classmethod_call(fn):
+    class Check:
+        __call__ = classmethod(lambda cls, r: fn(r))
+
+    return Check()
+
+
+def _metaclass_call(fn):
+    class Calls(type):
+        def __call__(cls, r):
+            return fn(r)
+
+    return Calls("Check", (), {})
+
+
+class TestCalledHelpers:
+    """A helper the lambda calls is not rewritten, so its ``r.b is None`` is
+    the Python value False, and ``or`` / ``and`` / ``|`` used to drop it from
+    the captured expression without an error (#185). The functions a lambda
+    names, through globals and closure variables, are checked and refused
+    instead, as far as they are user code."""
+
+    def test_module_helper_raises_naming_it(self, t):
+        # Run unchecked, this returned [2, 3, 4] instead of [1, 2, 3, 4].
+        with pytest.raises(
+            TypeError,
+            match=r"^'missing' \(reached by name from '.*<lambda>'\) compares a value with None",
+        ):
+            t.filter(lambda r: missing(r) or (r.a > 1))
+
+    def test_bitor_in_either_order(self, t):
+        # Run unchecked, the first returned [4] instead of [1, 3, 4], and the
+        # second failed on `bool | BinOpExpr` without naming the cause.
+        for pred in (
+            lambda r: (r.a > 3) | missing(r),
+            lambda r: missing(r) | (r.a > 3),
+        ):
+            with pytest.raises(TypeError, match=r"could not rewrite"):
+                t.filter(pred)
+
+    def test_helper_through_helper(self, t):
+        with pytest.raises(TypeError) as info:
+            t.filter(lambda r: missing_via_helper(r) or (r.a > 1))
+        assert str(info.value).startswith(
+            "'missing' (reached by name from 'TestCalledHelpers.test_helper_through_helper."
+            "<locals>.<lambda>' via 'missing_via_helper') compares a value with None"
+        )
+        with pytest.raises(TypeError) as info:
+            t.filter(lambda r: missing_via_two_helpers(r) or (r.a > 1))
+        assert str(info.value).startswith(
+            "'missing' (reached by name from 'TestCalledHelpers.test_helper_through_helper."
+            "<locals>.<lambda>' via 'missing_via_two_helpers' -> 'missing_via_helper') "
+            "compares a value with None"
+        )
+
+    def test_route_has_the_fewest_names(self, t):
+        # Each wrapper's closure names the function, which the wrapper also
+        # reaches through `__wrapped__` without a name; that route is the one
+        # reported. The first wrapper goes through a partial on the way, so
+        # its named route takes fewer steps. The second has the helper's name
+        # from functools.wraps, so its named route read "via 'missing'".
+        def keep_partial(fn):
+            @functools.wraps(functools.partial(fn))
+            def wrapper(*args):
+                return fn(*args)
+
+            return wrapper
+
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        with pytest.raises(TypeError, match=r"^'[^']*pred' compares a value with None"):
+            t.filter(keep_partial(pred))
+        check = _passthrough(missing)
+        with pytest.raises(
+            TypeError,
+            match=r"^'missing' \(reached by name from '[^']*<lambda>'\) compares a value with None",
+        ):
+            t.filter(lambda r: check(r) or (r.a > 1))
+
+    def test_helper_in_closure(self, t):
+        def absent(r):
+            return r.b is None
+
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
+            t.filter(lambda r: absent(r) or (r.a > 1))
+
+    def test_helper_in_closure_of_helper(self, t):
+        def make_check():
+            def absent(r):
+                return r.b is None
+
+            def check(r):
+                return absent(r)
+
+            return check
+
+        check = make_check()
+        with pytest.raises(
+            TypeError, match=r"'.*absent' \(reached by name from .* via '.*check'\)"
+        ):
+            t.filter(lambda r: check(r) or (r.a > 1))
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            functools.partial,
+            functools.lru_cache,
+            functools.cache,
+            staticmethod,
+            _passthrough,
+            _bound_method,
+            _callable_instance,
+            _classmethod_call,
+            _metaclass_call,
+        ],
+        ids=[
+            "partial",
+            "lru_cache",
+            "cache",
+            "staticmethod",
+            "decorator",
+            "bound-method",
+            "callable-instance",
+            "classmethod-call",
+            "metaclass-call",
+        ],
+    )
+    def test_helper_behind_wrapper(self, t, wrap):
+        def absent(r):
+            return r.b is None
+
+        check = wrap(absent)
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
+            t.filter(lambda r: check(r) or (r.a > 1))
+
+    def test_every_public_boundary(self, t):
+        for call in (
+            lambda: t.filter(lambda r: missing(r) or (r.a > 1)),
+            lambda: t.select(lambda r: [r.a, missing(r) or r.b]),
+            lambda: t.delete(lambda r: missing(r) or (r.a > 1)),
+            lambda: t.update(lambda r: missing(r) or (r.a > 1), a=0),
+            lambda: t.derive(lambda r: {"x": missing(r) or r.a}),
+        ):
+            with pytest.raises(TypeError, match=r"'missing' \(reached by name from"):
+                call()
+
+    def test_helper_passed_by_name_is_checked(self, t):
+        # Run unchecked, `apply(missing, r) or ...` returned [2, 3, 4]
+        # instead of [1, 2, 3, 4]. The code does not say whether the function
+        # it passes `missing` to calls it, so a function that ignores it is
+        # refused too (contract section 3.4).
+        for pred in (
+            lambda r: apply(missing, r) or (r.a > 1),
+            lambda r: ignores_check(r, missing),
+        ):
+            with pytest.raises(
+                TypeError, match=r"^'missing' \(reached by name from '.*<lambda>'\)"
+            ):
+                t.filter(pred)
+
+    @pytest.mark.parametrize(
+        "form",
+        ["attribute", "item", "default-value", "partial-argument", "class-method", "proxy"],
+    )
+    def test_helper_reached_other_than_by_name_is_not_checked(self, t, form):
+        # Each form that contract section 3.4 lists as not reached. The walk
+        # follows names, not attributes, items or the values of parameters;
+        # `type.__call__`, written in C, runs a class's methods; and a proxy
+        # that the code names reaches its function only by running code. So
+        # `or` still folds the helper's bool out, and the result is the rows
+        # where a > 1.
+        helpers = types.SimpleNamespace(missing=missing)
+        checks = [missing]
+
+        def with_default(r, check=missing):
+            return check(r)
+
+        bound = functools.partial(apply, missing)
+
+        class Missing:
+            def __new__(cls, r):
+                return r.b is None
+
+        proxied = _ForwardingProxy(missing)
+        pred = {
+            "attribute": lambda r: helpers.missing(r) or (r.a > 1),
+            "item": lambda r: checks[0](r) or (r.a > 1),
+            "default-value": lambda r: with_default(r) or (r.a > 1),
+            "partial-argument": lambda r: bound(r) or (r.a > 1),
+            "class-method": lambda r: Missing(r) or (r.a > 1),
+            "proxy": lambda r: proxied(r) or (r.a > 1),
+        }[form]
+        assert a_values(t.filter(pred)) == [2, 3, 4]
+
+    def test_python_value_test_in_helper_is_rejected_too(self, t):
+        # Helpers are checked, not rewritten, so a test on a Python value
+        # cannot be told apart from one on a column.
+        def threshold(value=None):
+            return 2 if value is None else value
+
+        with pytest.raises(TypeError, match=r"against a sentinel object rather than None"):
+            t.filter(lambda r: r.a > threshold())
+
+    def test_sentinel_in_helper_runs(self, t):
+        unset = object()
+
+        def threshold(value=unset):
+            return 2 if value is unset else value
+
+        assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
+
+    def test_helper_without_null_test_runs(self, t):
+        def above(r, n):
+            return r.a > n
+
+        assert a_values(t.filter(lambda r: above_one(r))) == [2, 3, 4]
+        assert a_values(t.filter(lambda r: above(r, 2) & above_one(r))) == [3, 4]
+        # The lambda's own test is rewritten; the helper next to it is clean.
+        assert a_values(t.filter(lambda r: (r.b is None) & above_one(r))) == [3]
+
+    def test_recursive_helpers_terminate(self, t):
+        assert a_values(t.filter(lambda r: ping(r))) == [3, 4]
+
+    def test_ltseq_functions_are_not_checked(self, t):
+        # `log(x, base=None)` tests its Python argument with `is None`.
+        assert _tests_identity_with_none(log.__code__)
+        out = t.derive(lambda r: {"x": log(r.a), "y": if_else(r.b.is_null(), 1, 0)})
+        assert out.to_arrow().column("y").to_pylist() == [1, 0, 1, 0]
+
+    def test_standard_library_functions_are_not_checked(self, t):
+        assert _tests_identity_with_none(loads.__code__)
+        assert a_values(t.filter(lambda r: r.a.is_in(loads("[2, 4]")))) == [2, 4]
+
+    def test_installed_packages_are_not_checked(self, t, tmp_path):
+        # The same helper is library code under site-packages and user code
+        # anywhere else.
+        source = """
+            def threshold(value=None):
+                return 2 if value is None else value
+            """
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        installed = _import_module_from_source(
+            site_packages, "ltseq_none_check_installed_mod", source
+        )
+        local = _import_module_from_source(tmp_path, "ltseq_none_check_local_mod", source)
+        try:
+            installed_threshold = installed.threshold
+            local_threshold = local.threshold
+            assert a_values(t.filter(lambda r: r.a > installed_threshold())) == [3, 4]
+            with pytest.raises(TypeError, match=r"'threshold' \(reached by name from"):
+                t.filter(lambda r: r.a > local_threshold())
+        finally:
+            del sys.modules[installed.__name__], sys.modules[local.__name__]
+
+    @pytest.mark.parametrize("decorated", [False, True], ids=["function", "decorated"])
+    def test_installed_function_handed_in_is_checked(self, t, tmp_path, decorated):
+        # Library code is skipped only when reached by name, and a
+        # decorator's closure naming the function it wraps does not make it
+        # so: run unchecked, the decorated function returned [2, 3, 4].
+        source = """
+            def pred(r):
+                return (r.b is None) or (r.a > 1)
+            """
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        installed = _import_module_from_source(
+            site_packages, "ltseq_none_check_installed_pred", source
+        )
+        try:
+            fn = _passthrough(installed.pred) if decorated else installed.pred
+            with pytest.raises(TypeError, match=r"^'pred' compares a value with None"):
+                t.filter(fn)
+        finally:
+            del sys.modules[installed.__name__]
+
+    def test_wrapper_reached_both_ways_is_read_both_ways(self, t):
+        # The decorator's closure names the partial it wraps, so the partial
+        # is reached directly and by name. Read as called, its `func` is the
+        # property's; read statically, it is the function the partial calls.
+        def harmless(r):
+            return r.a > 1
+
+        class Shadowed(functools.partial):
+            @property
+            def func(self):
+                return harmless
+
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        with pytest.raises(TypeError, match=r"^'[^']*pred' \(reached by name from"):
+            t.filter(_passthrough(Shadowed(pred)))
+
+    def test_closure_variable_bound_after_the_call_is_skipped(self, t):
+        use_later = False
+        pred = lambda r: later(r) if use_later else r.a > 2  # noqa: E731
+        assert a_values(t.filter(pred)) == [3, 4]
+
+        def later(r):
+            return r.b is None
+
+    @pytest.mark.parametrize("named", ["instance", "class", "instance-of-class"])
+    def test_objects_found_by_name_run_no_code(self, t, named):
+        # Like a lazy proxy, or werkzeug's LocalProxy outside a request. The
+        # helper names it in a branch that does not run, so the capture must
+        # neither run its attribute hooks (`__getattribute__` also serves
+        # `__getattr__`, properties and the `__class__` that isinstance
+        # reads) nor fail on them. A class's hooks are its metaclass's, and
+        # they run on reading `__dict__`, which inspect.getattr_static does.
+        touched = []
+
+        class Unbound:
+            def __getattribute__(self, name):
+                touched.append(name)
+                raise RuntimeError("working outside of a context")
+
+            def __call__(self):
+                raise RuntimeError("working outside of a context")
+
+        class Bound(type):
+            def __getattribute__(cls, name):
+                touched.append(name)
+                raise RuntimeError("working outside of a context")
+
+        class Lazy(metaclass=Bound):
+            def __call__(self):
+                raise RuntimeError("working outside of a context")
+
+        obj = {"instance": Unbound, "class": Lazy, "instance-of-class": Lazy}[named]
+        if named != "class":
+            obj = obj()
+
+        def threshold(from_context=False):
+            return obj() if from_context else 2
+
+        assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
+        assert touched == []
+
+    def test_wrapper_subclass_is_followed_without_its_hooks(self, t):
+        touched = []
+
+        class Recorded(functools.partial):
+            def __getattribute__(self, name):
+                touched.append(name)
+                return super().__getattribute__(name)
+
+        def absent(r):
+            return r.b is None
+
+        check = Recorded(absent)
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
+            t.filter(lambda r: check(r) or (r.a > 1))
+        assert touched == []
