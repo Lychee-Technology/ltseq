@@ -102,6 +102,15 @@ def m3() -> list[dict]:
                     _cell("m3", "m3.r3_filter_select_derive", terminal, r3, r3_warmup, p,
                           {"order": mode}, repeat=3, input_name="r3", mode=mode, slow_ms=0)
                 )
+    # How much of the row-group merge's cost at high partition counts its
+    # bounds explain: more units in flight, more batches buffered per unit.
+    for p in (CPUS, 2 * CPUS):
+        for window, buffer in ((p, 4), (p, 8), (2 * p, 2), (2 * p, 4)):
+            cells.append(
+                _cell("m3", "m3.r3_filter_select_derive", "stream", r3, r3_warmup, p,
+                      {"order": "interleaved", "order_window": window, "order_buffer": buffer},
+                      repeat=3, input_name="r3", mode=f"interleaved_w{window}_b{buffer}", slow_ms=0)
+            )
     for p in (4, CPUS):
         for mode in ("off", "concat", "interleaved"):
             cells.append(
