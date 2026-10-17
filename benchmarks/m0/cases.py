@@ -190,7 +190,7 @@ def m4b() -> list[dict]:
                 cells.append(
                     _cell("m4b", name, "stream", source, warmup, p,
                           {"checked": "fast", "restrict_pushdown": restrict},
-                          repeat=2 if file == "hits_sorted.parquet" else 5,
+                          repeat=3 if file == "hits_sorted.parquet" else 5,
                           input_name=file.removesuffix(".parquet"), mode=mode)
                 )
     return cells
@@ -207,7 +207,7 @@ def m5() -> list[dict]:
             for mode in ("off", "prune_off", "validate"):
                 cells.append(
                     _cell("m5", name, "stream", source, warmup, p, {"validate": mode},
-                          repeat=2, input_name="hits_sorted", mode=mode)
+                          repeat=3, input_name="hits_sorted", mode=mode)
                 )
     return cells
 

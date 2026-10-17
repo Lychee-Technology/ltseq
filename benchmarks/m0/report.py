@@ -28,6 +28,7 @@ def summarize(cell: dict) -> dict:
     if runs:
         seconds = [r["seconds"] for r in runs]
         out["median"] = statistics.median(seconds)
+        out["first"] = seconds[0]
         out["min"] = min(seconds)
         out["peak_mib"] = runs[0]["peak_above"] / 2**20
         ttfrs = [r["ttfr"] for r in runs if r.get("ttfr") is not None]
@@ -58,8 +59,8 @@ def table(record: dict) -> str:
         if cell["labels"].get("mode") == base_mode:
             baselines[scenario(cell)] = summarize(cell)
     label_keys = [k for k in cells[0]["labels"] if k != "mode"] if cells else []
-    head = ["pipeline", "terminal", *label_keys, "p", "mode", "median s", "× " + base_mode, "Mrows/s",
-            "peak MiB", "TTFR ms", "note"]
+    head = ["pipeline", "terminal", *label_keys, "p", "mode", "median s", "× " + base_mode, "first s",
+            "Mrows/s", "peak MiB", "TTFR ms", "note"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for cell in cells:
         s = summarize(cell)
@@ -78,6 +79,7 @@ def table(record: dict) -> str:
             str(cell["labels"].get("mode", "")),
             fmt(s.get("median"), ".4f"),
             fmt(ratio, ".2f"),
+            fmt(s.get("first"), ".4f"),
             fmt(s.get("mrows_s"), ".1f"),
             fmt(s.get("peak_mib"), ".1f"),
             fmt(s.get("ttfr_ms"), ".1f"),
@@ -103,8 +105,9 @@ def document(record: dict) -> str:
         f"- Command: `{host['command']}`, started {host['started']}",
         "",
         "`median s` is the median of a cell's measured runs (plan building plus the terminal); "
-        "`peak MiB` is the first measured run's resident growth; `TTFR ms` is the time to the "
-        "first non-empty batch of a stream.",
+        "`first s` is the first measured run, which also reads metadata later runs find cached "
+        "(a Parquet footer); `peak MiB` is the first measured run's resident growth; `TTFR ms` is "
+        "the time to the first non-empty batch of a stream.",
         "",
         table(record),
         "",
