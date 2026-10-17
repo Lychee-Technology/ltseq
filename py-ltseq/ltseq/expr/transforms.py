@@ -405,6 +405,19 @@ def _called_code(fn: Callable) -> Iterator[types.CodeType]:
                 pending.append(call)
 
 
+def _code_testing_identity_with_none(fn: Callable) -> types.CodeType | None:
+    """The first code object that calling ``fn`` runs directly (see
+    :func:`_called_code`) and that compares a value with ``None`` by
+    identity, or ``None`` if there is none.
+
+    Row and condition lambdas are both checked through this function. It
+    does not reach the functions ``fn`` calls, so a helper's ``x is None``
+    still runs as Python and returns a bool."""
+    return next(
+        (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
+    )
+
+
 def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     """Run a user row lambda against a :class:`SchemaProxy` for ``schema``.
 
@@ -424,9 +437,7 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
     # `is` cannot be overloaded: rewrite `x is None` / `x is not None` in the
     # lambda into explicit null checks before running it against the proxy.
     fn = _transform_lambda_for_none_checks(fn)
-    unrewritten = next(
-        (code for code in _called_code(fn) if _tests_identity_with_none(code)), None
-    )
+    unrewritten = _code_testing_identity_with_none(fn)
     if unrewritten is not None:
         raise TypeError(
             f"{unrewritten.co_qualname!r} compares a value with None using 'is' / 'is not', "
@@ -436,6 +447,52 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
             f"{_NULL_METHOD_GUIDANCE}"
         )
     return fn(SchemaProxy(schema))
+
+
+def _invoke_condition_lambda(
+    fn: Callable, left_schema: dict[str, str], right_schema: dict[str, str]
+) -> Any:
+    """Run a two-table condition lambda (the ``on=`` of ``join``,
+    ``semi_join``, ``anti_join``, ``asof_join`` and ``link``) against a
+    :class:`SchemaProxy` for each table.
+
+    Every public API that accepts ``lambda left, right: ...`` must call the
+    lambda through this function rather than on proxies of its own. The raw
+    result is returned; callers validate its shape.
+
+    Unlike :func:`_invoke_row_lambda`, nothing is rewritten: a null test
+    selects rows rather than pairing them, so it is never part of a join
+    condition. The check reads bytecode, so it cannot tell a column from a
+    Python value and rejects an ``is None`` test on a closure value too. It
+    does not reach the functions ``fn`` calls: with a helper that returns
+    ``x is not None``, ``helper(r.x) and (l.id == r.id)`` is still captured
+    as ``l.id == r.id``.
+
+    Raises:
+        TypeError: If ``fn``, or a function it wraps (see
+            :func:`_called_code`), compares a value with ``None`` by identity.
+            Python evaluates such a test to a constant bool (a column is
+            never ``None``), and ``and`` / ``or`` / conditional expressions
+            would otherwise silently drop part of the condition.
+    """
+    code = _code_testing_identity_with_none(fn)
+    if code is not None:
+        raise TypeError(
+            f"{code.co_qualname!r} compares a value with None using 'is' / 'is not'. "
+            "Join conditions support only comparisons between a column of each "
+            "table: == (combined with &) for join, semi_join, anti_join and "
+            "link, and one of >=, >, <=, < for asof_join. Python evaluates an "
+            "identity test instead of capturing it, and a column is never None, "
+            "so 'and', 'or' or a conditional expression would silently drop "
+            "part of the condition.\n\n"
+            "To keep or drop rows with nulls, filter a table before the join or "
+            "the result after it:\n"
+            "  - .filter(lambda r: r.col.is_not_null())  instead of  r.col is not None\n"
+            "  - .filter(lambda r: r.col.is_null())      instead of  r.col is None\n"
+            "Test Python values (such as an optional parameter) before building "
+            "the condition."
+        )
+    return fn(SchemaProxy(left_schema), SchemaProxy(right_schema))
 
 
 def _none_check_hint(result: Any) -> str:

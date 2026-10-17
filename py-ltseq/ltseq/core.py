@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from .linking import LinkedTable
     from .partitioning import PartitionedTable, SQLPartitionedTable
 
-from .expr import SchemaProxy, _lambda_to_expr
+from .expr import _lambda_to_expr
 from ._typing import JoinHow
 
 # Import mixin classes
@@ -594,7 +594,9 @@ class LTSeq(
 
         Raises:
             ValueError: If schema is not initialized or join_type is invalid
-            TypeError: If join condition is invalid
+            TypeError: If join condition is invalid, or tests a value against
+                None with ``is`` / ``is not`` (filter nulls before or after
+                the link instead)
 
         Example:
             >>> orders = LTSeq.read_csv("orders.csv")
@@ -626,13 +628,6 @@ class LTSeq(
             raise ValueError(
                 "Target table schema not initialized. Call read_csv() first."
             )
-
-        try:
-            self_proxy = SchemaProxy(self._schema)
-            target_proxy = SchemaProxy(target_table._schema)
-            _ = on(self_proxy, target_proxy)
-        except Exception as e:
-            raise TypeError(f"Invalid join condition: {e}")
 
         from .linking import LinkedTable
 

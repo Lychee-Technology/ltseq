@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Callable
 
+from .expr.transforms import _invoke_condition_lambda
 from .helpers import _extract_join_keys
 
 if TYPE_CHECKING:
@@ -53,7 +54,18 @@ class LinkedTable:
             join_fn: Lambda specifying the equi-join condition
             alias: Prefix applied to every target column (e.g., "prod")
             join_type: One of "inner", "left", "right", "full". Default: "inner"
+
+        Raises:
+            TypeError: If ``join_fn`` fails on the two schemas or tests a
+                value against ``None`` with ``is`` / ``is not``. Checked here
+                so that ``LTSeq.link`` and a chained :meth:`link` both raise
+                at the call.
         """
+        try:
+            _invoke_condition_lambda(join_fn, source_table._schema, target_table._schema)
+        except Exception as e:
+            raise TypeError(f"Invalid join condition: {e}")
+
         self._source = source_table
         self._target = target_table
         self._join_fn = join_fn
@@ -200,6 +212,12 @@ class LinkedTable:
 
         Returns:
             A new ``LinkedTable`` layered on the current join plan.
+
+        Raises:
+            TypeError: If the join condition is invalid, or tests a value
+                against None with ``is`` / ``is not`` (filter nulls before or
+                after the link instead). Raised here, as by ``LTSeq.link``,
+                not when the join plan is first built.
         """
         if alias is not None and as_ is not None:
             raise ValueError("Pass either as_ or alias, not both")
