@@ -93,9 +93,10 @@ def m3() -> list[dict]:
     r3, r3_warmup = inputs.r3(), inputs.r3_warmup()
     for terminal in ("stream", "count", "write_parquet"):
         for p in sorted({*PARTITIONS, 2 * CPUS}):
-            # `count` needs no order, so the merge never applies to it; its
-            # cells show that, against #251's baseline comment.
-            modes = ("off", "interleaved") if terminal == "count" else ("off", "concat", "interleaved")
+            # `count` needs no order, so no merge applies to it, and the
+            # row-group split would only change its parallelism; its cells
+            # are today's, for #251's baseline comment.
+            modes = ("off",) if terminal == "count" else ("off", "concat", "interleaved")
             for mode in modes:
                 cells.append(
                     _cell("m3", "m3.r3_filter_select_derive", terminal, r3, r3_warmup, p,
