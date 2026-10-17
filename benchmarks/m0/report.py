@@ -24,7 +24,6 @@ RESULTS = HERE / "results"
 BASELINE = {"m1": "off", "m2": "off", "m3": "off", "m4": "today", "m4b": "pushdown", "m5": "off", "m6": "off"}
 
 
-
 def summarize(cell: dict) -> dict:
     result = cell["result"]
     runs = result.get("runs") or []

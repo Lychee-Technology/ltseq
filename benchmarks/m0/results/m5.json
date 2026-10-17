@@ -1,0 +1,2544 @@
+{
+ "host": {
+  "commit": "bfa963a97a0328424c19ad806f0f8639a6b847c8",
+  "worktree_dirty": false,
+  "branch": "bench/251-m0-feasibility",
+  "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+  "cpu_count": 12,
+  "memory_bytes": 29271183360,
+  "kernel": "7.2.8-200.fc44.x86_64",
+  "python": "3.13.15",
+  "pyarrow": "25.0.1",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "m0_build": {
+   "debug_assertions": false
+  },
+  "command": "python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4",
+  "started": "2026-10-17T17:22:35-0400"
+ },
+ "measurement": "m5",
+ "title": "assume_sorted validation without pruning (D7)",
+ "gates": "M3",
+ "cells": [
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03279446414671838,
+      "ttfr": 0.03162945993244648,
+      "rows_out": 659,
+      "peak_above": 22433792
+     },
+     {
+      "seconds": 0.013260318897664547,
+      "ttfr": 0.013205665862187743,
+      "rows_out": 659,
+      "peak_above": 12832768
+     },
+     {
+      "seconds": 0.008954445831477642,
+      "ttfr": 0.008884243899956346,
+      "rows_out": 659,
+      "peak_above": 0
+     }
+    ],
+    "wall": 0.2793677810113877,
+    "busy_before": 0.009983361150494903,
+    "quiet_wait": 1.0004199070390314,
+    "other_cores": 0.10132163565591921,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 7.603291380917653,
+      "ttfr": 7.600850322982296,
+      "rows_out": 659,
+      "peak_above": 42889216
+     },
+     {
+      "seconds": 7.5092970579862595,
+      "ttfr": 7.506427773041651,
+      "rows_out": 659,
+      "peak_above": 28213248
+     },
+     {
+      "seconds": 7.509991766186431,
+      "ttfr": 7.507129946025088,
+      "rows_out": 659,
+      "peak_above": 28000256
+     }
+    ],
+    "wall": 22.846199156949297,
+    "busy_before": 0.00916666661699613,
+    "quiet_wait": 1.0006114151328802,
+    "other_cores": 0.13393343810927272,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 8.02301606698893,
+      "ttfr": 8.020435055950657,
+      "rows_out": 659,
+      "peak_above": 37552128
+     },
+     {
+      "seconds": 7.990281546022743,
+      "ttfr": 7.987449551932514,
+      "rows_out": 659,
+      "peak_above": 28180480
+     },
+     {
+      "seconds": 8.011659475043416,
+      "ttfr": 8.008857577107847,
+      "rows_out": 659,
+      "peak_above": 28278784
+     }
+    ],
+    "wall": 24.247562679927796,
+    "busy_before": 0.004999999888241291,
+    "quiet_wait": 1.0006270960438997,
+    "other_cores": 0.12497532391198436,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03380317403934896,
+      "ttfr": 0.03253116784617305,
+      "rows_out": 659,
+      "peak_above": 22642688
+     },
+     {
+      "seconds": 0.01451631379313767,
+      "ttfr": 0.014472030801698565,
+      "rows_out": 659,
+      "peak_above": 15732736
+     },
+     {
+      "seconds": 0.009175213053822517,
+      "ttfr": 0.009118827059864998,
+      "rows_out": 659,
+      "peak_above": 0
+     }
+    ],
+    "wall": 0.275625062873587,
+    "busy_before": 0.02242524913397134,
+    "quiet_wait": 1.0005413829348981,
+    "other_cores": 0.0782802577658754,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 4.118870998034254,
+      "ttfr": 4.118845069082454,
+      "rows_out": 659,
+      "peak_above": 65277952
+     },
+     {
+      "seconds": 4.077058458002284,
+      "ttfr": 4.077034733025357,
+      "rows_out": 659,
+      "peak_above": 1662976
+     },
+     {
+      "seconds": 4.099047117168084,
+      "ttfr": 4.099024975206703,
+      "rows_out": 659,
+      "peak_above": 16257024
+     }
+    ],
+    "wall": 12.520057326881215,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0003590700216591,
+    "other_cores": 0.1662711236696562,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 4.468769935891032,
+      "ttfr": 4.468747153878212,
+      "rows_out": 659,
+      "peak_above": 88383488
+     },
+     {
+      "seconds": 4.387684259098023,
+      "ttfr": 4.38766013411805,
+      "rows_out": 659,
+      "peak_above": 1531904
+     },
+     {
+      "seconds": 4.369595787022263,
+      "ttfr": 4.369572361931205,
+      "rows_out": 659,
+      "peak_above": 258048
+     }
+    ],
+    "wall": 13.450252793962136,
+    "busy_before": 0.013300083138647549,
+    "quiet_wait": 1.000645480118692,
+    "other_cores": 0.17034014419978813,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03436759696342051,
+      "ttfr": 0.03331043594516814,
+      "rows_out": 659,
+      "peak_above": 22446080
+     },
+     {
+      "seconds": 0.015410989057272673,
+      "ttfr": 0.015313436044380069,
+      "rows_out": 659,
+      "peak_above": 15777792
+     },
+     {
+      "seconds": 0.015048877103254199,
+      "ttfr": 0.014954929938539863,
+      "rows_out": 659,
+      "peak_above": 15732736
+     }
+    ],
+    "wall": 0.2871019309386611,
+    "busy_before": 0.008312552076492667,
+    "quiet_wait": 1.0003251971211284,
+    "other_cores": 0.10527967658203019,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.519291474018246,
+      "ttfr": 2.519266056129709,
+      "rows_out": 659,
+      "peak_above": 146710528
+     },
+     {
+      "seconds": 2.4845711330417544,
+      "ttfr": 2.4845487100537866,
+      "rows_out": 659,
+      "peak_above": 14622720
+     },
+     {
+      "seconds": 2.4423427989240736,
+      "ttfr": 2.4423193249385804,
+      "rows_out": 659,
+      "peak_above": 2523136
+     }
+    ],
+    "wall": 7.6920818509534,
+    "busy_before": 0.005833333358168602,
+    "quiet_wait": 1.0005295611917973,
+    "other_cores": 0.3380915660702658,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.650224996963516,
+      "ttfr": 2.650199618889019,
+      "rows_out": 659,
+      "peak_above": 145543168
+     },
+     {
+      "seconds": 2.6096757061313838,
+      "ttfr": 2.6096555690746754,
+      "rows_out": 659,
+      "peak_above": 17436672
+     },
+     {
+      "seconds": 2.590703167952597,
+      "ttfr": 2.590681788045913,
+      "rows_out": 659,
+      "peak_above": 1994752
+     }
+    ],
+    "wall": 8.079653511987999,
+    "busy_before": 0.007481296744976724,
+    "quiet_wait": 1.000639150151983,
+    "other_cores": 0.17261581807633078,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03537743887864053,
+      "ttfr": 0.03375305002555251,
+      "rows_out": 659,
+      "peak_above": 23097344
+     },
+     {
+      "seconds": 0.015244013862684369,
+      "ttfr": 0.01506586791947484,
+      "rows_out": 659,
+      "peak_above": 16564224
+     },
+     {
+      "seconds": 0.015488965902477503,
+      "ttfr": 0.015263109933584929,
+      "rows_out": 659,
+      "peak_above": 15814656
+     }
+    ],
+    "wall": 0.28409185097552836,
+    "busy_before": 0.004987531369762277,
+    "quiet_wait": 1.0006299710366875,
+    "other_cores": 0.0881475488014446,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.4690577320288867,
+      "ttfr": 2.4466839770320803,
+      "rows_out": 659,
+      "peak_above": 377458688
+     },
+     {
+      "seconds": 2.415542687056586,
+      "ttfr": 2.3992806950118393,
+      "rows_out": 659,
+      "peak_above": 28143616
+     },
+     {
+      "seconds": 2.408683225978166,
+      "ttfr": 2.3880207538604736,
+      "rows_out": 659,
+      "peak_above": 12877824
+     }
+    ],
+    "wall": 7.538432127097622,
+    "busy_before": 0.007481296746135078,
+    "quiet_wait": 1.0006267549470067,
+    "other_cores": 0.5254290192640467,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.user_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.599464191123843,
+      "ttfr": 2.5585892270319164,
+      "rows_out": 659,
+      "peak_above": 381108224
+     },
+     {
+      "seconds": 2.548016571905464,
+      "ttfr": 2.520060403039679,
+      "rows_out": 659,
+      "peak_above": 29126656
+     },
+     {
+      "seconds": 2.5324861779809,
+      "ttfr": 2.462234928039834,
+      "rows_out": 659,
+      "peak_above": 20758528
+     }
+    ],
+    "wall": 7.930985312908888,
+    "busy_before": 0.007493755191728841,
+    "quiet_wait": 1.0006247411947697,
+    "other_cores": 0.6455829630685436,
+    "attempt": 4
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.0900055128149688,
+      "ttfr": 0.0397859129589051,
+      "rows_out": 738172,
+      "peak_above": 5423104
+     },
+     {
+      "seconds": 1.0759655460715294,
+      "ttfr": 0.023232912179082632,
+      "rows_out": 738172,
+      "peak_above": 16384
+     },
+     {
+      "seconds": 1.0758216250687838,
+      "ttfr": 0.025739384116604924,
+      "rows_out": 738172,
+      "peak_above": 8192
+     }
+    ],
+    "wall": 3.4648713578935713,
+    "busy_before": 0.010833333401630322,
+    "quiet_wait": 1.0006086209323257,
+    "other_cores": 0.09751040244304171,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.2952313779387623,
+      "ttfr": 0.04800285003148019,
+      "rows_out": 738172,
+      "peak_above": 6168576
+     },
+     {
+      "seconds": 1.266476133139804,
+      "ttfr": 0.03176783910021186,
+      "rows_out": 738172,
+      "peak_above": 176128
+     },
+     {
+      "seconds": 1.2680135190021247,
+      "ttfr": 0.03181408694945276,
+      "rows_out": 738172,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 4.05358867906034,
+    "busy_before": 0.006655573894745086,
+    "quiet_wait": 1.0005641060415655,
+    "other_cores": 0.11473783765461538,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.897533736890182,
+      "ttfr": 0.06266905693337321,
+      "rows_out": 738172,
+      "peak_above": 6344704
+     },
+     {
+      "seconds": 1.8689851409289986,
+      "ttfr": 0.045410376973450184,
+      "rows_out": 738172,
+      "peak_above": 90112
+     },
+     {
+      "seconds": 1.8645291069988161,
+      "ttfr": 0.04488031892105937,
+      "rows_out": 738172,
+      "peak_above": 0
+     }
+    ],
+    "wall": 5.860430984990671,
+    "busy_before": 0.008312551922946382,
+    "quiet_wait": 1.0006513320840895,
+    "other_cores": 0.10262316925739935,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5863524149172008,
+      "ttfr": 0.033418769016861916,
+      "rows_out": 738172,
+      "peak_above": 24653824
+     },
+     {
+      "seconds": 0.5667440898250788,
+      "ttfr": 0.01485908986069262,
+      "rows_out": 738172,
+      "peak_above": 1785856
+     },
+     {
+      "seconds": 0.5756495338864625,
+      "ttfr": 0.014377020997926593,
+      "rows_out": 738172,
+      "peak_above": 401408
+     }
+    ],
+    "wall": 1.9529718630947173,
+    "busy_before": 0.010806317453380293,
+    "quiet_wait": 1.0005892950575799,
+    "other_cores": 0.19720509408137651,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.68654417200014,
+      "ttfr": 0.0497971607837826,
+      "rows_out": 738172,
+      "peak_above": 22261760
+     },
+     {
+      "seconds": 0.6713184518739581,
+      "ttfr": 0.03302190196700394,
+      "rows_out": 738172,
+      "peak_above": 225280
+     },
+     {
+      "seconds": 0.6722436149138957,
+      "ttfr": 0.03293914580717683,
+      "rows_out": 738172,
+      "peak_above": 237568
+     }
+    ],
+    "wall": 2.2677708950359374,
+    "busy_before": 0.0050000000434617204,
+    "quiet_wait": 1.0006593270227313,
+    "other_cores": 0.13052905857817396,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.0154897619504482,
+      "ttfr": 0.06614077603444457,
+      "rows_out": 738172,
+      "peak_above": 22065152
+     },
+     {
+      "seconds": 1.0419944780878723,
+      "ttfr": 0.04944279417395592,
+      "rows_out": 738172,
+      "peak_above": 495616
+     },
+     {
+      "seconds": 0.9871459708083421,
+      "ttfr": 0.04571286588907242,
+      "rows_out": 738172,
+      "peak_above": 634880
+     }
+    ],
+    "wall": 3.2693173731677234,
+    "busy_before": 0.009975062429857863,
+    "quiet_wait": 1.0006333768833429,
+    "other_cores": 0.12864275649262272,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.37302596191875637,
+      "ttfr": 0.026878679869696498,
+      "rows_out": 738172,
+      "peak_above": 40845312
+     },
+     {
+      "seconds": 0.3610395628493279,
+      "ttfr": 0.009058092953637242,
+      "rows_out": 738172,
+      "peak_above": 2805760
+     },
+     {
+      "seconds": 0.3667337601073086,
+      "ttfr": 0.00975705892778933,
+      "rows_out": 738172,
+      "peak_above": 4030464
+     }
+    ],
+    "wall": 1.3255352799315006,
+    "busy_before": 0.0066611158972716515,
+    "quiet_wait": 1.000380289973691,
+    "other_cores": 0.15662427316703556,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.43939511897042394,
+      "ttfr": 0.05729823000729084,
+      "rows_out": 738172,
+      "peak_above": 37285888
+     },
+     {
+      "seconds": 0.43049858091399074,
+      "ttfr": 0.04137093783356249,
+      "rows_out": 738172,
+      "peak_above": 1474560
+     },
+     {
+      "seconds": 0.4229720029979944,
+      "ttfr": 0.04119066894054413,
+      "rows_out": 738172,
+      "peak_above": 761856
+     }
+    ],
+    "wall": 1.5211772320326418,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0006315631326288,
+    "other_cores": 0.18674418388798264,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6225359418895096,
+      "ttfr": 0.0733674590010196,
+      "rows_out": 738172,
+      "peak_above": 41652224
+     },
+     {
+      "seconds": 0.6140453899279237,
+      "ttfr": 0.05835670395754278,
+      "rows_out": 738172,
+      "peak_above": 1306624
+     },
+     {
+      "seconds": 0.6118978639133275,
+      "ttfr": 0.05783114396035671,
+      "rows_out": 738172,
+      "peak_above": 73728
+     }
+    ],
+    "wall": 2.070569444913417,
+    "busy_before": 0.004170141846882899,
+    "quiet_wait": 1.000558007042855,
+    "other_cores": 0.1781046267816181,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.37879321607761085,
+      "ttfr": 0.029331891098991036,
+      "rows_out": 738172,
+      "peak_above": 156041216
+     },
+     {
+      "seconds": 0.3610975728370249,
+      "ttfr": 0.008489390835165977,
+      "rows_out": 738172,
+      "peak_above": 22020096
+     },
+     {
+      "seconds": 0.35714595997706056,
+      "ttfr": 0.00841232598759234,
+      "rows_out": 738172,
+      "peak_above": 15659008
+     }
+    ],
+    "wall": 1.3255227161571383,
+    "busy_before": 0.009983360997079787,
+    "quiet_wait": 1.0005967780016363,
+    "other_cores": 0.39264887370132134,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.4634272570256144,
+      "ttfr": 0.11817588307894766,
+      "rows_out": 738172,
+      "peak_above": 125657088
+     },
+     {
+      "seconds": 0.44789099181070924,
+      "ttfr": 0.11049540503881872,
+      "rows_out": 738172,
+      "peak_above": 10571776
+     },
+     {
+      "seconds": 0.44869165983982384,
+      "ttfr": 0.10307439579628408,
+      "rows_out": 738172,
+      "peak_above": 4075520
+     }
+    ],
+    "wall": 1.585724936099723,
+    "busy_before": 0.008326394640244135,
+    "quiet_wait": 1.000629090005532,
+    "other_cores": 0.37915466025460237,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.counter_events",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.534723293967545,
+      "ttfr": 0.13884936389513314,
+      "rows_out": 738172,
+      "peak_above": 130916352
+     },
+     {
+      "seconds": 0.5132548150140792,
+      "ttfr": 0.12600991898216307,
+      "rows_out": 738172,
+      "peak_above": 10280960
+     },
+     {
+      "seconds": 0.5133778958115727,
+      "ttfr": 0.11585790594108403,
+      "rows_out": 738172,
+      "peak_above": 10514432
+     }
+    ],
+    "wall": 1.7893991000019014,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0003539398312569,
+    "other_cores": 0.2781050900070818,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.0550972679629922,
+      "ttfr": 0.01893412508070469,
+      "rows_out": 99997497,
+      "peak_above": 5480448
+     },
+     {
+      "seconds": 1.0312445180024952,
+      "ttfr": 0.0017879980150610209,
+      "rows_out": 99997497,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 1.022466192021966,
+      "ttfr": 0.001817433163523674,
+      "rows_out": 99997497,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 3.319883822929114,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0003539000172168,
+    "other_cores": 0.0816459292879955,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.053635184187442,
+      "ttfr": 0.018787860171869397,
+      "rows_out": 99997497,
+      "peak_above": 5517312
+     },
+     {
+      "seconds": 1.0240240460261703,
+      "ttfr": 0.0017948001623153687,
+      "rows_out": 99997497,
+      "peak_above": 8192
+     },
+     {
+      "seconds": 1.0326145780272782,
+      "ttfr": 0.0017683510668575764,
+      "rows_out": 99997497,
+      "peak_above": 0
+     }
+    ],
+    "wall": 3.321849287021905,
+    "busy_before": 0.010000000086923441,
+    "quiet_wait": 1.0004447598475963,
+    "other_cores": 0.0807327409573356,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 1,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.6748775490559638,
+      "ttfr": 0.01821364788338542,
+      "rows_out": 99997497,
+      "peak_above": 5455872
+     },
+     {
+      "seconds": 1.6370519399642944,
+      "ttfr": 0.001926609082147479,
+      "rows_out": 99997497,
+      "peak_above": 155648
+     },
+     {
+      "seconds": 1.6480313709471375,
+      "ttfr": 0.00208873488008976,
+      "rows_out": 99997497,
+      "peak_above": 356352
+     }
+    ],
+    "wall": 5.173200117889792,
+    "busy_before": 0.0041666665735344095,
+    "quiet_wait": 1.000644019106403,
+    "other_cores": 0.10463272032442435,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5667928620241582,
+      "ttfr": 0.01925092190504074,
+      "rows_out": 99997497,
+      "peak_above": 20377600
+     },
+     {
+      "seconds": 0.5431752239819616,
+      "ttfr": 0.0020906778518110514,
+      "rows_out": 99997497,
+      "peak_above": 49152
+     },
+     {
+      "seconds": 0.5474113640375435,
+      "ttfr": 0.002086549997329712,
+      "rows_out": 99997497,
+      "peak_above": 188416
+     }
+    ],
+    "wall": 1.8717308638151735,
+    "busy_before": 0.004999999888241291,
+    "quiet_wait": 1.000729297986254,
+    "other_cores": 0.12453499801187401,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5555529599078,
+      "ttfr": 0.018897716887295246,
+      "rows_out": 99997497,
+      "peak_above": 20037632
+     },
+     {
+      "seconds": 0.5359870239626616,
+      "ttfr": 0.0020900580566376448,
+      "rows_out": 99997497,
+      "peak_above": 1241088
+     },
+     {
+      "seconds": 0.5387709278147668,
+      "ttfr": 0.002132376888766885,
+      "rows_out": 99997497,
+      "peak_above": 0
+     }
+    ],
+    "wall": 1.8441879409365356,
+    "busy_before": 0.007493755191728841,
+    "quiet_wait": 1.000357487006113,
+    "other_cores": 0.12317020186853221,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 2,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.8784192679449916,
+      "ttfr": 0.01972840097732842,
+      "rows_out": 99997497,
+      "peak_above": 17080320
+     },
+     {
+      "seconds": 0.8585553909651935,
+      "ttfr": 0.002662596059963107,
+      "rows_out": 99997497,
+      "peak_above": 4661248
+     },
+     {
+      "seconds": 0.8665473549626768,
+      "ttfr": 0.0022864770144224167,
+      "rows_out": 99997497,
+      "peak_above": 483328
+     }
+    ],
+    "wall": 2.817643345100805,
+    "busy_before": 0.008312551922946382,
+    "quiet_wait": 1.0003263580147177,
+    "other_cores": 0.09632340453880732,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.39050371409393847,
+      "ttfr": 0.019241925096139312,
+      "rows_out": 99997497,
+      "peak_above": 35053568
+     },
+     {
+      "seconds": 0.37466700305230916,
+      "ttfr": 0.002581181935966015,
+      "rows_out": 99997497,
+      "peak_above": 585728
+     },
+     {
+      "seconds": 0.37381635000929236,
+      "ttfr": 0.0025813321117311716,
+      "rows_out": 99997497,
+      "peak_above": 319488
+     }
+    ],
+    "wall": 1.3541986818891019,
+    "busy_before": 0.009975062276568988,
+    "quiet_wait": 1.000629120040685,
+    "other_cores": 0.13325444855167837,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3851688648574054,
+      "ttfr": 0.019213701831176877,
+      "rows_out": 99997497,
+      "peak_above": 35209216
+     },
+     {
+      "seconds": 0.37119252793490887,
+      "ttfr": 0.002560883993282914,
+      "rows_out": 99997497,
+      "peak_above": 393216
+     },
+     {
+      "seconds": 0.37415094999596477,
+      "ttfr": 0.002730873180553317,
+      "rows_out": 99997497,
+      "peak_above": 221184
+     }
+    ],
+    "wall": 1.3431072998791933,
+    "busy_before": 0.013300082983814203,
+    "quiet_wait": 1.0007451879791915,
+    "other_cores": 0.16841990385267663,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 4,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5650791239459068,
+      "ttfr": 0.019593907985836267,
+      "rows_out": 99997497,
+      "peak_above": 37490688
+     },
+     {
+      "seconds": 0.5582116679288447,
+      "ttfr": 0.0028491660486906767,
+      "rows_out": 99997497,
+      "peak_above": 1310720
+     },
+     {
+      "seconds": 0.5657326651271433,
+      "ttfr": 0.0028707070741802454,
+      "rows_out": 99997497,
+      "peak_above": 348160
+     }
+    ],
+    "wall": 1.9029508109670132,
+    "busy_before": 0.009143807253175264,
+    "quiet_wait": 1.0005410441663116,
+    "other_cores": 0.11193773283625867,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5113834789954126,
+      "ttfr": 0.022229783004149795,
+      "rows_out": 99997497,
+      "peak_above": 148627456
+     },
+     {
+      "seconds": 0.4894915330223739,
+      "ttfr": 0.00634661503136158,
+      "rows_out": 99997497,
+      "peak_above": 9138176
+     },
+     {
+      "seconds": 0.49167549586854875,
+      "ttfr": 0.004229355836287141,
+      "rows_out": 99997497,
+      "peak_above": 6832128
+     }
+    ],
+    "wall": 1.715673886006698,
+    "busy_before": 0.00916666661699613,
+    "quiet_wait": 1.000394978094846,
+    "other_cores": 0.3493426144575934,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "prune_off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "prune_off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5075547879096121,
+      "ttfr": 0.021587282884866,
+      "rows_out": 99997497,
+      "peak_above": 153387008
+     },
+     {
+      "seconds": 0.49040789995342493,
+      "ttfr": 0.005739601794630289,
+      "rows_out": 99997497,
+      "peak_above": 10444800
+     },
+     {
+      "seconds": 0.49117077491246164,
+      "ttfr": 0.006484373938292265,
+      "rows_out": 99997497,
+      "peak_above": 4952064
+     }
+    ],
+    "wall": 1.7138267171103507,
+    "busy_before": 0.03158769733816292,
+    "quiet_wait": 1.000626805005595,
+    "other_cores": 0.2981468274090114,
+    "attempt": 4
+   }
+  },
+  {
+   "measurement": "m5",
+   "pipeline": "m5.keys",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sorted.parquet",
+    "rows": 99997497,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ],
+    "warm_columns": [
+     "userid",
+     "eventtime",
+     "watchid",
+     "counterid",
+     "url"
+    ]
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sorted.parquet",
+    "rows": 10000,
+    "sorted_by": [
+     "userid",
+     "eventtime",
+     "watchid"
+    ]
+   },
+   "partitions": 12,
+   "flags": {
+    "validate": "validate"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "hits_sorted",
+    "mode": "validate"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6006856840103865,
+      "ttfr": 0.021698663011193275,
+      "rows_out": 99997497,
+      "peak_above": 166608896
+     },
+     {
+      "seconds": 0.5814706289675087,
+      "ttfr": 0.005816546035930514,
+      "rows_out": 99997497,
+      "peak_above": 11317248
+     },
+     {
+      "seconds": 0.5791518120095134,
+      "ttfr": 0.007220541127026081,
+      "rows_out": 99997497,
+      "peak_above": 1335296
+     }
+    ],
+    "wall": 1.9851834389846772,
+    "busy_before": 0.011627907025314282,
+    "quiet_wait": 1.000325398053974,
+    "other_cores": 0.4457059150386004,
+    "attempt": 1
+   }
+  }
+ ]
+}

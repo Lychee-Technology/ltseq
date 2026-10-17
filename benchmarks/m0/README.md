@@ -6,7 +6,7 @@ per-cell tables are under [results/](results/).
 
 | | Measurement | Prototype (`src/m0/`) | Gates |
 |---|---|---|---|
-| m1 | Checked integer `+ - * **` and `sum` (`//`, `%` and `abs` already raise today and are timed as controls) | `checked.rs` | M5, #221 |
+| m1 | Checked integer `+ - * **` and `sum` (`//` and `%` already raise today and are timed as controls) | `checked.rs` | M5, #221 |
 | m2 | Exact Σx, Σx², Σab: sum, mean, var, std, cov, corr, rolling | `exact.rs`, `exact_acc.rs` | M13, M4, OD-W |
 | m3 | Order-preserving merge, including TTFR with a slow partition | `ordered.rs` | M1, #148 |
 | m4 | Masked `&`/`\|` with fallible operands (D10) | `masked.rs` | M16, #252 |
@@ -58,6 +58,9 @@ python benchmarks/m0/report.py                     # results/<m>.md
 `--partitions`, `--pipeline` and `--repeat` to run a subset. Rust unit
 tests: `cargo test --features m0 --lib m0::`. The exact accumulator's
 reference tests run on their own in [exact_acc/](exact_acc/).
+`py-ltseq/tests/test_m0_prototypes.py` checks the Python switch on either
+build: a default build refuses it, and a measurement build applies and
+restores exactly the flags a block names.
 
 ## Method
 

@@ -1,0 +1,7824 @@
+{
+ "host": {
+  "commit": "bfa963a97a0328424c19ad806f0f8639a6b847c8",
+  "worktree_dirty": false,
+  "branch": "bench/251-m0-feasibility",
+  "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+  "cpu_count": 12,
+  "memory_bytes": 29271183360,
+  "kernel": "7.2.8-200.fc44.x86_64",
+  "python": "3.13.15",
+  "pyarrow": "25.0.1",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "m0_build": {
+   "debug_assertions": false
+  },
+  "command": "python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4",
+  "started": "2026-10-17T17:22:35-0400"
+ },
+ "measurement": "m6",
+ "title": "string_view normalized to string",
+ "gates": "M18",
+ "cells": [
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.46499286009930074,
+      "ttfr": 0.02723854500800371,
+      "rows_out": 1000000,
+      "peak_above": 100130816
+     },
+     {
+      "seconds": 0.4076873811427504,
+      "ttfr": 0.016581268049776554,
+      "rows_out": 1000000,
+      "peak_above": 69902336
+     },
+     {
+      "seconds": 0.41728143603540957,
+      "ttfr": 0.022859546123072505,
+      "rows_out": 1000000,
+      "peak_above": 83947520
+     },
+     {
+      "seconds": 0.39158681803382933,
+      "ttfr": 0.01598288002423942,
+      "rows_out": 1000000,
+      "peak_above": 4890624
+     },
+     {
+      "seconds": 0.41056491201743484,
+      "ttfr": 0.023170662112534046,
+      "rows_out": 1000000,
+      "peak_above": 85250048
+     }
+    ],
+    "wall": 2.24915206595324,
+    "busy_before": 0.015806988309943898,
+    "quiet_wait": 1.0005818360950798,
+    "other_cores": 0.20305118865027827,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5163178520742804,
+      "ttfr": 0.029399867169559002,
+      "rows_out": 1000000,
+      "peak_above": 75399168
+     },
+     {
+      "seconds": 0.46097095287404954,
+      "ttfr": 0.01715363678522408,
+      "rows_out": 1000000,
+      "peak_above": 22900736
+     },
+     {
+      "seconds": 0.46541110798716545,
+      "ttfr": 0.019406580133363605,
+      "rows_out": 1000000,
+      "peak_above": 31076352
+     },
+     {
+      "seconds": 0.4828121098689735,
+      "ttfr": 0.01706745382398367,
+      "rows_out": 1000000,
+      "peak_above": 22331392
+     },
+     {
+      "seconds": 0.4759162680711597,
+      "ttfr": 0.017000546911731362,
+      "rows_out": 1000000,
+      "peak_above": 22478848
+     }
+    ],
+    "wall": 2.561605551978573,
+    "busy_before": 0.005838198523496103,
+    "quiet_wait": 1.000332677969709,
+    "other_cores": 0.2012792325614792,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5672523989342153,
+      "ttfr": 0.03185551310889423,
+      "rows_out": 1000000,
+      "peak_above": 70651904
+     },
+     {
+      "seconds": 0.5176366069354117,
+      "ttfr": 0.018776042852550745,
+      "rows_out": 1000000,
+      "peak_above": 5292032
+     },
+     {
+      "seconds": 0.5218156101182103,
+      "ttfr": 0.018668120028451085,
+      "rows_out": 1000000,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 0.5215513410512358,
+      "ttfr": 0.01882277987897396,
+      "rows_out": 1000000,
+      "peak_above": 10735616
+     },
+     {
+      "seconds": 0.5277241610456258,
+      "ttfr": 0.01872641919180751,
+      "rows_out": 1000000,
+      "peak_above": 11034624
+     }
+    ],
+    "wall": 2.8205863020848483,
+    "busy_before": 0.054771784241344684,
+    "quiet_wait": 1.0002836352214217,
+    "other_cores": 0.11076987843172954,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.322453886969015,
+      "ttfr": 0.029995619086548686,
+      "rows_out": 1000000,
+      "peak_above": 148488192
+     },
+     {
+      "seconds": 0.26827068999409676,
+      "ttfr": 0.02317303605377674,
+      "rows_out": 1000000,
+      "peak_above": 107491328
+     },
+     {
+      "seconds": 0.2884137290529907,
+      "ttfr": 0.016866485122591257,
+      "rows_out": 1000000,
+      "peak_above": 80564224
+     },
+     {
+      "seconds": 0.27278143889270723,
+      "ttfr": 0.01691419491544366,
+      "rows_out": 1000000,
+      "peak_above": 29614080
+     },
+     {
+      "seconds": 0.27679696399718523,
+      "ttfr": 0.02381455502472818,
+      "rows_out": 1000000,
+      "peak_above": 81522688
+     }
+    ],
+    "wall": 1.5938771080691367,
+    "busy_before": 0.011656952434305316,
+    "quiet_wait": 1.0002837961073965,
+    "other_cores": 0.1384372729280365,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3494901619851589,
+      "ttfr": 0.03306294814683497,
+      "rows_out": 1000000,
+      "peak_above": 147652608
+     },
+     {
+      "seconds": 0.27739539090543985,
+      "ttfr": 0.018118083011358976,
+      "rows_out": 1000000,
+      "peak_above": 27267072
+     },
+     {
+      "seconds": 0.27532369806431234,
+      "ttfr": 0.018263978185132146,
+      "rows_out": 1000000,
+      "peak_above": 9699328
+     },
+     {
+      "seconds": 0.2840099430177361,
+      "ttfr": 0.018056348199024796,
+      "rows_out": 1000000,
+      "peak_above": 31240192
+     },
+     {
+      "seconds": 0.27266346709802747,
+      "ttfr": 0.018675754079595208,
+      "rows_out": 1000000,
+      "peak_above": 20324352
+     }
+    ],
+    "wall": 1.6271875218953937,
+    "busy_before": 0.00996677749447074,
+    "quiet_wait": 1.000590424053371,
+    "other_cores": 0.21564509065422205,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.4229815430007875,
+      "ttfr": 0.03560643992386758,
+      "rows_out": 1000000,
+      "peak_above": 151838720
+     },
+     {
+      "seconds": 0.35548902302980423,
+      "ttfr": 0.019934595096856356,
+      "rows_out": 1000000,
+      "peak_above": 22863872
+     },
+     {
+      "seconds": 0.3420106910634786,
+      "ttfr": 0.020305223995819688,
+      "rows_out": 1000000,
+      "peak_above": 28786688
+     },
+     {
+      "seconds": 0.33882040111348033,
+      "ttfr": 0.020309532061219215,
+      "rows_out": 1000000,
+      "peak_above": 8622080
+     },
+     {
+      "seconds": 0.3378415768966079,
+      "ttfr": 0.02072219899855554,
+      "rows_out": 1000000,
+      "peak_above": 25956352
+     }
+    ],
+    "wall": 1.9639425328932703,
+    "busy_before": 0.013266998355456389,
+    "quiet_wait": 1.000480977119878,
+    "other_cores": 0.25062749737718887,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.18186782486736774,
+      "ttfr": 0.032668975880369544,
+      "rows_out": 1000000,
+      "peak_above": 194875392
+     },
+     {
+      "seconds": 0.1780150569975376,
+      "ttfr": 0.025679218117147684,
+      "rows_out": 1000000,
+      "peak_above": 121815040
+     },
+     {
+      "seconds": 0.17059511807747185,
+      "ttfr": 0.025927715934813023,
+      "rows_out": 1000000,
+      "peak_above": 139710464
+     },
+     {
+      "seconds": 0.16610859497450292,
+      "ttfr": 0.02534638997167349,
+      "rows_out": 1000000,
+      "peak_above": 115666944
+     },
+     {
+      "seconds": 0.1691509981174022,
+      "ttfr": 0.019918525125831366,
+      "rows_out": 1000000,
+      "peak_above": 70598656
+     }
+    ],
+    "wall": 1.0278146020136774,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0002820629160851,
+    "other_cores": 0.20049238354877089,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.20599148096516728,
+      "ttfr": 0.032306703040376306,
+      "rows_out": 1000000,
+      "peak_above": 236998656
+     },
+     {
+      "seconds": 0.18136158003471792,
+      "ttfr": 0.023595221107825637,
+      "rows_out": 1000000,
+      "peak_above": 97591296
+     },
+     {
+      "seconds": 0.1985135341528803,
+      "ttfr": 0.02206956804729998,
+      "rows_out": 1000000,
+      "peak_above": 65609728
+     },
+     {
+      "seconds": 0.1664674209896475,
+      "ttfr": 0.02177929994650185,
+      "rows_out": 1000000,
+      "peak_above": 61321216
+     },
+     {
+      "seconds": 0.1628370920661837,
+      "ttfr": 0.023458985146135092,
+      "rows_out": 1000000,
+      "peak_above": 32849920
+     }
+    ],
+    "wall": 1.1094233570620418,
+    "busy_before": 0.014975041573100761,
+    "quiet_wait": 1.0002508740872145,
+    "other_cores": 0.4095145455255084,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.25513618695549667,
+      "ttfr": 0.036724716890603304,
+      "rows_out": 1000000,
+      "peak_above": 223035392
+     },
+     {
+      "seconds": 0.22399575100280344,
+      "ttfr": 0.03254065406508744,
+      "rows_out": 1000000,
+      "peak_above": 164679680
+     },
+     {
+      "seconds": 0.2405213329475373,
+      "ttfr": 0.02236818987876177,
+      "rows_out": 1000000,
+      "peak_above": 128782336
+     },
+     {
+      "seconds": 0.22268249583430588,
+      "ttfr": 0.03278836980462074,
+      "rows_out": 1000000,
+      "peak_above": 91508736
+     },
+     {
+      "seconds": 0.23357279296033084,
+      "ttfr": 0.03365611587651074,
+      "rows_out": 1000000,
+      "peak_above": 107515904
+     }
+    ],
+    "wall": 1.3684293830301613,
+    "busy_before": 0.00915903408875943,
+    "quiet_wait": 1.0005619591102004,
+    "other_cores": 0.15032562393833598,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.12053668103180826,
+      "ttfr": 0.04437886597588658,
+      "rows_out": 1000000,
+      "peak_above": 420851712
+     },
+     {
+      "seconds": 0.10757475206628442,
+      "ttfr": 0.04522610316053033,
+      "rows_out": 1000000,
+      "peak_above": 376020992
+     },
+     {
+      "seconds": 0.10005056695081294,
+      "ttfr": 0.03504848782904446,
+      "rows_out": 1000000,
+      "peak_above": 215724032
+     },
+     {
+      "seconds": 0.10349656990729272,
+      "ttfr": 0.03358131507411599,
+      "rows_out": 1000000,
+      "peak_above": 210288640
+     },
+     {
+      "seconds": 0.11153001384809613,
+      "ttfr": 0.04025486693717539,
+      "rows_out": 1000000,
+      "peak_above": 186990592
+     }
+    ],
+    "wall": 0.7225903437938541,
+    "busy_before": 0.01245847163795869,
+    "quiet_wait": 1.000565896043554,
+    "other_cores": 0.3347180060026156,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.13343648402951658,
+      "ttfr": 0.04748629103414714,
+      "rows_out": 1000000,
+      "peak_above": 480407552
+     },
+     {
+      "seconds": 0.11799701699055731,
+      "ttfr": 0.03665786096826196,
+      "rows_out": 1000000,
+      "peak_above": 371363840
+     },
+     {
+      "seconds": 0.12234983802773058,
+      "ttfr": 0.036484593991190195,
+      "rows_out": 1000000,
+      "peak_above": 194740224
+     },
+     {
+      "seconds": 0.11752518801949918,
+      "ttfr": 0.04115905985236168,
+      "rows_out": 1000000,
+      "peak_above": 132739072
+     },
+     {
+      "seconds": 0.12105894600972533,
+      "ttfr": 0.044061388121917844,
+      "rows_out": 1000000,
+      "peak_above": 137187328
+     }
+    ],
+    "wall": 0.8079859521239996,
+    "busy_before": 0.01747088209084716,
+    "quiet_wait": 1.0002136130351573,
+    "other_cores": 0.3465183983116683,
+    "attempt": 3
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.18046658509410918,
+      "ttfr": 0.053442832082509995,
+      "rows_out": 1000000,
+      "peak_above": 535613440
+     },
+     {
+      "seconds": 0.15531405992805958,
+      "ttfr": 0.04567311494611204,
+      "rows_out": 1000000,
+      "peak_above": 421376000
+     },
+     {
+      "seconds": 0.16068917512893677,
+      "ttfr": 0.043907608138397336,
+      "rows_out": 1000000,
+      "peak_above": 304562176
+     },
+     {
+      "seconds": 0.15297642489895225,
+      "ttfr": 0.04434716608375311,
+      "rows_out": 1000000,
+      "peak_above": 299556864
+     },
+     {
+      "seconds": 0.1558279769960791,
+      "ttfr": 0.0485821939073503,
+      "rows_out": 1000000,
+      "peak_above": 308215808
+     }
+    ],
+    "wall": 0.9857005330268294,
+    "busy_before": 0.011627907025314282,
+    "quiet_wait": 1.0005522300489247,
+    "other_cores": 0.30878546699098547,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7088476230856031,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 762343424
+     },
+     {
+      "seconds": 0.5972105672117323,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 545845248
+     },
+     {
+      "seconds": 0.5281492718495429,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 350363648
+     },
+     {
+      "seconds": 0.5226096459664404,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 345300992
+     },
+     {
+      "seconds": 0.5280657738912851,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 344576000
+     }
+    ],
+    "wall": 3.067510758060962,
+    "busy_before": 0.011627907027113173,
+    "quiet_wait": 1.0005699140019715,
+    "other_cores": 0.1620196437753303,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6351249651052058,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 500834304
+     },
+     {
+      "seconds": 0.44466736796312034,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 61386752
+     },
+     {
+      "seconds": 0.4268806199543178,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 7544832
+     },
+     {
+      "seconds": 0.42499405588023365,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 2134016
+     },
+     {
+      "seconds": 0.4274565239902586,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 86016
+     }
+    ],
+    "wall": 2.560999814188108,
+    "busy_before": 0.008326394640244135,
+    "quiet_wait": 1.0005667661316693,
+    "other_cores": 0.20592035846892834,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7401970231439918,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 483852288
+     },
+     {
+      "seconds": 0.5444768008310348,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 65687552
+     },
+     {
+      "seconds": 0.5442804209887981,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 65548288
+     },
+     {
+      "seconds": 0.5437763519585133,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 65630208
+     },
+     {
+      "seconds": 0.5283600480761379,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 23891968
+     }
+    ],
+    "wall": 3.099238110007718,
+    "busy_before": 0.018272425306220023,
+    "quiet_wait": 1.0006008129566908,
+    "other_cores": 0.16874340744962746,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.4390521999448538,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 794255360
+     },
+     {
+      "seconds": 0.36026606312952936,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 449212416
+     },
+     {
+      "seconds": 0.26477085798978806,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 172597248
+     },
+     {
+      "seconds": 0.42007737304084003,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 600027136
+     },
+     {
+      "seconds": 0.3457065939437598,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 313442304
+     }
+    ],
+    "wall": 2.060791508993134,
+    "busy_before": 0.011656952589396502,
+    "quiet_wait": 1.0002565239556134,
+    "other_cores": 0.1571585481361235,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.412098309956491,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 565080064
+     },
+     {
+      "seconds": 0.2924261479638517,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 99147776
+     },
+     {
+      "seconds": 0.32674960093572736,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 151773184
+     },
+     {
+      "seconds": 0.2771259529981762,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 25034752
+     },
+     {
+      "seconds": 0.2737133940681815,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 3301376
+     }
+    ],
+    "wall": 1.7889175300952047,
+    "busy_before": 0.011627906872408427,
+    "quiet_wait": 1.0002918411046267,
+    "other_cores": 0.12049297741606907,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.48126680799759924,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 561672192
+     },
+     {
+      "seconds": 0.41217062692157924,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 196804608
+     },
+     {
+      "seconds": 0.3579132698941976,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 67833856
+     },
+     {
+      "seconds": 0.3590150859672576,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 65642496
+     },
+     {
+      "seconds": 0.37077183509245515,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 111255552
+     }
+    ],
+    "wall": 2.1784089100547135,
+    "busy_before": 0.04635761593692771,
+    "quiet_wait": 1.000677146948874,
+    "other_cores": 0.18554413611872903,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.25738481315784156,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 802451456
+     },
+     {
+      "seconds": 0.2171763030346483,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 473690112
+     },
+     {
+      "seconds": 0.18977953982539475,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 393601024
+     },
+     {
+      "seconds": 0.20576722896657884,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 272584704
+     },
+     {
+      "seconds": 0.20176235493272543,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 233545728
+     }
+    ],
+    "wall": 1.2578631239011884,
+    "busy_before": 0.009174311876722513,
+    "quiet_wait": 1.0005650261882693,
+    "other_cores": 0.15357632853835188,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.26001566904596984,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 631320576
+     },
+     {
+      "seconds": 0.19263104209676385,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 261910528
+     },
+     {
+      "seconds": 0.1913777799345553,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 195366912
+     },
+     {
+      "seconds": 0.19386353297159076,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 146280448
+     },
+     {
+      "seconds": 0.1767543109599501,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 68202496
+     }
+    ],
+    "wall": 1.233896714169532,
+    "busy_before": 0.013300083138647549,
+    "quiet_wait": 1.0002896869555116,
+    "other_cores": 0.18980113793775222,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3070412720553577,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 648060928
+     },
+     {
+      "seconds": 0.24830555799417198,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 274120704
+     },
+     {
+      "seconds": 0.25227443501353264,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 165773312
+     },
+     {
+      "seconds": 0.26167699811048806,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 119259136
+     },
+     {
+      "seconds": 0.23971587582491338,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 98353152
+     }
+    ],
+    "wall": 1.5117575731128454,
+    "busy_before": 0.01413133831327085,
+    "quiet_wait": 1.0006322520785034,
+    "other_cores": 0.3883440114602306,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.15984203992411494,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 809013248
+     },
+     {
+      "seconds": 0.1352843651548028,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 466735104
+     },
+     {
+      "seconds": 0.13188892812468112,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 372613120
+     },
+     {
+      "seconds": 0.13806687691248953,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 294715392
+     },
+     {
+      "seconds": 0.13556872098706663,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 310837248
+     }
+    ],
+    "wall": 0.9070305940695107,
+    "busy_before": 0.020764119599658504,
+    "quiet_wait": 1.0003141032066196,
+    "other_cores": 0.2921081188753569,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1667783570010215,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 698499072
+     },
+     {
+      "seconds": 0.14109718590043485,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 523407360
+     },
+     {
+      "seconds": 0.12314619799144566,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 186974208
+     },
+     {
+      "seconds": 0.12741313595324755,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 164630528
+     },
+     {
+      "seconds": 0.12889125104993582,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 66224128
+     }
+    ],
+    "wall": 0.9141468910966069,
+    "busy_before": 0.01331114794445233,
+    "quiet_wait": 1.0005678199231625,
+    "other_cores": 0.37773032373754384,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.strings",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2118994309566915,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 787955712
+     },
+     {
+      "seconds": 0.18595929211005569,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 771510272
+     },
+     {
+      "seconds": 0.1969010359607637,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 454426624
+     },
+     {
+      "seconds": 0.18358290498144925,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 372846592
+     },
+     {
+      "seconds": 0.18669815408065915,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 396357632
+     }
+    ],
+    "wall": 1.1729715859983116,
+    "busy_before": 0.020729684907892922,
+    "quiet_wait": 1.0004047940019518,
+    "other_cores": 0.261743764638679,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3075966180767864,
+      "ttfr": 0.015462910989299417,
+      "rows_out": 1000000,
+      "peak_above": 60211200
+     },
+     {
+      "seconds": 0.2672904140781611,
+      "ttfr": 0.013693377142772079,
+      "rows_out": 1000000,
+      "peak_above": 59559936
+     },
+     {
+      "seconds": 0.26296975393779576,
+      "ttfr": 0.009453990962356329,
+      "rows_out": 1000000,
+      "peak_above": 46804992
+     },
+     {
+      "seconds": 0.2635153620503843,
+      "ttfr": 0.009548980044201016,
+      "rows_out": 1000000,
+      "peak_above": 46804992
+     },
+     {
+      "seconds": 0.26672952715307474,
+      "ttfr": 0.009594605071470141,
+      "rows_out": 1000000,
+      "peak_above": 46800896
+     }
+    ],
+    "wall": 1.518645908916369,
+    "busy_before": 0.011647254625728218,
+    "quiet_wait": 2.0011306619271636,
+    "other_cores": 0.13737369521008103,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3269909948576242,
+      "ttfr": 0.01705854688771069,
+      "rows_out": 1000000,
+      "peak_above": 42917888
+     },
+     {
+      "seconds": 0.26581855001859367,
+      "ttfr": 0.00956771383062005,
+      "rows_out": 1000000,
+      "peak_above": 16977920
+     },
+     {
+      "seconds": 0.26998477010056376,
+      "ttfr": 0.009560592006891966,
+      "rows_out": 1000000,
+      "peak_above": 16846848
+     },
+     {
+      "seconds": 0.2669251258485019,
+      "ttfr": 0.009551143040880561,
+      "rows_out": 1000000,
+      "peak_above": 16826368
+     },
+     {
+      "seconds": 0.266489215195179,
+      "ttfr": 0.009620524011552334,
+      "rows_out": 1000000,
+      "peak_above": 16826368
+     }
+    ],
+    "wall": 1.5749349729157984,
+    "busy_before": 0.01331114794445233,
+    "quiet_wait": 1.0005594140384346,
+    "other_cores": 0.1142421787888981,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3279104670509696,
+      "ttfr": 0.01752898283302784,
+      "rows_out": 1000000,
+      "peak_above": 42164224
+     },
+     {
+      "seconds": 0.296897181076929,
+      "ttfr": 0.015887720976024866,
+      "rows_out": 1000000,
+      "peak_above": 37335040
+     },
+     {
+      "seconds": 0.30058118188753724,
+      "ttfr": 0.01545214094221592,
+      "rows_out": 1000000,
+      "peak_above": 37253120
+     },
+     {
+      "seconds": 0.29668520111590624,
+      "ttfr": 0.015460266033187509,
+      "rows_out": 1000000,
+      "peak_above": 37105664
+     },
+     {
+      "seconds": 0.29963267408311367,
+      "ttfr": 0.015576535137370229,
+      "rows_out": 1000000,
+      "peak_above": 37031936
+     }
+    ],
+    "wall": 1.6757880740333349,
+    "busy_before": 0.02657807296172265,
+    "quiet_wait": 1.0005647731013596,
+    "other_cores": 0.38157748583057016,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.19423731788992882,
+      "ttfr": 0.016884187934920192,
+      "rows_out": 1000000,
+      "peak_above": 99373056
+     },
+     {
+      "seconds": 0.175683454843238,
+      "ttfr": 0.009998166002333164,
+      "rows_out": 1000000,
+      "peak_above": 48533504
+     },
+     {
+      "seconds": 0.17279310896992683,
+      "ttfr": 0.010204595047980547,
+      "rows_out": 1000000,
+      "peak_above": 49074176
+     },
+     {
+      "seconds": 0.1794874898623675,
+      "ttfr": 0.009883268969133496,
+      "rows_out": 1000000,
+      "peak_above": 64688128
+     },
+     {
+      "seconds": 0.1714450791478157,
+      "ttfr": 0.010239230003207922,
+      "rows_out": 1000000,
+      "peak_above": 49172480
+     }
+    ],
+    "wall": 1.0471215050201863,
+    "busy_before": 0.019917012465450464,
+    "quiet_wait": 1.0003047960344702,
+    "other_cores": 0.3238306143058196,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.18772585107944906,
+      "ttfr": 0.01759755192324519,
+      "rows_out": 1000000,
+      "peak_above": 91009024
+     },
+     {
+      "seconds": 0.1797636509872973,
+      "ttfr": 0.010461859870702028,
+      "rows_out": 1000000,
+      "peak_above": 27779072
+     },
+     {
+      "seconds": 0.17244149604812264,
+      "ttfr": 0.010203582933172584,
+      "rows_out": 1000000,
+      "peak_above": 18403328
+     },
+     {
+      "seconds": 0.16767027787864208,
+      "ttfr": 0.010636077960953116,
+      "rows_out": 1000000,
+      "peak_above": 43814912
+     },
+     {
+      "seconds": 0.15779294003732502,
+      "ttfr": 0.010742638958618045,
+      "rows_out": 1000000,
+      "peak_above": 43376640
+     }
+    ],
+    "wall": 1.0201422369573265,
+    "busy_before": 0.011656952589396502,
+    "quiet_wait": 1.000410394044593,
+    "other_cores": 0.10463442832721334,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2040844690054655,
+      "ttfr": 0.018024255987256765,
+      "rows_out": 1000000,
+      "peak_above": 79179776
+     },
+     {
+      "seconds": 0.17884566099382937,
+      "ttfr": 0.010518897091969848,
+      "rows_out": 1000000,
+      "peak_above": 43737088
+     },
+     {
+      "seconds": 0.17620671913027763,
+      "ttfr": 0.01598001504316926,
+      "rows_out": 1000000,
+      "peak_above": 60477440
+     },
+     {
+      "seconds": 0.17455504811368883,
+      "ttfr": 0.015902720158919692,
+      "rows_out": 1000000,
+      "peak_above": 53846016
+     },
+     {
+      "seconds": 0.17434852896258235,
+      "ttfr": 0.01627447991631925,
+      "rows_out": 1000000,
+      "peak_above": 55951360
+     }
+    ],
+    "wall": 1.064208425115794,
+    "busy_before": 0.014131338468104196,
+    "quiet_wait": 1.0005801231600344,
+    "other_cores": 0.2576826057077908,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10680954088456929,
+      "ttfr": 0.018191841896623373,
+      "rows_out": 1000000,
+      "peak_above": 109596672
+     },
+     {
+      "seconds": 0.09637388098053634,
+      "ttfr": 0.013576406985521317,
+      "rows_out": 1000000,
+      "peak_above": 51150848
+     },
+     {
+      "seconds": 0.09498157701455057,
+      "ttfr": 0.01562500582076609,
+      "rows_out": 1000000,
+      "peak_above": 59699200
+     },
+     {
+      "seconds": 0.09192121285013855,
+      "ttfr": 0.013298403937369585,
+      "rows_out": 1000000,
+      "peak_above": 87425024
+     },
+     {
+      "seconds": 0.08856334700249135,
+      "ttfr": 0.011533709010109305,
+      "rows_out": 1000000,
+      "peak_above": 65019904
+     }
+    ],
+    "wall": 0.6374041100498289,
+    "busy_before": 0.009975062276568988,
+    "quiet_wait": 1.0004704159218818,
+    "other_cores": 0.14828897059048796,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.12534823501482606,
+      "ttfr": 0.019393584923818707,
+      "rows_out": 1000000,
+      "peak_above": 135102464
+     },
+     {
+      "seconds": 0.09983365796506405,
+      "ttfr": 0.011344631901010871,
+      "rows_out": 1000000,
+      "peak_above": 86503424
+     },
+     {
+      "seconds": 0.09254341502673924,
+      "ttfr": 0.01420788699761033,
+      "rows_out": 1000000,
+      "peak_above": 80187392
+     },
+     {
+      "seconds": 0.10154284909367561,
+      "ttfr": 0.015750071965157986,
+      "rows_out": 1000000,
+      "peak_above": 70922240
+     },
+     {
+      "seconds": 0.10004494595341384,
+      "ttfr": 0.011845635948702693,
+      "rows_out": 1000000,
+      "peak_above": 79503360
+     }
+    ],
+    "wall": 0.6790077369660139,
+    "busy_before": 0.013300083291421598,
+    "quiet_wait": 1.0002576159313321,
+    "other_cores": 0.16612476347616167,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1259714311454445,
+      "ttfr": 0.019567033043131232,
+      "rows_out": 1000000,
+      "peak_above": 117055488
+     },
+     {
+      "seconds": 0.10724233603104949,
+      "ttfr": 0.011633555870503187,
+      "rows_out": 1000000,
+      "peak_above": 88657920
+     },
+     {
+      "seconds": 0.1082732891663909,
+      "ttfr": 0.018462943146005273,
+      "rows_out": 1000000,
+      "peak_above": 100134912
+     },
+     {
+      "seconds": 0.11636749701574445,
+      "ttfr": 0.012260959018021822,
+      "rows_out": 1000000,
+      "peak_above": 79253504
+     },
+     {
+      "seconds": 0.10666598100215197,
+      "ttfr": 0.018472922034561634,
+      "rows_out": 1000000,
+      "peak_above": 59416576
+     }
+    ],
+    "wall": 0.7218275771010667,
+    "busy_before": 0.013256006640021625,
+    "quiet_wait": 1.0005601770244539,
+    "other_cores": 0.32523140926792987,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07124495995230973,
+      "ttfr": 0.025271790102124214,
+      "rows_out": 1000000,
+      "peak_above": 231829504
+     },
+     {
+      "seconds": 0.06486737495288253,
+      "ttfr": 0.02454885793849826,
+      "rows_out": 1000000,
+      "peak_above": 240422912
+     },
+     {
+      "seconds": 0.05720063205808401,
+      "ttfr": 0.02039018413051963,
+      "rows_out": 1000000,
+      "peak_above": 52633600
+     },
+     {
+      "seconds": 0.05633686389774084,
+      "ttfr": 0.02085009985603392,
+      "rows_out": 1000000,
+      "peak_above": 65978368
+     },
+     {
+      "seconds": 0.06123879901133478,
+      "ttfr": 0.02113381400704384,
+      "rows_out": 1000000,
+      "peak_above": 41619456
+     }
+    ],
+    "wall": 0.48317325999960303,
+    "busy_before": 0.033996683415748435,
+    "quiet_wait": 1.0002850871533155,
+    "other_cores": 0.14411807258737744,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08034976199269295,
+      "ttfr": 0.026507647940889,
+      "rows_out": 1000000,
+      "peak_above": 266588160
+     },
+     {
+      "seconds": 0.06627881387248635,
+      "ttfr": 0.02627114299684763,
+      "rows_out": 1000000,
+      "peak_above": 250781696
+     },
+     {
+      "seconds": 0.06853755004703999,
+      "ttfr": 0.020847455132752657,
+      "rows_out": 1000000,
+      "peak_above": 111284224
+     },
+     {
+      "seconds": 0.07259953208267689,
+      "ttfr": 0.02157261106185615,
+      "rows_out": 1000000,
+      "peak_above": 153583616
+     },
+     {
+      "seconds": 0.07639542291872203,
+      "ttfr": 0.019388075917959213,
+      "rows_out": 1000000,
+      "peak_above": 148140032
+     }
+    ],
+    "wall": 0.531318852910772,
+    "busy_before": 0.0124688278070029,
+    "quiet_wait": 1.0005684809293598,
+    "other_cores": 0.22454313411508442,
+    "attempt": 2
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07900044997222722,
+      "ttfr": 0.02848646603524685,
+      "rows_out": 1000000,
+      "peak_above": 264581120
+     },
+     {
+      "seconds": 0.07242602505721152,
+      "ttfr": 0.02514719497412443,
+      "rows_out": 1000000,
+      "peak_above": 230858752
+     },
+     {
+      "seconds": 0.06856676400639117,
+      "ttfr": 0.023363173939287663,
+      "rows_out": 1000000,
+      "peak_above": 109125632
+     },
+     {
+      "seconds": 0.06963237188756466,
+      "ttfr": 0.022191396914422512,
+      "rows_out": 1000000,
+      "peak_above": 102903808
+     },
+     {
+      "seconds": 0.06618840410374105,
+      "ttfr": 0.02397261210717261,
+      "rows_out": 1000000,
+      "peak_above": 79048704
+     }
+    ],
+    "wall": 0.524488695897162,
+    "busy_before": 0.010824313140881206,
+    "quiet_wait": 1.0002710719127208,
+    "other_cores": 0.3229507136834705,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3378349340055138,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 225947648
+     },
+     {
+      "seconds": 0.327548905974254,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 225415168
+     },
+     {
+      "seconds": 0.32275925297290087,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 221175808
+     },
+     {
+      "seconds": 0.325585407204926,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 221171712
+     },
+     {
+      "seconds": 0.3237760888878256,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 221171712
+     }
+    ],
+    "wall": 1.7880965049844235,
+    "busy_before": 0.04817275733014373,
+    "quiet_wait": 1.0006958509329706,
+    "other_cores": 0.08320635978140807,
+    "attempt": 2
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.362171663204208,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 222375936
+     },
+     {
+      "seconds": 0.30426037311553955,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 157507584
+     },
+     {
+      "seconds": 0.2951287899632007,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 152002560
+     },
+     {
+      "seconds": 0.2753410500008613,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 85676032
+     },
+     {
+      "seconds": 0.2708539869636297,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 85680128
+     }
+    ],
+    "wall": 1.6974326400086284,
+    "busy_before": 0.008326394640244135,
+    "quiet_wait": 1.0006229130085558,
+    "other_cores": 0.12011080526033432,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3683401539456099,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 210096128
+     },
+     {
+      "seconds": 0.28913772315718234,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 75292672
+     },
+     {
+      "seconds": 0.30952367791906,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 131153920
+     },
+     {
+      "seconds": 0.2987591379787773,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 102236160
+     },
+     {
+      "seconds": 0.30737762502394617,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 131420160
+     }
+    ],
+    "wall": 1.7419973260257393,
+    "busy_before": 0.013289036403508953,
+    "quiet_wait": 1.0005417098291218,
+    "other_cores": 0.1962017945629359,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.21883484814316034,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 241471488
+     },
+     {
+      "seconds": 0.20832614903338253,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 201650176
+     },
+     {
+      "seconds": 0.1944351210258901,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 197767168
+     },
+     {
+      "seconds": 0.18902186281047761,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 107253760
+     },
+     {
+      "seconds": 0.2102377018891275,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 160399360
+     }
+    ],
+    "wall": 1.1762175920885056,
+    "busy_before": 0.024979183920732406,
+    "quiet_wait": 1.0002684858627617,
+    "other_cores": 0.1052483834468114,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.23435560707002878,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 255467520
+     },
+     {
+      "seconds": 0.19536996097303927,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 176205824
+     },
+     {
+      "seconds": 0.2129459830466658,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 224694272
+     },
+     {
+      "seconds": 0.20382860605604947,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 185917440
+     },
+     {
+      "seconds": 0.2019437770359218,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 183840768
+     }
+    ],
+    "wall": 1.2217850380111486,
+    "busy_before": 0.007493755191728841,
+    "quiet_wait": 1.000556527869776,
+    "other_cores": 0.06866019506015004,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2405783508438617,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 248578048
+     },
+     {
+      "seconds": 0.19782002712599933,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 152850432
+     },
+     {
+      "seconds": 0.21143410517834127,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 182001664
+     },
+     {
+      "seconds": 0.21540715009905398,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 115515392
+     },
+     {
+      "seconds": 0.19249852211214602,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 136024064
+     }
+    ],
+    "wall": 1.2266414160840213,
+    "busy_before": 0.011637572785024941,
+    "quiet_wait": 1.0005669901147485,
+    "other_cores": 0.1206367216740031,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1297007161192596,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 248582144
+     },
+     {
+      "seconds": 0.12384028593078256,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 212156416
+     },
+     {
+      "seconds": 0.1185200719628483,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 208859136
+     },
+     {
+      "seconds": 0.11837160191498697,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 214712320
+     },
+     {
+      "seconds": 0.11607929388992488,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 215674880
+     }
+    ],
+    "wall": 0.767406223108992,
+    "busy_before": 0.015806988309943898,
+    "quiet_wait": 1.0005688518285751,
+    "other_cores": 0.1032842813059305,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1411052809562534,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 291430400
+     },
+     {
+      "seconds": 0.12046457501128316,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 161656832
+     },
+     {
+      "seconds": 0.11784732504747808,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 130121728
+     },
+     {
+      "seconds": 0.10664048185572028,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 111509504
+     },
+     {
+      "seconds": 0.11781194899231195,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 130506752
+     }
+    ],
+    "wall": 0.7786702560260892,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0005552149377763,
+    "other_cores": 0.1457381993088304,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.16301322518847883,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 284147712
+     },
+     {
+      "seconds": 0.13897851412184536,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 242741248
+     },
+     {
+      "seconds": 0.13937788689509034,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 263159808
+     },
+     {
+      "seconds": 0.12974588107317686,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 244051968
+     },
+     {
+      "seconds": 0.13122990704141557,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 146518016
+     }
+    ],
+    "wall": 0.8594723369460553,
+    "busy_before": 0.005833333358168602,
+    "quiet_wait": 1.000555939041078,
+    "other_cores": 0.10972662611990178,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0814360489603132,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 257277952
+     },
+     {
+      "seconds": 0.07392150303348899,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 257957888
+     },
+     {
+      "seconds": 0.06716743810102344,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 122949632
+     },
+     {
+      "seconds": 0.06689688912592828,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 124608512
+     },
+     {
+      "seconds": 0.0714714559726417,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 94351360
+     }
+    ],
+    "wall": 0.5292751130182296,
+    "busy_before": 0.008326394794043972,
+    "quiet_wait": 1.000555818900466,
+    "other_cores": 0.271635664765967,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08924512006342411,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 327151616
+     },
+     {
+      "seconds": 0.09294289699755609,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 322277376
+     },
+     {
+      "seconds": 0.08796285511925817,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 297787392
+     },
+     {
+      "seconds": 0.08380590402521193,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 226181120
+     },
+     {
+      "seconds": 0.08736601984128356,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 215560192
+     }
+    ],
+    "wall": 0.6175759059842676,
+    "busy_before": 0.017470881938592326,
+    "quiet_wait": 1.0005666778888553,
+    "other_cores": 0.27921749685092784,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.url_title",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.09268571296706796,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 339132416
+     },
+     {
+      "seconds": 0.09662033501081169,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 317792256
+     },
+     {
+      "seconds": 0.09123381692916155,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 258023424
+     },
+     {
+      "seconds": 0.09413566393777728,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 251342848
+     },
+     {
+      "seconds": 0.08978942595422268,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 261795840
+     }
+    ],
+    "wall": 0.6263506861869246,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0006007321644574,
+    "other_cores": 0.180087612799946,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6390787439886481,
+      "ttfr": 0.03606315981596708,
+      "rows_out": 1000000,
+      "peak_above": 125931520
+     },
+     {
+      "seconds": 0.5663461009971797,
+      "ttfr": 0.02252756990492344,
+      "rows_out": 1000000,
+      "peak_above": 59691008
+     },
+     {
+      "seconds": 0.5697691300883889,
+      "ttfr": 0.022344095166772604,
+      "rows_out": 1000000,
+      "peak_above": 67174400
+     },
+     {
+      "seconds": 0.5737484770361334,
+      "ttfr": 0.022755268961191177,
+      "rows_out": 1000000,
+      "peak_above": 61358080
+     },
+     {
+      "seconds": 0.5717523070052266,
+      "ttfr": 0.022196706850081682,
+      "rows_out": 1000000,
+      "peak_above": 70070272
+     }
+    ],
+    "wall": 3.0850684160832316,
+    "busy_before": 0.009983360997079787,
+    "quiet_wait": 1.000485504977405,
+    "other_cores": 0.09108744462356307,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6741463290527463,
+      "ttfr": 0.03915110812522471,
+      "rows_out": 1000000,
+      "peak_above": 103276544
+     },
+     {
+      "seconds": 0.6684969859197736,
+      "ttfr": 0.024879270931705832,
+      "rows_out": 1000000,
+      "peak_above": 37027840
+     },
+     {
+      "seconds": 0.6327220688108355,
+      "ttfr": 0.023097092984244227,
+      "rows_out": 1000000,
+      "peak_above": 25321472
+     },
+     {
+      "seconds": 0.6432466160040349,
+      "ttfr": 0.026244341861456633,
+      "rows_out": 1000000,
+      "peak_above": 39170048
+     },
+     {
+      "seconds": 0.6344243250787258,
+      "ttfr": 0.023441341007128358,
+      "rows_out": 1000000,
+      "peak_above": 27631616
+     }
+    ],
+    "wall": 3.4201020828913897,
+    "busy_before": 0.006650041723127472,
+    "quiet_wait": 1.0003032819367945,
+    "other_cores": 0.09689447645518477,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7757849879562855,
+      "ttfr": 0.04365767794661224,
+      "rows_out": 1000000,
+      "peak_above": 97247232
+     },
+     {
+      "seconds": 0.7255758880637586,
+      "ttfr": 0.02522186702117324,
+      "rows_out": 1000000,
+      "peak_above": 21598208
+     },
+     {
+      "seconds": 0.7559399108868092,
+      "ttfr": 0.02767236204817891,
+      "rows_out": 1000000,
+      "peak_above": 991232
+     },
+     {
+      "seconds": 0.6999875409528613,
+      "ttfr": 0.02508758194744587,
+      "rows_out": 1000000,
+      "peak_above": 20758528
+     },
+     {
+      "seconds": 0.7593939180951566,
+      "ttfr": 0.027772310888394713,
+      "rows_out": 1000000,
+      "peak_above": 335872
+     }
+    ],
+    "wall": 3.8867651289328933,
+    "busy_before": 0.009159034243850617,
+    "quiet_wait": 1.0002937139943242,
+    "other_cores": 0.18553269267057731,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.43987862719222903,
+      "ttfr": 0.041920074028894305,
+      "rows_out": 1000000,
+      "peak_above": 220749824
+     },
+     {
+      "seconds": 0.37036087084561586,
+      "ttfr": 0.024051300948485732,
+      "rows_out": 1000000,
+      "peak_above": 99983360
+     },
+     {
+      "seconds": 0.35957144293934107,
+      "ttfr": 0.024976993910968304,
+      "rows_out": 1000000,
+      "peak_above": 26775552
+     },
+     {
+      "seconds": 0.3615426179021597,
+      "ttfr": 0.02373114787042141,
+      "rows_out": 1000000,
+      "peak_above": 47226880
+     },
+     {
+      "seconds": 0.3659208961762488,
+      "ttfr": 0.0235341670922935,
+      "rows_out": 1000000,
+      "peak_above": 51916800
+     }
+    ],
+    "wall": 2.068882361985743,
+    "busy_before": 0.004170141691533012,
+    "quiet_wait": 1.0005734709557146,
+    "other_cores": 0.15489860839661218,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.4393014789093286,
+      "ttfr": 0.04334003897383809,
+      "rows_out": 1000000,
+      "peak_above": 213241856
+     },
+     {
+      "seconds": 0.3934740039985627,
+      "ttfr": 0.02487221802584827,
+      "rows_out": 1000000,
+      "peak_above": 30896128
+     },
+     {
+      "seconds": 0.3901740270666778,
+      "ttfr": 0.025075711077079177,
+      "rows_out": 1000000,
+      "peak_above": 16424960
+     },
+     {
+      "seconds": 0.39054964506067336,
+      "ttfr": 0.024736151099205017,
+      "rows_out": 1000000,
+      "peak_above": 35401728
+     },
+     {
+      "seconds": 0.3810275960713625,
+      "ttfr": 0.024874261114746332,
+      "rows_out": 1000000,
+      "peak_above": 16470016
+     }
+    ],
+    "wall": 2.1754612668883055,
+    "busy_before": 0.007493755191728841,
+    "quiet_wait": 1.0002750291023403,
+    "other_cores": 0.1349277063327269,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.5134490970522165,
+      "ttfr": 0.04863114608451724,
+      "rows_out": 1000000,
+      "peak_above": 211083264
+     },
+     {
+      "seconds": 0.4611857580021024,
+      "ttfr": 0.02638794295489788,
+      "rows_out": 1000000,
+      "peak_above": 35037184
+     },
+     {
+      "seconds": 0.45102390297688544,
+      "ttfr": 0.027136601973325014,
+      "rows_out": 1000000,
+      "peak_above": 25346048
+     },
+     {
+      "seconds": 0.4536861199885607,
+      "ttfr": 0.0269977820571512,
+      "rows_out": 1000000,
+      "peak_above": 16633856
+     },
+     {
+      "seconds": 0.4450936820358038,
+      "ttfr": 0.026787165086716413,
+      "rows_out": 1000000,
+      "peak_above": 35762176
+     }
+    ],
+    "wall": 2.50616423599422,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0005536938551813,
+    "other_cores": 0.19905199892921374,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2732778040226549,
+      "ttfr": 0.044890270102769136,
+      "rows_out": 1000000,
+      "peak_above": 356667392
+     },
+     {
+      "seconds": 0.2292752768844366,
+      "ttfr": 0.026782716857269406,
+      "rows_out": 1000000,
+      "peak_above": 77541376
+     },
+     {
+      "seconds": 0.2293985690921545,
+      "ttfr": 0.02802182105369866,
+      "rows_out": 1000000,
+      "peak_above": 92680192
+     },
+     {
+      "seconds": 0.20866194181144238,
+      "ttfr": 0.027908045798540115,
+      "rows_out": 1000000,
+      "peak_above": 28672000
+     },
+     {
+      "seconds": 0.2150627519004047,
+      "ttfr": 0.02757969801314175,
+      "rows_out": 1000000,
+      "peak_above": 81809408
+     }
+    ],
+    "wall": 1.3435981448274106,
+    "busy_before": 0.021558872285674855,
+    "quiet_wait": 1.0005007321015,
+    "other_cores": 0.17615906981946655,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.27974467701278627,
+      "ttfr": 0.04658730700612068,
+      "rows_out": 1000000,
+      "peak_above": 354050048
+     },
+     {
+      "seconds": 0.24126266012899578,
+      "ttfr": 0.030099845957010984,
+      "rows_out": 1000000,
+      "peak_above": 180690944
+     },
+     {
+      "seconds": 0.22307322197593749,
+      "ttfr": 0.02970688510686159,
+      "rows_out": 1000000,
+      "peak_above": 55078912
+     },
+     {
+      "seconds": 0.22493958799168468,
+      "ttfr": 0.02901949011720717,
+      "rows_out": 1000000,
+      "peak_above": 18071552
+     },
+     {
+      "seconds": 0.22322942689061165,
+      "ttfr": 0.02968103694729507,
+      "rows_out": 1000000,
+      "peak_above": 12156928
+     }
+    ],
+    "wall": 1.387149530928582,
+    "busy_before": 0.011647254778885494,
+    "quiet_wait": 1.0002841560635716,
+    "other_cores": 0.09117041545387566,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.32115324796177447,
+      "ttfr": 0.051242746878415346,
+      "rows_out": 1000000,
+      "peak_above": 363388928
+     },
+     {
+      "seconds": 0.2885336549952626,
+      "ttfr": 0.0372233260422945,
+      "rows_out": 1000000,
+      "peak_above": 108224512
+     },
+     {
+      "seconds": 0.29214921593666077,
+      "ttfr": 0.02925992291420698,
+      "rows_out": 1000000,
+      "peak_above": 84762624
+     },
+     {
+      "seconds": 0.2798939978238195,
+      "ttfr": 0.03022984997369349,
+      "rows_out": 1000000,
+      "peak_above": 64270336
+     },
+     {
+      "seconds": 0.2726858190726489,
+      "ttfr": 0.031489184126257896,
+      "rows_out": 1000000,
+      "peak_above": 85393408
+     }
+    ],
+    "wall": 1.6477461338508874,
+    "busy_before": 0.012468827961836246,
+    "quiet_wait": 1.0005563190206885,
+    "other_cores": 0.2600831465335497,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.175728979986161,
+      "ttfr": 0.06724444404244423,
+      "rows_out": 1000000,
+      "peak_above": 666755072
+     },
+     {
+      "seconds": 0.15417710808105767,
+      "ttfr": 0.04799827514216304,
+      "rows_out": 1000000,
+      "peak_above": 408911872
+     },
+     {
+      "seconds": 0.14720511296764016,
+      "ttfr": 0.05663408385589719,
+      "rows_out": 1000000,
+      "peak_above": 169177088
+     },
+     {
+      "seconds": 0.15457556792534888,
+      "ttfr": 0.0541816339828074,
+      "rows_out": 1000000,
+      "peak_above": 112758784
+     },
+     {
+      "seconds": 0.14883206691592932,
+      "ttfr": 0.0512928010430187,
+      "rows_out": 1000000,
+      "peak_above": 69144576
+     }
+    ],
+    "wall": 1.0023998329415917,
+    "busy_before": 0.011656952589396502,
+    "quiet_wait": 1.0005834500771016,
+    "other_cores": 0.2606135702984361,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1841542220208794,
+      "ttfr": 0.06696397508494556,
+      "rows_out": 1000000,
+      "peak_above": 686632960
+     },
+     {
+      "seconds": 0.1693591291550547,
+      "ttfr": 0.058505479944869876,
+      "rows_out": 1000000,
+      "peak_above": 431742976
+     },
+     {
+      "seconds": 0.1619699290022254,
+      "ttfr": 0.05765242292545736,
+      "rows_out": 1000000,
+      "peak_above": 141205504
+     },
+     {
+      "seconds": 0.16775737097486854,
+      "ttfr": 0.05879241996444762,
+      "rows_out": 1000000,
+      "peak_above": 174288896
+     },
+     {
+      "seconds": 0.16154057998210192,
+      "ttfr": 0.05373162589967251,
+      "rows_out": 1000000,
+      "peak_above": 130625536
+     }
+    ],
+    "wall": 1.0597295868210495,
+    "busy_before": 0.00915903408875943,
+    "quiet_wait": 1.0002583570312709,
+    "other_cores": 0.33142511560249405,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.22975299693644047,
+      "ttfr": 0.0787117169238627,
+      "rows_out": 1000000,
+      "peak_above": 743514112
+     },
+     {
+      "seconds": 0.20787763502448797,
+      "ttfr": 0.06393362605012953,
+      "rows_out": 1000000,
+      "peak_above": 430358528
+     },
+     {
+      "seconds": 0.20027062413282692,
+      "ttfr": 0.06244135508313775,
+      "rows_out": 1000000,
+      "peak_above": 150921216
+     },
+     {
+      "seconds": 0.20345506281591952,
+      "ttfr": 0.06931670685298741,
+      "rows_out": 1000000,
+      "peak_above": 101613568
+     },
+     {
+      "seconds": 0.20366211305372417,
+      "ttfr": 0.0634136360604316,
+      "rows_out": 1000000,
+      "peak_above": 170606592
+     }
+    ],
+    "wall": 1.2622724319808185,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0002930629998446,
+    "other_cores": 0.4063837458411909,
+    "attempt": 2
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.9628710132092237,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1033904128
+     },
+     {
+      "seconds": 0.675010145874694,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 381022208
+     },
+     {
+      "seconds": 0.588801875943318,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 113926144
+     },
+     {
+      "seconds": 0.5761149250902236,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 80064512
+     },
+     {
+      "seconds": 0.556027322076261,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 17793024
+     }
+    ],
+    "wall": 3.5916293170303106,
+    "busy_before": 0.01916666670391957,
+    "quiet_wait": 1.0002684670034796,
+    "other_cores": 0.1456066186710374,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.9105776459909976,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 778797056
+     },
+     {
+      "seconds": 0.6243746520485729,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 94552064
+     },
+     {
+      "seconds": 0.5983410270418972,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 11583488
+     },
+     {
+      "seconds": 0.5933228428475559,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1581056
+     },
+     {
+      "seconds": 0.5928719830699265,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 692224
+     }
+    ],
+    "wall": 3.5439374691341072,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0002780051436275,
+    "other_cores": 0.1998486162000414,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.0158512329217046,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 771502080
+     },
+     {
+      "seconds": 0.7101602868642658,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 47546368
+     },
+     {
+      "seconds": 0.701720176031813,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 28639232
+     },
+     {
+      "seconds": 0.7017552519682795,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 29540352
+     },
+     {
+      "seconds": 0.6987817799672484,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 20168704
+     }
+    ],
+    "wall": 4.043047853047028,
+    "busy_before": 0.006661115743213546,
+    "quiet_wait": 1.0002988330088556,
+    "other_cores": 0.07285815337902232,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6132985870353878,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1092530176
+     },
+     {
+      "seconds": 0.429948067991063,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 332058624
+     },
+     {
+      "seconds": 0.4367115010973066,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 245440512
+     },
+     {
+      "seconds": 0.370178306940943,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 56438784
+     },
+     {
+      "seconds": 0.3610746660269797,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": -815104
+     }
+    ],
+    "wall": 2.455318266991526,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.000292140059173,
+    "other_cores": 0.16322934833274944,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6109840259887278,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 860975104
+     },
+     {
+      "seconds": 0.47130592283792794,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 257630208
+     },
+     {
+      "seconds": 0.5189773731399328,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 529412096
+     },
+     {
+      "seconds": 0.41047660494223237,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 107454464
+     },
+     {
+      "seconds": 0.3975460350047797,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 56291328
+     }
+    ],
+    "wall": 2.6704585128463805,
+    "busy_before": 0.008312551922946382,
+    "quiet_wait": 1.0005550670903176,
+    "other_cores": 0.11227173157674611,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.6722986679524183,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 861220864
+     },
+     {
+      "seconds": 0.541142039000988,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 238477312
+     },
+     {
+      "seconds": 0.49174700304865837,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 54210560
+     },
+     {
+      "seconds": 0.462525021051988,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 37584896
+     },
+     {
+      "seconds": 0.48578950902447104,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 72462336
+     }
+    ],
+    "wall": 2.882347325794399,
+    "busy_before": 0.01331114794445233,
+    "quiet_wait": 1.0004841419868171,
+    "other_cores": 0.11659559524737736,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.36011555907316506,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1147797504
+     },
+     {
+      "seconds": 0.2870673320721835,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 414752768
+     },
+     {
+      "seconds": 0.26098848204128444,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 166334464
+     },
+     {
+      "seconds": 0.2099898641463369,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 50044928
+     },
+     {
+      "seconds": 0.25636678491719067,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 221945856
+     }
+    ],
+    "wall": 1.6275844108313322,
+    "busy_before": 0.0033361133532264094,
+    "quiet_wait": 1.0005518009420484,
+    "other_cores": 0.14561886873165172,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3718540349509567,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 960012288
+     },
+     {
+      "seconds": 0.29417811892926693,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 385753088
+     },
+     {
+      "seconds": 0.2854375618044287,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 249405440
+     },
+     {
+      "seconds": 0.29343949700705707,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 341299200
+     },
+     {
+      "seconds": 0.2650081051979214,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 207597568
+     }
+    ],
+    "wall": 1.755951897939667,
+    "busy_before": 0.008305647810207374,
+    "quiet_wait": 1.0005815820768476,
+    "other_cores": 0.1901356193360834,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.41606039507314563,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1015959552
+     },
+     {
+      "seconds": 0.3487273841165006,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 403701760
+     },
+     {
+      "seconds": 0.3116651619784534,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 148406272
+     },
+     {
+      "seconds": 0.2806113900151104,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 122822656
+     },
+     {
+      "seconds": 0.27814609510824084,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 125775872
+     }
+    ],
+    "wall": 1.8711213348433375,
+    "busy_before": 0.0066500415693237745,
+    "quiet_wait": 1.0005855839699507,
+    "other_cores": 0.12767424308643485,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.24308072519488633,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1217531904
+     },
+     {
+      "seconds": 0.1837416449561715,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 775909376
+     },
+     {
+      "seconds": 0.1893812690395862,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 264138752
+     },
+     {
+      "seconds": 0.17273576091974974,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 218140672
+     },
+     {
+      "seconds": 0.16656473488546908,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 86269952
+     }
+    ],
+    "wall": 1.2297196260187775,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0003149518743157,
+    "other_cores": 0.20353257257653543,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2529501779936254,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1110614016
+     },
+     {
+      "seconds": 0.20699039311148226,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 763056128
+     },
+     {
+      "seconds": 0.18638067692518234,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 319393792
+     },
+     {
+      "seconds": 0.1943796358536929,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 276590592
+     },
+     {
+      "seconds": 0.19138853112235665,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 180142080
+     }
+    ],
+    "wall": 1.3070919890888035,
+    "busy_before": 0.006661115743213546,
+    "quiet_wait": 1.0006256678607315,
+    "other_cores": 0.19816661975921673,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.all_columns",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2672043018974364,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 1178697728
+     },
+     {
+      "seconds": 0.23950548912398517,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 825999360
+     },
+     {
+      "seconds": 0.23121618293225765,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 271482880
+     },
+     {
+      "seconds": 0.21347386692650616,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 238489600
+     },
+     {
+      "seconds": 0.22007142705842853,
+      "ttfr": null,
+      "rows_out": 1000000,
+      "peak_above": 214847488
+     }
+    ],
+    "wall": 1.438045877031982,
+    "busy_before": 0.006661115588122359,
+    "quiet_wait": 1.0003045320045203,
+    "other_cores": 0.2808672573949685,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11165086319670081,
+      "ttfr": 0.009772581048309803,
+      "rows_out": 132,
+      "peak_above": 38518784
+     },
+     {
+      "seconds": 0.0856192889623344,
+      "ttfr": 0.005667255958542228,
+      "rows_out": 132,
+      "peak_above": 24834048
+     },
+     {
+      "seconds": 0.08604132500477135,
+      "ttfr": 0.005873996065929532,
+      "rows_out": 132,
+      "peak_above": 25878528
+     },
+     {
+      "seconds": 0.0864905109629035,
+      "ttfr": 0.006536273052915931,
+      "rows_out": 132,
+      "peak_above": 25772032
+     },
+     {
+      "seconds": 0.08594316989183426,
+      "ttfr": 0.005735234823077917,
+      "rows_out": 132,
+      "peak_above": 25772032
+     }
+    ],
+    "wall": 0.6082194508053362,
+    "busy_before": 0.007475083044657113,
+    "quiet_wait": 1.0006206869147718,
+    "other_cores": 0.07384176893640917,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11313585890457034,
+      "ttfr": 0.012677032966166735,
+      "rows_out": 132,
+      "peak_above": 30453760
+     },
+     {
+      "seconds": 0.07974795904010534,
+      "ttfr": 0.006482932949438691,
+      "rows_out": 132,
+      "peak_above": 200704
+     },
+     {
+      "seconds": 0.0791504429653287,
+      "ttfr": 0.006113037001341581,
+      "rows_out": 132,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.07975521287880838,
+      "ttfr": 0.006308254785835743,
+      "rows_out": 132,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.07965206797234714,
+      "ttfr": 0.006236197892576456,
+      "rows_out": 132,
+      "peak_above": 364544
+     }
+    ],
+    "wall": 0.588706088019535,
+    "busy_before": 0.0033305577940611797,
+    "quiet_wait": 1.000570725183934,
+    "other_cores": 0.04172031093768362,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0998144920449704,
+      "ttfr": 0.010120876831933856,
+      "rows_out": 132,
+      "peak_above": 26042368
+     },
+     {
+      "seconds": 0.07412423496134579,
+      "ttfr": 0.006001305999234319,
+      "rows_out": 132,
+      "peak_above": 1818624
+     },
+     {
+      "seconds": 0.07348029082641006,
+      "ttfr": 0.005886539816856384,
+      "rows_out": 132,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.07302009407430887,
+      "ttfr": 0.005829080939292908,
+      "rows_out": 132,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 0.07295948918908834,
+      "ttfr": 0.005804064217954874,
+      "rows_out": 132,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.5459079369902611,
+    "busy_before": 0.007487520940352257,
+    "quiet_wait": 1.0004434359725565,
+    "other_cores": 0.06968391055232658,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07630575401708484,
+      "ttfr": 0.010338566964492202,
+      "rows_out": 132,
+      "peak_above": 54018048
+     },
+     {
+      "seconds": 0.05683488305658102,
+      "ttfr": 0.008764241123571992,
+      "rows_out": 132,
+      "peak_above": 24035328
+     },
+     {
+      "seconds": 0.0651424031239003,
+      "ttfr": 0.008877514163032174,
+      "rows_out": 132,
+      "peak_above": 40493056
+     },
+     {
+      "seconds": 0.05888844118453562,
+      "ttfr": 0.006371143041178584,
+      "rows_out": 132,
+      "peak_above": 50249728
+     },
+     {
+      "seconds": 0.05898100486956537,
+      "ttfr": 0.008687024936079979,
+      "rows_out": 132,
+      "peak_above": 45674496
+     }
+    ],
+    "wall": 0.4712800949346274,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0005680311005563,
+    "other_cores": 0.03139110064913791,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07932063401676714,
+      "ttfr": 0.013072878122329712,
+      "rows_out": 132,
+      "peak_above": 53280768
+     },
+     {
+      "seconds": 0.07224289001896977,
+      "ttfr": 0.01075628399848938,
+      "rows_out": 132,
+      "peak_above": 42668032
+     },
+     {
+      "seconds": 0.06750205787830055,
+      "ttfr": 0.0072658178396523,
+      "rows_out": 132,
+      "peak_above": 13570048
+     },
+     {
+      "seconds": 0.06817712099291384,
+      "ttfr": 0.01031401101499796,
+      "rows_out": 132,
+      "peak_above": 26451968
+     },
+     {
+      "seconds": 0.06091533903963864,
+      "ttfr": 0.010411333991214633,
+      "rows_out": 132,
+      "peak_above": 36675584
+     }
+    ],
+    "wall": 0.5073860669508576,
+    "busy_before": 0.007481296746135078,
+    "quiet_wait": 1.0002491890918463,
+    "other_cores": 0.11178470479982908,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06419229391030967,
+      "ttfr": 0.010145253967493773,
+      "rows_out": 132,
+      "peak_above": 44638208
+     },
+     {
+      "seconds": 0.050889702048152685,
+      "ttfr": 0.00663239392451942,
+      "rows_out": 132,
+      "peak_above": 11149312
+     },
+     {
+      "seconds": 0.048515318892896175,
+      "ttfr": 0.006552906008437276,
+      "rows_out": 132,
+      "peak_above": 94208
+     },
+     {
+      "seconds": 0.049175693187862635,
+      "ttfr": 0.006631623022258282,
+      "rows_out": 132,
+      "peak_above": 1282048
+     },
+     {
+      "seconds": 0.04839057312346995,
+      "ttfr": 0.006373676937073469,
+      "rows_out": 132,
+      "peak_above": 2605056
+     }
+    ],
+    "wall": 0.4180071339942515,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0006206689868122,
+    "other_cores": 0.09491464946288229,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.04606099613010883,
+      "ttfr": 0.011372114066034555,
+      "rows_out": 132,
+      "peak_above": 73584640
+     },
+     {
+      "seconds": 0.03377807606011629,
+      "ttfr": 0.007329087937250733,
+      "rows_out": 132,
+      "peak_above": 45092864
+     },
+     {
+      "seconds": 0.03616642509587109,
+      "ttfr": 0.008907340932637453,
+      "rows_out": 132,
+      "peak_above": 26398720
+     },
+     {
+      "seconds": 0.03691059700213373,
+      "ttfr": 0.0076653310097754,
+      "rows_out": 132,
+      "peak_above": 16105472
+     },
+     {
+      "seconds": 0.031100831925868988,
+      "ttfr": 0.009322813944891095,
+      "rows_out": 132,
+      "peak_above": 20852736
+     }
+    ],
+    "wall": 0.34490645700134337,
+    "busy_before": 0.004995836691091769,
+    "quiet_wait": 1.0005706360097975,
+    "other_cores": 0.05410452967852916,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.04900276707485318,
+      "ttfr": 0.015169237041845918,
+      "rows_out": 132,
+      "peak_above": 89378816
+     },
+     {
+      "seconds": 0.036699559073895216,
+      "ttfr": 0.00845122104510665,
+      "rows_out": 132,
+      "peak_above": 22228992
+     },
+     {
+      "seconds": 0.03514144313521683,
+      "ttfr": 0.007763005094602704,
+      "rows_out": 132,
+      "peak_above": 30969856
+     },
+     {
+      "seconds": 0.0406353329308331,
+      "ttfr": 0.008258508052676916,
+      "rows_out": 132,
+      "peak_above": 26259456
+     },
+     {
+      "seconds": 0.03706101980060339,
+      "ttfr": 0.007975504966452718,
+      "rows_out": 132,
+      "peak_above": 32874496
+     }
+    ],
+    "wall": 0.3614999789278954,
+    "busy_before": 0.005823627312864109,
+    "quiet_wait": 1.0002739659976214,
+    "other_cores": 0.189507615353255,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.04675290919840336,
+      "ttfr": 0.011197244049981236,
+      "rows_out": 132,
+      "peak_above": 56958976
+     },
+     {
+      "seconds": 0.03174953395500779,
+      "ttfr": 0.007319309050217271,
+      "rows_out": 132,
+      "peak_above": 33427456
+     },
+     {
+      "seconds": 0.030662024160847068,
+      "ttfr": 0.007668757112696767,
+      "rows_out": 132,
+      "peak_above": 15208448
+     },
+     {
+      "seconds": 0.032597580924630165,
+      "ttfr": 0.009171878919005394,
+      "rows_out": 132,
+      "peak_above": 16936960
+     },
+     {
+      "seconds": 0.028885147999972105,
+      "ttfr": 0.008381109917536378,
+      "rows_out": 132,
+      "peak_above": 262144
+     }
+    ],
+    "wall": 0.33297809795476496,
+    "busy_before": 0.005828476448885492,
+    "quiet_wait": 1.0005586200859398,
+    "other_cores": 0.1917633620504745,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.033628573874011636,
+      "ttfr": 0.018498159013688564,
+      "rows_out": 132,
+      "peak_above": 121491456
+     },
+     {
+      "seconds": 0.02646140195429325,
+      "ttfr": 0.01679881801828742,
+      "rows_out": 132,
+      "peak_above": 121397248
+     },
+     {
+      "seconds": 0.025365195935592055,
+      "ttfr": 0.015268034068867564,
+      "rows_out": 132,
+      "peak_above": 38416384
+     },
+     {
+      "seconds": 0.025390173075720668,
+      "ttfr": 0.016441164072602987,
+      "rows_out": 132,
+      "peak_above": 14974976
+     },
+     {
+      "seconds": 0.024212063988670707,
+      "ttfr": 0.015833890065550804,
+      "rows_out": 132,
+      "peak_above": 24993792
+     }
+    ],
+    "wall": 0.30749333393760026,
+    "busy_before": 0.00581395335885184,
+    "quiet_wait": 1.0005221639294177,
+    "other_cores": 0.1345004805875193,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.040562545880675316,
+      "ttfr": 0.022937091998755932,
+      "rows_out": 132,
+      "peak_above": 151973888
+     },
+     {
+      "seconds": 0.03228191682137549,
+      "ttfr": 0.016653483966365457,
+      "rows_out": 132,
+      "peak_above": 149176320
+     },
+     {
+      "seconds": 0.032823186833411455,
+      "ttfr": 0.01931922580115497,
+      "rows_out": 132,
+      "peak_above": 74334208
+     },
+     {
+      "seconds": 0.03464585985057056,
+      "ttfr": 0.01686582388356328,
+      "rows_out": 132,
+      "peak_above": 51400704
+     },
+     {
+      "seconds": 0.03214377607218921,
+      "ttfr": 0.0180211600381881,
+      "rows_out": 132,
+      "peak_above": 40886272
+     }
+    ],
+    "wall": 0.3446794378105551,
+    "busy_before": 0.0066500415693237745,
+    "quiet_wait": 1.0002730549313128,
+    "other_cores": 0.13287128359144387,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03261610702611506,
+      "ttfr": 0.016363458009436727,
+      "rows_out": 132,
+      "peak_above": 118808576
+     },
+     {
+      "seconds": 0.02709218906238675,
+      "ttfr": 0.016187356086447835,
+      "rows_out": 132,
+      "peak_above": 118181888
+     },
+     {
+      "seconds": 0.02445546304807067,
+      "ttfr": 0.015383962076157331,
+      "rows_out": 132,
+      "peak_above": 27095040
+     },
+     {
+      "seconds": 0.026306599145755172,
+      "ttfr": 0.01644270704127848,
+      "rows_out": 132,
+      "peak_above": 21774336
+     },
+     {
+      "seconds": 0.024096395820379257,
+      "ttfr": 0.014227242907509208,
+      "rows_out": 132,
+      "peak_above": 16011264
+     }
+    ],
+    "wall": 0.3053727811202407,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0005708239041269,
+    "other_cores": 0.0965672250748323,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1259452709928155,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 101761024
+     },
+     {
+      "seconds": 0.11528454697690904,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 90304512
+     },
+     {
+      "seconds": 0.11485956702381372,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 95174656
+     },
+     {
+      "seconds": 0.11405341792851686,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 95170560
+     },
+     {
+      "seconds": 0.11299800896085799,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 95170560
+     }
+    ],
+    "wall": 0.740921868942678,
+    "busy_before": 0.013289036403508953,
+    "quiet_wait": 1.000257987063378,
+    "other_cores": 0.3430213239754063,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11854753410443664,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 31539200
+     },
+     {
+      "seconds": 0.10381541098468006,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 21364736
+     },
+     {
+      "seconds": 0.0904909479431808,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 22351872
+     },
+     {
+      "seconds": 0.0895244269631803,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 22241280
+     },
+     {
+      "seconds": 0.08987356396391988,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 22241280
+     }
+    ],
+    "wall": 0.6476270479615778,
+    "busy_before": 0.003330557949152366,
+    "quiet_wait": 1.0005698539316654,
+    "other_cores": 0.09799621403652821,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10083665908314288,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 26509312
+     },
+     {
+      "seconds": 0.07841779291629791,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 9658368
+     },
+     {
+      "seconds": 0.09321375703439116,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 18903040
+     },
+     {
+      "seconds": 0.07339488016441464,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.07294493215158582,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 0
+     }
+    ],
+    "wall": 0.5764467611443251,
+    "busy_before": 0.005828476293794306,
+    "quiet_wait": 1.0005717570893466,
+    "other_cores": 0.25374936647524843,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08961080899462104,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 106094592
+     },
+     {
+      "seconds": 0.0810507528949529,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 101535744
+     },
+     {
+      "seconds": 0.07715297001414001,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 87949312
+     },
+     {
+      "seconds": 0.07908222381956875,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 96305152
+     },
+     {
+      "seconds": 0.07270981906913221,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 83210240
+     }
+    ],
+    "wall": 0.5549576869234443,
+    "busy_before": 0.007481296744976724,
+    "quiet_wait": 1.0005588640924543,
+    "other_cores": 0.09261066395139998,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07437272206880152,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 54284288
+     },
+     {
+      "seconds": 0.05492902081459761,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 13942784
+     },
+     {
+      "seconds": 0.05404735100455582,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 983040
+     },
+     {
+      "seconds": 0.06758097815327346,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 32915456
+     },
+     {
+      "seconds": 0.05311047611758113,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 2785280
+     }
+    ],
+    "wall": 0.46690161898732185,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0005702830385417,
+    "other_cores": 0.08106204282090168,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07455573696643114,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 52768768
+     },
+     {
+      "seconds": 0.05205559893511236,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 21430272
+     },
+     {
+      "seconds": 0.048370837001129985,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 1486848
+     },
+     {
+      "seconds": 0.04797273688018322,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.048001531045883894,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.43115916196256876,
+    "busy_before": 0.005818786237679125,
+    "quiet_wait": 1.0005703219212592,
+    "other_cores": 0.07562636550284005,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.055063714971765876,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 116207616
+     },
+     {
+      "seconds": 0.04524056985974312,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 104796160
+     },
+     {
+      "seconds": 0.0449925628490746,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 76537856
+     },
+     {
+      "seconds": 0.041002183919772506,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 59977728
+     },
+     {
+      "seconds": 0.043735785176977515,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 87150592
+     }
+    ],
+    "wall": 0.38852359796874225,
+    "busy_before": 0.009151414568742846,
+    "quiet_wait": 1.00054756202735,
+    "other_cores": 0.05776225683164605,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.05576579784974456,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 97652736
+     },
+     {
+      "seconds": 0.03686162503436208,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 41947136
+     },
+     {
+      "seconds": 0.04271434107795358,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 44457984
+     },
+     {
+      "seconds": 0.038242585957050323,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 45359104
+     },
+     {
+      "seconds": 0.037923585157841444,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 27123712
+     }
+    ],
+    "wall": 0.39238793798722327,
+    "busy_before": 0.0041631973976676605,
+    "quiet_wait": 1.0002543989103287,
+    "other_cores": 0.16758924730894142,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.046432745177298784,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 61460480
+     },
+     {
+      "seconds": 0.0322964140214026,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 46628864
+     },
+     {
+      "seconds": 0.03418797696940601,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 22929408
+     },
+     {
+      "seconds": 0.032281225081533194,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 20336640
+     },
+     {
+      "seconds": 0.028549275128170848,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 2801664
+     }
+    ],
+    "wall": 0.33755216212011874,
+    "busy_before": 0.003336113508576297,
+    "quiet_wait": 1.0002878739032894,
+    "other_cores": 0.15817407620887813,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03583363816142082,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 135667712
+     },
+     {
+      "seconds": 0.02918928093276918,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 125894656
+     },
+     {
+      "seconds": 0.026234283111989498,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 39661568
+     },
+     {
+      "seconds": 0.02551520918495953,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 29470720
+     },
+     {
+      "seconds": 0.026576217031106353,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 16633856
+     }
+    ],
+    "wall": 0.33361293305642903,
+    "busy_before": 0.005818786391611529,
+    "quiet_wait": 1.0005718460306525,
+    "other_cores": 0.28854396553815626,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0418052370660007,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 146653184
+     },
+     {
+      "seconds": 0.03350409911945462,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 148598784
+     },
+     {
+      "seconds": 0.03167233895510435,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 77512704
+     },
+     {
+      "seconds": 0.03200693801045418,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 32616448
+     },
+     {
+      "seconds": 0.03341469005681574,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 61173760
+     }
+    ],
+    "wall": 0.34616308589465916,
+    "busy_before": 0.0041631973976676605,
+    "quiet_wait": 1.000571645796299,
+    "other_cores": 0.19145022044927454,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.filter_contains",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.033577427035197616,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 119058432
+     },
+     {
+      "seconds": 0.030032688984647393,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 125874176
+     },
+     {
+      "seconds": 0.025066784117370844,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 32235520
+     },
+     {
+      "seconds": 0.026878387201577425,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 42352640
+     },
+     {
+      "seconds": 0.02350930985994637,
+      "ttfr": null,
+      "rows_out": 132,
+      "peak_above": 8642560
+     }
+    ],
+    "wall": 0.3114638030529022,
+    "busy_before": 0.01665278928048827,
+    "quiet_wait": 1.0005890808533877,
+    "other_cores": 0.3046228787036601,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.19924402004107833,
+      "ttfr": 0.19436426693573594,
+      "rows_out": 380407,
+      "peak_above": 92925952
+     },
+     {
+      "seconds": 0.1698611848987639,
+      "ttfr": 0.16342060081660748,
+      "rows_out": 380407,
+      "peak_above": 89055232
+     },
+     {
+      "seconds": 0.1735918540507555,
+      "ttfr": 0.1665846121031791,
+      "rows_out": 380407,
+      "peak_above": 96657408
+     },
+     {
+      "seconds": 0.1718284508679062,
+      "ttfr": 0.1654478400014341,
+      "rows_out": 380407,
+      "peak_above": 96788480
+     },
+     {
+      "seconds": 0.1698503950610757,
+      "ttfr": 0.16388028720393777,
+      "rows_out": 380407,
+      "peak_above": 89133056
+     }
+    ],
+    "wall": 1.0392193379811943,
+    "busy_before": 0.005818786237679125,
+    "quiet_wait": 1.000608084956184,
+    "other_cores": 0.07703186218137702,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1955993741285056,
+      "ttfr": 0.19253537198528647,
+      "rows_out": 380407,
+      "peak_above": 91545600
+     },
+     {
+      "seconds": 0.16728734597563744,
+      "ttfr": 0.16429608105681837,
+      "rows_out": 380407,
+      "peak_above": 84541440
+     },
+     {
+      "seconds": 0.17011207807809114,
+      "ttfr": 0.1661638100631535,
+      "rows_out": 380407,
+      "peak_above": 83755008
+     },
+     {
+      "seconds": 0.16805476206354797,
+      "ttfr": 0.1649001589976251,
+      "rows_out": 380407,
+      "peak_above": 83881984
+     },
+     {
+      "seconds": 0.16731098084710538,
+      "ttfr": 0.16418909979984164,
+      "rows_out": 380407,
+      "peak_above": 83804160
+     }
+    ],
+    "wall": 1.024848054163158,
+    "busy_before": 0.005833333202948173,
+    "quiet_wait": 1.0005653139669448,
+    "other_cores": 0.08231171327077162,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.19755760300904512,
+      "ttfr": 0.18891380890272558,
+      "rows_out": 380407,
+      "peak_above": 92389376
+     },
+     {
+      "seconds": 0.17417209595441818,
+      "ttfr": 0.16418886906467378,
+      "rows_out": 380407,
+      "peak_above": 89419776
+     },
+     {
+      "seconds": 0.1753705139271915,
+      "ttfr": 0.1645161749329418,
+      "rows_out": 380407,
+      "peak_above": 89284608
+     },
+     {
+      "seconds": 0.17670454806648195,
+      "ttfr": 0.16603062907233834,
+      "rows_out": 380407,
+      "peak_above": 96935936
+     },
+     {
+      "seconds": 0.17598618380725384,
+      "ttfr": 0.16359284589998424,
+      "rows_out": 380407,
+      "peak_above": 89337856
+     }
+    ],
+    "wall": 1.0545128588564694,
+    "busy_before": 0.004163197242576474,
+    "quiet_wait": 1.0005986578762531,
+    "other_cores": 0.039091985384935954,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.16652376810088754,
+      "ttfr": 0.15311555797234178,
+      "rows_out": 380407,
+      "peak_above": 164655104
+     },
+     {
+      "seconds": 0.15087568783201277,
+      "ttfr": 0.14292801497504115,
+      "rows_out": 380407,
+      "peak_above": 155672576
+     },
+     {
+      "seconds": 0.14332086499780416,
+      "ttfr": 0.1341830100864172,
+      "rows_out": 380407,
+      "peak_above": 100622336
+     },
+     {
+      "seconds": 0.13934441399760544,
+      "ttfr": 0.13430360797792673,
+      "rows_out": 380407,
+      "peak_above": 115814400
+     },
+     {
+      "seconds": 0.1401414459105581,
+      "ttfr": 0.1351839059498161,
+      "rows_out": 380407,
+      "peak_above": 49049600
+     }
+    ],
+    "wall": 0.9058610331267118,
+    "busy_before": 0.00916666661699613,
+    "quiet_wait": 1.0002298320177943,
+    "other_cores": 0.08183815907562429,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.17143804603256285,
+      "ttfr": 0.1657750578597188,
+      "rows_out": 380407,
+      "peak_above": 149983232
+     },
+     {
+      "seconds": 0.1724738678894937,
+      "ttfr": 0.1651771808974445,
+      "rows_out": 380407,
+      "peak_above": 153165824
+     },
+     {
+      "seconds": 0.17124820803292096,
+      "ttfr": 0.16529903002083302,
+      "rows_out": 380407,
+      "peak_above": 166920192
+     },
+     {
+      "seconds": 0.15613191993907094,
+      "ttfr": 0.15213816589675844,
+      "rows_out": 380407,
+      "peak_above": 109355008
+     },
+     {
+      "seconds": 0.17597714718431234,
+      "ttfr": 0.1711333419661969,
+      "rows_out": 380407,
+      "peak_above": 110280704
+     }
+    ],
+    "wall": 1.01562688103877,
+    "busy_before": 0.007481296746135078,
+    "quiet_wait": 1.0005572410300374,
+    "other_cores": 0.06607249477240666,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1721041409764439,
+      "ttfr": 0.16104368399828672,
+      "rows_out": 380407,
+      "peak_above": 167690240
+     },
+     {
+      "seconds": 0.1422437960281968,
+      "ttfr": 0.12726941495202482,
+      "rows_out": 380407,
+      "peak_above": 105299968
+     },
+     {
+      "seconds": 0.14971722615882754,
+      "ttfr": 0.13975175214000046,
+      "rows_out": 380407,
+      "peak_above": 142258176
+     },
+     {
+      "seconds": 0.1407303751911968,
+      "ttfr": 0.13422974897548556,
+      "rows_out": 380407,
+      "peak_above": 105807872
+     },
+     {
+      "seconds": 0.12817235686816275,
+      "ttfr": 0.12085722503252327,
+      "rows_out": 380407,
+      "peak_above": 74960896
+     }
+    ],
+    "wall": 0.9197125758510083,
+    "busy_before": 0.004991680576020973,
+    "quiet_wait": 1.000567379174754,
+    "other_cores": 0.06521276621293368,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10985032003372908,
+      "ttfr": 0.09841550700366497,
+      "rows_out": 380407,
+      "peak_above": 213684224
+     },
+     {
+      "seconds": 0.09040505718439817,
+      "ttfr": 0.08130336017347872,
+      "rows_out": 380407,
+      "peak_above": 147238912
+     },
+     {
+      "seconds": 0.0839288248680532,
+      "ttfr": 0.07455665897578001,
+      "rows_out": 380407,
+      "peak_above": 98082816
+     },
+     {
+      "seconds": 0.09735678206197917,
+      "ttfr": 0.08640399808064103,
+      "rows_out": 380407,
+      "peak_above": 146984960
+     },
+     {
+      "seconds": 0.08969079097732902,
+      "ttfr": 0.07839796599000692,
+      "rows_out": 380407,
+      "peak_above": 150040576
+     }
+    ],
+    "wall": 0.6351216689217836,
+    "busy_before": 0.008333333457509676,
+    "quiet_wait": 1.0003731839824468,
+    "other_cores": 0.11442374494070692,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11473409994505346,
+      "ttfr": 0.1007748618721962,
+      "rows_out": 380407,
+      "peak_above": 191610880
+     },
+     {
+      "seconds": 0.10289408406242728,
+      "ttfr": 0.09488699911162257,
+      "rows_out": 380407,
+      "peak_above": 199761920
+     },
+     {
+      "seconds": 0.09206666611135006,
+      "ttfr": 0.08836199715733528,
+      "rows_out": 380407,
+      "peak_above": 139853824
+     },
+     {
+      "seconds": 0.0968011359218508,
+      "ttfr": 0.0915471981279552,
+      "rows_out": 380407,
+      "peak_above": 106913792
+     },
+     {
+      "seconds": 0.0869359509088099,
+      "ttfr": 0.0812636949121952,
+      "rows_out": 380407,
+      "peak_above": 69816320
+     }
+    ],
+    "wall": 0.6712120729498565,
+    "busy_before": 0.004991680421058815,
+    "quiet_wait": 1.0006725459825248,
+    "other_cores": 0.10134501912872095,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10994560900144279,
+      "ttfr": 0.09805797412991524,
+      "rows_out": 380407,
+      "peak_above": 216727552
+     },
+     {
+      "seconds": 0.0961276269517839,
+      "ttfr": 0.08545594196766615,
+      "rows_out": 380407,
+      "peak_above": 133799936
+     },
+     {
+      "seconds": 0.08729530801065266,
+      "ttfr": 0.07733592484146357,
+      "rows_out": 380407,
+      "peak_above": 94109696
+     },
+     {
+      "seconds": 0.08909420692361891,
+      "ttfr": 0.07694254396483302,
+      "rows_out": 380407,
+      "peak_above": 112369664
+     },
+     {
+      "seconds": 0.08573445677757263,
+      "ttfr": 0.07583709084428847,
+      "rows_out": 380407,
+      "peak_above": 103256064
+     }
+    ],
+    "wall": 0.6362574689555913,
+    "busy_before": 0.009151414413780687,
+    "quiet_wait": 1.0005619800649583,
+    "other_cores": 0.14602264569004308,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07786642503924668,
+      "ttfr": 0.07323263492435217,
+      "rows_out": 380407,
+      "peak_above": 201084928
+     },
+     {
+      "seconds": 0.06966277887113392,
+      "ttfr": 0.06379571603611112,
+      "rows_out": 380407,
+      "peak_above": 169119744
+     },
+     {
+      "seconds": 0.06858393689617515,
+      "ttfr": 0.06418301607482135,
+      "rows_out": 380407,
+      "peak_above": 130215936
+     },
+     {
+      "seconds": 0.06836472311988473,
+      "ttfr": 0.06231415504589677,
+      "rows_out": 380407,
+      "peak_above": 94887936
+     },
+     {
+      "seconds": 0.06571192597039044,
+      "ttfr": 0.062429341953247786,
+      "rows_out": 380407,
+      "peak_above": 108527616
+     }
+    ],
+    "wall": 0.5254048220813274,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0002795872278512,
+    "other_cores": 0.20046827939887046,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.09151574899442494,
+      "ttfr": 0.0852619269862771,
+      "rows_out": 380407,
+      "peak_above": 227364864
+     },
+     {
+      "seconds": 0.07776500307954848,
+      "ttfr": 0.07366586104035378,
+      "rows_out": 380407,
+      "peak_above": 164507648
+     },
+     {
+      "seconds": 0.08000668697059155,
+      "ttfr": 0.07709952001459897,
+      "rows_out": 380407,
+      "peak_above": 101568512
+     },
+     {
+      "seconds": 0.08446248108521104,
+      "ttfr": 0.07489398401230574,
+      "rows_out": 380407,
+      "peak_above": 107700224
+     },
+     {
+      "seconds": 0.08106844616122544,
+      "ttfr": 0.07353163696825504,
+      "rows_out": 380407,
+      "peak_above": 121671680
+     }
+    ],
+    "wall": 0.58462118008174,
+    "busy_before": 0.009983361152041946,
+    "quiet_wait": 1.0003076700959355,
+    "other_cores": 0.18185793250098997,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07676606089808047,
+      "ttfr": 0.07336886087432504,
+      "rows_out": 380407,
+      "peak_above": 193781760
+     },
+     {
+      "seconds": 0.07304961001500487,
+      "ttfr": 0.06339481100440025,
+      "rows_out": 380407,
+      "peak_above": 136069120
+     },
+     {
+      "seconds": 0.07831119187176228,
+      "ttfr": 0.062387343030422926,
+      "rows_out": 380407,
+      "peak_above": 115650560
+     },
+     {
+      "seconds": 0.07160977693274617,
+      "ttfr": 0.060314618051052094,
+      "rows_out": 380407,
+      "peak_above": 124547072
+     },
+     {
+      "seconds": 0.07622576411813498,
+      "ttfr": 0.0635869731195271,
+      "rows_out": 380407,
+      "peak_above": 105562112
+     }
+    ],
+    "wall": 0.5477166469208896,
+    "busy_before": 0.0033333334140479565,
+    "quiet_wait": 1.0002967179752886,
+    "other_cores": 0.1464388572117189,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.195199360139668,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 93270016
+     },
+     {
+      "seconds": 0.17171819298528135,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 94679040
+     },
+     {
+      "seconds": 0.1732305628247559,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 94621696
+     },
+     {
+      "seconds": 0.17090353881940246,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 94699520
+     },
+     {
+      "seconds": 0.17178451782092452,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 94699520
+     }
+    ],
+    "wall": 1.0360229150392115,
+    "busy_before": 0.008326394949135158,
+    "quiet_wait": 1.0002438698429614,
+    "other_cores": 0.06207970558154761,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.19499858212657273,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 91557888
+     },
+     {
+      "seconds": 0.16647884319536388,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 84553728
+     },
+     {
+      "seconds": 0.16593345603905618,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 83767296
+     },
+     {
+      "seconds": 0.1661737379617989,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 83767296
+     },
+     {
+      "seconds": 0.16601270507089794,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 83763200
+     }
+    ],
+    "wall": 1.016342228045687,
+    "busy_before": 0.009983360997079787,
+    "quiet_wait": 1.0002944059669971,
+    "other_cores": 0.052198954715384396,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.21914097387343645,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 112902144
+     },
+     {
+      "seconds": 0.18734899000264704,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 109740032
+     },
+     {
+      "seconds": 0.18698145798407495,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 110088192
+     },
+     {
+      "seconds": 0.18543506506830454,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 109670400
+     },
+     {
+      "seconds": 0.1854583288077265,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 109670400
+     }
+    ],
+    "wall": 1.1187347169034183,
+    "busy_before": 0.005828476139607065,
+    "quiet_wait": 1.00057028606534,
+    "other_cores": 0.13431960135115087,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.16481785383075476,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 170508288
+     },
+     {
+      "seconds": 0.14914640109054744,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 169869312
+     },
+     {
+      "seconds": 0.14614262012764812,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 152092672
+     },
+     {
+      "seconds": 0.12936519389040768,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 61898752
+     },
+     {
+      "seconds": 0.11815513484179974,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 41086976
+     }
+    ],
+    "wall": 0.8757625380530953,
+    "busy_before": 0.008305647810207374,
+    "quiet_wait": 1.0006188668776304,
+    "other_cores": 0.06715975786168307,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.17496504983864725,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 145420288
+     },
+     {
+      "seconds": 0.17910156305879354,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 162951168
+     },
+     {
+      "seconds": 0.17855538404546678,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 181514240
+     },
+     {
+      "seconds": 0.17451928998343647,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 141504512
+     },
+     {
+      "seconds": 0.1755845071747899,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 167686144
+     }
+    ],
+    "wall": 1.0473275629337877,
+    "busy_before": 0.004995836845408145,
+    "quiet_wait": 1.0002935428638011,
+    "other_cores": 0.09881244830476418,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.16817393596284091,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 166260736
+     },
+     {
+      "seconds": 0.14892030390910804,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 140976128
+     },
+     {
+      "seconds": 0.13466714206151664,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 100003840
+     },
+     {
+      "seconds": 0.1241374749224633,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 26894336
+     },
+     {
+      "seconds": 0.127148917876184,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 28913664
+     }
+    ],
+    "wall": 0.8752596720587462,
+    "busy_before": 0.008333333302289248,
+    "quiet_wait": 1.0002657300792634,
+    "other_cores": 0.0709332349952684,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10689224605448544,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 202440704
+     },
+     {
+      "seconds": 0.09646284813061357,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 198180864
+     },
+     {
+      "seconds": 0.0909632567781955,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 147148800
+     },
+     {
+      "seconds": 0.09027185500599444,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 139141120
+     },
+     {
+      "seconds": 0.09340092004276812,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 112672768
+     }
+    ],
+    "wall": 0.6427708801347762,
+    "busy_before": 0.0041631975521131724,
+    "quiet_wait": 1.0006126139778644,
+    "other_cores": 0.09857322336693006,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10793661396019161,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 212811776
+     },
+     {
+      "seconds": 0.10094218701124191,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 94851072
+     },
+     {
+      "seconds": 0.0988024459220469,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 106246144
+     },
+     {
+      "seconds": 0.09647265588864684,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 125423616
+     },
+     {
+      "seconds": 0.10780296311713755,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 148824064
+     }
+    ],
+    "wall": 0.6776437580119818,
+    "busy_before": 0.0033277872567811792,
+    "quiet_wait": 1.0006587021052837,
+    "other_cores": 0.10586683226194743,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1113419090397656,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 198897664
+     },
+     {
+      "seconds": 0.10420155711472034,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 166187008
+     },
+     {
+      "seconds": 0.09000137588009238,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 113274880
+     },
+     {
+      "seconds": 0.08997273212298751,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 118247424
+     },
+     {
+      "seconds": 0.08339569089002907,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 84209664
+     }
+    ],
+    "wall": 0.6496013270225376,
+    "busy_before": 0.007493755191728841,
+    "quiet_wait": 1.000531812896952,
+    "other_cores": 0.3973560223269007,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07877590786665678,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 196087808
+     },
+     {
+      "seconds": 0.07295546191744506,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 175316992
+     },
+     {
+      "seconds": 0.07055939803831279,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 109993984
+     },
+     {
+      "seconds": 0.07294993195682764,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 97374208
+     },
+     {
+      "seconds": 0.06973458407446742,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 154959872
+     }
+    ],
+    "wall": 0.540757698006928,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0006479078438133,
+    "other_cores": 0.1358926553414045,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "plain"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "plain"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0883556550834328,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 217174016
+     },
+     {
+      "seconds": 0.08038034988567233,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 157548544
+     },
+     {
+      "seconds": 0.07761975983157754,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 69152768
+     },
+     {
+      "seconds": 0.0782306999899447,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 118317056
+     },
+     {
+      "seconds": 0.08366350503638387,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 59678720
+     }
+    ],
+    "wall": 0.5780149940401316,
+    "busy_before": 0.004991680421058815,
+    "quiet_wait": 1.0005534240044653,
+    "other_cores": 0.18561456376535723,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m6",
+   "pipeline": "m6.group_by_url",
+   "terminal": "to_arrow",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "views": "cast"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "cast"
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08255512802861631,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 202510336
+     },
+     {
+      "seconds": 0.07316940580494702,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 162979840
+     },
+     {
+      "seconds": 0.0698560441378504,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 112898048
+     },
+     {
+      "seconds": 0.0712203229777515,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 70135808
+     },
+     {
+      "seconds": 0.07645557611249387,
+      "ttfr": null,
+      "rows_out": 380407,
+      "peak_above": 121331712
+     }
+    ],
+    "wall": 0.5507486178539693,
+    "busy_before": 0.008305647808922453,
+    "quiet_wait": 1.0005608880892396,
+    "other_cores": 0.24802059748935842,
+    "attempt": 1
+   }
+  }
+ ]
+}
