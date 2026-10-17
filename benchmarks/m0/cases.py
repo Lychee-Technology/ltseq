@@ -102,10 +102,12 @@ def m3() -> list[dict]:
                     _cell("m3", "m3.r3_filter_select_derive", terminal, r3, r3_warmup, p,
                           {"order": mode}, repeat=3, input_name="r3", mode=mode, slow_ms=0)
                 )
-    # How much of the row-group merge's cost at high partition counts its
-    # bounds explain: more units in flight, more batches buffered per unit.
-    for p in (CPUS, 2 * CPUS):
-        for window, buffer in ((p, 4), (p, 8), (2 * p, 2), (2 * p, 4)):
+    # How much of the row-group merge's cost its bounds explain: more
+    # batches buffered per unit at every partition count, and more units in
+    # flight at the high ones.
+    for p in sorted({2, 4, CPUS, 2 * CPUS}):
+        bounds = [(p, 4), (p, 8)] + ([(2 * p, 2), (2 * p, 4)] if p >= CPUS else [])
+        for window, buffer in bounds:
             cells.append(
                 _cell("m3", "m3.r3_filter_select_derive", "stream", r3, r3_warmup, p,
                       {"order": "interleaved", "order_window": window, "order_buffer": buffer},
@@ -183,12 +185,21 @@ def m4() -> list[dict]:
     return cells
 
 
-M4B_MODES = {"pushdown": "off", "operator": "operator", "keys": "keys"}
+M4B_MODES = {
+    "pushdown": {"restrict_pushdown": "off"},
+    "operator": {"restrict_pushdown": "operator"},
+    "keys": {"restrict_pushdown": "keys"},
+    # Today's pushdown with the scan's row filter and pruning off (m5's
+    # `prune_off`): on the sample file, where no row group's statistics
+    # exclude the filter's value, this separates what evaluating the filter
+    # inside the scan costs from where the barrier puts it.
+    "scan_filter_off": {"restrict_pushdown": "off", "validate": "prune_off"},
+}
 
 
 def m4b() -> list[dict]:
     """Today's pushdown and the two barrier placements, with checked
-    arithmetic on in all three so only the pushdown differs: ClickBench's
+    arithmetic on in all of them so only the pushdown differs: ClickBench's
     sample, and hits_sorted for a filter that statistics prune."""
     cells = []
     for name in pipelines.M4B:
@@ -196,10 +207,11 @@ def m4b() -> list[dict]:
         warm = ("userid", "counterid", "watchid") if file == "hits_sorted.parquet" else ()
         source, warmup = inputs.clickbench(file, warm=warm), inputs.clickbench_warmup(file)
         for p in PARTITIONS:
-            for mode, restrict in M4B_MODES.items():
+            for mode, flags in M4B_MODES.items():
+                if mode == "scan_filter_off" and file == "hits_sorted.parquet":
+                    continue
                 cells.append(
-                    _cell("m4b", name, "stream", source, warmup, p,
-                          {"checked": "fast", "restrict_pushdown": restrict},
+                    _cell("m4b", name, "stream", source, warmup, p, {"checked": "fast", **flags},
                           repeat=3 if file == "hits_sorted.parquet" else 5,
                           input_name=file.removesuffix(".parquet"), mode=mode)
                 )

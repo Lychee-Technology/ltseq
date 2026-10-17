@@ -72,3 +72,9 @@ non-empty batch of the Arrow C stream, which is what `to_batches` will
 return. Inputs are `bench_core.py`'s synthetic table (held in memory for
 operator measurements, read from CSV for the scan), the ClickBench files
 and the R3 harness's input; `inputs.py` documents each.
+
+Before each cell the harness waits until the whole machine is at most 8%
+busy over a second, and records how many cores other processes kept busy
+while the cell ran (`other_cores`); `report.py` flags a cell above half a
+core as contended. Neither makes a shared machine quiet, but a reader can
+tell which cells another workload overlapped.
