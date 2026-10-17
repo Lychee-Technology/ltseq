@@ -16,6 +16,8 @@ pub(crate) mod engine; // DataFusion session and Tokio runtime
 mod error;
 pub(crate) mod format; // Formatting and display functions
 pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
+#[cfg(feature = "m0")]
+pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
@@ -1252,6 +1254,12 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transpiler::probe::_holds, m)?)?;
     m.add_function(wrap_pyfunction!(engine::_set_layout_overrides, m)?)?;
     m.add_function(wrap_pyfunction!(engine::_engine_config, m)?)?;
+    #[cfg(feature = "m0")]
+    {
+        m.add_function(wrap_pyfunction!(m0::_set_m0_prototypes, m)?)?;
+        m.add_function(wrap_pyfunction!(m0::_m0_prototypes, m)?)?;
+        m.add_function(wrap_pyfunction!(m0::_m0_build, m)?)?;
+    }
     Ok(())
 }
 

@@ -145,11 +145,22 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     config.options_mut().execution.parquet.pushdown_filters = true;
     config.options_mut().execution.parquet.reorder_filters = true;
 
-    let session = SessionContext::new_with_config(config);
+    let session = new_session(config);
     // Appended to DataFusion's rules, so it runs after the ones that build
     // IN lists in every pass.
     session.add_optimizer_rule(Arc::new(FloatListZeros));
     Arc::new(session)
+}
+
+#[cfg(not(feature = "m0"))]
+fn new_session(config: SessionConfig) -> SessionContext {
+    SessionContext::new_with_config(config)
+}
+
+/// A measurement build adds the #251 prototypes in effect (`crate::m0`).
+#[cfg(feature = "m0")]
+fn new_session(config: SessionConfig) -> SessionContext {
+    crate::m0::session(config)
 }
 
 /// Set the layout overrides (`None` clears one) and return the previous

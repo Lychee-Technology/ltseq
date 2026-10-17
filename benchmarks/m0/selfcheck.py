@@ -1,0 +1,233 @@
+"""Check that each #251 prototype does what its measurement assumes.
+
+``python benchmarks/m0/selfcheck.py`` (any build with the ``m0`` feature).
+A prototype that silently did nothing, or did something else, would make
+its timing meaningless, so ``run.py``'s numbers are only read after this
+passes. Small inputs only; ClickBench checks are skipped when the files are
+missing.
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import inputs  # noqa: E402
+import pipelines  # noqa: E402
+from ltseq import LTSeq  # noqa: E402
+from ltseq._testing import pinned_engine, prototypes  # noqa: E402
+
+INT64_MAX = 2**63 - 1
+CHECKS = []
+
+
+def check(fn):
+    CHECKS.append(fn)
+    return fn
+
+
+def raises(fn, text: str) -> str:
+    try:
+        fn()
+    except Exception as error:  # noqa: BLE001 - the class is the point being checked
+        message = f"{type(error).__name__}: {error}"
+        assert text in message, f"expected {text!r} in {message!r}"
+        return message
+    raise AssertionError(f"expected an error containing {text!r}")
+
+
+def plan(t: LTSeq) -> str:
+    logical, physical = t._inner.explain_plan()
+    return logical + "\n" + physical
+
+
+@check
+def m1_checked_arithmetic_raises_only_on_overflow():
+    data = pa.table({"x": [1, INT64_MAX - 1, 5], "y": [2, 1, -3]})
+    for mode in ("arrow", "fast"):
+        with prototypes(checked=mode):
+            t = LTSeq.from_arrow(data)
+        ok = t.derive(s=lambda r: r.x + r.y, d=lambda r: r.x - r.y, m=lambda r: r.y * 3)
+        assert "m0_checked_add" in plan(ok), plan(ok)
+        assert ok.to_arrow().column("s").to_pylist() == [3, INT64_MAX, 2]
+        raises(lambda: t.derive(s=lambda r: r.x + r.x).to_arrow(), "ArithmeticOverflowError")
+        raises(lambda: t.derive(m=lambda r: r.x * 2).to_arrow(), "ArithmeticOverflowError")
+        raises(lambda: t.derive(d=lambda r: r.y - r.x - r.x).to_arrow(), "ArithmeticOverflowError")
+        # A sum whose running value overflows but whose total fits.
+        total = t.agg(s=lambda g: g.x.sum())
+        assert "m0_checked_sum" in plan(total), plan(total)
+    with prototypes(checked="fast"):
+        fits = LTSeq.from_arrow(pa.table({"x": [INT64_MAX, 5, -10]}))
+        over = LTSeq.from_arrow(pa.table({"x": [INT64_MAX, 1]}))
+    assert fits.agg(s=lambda g: g.x.sum()).to_arrow().column("s").to_pylist() == [INT64_MAX - 5]
+    raises(lambda: over.agg(s=lambda g: g.x.sum()).to_arrow(), "ArithmeticOverflowError")
+    # Today's kernels wrap.
+    today = LTSeq.from_arrow(pa.table({"x": [INT64_MAX, 1]}))
+    assert today.agg(s=lambda g: g.x.sum()).to_arrow().column("s").to_pylist() == [-(2**63)]
+    # Every m1 pipeline gives today's values when nothing overflows.
+    csv = str(inputs.bench_core_csv(inputs.WARMUP_ROWS))
+    for name, pipeline in pipelines.M1.items():
+        results = []
+        for mode in ("off", "arrow", "fast"):
+            with pinned_engine(target_partitions=1), prototypes(checked=mode):
+                t = LTSeq.read_csv(csv).collect()
+                if name == "m1.cum_sum":
+                    t = t.sort("id")
+                results.append(pipeline(t).to_arrow())
+        assert results[0].equals(results[1]) and results[0].equals(results[2]), name
+
+
+@check
+def m2_exact_statistics_are_exact_and_order_independent():
+    cancel = pa.table({"x": [1e16, 1.0, -1e16], "g": [1, 1, 1]})
+    with prototypes(exact="exact"):
+        t = LTSeq.from_arrow(cancel)
+    q = t.agg(s=lambda g: g.x.sum(), m=lambda g: g.x.mean())
+    assert "m0_exact_sum" in plan(q), plan(q)
+    assert q.to_arrow().to_pylist() == [{"s": 1.0, "m": 1 / 3}]
+    with prototypes(exact="compensated"):
+        t = LTSeq.from_arrow(cancel)
+    assert t.agg(s=lambda g: g.x.sum()).to_arrow().column("s").to_pylist() == [1.0]
+    # Each m2 pipeline: exact results do not depend on the partition count,
+    # and stay within rounding of today's.
+    csv = str(inputs.bench_core_csv(inputs.WARMUP_ROWS))
+    for name, pipeline in pipelines.M2.items():
+        outs = {}
+        for mode, p in (("off", 1), ("exact", 1), ("exact", 12), ("compensated", 4)):
+            with pinned_engine(target_partitions=p), prototypes(exact=mode):
+                t = LTSeq.read_csv(csv).collect().sort("id")
+            out = pipeline(t)
+            if mode != "off":
+                assert "m0_exact" in plan(out), (name, plan(out))
+            table = out.to_arrow()
+            keys = [f.name for f in table.schema if not pa.types.is_floating(f.type)]
+            rows = table.sort_by([(k, "ascending") for k in keys]).to_pylist() if keys else table.to_pylist()
+            outs[(mode, p)] = rows
+        assert outs[("exact", 1)] == outs[("exact", 12)], name
+        for a, b in zip(outs[("off", 1)], outs[("exact", 1)]):
+            for k, v in a.items():
+                if isinstance(v, float) and v == v:
+                    assert abs(v - b[k]) <= 1e-9 * max(1.0, abs(v)), (name, k, v, b[k])
+
+
+@check
+def m3_ordered_output_restores_file_then_row_order():
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in range(3):
+            ids = pa.array(range(f * 30_000, (f + 1) * 30_000), pa.int64())
+            pq.write_table(pa.table({"id": ids, "v": ids}), f"{tmp}/part-{f}.parquet", row_group_size=4_000)
+        expected = list(range(90_000))
+        for mode in ("concat", "interleaved"):
+            for slow in (0, 5):
+                with pinned_engine(target_partitions=4, batch_size=1024), prototypes(order=mode, slow_ms=slow):
+                    t = LTSeq.read_parquet(tmp)
+                got = pipelines.M3["m3.r3_filter_select_derive"](t).to_arrow().column("id").to_pylist()
+                assert got == [i for i in expected if i % 4 != 0], (mode, slow)
+                assert "OrderedMergeExec" in plan(t.select("id")), plan(t)
+
+
+@check
+def m4_masked_operands_guard_each_other():
+    for failing in (False, True):
+        data = inputs.zones(20_000, 0.5, failing)
+        demanded = int(pc.sum(data.column("g")).as_py())
+        for name, pipeline in pipelines.M4.items():
+            for mode in ("select", "errors", "optimistic"):
+                with prototypes(checked="fast", masked=mode):
+                    t = LTSeq.from_arrow(data)
+                result = pipeline(t)
+                assert "m0_masked" in plan(result), plan(result)
+                rows = result.to_arrow().num_rows
+                # `&` keeps the zone-0 rows; `|` of the negations keeps the rest.
+                want = demanded if "_and_" in name else 20_000 - demanded
+                assert rows == want, (name, mode, failing, rows, want)
+        if failing:
+            with prototypes(checked="fast"):
+                t = LTSeq.from_arrow(data)
+            raises(lambda: pipelines.M4["m4.fallible_and_guard"](t).to_arrow(), "ArithmeticOverflowError")
+
+
+@check
+def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
+    path = inputs.CLICKBENCH / "hits_sample.parquet"
+    if not path.exists():
+        print("  skipped: no hits_sample.parquet")
+        return
+    warm = inputs.clickbench_warmup("hits_sample.parquet")["path"]
+    for name, pipeline in pipelines.M4B.items():
+        results = []
+        for restrict in (False, True):
+            with prototypes(checked="fast", restrict_pushdown=restrict):
+                t = LTSeq.read_parquet(warm)
+            q = pipeline(t)
+            logical, physical = q._inner.explain_plan()
+            assert ("M0Barrier" in logical) == restrict, logical
+            # The filter stays a FilterExec above the barrier, not a scan
+            # predicate (DataFusion also pushes filters physically).
+            assert ("FilterExec" in physical) == restrict, physical
+            results.append(sorted(map(str, q.to_arrow().to_pylist())))
+        assert results[0] == results[1] and results[0], name
+
+
+@check
+def m5_validation_catches_violations_and_disables_pruning():
+    with tempfile.TemporaryDirectory() as tmp:
+        good = pa.table({"x": pa.array(range(10_000), pa.int64())})
+        pq.write_table(good, f"{tmp}/good.parquet", row_group_size=1_000)
+        # One violation, straddling a row-group boundary.
+        bad_x = list(range(10_000))
+        bad_x[5_000], bad_x[4_999] = bad_x[4_999], bad_x[5_000]
+        pq.write_table(pa.table({"x": pa.array(bad_x, pa.int64())}), f"{tmp}/bad.parquet", row_group_size=1_000)
+        for p in (1, 4):
+            with pinned_engine(target_partitions=p), prototypes(validate="validate"):
+                ok = LTSeq.read_parquet(f"{tmp}/good.parquet").assume_sorted("x")
+                bad = LTSeq.read_parquet(f"{tmp}/bad.parquet").assume_sorted("x")
+            assert "ValidateSortedExec" in plan(ok.filter(lambda r: r.x > 9_000)), plan(ok)
+            assert ok.filter(lambda r: r.x > 9_000).to_arrow().num_rows == 999
+            # The filter would let statistics skip the bad row groups.
+            raises(lambda: bad.filter(lambda r: r.x > 9_000).to_arrow(), "OrderViolationError")
+        # Partition boundaries: each of 4 partitions sorted, out of order
+        # between them.
+        rows = [list(range(i * 1_000, (i + 1) * 1_000)) for i in (0, 2, 1, 3)]
+        pq.write_table(pa.table({"x": pa.array(sum(rows, []), pa.int64())}), f"{tmp}/parts.parquet",
+                       row_group_size=1_000)
+        with pinned_engine(target_partitions=4), prototypes(validate="validate"):
+            parts = LTSeq.read_parquet(f"{tmp}/parts.parquet").assume_sorted("x")
+        raises(lambda: parts.to_arrow(), "OrderViolationError")
+
+
+@check
+def m6_views_become_plain_strings():
+    with tempfile.TemporaryDirectory() as tmp:
+        pq.write_table(pa.table({"s": ["a", None, "ccc"], "n": [1, 2, 3]}), f"{tmp}/s.parquet")
+        types = {}
+        for mode in ("off", "plain", "cast"):
+            with prototypes(views=mode):
+                t = LTSeq.read_parquet(f"{tmp}/s.parquet")
+            types[mode] = t.to_arrow().schema.field("s").type
+            assert t.to_arrow().column("s").to_pylist() == ["a", None, "ccc"]
+        assert types == {"off": pa.string_view(), "plain": pa.string(), "cast": pa.string()}, types
+
+
+def main() -> int:
+    failed = 0
+    for fn in CHECKS:
+        try:
+            fn()
+            print(f"ok    {fn.__name__}")
+        except Exception as error:  # noqa: BLE001
+            failed += 1
+            print(f"FAIL  {fn.__name__}: {type(error).__name__}: {error}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

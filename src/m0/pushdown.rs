@@ -1,0 +1,230 @@
+//! m4b: a filter kept above a sort, aggregate or distinct (D10a; M16).
+//!
+//! D10a makes a sort, group or aggregate demand its keys on every row, so a
+//! filter written after one cannot move below it when a key is fallible:
+//! the rows the filter removes may be the ones whose key raises.
+//! DataFusion pushes such filters down, through a sort or distinct always
+//! and through an aggregate when they read only group keys. This prototype
+//! prices losing that pushdown: a no-op [`Barrier`] goes above each sort,
+//! aggregate and distinct a filter sits over (through projections), and
+//! `PushDownFilter` does not cross an extension node it knows nothing
+//! about. DataFusion 55 also pushes filters in the physical plan (through
+//! an aggregate's group keys into the scan), so the barrier is planned as
+//! [`BarrierExec`], which passes batches through and, like any operator
+//! that does not say otherwise, no filters.
+//!
+//! It does not ask whether a key is fallible; the m4b pipelines are written
+//! so that one is (a derived integer key under checked arithmetic).
+
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::common::{DFSchemaRef, Result};
+use datafusion::execution::context::QueryPlanner;
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::{
+    Expr, Extension, Filter, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
+};
+use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    ReplaceChildrenOptions,
+};
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+
+/// A node that passes its input through unchanged and stops filter pushdown.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+pub(crate) struct Barrier {
+    input: LogicalPlan,
+}
+
+impl UserDefinedLogicalNodeCore for Barrier {
+    fn name(&self) -> &str {
+        "M0Barrier"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        Vec::new()
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "M0Barrier")
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(Barrier {
+            input: inputs.swap_remove(0),
+        })
+    }
+
+    // Projection pruning still crosses the barrier: it needs from its input
+    // exactly the columns asked of it.
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        Some(vec![output_columns.to_vec()])
+    }
+}
+
+/// Puts a barrier above the sort, aggregate or distinct under `plan`,
+/// looking through projections and aliases.
+fn guard(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+    match plan {
+        LogicalPlan::Sort(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
+            Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+                node: Arc::new(Barrier { input: plan }),
+            })))
+        }
+        LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => plan.map_children(guard),
+        other => Ok(Transformed::no(other)),
+    }
+}
+
+/// Runs first in each optimizer pass, before `PushDownFilter`.
+#[derive(Debug)]
+pub(crate) struct RestrictPushdown;
+
+impl OptimizerRule for RestrictPushdown {
+    fn name(&self) -> &str {
+        "ltseq_m0_restrict_pushdown"
+    }
+
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        _config: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        plan.transform_down(|node| {
+            let LogicalPlan::Filter(filter) = node else {
+                return Ok(Transformed::no(node));
+            };
+            let input = guard(Arc::unwrap_or_clone(filter.input))?;
+            let transformed = input.transformed;
+            let node =
+                LogicalPlan::Filter(Filter::try_new(filter.predicate, Arc::new(input.data))?);
+            Ok(if transformed {
+                Transformed::yes(node)
+            } else {
+                Transformed::no(node)
+            })
+        })
+    }
+}
+
+/// A [`Barrier`] in the physical plan: its input's batches, unchanged.
+#[derive(Debug)]
+struct BarrierExec {
+    input: Arc<dyn ExecutionPlan>,
+}
+
+impl DisplayAs for BarrierExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "M0BarrierExec")
+    }
+}
+
+impl ExecutionPlan for BarrierExec {
+    fn name(&self) -> &str {
+        "M0BarrierExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.input.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn replace_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(BarrierExec {
+            input: children.swap_remove(0),
+        }))
+    }
+
+    #[allow(deprecated)]
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.input.execute(partition, context)
+    }
+}
+
+/// Plans a [`Barrier`] as a [`BarrierExec`].
+struct BarrierPlanner;
+
+#[async_trait]
+impl ExtensionPlanner for BarrierPlanner {
+    async fn plan_extension(
+        &self,
+        _planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        physical_inputs: &[Arc<dyn ExecutionPlan>],
+        _session: &dyn datafusion::catalog::Session,
+        _planning_ctx: &datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(node.as_any().downcast_ref::<Barrier>().map(|_| {
+            Arc::new(BarrierExec {
+                input: Arc::clone(&physical_inputs[0]),
+            }) as Arc<dyn ExecutionPlan>
+        }))
+    }
+}
+
+/// DataFusion's planner plus [`BarrierPlanner`].
+#[derive(Debug)]
+pub(crate) struct BarrierQueryPlanner;
+
+#[async_trait]
+impl QueryPlanner for BarrierQueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session: &dyn datafusion::catalog::Session,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(BarrierPlanner)])
+            .create_physical_plan(logical_plan, session)
+            .await
+    }
+}

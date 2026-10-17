@@ -49,3 +49,46 @@ def pinned_engine(
         yield current_engine_config()
     finally:
         ltseq_core._set_layout_overrides(*previous)
+
+
+def prototypes_available() -> bool:
+    """Whether this build carries the #251 measurement prototypes.
+
+    Only an extension built with the ``m0`` cargo feature does (``maturin
+    develop --release --features m0``); shipped builds never do.
+    """
+    return hasattr(ltseq_core, "_set_m0_prototypes")
+
+
+@contextmanager
+def prototypes(**flags: object) -> Iterator[dict[str, str]]:
+    """Turn on #251's measurement prototypes for tables built inside the block.
+
+    Every flag left out is off, so the block's prototypes are exactly the
+    ones named; the flags in effect before come back on exit. Flags and
+    values are documented in ``src/m0/mod.rs`` (for example
+    ``checked="fast"``, ``order="interleaved"``, ``order_window=4``). A table
+    keeps the prototypes in effect at its reader or constructor call, as it
+    keeps the layout of ``pinned_engine``. Yields the flags now in effect.
+    Raises ``RuntimeError`` on a build without the prototypes and
+    ``ValueError`` for an unknown flag or value.
+    """
+    if not prototypes_available():
+        raise RuntimeError(
+            "this ltseq build has no #251 prototypes; build it with "
+            "`maturin develop --release --features m0`"
+        )
+    core = ltseq_core
+    previous = core._set_m0_prototypes(  # type: ignore[attr-defined]
+        {name: _flag_text(value) for name, value in flags.items()}
+    )
+    try:
+        yield dict(core._m0_prototypes())  # type: ignore[attr-defined]
+    finally:
+        core._set_m0_prototypes(previous)  # type: ignore[attr-defined]
+
+
+def _flag_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
