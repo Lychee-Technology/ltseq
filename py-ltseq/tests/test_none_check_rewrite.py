@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import types
 from json import loads
 
 import pandas as pd
@@ -691,6 +692,31 @@ class TestWrappedCallables:
 
         assert a_values(t.filter(Anything())) == [3, 4]
 
+    def test_proxy_of_function_fails_closed(self, t):
+        # The shape of wrapt's FunctionWrapper: it reaches the function only
+        # through attribute hooks. The callable LTSeq is handed is read as
+        # Python reads it, so the proxy is followed; one that a helper names
+        # is read statically and is not (TestCalledHelpers).
+        class Proxy:
+            def __init__(self, wrapped):
+                object.__setattr__(self, "_wrapped", wrapped)
+
+            @property
+            def __class__(self):
+                return type(object.__getattribute__(self, "_wrapped"))
+
+            def __getattr__(self, name):
+                return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+            def __call__(self, *args):
+                return object.__getattribute__(self, "_wrapped")(*args)
+
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        with pytest.raises(TypeError, match=r"'.*pred' compares a value with None"):
+            t.filter(Proxy(pred))
+
     def test_partial_without_null_check_is_returned_unchanged(self):
         p = functools.partial(lambda r, th: r.a > th, th=1)
         assert _transform_lambda_for_none_checks(p) is p
@@ -710,6 +736,29 @@ def _bound_method(fn):
             return fn(r)
 
     return Holder().check
+
+
+def _callable_instance(fn):
+    class Check:
+        def __call__(self, r):
+            return fn(r)
+
+    return Check()
+
+
+def _classmethod_call(fn):
+    class Check:
+        __call__ = classmethod(lambda cls, r: fn(r))
+
+    return Check()
+
+
+def _metaclass_call(fn):
+    class Calls(type):
+        def __call__(cls, r):
+            return fn(r)
+
+    return Calls("Check", (), {})
 
 
 class TestCalledHelpers:
@@ -768,8 +817,28 @@ class TestCalledHelpers:
 
     @pytest.mark.parametrize(
         "wrap",
-        [functools.partial, functools.lru_cache, _passthrough, _bound_method],
-        ids=["partial", "lru_cache", "decorator", "bound-method"],
+        [
+            functools.partial,
+            functools.lru_cache,
+            functools.cache,
+            staticmethod,
+            _passthrough,
+            _bound_method,
+            _callable_instance,
+            _classmethod_call,
+            _metaclass_call,
+        ],
+        ids=[
+            "partial",
+            "lru_cache",
+            "cache",
+            "staticmethod",
+            "decorator",
+            "bound-method",
+            "callable-instance",
+            "classmethod-call",
+            "metaclass-call",
+        ],
     )
     def test_helper_behind_wrapper(self, t, wrap):
         def absent(r):
@@ -789,6 +858,13 @@ class TestCalledHelpers:
         ):
             with pytest.raises(TypeError, match=r"'missing' \(called from"):
                 call()
+
+    def test_helper_called_through_an_attribute_is_not_checked(self, t):
+        # The documented limit (contract section 3.4): the walk follows
+        # names, not attributes, so `or` still folds the helper's bool out
+        # and the result is the rows where a > 1.
+        helpers = types.SimpleNamespace(missing=missing)
+        assert a_values(t.filter(lambda r: helpers.missing(r) or (r.a > 1))) == [2, 3, 4]
 
     def test_python_value_test_in_helper_is_rejected_too(self, t):
         # Helpers are checked, not rewritten, so a test on a Python value
@@ -859,11 +935,17 @@ class TestCalledHelpers:
         def later(r):
             return r.b is None
 
-    def test_callable_whose_attributes_fail_is_skipped(self, t):
-        # Like werkzeug's LocalProxy outside a request. The helper names it
-        # in a branch that does not run, so the capture must not fail on it.
+    def test_objects_found_by_name_run_no_code(self, t):
+        # Like a lazy proxy, or werkzeug's LocalProxy outside a request. The
+        # helper names it in a branch that does not run, so the capture must
+        # neither run its attribute hooks (`__getattribute__` also serves
+        # `__getattr__`, properties and the `__class__` that isinstance
+        # reads) nor fail on them.
+        touched = []
+
         class Unbound:
-            def __getattr__(self, name):
+            def __getattribute__(self, name):
+                touched.append(name)
                 raise RuntimeError("working outside of a context")
 
             def __call__(self):
@@ -875,3 +957,20 @@ class TestCalledHelpers:
             return proxy() if from_proxy else 2
 
         assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
+        assert touched == []
+
+    def test_wrapper_subclass_is_followed_without_its_hooks(self, t):
+        touched = []
+
+        class Recorded(functools.partial):
+            def __getattribute__(self, name):
+                touched.append(name)
+                return super().__getattribute__(name)
+
+        def absent(r):
+            return r.b is None
+
+        check = Recorded(absent)
+        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+            t.filter(lambda r: check(r) or (r.a > 1))
+        assert touched == []

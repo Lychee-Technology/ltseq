@@ -406,11 +406,11 @@ def _is_library_file(filename: str) -> bool:
     ) or path.startswith(_stdlib_dirs())
 
 
-def _is_library_code(obj: Any, code: types.CodeType) -> bool:
-    module = getattr(obj, "__module__", None)
-    if isinstance(module, str) and module.partition(".")[0] == _PACKAGE:
+def _is_library_function(func: types.FunctionType) -> bool:
+    module = func.__module__
+    if type(module) is str and module.partition(".")[0] == _PACKAGE:
         return True
-    return _is_library_file(code.co_filename)
+    return _is_library_file(func.__code__.co_filename)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -473,9 +473,20 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
 
     Wrappers are followed rather than treated as opaque because the ones
     implemented in C have no code of their own: stopping at them would let
-    the function they call run unchecked. Attributes are read where these
-    wrappers keep them, never through ``__getattr__``, so an object that
-    fabricates attributes on demand (a ``Mock``) cannot make the walk endless.
+    the function they call run unchecked.
+
+    The walk runs no code of the objects it reaches by name. The user never
+    handed them to LTSeq, and a helper may name one only in a branch that
+    does not run, so they are read statically (see :func:`_read_statically`):
+    a lazy proxy is not resolved, and one that fails outside some context
+    (werkzeug's ``LocalProxy``) does not fail the capture. ``fn`` and the
+    wrappers around it are about to be called, so they are read as Python
+    reads them (see :func:`_read_as_called`), which also follows a proxy
+    that forwards to the function it wraps (wrapt's ``FunctionWrapper``).
+    Either way an object that fabricates attributes on demand (a ``Mock``)
+    cannot make the walk endless: a fabricated ``__code__`` is not a code
+    object, and ``__wrapped__`` is read where wrappers store it, not
+    through ``__getattr__``.
 
     Names are followed only into user code. Functions of this package, of
     the standard library and of installed distributions are skipped: they
@@ -483,7 +494,8 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     refuse ordinary lambdas. A callable reached other than by name is not
     followed: an attribute (``helpers.missing(r)``, ``self.check(r)``), an
     argument or a default value. Nor are the methods of a class, which
-    ``type.__call__``, written in C, runs.
+    ``type.__call__``, written in C, runs, or the function behind a proxy
+    reached by name.
     """
     pending: collections.deque[_Visit] = collections.deque([(fn, ())])
     # Keyed by id, holding the object so the id cannot be reused mid-walk.
@@ -493,45 +505,98 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
         if id(obj) in seen:
             continue
         seen[id(obj)] = obj
-        try:
-            reached, following = _visit(obj, via)
-        except Exception:
-            # The user never handed an object found by name to LTSeq, so its
-            # failing attribute access (werkzeug's LocalProxy outside a
-            # request, say) must not fail the capture; it is skipped.
-            if not via:
-                raise
-            continue
+        reached, following = _visit(obj, via)
         if reached is not None:
             yield reached
         pending.extend(following)
 
 
-def _visit(obj: Any, via: tuple[str, ...]) -> tuple[_ReachedCode | None, list[_Visit]]:
-    """One step of :func:`_called_code`: ``obj``'s code, unless ``obj`` is
-    library code reached by name, and the objects to visit after it."""
-    reached = None
-    following: list[_Visit] = []
+class _Parts(NamedTuple):
+    """What :func:`_visit` reads of an object."""
+
+    # Its own code, if it has any.
+    code: types.CodeType | None
+    # Whether it is a function, whose names are followed.
+    is_function: bool
+    # The callables a wrapper forwards to.
+    forwards_to: list[Any]
+    # Its class's `__call__`, read only when it has no code of its own.
+    call: Any
+
+
+def _read_as_called(obj: Any) -> _Parts:
+    """``obj``'s parts, read as Python reads them: through ``isinstance``
+    and ``getattr``, so that a proxy which forwards ``__class__`` and its
+    other attributes to a function is followed to it."""
     code = getattr(obj, "__code__", None)
-    has_code = isinstance(code, types.CodeType)
-    if has_code and not (via and _is_library_code(obj, code)):
-        reached = _ReachedCode(code, via)
-        if isinstance(obj, types.FunctionType):
-            inner = via + (obj.__qualname__,)
-            following.extend((callee, inner) for callee in _named_callables(obj))
+    if not isinstance(code, types.CodeType):
+        code = None
+    forwards_to = []
     if isinstance(obj, functools.partial):
-        following.append((obj.func, via))
+        forwards_to.append(obj.func)
     elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
-        following.append((obj.__func__, via))
+        forwards_to.append(obj.__func__)
     # functools.update_wrapper stores `__wrapped__` in the instance dict.
     attrs = getattr(obj, "__dict__", None)
     if isinstance(attrs, dict) and "__wrapped__" in attrs:
-        following.append((attrs["__wrapped__"], via))
-    if not has_code:
-        # A C slot (as on functools.partial itself) has no code to follow.
-        call = getattr(type(obj), "__call__", None)
-        if call is not None and not isinstance(call, types.WrapperDescriptorType):
-            following.append((call, via))
+        forwards_to.append(attrs["__wrapped__"])
+    call = getattr(type(obj), "__call__", None) if code is None else None
+    return _Parts(code, isinstance(obj, types.FunctionType), forwards_to, call)
+
+
+# The C wrappers that forward a call to a callable they keep in a slot, with
+# the descriptor of that slot. Reading the slot through the wrapper type's
+# own descriptor, rather than through getattr, runs no `__getattribute__`
+# or property that a subclass defines.
+_FORWARDING_SLOTS = (
+    (functools.partial, vars(functools.partial)["func"]),
+    (types.MethodType, vars(types.MethodType)["__func__"]),
+    (staticmethod, vars(staticmethod)["__func__"]),
+    (classmethod, vars(classmethod)["__func__"]),
+)
+
+
+def _read_statically(obj: Any) -> _Parts:
+    """``obj``'s parts, read without running any of its code.
+
+    ``obj`` is told apart by ``type(obj)``, never ``isinstance``, which
+    reads ``obj.__class__``; and its attributes are read through the C
+    descriptors of known types or with :func:`inspect.getattr_static`, which
+    returns a descriptor it finds rather than running it. A proxy is
+    therefore not followed."""
+    kind = type(obj)
+    is_function = kind is types.FunctionType
+    forwards_to = [
+        slot.__get__(obj, kind)
+        for wrapper, slot in _FORWARDING_SLOTS
+        if issubclass(kind, wrapper)
+    ]
+    # Read statically, the `__wrapped__` slot of staticmethod and
+    # classmethod is its descriptor, which is not callable; their
+    # `__func__` above is the same function.
+    wrapped = inspect.getattr_static(obj, "__wrapped__", None)
+    if callable(wrapped):
+        forwards_to.append(wrapped)
+    if is_function:
+        return _Parts(obj.__code__, True, forwards_to, None)
+    return _Parts(None, False, forwards_to, inspect.getattr_static(kind, "__call__", None))
+
+
+def _visit(obj: Any, via: tuple[str, ...]) -> tuple[_ReachedCode | None, list[_Visit]]:
+    """One step of :func:`_called_code`: ``obj``'s code, unless ``obj`` is
+    library code reached by name, and the objects to visit after it."""
+    parts = _read_statically(obj) if via else _read_as_called(obj)
+    reached = None
+    following: list[_Visit] = []
+    if parts.code is not None and not (via and _is_library_function(obj)):
+        reached = _ReachedCode(parts.code, via)
+        if parts.is_function:
+            inner = via + (obj.__qualname__,)
+            following.extend((callee, inner) for callee in _named_callables(obj))
+    following.extend((callee, via) for callee in parts.forwards_to)
+    # A C slot (as on functools.partial itself) has no code to follow.
+    if parts.call is not None and type(parts.call) is not types.WrapperDescriptorType:
+        following.append((parts.call, via))
     return reached, following
 
 
