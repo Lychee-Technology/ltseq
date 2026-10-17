@@ -7,7 +7,8 @@ peaks and allocator state are the cell's own.
 
 The machine the measurements ran on is shared, so ``run_cell`` waits for
 it to go quiet before each cell and records how much CPU other processes
-took while the cell ran; ``report.py`` flags the cells they contended.
+took while the cell ran; ``run.py`` runs a contended cell again and
+``report.py`` flags any that stayed contended.
 """
 
 from __future__ import annotations
@@ -34,6 +35,9 @@ ABORT_ABOVE = 8 << 30
 # seconds of waiting, whichever comes first.
 QUIET_SHARE = 0.08
 QUIET_TIMEOUT = 1800
+# Cores other processes may keep busy, averaged over a cell, before the
+# cell counts as contended.
+CONTENDED = 0.5
 
 
 def _run(*args: str) -> str:

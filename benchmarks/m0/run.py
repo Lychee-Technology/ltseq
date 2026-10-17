@@ -52,12 +52,31 @@ def _summary(result: dict) -> str:
     return text
 
 
+def _measure(cell: dict, scratch: Path, retries: int) -> dict:
+    """Run a cell; while other processes contend it, run it again, up to
+    `retries` more times, and keep the least contended attempt."""
+    best = None
+    for attempt in range(1, retries + 2):
+        if cell["input"].get("warm_columns"):
+            inputs.warm_columns(Path(cell["input"]["path"]), cell["input"]["warm_columns"])
+        result = harness.run_cell(cell, scratch)
+        result["attempt"] = attempt
+        others = result.get("other_cores") or 0.0
+        if best is None or others < (best.get("other_cores") or 0.0):
+            best = result
+        if others <= harness.CONTENDED:
+            break
+    return best
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", default=",".join(cases.CASES), help="measurements to run (comma-separated)")
     parser.add_argument("--partitions", help="keep only these partition counts (comma-separated)")
     parser.add_argument("--pipeline", help="keep only pipelines whose name contains this")
     parser.add_argument("--repeat", type=int, help="override each cell's measured runs")
+    parser.add_argument("--retries", type=int, default=3,
+                        help="runs of a contended cell beyond the first (default 3)")
     parser.add_argument("--allow-debug", action="store_true", help="measure a debug build (for smoke tests)")
     parser.add_argument("--out", type=Path, help="results directory (default benchmarks/m0/results)")
     args = parser.parse_args()
@@ -90,9 +109,7 @@ def main() -> int:
         target = out_dir / f"{name}.json"
         started = time.perf_counter()
         for i, cell in enumerate(cells, 1):
-            if cell["input"].get("warm_columns"):
-                inputs.warm_columns(Path(cell["input"]["path"]), cell["input"]["warm_columns"])
-            result = harness.run_cell(cell, scratch)
+            result = _measure(cell, scratch, args.retries)
             record["cells"].append({**_relative(cell), "result": result})
             target.write_text(json.dumps(record, indent=1))
             labels = " ".join(f"{k}={v}" for k, v in cell["labels"].items())

@@ -15,15 +15,14 @@ import json
 import statistics
 from pathlib import Path
 
+from harness import CONTENDED
+
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 
 # The mode every other mode of a measurement is compared with.
 BASELINE = {"m1": "off", "m2": "off", "m3": "off", "m4": "today", "m4b": "pushdown", "m5": "off", "m6": "off"}
 
-# Cores other processes may keep busy, averaged over a cell, before the
-# cell is flagged as contended.
-CONTENDED = 0.5
 
 
 def summarize(cell: dict) -> dict:

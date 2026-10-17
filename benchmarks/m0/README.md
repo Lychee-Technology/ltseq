@@ -75,6 +75,8 @@ and the R3 harness's input; `inputs.py` documents each.
 
 Before each cell the harness waits until the whole machine is at most 8%
 busy over a second, and records how many cores other processes kept busy
-while the cell ran (`other_cores`); `report.py` flags a cell above half a
-core as contended. Neither makes a shared machine quiet, but a reader can
+while the cell ran (`other_cores`). A cell above half a core counts as
+contended: `run.py` runs it again, up to `--retries` more times (3), keeps
+the least contended attempt, and `report.py` flags any cell that stayed
+contended. None of this makes a shared machine quiet, but a reader can
 tell which cells another workload overlapped.
