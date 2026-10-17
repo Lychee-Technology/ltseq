@@ -16,6 +16,10 @@ import pipelines
 
 CPUS = os.cpu_count() or 1
 PARTITIONS = sorted({1, 2, 4, CPUS})
+# m1 and m2 add 10M rows to bench_core's sizes: at 1M rows an in-memory
+# kernel takes about a millisecond, and the fixed cost of building and
+# planning a query (about 0.3 ms) dilutes the kernel's ratio.
+KERNEL_SIZES = (*inputs.SIZES, 10_000_000)
 
 # What each measurement prices and which impact-map items wait on it.
 MEASUREMENTS = {
@@ -23,7 +27,7 @@ MEASUREMENTS = {
     "m2": {"title": "Exact float accumulation", "gates": "M13, M4; OD-W (#276)"},
     "m3": {"title": "Order-preserving merge", "gates": "M1, #148"},
     "m4": {"title": "Masked evaluation of & and |", "gates": "M16, #252"},
-    "m4b": {"title": "Filter pushdown lost past sort and aggregate (D10a)", "gates": "M16"},
+    "m4b": {"title": "Filter pushdown lost past sort, aggregate and distinct (D10a)", "gates": "M16"},
     "m5": {"title": "assume_sorted validation without pruning (D7)", "gates": "M3"},
     "m6": {"title": "string_view normalized to string", "gates": "M18"},
 }
@@ -56,7 +60,7 @@ def _cell(measurement, pipeline, terminal, source, warmup, partitions, flags, re
 def m1() -> list[dict]:
     """Every pipeline at every size and partition count, three modes."""
     cells = []
-    for rows in inputs.SIZES:
+    for rows in KERNEL_SIZES:
         for name in pipelines.M1:
             source, warmup = _memory(rows, name), _memory(inputs.WARMUP_ROWS, name)
             for p in PARTITIONS:
@@ -70,7 +74,7 @@ def m1() -> list[dict]:
 def m2() -> list[dict]:
     """Every pipeline at every size and partition count, three modes."""
     cells = []
-    for rows in inputs.SIZES:
+    for rows in KERNEL_SIZES:
         for name in pipelines.M2:
             source, warmup = _memory(rows, name), _memory(inputs.WARMUP_ROWS, name)
             for p in PARTITIONS:
@@ -169,18 +173,24 @@ def m4() -> list[dict]:
     return cells
 
 
+M4B_MODES = {"pushdown": "off", "operator": "operator", "keys": "keys"}
+
+
 def m4b() -> list[dict]:
-    """ClickBench's sample, with and without the barrier, checked arithmetic
-    on in both so only the pushdown differs."""
+    """Today's pushdown and the two barrier placements, with checked
+    arithmetic on in all three so only the pushdown differs: ClickBench's
+    sample, and hits_sorted for a filter that statistics prune."""
     cells = []
-    hits, warmup = inputs.clickbench("hits_sample.parquet"), inputs.clickbench_warmup("hits_sample.parquet")
     for name in pipelines.M4B:
+        file = "hits_sorted.parquet" if name in pipelines.M4B_SORTED else "hits_sample.parquet"
+        source, warmup = inputs.clickbench(file), inputs.clickbench_warmup(file)
         for p in PARTITIONS:
-            for restrict in (False, True):
+            for mode, restrict in M4B_MODES.items():
                 cells.append(
-                    _cell("m4b", name, "stream", hits, warmup, p,
+                    _cell("m4b", name, "stream", source, warmup, p,
                           {"checked": "fast", "restrict_pushdown": restrict},
-                          input_name="hits_sample", mode="restricted" if restrict else "pushdown")
+                          repeat=2 if file == "hits_sorted.parquet" else 5,
+                          input_name=file.removesuffix(".parquet"), mode=mode)
                 )
     return cells
 

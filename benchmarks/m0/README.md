@@ -6,11 +6,11 @@ per-cell tables are under [results/](results/).
 
 | | Measurement | Prototype (`src/m0/`) | Gates |
 |---|---|---|---|
-| m1 | Checked integer `+ - * // % **`, `abs`, `sum` | `checked.rs` | M5, #221 |
+| m1 | Checked integer `+ - * **` and `sum` (`//`, `%` and `abs` already raise today and are timed as controls) | `checked.rs` | M5, #221 |
 | m2 | Exact Σx, Σx², Σab: sum, mean, var, std, cov, corr, rolling | `exact.rs`, `exact_acc.rs` | M13, M4, OD-W |
 | m3 | Order-preserving merge, including TTFR with a slow partition | `ordered.rs` | M1, #148 |
 | m4 | Masked `&`/`\|` with fallible operands (D10) | `masked.rs` | M16, #252 |
-| m4b | Filter pushdown lost past sort and aggregate (D10a) | `pushdown.rs` | M16 |
+| m4b | Filter pushdown lost past sort, aggregate and distinct (D10a) | `pushdown.rs` | M16 |
 | m5 | `assume_sorted` validated on every pair, no pruning (D7) | `validate.rs` | M3 |
 | m6 | `string_view` normalized to `string` | `views.rs` | M18 |
 
@@ -37,7 +37,7 @@ with pinned_engine(target_partitions=4), prototypes(checked="fast"):
 | `order_window`, `order_buffer` | units in flight (default `target_partitions`), batches buffered per unit (2) |
 | `slow_ms` | delay per batch of the first `1/target_partitions` of the scan |
 | `masked` | `off`, `select`, `errors`, `optimistic` (with `checked` on, so operands can fail) |
-| `restrict_pushdown` | `true` keeps a filter above the sort or aggregate below it |
+| `restrict_pushdown` | `off`, `operator` (a filter stays above the sort, aggregate or distinct below it), `keys` (it crosses the operator but stays above the operator's input) |
 | `validate` | `off`, `prune_off` (D7's read without the check), `validate` |
 | `views` | `off`, `plain` (scan decodes `string`), `cast` (cast at the plan's root) |
 

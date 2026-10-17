@@ -24,6 +24,7 @@ use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{exec_err, Result};
+use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::expressions::Column;
@@ -50,21 +51,38 @@ impl PhysicalOptimizerRule for ValidateSorted {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|node| {
-            if !node.is::<DataSourceExec>() {
-                return Ok(Transformed::no(node));
-            }
-            let Some(ordering) = node.properties().output_ordering().cloned() else {
+            let Some(scan) = node.downcast_ref::<DataSourceExec>() else {
                 return Ok(Transformed::no(node));
             };
+            // The declared order, not `properties().output_ordering()`: that
+            // one is normalized, and drops a key the scan's predicate makes
+            // constant (`userid = 17...` leaves `eventtime, watchid`), while
+            // the predicate prunes nothing here and every key still varies.
+            let Some((config, _)) = scan.downcast_to_file_source::<ParquetSource>() else {
+                return Ok(Transformed::no(node));
+            };
+            let Some(ordering) = config.output_ordering.first() else {
+                return Ok(Transformed::no(node));
+            };
+            let schema = node.schema();
             let mut keys = Vec::new();
             for sort in ordering.iter() {
                 let Some(column) = sort.expr.downcast_ref::<Column>() else {
                     return exec_err!("m0 validates orders on columns only, not {}", sort.expr);
                 };
-                let field = node.schema().field(column.index()).clone();
+                // The ordering names table columns; the scan may project.
+                let Ok(index) = schema.index_of(column.name()) else {
+                    return exec_err!(
+                        "m0 validates only keys the scan reads, not {}",
+                        column.name()
+                    );
+                };
                 keys.push((
-                    column.index(),
-                    SortField::new_with_options(field.data_type().clone(), sort.options),
+                    index,
+                    SortField::new_with_options(
+                        schema.field(index).data_type().clone(),
+                        sort.options,
+                    ),
                 ));
             }
             let partitions = node.properties().partitioning.partition_count();

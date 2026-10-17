@@ -1,20 +1,28 @@
-//! m4b: a filter kept above a sort, aggregate or distinct (D10a; M16).
+//! m4b: a filter kept above a sort, aggregate or distinct, or above its
+//! input (D10a; M16).
 //!
-//! D10a makes a sort, group or aggregate demand its keys on every row, so a
-//! filter written after one cannot move below it when a key is fallible:
-//! the rows the filter removes may be the ones whose key raises.
-//! DataFusion pushes such filters down, through a sort or distinct always
-//! and through an aggregate when they read only group keys. This prototype
-//! prices losing that pushdown: a no-op [`Barrier`] goes above each sort,
-//! aggregate and distinct a filter sits over (through projections), and
-//! `PushDownFilter` does not cross an extension node it knows nothing
-//! about. DataFusion 55 also pushes filters in the physical plan (through
-//! an aggregate's group keys into the scan), so the barrier is planned as
-//! [`BarrierExec`], which passes batches through and, like any operator
-//! that does not say otherwise, no filters.
+//! D10a makes a sort, grouping, distinct or aggregate demand its keys and
+//! arguments on every input row (contract §20.2), so a filter written after
+//! one may not move to where a fallible key or argument would go
+//! unevaluated on the rows it removes. DataFusion pushes such filters down,
+//! through a sort or distinct always and through an aggregate when they
+//! read only group keys, then into the scan, where Parquet statistics can
+//! skip row groups. This prototype prices losing that, with a no-op
+//! [`Barrier`] that `PushDownFilter` does not cross, as it crosses no
+//! extension node it knows nothing about. Two placements bound the cost
+//! ([`Restrict`]): above each sort, aggregate and distinct a filter sits
+//! over (through projections), the filter never crosses the operator;
+//! between the operator and its input, it crosses the operator but stays
+//! above the projection that computes the keys. The second is what an
+//! implementation that knows a key is fallible pays, short of proving from
+//! statistics that the key cannot fail in a row group. DataFusion 55 also
+//! pushes filters in the physical plan (through an aggregate's group keys
+//! into the scan), so the barrier is planned as [`BarrierExec`], which
+//! passes batches through and, like any operator that does not say
+//! otherwise, no filters.
 //!
 //! It does not ask whether a key is fallible; the m4b pipelines are written
-//! so that one is (a derived integer key under checked arithmetic).
+//! so that one is (a derived integer under checked arithmetic).
 
 use std::fmt;
 use std::sync::Arc;
@@ -34,6 +42,8 @@ use datafusion::physical_plan::{
     ReplaceChildrenOptions,
 };
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+
+use super::Restrict;
 
 /// A node that passes its input through unchanged and stops filter pushdown.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
@@ -79,23 +89,37 @@ impl UserDefinedLogicalNodeCore for Barrier {
     }
 }
 
-/// Puts a barrier above the sort, aggregate or distinct under `plan`,
-/// looking through projections and aliases.
-fn guard(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-    match plan {
-        LogicalPlan::Sort(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
-            Ok(Transformed::yes(LogicalPlan::Extension(Extension {
-                node: Arc::new(Barrier { input: plan }),
-            })))
+/// `plan` under a barrier, unless it is one already: the rule runs in
+/// every optimizer pass.
+fn barrier(plan: LogicalPlan) -> Transformed<LogicalPlan> {
+    if let LogicalPlan::Extension(Extension { node }) = &plan {
+        if node.as_any().is::<Barrier>() {
+            return Transformed::no(plan);
         }
-        LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => plan.map_children(guard),
+    }
+    Transformed::yes(LogicalPlan::Extension(Extension {
+        node: Arc::new(Barrier { input: plan }),
+    }))
+}
+
+/// Puts a barrier above the sort, aggregate or distinct under `plan`, or
+/// above its input, looking through projections and aliases.
+fn guard(plan: LogicalPlan, at: Restrict) -> Result<Transformed<LogicalPlan>> {
+    match plan {
+        LogicalPlan::Sort(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => match at {
+            Restrict::Keys => plan.map_children(|input| Ok(barrier(input))),
+            _ => Ok(barrier(plan)),
+        },
+        LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => {
+            plan.map_children(|child| guard(child, at))
+        }
         other => Ok(Transformed::no(other)),
     }
 }
 
 /// Runs first in each optimizer pass, before `PushDownFilter`.
 #[derive(Debug)]
-pub(crate) struct RestrictPushdown;
+pub(crate) struct RestrictPushdown(pub(crate) Restrict);
 
 impl OptimizerRule for RestrictPushdown {
     fn name(&self) -> &str {
@@ -111,7 +135,7 @@ impl OptimizerRule for RestrictPushdown {
             let LogicalPlan::Filter(filter) = node else {
                 return Ok(Transformed::no(node));
             };
-            let input = guard(Arc::unwrap_or_clone(filter.input))?;
+            let input = guard(Arc::unwrap_or_clone(filter.input), self.0)?;
             let transformed = input.transformed;
             let node =
                 LogicalPlan::Filter(Filter::try_new(filter.predicate, Arc::new(input.data))?);

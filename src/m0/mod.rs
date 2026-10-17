@@ -7,11 +7,11 @@
 //!
 //! | Measurement | Prototype | Gates |
 //! |---|---|---|
-//! | m1 | `checked`: checked `+ - *`, unary `-`, integer `**`, `sum` | M5 |
+//! | m1 | `checked`: checked `+ - *`, integer `**`, `sum` | M5 |
 //! | m2 | `exact`: exact float `sum`, `mean`, `var`, `std`, `cov`, `corr` | M13, M4 |
 //! | m3 | `ordered`: file-then-row order restored after a parallel scan | M1 |
 //! | m4 | `masked`: either operand of `&`/`|` guards the other (D10) | M16 |
-//! | m4b | `pushdown`: no filter pushdown past a sort or aggregate (D10a) | M16 |
+//! | m4b | `pushdown`: a filter kept above a sort, aggregate or distinct, or its input (D10a) | M16 |
 //! | m5 | `validate`: `assume_sorted` checked on every row, no pruning (D7) | M3 |
 //! | m6 | `views`: `string_view` normalized to `string` | M18 |
 //!
@@ -40,13 +40,14 @@ pub(crate) mod pushdown;
 pub(crate) mod validate;
 pub(crate) mod views;
 
-/// m1: how integer `+ - *`, unary `-`, `**` and `sum` are computed.
+/// m1: how integer `+ - *`, `**` and `sum` are computed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(crate) enum Checked {
     /// Today's wrapping DataFusion kernels.
     #[default]
     Off,
-    /// arrow's checked kernels (`add`, `sub`, `mul`, `neg`), element by element.
+    /// arrow's checked kernels (`add`, `sub`, `mul`; `pow` through
+    /// `i64::checked_pow`), which stop at the first overflow.
     Arrow,
     /// Wrapping arithmetic plus a branch-free overflow mask per batch.
     Fast,
@@ -122,6 +123,20 @@ pub(crate) enum Views {
     Cast,
 }
 
+/// m4b: how far a filter above a sort, aggregate or distinct may move
+/// down (D10a).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Restrict {
+    /// Today: as far as DataFusion pushes it, into the scan if it can.
+    #[default]
+    Off,
+    /// Not past the operator.
+    Operator,
+    /// Past the operator but not into its input, where the keys and
+    /// arguments it demands on every row are computed.
+    Keys,
+}
+
 /// The prototypes a session is created with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Prototypes {
@@ -138,8 +153,7 @@ pub(crate) struct Prototypes {
     pub(crate) slow_ms: u64,
     pub(crate) validate: Sorted,
     pub(crate) views: Views,
-    /// m4b: keep a filter above a sort, aggregate or distinct (D10a).
-    pub(crate) restrict_pushdown: bool,
+    pub(crate) restrict_pushdown: Restrict,
 }
 
 impl Default for Prototypes {
@@ -154,7 +168,7 @@ impl Default for Prototypes {
             slow_ms: 0,
             validate: Sorted::Off,
             views: Views::Off,
-            restrict_pushdown: false,
+            restrict_pushdown: Restrict::Off,
         }
     }
 }
@@ -231,8 +245,9 @@ impl Prototypes {
                 }
                 "restrict_pushdown" => {
                     p.restrict_pushdown = match v {
-                        "true" | "True" | "1" => true,
-                        "false" | "False" | "0" => false,
+                        "off" => Restrict::Off,
+                        "operator" => Restrict::Operator,
+                        "keys" => Restrict::Keys,
                         _ => return Err(bad()),
                     }
                 }
@@ -301,7 +316,11 @@ impl Prototypes {
         );
         out.insert(
             name("restrict_pushdown"),
-            self.restrict_pushdown.to_string(),
+            name(match self.restrict_pushdown {
+                Restrict::Off => "off",
+                Restrict::Operator => "operator",
+                Restrict::Keys => "keys",
+            }),
         );
         out
     }
@@ -337,10 +356,10 @@ pub(crate) fn session(mut config: SessionConfig) -> SessionContext {
     let mut builder = SessionStateBuilder::new()
         .with_config(config)
         .with_default_features();
-    if p.restrict_pushdown {
+    if p.restrict_pushdown != Restrict::Off {
         // Must run before `PushDownFilter`, so it goes first.
         let mut rules = Optimizer::new().rules;
-        rules.insert(0, Arc::new(pushdown::RestrictPushdown));
+        rules.insert(0, Arc::new(pushdown::RestrictPushdown(p.restrict_pushdown)));
         builder = builder
             .with_optimizer_rules(rules)
             .with_query_planner(Arc::new(pushdown::BarrierQueryPlanner));
@@ -419,7 +438,7 @@ mod tests {
             ("order", "interleaved"),
             ("order_window", "3"),
             ("slow_ms", "50"),
-            ("restrict_pushdown", "true"),
+            ("restrict_pushdown", "keys"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -157,24 +157,43 @@ def m4_masked_operands_guard_each_other():
 
 @check
 def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
-    path = inputs.CLICKBENCH / "hits_sample.parquet"
-    if not path.exists():
-        print("  skipped: no hits_sample.parquet")
-        return
-    warm = inputs.clickbench_warmup("hits_sample.parquet")["path"]
-    for name, pipeline in pipelines.M4B.items():
-        results = []
-        for restrict in (False, True):
-            with prototypes(checked="fast", restrict_pushdown=restrict):
-                t = LTSeq.read_parquet(warm)
-            q = pipeline(t)
-            logical, physical = q._inner.explain_plan()
-            assert ("M0Barrier" in logical) == restrict, logical
-            # The filter stays a FilterExec above the barrier, not a scan
-            # predicate (DataFusion also pushes filters physically).
-            assert ("FilterExec" in physical) == restrict, physical
-            results.append(sorted(map(str, q.to_arrow().to_pylist())))
-        assert results[0] == results[1] and results[0], name
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, pipeline in pipelines.M4B.items():
+            file = "hits_sorted.parquet" if name in pipelines.M4B_SORTED else "hits_sample.parquet"
+            if not (inputs.CLICKBENCH / file).exists():
+                print(f"  skipped {name}: no {file}")
+                continue
+            warm = inputs.clickbench_warmup(file)["path"]
+            if name in pipelines.M4B_SORTED:
+                # The warm-up rows hold no row of USER, which these filter on.
+                user = pq.read_table(inputs.CLICKBENCH / file, filters=[("userid", "==", pipelines.USER)])
+                warm = f"{tmp}/{name}.parquet"
+                pq.write_table(pa.concat_tables([pq.read_table(inputs.clickbench_warmup(file)["path"]), user]), warm)
+            results = []
+            for restrict in ("off", "operator", "keys"):
+                with prototypes(checked="fast", restrict_pushdown=restrict):
+                    t = LTSeq.read_parquet(warm)
+                q = pipeline(t)
+                logical, physical = q._inner.explain_plan()
+                assert ("M0Barrier" in logical) == (restrict != "off"), logical
+                lines = physical.splitlines()
+
+                def first(*names):
+                    return min((i for i, line in enumerate(lines) if any(n in line for n in names)), default=None)
+
+                # Today the filter becomes a scan predicate (DataFusion also
+                # pushes filters physically); with a barrier it stays a
+                # FilterExec, above the operator or between it and the barrier.
+                filter_at, operator_at = first("FilterExec"), first("SortExec", "AggregateExec")
+                barrier_at = first("M0BarrierExec")
+                if restrict == "off":
+                    assert filter_at is None, physical
+                elif restrict == "operator":
+                    assert filter_at < barrier_at < operator_at, physical
+                else:
+                    assert operator_at < filter_at < barrier_at, physical
+                results.append(sorted(map(str, q.to_arrow().to_pylist())))
+            assert results[0] == results[1] == results[2] and results[0], name
 
 
 @check
@@ -202,6 +221,20 @@ def m5_validation_catches_violations_and_disables_pruning():
         with pinned_engine(target_partitions=4), prototypes(validate="validate"):
             parts = LTSeq.read_parquet(f"{tmp}/parts.parquet").assume_sorted("x")
         raises(lambda: parts.to_arrow(), "OrderViolationError")
+        # Two keys, the filter fixing the first: the order still checks both
+        # (a scan predicate makes `a` constant in DataFusion's view of the
+        # scan's ordering), and still every row, not only those that pass.
+        a = [i // 100 for i in range(10_000)]
+        b = [i % 100 for i in range(10_000)]
+        pq.write_table(pa.table({"a": a, "b": b}), f"{tmp}/two.parquet", row_group_size=1_000)
+        b[7_005], b[7_006] = b[7_006], b[7_005]
+        pq.write_table(pa.table({"a": a, "b": b}), f"{tmp}/two_bad.parquet", row_group_size=1_000)
+        for p in (1, 4):
+            with pinned_engine(target_partitions=p), prototypes(validate="validate"):
+                two = LTSeq.read_parquet(f"{tmp}/two.parquet").assume_sorted("a", "b")
+                two_bad = LTSeq.read_parquet(f"{tmp}/two_bad.parquet").assume_sorted("a", "b")
+            assert two.filter(lambda r: r.a == 50).to_arrow().num_rows == 100
+            raises(lambda: two_bad.filter(lambda r: r.a == 50).to_arrow(), "OrderViolationError")
 
 
 @check

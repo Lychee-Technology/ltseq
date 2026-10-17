@@ -20,6 +20,10 @@ from ltseq.expr.base import corr, covar, power
 
 Pipeline = Callable[[LTSeq], LTSeq]
 
+# A ClickBench user with 659 events, which lie in one row group of
+# hits_sorted.parquet (m4b, m5).
+USER = 1773273755792258443
+
 
 # m1: checked integer arithmetic (M5). bench_core in memory: `id` is the row
 # number and `value` is in [1, 1000], so nothing overflows.
@@ -107,9 +111,9 @@ M4: dict[str, Pipeline] = {
 }
 
 
-# m4b: a filter above a sort or aggregate whose key is a derived integer
-# (D10a). DataFusion pushes both filters below the sort or aggregate today.
-# ClickBench sample.
+# m4b: a filter above a sort, aggregate or distinct whose key or argument is
+# a derived integer (D10a). DataFusion pushes each filter below the operator
+# today, and into the scan. ClickBench sample, except M4B_SORTED.
 M4B: dict[str, Pipeline] = {
     "m4b.sort_then_filter": lambda t: (
         t.derive(k=lambda r: r.counterid + 1)
@@ -123,14 +127,30 @@ M4B: dict[str, Pipeline] = {
         .agg(n=lambda g: g.watchid.count(), s=lambda g: g.resolutionwidth.sum())
         .filter(lambda r: r.k == 230)
     ),
+    "m4b.distinct_then_filter": lambda t: (
+        t.derive(k=lambda r: r.counterid + 1)
+        .select("k", "regionid", "searchengineid")
+        .distinct()
+        .filter(lambda r: r.regionid == 229)
+    ),
+    # hits_sorted: USER's events lie in one of 814 row groups, so
+    # today the filter on the group key reaches the scan and statistics skip
+    # the rest; the argument `k` is demanded on every row under D10a.
+    "m4b.user_totals": lambda t: (
+        t.derive(k=lambda r: r.counterid + 1)
+        .group_by("userid")
+        .agg(n=lambda g: g.watchid.count(), s=lambda g: g.k.sum())
+        .filter(lambda r: r.userid == USER)
+    ),
 }
+M4B_SORTED = {"m4b.user_totals"}
 
 
 # m5: `assume_sorted` validated on every row (M3). hits_sorted.parquet,
 # declared sorted by (userid, eventtime, watchid) in the input spec.
 M5: dict[str, Pipeline] = {
-    # One user's 659 events, inside one row group: pruning reads one or two.
-    "m5.user_events": lambda t: t.filter(lambda r: r.userid == 1773273755792258443).select(
+    # USER's events: pruning reads one or two row groups.
+    "m5.user_events": lambda t: t.filter(lambda r: r.userid == USER).select(
         "userid", "eventtime", "watchid", "url"
     ),
     # A predicate statistics cannot prune: every row group is read anyway.
