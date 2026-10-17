@@ -4,7 +4,8 @@ Writes ``results/<name>.md`` next to each ``results/<name>.json``: one row
 per cell, with the median of its measured runs, the ratio to the baseline
 mode of the same scenario (same pipeline, terminal, input and partition
 count), throughput over the input rows, the first run's peak memory and,
-for streamed terminals, its time to first row.
+for streamed terminals, its time to first row. A cell during which other
+processes kept more than ``CONTENDED`` cores busy is flagged in its note.
 """
 
 from __future__ import annotations
@@ -20,11 +21,16 @@ RESULTS = HERE / "results"
 # The mode every other mode of a measurement is compared with.
 BASELINE = {"m1": "off", "m2": "off", "m3": "off", "m4": "today", "m4b": "pushdown", "m5": "off", "m6": "off"}
 
+# Cores other processes may keep busy, averaged over a cell, before the
+# cell is flagged as contended.
+CONTENDED = 0.5
+
 
 def summarize(cell: dict) -> dict:
     result = cell["result"]
     runs = result.get("runs") or []
-    out = {"error": result.get("error"), "aborted": result.get("aborted", False)}
+    out = {"error": result.get("error"), "aborted": result.get("aborted", False),
+           "other_cores": result.get("other_cores")}
     if runs:
         seconds = [r["seconds"] for r in runs]
         out["median"] = statistics.median(seconds)
@@ -67,10 +73,12 @@ def table(record: dict) -> str:
         base = baselines.get(scenario(cell), {})
         ratio = s["median"] / base["median"] if s.get("median") and base.get("median") else None
         note = ""
+        if (s["other_cores"] or 0) > CONTENDED:
+            note = f"contended ({s['other_cores']:.1f} other cores) "
         if s["aborted"]:
-            note = "aborted: " + (s["error"] or "memory")
+            note += "aborted: " + (s["error"] or "memory")
         elif s["error"]:
-            note = s["error"].split("\n")[0][:90].replace("|", "/")
+            note += s["error"].split("\n")[0][:90].replace("|", "/")
         row = [
             cell["pipeline"],
             cell["terminal"],
@@ -92,6 +100,9 @@ def table(record: dict) -> str:
 def document(record: dict) -> str:
     host = record["host"]
     build = ", ".join(f"{k}={v}" for k, v in host.get("m0_build", {}).items())
+    others = [c["result"].get("other_cores") for c in record["cells"]]
+    measured = [o for o in others if o is not None]
+    contended = sum(o > CONTENDED for o in measured)
     return "\n".join([
         f"# {record['measurement']}: {record['title']}",
         "",
@@ -103,6 +114,8 @@ def document(record: dict) -> str:
         f"Linux {host['kernel']}",
         f"- Python {host['python']}, pyarrow {host['pyarrow']}, {host['rustc']}; m0 build: {build}",
         f"- Command: `{host['command']}`, started {host['started']}",
+        f"- Contention: {contended} of {len(measured)} cells ran while other processes kept more than "
+        f"{CONTENDED} cores busy (flagged in the note)" if measured else "- Contention: not recorded",
         "",
         "`median s` is the median of a cell's measured runs (plan building plus the terminal); "
         "`first s` is the first measured run, which also reads metadata later runs find cached "
