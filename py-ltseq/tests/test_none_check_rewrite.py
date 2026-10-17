@@ -68,6 +68,14 @@ def above_one(r):
     return r.a > 1
 
 
+def apply(check, r):
+    return check(r)
+
+
+def ignores_check(r, check):
+    return r.a > 1
+
+
 # Recursive in their code, not when called: the walk of names must end.
 def ping(r, depth=0):
     return pong(r, depth + 1) if depth < 1 else r.a > 2
@@ -772,7 +780,7 @@ class TestCalledHelpers:
         # Run unchecked, this returned [2, 3, 4] instead of [1, 2, 3, 4].
         with pytest.raises(
             TypeError,
-            match=r"^'missing' \(called from '.*<lambda>'\) compares a value with None",
+            match=r"^'missing' \(reached by name from '.*<lambda>'\) compares a value with None",
         ):
             t.filter(lambda r: missing(r) or (r.a > 1))
 
@@ -790,7 +798,7 @@ class TestCalledHelpers:
         with pytest.raises(TypeError) as info:
             t.filter(lambda r: missing_via_helper(r) or (r.a > 1))
         assert str(info.value).startswith(
-            "'missing' (called from 'TestCalledHelpers.test_helper_through_helper."
+            "'missing' (reached by name from 'TestCalledHelpers.test_helper_through_helper."
             "<locals>.<lambda>' via 'missing_via_helper') compares a value with None"
         )
 
@@ -798,7 +806,7 @@ class TestCalledHelpers:
         def absent(r):
             return r.b is None
 
-        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
             t.filter(lambda r: absent(r) or (r.a > 1))
 
     def test_helper_in_closure_of_helper(self, t):
@@ -812,7 +820,9 @@ class TestCalledHelpers:
             return check
 
         check = make_check()
-        with pytest.raises(TypeError, match=r"'.*absent' \(called from .* via '.*check'\)"):
+        with pytest.raises(
+            TypeError, match=r"'.*absent' \(reached by name from .* via '.*check'\)"
+        ):
             t.filter(lambda r: check(r) or (r.a > 1))
 
     @pytest.mark.parametrize(
@@ -845,7 +855,7 @@ class TestCalledHelpers:
             return r.b is None
 
         check = wrap(absent)
-        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
             t.filter(lambda r: check(r) or (r.a > 1))
 
     def test_every_public_boundary(self, t):
@@ -856,15 +866,39 @@ class TestCalledHelpers:
             lambda: t.update(lambda r: missing(r) or (r.a > 1), a=0),
             lambda: t.derive(lambda r: {"x": missing(r) or r.a}),
         ):
-            with pytest.raises(TypeError, match=r"'missing' \(called from"):
+            with pytest.raises(TypeError, match=r"'missing' \(reached by name from"):
                 call()
 
-    def test_helper_called_through_an_attribute_is_not_checked(self, t):
-        # The documented limit (contract section 3.4): the walk follows
-        # names, not attributes, so `or` still folds the helper's bool out
-        # and the result is the rows where a > 1.
+    def test_helper_passed_by_name_is_checked(self, t):
+        # Run unchecked, `apply(missing, r) or ...` returned [2, 3, 4]
+        # instead of [1, 2, 3, 4]. The code does not say whether the function
+        # it passes `missing` to calls it, so a function that ignores it is
+        # refused too (contract section 3.4).
+        for pred in (
+            lambda r: apply(missing, r) or (r.a > 1),
+            lambda r: ignores_check(r, missing),
+        ):
+            with pytest.raises(
+                TypeError, match=r"^'missing' \(reached by name from '.*<lambda>'\)"
+            ):
+                t.filter(pred)
+
+    def test_helper_reached_other_than_by_name_is_not_checked(self, t):
+        # The documented limits (contract section 3.4): the walk follows
+        # names, not attributes or the values of parameters, so `or` still
+        # folds the helper's bool out and the result is the rows where a > 1.
         helpers = types.SimpleNamespace(missing=missing)
-        assert a_values(t.filter(lambda r: helpers.missing(r) or (r.a > 1))) == [2, 3, 4]
+
+        def with_default(r, check=missing):
+            return check(r)
+
+        bound = functools.partial(apply, missing)
+        for pred in (
+            lambda r: helpers.missing(r) or (r.a > 1),
+            lambda r: with_default(r) or (r.a > 1),
+            lambda r: bound(r) or (r.a > 1),
+        ):
+            assert a_values(t.filter(pred)) == [2, 3, 4]
 
     def test_python_value_test_in_helper_is_rejected_too(self, t):
         # Helpers are checked, not rewritten, so a test on a Python value
@@ -922,7 +956,7 @@ class TestCalledHelpers:
             installed_threshold = installed.threshold
             local_threshold = local.threshold
             assert a_values(t.filter(lambda r: r.a > installed_threshold())) == [3, 4]
-            with pytest.raises(TypeError, match=r"'threshold' \(called from"):
+            with pytest.raises(TypeError, match=r"'threshold' \(reached by name from"):
                 t.filter(lambda r: r.a > local_threshold())
         finally:
             del sys.modules[installed.__name__], sys.modules[local.__name__]
@@ -971,6 +1005,6 @@ class TestCalledHelpers:
             return r.b is None
 
         check = Recorded(absent)
-        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+        with pytest.raises(TypeError, match=r"'.*absent' \(reached by name from"):
             t.filter(lambda r: check(r) or (r.a > 1))
         assert touched == []

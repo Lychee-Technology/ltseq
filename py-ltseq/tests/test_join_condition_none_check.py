@@ -185,7 +185,7 @@ class TestBoundary:
         # The helper returns True for a column, so `and` used to drop the
         # test (#185). The check follows the names the condition calls.
         call, key = ENTRY_POINTS[entry]
-        named = r"'_nonnull' \(called from '.*<lambda>'\) "
+        named = r"'_nonnull' \(reached by name from '.*<lambda>'\) "
         with pytest.raises(TypeError, match=named + GUIDANCE):
             call(left, right, lambda l, r: _nonnull(r.x) and key(l, r))
 

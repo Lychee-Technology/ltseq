@@ -431,7 +431,11 @@ def _global_names(code: types.CodeType) -> tuple[str, ...]:
 def _named_callables(func: types.FunctionType) -> Iterator[Any]:
     """The callables ``func`` refers to by name: the globals its code loads,
     looked up in ``func.__globals__`` and then its builtins as
-    ``LOAD_GLOBAL`` does, and the contents of its closure cells."""
+    ``LOAD_GLOBAL`` does, and the contents of its closure cells.
+
+    A name counts whatever the code does with it: a callable it passes to
+    another function (``apply(check, r)``) counts like one it calls, because
+    the code does not say whether that function calls it."""
     values: list[Any] = []
     for name in _global_names(func.__code__):
         for namespace in (func.__globals__, func.__builtins__):
@@ -492,8 +496,10 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     the standard library and of installed distributions are skipped: they
     test Python values with ``is None`` routinely, and checking them would
     refuse ordinary lambdas. A callable reached other than by name is not
-    followed: an attribute (``helpers.missing(r)``, ``self.check(r)``), an
-    argument or a default value. Nor are the methods of a class, which
+    followed: through an attribute (``helpers.missing(r)``,
+    ``self.check(r)``), or only as the value of a parameter, which no code
+    the walk reaches names (a default value, or an argument that a
+    ``functools.partial`` binds). Nor are the methods of a class, which
     ``type.__call__``, written in C, runs, or the function behind a proxy
     reached by name.
     """
@@ -613,13 +619,16 @@ def _code_testing_identity_with_none(fn: Callable) -> _ReachedCode | None:
 
 
 def _describe_reached(reached: _ReachedCode) -> str:
-    """``'name'``, followed for a helper by the functions that lead to it."""
+    """``'name'``, followed for a helper by the functions that lead to it.
+
+    The route names the functions that name the helper, which need not call
+    it (it may be passed on, or named in a branch that does not run)."""
     name = repr(reached.code.co_qualname)
     if not reached.via:
         return name
-    caller, *through = reached.via
+    first, *through = reached.via
     route = f" via {' -> '.join(map(repr, through))}" if through else ""
-    return f"{name} (called from {caller!r}{route})"
+    return f"{name} (reached by name from {first!r}{route})"
 
 
 def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
@@ -632,7 +641,7 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
 
     Raises:
         TypeError: If ``fn``, a function it wraps, or a user function either
-            calls by name (see :func:`_called_code`) still compares a value
+            names (see :func:`_called_code`) still compares a value
             with ``None`` by identity after the rewrite (source unavailable,
             a plain ``def``, a helper, ...). Such a check is a Python bool,
             not a null predicate, and ``and`` / ``or`` / conditional
@@ -676,7 +685,7 @@ def _invoke_condition_lambda(
 
     Raises:
         TypeError: If ``fn``, a function it wraps, or a user function either
-            calls by name (see :func:`_called_code`) compares a value with
+            names (see :func:`_called_code`) compares a value with
             ``None`` by identity. Python evaluates such a test to a constant
             bool (a column is never ``None``), and ``and`` / ``or`` /
             conditional expressions would otherwise silently drop part of
