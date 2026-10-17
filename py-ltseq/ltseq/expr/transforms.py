@@ -482,7 +482,8 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     test Python values with ``is None`` routinely, and checking them would
     refuse ordinary lambdas. A callable reached other than by name is not
     followed: an attribute (``helpers.missing(r)``, ``self.check(r)``), an
-    argument, a default value, or a class.
+    argument or a default value. Nor are the methods of a class, which
+    ``type.__call__``, written in C, runs.
     """
     pending: collections.deque[_Visit] = collections.deque([(fn, ())])
     # Keyed by id, holding the object so the id cannot be reused mid-walk.
