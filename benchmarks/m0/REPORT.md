@@ -199,11 +199,11 @@ or per window.
   double-double addition is a longer dependency chain than a
   superaccumulator update; this was not profiled.
 
-For OD-W (#276) the trade is exact windows at 2 to 3.9 times today's
-time against compensated ones at 1.4 to 1.6, which are deterministic for
-a fixed row order but not exact. Grouped statistics over many groups, at
-6 times and nearly 3 times the memory, are the item most likely to need
-a budget exception or a leaner accumulator for M13.
+For OD-W (#276) the trade is exact rolling `mean` and `std` at 2 to 3.9
+times today's time against compensated ones at 1.4 to 1.6, which are
+deterministic for a fixed row order but not exact. Grouped statistics
+over many groups, at 6 times and nearly 3 times the memory, are the item
+most likely to need a budget exception or a leaner accumulator for M13.
 
 ## m3: order-preserving merge (gates M1, #148)
 
@@ -533,10 +533,11 @@ decisions open:
    failing rows and up to 1.5 times with them. Evaluating the fallible
    operand only on open rows costs up to 2.9 times. Is the mask strategy
    the one M16 should build?
-4. **OD-W (#276).** Exact windows cost 2 to 3.9 times today's time,
-   compensated ones 1.4 to 1.6. Which does the contract require? And do
-   exact grouped statistics over many groups (6 times, nearly 3 times the
-   memory) get a budget exception, or a leaner accumulator first?
+4. **OD-W (#276).** Exact rolling `mean` and `std` cost 2 to 3.9 times
+   today's time, compensated ones 1.4 to 1.6. Which does the contract
+   require? And do exact grouped statistics over many groups (6 times,
+   nearly 3 times the memory) get a budget exception, or a leaner
+   accumulator first?
 5. **M1.** With 8 batches per unit the row-group merge is within 10% of
    today at 12 and 24 partitions but 1.18 times at 4. Is that within
    budget, or should another schedule be prototyped first?
