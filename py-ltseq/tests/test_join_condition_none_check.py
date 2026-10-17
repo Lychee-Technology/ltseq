@@ -7,7 +7,8 @@ identity test instead of capturing it: a proxy column is never `None`, so
 `and` / `or` / a conditional expression used to drop the test silently. The
 lambda is never rewritten (a null test selects rows rather than pairing
 them); every entry point refuses it with a `TypeError` at the call that
-points to `filter` with `is_null()` / `is_not_null()`.
+points to `filter` with `is_null()` / `is_not_null()`, also when the test is
+in a helper the condition calls by name (#185).
 """
 
 import ast
@@ -179,14 +180,13 @@ class TestBoundary:
         joined = left.join(right, on=lambda l, r, unused=None: l.id == r.id)
         assert joined.to_pandas()["id"].tolist() == [1, 2]
 
-    @pytest.mark.xfail(
-        strict=True, reason="#185: the check does not reach functions the condition calls"
-    )
     @pytest.mark.parametrize("entry", ENTRY_POINTS)
     def test_null_identity_test_in_a_called_helper_raises(self, left, right, entry):
-        # The helper returns True for a column, so `and` drops the test.
+        # The helper returns True for a column, so `and` used to drop the
+        # test (#185). The check follows the names the condition calls.
         call, key = ENTRY_POINTS[entry]
-        with pytest.raises(TypeError, match=GUIDANCE):
+        named = r"'_nonnull' \(called from '.*<lambda>'\) "
+        with pytest.raises(TypeError, match=named + GUIDANCE):
             call(left, right, lambda l, r: _nonnull(r.x) and key(l, r))
 
 

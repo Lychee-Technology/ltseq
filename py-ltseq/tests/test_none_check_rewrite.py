@@ -14,7 +14,11 @@ The rewrite must:
   wrong or partial result) when a null identity check cannot be rewritten:
   no source, a plain def, or source that no longer matches the lambda;
 - see through wrappers: a functools.partial of a lambda is rewritten, and a
-  check behind partial, lru_cache, staticmethod or a decorator fails closed.
+  check behind partial, lru_cache, staticmethod or a decorator fails closed;
+- fail closed when a user function the lambda calls by name, directly or
+  through other helpers, makes the check, without rewriting it, while
+  functions of ltseq, the standard library and installed packages are not
+  checked (#185).
 """
 
 import functools
@@ -23,13 +27,18 @@ import os
 import subprocess
 import sys
 import textwrap
+from json import loads
 
 import pandas as pd
 import pytest
 
 from ltseq import LTSeq
-from ltseq.expr.base import if_else
-from ltseq.expr.transforms import _NULL_CHECK_HELPER, _transform_lambda_for_none_checks
+from ltseq.expr.base import if_else, log
+from ltseq.expr.transforms import (
+    _NULL_CHECK_HELPER,
+    _tests_identity_with_none,
+    _transform_lambda_for_none_checks,
+)
 
 MODULE_THRESHOLD = 2
 
@@ -43,6 +52,29 @@ MODULE_DERIVE = lambda r: {"missing": r.b is None}  # noqa: E731
 __ltseq_null_check__ = 5
 assert _NULL_CHECK_HELPER == "__ltseq_null_check__"
 MODULE_PRED_WITH_HELPER_NAME = lambda r: (r.b is None) & (__ltseq_null_check__ > 0)  # noqa: E731
+
+
+# Helpers that lambdas call by name (#185). LTSeq never rewrites them, so on
+# an expression `r.b is None` is the Python value False.
+def missing(r):
+    return r.b is None
+
+
+def missing_via_helper(r):
+    return missing(r)
+
+
+def above_one(r):
+    return r.a > 1
+
+
+# Recursive in their code, not when called: the walk of names must end.
+def ping(r, depth=0):
+    return pong(r, depth + 1) if depth < 1 else r.a > 2
+
+
+def pong(r, depth):
+    return ping(r, depth)
 
 
 @pytest.fixture
@@ -663,3 +695,167 @@ class TestWrappedCallables:
     def test_partial_without_null_check_is_returned_unchanged(self):
         p = functools.partial(lambda r, th: r.a > th, th=1)
         assert _transform_lambda_for_none_checks(p) is p
+
+
+def _passthrough(fn):
+    @functools.wraps(fn)
+    def wrapper(r):
+        return fn(r)
+
+    return wrapper
+
+
+def _bound_method(fn):
+    class Holder:
+        def check(self, r):
+            return fn(r)
+
+    return Holder().check
+
+
+class TestCalledHelpers:
+    """A helper the lambda calls is not rewritten, so its ``r.b is None`` is
+    the Python value False, and ``or`` / ``and`` / ``|`` used to drop it from
+    the captured expression without an error (#185). The functions a lambda
+    names, through globals and closure variables, are checked and refused
+    instead, as far as they are user code."""
+
+    def test_module_helper_raises_naming_it(self, t):
+        # Run unchecked, this returned [2, 3, 4] instead of [1, 2, 3, 4].
+        with pytest.raises(
+            TypeError,
+            match=r"^'missing' \(called from '.*<lambda>'\) compares a value with None",
+        ):
+            t.filter(lambda r: missing(r) or (r.a > 1))
+
+    def test_bitor_in_either_order(self, t):
+        # Run unchecked, the first returned [4] instead of [1, 3, 4], and the
+        # second failed on `bool | BinOpExpr` without naming the cause.
+        for pred in (
+            lambda r: (r.a > 3) | missing(r),
+            lambda r: missing(r) | (r.a > 3),
+        ):
+            with pytest.raises(TypeError, match=r"could not rewrite"):
+                t.filter(pred)
+
+    def test_helper_through_helper(self, t):
+        with pytest.raises(TypeError) as info:
+            t.filter(lambda r: missing_via_helper(r) or (r.a > 1))
+        assert str(info.value).startswith(
+            "'missing' (called from 'TestCalledHelpers.test_helper_through_helper."
+            "<locals>.<lambda>' via 'missing_via_helper') compares a value with None"
+        )
+
+    def test_helper_in_closure(self, t):
+        def absent(r):
+            return r.b is None
+
+        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+            t.filter(lambda r: absent(r) or (r.a > 1))
+
+    def test_helper_in_closure_of_helper(self, t):
+        def make_check():
+            def absent(r):
+                return r.b is None
+
+            def check(r):
+                return absent(r)
+
+            return check
+
+        check = make_check()
+        with pytest.raises(TypeError, match=r"'.*absent' \(called from .* via '.*check'\)"):
+            t.filter(lambda r: check(r) or (r.a > 1))
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [functools.partial, functools.lru_cache, _passthrough, _bound_method],
+        ids=["partial", "lru_cache", "decorator", "bound-method"],
+    )
+    def test_helper_behind_wrapper(self, t, wrap):
+        def absent(r):
+            return r.b is None
+
+        check = wrap(absent)
+        with pytest.raises(TypeError, match=r"'.*absent' \(called from"):
+            t.filter(lambda r: check(r) or (r.a > 1))
+
+    def test_every_public_boundary(self, t):
+        for call in (
+            lambda: t.filter(lambda r: missing(r) or (r.a > 1)),
+            lambda: t.select(lambda r: [r.a, missing(r) or r.b]),
+            lambda: t.delete(lambda r: missing(r) or (r.a > 1)),
+            lambda: t.update(lambda r: missing(r) or (r.a > 1), a=0),
+            lambda: t.derive(lambda r: {"x": missing(r) or r.a}),
+        ):
+            with pytest.raises(TypeError, match=r"'missing' \(called from"):
+                call()
+
+    def test_python_value_test_in_helper_is_rejected_too(self, t):
+        # Helpers are checked, not rewritten, so a test on a Python value
+        # cannot be told apart from one on a column.
+        def threshold(value=None):
+            return 2 if value is None else value
+
+        with pytest.raises(TypeError, match=r"against a sentinel object rather than None"):
+            t.filter(lambda r: r.a > threshold())
+
+    def test_sentinel_in_helper_runs(self, t):
+        unset = object()
+
+        def threshold(value=unset):
+            return 2 if value is unset else value
+
+        assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
+
+    def test_helper_without_null_test_runs(self, t):
+        def above(r, n):
+            return r.a > n
+
+        assert a_values(t.filter(lambda r: above_one(r))) == [2, 3, 4]
+        assert a_values(t.filter(lambda r: above(r, 2) & above_one(r))) == [3, 4]
+        # The lambda's own test is rewritten; the helper next to it is clean.
+        assert a_values(t.filter(lambda r: (r.b is None) & above_one(r))) == [3]
+
+    def test_recursive_helpers_terminate(self, t):
+        assert a_values(t.filter(lambda r: ping(r))) == [3, 4]
+
+    def test_ltseq_functions_are_not_checked(self, t):
+        # `log(x, base=None)` tests its Python argument with `is None`.
+        assert _tests_identity_with_none(log.__code__)
+        out = t.derive(lambda r: {"x": log(r.a), "y": if_else(r.b.is_null(), 1, 0)})
+        assert out.to_arrow().column("y").to_pylist() == [1, 0, 1, 0]
+
+    def test_standard_library_functions_are_not_checked(self, t):
+        assert _tests_identity_with_none(loads.__code__)
+        assert a_values(t.filter(lambda r: r.a.is_in(loads("[2, 4]")))) == [2, 4]
+
+    def test_installed_packages_are_not_checked(self, t, tmp_path):
+        # The same helper is library code under site-packages and user code
+        # anywhere else.
+        source = """
+            def threshold(value=None):
+                return 2 if value is None else value
+            """
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        installed = _import_module_from_source(
+            site_packages, "ltseq_none_check_installed_mod", source
+        )
+        local = _import_module_from_source(tmp_path, "ltseq_none_check_local_mod", source)
+        try:
+            installed_threshold = installed.threshold
+            local_threshold = local.threshold
+            assert a_values(t.filter(lambda r: r.a > installed_threshold())) == [3, 4]
+            with pytest.raises(TypeError, match=r"'threshold' \(called from"):
+                t.filter(lambda r: r.a > local_threshold())
+        finally:
+            del sys.modules[installed.__name__], sys.modules[local.__name__]
+
+    def test_closure_variable_bound_after_the_call_is_skipped(self, t):
+        use_later = False
+        pred = lambda r: later(r) if use_later else r.a > 2  # noqa: E731
+        assert a_values(t.filter(pred)) == [3, 4]
+
+        def later(r):
+            return r.b is None
