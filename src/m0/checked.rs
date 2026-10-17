@@ -40,12 +40,13 @@ use datafusion::logical_expr::utils::format_state_name;
 use datafusion::logical_expr::utils::AggregateOrderSensitivity;
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, BinaryExpr, Cast, ColumnarValue, EmitTo, Expr,
-    ExprSchemable, GroupsAccumulator, LogicalPlan, Operator, ReversedUDAF, ScalarFunctionArgs,
-    ScalarUDF, ScalarUDFImpl, Signature, Volatility, WindowFunctionDefinition,
+    GroupsAccumulator, LogicalPlan, Operator, ReversedUDAF, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility, WindowFunctionDefinition,
 };
 use datafusion::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
 
 use super::Checked;
+use crate::transpiler::planned_type;
 
 /// The error the contract names, as the message prefix a test can match.
 pub(crate) const OVERFLOW: &str = "ArithmeticOverflowError";
@@ -617,7 +618,7 @@ impl CheckedArithmetic {
     }
 
     fn rewrite_expr(&self, expr: Expr, schema: &DFSchema) -> Result<Transformed<Expr>> {
-        let int64 = |e: &Expr| matches!(e.get_type(schema), Ok(DataType::Int64));
+        let int64 = |e: &Expr| planned_type(e, schema) == Some(DataType::Int64);
         Ok(match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right })
                 if matches!(op, Operator::Plus | Operator::Minus | Operator::Multiply)

@@ -27,6 +27,8 @@ pub(crate) mod window_native;
 pub(crate) use float_lists::FloatListZeros;
 pub(crate) use literals::column_value;
 pub(crate) use resolve::{binary_input_types, Resolver};
+#[cfg(feature = "m0")]
+pub(crate) use resolve::planned_type;
 pub use window_native::pyexpr_to_window_expr;
 
 use crate::types::{arg, Arg, PyExpr};

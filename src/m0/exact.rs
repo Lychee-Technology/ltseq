@@ -34,13 +34,14 @@ use datafusion::logical_expr::expr_rewriter::NamePreserver;
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::utils::{format_state_name, AggregateOrderSensitivity};
 use datafusion::logical_expr::{
-    Accumulator, AggregateUDF, AggregateUDFImpl, EmitTo, Expr, ExprSchemable, GroupsAccumulator,
-    LogicalPlan, ReversedUDAF, Signature, Volatility, WindowFunctionDefinition,
+    Accumulator, AggregateUDF, AggregateUDFImpl, EmitTo, Expr, GroupsAccumulator, LogicalPlan,
+    ReversedUDAF, Signature, Volatility, WindowFunctionDefinition,
 };
 use datafusion::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
 
 use super::exact_acc::{exact_corr, exact_cov, exact_mean, exact_std, exact_var, ExactAcc};
 use super::FloatSums;
+use crate::transpiler::planned_type;
 
 /// A statistic and the sums it needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -780,7 +781,7 @@ impl ExactFloat {
         schema: &DFSchema,
     ) -> Option<Arc<AggregateUDF>> {
         let stat = Stat::of(name)?;
-        let float = |e: &Expr| matches!(e.get_type(schema), Ok(DataType::Float64));
+        let float = |e: &Expr| planned_type(e, schema) == Some(DataType::Float64);
         if distinct || args.len() != stat.arity() || !args.iter().all(float) {
             return None;
         }

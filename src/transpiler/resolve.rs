@@ -107,6 +107,19 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// The type `expr` executes as in a plan DataFusion is optimizing, `schema`
+/// being its input's: the #251 prototypes' optimizer rules ask (`crate::m0`).
+/// The analyzer has coerced such a plan and coercion is idempotent, but the
+/// type is read from `expr` coerced again, as [`Resolver::data_type`] reads
+/// it. The plan's schema keeps its column qualifiers, which the Arrow schema
+/// [`Resolver::new`] takes would drop.
+#[cfg(feature = "m0")]
+pub(crate) fn planned_type(expr: &Expr, schema: &DFSchema) -> Option<DataType> {
+    let mut analyzer = TypeCoercionRewriter::new(schema);
+    let coerced = ask(|| expr.clone().rewrite(&mut analyzer)).ok()?.data;
+    ask(|| coerced.get_type(schema)).ok()
+}
+
 /// DataFusion's coercion of the operands of `left op right`
 /// (`BinaryTypeCoercer`, the analyzer's rule for a binary pair), asked
 /// before the expression is built.
