@@ -453,6 +453,10 @@ class _ReachedCode(NamedTuple):
     via: tuple[str, ...]
 
 
+# An object for _called_code to visit, with the `via` of _ReachedCode.
+_Visit = tuple[Any, tuple[str, ...]]
+
+
 def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     """The Python code objects that calling ``fn`` can run, as far as they
     are found without running it, nearest first.
@@ -480,9 +484,7 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     followed: an attribute (``helpers.missing(r)``, ``self.check(r)``), an
     argument, a default value, or a class.
     """
-    pending: collections.deque[tuple[Any, tuple[str, ...]]] = collections.deque(
-        [(fn, ())]
-    )
+    pending: collections.deque[_Visit] = collections.deque([(fn, ())])
     # Keyed by id, holding the object so the id cannot be reused mid-walk.
     seen: dict[int, Any] = {}
     while pending:
@@ -490,26 +492,46 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
         if id(obj) in seen:
             continue
         seen[id(obj)] = obj
-        code = getattr(obj, "__code__", None)
-        has_code = isinstance(code, types.CodeType)
-        if has_code and not (via and _is_library_code(obj, code)):
-            yield _ReachedCode(code, via)
-            if isinstance(obj, types.FunctionType):
-                callees = _named_callables(obj)
-                pending.extend((callee, via + (obj.__qualname__,)) for callee in callees)
-        if isinstance(obj, functools.partial):
-            pending.append((obj.func, via))
-        elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
-            pending.append((obj.__func__, via))
-        # functools.update_wrapper stores `__wrapped__` in the instance dict.
-        attrs = getattr(obj, "__dict__", None)
-        if isinstance(attrs, dict) and "__wrapped__" in attrs:
-            pending.append((attrs["__wrapped__"], via))
-        if not has_code:
-            # A C slot (as on functools.partial itself) has no code to follow.
-            call = getattr(type(obj), "__call__", None)
-            if call is not None and not isinstance(call, types.WrapperDescriptorType):
-                pending.append((call, via))
+        try:
+            reached, following = _visit(obj, via)
+        except Exception:
+            # The user never handed an object found by name to LTSeq, so its
+            # failing attribute access (werkzeug's LocalProxy outside a
+            # request, say) must not fail the capture; it is skipped.
+            if not via:
+                raise
+            continue
+        if reached is not None:
+            yield reached
+        pending.extend(following)
+
+
+def _visit(obj: Any, via: tuple[str, ...]) -> tuple[_ReachedCode | None, list[_Visit]]:
+    """One step of :func:`_called_code`: ``obj``'s code, unless ``obj`` is
+    library code reached by name, and the objects to visit after it."""
+    reached = None
+    following: list[_Visit] = []
+    code = getattr(obj, "__code__", None)
+    has_code = isinstance(code, types.CodeType)
+    if has_code and not (via and _is_library_code(obj, code)):
+        reached = _ReachedCode(code, via)
+        if isinstance(obj, types.FunctionType):
+            inner = via + (obj.__qualname__,)
+            following.extend((callee, inner) for callee in _named_callables(obj))
+    if isinstance(obj, functools.partial):
+        following.append((obj.func, via))
+    elif isinstance(obj, (types.MethodType, staticmethod, classmethod)):
+        following.append((obj.__func__, via))
+    # functools.update_wrapper stores `__wrapped__` in the instance dict.
+    attrs = getattr(obj, "__dict__", None)
+    if isinstance(attrs, dict) and "__wrapped__" in attrs:
+        following.append((attrs["__wrapped__"], via))
+    if not has_code:
+        # A C slot (as on functools.partial itself) has no code to follow.
+        call = getattr(type(obj), "__call__", None)
+        if call is not None and not isinstance(call, types.WrapperDescriptorType):
+            following.append((call, via))
+    return reached, following
 
 
 def _code_testing_identity_with_none(fn: Callable) -> _ReachedCode | None:

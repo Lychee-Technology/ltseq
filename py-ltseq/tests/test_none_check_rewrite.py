@@ -15,10 +15,9 @@ The rewrite must:
   no source, a plain def, or source that no longer matches the lambda;
 - see through wrappers: a functools.partial of a lambda is rewritten, and a
   check behind partial, lru_cache, staticmethod or a decorator fails closed;
-- fail closed when a user function the lambda calls by name, directly or
-  through other helpers, makes the check, without rewriting it, while
-  functions of ltseq, the standard library and installed packages are not
-  checked (#185).
+- refuse, without rewriting it, a null identity check in a user function the
+  lambda calls by name, directly or through other helpers; functions of
+  ltseq, the standard library and installed packages are not checked (#185).
 """
 
 import functools
@@ -859,3 +858,20 @@ class TestCalledHelpers:
 
         def later(r):
             return r.b is None
+
+    def test_callable_whose_attributes_fail_is_skipped(self, t):
+        # Like werkzeug's LocalProxy outside a request. The helper names it
+        # in a branch that does not run, so the capture must not fail on it.
+        class Unbound:
+            def __getattr__(self, name):
+                raise RuntimeError("working outside of a context")
+
+            def __call__(self):
+                raise RuntimeError("working outside of a context")
+
+        proxy = Unbound()
+
+        def threshold(from_proxy=False):
+            return proxy() if from_proxy else 2
+
+        assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
