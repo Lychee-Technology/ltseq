@@ -20,6 +20,8 @@ import pytest
 
 from ltseq import LTSeq
 
+from .test_none_check_rewrite import _ForwardingProxy, _passthrough
+
 GUIDANCE = r"compares a value with None using 'is' / 'is not'"
 
 
@@ -130,20 +132,18 @@ class TestEveryCallableFormRejects:
         with pytest.raises(TypeError, match=GUIDANCE):
             left.join(right, on=functools.partial(cond, "x"))
 
-    def test_decorated_function(self, left, right):
-        def passthrough(fn):
-            @functools.wraps(fn)
-            def wrapper(*args):
-                return fn(*args)
-
-            return wrapper
-
-        @passthrough
+    @pytest.mark.parametrize("proxied", [False, True], ids=["function", "proxy"])
+    def test_decorated_function(self, left, right, proxied):
+        # The decorator's closure names what it wraps, so that is reached by
+        # name too; it is still checked as the callable handed to LTSeq,
+        # through a proxy as well. Run unchecked, the decorated proxy joined
+        # on l.id == r.id alone.
         def cond(l, r):
             return (r.x is not None) and (l.id == r.id)
 
-        with pytest.raises(TypeError, match=GUIDANCE):
-            left.join(right, on=cond)
+        target = _ForwardingProxy(cond) if proxied else cond
+        with pytest.raises(TypeError, match=r"condition: '[^']*cond' " + GUIDANCE):
+            left.join(right, on=_passthrough(target))
 
     def test_callable_instance(self, left, right):
         class Cond:

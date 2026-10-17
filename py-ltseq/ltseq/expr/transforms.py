@@ -463,34 +463,35 @@ _Visit = tuple[Any, tuple[str, ...]]
 
 def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     """The Python code objects that calling ``fn`` can run, as far as they
-    are found without running it, nearest first.
+    are found without running it, those reached through the fewest names
+    first.
 
-    That is the code ``fn`` runs directly: a function's or bound method's
-    own, a callable instance's ``__call__``, and those of the functions a
-    wrapper forwards to (``functools.partial``, nested or not,
-    ``staticmethod`` / ``classmethod``, and anything that sets
-    ``__wrapped__``, such as ``functools.wraps`` decorators and
-    ``functools.lru_cache``). It is also the code of every user function
-    that a function found this way refers to by name (see
-    :func:`_named_callables`), which is how a helper is usually called, and
-    so on through those functions' names.
+    The code ``fn`` runs directly is a function's or bound method's own, a
+    callable instance's ``__call__``, and those of the functions a wrapper
+    forwards to (``functools.partial``, nested or not, ``staticmethod`` /
+    ``classmethod``, and anything that sets ``__wrapped__``, such as
+    ``functools.wraps`` decorators and ``functools.lru_cache``). The code
+    reached by name is that of every user function that a function found
+    either way refers to by name (see :func:`_named_callables`), which is
+    how a helper is usually called, and so on through those functions'
+    names.
 
     Wrappers are followed rather than treated as opaque because the ones
     implemented in C have no code of their own: stopping at them would let
     the function they call run unchecked.
 
-    The walk runs no code of the objects it reaches by name. The user never
-    handed them to LTSeq, and a helper may name one only in a branch that
-    does not run, so they are read statically (see :func:`_read_statically`):
-    a lazy proxy is not resolved, and one that fails outside some context
-    (werkzeug's ``LocalProxy``) does not fail the capture. ``fn`` and the
-    wrappers around it are about to be called, so they are read as Python
-    reads them (see :func:`_read_as_called`), which also follows a proxy
-    that forwards to the function it wraps (wrapt's ``FunctionWrapper``).
-    Either way an object that fabricates attributes on demand (a ``Mock``)
-    cannot make the walk endless: a fabricated ``__code__`` is not a code
-    object, and ``__wrapped__`` is read where wrappers store it, not
-    through ``__getattr__``.
+    The walk runs no code of the objects it reaches by name, nor of their
+    classes. The user never handed them to LTSeq, and a helper may name one
+    only in a branch that does not run, so they are read statically (see
+    :func:`_read_statically`): a lazy proxy is not resolved, and one that
+    fails outside some context (werkzeug's ``LocalProxy``) does not fail
+    the capture. ``fn`` and the wrappers around it are about to be called,
+    so they are read as Python reads them (see :func:`_read_as_called`),
+    which also follows a proxy that forwards to the function it wraps
+    (wrapt's ``FunctionWrapper``). Either way an object that fabricates
+    attributes on demand (a ``Mock``) cannot make the walk endless: a
+    fabricated ``__code__`` is not a code object, and ``__wrapped__`` is
+    read where wrappers store it, not through ``__getattr__``.
 
     Names are followed only into user code. Functions of this package, of
     the standard library and of installed distributions are skipped: they
@@ -504,17 +505,28 @@ def _called_code(fn: Callable) -> Iterator[_ReachedCode]:
     reached by name.
     """
     pending: collections.deque[_Visit] = collections.deque([(fn, ())])
-    # Keyed by id, holding the object so the id cannot be reused mid-walk.
-    seen: dict[int, Any] = {}
+    # Keyed by id and by how the object is read, holding the object so the
+    # id cannot be reused mid-walk. The same object is often reached both
+    # directly and by name (a decorator's closure names the function it
+    # stores in `__wrapped__`), and is then read both ways, since neither
+    # reading finds all the other does: reading it as called follows a proxy
+    # and checks library code, and reading it statically finds the function
+    # in a wrapper's slot even where a subclass's property answers otherwise.
+    seen: dict[tuple[int, bool], Any] = {}
     while pending:
         obj, via = pending.popleft()
-        if id(obj) in seen:
+        key = (id(obj), bool(via))
+        if key in seen:
             continue
-        seen[id(obj)] = obj
-        reached, following = _visit(obj, via)
+        seen[key] = obj
+        reached, forwarded, named = _visit(obj, via)
         if reached is not None:
             yield reached
-        pending.extend(following)
+        # Fewest names first: what obj forwards to is as near as obj, and
+        # what it names is one name further (a 0-1 breadth-first search). So
+        # the code fn runs directly comes before any code reached by name.
+        pending.extendleft(reversed(forwarded))
+        pending.extend(named)
 
 
 class _Parts(NamedTuple):
@@ -562,13 +574,33 @@ _FORWARDING_SLOTS = (
 )
 
 
-def _read_statically(obj: Any) -> _Parts:
-    """``obj``'s parts, read without running any of its code.
+# The descriptors through which `type` itself reads a class's MRO and
+# namespace. Reading `cls.__mro__` or `cls.__dict__` instead runs the
+# `__getattribute__` of a metaclass, which inspect.getattr_static does.
+_class_mro = vars(type)["__mro__"].__get__
+_class_namespace = vars(type)["__dict__"].__get__
 
-    ``obj`` is told apart by ``type(obj)``, never ``isinstance``, which
-    reads ``obj.__class__``; and its attributes are read through the C
-    descriptors of known types or with :func:`inspect.getattr_static`, which
-    returns a descriptor it finds rather than running it. A proxy is
+
+def _class_attribute(kind: type, name: str) -> Any:
+    """``name`` as defined by the first class in ``kind``'s MRO that defines
+    it, or ``None``; a descriptor is returned, not run."""
+    for cls in _class_mro(kind):
+        namespace = _class_namespace(cls)
+        if name in namespace:
+            return namespace[name]
+    return None
+
+
+def _read_statically(obj: Any) -> _Parts:
+    """``obj``'s parts, read without running any of its code or of its
+    class's.
+
+    It reads what :func:`_read_as_called` reads, but ``obj`` is told apart
+    by ``type(obj)``, never ``isinstance``, which reads ``obj.__class__``;
+    a wrapper's slot is read through the wrapper type's own descriptor; and
+    the instance dict and ``__call__`` are found in the class namespaces
+    (see :func:`_class_attribute`), where a property or attribute hook that
+    the class defines in their place is found rather than run. A proxy is
     therefore not followed."""
     kind = type(obj)
     is_function = kind is types.FunctionType
@@ -577,33 +609,36 @@ def _read_statically(obj: Any) -> _Parts:
         for wrapper, slot in _FORWARDING_SLOTS
         if issubclass(kind, wrapper)
     ]
-    # Read statically, the `__wrapped__` slot of staticmethod and
-    # classmethod is its descriptor, which is not callable; their
-    # `__func__` above is the same function.
-    wrapped = inspect.getattr_static(obj, "__wrapped__", None)
-    if callable(wrapped):
-        forwards_to.append(wrapped)
+    # The instance dict's own descriptor is written in C; anything else in
+    # its place is the class's code.
+    dict_slot = _class_attribute(kind, "__dict__")
+    if type(dict_slot) is types.GetSetDescriptorType:
+        attrs = dict_slot.__get__(obj, kind)
+        if type(attrs) is dict and "__wrapped__" in attrs:
+            forwards_to.append(attrs["__wrapped__"])
     if is_function:
         return _Parts(obj.__code__, True, forwards_to, None)
-    return _Parts(None, False, forwards_to, inspect.getattr_static(kind, "__call__", None))
+    return _Parts(None, False, forwards_to, _class_attribute(kind, "__call__"))
 
 
-def _visit(obj: Any, via: tuple[str, ...]) -> tuple[_ReachedCode | None, list[_Visit]]:
+def _visit(
+    obj: Any, via: tuple[str, ...]
+) -> tuple[_ReachedCode | None, list[_Visit], list[_Visit]]:
     """One step of :func:`_called_code`: ``obj``'s code, unless ``obj`` is
-    library code reached by name, and the objects to visit after it."""
+    library code reached by name; the objects it forwards to; and the
+    objects its code names."""
     parts = _read_statically(obj) if via else _read_as_called(obj)
-    reached = None
-    following: list[_Visit] = []
-    if parts.code is not None and not (via and _is_library_function(obj)):
-        reached = _ReachedCode(parts.code, via)
-        if parts.is_function:
-            inner = via + (obj.__qualname__,)
-            following.extend((callee, inner) for callee in _named_callables(obj))
-    following.extend((callee, via) for callee in parts.forwards_to)
+    forwarded: list[_Visit] = [(callee, via) for callee in parts.forwards_to]
     # A C slot (as on functools.partial itself) has no code to follow.
     if parts.call is not None and type(parts.call) is not types.WrapperDescriptorType:
-        following.append((parts.call, via))
-    return reached, following
+        forwarded.append((parts.call, via))
+    if parts.code is None or (via and _is_library_function(obj)):
+        return None, forwarded, []
+    named: list[_Visit] = []
+    if parts.is_function:
+        inner = via + (obj.__qualname__,)
+        named = [(callee, inner) for callee in _named_callables(obj)]
+    return _ReachedCode(parts.code, via), forwarded, named
 
 
 def _code_testing_identity_with_none(fn: Callable) -> _ReachedCode | None:

@@ -725,14 +725,20 @@ class TestWrappedCallables:
 
         assert a_values(t.filter(Anything())) == [3, 4]
 
-    def test_proxy_of_function_fails_closed(self, t):
+    @pytest.mark.parametrize("decorated", [False, True], ids=["proxy", "decorated-proxy"])
+    def test_proxy_of_function_fails_closed(self, t, decorated):
         # A proxy that the code names is not followed
         # (TestCalledHelpers.test_helper_reached_other_than_by_name_is_not_checked).
+        # A decorator's closure names the proxy it wraps, which must not make
+        # it one: run unchecked, the decorated proxy returned [2, 3, 4].
         def pred(r):
             return (r.b is None) or (r.a > 1)
 
-        with pytest.raises(TypeError, match=r"'.*pred' compares a value with None"):
-            t.filter(_ForwardingProxy(pred))
+        fn = _ForwardingProxy(pred)
+        if decorated:
+            fn = _passthrough(fn)
+        with pytest.raises(TypeError, match=r"^'[^']*pred' compares a value with None"):
+            t.filter(fn)
 
     def test_partial_without_null_check_is_returned_unchanged(self):
         p = functools.partial(lambda r, th: r.a > th, th=1)
@@ -741,8 +747,8 @@ class TestWrappedCallables:
 
 def _passthrough(fn):
     @functools.wraps(fn)
-    def wrapper(r):
-        return fn(r)
+    def wrapper(*args):
+        return fn(*args)
 
     return wrapper
 
@@ -817,6 +823,31 @@ class TestCalledHelpers:
             "<locals>.<lambda>' via 'missing_via_two_helpers' -> 'missing_via_helper') "
             "compares a value with None"
         )
+
+    def test_route_has_the_fewest_names(self, t):
+        # Each wrapper's closure names the function, which the wrapper also
+        # reaches through `__wrapped__` without a name; that route is the one
+        # reported. The first wrapper goes through a partial on the way, so
+        # its named route takes fewer steps. The second has the helper's name
+        # from functools.wraps, so its named route read "via 'missing'".
+        def keep_partial(fn):
+            @functools.wraps(functools.partial(fn))
+            def wrapper(*args):
+                return fn(*args)
+
+            return wrapper
+
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        with pytest.raises(TypeError, match=r"^'[^']*pred' compares a value with None"):
+            t.filter(keep_partial(pred))
+        check = _passthrough(missing)
+        with pytest.raises(
+            TypeError,
+            match=r"^'missing' \(reached by name from '[^']*<lambda>'\) compares a value with None",
+        ):
+            t.filter(lambda r: check(r) or (r.a > 1))
 
     def test_helper_in_closure(self, t):
         def absent(r):
@@ -994,6 +1025,45 @@ class TestCalledHelpers:
         finally:
             del sys.modules[installed.__name__], sys.modules[local.__name__]
 
+    @pytest.mark.parametrize("decorated", [False, True], ids=["function", "decorated"])
+    def test_installed_function_handed_in_is_checked(self, t, tmp_path, decorated):
+        # Library code is skipped only when reached by name, and a
+        # decorator's closure naming the function it wraps does not make it
+        # so: run unchecked, the decorated function returned [2, 3, 4].
+        source = """
+            def pred(r):
+                return (r.b is None) or (r.a > 1)
+            """
+        site_packages = tmp_path / "site-packages"
+        site_packages.mkdir()
+        installed = _import_module_from_source(
+            site_packages, "ltseq_none_check_installed_pred", source
+        )
+        try:
+            fn = _passthrough(installed.pred) if decorated else installed.pred
+            with pytest.raises(TypeError, match=r"^'pred' compares a value with None"):
+                t.filter(fn)
+        finally:
+            del sys.modules[installed.__name__]
+
+    def test_wrapper_reached_both_ways_is_read_both_ways(self, t):
+        # The decorator's closure names the partial it wraps, so the partial
+        # is reached directly and by name. Read as called, its `func` is the
+        # property's; read statically, it is the function the partial calls.
+        def harmless(r):
+            return r.a > 1
+
+        class Shadowed(functools.partial):
+            @property
+            def func(self):
+                return harmless
+
+        def pred(r):
+            return (r.b is None) or (r.a > 1)
+
+        with pytest.raises(TypeError, match=r"^'[^']*pred' \(reached by name from"):
+            t.filter(_passthrough(Shadowed(pred)))
+
     def test_closure_variable_bound_after_the_call_is_skipped(self, t):
         use_later = False
         pred = lambda r: later(r) if use_later else r.a > 2  # noqa: E731
@@ -1002,12 +1072,14 @@ class TestCalledHelpers:
         def later(r):
             return r.b is None
 
-    def test_objects_found_by_name_run_no_code(self, t):
+    @pytest.mark.parametrize("named", ["instance", "class", "instance-of-class"])
+    def test_objects_found_by_name_run_no_code(self, t, named):
         # Like a lazy proxy, or werkzeug's LocalProxy outside a request. The
         # helper names it in a branch that does not run, so the capture must
         # neither run its attribute hooks (`__getattribute__` also serves
         # `__getattr__`, properties and the `__class__` that isinstance
-        # reads) nor fail on them.
+        # reads) nor fail on them. A class's hooks are its metaclass's, and
+        # they run on reading `__dict__`, which inspect.getattr_static does.
         touched = []
 
         class Unbound:
@@ -1018,10 +1090,21 @@ class TestCalledHelpers:
             def __call__(self):
                 raise RuntimeError("working outside of a context")
 
-        proxy = Unbound()
+        class Bound(type):
+            def __getattribute__(cls, name):
+                touched.append(name)
+                raise RuntimeError("working outside of a context")
 
-        def threshold(from_proxy=False):
-            return proxy() if from_proxy else 2
+        class Lazy(metaclass=Bound):
+            def __call__(self):
+                raise RuntimeError("working outside of a context")
+
+        obj = {"instance": Unbound, "class": Lazy, "instance-of-class": Lazy}[named]
+        if named != "class":
+            obj = obj()
+
+        def threshold(from_context=False):
+            return obj() if from_context else 2
 
         assert a_values(t.filter(lambda r: r.a > threshold())) == [3, 4]
         assert touched == []
