@@ -193,7 +193,8 @@ def m4b() -> list[dict]:
     cells = []
     for name in pipelines.M4B:
         file = "hits_sorted.parquet" if name in pipelines.M4B_SORTED else "hits_sample.parquet"
-        source, warmup = inputs.clickbench(file), inputs.clickbench_warmup(file)
+        warm = ("userid", "counterid", "watchid") if file == "hits_sorted.parquet" else ()
+        source, warmup = inputs.clickbench(file, warm=warm), inputs.clickbench_warmup(file)
         for p in PARTITIONS:
             for mode, restrict in M4B_MODES.items():
                 cells.append(
@@ -209,7 +210,8 @@ def m5() -> list[dict]:
     """hits_sorted.parquet (100M rows) declared sorted by its keys."""
     cells = []
     keys = ("userid", "eventtime", "watchid")
-    source = inputs.clickbench("hits_sorted.parquet", sorted_by=keys)
+    # The columns the m5 pipelines read, 4.5 GiB of the file's 16.
+    source = inputs.clickbench("hits_sorted.parquet", sorted_by=keys, warm=(*keys, "counterid", "url"))
     warmup = inputs.clickbench_warmup("hits_sorted.parquet", sorted_by=keys)
     for name in pipelines.M5:
         for p in PARTITIONS:

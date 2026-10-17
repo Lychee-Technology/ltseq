@@ -83,13 +83,15 @@ def main() -> int:
                 c["repeat"] = args.repeat
         for path in {Path(c["input"]["path"]) for c in cells if c["input"].get("kind") == "parquet"}:
             # hits_sorted.parquet is larger than the page cache can hold;
-            # its cells read what they need from disk.
+            # its cells warm the columns they read (`warm_columns`).
             if path.is_dir() or path.stat().st_size < 4 << 30:
                 inputs.warm_page_cache(path)
         record = {"host": host, "measurement": name, **cases.MEASUREMENTS[name], "cells": []}
         target = out_dir / f"{name}.json"
         started = time.perf_counter()
         for i, cell in enumerate(cells, 1):
+            if cell["input"].get("warm_columns"):
+                inputs.warm_columns(Path(cell["input"]["path"]), cell["input"]["warm_columns"])
             result = harness.run_cell(cell, scratch)
             record["cells"].append({**_relative(cell), "result": result})
             target.write_text(json.dumps(record, indent=1))

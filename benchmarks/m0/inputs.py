@@ -86,7 +86,9 @@ def scan_csv(rows: int) -> dict:
     return {"kind": "csv", "path": str(bench_core_csv(rows)), "rows": rows}
 
 
-def clickbench(name: str, sorted_by: tuple[str, ...] = ()) -> dict:
+def clickbench(name: str, sorted_by: tuple[str, ...] = (), warm: tuple[str, ...] = ()) -> dict:
+    """A ClickBench file; ``warm`` names the columns to bring into the page
+    cache before each cell, for a file too large to keep there whole."""
     path = CLICKBENCH / name
     if not path.exists():
         raise FileNotFoundError(
@@ -95,6 +97,8 @@ def clickbench(name: str, sorted_by: tuple[str, ...] = ()) -> dict:
     spec = {"kind": "parquet", "path": str(path), "rows": pq.read_metadata(path).num_rows}
     if sorted_by:
         spec["sorted_by"] = list(sorted_by)
+    if warm:
+        spec["warm_columns"] = list(warm)
     return spec
 
 
@@ -147,6 +151,29 @@ def warm_page_cache(path: Path) -> None:
         with open(p, "rb") as f:
             while f.read(64 << 20):
                 pass
+
+
+def warm_columns(path: Path, columns: list[str]) -> None:
+    """Read the bytes of ``columns``' chunks in every row group, so the page
+    cache holds them. hits_sorted.parquet (16 GiB) does not stay there whole,
+    and without this the first cells to read a column read it from disk."""
+    metadata = pq.ParquetFile(path).metadata
+    ranges = []
+    for i in range(metadata.num_row_groups):
+        group = metadata.row_group(i)
+        for j in range(group.num_columns):
+            chunk = group.column(j)
+            if chunk.path_in_schema in columns:
+                start = chunk.dictionary_page_offset if chunk.has_dictionary_page else chunk.data_page_offset
+                ranges.append((start, chunk.total_compressed_size))
+    with open(path, "rb", buffering=0) as f:
+        for start, size in sorted(ranges):
+            f.seek(start)
+            while size > 0:
+                read = len(f.read(min(size, 64 << 20)) or b"")
+                if not read:
+                    break
+                size -= read
 
 
 # ---------------------------------------------------------------------------
