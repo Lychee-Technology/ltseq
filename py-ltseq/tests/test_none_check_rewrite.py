@@ -64,6 +64,10 @@ def missing_via_helper(r):
     return missing(r)
 
 
+def missing_via_two_helpers(r):
+    return missing_via_helper(r)
+
+
 def above_one(r):
     return r.a > 1
 
@@ -613,6 +617,27 @@ def _unflattened_partial(fn, *args, **kwargs):
     return outer
 
 
+class _ForwardingProxy:
+    """The shape of wrapt's ``FunctionWrapper``: it reaches the function only
+    through attribute hooks and its own ``__call__``. The callable LTSeq is
+    handed is read as Python reads it, so this proxy is followed there; one
+    that the code names is read statically and is not. With wrapt 1.17.2, a
+    ``FunctionWrapper`` and this class behave alike on both reads."""
+
+    def __init__(self, wrapped):
+        object.__setattr__(self, "_wrapped", wrapped)
+
+    @property
+    def __class__(self):
+        return type(object.__getattribute__(self, "_wrapped"))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+    def __call__(self, *args):
+        return object.__getattribute__(self, "_wrapped")(*args)
+
+
 class TestWrappedCallables:
     """A wrapper implemented in C (``functools.partial``, ``lru_cache``,
     ``staticmethod``) has no code of its own. The fail-closed check must look
@@ -701,29 +726,13 @@ class TestWrappedCallables:
         assert a_values(t.filter(Anything())) == [3, 4]
 
     def test_proxy_of_function_fails_closed(self, t):
-        # The shape of wrapt's FunctionWrapper: it reaches the function only
-        # through attribute hooks. The callable LTSeq is handed is read as
-        # Python reads it, so the proxy is followed; one that a helper names
-        # is read statically and is not (TestCalledHelpers).
-        class Proxy:
-            def __init__(self, wrapped):
-                object.__setattr__(self, "_wrapped", wrapped)
-
-            @property
-            def __class__(self):
-                return type(object.__getattribute__(self, "_wrapped"))
-
-            def __getattr__(self, name):
-                return getattr(object.__getattribute__(self, "_wrapped"), name)
-
-            def __call__(self, *args):
-                return object.__getattribute__(self, "_wrapped")(*args)
-
+        # A proxy that the code names is not followed
+        # (TestCalledHelpers.test_helper_reached_other_than_by_name_is_not_checked).
         def pred(r):
             return (r.b is None) or (r.a > 1)
 
         with pytest.raises(TypeError, match=r"'.*pred' compares a value with None"):
-            t.filter(Proxy(pred))
+            t.filter(_ForwardingProxy(pred))
 
     def test_partial_without_null_check_is_returned_unchanged(self):
         p = functools.partial(lambda r, th: r.a > th, th=1)
@@ -800,6 +809,13 @@ class TestCalledHelpers:
         assert str(info.value).startswith(
             "'missing' (reached by name from 'TestCalledHelpers.test_helper_through_helper."
             "<locals>.<lambda>' via 'missing_via_helper') compares a value with None"
+        )
+        with pytest.raises(TypeError) as info:
+            t.filter(lambda r: missing_via_two_helpers(r) or (r.a > 1))
+        assert str(info.value).startswith(
+            "'missing' (reached by name from 'TestCalledHelpers.test_helper_through_helper."
+            "<locals>.<lambda>' via 'missing_via_two_helpers' -> 'missing_via_helper') "
+            "compares a value with None"
         )
 
     def test_helper_in_closure(self, t):
@@ -883,22 +899,39 @@ class TestCalledHelpers:
             ):
                 t.filter(pred)
 
-    def test_helper_reached_other_than_by_name_is_not_checked(self, t):
-        # The documented limits (contract section 3.4): the walk follows
-        # names, not attributes or the values of parameters, so `or` still
-        # folds the helper's bool out and the result is the rows where a > 1.
+    @pytest.mark.parametrize(
+        "form",
+        ["attribute", "item", "default-value", "partial-argument", "class-method", "proxy"],
+    )
+    def test_helper_reached_other_than_by_name_is_not_checked(self, t, form):
+        # Each form that contract section 3.4 lists as not reached. The walk
+        # follows names, not attributes, items or the values of parameters;
+        # `type.__call__`, written in C, runs a class's methods; and a proxy
+        # that the code names reaches its function only by running code. So
+        # `or` still folds the helper's bool out, and the result is the rows
+        # where a > 1.
         helpers = types.SimpleNamespace(missing=missing)
+        checks = [missing]
 
         def with_default(r, check=missing):
             return check(r)
 
         bound = functools.partial(apply, missing)
-        for pred in (
-            lambda r: helpers.missing(r) or (r.a > 1),
-            lambda r: with_default(r) or (r.a > 1),
-            lambda r: bound(r) or (r.a > 1),
-        ):
-            assert a_values(t.filter(pred)) == [2, 3, 4]
+
+        class Missing:
+            def __new__(cls, r):
+                return r.b is None
+
+        proxied = _ForwardingProxy(missing)
+        pred = {
+            "attribute": lambda r: helpers.missing(r) or (r.a > 1),
+            "item": lambda r: checks[0](r) or (r.a > 1),
+            "default-value": lambda r: with_default(r) or (r.a > 1),
+            "partial-argument": lambda r: bound(r) or (r.a > 1),
+            "class-method": lambda r: Missing(r) or (r.a > 1),
+            "proxy": lambda r: proxied(r) or (r.a > 1),
+        }[form]
+        assert a_values(t.filter(pred)) == [2, 3, 4]
 
     def test_python_value_test_in_helper_is_rejected_too(self, t):
         # Helpers are checked, not rewritten, so a test on a Python value
