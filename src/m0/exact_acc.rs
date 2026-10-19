@@ -232,103 +232,108 @@ impl ExactAcc {
         Self::default()
     }
 
+    // `add`, `sub`, `add_product`, `sub_product` and `merge` return the heap
+    // bytes they allocated (see `heap_bytes`), so that a caller holding many
+    // accumulators can keep their total without walking them. Only the slow
+    // paths and `normalize` allocate; the fast path returns 0.
+
     /// Adds `x` exactly.
     #[inline]
-    pub fn add(&mut self, x: f64) {
-        self.add_value::<false>(x.to_bits());
+    pub fn add(&mut self, x: f64) -> usize {
+        self.add_value::<false>(x.to_bits())
     }
 
     /// Subtracts `x` exactly; exactly undoes `add(x)`, including the
     /// non-finite counts.
     #[inline]
-    pub fn sub(&mut self, x: f64) {
-        self.add_value::<true>(x.to_bits());
+    pub fn sub(&mut self, x: f64) -> usize {
+        self.add_value::<true>(x.to_bits())
     }
 
     /// Adds the exact (never rounded) product `a * b`.
     #[inline]
-    pub fn add_product(&mut self, a: f64, b: f64) {
-        self.add_prod::<false>(a.to_bits(), b.to_bits());
+    pub fn add_product(&mut self, a: f64, b: f64) -> usize {
+        self.add_prod::<false>(a.to_bits(), b.to_bits())
     }
 
     /// Subtracts the exact product `a * b`; exactly undoes `add_product(a, b)`.
     #[inline]
-    pub fn sub_product(&mut self, a: f64, b: f64) {
-        self.add_prod::<true>(a.to_bits(), b.to_bits());
+    pub fn sub_product(&mut self, a: f64, b: f64) -> usize {
+        self.add_prod::<true>(a.to_bits(), b.to_bits())
     }
 
     #[inline(always)]
-    fn add_value<const NEG: bool>(&mut self, bits: u64) {
+    fn add_value<const NEG: bool>(&mut self, bits: u64) -> usize {
         if is_normal(bits) && put_normal::<NEG>(&mut self.chunks, self.base, bits) {
             self.units += VALUE_UNITS;
             if self.units >= UNIT_LIMIT {
-                self.normalize();
+                return self.normalize();
             }
-            return;
+            return 0;
         }
-        self.add_value_slow(bits, NEG);
+        self.add_value_slow(bits, NEG)
     }
 
     /// Non-finite (counted), zero (ignored, so it never grows the range),
     /// subnormal, or out of the current chunk range (grow, then add).
     #[cold]
     #[inline(never)]
-    fn add_value_slow(&mut self, bits: u64, negate: bool) {
+    fn add_value_slow(&mut self, bits: u64, negate: bool) -> usize {
         if is_nonfinite(bits) {
-            self.count(kind_of_value(bits), negate);
-            return;
+            return self.count(kind_of_value(bits), negate);
         }
         let (m, p) = split(bits);
         if m == 0 {
-            return;
+            return 0;
         }
         let k = (p >> 5) as i32;
-        self.cover(k, k + 2);
+        let mut grown = self.cover(k, k + 2);
         let neg = (bits & SIGN_BIT != 0) ^ negate;
         let done = put_value(&mut self.chunks, self.base, m, p, neg);
         debug_assert!(done);
         self.units += VALUE_UNITS;
         if self.units >= UNIT_LIMIT {
-            self.normalize();
+            grown += self.normalize();
         }
+        grown
     }
 
     #[inline(always)]
-    fn add_prod<const NEG: bool>(&mut self, a: u64, b: u64) {
+    fn add_prod<const NEG: bool>(&mut self, a: u64, b: u64) -> usize {
         if is_normal(a) & is_normal(b)
             && put_normal_product::<NEG>(&mut self.chunks, self.base, a, b)
         {
             self.units += PRODUCT_UNITS;
             if self.units >= UNIT_LIMIT {
-                self.normalize();
+                return self.normalize();
             }
-            return;
+            return 0;
         }
-        self.add_prod_slow(a, b, NEG);
+        self.add_prod_slow(a, b, NEG)
     }
 
     #[cold]
     #[inline(never)]
-    fn add_prod_slow(&mut self, a: u64, b: u64, negate: bool) {
+    fn add_prod_slow(&mut self, a: u64, b: u64, negate: bool) -> usize {
         if is_nonfinite(a) | is_nonfinite(b) {
-            self.count(kind_of_product(a, b), negate);
-            return;
+            return self.count(kind_of_product(a, b), negate);
         }
         let (ma, pa) = split(a);
         let (mb, pb) = split(b);
         if ma == 0 || mb == 0 {
-            return;
+            return 0;
         }
         let p = pa + pb - OFFSET;
         let k = (p >> 5) as i32;
-        self.cover(k, k + 5);
+        let mut grown = self.cover(k, k + 5);
         let neg = ((a ^ b) & SIGN_BIT != 0) ^ negate;
         let done = put_product(&mut self.chunks, self.base, ma, mb, p, neg);
         debug_assert!(done);
         self.units += PRODUCT_UNITS;
         if self.units >= UNIT_LIMIT {
-            self.normalize();
+            grown += self.normalize();
         }
+        grown
     }
 
     /// Adds every value of `xs`; same result as `add` on each, faster for
@@ -457,22 +462,35 @@ impl ExactAcc {
         }
     }
 
+    /// The non-finite counts, allocated on first use; also returns the bytes
+    /// that allocated.
+    fn nonfinite_counts(&mut self) -> (&mut NonFinite, usize) {
+        let grown = if self.nonfinite.is_none() {
+            std::mem::size_of::<NonFinite>()
+        } else {
+            0
+        };
+        (self.nonfinite.get_or_insert_with(Default::default), grown)
+    }
+
     #[cold]
     #[inline(never)]
-    fn count(&mut self, kind: Kind, negate: bool) {
-        let nf = self.nonfinite.get_or_insert_with(Default::default);
+    fn count(&mut self, kind: Kind, negate: bool) -> usize {
+        let (nf, grown) = self.nonfinite_counts();
         let d = if negate { -1 } else { 1 };
         match kind {
             Kind::Nan => nf.nan += d,
             Kind::PosInf => nf.pos_inf += d,
             Kind::NegInf => nf.neg_inf += d,
         }
+        grown
     }
 
-    /// Grows the chunk range to include chunks `[lo, hi)`.
+    /// Grows the chunk range to include chunks `[lo, hi)`; returns the bytes
+    /// that added.
     #[cold]
     #[inline(never)]
-    fn cover(&mut self, lo: i32, hi: i32) {
+    fn cover(&mut self, lo: i32, hi: i32) -> usize {
         let len = self.chunks.len() as i32;
         let (nlo, nhi) = if len == 0 {
             (lo, hi)
@@ -480,7 +498,7 @@ impl ExactAcc {
             (lo.min(self.base), hi.max(self.base + len))
         };
         if len != 0 && nlo == self.base && nhi == self.base + len {
-            return;
+            return 0;
         }
         let mut v = vec![0i64; (nhi - nlo) as usize];
         if len != 0 {
@@ -489,15 +507,17 @@ impl ExactAcc {
         }
         self.chunks = v.into_boxed_slice();
         self.base = nlo;
+        (nhi - nlo - len) as usize * std::mem::size_of::<i64>()
     }
 
     /// Propagates carries: all chunks but the top into `[0, 2^32)`, the top
-    /// into `[-2^31, 2^31)` (growing by one chunk if needed).
-    fn normalize(&mut self) {
+    /// into `[-2^31, 2^31)` (growing by one chunk if needed, whose bytes it
+    /// returns).
+    fn normalize(&mut self) -> usize {
         self.units = 0;
         let n = self.chunks.len();
         if n == 0 {
-            return;
+            return 0;
         }
         let mut carry = 0i64;
         for c in self.chunks[..n - 1].iter_mut() {
@@ -508,38 +528,43 @@ impl ExactAcc {
         let top = self.chunks[n - 1] + carry;
         if (-(1i64 << 31)..(1i64 << 31)).contains(&top) {
             self.chunks[n - 1] = top;
+            0
         } else {
             let end = self.base + n as i32;
-            self.cover(self.base, end + 1);
+            let grown = self.cover(self.base, end + 1);
             self.chunks[n - 1] = top & LOW32;
             self.chunks[n] = top >> 32; // |top| < 2^63, so this is in [-2^31, 2^31)
+            grown
         }
     }
 
     /// Adds another partial state (parallel aggregation).
-    pub fn merge(&mut self, other: &ExactAcc) {
+    pub fn merge(&mut self, other: &ExactAcc) -> usize {
+        let mut grown = 0;
         if let Some(o) = other.nonfinite.as_deref() {
-            let nf = self.nonfinite.get_or_insert_with(Default::default);
+            let (nf, allocated) = self.nonfinite_counts();
             nf.nan += o.nan;
             nf.pos_inf += o.pos_inf;
             nf.neg_inf += o.neg_inf;
+            grown += allocated;
         }
         if other.chunks.is_empty() {
-            return;
+            return grown;
         }
         // other.units < UNIT_LIMIT always holds between operations.
         if self.units + other.units + 1 >= UNIT_LIMIT {
-            self.normalize();
+            grown += self.normalize();
         }
-        self.cover(other.base, other.base + other.chunks.len() as i32);
+        grown += self.cover(other.base, other.base + other.chunks.len() as i32);
         let off = (other.base - self.base) as usize;
         for (d, s) in self.chunks[off..].iter_mut().zip(other.chunks.iter()) {
             *d += *s;
         }
         self.units += other.units + 1;
         if self.units >= UNIT_LIMIT {
-            self.normalize();
+            grown += self.normalize();
         }
+        grown
     }
 
     /// The sum rules for non-finite values: NaN if any NaN or both infinities
@@ -1077,6 +1102,44 @@ mod tests {
     #[test]
     fn struct_is_small() {
         assert_eq!(std::mem::size_of::<ExactAcc>(), 32);
+    }
+
+    #[test]
+    fn changes_return_the_heap_bytes_they_allocate() {
+        // Through every path that allocates: the first chunks, a wider range,
+        // products, subnormals, the non-finite counts, merges, and the top
+        // chunk `normalize` adds.
+        fn check(acc: &mut ExactAcc, change: impl FnOnce(&mut ExactAcc) -> usize) {
+            let before = acc.heap_bytes();
+            let grown = change(acc);
+            assert_eq!(before + grown, acc.heap_bytes());
+        }
+        let mut acc = ExactAcc::new();
+        check(&mut acc, |a| a.add(1.0));
+        check(&mut acc, |a| a.add(1.0));
+        check(&mut acc, |a| a.add(1e-300));
+        check(&mut acc, |a| a.sub(1e300));
+        check(&mut acc, |a| a.add_product(1e200, 1e100));
+        check(&mut acc, |a| a.sub_product(5e-324, 1e-10));
+        check(&mut acc, |a| a.add(f64::NAN));
+        check(&mut acc, |a| a.sub(f64::INFINITY));
+        let mut other = ExactAcc::new();
+        check(&mut other, |a| a.add_product(f64::NEG_INFINITY, 2.0));
+        check(&mut other, |a| a.add(f64::MIN_POSITIVE));
+        let mut merged = ExactAcc::new();
+        check(&mut merged, |a| a.merge(&other));
+        check(&mut merged, |a| a.merge(&acc));
+        // 1,024 additions of MAX use up the unit budget, and the carry out of
+        // the top chunk needs one more.
+        let mut big = ExactAcc::new();
+        let mut grew = false;
+        for _ in 0..5_000 {
+            let before = big.heap_bytes();
+            let grown = big.add(f64::MAX);
+            assert_eq!(before + grown, big.heap_bytes());
+            grew |= before > 0 && grown > 0;
+        }
+        assert!(grew, "normalize never grew the range");
     }
 
     // ---- output verifier for the rational rounding helpers -----------------

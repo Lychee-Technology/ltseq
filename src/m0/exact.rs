@@ -103,22 +103,34 @@ impl Stat {
 }
 
 /// Running sums of values and of products of values.
+///
+/// `add`, `sub`, `add_product`, `sub_product` and `merge` return the heap
+/// bytes they allocated, which `heap_bytes` then counts, so that a caller
+/// holding many sums keeps their total without walking them.
 pub(crate) trait Sums: Clone + Default + Debug + Send + Sync + 'static {
-    fn add(&mut self, x: f64);
-    fn sub(&mut self, x: f64);
-    fn add_product(&mut self, a: f64, b: f64);
-    fn sub_product(&mut self, a: f64, b: f64);
+    fn add(&mut self, x: f64) -> usize;
+    fn sub(&mut self, x: f64) -> usize;
+    fn add_product(&mut self, a: f64, b: f64) -> usize;
+    fn sub_product(&mut self, a: f64, b: f64) -> usize;
     fn add_slice(&mut self, xs: &[f64]) {
-        xs.iter().for_each(|&x| self.add(x));
+        for &x in xs {
+            self.add(x);
+        }
     }
     fn sub_slice(&mut self, xs: &[f64]) {
-        xs.iter().for_each(|&x| self.sub(x));
+        for &x in xs {
+            self.sub(x);
+        }
     }
     fn add_products(&mut self, a: &[f64], b: &[f64]) {
-        a.iter().zip(b).for_each(|(&a, &b)| self.add_product(a, b));
+        for (&a, &b) in a.iter().zip(b) {
+            self.add_product(a, b);
+        }
     }
     fn sub_products(&mut self, a: &[f64], b: &[f64]) {
-        a.iter().zip(b).for_each(|(&a, &b)| self.sub_product(a, b));
+        for (&a, &b) in a.iter().zip(b) {
+            self.sub_product(a, b);
+        }
     }
     fn add_squares(&mut self, xs: &[f64]) {
         self.add_products(xs, xs)
@@ -126,7 +138,7 @@ pub(crate) trait Sums: Clone + Default + Debug + Send + Sync + 'static {
     fn sub_squares(&mut self, xs: &[f64]) {
         self.sub_products(xs, xs)
     }
-    fn merge(&mut self, other: &Self);
+    fn merge(&mut self, other: &Self) -> usize;
     fn serialize(&self, out: &mut Vec<u8>);
     fn deserialize(bytes: &[u8]) -> Result<Self>;
     fn heap_bytes(&self) -> usize;
@@ -140,16 +152,16 @@ pub(crate) trait Sums: Clone + Default + Debug + Send + Sync + 'static {
 }
 
 impl Sums for ExactAcc {
-    fn add(&mut self, x: f64) {
+    fn add(&mut self, x: f64) -> usize {
         ExactAcc::add(self, x)
     }
-    fn sub(&mut self, x: f64) {
+    fn sub(&mut self, x: f64) -> usize {
         ExactAcc::sub(self, x)
     }
-    fn add_product(&mut self, a: f64, b: f64) {
+    fn add_product(&mut self, a: f64, b: f64) -> usize {
         ExactAcc::add_product(self, a, b)
     }
-    fn sub_product(&mut self, a: f64, b: f64) {
+    fn sub_product(&mut self, a: f64, b: f64) -> usize {
         ExactAcc::sub_product(self, a, b)
     }
     fn add_slice(&mut self, xs: &[f64]) {
@@ -170,7 +182,7 @@ impl Sums for ExactAcc {
     fn sub_squares(&mut self, xs: &[f64]) {
         ExactAcc::sub_squares(self, xs)
     }
-    fn merge(&mut self, other: &Self) {
+    fn merge(&mut self, other: &Self) -> usize {
         ExactAcc::merge(self, other)
     }
     fn serialize(&self, out: &mut Vec<u8>) {
@@ -282,24 +294,27 @@ impl DoubleDouble {
 
 impl Sums for DoubleDouble {
     #[inline(always)]
-    fn add(&mut self, x: f64) {
+    fn add(&mut self, x: f64) -> usize {
         let (s, e) = two_sum(self.hi, x);
         let (hi, lo) = quick_two_sum(s, e + self.lo);
         *self = DoubleDouble { hi, lo };
+        0
     }
-    fn sub(&mut self, x: f64) {
+    fn sub(&mut self, x: f64) -> usize {
         self.add(-x)
     }
     #[inline(always)]
-    fn add_product(&mut self, a: f64, b: f64) {
+    fn add_product(&mut self, a: f64, b: f64) -> usize {
         let (p, e) = two_prod(a, b);
         *self = self.plus(DoubleDouble { hi: p, lo: e });
+        0
     }
-    fn sub_product(&mut self, a: f64, b: f64) {
+    fn sub_product(&mut self, a: f64, b: f64) -> usize {
         self.add_product(-a, b)
     }
-    fn merge(&mut self, other: &Self) {
+    fn merge(&mut self, other: &Self) -> usize {
         *self = self.plus(*other);
+        0
     }
     fn serialize(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.hi.to_le_bytes());
@@ -505,18 +520,9 @@ struct StatGroups<S: Sums> {
     sums: Vec<Vec<S>>,
     n: Vec<u64>,
     /// The heap bytes the sums own. DataFusion asks for `size()` after every
-    /// batch, so this is kept up to date where a sum changes instead of
-    /// being added up over every group there.
+    /// batch, so this adds up what each change allocates instead of walking
+    /// every group there.
     heap: usize,
-}
-
-/// Change `sum` with `f`, keeping `heap` (which counts `sum`'s heap bytes)
-/// up to date.
-#[inline(always)]
-fn tracked<S: Sums>(heap: &mut usize, sum: &mut S, f: impl FnOnce(&mut S)) {
-    let before = sum.heap_bytes();
-    f(sum);
-    *heap = *heap - before + sum.heap_bytes();
 }
 
 impl<S: Sums> StatGroups<S> {
@@ -581,29 +587,30 @@ impl<S: Sums> GroupsAccumulator for StatGroups<S> {
                 }
             };
         }
-        let heap = &mut self.heap;
+        let mut heap = 0;
         match (self.stat, b) {
             (Stat::Sum | Stat::Mean, _) => each_row!(|g, i| {
-                tracked(heap, &mut self.sums[0][g], |s| s.add(a[i]));
+                heap += self.sums[0][g].add(a[i]);
             }),
             (Stat::Var | Stat::Std, _) => each_row!(|g, i| {
-                tracked(heap, &mut self.sums[0][g], |s| s.add(a[i]));
-                tracked(heap, &mut self.sums[1][g], |s| s.add_product(a[i], a[i]));
+                heap += self.sums[0][g].add(a[i]);
+                heap += self.sums[1][g].add_product(a[i], a[i]);
             }),
             (Stat::Cov, Some(b)) => each_row!(|g, i| {
-                tracked(heap, &mut self.sums[0][g], |s| s.add_product(a[i], b[i]));
-                tracked(heap, &mut self.sums[1][g], |s| s.add(a[i]));
-                tracked(heap, &mut self.sums[2][g], |s| s.add(b[i]));
+                heap += self.sums[0][g].add_product(a[i], b[i]);
+                heap += self.sums[1][g].add(a[i]);
+                heap += self.sums[2][g].add(b[i]);
             }),
             (Stat::Corr, Some(b)) => each_row!(|g, i| {
-                tracked(heap, &mut self.sums[0][g], |s| s.add_product(a[i], b[i]));
-                tracked(heap, &mut self.sums[1][g], |s| s.add(a[i]));
-                tracked(heap, &mut self.sums[2][g], |s| s.add(b[i]));
-                tracked(heap, &mut self.sums[3][g], |s| s.add_product(a[i], a[i]));
-                tracked(heap, &mut self.sums[4][g], |s| s.add_product(b[i], b[i]));
+                heap += self.sums[0][g].add_product(a[i], b[i]);
+                heap += self.sums[1][g].add(a[i]);
+                heap += self.sums[2][g].add(b[i]);
+                heap += self.sums[3][g].add_product(a[i], a[i]);
+                heap += self.sums[4][g].add_product(b[i], b[i]);
             }),
             _ => return exec_err!("{} takes two arguments", self.stat.name()),
         }
+        self.heap += heap;
         Ok(())
     }
 
@@ -643,7 +650,7 @@ impl<S: Sums> GroupsAccumulator for StatGroups<S> {
             }
             for (j, column) in states.iter().enumerate() {
                 let other = S::deserialize(column.value(row))?;
-                tracked(&mut self.heap, &mut self.sums[j][g], |s| s.merge(&other));
+                self.heap += self.sums[j][g].merge(&other);
             }
             self.n[g] += counts.value(row);
         }
