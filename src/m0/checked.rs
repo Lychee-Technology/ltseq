@@ -21,7 +21,10 @@
 //! for the overflowing row only when the word says there is one.
 //!
 //! Narrower integer types are left alone: widening them makes the check a
-//! compare, cheaper than Int64's.
+//! compare, cheaper than Int64's. So are nodes with no input or several
+//! (scans, joins): a join's condition keeps wrapping arithmetic, as would a
+//! filter a logical scan holds. No #251 pipeline joins on arithmetic, and in
+//! m4b's plans the Parquet scan's predicate is the checked one.
 
 use std::sync::Arc;
 
