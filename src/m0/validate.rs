@@ -11,6 +11,15 @@
 //! partition to finish check the pairs between partitions, which a Parquet
 //! scan reads as contiguous ranges in file order.
 //!
+//! It checks one file, which is what m5 measures, and refuses a scan of
+//! several, where both of its assumptions fail. Partition i + 1 need not
+//! follow partition i in file order: to keep each file's order, DataFusion
+//! puts the ranges it splits off a file in new groups after the original
+//! ones. And DataFusion's file opener skips a whole file whose statistics
+//! exclude the predicate, which none of the session's options turns off.
+//! On one file that skips every row or none, and each m5 pipeline matches
+//! rows; M3 has to turn it off and map partitions to file-then-row order.
+//!
 //! The keys must be among the scan's columns, which they are in the m5
 //! pipelines; an implementation would add them. A `count()` that DataFusion
 //! answers from metadata never reaches the scan, so m5 times a stream.
@@ -64,6 +73,14 @@ impl PhysicalOptimizerRule for ValidateSorted {
             let Some(ordering) = config.output_ordering.first() else {
                 return Ok(Transformed::no(node));
             };
+            // One file only (see the module comment).
+            let mut files = config.file_groups.iter().flat_map(|g| g.files());
+            if files
+                .next()
+                .is_some_and(|first| files.any(|f| f.path() != first.path()))
+            {
+                return exec_err!("m0 validates the order of one file, not of a scan over several");
+            }
             let schema = node.schema();
             let mut keys = Vec::new();
             for sort in ordering.iter() {
@@ -320,6 +337,21 @@ mod tests {
         RecordBatch::try_from_iter([("x", Arc::new(Int64Array::from(values)) as _)]).unwrap()
     }
 
+    /// Writes `values` as column `x` to a Parquet file of 64-row groups.
+    fn write_parquet(path: &std::path::Path, values: Vec<i64>) {
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+
+        let rows = batch(values);
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(64))
+            .build();
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, rows.schema(), Some(props)).unwrap();
+        writer.write(&rows).unwrap();
+        writer.close().unwrap();
+    }
+
     #[test]
     fn violations_inside_and_across_batches_raise() {
         let mut c = checker();
@@ -361,21 +393,12 @@ mod tests {
         use crate::engine::RUNTIME;
         use datafusion::execution::config::SessionConfig;
         use datafusion::prelude::{col, lit, ParquetReadOptions};
-        use parquet::arrow::ArrowWriter;
-        use parquet::file::properties::WriterProperties;
 
         let path = std::env::temp_dir().join(format!(
             "ltseq_m0_validate_ranges_{}.parquet",
             std::process::id()
         ));
-        let rows = batch((0..1024).collect());
-        let props = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(64))
-            .build();
-        let file = std::fs::File::create(&path).unwrap();
-        let mut writer = ArrowWriter::try_new(file, rows.schema(), Some(props)).unwrap();
-        writer.write(&rows).unwrap();
-        writer.close().unwrap();
+        write_parquet(&path, (0..1024).collect());
         let path = path.to_str().unwrap().to_string();
 
         // Whether an idle partition of the plan's one scan may read a
@@ -431,6 +454,57 @@ mod tests {
             // ranges, and a limit above the scan lifts that.
             let today_with_limit = validate == Sorted::Off && limit.is_some();
             assert_eq!(shares, today_with_limit, "{validate:?}, limit {limit:?}");
+        }
+    }
+
+    /// Across files the partitions need not follow file order and the
+    /// opener prunes whole files, so the check refuses such a scan instead
+    /// of passing it unchecked or failing it falsely.
+    #[test]
+    fn a_scan_of_several_files_is_refused() {
+        use super::super::{session_with, Prototypes, Sorted};
+        use crate::engine::RUNTIME;
+        use datafusion::execution::config::SessionConfig;
+        use datafusion::prelude::{col, lit, ParquetReadOptions};
+
+        let dir =
+            std::env::temp_dir().join(format!("ltseq_m0_validate_files_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Out of order between the files. Under `x >= 6` the opener skips
+        // `a` by its statistics, so a check of the rows read passes.
+        write_parquet(&dir.join("a.parquet"), (1..=5).collect());
+        write_parquet(&dir.join("b.parquet"), (3..=7).collect());
+
+        let plan = |validate: Sorted, partitions: usize| -> Result<()> {
+            let p = Prototypes {
+                validate,
+                ..Prototypes::default()
+            };
+            let ctx = session_with(p, SessionConfig::new().with_target_partitions(partitions));
+            RUNTIME.block_on(async {
+                let order = vec![vec![col("x").sort(true, false)]];
+                let options = ParquetReadOptions::default().file_sort_order(order);
+                let df = ctx.read_parquet(dir.to_str().unwrap(), options).await?;
+                df.filter(col("x").gt_eq(lit(6)))?
+                    .create_physical_plan()
+                    .await
+                    .map(|_| ())
+            })
+        };
+        let planned: Vec<_> = [1, 4]
+            .into_iter()
+            .flat_map(|p| [(Sorted::PruneOff, p), (Sorted::Validate, p)])
+            .map(|(validate, p)| (validate, p, plan(validate, p)))
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        for (validate, p, planned) in planned {
+            match validate {
+                Sorted::Validate => {
+                    let err = planned.expect_err("a scan of two files is refused");
+                    assert!(err.to_string().contains("one file"), "p={p}: {err}");
+                }
+                _ => planned.unwrap_or_else(|e| panic!("{validate:?} p={p}: {e}")),
+            }
         }
     }
 }

@@ -379,6 +379,8 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
     if matches!(p.validate, Sorted::PruneOff | Sorted::Validate) {
         // D7: nothing below the declaration may skip a row, so no statistics,
         // page-index or bloom-filter pruning and no row filter in the scan.
+        // None of these stops the file opener from skipping a whole file by
+        // its statistics, which is one reason `validate` checks one file.
         options.execution.parquet.pruning = false;
         options.execution.parquet.pushdown_filters = false;
         options.execution.parquet.enable_page_index = false;

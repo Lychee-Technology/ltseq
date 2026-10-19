@@ -23,7 +23,13 @@
 //! Errors are kept as masks only for the expression shapes m4 measures: a
 //! checked function, and a binary operator over expressions that are
 //! either infallible or of these shapes. Any other fallible expression is
-//! evaluated as today and may raise.
+//! evaluated as today and may raise. That includes an `AND` or `OR` nested
+//! in another: the rule rewrites the inner one into its own
+//! [`MaskedLogical`], which raises for a row its own operands leave
+//! undecided instead of passing the error out, so the outer operand never
+//! gets to decide that row. Each m4 pipeline has one `&` or `|`, so m4
+//! prices that flat form only; M16 has to carry errors through nested
+//! logical operators before raising.
 
 use std::fmt;
 use std::sync::Arc;

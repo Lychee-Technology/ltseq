@@ -271,6 +271,16 @@ def m5_validation_catches_violations_and_disables_pruning():
                 two_bad = LTSeq.read_parquet(f"{tmp}/two_bad.parquet").assume_sorted("a", "b")
             assert two.filter(lambda r: r.a == 50).to_arrow().num_rows == 100
             raises(lambda: two_bad.filter(lambda r: r.a == 50).to_arrow(), "OrderViolationError")
+        # Several files: the check holds within one file only, so it refuses
+        # them. Unrefused, `x >= 6` skips `a` by its statistics and the
+        # out-of-order pair between the files goes unread.
+        Path(f"{tmp}/files").mkdir()
+        pq.write_table(pa.table({"x": pa.array([1, 2, 3, 4, 5], pa.int64())}), f"{tmp}/files/a.parquet")
+        pq.write_table(pa.table({"x": pa.array([3, 4, 5, 6, 7], pa.int64())}), f"{tmp}/files/b.parquet")
+        for p in (1, 4):
+            with pinned_engine(target_partitions=p), prototypes(validate="validate"):
+                files = LTSeq.read_parquet(f"{tmp}/files").assume_sorted("x")
+            raises(lambda: files.filter(lambda r: r.x >= 6).to_arrow(), "one file")
 
 
 @check
