@@ -15,7 +15,11 @@
 //! between the operator and its input, it crosses the operator but stays
 //! above the projection that computes the keys. The second is what an
 //! implementation that knows a key is fallible pays, short of proving from
-//! statistics that the key cannot fail in a row group. DataFusion 55 also
+//! statistics that the key cannot fail in a row group. Above a sort, the
+//! first placement filters the sort's merged stream in one partition
+//! (`session` turns off round-robin repartitioning, which would return the
+//! rows unsorted); filtering each sorted partition before the merge would
+//! cost less, and is not measured. DataFusion 55 also
 //! pushes filters in the physical plan (through an aggregate's group keys
 //! into the scan), so the barrier is planned as [`BarrierExec`], which
 //! passes batches through and, like any operator that does not say

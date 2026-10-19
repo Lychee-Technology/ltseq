@@ -130,7 +130,8 @@ pub(crate) enum Restrict {
     /// Today: as far as DataFusion pushes it, into the scan if it can.
     #[default]
     Off,
-    /// Not past the operator.
+    /// Not past the operator. Over a sort, the filter runs on the sort's
+    /// merged stream, in one partition.
     Operator,
     /// Past the operator but not into its input, where the keys and
     /// arguments it demands on every row are computed.
@@ -351,6 +352,13 @@ pub(crate) fn session(mut config: SessionConfig) -> SessionContext {
         // DataFusion 55's file stream lets an idle partition steal another's
         // files, so a partition no longer holds a fixed range of the input.
         options.execution.enable_file_stream_work_stealing = false;
+    }
+    if p.restrict_pushdown == Restrict::Operator {
+        // A filter kept above a sort reads the sort's merged stream.
+        // DataFusion would scatter that stream round-robin for the filter's
+        // sake, and the terminal would interleave the partitions again, so
+        // the rows would leave unsorted (#148).
+        options.optimizer.enable_round_robin_repartition = false;
     }
 
     let mut builder = SessionStateBuilder::new()

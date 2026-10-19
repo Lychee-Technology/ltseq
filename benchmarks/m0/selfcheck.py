@@ -9,6 +9,7 @@ missing.
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -169,9 +170,14 @@ def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
                 user = pq.read_table(inputs.CLICKBENCH / file, filters=[("userid", "==", pipelines.USER)])
                 warm = f"{tmp}/{name}.parquet"
                 pq.write_table(pa.concat_tables([pq.read_table(inputs.clickbench_warmup(file)["path"]), user]), warm)
-            results = []
+            results, repartitions = [], []
             for restrict in ("off", "operator", "keys"):
-                with prototypes(checked="fast", restrict_pushdown=restrict):
+                # Several partitions and small batches, so that a plan which
+                # scattered an ordered stream would return it out of order.
+                with (
+                    pinned_engine(target_partitions=4, batch_size=256),
+                    prototypes(checked="fast", restrict_pushdown=restrict),
+                ):
                     t = LTSeq.read_parquet(warm)
                 q = pipeline(t)
                 logical, physical = q._inner.explain_plan()
@@ -192,7 +198,18 @@ def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
                     assert filter_at < barrier_at < operator_at, physical
                 else:
                     assert operator_at < filter_at < barrier_at, physical
-                results.append(sorted(map(str, q.to_arrow().to_pylist())))
+                # Only the filter moves: every mode repartitions as today's
+                # plan does, and a result with a declared order (the sort's)
+                # comes back in it.
+                repartitions.append(re.findall(r"RepartitionExec: partitioning=(\w+)", physical))
+                table = q.to_arrow()
+                if q._sort_keys:
+                    order = [(key, "descending" if desc else "ascending") for key, desc in q._sort_keys]
+                    # A stable sort of rows already in order leaves them in place.
+                    moved = pc.sort_indices(table.select([key for key, _ in order]), sort_keys=order)
+                    assert moved.to_pylist() == list(range(table.num_rows)), f"{name} with {restrict}: rows out of order"
+                results.append(sorted(map(str, table.to_pylist())))
+            assert repartitions[0] == repartitions[1] == repartitions[2], (name, repartitions)
             assert results[0] == results[1] == results[2] and results[0], name
 
 

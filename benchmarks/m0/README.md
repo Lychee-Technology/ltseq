@@ -37,7 +37,7 @@ with pinned_engine(target_partitions=4), prototypes(checked="fast"):
 | `order_window`, `order_buffer` | units in flight (default `target_partitions`), batches buffered per unit (2) |
 | `slow_ms` | delay per batch of the first `1/target_partitions` of the scan |
 | `masked` | `off`, `select`, `errors`, `optimistic` (with `checked` on, so operands can fail) |
-| `restrict_pushdown` | `off`, `operator` (a filter stays above the sort, aggregate or distinct below it), `keys` (it crosses the operator but stays above the operator's input) |
+| `restrict_pushdown` | `off`, `operator` (a filter stays above the sort, aggregate or distinct below it; above a sort it reads the merged stream, in one partition), `keys` (it crosses the operator but stays above the operator's input) |
 | `validate` | `off`, `prune_off` (D7's read without the check), `validate` |
 | `views` | `off`, `plain` (scan decodes `string`), `cast` (cast at the plan's root) |
 
