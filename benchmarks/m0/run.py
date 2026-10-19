@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--partitions", help="keep only these partition counts (comma-separated)")
     parser.add_argument("--pipeline", help="keep only pipelines whose name contains this")
     parser.add_argument("--repeat", type=int, help="override each cell's measured runs")
+    parser.add_argument("--batch-size", type=int, help="override each cell's batch size")
     parser.add_argument("--retries", type=int, default=3,
                         help="runs of a contended cell beyond the first (default 3)")
     parser.add_argument("--allow-debug", action="store_true", help="measure a debug build (for smoke tests)")
@@ -100,6 +101,9 @@ def main() -> int:
         if args.repeat:
             for c in cells:
                 c["repeat"] = args.repeat
+        if args.batch_size:
+            for c in cells:
+                c["batch_size"] = args.batch_size
         for path in {Path(c["input"]["path"]) for c in cells if c["input"].get("kind") == "parquet"}:
             # hits_sorted.parquet is larger than the page cache can hold;
             # its cells warm the columns they read (`warm_columns`).
