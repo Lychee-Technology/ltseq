@@ -87,6 +87,13 @@ impl PhysicalOptimizerRule for SplitScanByRowGroup {
 /// One file group per row group of `files`, each a one-byte range at the row
 /// group's first page: DataFusion's Parquet opener scans a row group exactly
 /// when that offset lies in the range (`prune_by_range`).
+///
+/// A physical optimizer rule gets neither the object store nor DataFusion's
+/// metadata cache, so this reads each footer itself, synchronously, and takes
+/// each location as a path on the local filesystem. That holds for the local
+/// files m3 measures; any other store fails here. Every query reads the
+/// footers again, inside the time `Interleaved` is measured by. M1 can split
+/// at execution instead, where the task context has both.
 fn row_group_units<'a>(files: impl Iterator<Item = &'a PartitionedFile>) -> Result<Vec<FileGroup>> {
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
