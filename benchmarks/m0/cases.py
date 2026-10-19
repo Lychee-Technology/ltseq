@@ -72,16 +72,17 @@ def m1() -> list[dict]:
 
 
 def m2() -> list[dict]:
-    """Every pipeline at every size and partition count, three modes."""
+    """Every pipeline at every size and partition count, three modes, with
+    partial aggregation never skipped: over 100,000 groups DataFusion's
+    probe skips it in some runs and not others."""
     cells = []
     for rows in KERNEL_SIZES:
         for name in pipelines.M2:
             source, warmup = _memory(rows, name), _memory(inputs.WARMUP_ROWS, name)
             for p in PARTITIONS:
                 for mode in ("off", "exact", "compensated"):
-                    cells.append(
-                        _cell("m2", name, "stream", source, warmup, p, {"exact": mode}, rows=rows, mode=mode)
-                    )
+                    flags = {"exact": mode, "partial_skip": "never"}
+                    cells.append(_cell("m2", name, "stream", source, warmup, p, flags, rows=rows, mode=mode))
     return cells
 
 

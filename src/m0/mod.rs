@@ -138,6 +138,19 @@ pub(crate) enum Restrict {
     Keys,
 }
 
+/// Whether DataFusion may skip partial aggregation. It does once a
+/// partition's first 100,000 rows hold more than 0.8 groups per row, which
+/// for a grouping over many keys depends on how the input's batches reached
+/// the partitions; m2 pins it off so every run takes the same path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PartialSkip {
+    /// Today: DataFusion's probe decides.
+    #[default]
+    Default,
+    /// Never skipped.
+    Never,
+}
+
 /// The prototypes a session is created with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Prototypes {
@@ -155,6 +168,7 @@ pub(crate) struct Prototypes {
     pub(crate) validate: Sorted,
     pub(crate) views: Views,
     pub(crate) restrict_pushdown: Restrict,
+    pub(crate) partial_skip: PartialSkip,
 }
 
 impl Default for Prototypes {
@@ -170,6 +184,7 @@ impl Default for Prototypes {
             validate: Sorted::Off,
             views: Views::Off,
             restrict_pushdown: Restrict::Off,
+            partial_skip: PartialSkip::Default,
         }
     }
 }
@@ -252,6 +267,13 @@ impl Prototypes {
                         _ => return Err(bad()),
                     }
                 }
+                "partial_skip" => {
+                    p.partial_skip = match v {
+                        "default" => PartialSkip::Default,
+                        "never" => PartialSkip::Never,
+                        _ => return Err(bad()),
+                    }
+                }
                 _ => return Err(format!("unknown prototype flag {key:?}")),
             }
         }
@@ -323,6 +345,13 @@ impl Prototypes {
                 Restrict::Keys => "keys",
             }),
         );
+        out.insert(
+            name("partial_skip"),
+            name(match self.partial_skip {
+                PartialSkip::Default => "default",
+                PartialSkip::Never => "never",
+            }),
+        );
         out
     }
 }
@@ -340,6 +369,12 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
     let options = config.options_mut();
     if p.views == Views::Plain {
         options.execution.parquet.schema_force_view_types = false;
+    }
+    if p.partial_skip == PartialSkip::Never {
+        // Skipping needs more groups than rows times this, which cannot be.
+        options
+            .execution
+            .skip_partial_aggregation_probe_ratio_threshold = 1.0;
     }
     if matches!(p.validate, Sorted::PruneOff | Sorted::Validate) {
         // D7: nothing below the declaration may skip a row, so no statistics,
@@ -458,6 +493,7 @@ mod tests {
             ("order_window", "3"),
             ("slow_ms", "50"),
             ("restrict_pushdown", "keys"),
+            ("partial_skip", "never"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
