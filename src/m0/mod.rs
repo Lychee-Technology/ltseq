@@ -110,6 +110,20 @@ pub(crate) enum Sorted {
     Validate,
 }
 
+/// m4b's `scan_filter_off` control: whether the scan may skip rows. `Off`
+/// turns off the four options m5's `PruneOff` and `Validate` turn off, but
+/// leaves the partitions' scheduling as today's, which those two change, so
+/// the control differs from today's session in the scan's filtering alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Pruning {
+    /// Today: statistics, page-index and bloom-filter pruning, and the
+    /// scan's row filter.
+    #[default]
+    On,
+    /// None of the four.
+    Off,
+}
+
 /// m6: where Parquet's `string_view` columns become `string`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Views {
@@ -166,6 +180,7 @@ pub(crate) struct Prototypes {
     /// scanned data produces, in milliseconds (0: none).
     pub(crate) slow_ms: u64,
     pub(crate) validate: Sorted,
+    pub(crate) pruning: Pruning,
     pub(crate) views: Views,
     pub(crate) restrict_pushdown: Restrict,
     pub(crate) partial_skip: PartialSkip,
@@ -182,6 +197,7 @@ impl Default for Prototypes {
             order_buffer: NonZeroUsize::new(2).expect("2 is nonzero"),
             slow_ms: 0,
             validate: Sorted::Off,
+            pruning: Pruning::On,
             views: Views::Off,
             restrict_pushdown: Restrict::Off,
             partial_skip: PartialSkip::Default,
@@ -248,6 +264,13 @@ impl Prototypes {
                         "off" => Sorted::Off,
                         "prune_off" => Sorted::PruneOff,
                         "validate" => Sorted::Validate,
+                        _ => return Err(bad()),
+                    }
+                }
+                "pruning" => {
+                    p.pruning = match v {
+                        "on" => Pruning::On,
+                        "off" => Pruning::Off,
                         _ => return Err(bad()),
                     }
                 }
@@ -330,6 +353,13 @@ impl Prototypes {
             }),
         );
         out.insert(
+            name("pruning"),
+            name(match self.pruning {
+                Pruning::On => "on",
+                Pruning::Off => "off",
+            }),
+        );
+        out.insert(
             name("views"),
             name(match self.views {
                 Views::Off => "off",
@@ -376,7 +406,8 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
             .execution
             .skip_partial_aggregation_probe_ratio_threshold = 1.0;
     }
-    if matches!(p.validate, Sorted::PruneOff | Sorted::Validate) {
+    let d7 = matches!(p.validate, Sorted::PruneOff | Sorted::Validate);
+    if d7 || p.pruning == Pruning::Off {
         // D7: nothing below the declaration may skip a row, so no statistics,
         // page-index or bloom-filter pruning and no row filter in the scan.
         // None of these stops the file opener from skipping a whole file by
@@ -385,12 +416,14 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
         options.execution.parquet.pushdown_filters = false;
         options.execution.parquet.enable_page_index = false;
         options.execution.parquet.bloom_filter_on_read = false;
+    }
+    if d7 {
         // The check pairs partition i's last row with partition i + 1's
         // first, so each partition must read only its own range, and
         // `PruneOff`, the check's baseline, reads the same way. A declared
         // order keeps partitions to their ranges, but a limit above the scan
         // clears that, and DataFusion 55 then lets an idle partition steal a
-        // sibling's ranges.
+        // sibling's ranges. `Pruning::Off` alone keeps today's scheduling.
         options.execution.enable_file_stream_work_stealing = false;
     }
     if p.order != Order::Off {
@@ -485,6 +518,9 @@ pub(crate) fn _m0_build() -> HashMap<String, bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    type Options = BTreeMap<String, Option<String>>;
 
     #[test]
     fn flags_round_trip_and_unknown_flags_are_refused() {
@@ -495,6 +531,7 @@ mod tests {
             ("order_window", "3"),
             ("slow_ms", "50"),
             ("restrict_pushdown", "keys"),
+            ("pruning", "off"),
             ("partial_skip", "never"),
         ]
         .into_iter()
@@ -512,5 +549,66 @@ mod tests {
             "sorted".to_string()
         )]))
         .is_err());
+    }
+
+    /// The options a session built with `p` sets, and the names of the rules
+    /// it runs, in order.
+    fn session_of(p: Prototypes) -> (Options, Vec<String>) {
+        // LTSeq's engine turns the scan's row filter on, which DataFusion's
+        // default leaves off; with it on, all four options `pruning` turns
+        // off start on, so each change shows.
+        let mut config = SessionConfig::new();
+        config.options_mut().execution.parquet.pushdown_filters = true;
+        let state = session_with(p, config).state();
+        let options = (state.config().options().entries().into_iter())
+            .map(|e| (e.key, e.value))
+            .collect();
+        let rules = (state.analyzer().rules.iter().map(|r| r.name()))
+            .chain(state.optimizers().iter().map(|r| r.name()))
+            .chain(state.physical_optimizers().iter().map(|r| r.name()))
+            .map(str::to_string)
+            .collect();
+        (options, rules)
+    }
+
+    fn changed(a: &Options, b: &Options) -> Vec<String> {
+        assert!(a.keys().eq(b.keys()));
+        a.keys().filter(|k| a[*k] != b[*k]).cloned().collect()
+    }
+
+    /// m4b's control differs from today's session in the four options that
+    /// let the scan skip rows and in nothing else, scheduling included; m5's
+    /// modes add range ownership to it.
+    #[test]
+    fn pruning_off_changes_only_what_the_scan_may_skip() {
+        // m4b runs every mode with checked arithmetic on.
+        let today = Prototypes {
+            checked: Checked::Fast,
+            ..Prototypes::default()
+        };
+        let control = Prototypes {
+            pruning: Pruning::Off,
+            ..today
+        };
+        let (today_options, today_rules) = session_of(today);
+        let (control_options, control_rules) = session_of(control);
+        assert_eq!(today_rules, control_rules);
+        assert_eq!(
+            changed(&today_options, &control_options),
+            [
+                "datafusion.execution.parquet.bloom_filter_on_read",
+                "datafusion.execution.parquet.enable_page_index",
+                "datafusion.execution.parquet.pruning",
+                "datafusion.execution.parquet.pushdown_filters",
+            ]
+        );
+        for validate in [Sorted::PruneOff, Sorted::Validate] {
+            let (m5_options, _) = session_of(Prototypes { validate, ..today });
+            assert_eq!(
+                changed(&control_options, &m5_options),
+                ["datafusion.execution.enable_file_stream_work_stealing"],
+                "{validate:?}"
+            );
+        }
     }
 }

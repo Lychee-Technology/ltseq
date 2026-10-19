@@ -386,10 +386,12 @@ mod tests {
     }
 
     /// `Ends::finish` pairs partition `i` with partition `i + 1`, which holds
-    /// only while each partition reads its own range of the file.
+    /// only while each partition reads its own range of the file. m4b's
+    /// control, which turns off the same scan options, must share work
+    /// exactly as today's session does, declared order or not.
     #[test]
     fn validated_scans_keep_each_partition_to_its_own_range() {
-        use super::super::{session_with, Prototypes, Sorted};
+        use super::super::{session_with, Prototypes, Pruning, Sorted};
         use crate::engine::RUNTIME;
         use datafusion::execution::config::SessionConfig;
         use datafusion::prelude::{col, lit, ParquetReadOptions};
@@ -403,19 +405,17 @@ mod tests {
 
         // Whether an idle partition of the plan's one scan may read a
         // sibling's ranges, as DataFusion decides when it executes the scan.
-        let shares_work = |validate: Sorted, limit: Option<usize>| -> bool {
+        let shares_work = |p: Prototypes, declared: bool, limit: Option<usize>| -> bool {
             let mut config = SessionConfig::new().with_target_partitions(4);
             config.options_mut().optimizer.repartition_file_min_size = 0;
-            let p = Prototypes {
-                validate,
-                ..Prototypes::default()
-            };
             let ctx = session_with(p, config);
             let plan = RUNTIME
                 .block_on(async {
-                    let order = vec![vec![col("x").sort(true, false)]];
-                    let options = ParquetReadOptions::default().file_sort_order(order);
-                    // A filter, as in m5, so that the scan is split.
+                    let mut options = ParquetReadOptions::default();
+                    if declared {
+                        options = options.file_sort_order(vec![vec![col("x").sort(true, false)]]);
+                    }
+                    // A filter, as in m4b and m5, so that the scan is split.
                     let df = ctx.read_parquet(path.as_str(), options).await?;
                     let df = df.filter(col("x").gt_eq(lit(10)))?;
                     let df = match limit {
@@ -437,23 +437,49 @@ mod tests {
                 Ok(TreeNodeRecursion::Continue)
             })
             .unwrap();
-            assert_eq!(checked, validate == Sorted::Validate, "{plan:?}");
+            assert_eq!(
+                checked,
+                declared && p.validate == Sorted::Validate,
+                "{plan:?}"
+            );
             assert_eq!(scans.len(), 1, "{plan:?}");
             scans[0]
         };
 
-        let cases = [Sorted::Off, Sorted::PruneOff, Sorted::Validate]
-            .into_iter()
-            .flat_map(|validate| [(validate, None), (validate, Some(5))]);
-        let shared: Vec<_> = cases
-            .map(|(validate, limit)| (validate, limit, shares_work(validate, limit)))
-            .collect();
+        let sessions = [
+            Prototypes::default(),
+            Prototypes {
+                pruning: Pruning::Off,
+                ..Prototypes::default()
+            },
+            Prototypes {
+                validate: Sorted::PruneOff,
+                ..Prototypes::default()
+            },
+            Prototypes {
+                validate: Sorted::Validate,
+                ..Prototypes::default()
+            },
+        ];
+        let mut shared = Vec::new();
+        for p in sessions {
+            for declared in [true, false] {
+                for limit in [None, Some(5)] {
+                    shared.push((p, declared, limit, shares_work(p, declared, limit)));
+                }
+            }
+        }
         let _ = std::fs::remove_file(&path);
-        for (validate, limit, shares) in shared {
+        for (p, declared, limit, shares) in shared {
             // Today a declared order keeps the scan's partitions to their
             // ranges, and a limit above the scan lifts that.
-            let today_with_limit = validate == Sorted::Off && limit.is_some();
-            assert_eq!(shares, today_with_limit, "{validate:?}, limit {limit:?}");
+            let today = !declared || limit.is_some();
+            let m5 = p.validate != Sorted::Off;
+            assert_eq!(
+                shares,
+                today && !m5,
+                "{p:?}, declared {declared}, limit {limit:?}"
+            );
         }
     }
 

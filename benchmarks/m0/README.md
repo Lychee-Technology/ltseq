@@ -38,7 +38,8 @@ with pinned_engine(target_partitions=4), prototypes(checked="fast"):
 | `slow_ms` | delay per batch of the first `1/target_partitions` of the scan |
 | `masked` | `off`, `select`, `errors`, `optimistic` (with `checked` on, so operands can fail) |
 | `restrict_pushdown` | `off`, `operator` (a filter stays above the sort, aggregate or distinct below it; above a sort it reads the merged stream, in one partition), `keys` (it crosses the operator but stays above the operator's input) |
-| `validate` | `off`, `prune_off` (D7's read without the check), `validate` |
+| `validate` | `off`, `prune_off` (D7's read without the check), `validate`; both turn `pruning` off and keep each partition to its own range (no file-stream work stealing) |
+| `pruning` | `on`, `off` (no statistics, page-index or bloom-filter pruning and no row filter in the scan, scheduling as today; m4b's `scan_filter_off`) |
 | `views` | `off`, `plain` (scan decodes `string`), `cast` (cast at the plan's root) |
 | `partial_skip` | `default`, `never` (DataFusion never skips partial aggregation; m2 sets it so that a grouping over many keys takes the same path in every run) |
 

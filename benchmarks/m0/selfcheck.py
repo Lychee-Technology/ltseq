@@ -177,6 +177,10 @@ def m4_masked_operands_guard_each_other():
 
 @check
 def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
+    # The control is today's pushdown with the scan's filtering off and
+    # nothing else (`m0::tests` checks what `pruning` changes in a session).
+    control = dict(cases.M4B_MODES["scan_filter_off"])
+    assert control.pop("pruning") == "off" and control == cases.M4B_MODES["pushdown"], cases.M4B_MODES
     with tempfile.TemporaryDirectory() as tmp:
         for name, pipeline in pipelines.M4B.items():
             file = "hits_sorted.parquet" if name in pipelines.M4B_SORTED else "hits_sample.parquet"
@@ -190,30 +194,35 @@ def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
                 warm = f"{tmp}/{name}.parquet"
                 pq.write_table(pa.concat_tables([pq.read_table(inputs.clickbench_warmup(file)["path"]), user]), warm)
             results, repartitions = [], []
-            for restrict in ("off", "operator", "keys"):
+            for mode, flags in cases.M4B_MODES.items():
+                if mode == "scan_filter_off" and name in pipelines.M4B_SORTED:
+                    continue  # m4b runs the control on the sample only
                 # Several partitions and small batches, so that a plan which
                 # scattered an ordered stream would return it out of order.
                 with (
                     pinned_engine(target_partitions=4, batch_size=256),
-                    prototypes(checked="fast", restrict_pushdown=restrict),
+                    prototypes(checked="fast", **flags),
                 ):
                     t = LTSeq.read_parquet(warm)
                 q = pipeline(t)
                 logical, physical = q._inner.explain_plan()
-                assert ("M0Barrier" in logical) == (restrict != "off"), logical
+                assert ("M0Barrier" in logical) == (flags["restrict_pushdown"] != "off"), logical
                 lines = physical.splitlines()
 
                 def first(*names):
                     return min((i for i, line in enumerate(lines) if any(n in line for n in names)), default=None)
 
                 # Today the filter becomes a scan predicate (DataFusion also
-                # pushes filters physically); with a barrier it stays a
-                # FilterExec, above the operator or between it and the barrier.
+                # pushes filters physically); without the scan's row filter
+                # it stays a FilterExec below the operator, and with a
+                # barrier above the operator or between it and the barrier.
                 filter_at, operator_at = first("FilterExec"), first("SortExec", "AggregateExec")
                 barrier_at = first("M0BarrierExec")
-                if restrict == "off":
+                if mode == "pushdown":
                     assert filter_at is None, physical
-                elif restrict == "operator":
+                elif mode == "scan_filter_off":
+                    assert barrier_at is None and operator_at < filter_at, physical
+                elif mode == "operator":
                     assert filter_at < barrier_at < operator_at, physical
                 else:
                     assert operator_at < filter_at < barrier_at, physical
@@ -226,10 +235,10 @@ def m4b_barrier_keeps_the_filter_above_sort_and_aggregate():
                     order = [(key, "descending" if desc else "ascending") for key, desc in q._sort_keys]
                     # A stable sort of rows already in order leaves them in place.
                     moved = pc.sort_indices(table.select([key for key, _ in order]), sort_keys=order)
-                    assert moved.to_pylist() == list(range(table.num_rows)), f"{name} with {restrict}: rows out of order"
+                    assert moved.to_pylist() == list(range(table.num_rows)), f"{name} with {mode}: rows out of order"
                 results.append(sorted(map(str, table.to_pylist())))
-            assert repartitions[0] == repartitions[1] == repartitions[2], (name, repartitions)
-            assert results[0] == results[1] == results[2] and results[0], name
+            assert all(r == repartitions[0] for r in repartitions), (name, repartitions)
+            assert all(r == results[0] for r in results) and results[0], name
 
 
 @check

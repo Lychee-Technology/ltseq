@@ -470,7 +470,10 @@ value plus one overflows `int64`. A rule that reads only the operand
 types would keep today's pushdown in all four pipelines. Checked
 arithmetic (m1) is on in every mode, so only the pushdown differs.
 A control, `scan_filter_off`, keeps today's pushdown but turns off the
-scan's row filter and pruning (m5's `prune_off`). On the sample file no
+scan's row filter and pruning, the four Parquet options m5's `prune_off`
+turns off (`pruning=off`). Unlike `prune_off` it leaves DataFusion's
+file-stream work stealing as today's plan has it, so only the scan's
+filtering differs from `pushdown`. On the sample file no
 row group's statistics exclude the filter's value, so the control
 separates the cost of evaluating the filter inside the scan from the
 barrier's placement.

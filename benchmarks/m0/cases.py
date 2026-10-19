@@ -190,11 +190,15 @@ M4B_MODES = {
     "pushdown": {"restrict_pushdown": "off"},
     "operator": {"restrict_pushdown": "operator"},
     "keys": {"restrict_pushdown": "keys"},
-    # Today's pushdown with the scan's row filter and pruning off (m5's
-    # `prune_off`): on the sample file, where no row group's statistics
-    # exclude the filter's value, this separates what evaluating the filter
-    # inside the scan costs from where the barrier puts it.
-    "scan_filter_off": {"restrict_pushdown": "off", "validate": "prune_off"},
+    # Today's pushdown with the scan's row filter and pruning off: on the
+    # sample file, where no row group's statistics exclude the filter's
+    # value, this separates what evaluating the filter inside the scan costs
+    # from where the barrier puts it. Not m5's `prune_off`, which also keeps
+    # each partition to its own range and so would change the scheduling
+    # too. The committed cells record it as `validate=prune_off`, which set
+    # exactly what `pruning=off` sets until m5's modes took on that range
+    # ownership.
+    "scan_filter_off": {"restrict_pushdown": "off", "pruning": "off"},
 }
 
 
