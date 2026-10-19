@@ -575,8 +575,7 @@ One observation concerns today's engine rather than the contract. LTSeq
 turns on the Parquet scan's row filter (`pushdown_filters`). In m4b it
 cost 1.04 to 1.4 times on a filter that keeps 20% of rows. In m5, turning
 it off together with the page index cost 17 to 24% on a filter that
-keeps 0.7%. Whoever owns the scan configuration may want that measured
-more widely.
+keeps 0.7%. #307 asks for it to be measured more widely.
 
 ## Caveats
 
