@@ -331,8 +331,12 @@ impl Prototypes {
 ///
 /// With every flag off this builds exactly the session the default build
 /// does, so a baseline run of the `m0` build measures today's engine.
-pub(crate) fn session(mut config: SessionConfig) -> SessionContext {
-    let p = Prototypes::current();
+pub(crate) fn session(config: SessionConfig) -> SessionContext {
+    session_with(Prototypes::current(), config)
+}
+
+/// [`session`] with the prototypes `p` instead of those in effect.
+fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
     let options = config.options_mut();
     if p.views == Views::Plain {
         options.execution.parquet.schema_force_view_types = false;
@@ -344,6 +348,13 @@ pub(crate) fn session(mut config: SessionConfig) -> SessionContext {
         options.execution.parquet.pushdown_filters = false;
         options.execution.parquet.enable_page_index = false;
         options.execution.parquet.bloom_filter_on_read = false;
+        // The check pairs partition i's last row with partition i + 1's
+        // first, so each partition must read only its own range, and
+        // `PruneOff`, the check's baseline, reads the same way. A declared
+        // order keeps partitions to their ranges, but a limit above the scan
+        // clears that, and DataFusion 55 then lets an idle partition steal a
+        // sibling's ranges.
+        options.execution.enable_file_stream_work_stealing = false;
     }
     if p.order != Order::Off {
         // A round-robin repartition would scatter batches across partitions

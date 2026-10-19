@@ -4,12 +4,12 @@
 //! v0.4 trusts the declaration. The contract checks each adjacent pair when
 //! its later row is read, across batch, file and partition boundaries, and
 //! applies no statistics pruning or pushdown below the declaration, so that
-//! no pair goes unchecked. The session turns pruning and pushdown off
-//! (`super::session`); this rule wraps each scan that declares an order in
-//! [`ValidateSortedExec`], which compares adjacent rows' keys in the row
-//! format and has the last partition to finish check the pairs between
-//! partitions, which a Parquet scan reads as contiguous ranges in file
-//! order.
+//! no pair goes unchecked. The session turns pruning and pushdown off and
+//! keeps each partition of a scan to its own range (`super::session`); this
+//! rule wraps each scan that declares an order in [`ValidateSortedExec`],
+//! which compares adjacent rows' keys in the row format and has the last
+//! partition to finish check the pairs between partitions, which a Parquet
+//! scan reads as contiguous ranges in file order.
 //!
 //! The keys must be among the scan's columns, which they are in the m5
 //! pipelines; an implementation would add them. A `count()` that DataFusion
@@ -351,5 +351,86 @@ mod tests {
         let mut ends = Ends::new(2);
         ends.finish(1, early).unwrap();
         assert!(ends.finish(0, late).is_err());
+    }
+
+    /// `Ends::finish` pairs partition `i` with partition `i + 1`, which holds
+    /// only while each partition reads its own range of the file.
+    #[test]
+    fn validated_scans_keep_each_partition_to_its_own_range() {
+        use super::super::{session_with, Prototypes, Sorted};
+        use crate::engine::RUNTIME;
+        use datafusion::execution::config::SessionConfig;
+        use datafusion::prelude::{col, lit, ParquetReadOptions};
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+
+        let path = std::env::temp_dir().join(format!(
+            "ltseq_m0_validate_ranges_{}.parquet",
+            std::process::id()
+        ));
+        let rows = batch((0..1024).collect());
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(64))
+            .build();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, rows.schema(), Some(props)).unwrap();
+        writer.write(&rows).unwrap();
+        writer.close().unwrap();
+        let path = path.to_str().unwrap().to_string();
+
+        // Whether an idle partition of the plan's one scan may read a
+        // sibling's ranges, as DataFusion decides when it executes the scan.
+        let shares_work = |validate: Sorted, limit: Option<usize>| -> bool {
+            let mut config = SessionConfig::new().with_target_partitions(4);
+            config.options_mut().optimizer.repartition_file_min_size = 0;
+            let p = Prototypes {
+                validate,
+                ..Prototypes::default()
+            };
+            let ctx = session_with(p, config);
+            let plan = RUNTIME
+                .block_on(async {
+                    let order = vec![vec![col("x").sort(true, false)]];
+                    let options = ParquetReadOptions::default().file_sort_order(order);
+                    // A filter, as in m5, so that the scan is split.
+                    let df = ctx.read_parquet(path.as_str(), options).await?;
+                    let df = df.filter(col("x").gt_eq(lit(10)))?;
+                    let df = match limit {
+                        Some(n) => df.limit(0, Some(n))?,
+                        None => df,
+                    };
+                    df.create_physical_plan().await
+                })
+                .unwrap();
+            let options = ctx.state().config().options().clone();
+            let mut checked = false;
+            let mut scans = Vec::new();
+            plan.apply(|node| {
+                checked |= node.is::<ValidateSortedExec>();
+                if let Some(scan) = node.downcast_ref::<DataSourceExec>() {
+                    assert!(node.properties().partitioning.partition_count() > 1);
+                    scans.push(scan.data_source().create_sibling_state(&options).is_some());
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            assert_eq!(checked, validate == Sorted::Validate, "{plan:?}");
+            assert_eq!(scans.len(), 1, "{plan:?}");
+            scans[0]
+        };
+
+        let cases = [Sorted::Off, Sorted::PruneOff, Sorted::Validate]
+            .into_iter()
+            .flat_map(|validate| [(validate, None), (validate, Some(5))]);
+        let shared: Vec<_> = cases
+            .map(|(validate, limit)| (validate, limit, shares_work(validate, limit)))
+            .collect();
+        let _ = std::fs::remove_file(&path);
+        for (validate, limit, shares) in shared {
+            // Today a declared order keeps the scan's partitions to their
+            // ranges, and a limit above the scan lifts that.
+            let today_with_limit = validate == Sorted::Off && limit.is_some();
+            assert_eq!(shares, today_with_limit, "{validate:?}, limit {limit:?}");
+        }
     }
 }
