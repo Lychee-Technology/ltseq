@@ -56,8 +56,9 @@ python benchmarks/m0/report.py                     # results/<m>.md
 
 `run.py` refuses a debug build unless given `--allow-debug`, and takes
 `--partitions`, `--pipeline` and `--repeat` to run a subset. Rust unit
-tests: `cargo test --features m0 --lib m0::`. The exact accumulator's
-reference tests run on their own in [exact_acc/](exact_acc/).
+tests: `cargo test --features m0 --lib m0::`, which CI runs, with clippy on
+the feature. The exact accumulator's reference tests run on their own in
+[exact_acc/](exact_acc/).
 `py-ltseq/tests/test_m0_prototypes.py` checks the Python switch on either
 build: a default build refuses it, and a measurement build applies and
 restores exactly the flags a block names.
