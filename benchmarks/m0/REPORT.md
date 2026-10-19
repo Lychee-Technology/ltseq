@@ -552,15 +552,17 @@ file and partition boundaries. It applies no statistics pruning or
 pushdown below the declaration, so no pair goes unchecked. v0.4 trusts the
 declaration.
 
-**Prototypes** (`validate.rs`). `prune_off` turns pruning and pushdown off
-without checking: D7's read on its own. `validate` adds the check, which
+**Prototypes** (`validate.rs`). `prune_off` turns off four Parquet
+options, row-group statistics pruning, the scan's row filter, the page
+index and bloom filters, without checking: D7's read on its own.
+`validate` adds the check, which
 compares adjacent rows' keys in arrow's row format; the last partition to
 finish checks the pairs between partitions.
 
 m5 reads one file, and `validate` refuses a scan of several, so these
 cells say nothing about checking across files. Across files a partition
-need not follow the one before it in file order, and none of the options
-`prune_off` turns off stops DataFusion's file opener from skipping a
+need not follow the one before it in file order, and none of the four
+options stops DataFusion's file opener from skipping a
 whole file by its statistics. On one file that skips every row or none,
 and each pipeline below matches rows. M3 needs both: partitions in
 file-then-row order, and that file pruning off.
@@ -600,8 +602,8 @@ queries a sort declaration exists for.
   control, since no cell turned the row filter off alone: the 17 to 24% is
   what the row filter saves, net of the statistics and bloom-filter
   checks that today's plan runs and that skip nothing. The check then
-  costs 1.2 to 1.8
-  times today's time. The ratio falls with the partition count because
+  costs 1.2 to 1.8 times today's time. The ratio falls with the partition
+  count because
   each partition checks its own range; on one core the check takes about
   0.6 s per 100M rows of three keys.
 
