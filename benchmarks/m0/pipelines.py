@@ -97,9 +97,16 @@ M3: dict[str, Pipeline] = {
 # m4: masked `&` and `|` (M16). `g > 0` is the guard, `a1 * a2 > 0` and
 # `b1 * b2 > 0` the fallible operands (inputs.zones). The `|` forms negate
 # each comparison, so the fallible operand is demanded on the same rows.
+#
+# Each form must run in the order it is written. DataFusion moves an `AND`
+# conjunct made only of plain operators ahead of one that calls a function,
+# and checked arithmetic is a function, so with `checked` on `(a1 * a2 > 0)
+# & (g > 0)` would run its guard first. `fallible_and_guard` therefore
+# writes the guard as `abs(g) > 0`, a function call that is not checked and
+# the same predicate, since `g` is 0 or 1 (selfcheck.py checks the order).
 M4: dict[str, Pipeline] = {
     "m4.guard_and_fallible": lambda t: t.filter(lambda r: (r.g > 0) & (r.a1 * r.a2 > 0)),
-    "m4.fallible_and_guard": lambda t: t.filter(lambda r: (r.a1 * r.a2 > 0) & (r.g > 0)),
+    "m4.fallible_and_guard": lambda t: t.filter(lambda r: (r.a1 * r.a2 > 0) & (r.g.abs() > 0)),
     "m4.fallible_and_fallible": lambda t: t.filter(
         lambda r: (r.a1 * r.a2 > 0) & (r.b1 * r.b2 > 0)
     ),

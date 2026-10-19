@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import cases  # noqa: E402
 import inputs  # noqa: E402
 import pipelines  # noqa: E402
 from ltseq import LTSeq  # noqa: E402
@@ -154,6 +155,24 @@ def m4_masked_operands_guard_each_other():
             with prototypes(checked="fast"):
                 t = LTSeq.from_arrow(data)
             raises(lambda: pipelines.M4["m4.fallible_and_guard"](t).to_arrow(), "ArithmeticOverflowError")
+    # Each `&` form runs in its written order in every mode m4 measures.
+    data = inputs.zones(20_000, 0.01, True)
+    for name in ("m4.guard_and_fallible", "m4.fallible_and_guard"):
+        for mode, flags in cases.M4_MODES.items():
+            with prototypes(**flags):
+                t = LTSeq.from_arrow(data)
+            _, physical = pipelines.M4[name](t)._inner.explain_plan()
+            line = next(line for line in physical.splitlines() if "FilterExec" in line)
+            product_first = line.index("a1@") < line.index("g@")
+            assert product_first == (name == "m4.fallible_and_guard"), (name, mode, line)
+    # So at a 1% share today's checked plan raises only with the product
+    # first: a guard first leaves under 20% of the rows open, and the product
+    # runs only on those.
+    with prototypes(checked="fast"):
+        t = LTSeq.from_arrow(data)
+    raises(lambda: pipelines.M4["m4.fallible_and_guard"](t).to_arrow(), "ArithmeticOverflowError")
+    rows = pipelines.M4["m4.guard_and_fallible"](t).to_arrow().num_rows
+    assert rows == pc.sum(data.column("g")).as_py(), rows
 
 
 @check
