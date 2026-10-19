@@ -16,7 +16,7 @@ acceptance criterion), and the questions for it are at the end.
 |---|---|
 | Machine | AMD Ryzen 5 5600G (6 cores, 12 threads), 27 GiB, Linux 7.2.8, NVMe |
 | Build | `maturin develop --release --features m0` (fat LTO), rustc 1.96.1, Python 3.13.15, pyarrow 25.0.1 |
-| Commit | `bfa963a` for every measurement except m4b, with a clean worktree. m4b ran again at `15209f4` after its `operator` placement over a sort was fixed, which changed only that placement's three plans over the sort. The branch's other later commits add this report, the results, a test, a stricter self-check, a CI step, README notes and comments (and drop a blank line in `report.py`) |
+| Commit | `bfa963a` for every measurement except m4b, with a clean worktree. m4b ran again at `15209f4` after its `operator` placement over a sort was fixed, which changed only that placement's three plans over the sort. The branch's other later commits add this report, the results, a test, a stricter self-check, a CI step, README notes and comments, rewrite one loop in m2's state decoding for a newer clippy lint without changing what it does, and drop a blank line in `report.py` |
 | Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT; m4b again with `--only m4b`, started 2026-10-18 21:09 EDT |
 | Partitions | 1, 2, 4 and 12 (the CPU count) through #274's `pinned_engine`; m3 adds 24 for the baseline comment |
 | Data | bench_core's synthetic table at 10K, 100K and 1M rows (m1 and m2 add 10M); ClickBench's 1M-row sample and its 100M-row file sorted by `(userid, eventtime, watchid)` (16 GiB, 814 row groups); the R3 harness's 640 MiB input |

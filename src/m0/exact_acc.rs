@@ -729,9 +729,10 @@ impl ExactAcc {
         if len > 0 {
             let sign = if flags & 2 != 0 { -1 } else { 1 };
             acc.base = base as i32;
-            acc.chunks = digits
-                .chunks_exact(4)
-                .map(|d| sign * u32::from_le_bytes(d.try_into().unwrap()) as i64)
+            let (words, _) = digits.as_chunks::<4>();
+            acc.chunks = words
+                .iter()
+                .map(|&d| sign * u32::from_le_bytes(d) as i64)
                 .collect();
         }
         // |chunk| < 2^32 satisfies the invariant with units == 0.
