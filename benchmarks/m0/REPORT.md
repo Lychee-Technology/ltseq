@@ -59,8 +59,8 @@ the same build with every prototype off.
 
 | | Prices | Gates | Cost against today | Decision it informs |
 |---|---|---|---|---|
-| m1 | Checked integer arithmetic | M5, #221 | Within noise for `+ - *` computed as wrapping arithmetic plus an overflow mask; up to 1.3× for a grouped `sum` over 100,000 groups | The budget only |
-| m2 | Exact float statistics | M13, M4, OD-W | 0.9 to 1.9× for global `var`, `std`, `cov` and `corr`, up to 3.9× (about 12 ms per 10M rows) for `sum` and `mean`; 1.7 to 1.8× grouped over a few keys, 6.2 to 6.5× and 2.8× the memory over 100,000 groups; windows 1.2 to 3.9× (compensated 1.1 to 1.6×) | OD-W: exact or compensated windows; a budget exception or a leaner state for many groups |
+| m1 | Checked integer arithmetic | M5, #221 | Within noise for `+ - *` computed as wrapping arithmetic plus an overflow mask; up to 1.3× for a grouped `sum` over 100,000 groups at 10M rows, 1.43× at 1M | The budget only |
+| m2 | Exact float statistics | M13, M4, OD-W | 0.9 to 1.9× for global `var`, `std`, `cov` and `corr`, up to 3.9× (about 12 ms per 10M rows) for `sum` and `mean`; 1.7 to 1.8× grouped over a few keys, 6.2 to 6.5× (4.4 to 6.75× at 1M rows) and 2.8× the memory over 100,000 groups; windows 1.2 to 3.9× (compensated 1.1 to 1.6×) | OD-W: exact or compensated windows; a budget exception or a leaner state for many groups |
 | m3 | Order-preserving merge | M1, #148 | Row-group merge with 8 batches per unit: 0.97 to 1.09× at 12 and 24 partitions, 1.18× at 4, 7 to 15 MiB more; contiguous ranges 2 to 4× | Buffer size and schedule |
 | m4 | Masked `&` and `\|` | M16, #252 | Errors kept as masks: within noise without failing rows, up to 1.5× with them. Today's checked plan raises in 21 of 24 cells with failing rows, depending on operand order | Which strategy M16 builds |
 | m4b | Pushdown lost to D10a | M16 | Filter kept above the keys' computation: no cost where statistics cannot prune, 56 to 260× on a lookup by a sorted key; kept above the operator, 1.2 to 2.4× and up to 1,400× | Where M16 places the filter; whether it proves keys infallible |
@@ -71,7 +71,7 @@ The two large costs are both lost row-group pruning (m4b and m5), and
 both come from rules that forbid a filter or a skip below a point the
 contract fixes. Apart from pruning, the worst measured costs are exact
 statistics: 3.9 times on a rolling `std` and on a global `sum` at one
-partition, and 6.5 times grouped over 100,000 groups. Everything else
+partition, and 6.5 times grouped over 100,000 groups (6.75 at 1M rows). Everything else
 costs at most about 1.5 times with the cheapest prototype measured.
 
 ## m1: checked integer arithmetic (gates M5, #221)
@@ -96,9 +96,11 @@ measurement prices the check, not the error path.
 one partition, then each prototype's time as a multiple of today's at 1,
 2, 4 and 12 partitions. Peak memory differs between modes only for the
 grouped sum over 100,000 groups: 57 MiB today and 74 to 75 MiB checked,
-at 12 partitions. At 10K to 1M rows the pattern is the same with more
-noise, since a pipeline takes about a millisecond at 1M rows
-([results/m1.md](results/m1.md)).
+at 12 partitions. At 10K to 1M rows the element-wise pattern is the same
+with more noise, since such a pipeline takes about a millisecond at 1M
+rows ([results/m1.md](results/m1.md)). The grouped sum over 100,000
+groups costs more at 1M rows: 1.06 to 1.43 times, on cells of 10 to
+18 ms, above this measurement's noise for cells of that size.
 
 | pipeline | terminal | off s (p=1) | arrow × at p=1/2/4/12 | fast × at p=1/2/4/12 |
 |---|---|---|---|---|
@@ -127,14 +129,15 @@ noise, since a pipeline takes about a millisecond at 1M rows
   median and 0.19 at the 90th percentile, so the fade is not resolved
   more finely than that.
 - A checked `sum` costs 1.0 to 1.15 times globally or over a few groups,
-  and up to 1.3 times over 100,000 groups, where each group keeps an i128
-  instead of an i64.
+  and up to 1.3 times over 100,000 groups (1.43 at 1M rows), where each
+  group keeps an i128 instead of an i64.
 - Integer `**` takes 0.19 to 0.38 of today's time, and `cum_sum` 0.68 to
   0.75. Neither is a cost: today's `power` computes in float64, and the
   checked window sum happens to be faster than DataFusion's.
 
 For M5 the measured cost is nothing on element-wise arithmetic and up to
-1.3 times on grouped sums over many groups.
+1.3 times on grouped sums over many groups at 10M rows, 1.43 at 1M; a
+budget should be set against the larger figure.
 
 ## m2: exact float accumulation (gates M13, M4; OD-W, #276)
 
@@ -185,7 +188,8 @@ or per window.
   that is about 12 ms more. Exact `cov` costs 1.4 to 1.9 times.
 - Grouped statistics: 1.7 to 1.8 times over 5 categories; 6.2 to 6.5
   times over 100,000 groups, where the exact state per group also takes
-  2.8 times the memory (546 MiB against 196 at 12 partitions). The
+  2.8 times the memory (546 MiB against 196 at 12 partitions). At 1M rows
+  the same pipeline costs 4.4 to 6.75 times (6.75 at one partition). The
   prototype keeps a full superaccumulator per group. A grouped sum alone
   costs 1.6 to 3.4 times.
 - Rolling windows: 1.2 times for `sum`, 2.0 to 2.25 for `mean` and 3.2
@@ -202,8 +206,9 @@ or per window.
 For OD-W (#276) the trade is exact rolling `mean` and `std` at 2 to 3.9
 times today's time against compensated ones at 1.4 to 1.6, which are
 deterministic for a fixed row order but not exact. Grouped statistics
-over many groups, at 6 times and nearly 3 times the memory, are the item
-most likely to need a budget exception or a leaner accumulator for M13.
+over many groups, at 6 to 6.75 times and nearly 3 times the memory, are
+the item most likely to need a budget exception or a leaner accumulator
+for M13.
 
 ## m3: order-preserving merge (gates M1, #148)
 
@@ -535,8 +540,8 @@ decisions open:
    the one M16 should build?
 4. **OD-W (#276).** Exact rolling `mean` and `std` cost 2 to 3.9 times
    today's time, compensated ones 1.4 to 1.6. Which does the contract
-   require? And do exact grouped statistics over many groups (6 times,
-   nearly 3 times the memory) get a budget exception, or a leaner
+   require? And do exact grouped statistics over many groups (6 to 6.75
+   times, nearly 3 times the memory) get a budget exception, or a leaner
    accumulator first?
 5. **M1.** With 8 batches per unit the row-group merge is within 10% of
    today at 12 and 24 partitions but 1.18 times at 4. Is that within
