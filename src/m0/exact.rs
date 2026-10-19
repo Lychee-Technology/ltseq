@@ -504,9 +504,31 @@ struct StatGroups<S: Sums> {
     /// One vector per sum, indexed by group.
     sums: Vec<Vec<S>>,
     n: Vec<u64>,
+    /// The heap bytes the sums own. DataFusion asks for `size()` after every
+    /// batch, so this is kept up to date where a sum changes instead of
+    /// being added up over every group there.
+    heap: usize,
+}
+
+/// Change `sum` with `f`, keeping `heap` (which counts `sum`'s heap bytes)
+/// up to date.
+#[inline(always)]
+fn tracked<S: Sums>(heap: &mut usize, sum: &mut S, f: impl FnOnce(&mut S)) {
+    let before = sum.heap_bytes();
+    f(sum);
+    *heap = *heap - before + sum.heap_bytes();
 }
 
 impl<S: Sums> StatGroups<S> {
+    fn new(stat: Stat) -> Self {
+        StatGroups {
+            stat,
+            sums: vec![Vec::new(); stat.sums()],
+            n: Vec::new(),
+            heap: 0,
+        }
+    }
+
     fn grow(&mut self, groups: usize) {
         for s in &mut self.sums {
             s.resize(groups, S::default());
@@ -515,11 +537,12 @@ impl<S: Sums> StatGroups<S> {
     }
 
     fn take(&mut self, emit_to: EmitTo) -> (Vec<Vec<S>>, Vec<u64>) {
-        let sums = self
+        let sums: Vec<Vec<S>> = self
             .sums
             .iter_mut()
             .map(|s| emit_to.take_needed(s))
             .collect();
+        self.heap -= sums.iter().flatten().map(S::heap_bytes).sum::<usize>();
         (sums, emit_to.take_needed(&mut self.n))
     }
 }
@@ -558,25 +581,26 @@ impl<S: Sums> GroupsAccumulator for StatGroups<S> {
                 }
             };
         }
+        let heap = &mut self.heap;
         match (self.stat, b) {
             (Stat::Sum | Stat::Mean, _) => each_row!(|g, i| {
-                self.sums[0][g].add(a[i]);
+                tracked(heap, &mut self.sums[0][g], |s| s.add(a[i]));
             }),
             (Stat::Var | Stat::Std, _) => each_row!(|g, i| {
-                self.sums[0][g].add(a[i]);
-                self.sums[1][g].add_product(a[i], a[i]);
+                tracked(heap, &mut self.sums[0][g], |s| s.add(a[i]));
+                tracked(heap, &mut self.sums[1][g], |s| s.add_product(a[i], a[i]));
             }),
             (Stat::Cov, Some(b)) => each_row!(|g, i| {
-                self.sums[0][g].add_product(a[i], b[i]);
-                self.sums[1][g].add(a[i]);
-                self.sums[2][g].add(b[i]);
+                tracked(heap, &mut self.sums[0][g], |s| s.add_product(a[i], b[i]));
+                tracked(heap, &mut self.sums[1][g], |s| s.add(a[i]));
+                tracked(heap, &mut self.sums[2][g], |s| s.add(b[i]));
             }),
             (Stat::Corr, Some(b)) => each_row!(|g, i| {
-                self.sums[0][g].add_product(a[i], b[i]);
-                self.sums[1][g].add(a[i]);
-                self.sums[2][g].add(b[i]);
-                self.sums[3][g].add_product(a[i], a[i]);
-                self.sums[4][g].add_product(b[i], b[i]);
+                tracked(heap, &mut self.sums[0][g], |s| s.add_product(a[i], b[i]));
+                tracked(heap, &mut self.sums[1][g], |s| s.add(a[i]));
+                tracked(heap, &mut self.sums[2][g], |s| s.add(b[i]));
+                tracked(heap, &mut self.sums[3][g], |s| s.add_product(a[i], a[i]));
+                tracked(heap, &mut self.sums[4][g], |s| s.add_product(b[i], b[i]));
             }),
             _ => return exec_err!("{} takes two arguments", self.stat.name()),
         }
@@ -618,7 +642,8 @@ impl<S: Sums> GroupsAccumulator for StatGroups<S> {
                 continue;
             }
             for (j, column) in states.iter().enumerate() {
-                self.sums[j][g].merge(&S::deserialize(column.value(row))?);
+                let other = S::deserialize(column.value(row))?;
+                tracked(&mut self.heap, &mut self.sums[j][g], |s| s.merge(&other));
             }
             self.n[g] += counts.value(row);
         }
@@ -631,24 +656,19 @@ impl<S: Sums> GroupsAccumulator for StatGroups<S> {
         opt_filter: Option<&BooleanArray>,
     ) -> Result<Vec<ArrayRef>> {
         let rows = values[0].len();
-        let mut groups = StatGroups::<S> {
-            stat: self.stat,
-            sums: vec![Vec::new(); self.sums.len()],
-            n: Vec::new(),
-        };
+        let mut groups = StatGroups::<S>::new(self.stat);
         let identity: Vec<usize> = (0..rows).collect();
         groups.update_batch(values, &identity, opt_filter, rows)?;
         groups.state(EmitTo::All)
     }
 
     fn size(&self) -> usize {
-        let heap: usize = self.sums.iter().flatten().map(|s| s.heap_bytes()).sum();
         self.sums
             .iter()
             .map(|s| s.capacity() * size_of::<S>())
             .sum::<usize>()
             + self.n.capacity() * 8
-            + heap
+            + self.heap
     }
 }
 
@@ -714,18 +734,9 @@ impl AggregateUDFImpl for StatUdaf {
         &self,
         _args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        let k = self.stat.sums();
         Ok(match self.mode {
-            FloatSums::Compensated => Box::new(StatGroups::<DoubleDouble> {
-                stat: self.stat,
-                sums: vec![Vec::new(); k],
-                n: Vec::new(),
-            }),
-            _ => Box::new(StatGroups::<ExactAcc> {
-                stat: self.stat,
-                sums: vec![Vec::new(); k],
-                n: Vec::new(),
-            }),
+            FloatSums::Compensated => Box::new(StatGroups::<DoubleDouble>::new(self.stat)),
+            _ => Box::new(StatGroups::<ExactAcc>::new(self.stat)),
         })
     }
 
@@ -900,21 +911,13 @@ mod tests {
     fn groups_and_partial_states_agree_with_one_accumulator() {
         let xs: Vec<f64> = (0..1000).map(|i| (i as f64) * 0.1 + 1e8).collect();
         let whole = evaluate::<ExactAcc>(Stat::Var, &[&xs]);
-        let mut groups = StatGroups::<ExactAcc> {
-            stat: Stat::Var,
-            sums: vec![Vec::new(); 2],
-            n: Vec::new(),
-        };
+        let mut groups = StatGroups::<ExactAcc>::new(Stat::Var);
         // Two partial states for group 0, merged.
         let half = xs.len() / 2;
         let left = groups
             .convert_to_state(&[column(&xs[..half])], None)
             .unwrap();
-        let mut merged = StatGroups::<ExactAcc> {
-            stat: Stat::Var,
-            sums: vec![Vec::new(); 2],
-            n: Vec::new(),
-        };
+        let mut merged = StatGroups::<ExactAcc>::new(Stat::Var);
         merged.merge_batch(&left, &vec![0; half], 1).unwrap();
         groups
             .update_batch(&[column(&xs[half..])], &vec![0; xs.len() - half], None, 1)
@@ -923,6 +926,46 @@ mod tests {
         merged.merge_batch(&right, &[0], 1).unwrap();
         let out = merged.evaluate(EmitTo::All).unwrap();
         assert_eq!(out.as_primitive::<Float64Type>().value(0), whole.unwrap());
+    }
+
+    /// `size()` as a walk over every group's sums.
+    fn walked_size<S: Sums>(groups: &StatGroups<S>) -> usize {
+        let heap: usize = groups.sums.iter().flatten().map(S::heap_bytes).sum();
+        groups
+            .sums
+            .iter()
+            .map(|s| s.capacity() * size_of::<S>())
+            .sum::<usize>()
+            + groups.n.capacity() * 8
+            + heap
+    }
+
+    #[test]
+    fn group_sizes_follow_growth_merges_and_emits() {
+        // Exponents far apart grow a superaccumulator's chunks; an infinity
+        // allocates its non-finite state.
+        let a = [1e-300, 1e300, 3.5, f64::INFINITY, -2e150, 1e-10];
+        let b = [2.0, -1e200, 1e-200, 4.0, 5.0, f64::NAN];
+        let columns = [column(&a), column(&b)];
+        let mut groups = StatGroups::<ExactAcc>::new(Stat::Corr);
+        let mut other = StatGroups::<ExactAcc>::new(Stat::Corr);
+        for round in 0..4 {
+            let indices: Vec<usize> = (0..a.len()).map(|i| (i + round) % 5).collect();
+            groups.update_batch(&columns, &indices, None, 5).unwrap();
+            assert_eq!(groups.size(), walked_size(&groups), "update {round}");
+            other
+                .update_batch(&columns, &[0, 1, 0, 1, 0, 1], None, 2)
+                .unwrap();
+            let state = other.state(EmitTo::First(1)).unwrap();
+            assert_eq!(other.size(), walked_size(&other), "state {round}");
+            groups.merge_batch(&state, &[4], 5).unwrap();
+            assert_eq!(groups.size(), walked_size(&groups), "merge {round}");
+            groups.evaluate(EmitTo::First(2)).unwrap();
+            assert_eq!(groups.size(), walked_size(&groups), "evaluate {round}");
+        }
+        assert!(groups.heap > 0);
+        groups.evaluate(EmitTo::All).unwrap();
+        assert_eq!(groups.heap, 0);
     }
 
     #[test]
