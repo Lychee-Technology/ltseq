@@ -16,8 +16,8 @@ acceptance criterion), and the questions for it are at the end.
 |---|---|
 | Machine | AMD Ryzen 5 5600G (6 cores, 12 threads), 27 GiB, Linux 7.2.8, NVMe |
 | Build | `maturin develop --release --features m0` (fat LTO), rustc 1.96.1, Python 3.13.15, pyarrow 25.0.1 |
-| Commit | `bfa963a` for every measurement except m4b, with a clean worktree. m4b ran again at `15209f4` after its `operator` placement over a sort was fixed, which changed only that placement's three plans over the sort. The branch's other later commits add this report, the results, a test, a stricter self-check, a CI step, README notes and comments, rewrite one loop in m2's state decoding for a newer clippy lint without changing what it does, and drop a blank line in `report.py` |
-| Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT; m4b again with `--only m4b`, started 2026-10-18 21:09 EDT |
+| Commit | `bfa963a` for m1, m3, m5 and m6, each with a clean worktree. m4b ran again at `15209f4`, after its `operator` placement over a sort was fixed, which changed only that placement's three plans over the sort. m4 ran again at `e168139`, after its `fallible_and_guard` was made to run in its written order, and m2 at `1668833`, after its grouped state stopped walking every group to report its size and its cells stopped skipping partial aggregation. Of the branch's other later commits, `aeea468` turns off work stealing in m5's `prune_off` and `validate`, which changes no measured plan; the rest add this report, the results, tests, a stricter self-check, a CI step, README notes, comments and a `--batch-size` option for `run.py`, and drop a blank line in `report.py` |
+| Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT; m4b again with `--only m4b`, started 2026-10-18 21:09 EDT; m4 again with `--only m2,m4`, started 2026-10-19 11:09 EDT (its m2 results were replaced); m2 again with `--only m2`, started 2026-10-19 12:19 EDT |
 | Partitions | 1, 2, 4 and 12 (the CPU count) through #274's `pinned_engine`; m3 adds 24 for the baseline comment |
 | Data | bench_core's synthetic table at 10K, 100K and 1M rows (m1 and m2 add 10M); ClickBench's 1M-row sample and its 100M-row file sorted by `(userid, eventtime, watchid)` (16 GiB, 814 row groups); the R3 harness's 640 MiB input |
 
@@ -32,25 +32,33 @@ as CI tests it, all 15,706 pass.
 flag set) runs in a fresh process: it builds the input, runs the pipeline
 once over a 10K-row warm-up input, then times 5 runs (3 over the sorted
 ClickBench file and the R3 input). A run's time covers building the plan and
-draining the terminal; the tables give the median. Peak memory is the
-resident growth over the first measured run, as in the R3 harness. TTFR is
-the time to the first non-empty batch of the Arrow C stream, which is what
-`to_batches` will return.
+draining the terminal; the tables give the median. Every run of a cell
+queries one table, built before the first, so later runs find the
+Parquet footer that DataFusion cached during the first. Over the sorted
+ClickBench file that read takes about 30 ms, ten times today's lookup,
+so m4b and m5 give lookup ratios two ways: by medians, which describe a
+repeated query, and by first runs, which describe the first query on a
+table. Peak memory is the resident growth over the first measured run,
+as in the R3 harness. TTFR is the time to the first non-empty batch of
+the Arrow C stream, which is what `to_batches` will return.
 
 **Noise.** m1, m3, m4b, m5 and m6 also ran at an earlier commit with the
 same prototypes. Between the two runs a cell's ratio to today moved by
 0.03 to 0.07 at the median and 0.11 to 0.19 at the 90th percentile; the
 large m4b and m5 ratios moved by under 10%; m4b's third run is compared
-in its section. Cells that take a few
-milliseconds move most. Read a ratio within 0.1 of 1 as no difference,
-and within 0.2 for a cell under 10 ms.
+in its section. m2 and m4 ran again after their fixes; their cells
+whose plans did not change moved by 0.04 at the median and by 0.15 (m4)
+and 0.23 (m2) at the 90th percentile, m2's most in global aggregates
+that take 1 to 15 ms. Cells that take a few milliseconds move most.
+Read a ratio within 0.1 of 1 as no difference, and within 0.2 for a
+cell under 10 ms.
 
 **Contention.** Other workloads share the machine. Before each cell the
 harness waited until the machine was at most 8% busy. When other
 processes kept more than half a core busy during a cell, it ran the cell
-again, up to three times, and kept the least contended attempt. 66 of
-1,894 cells ran more than once. 9 stayed contended (6 in m2, 2 in m5 and
-1 in m4b, with at most one other core busy) and are flagged in
+again, up to three times, and kept the least contended attempt. 26 of
+1,894 cells ran more than once. 3 stayed contended (2 in m5 and 1 in
+m4b, with at most 0.65 of another core busy) and are flagged in
 `results/*.md`.
 
 ## Summary
@@ -62,19 +70,24 @@ the same build with every prototype off.
 | | Prices | Gates | Cost against today | Decision it informs |
 |---|---|---|---|---|
 | m1 | Checked integer arithmetic | M5, #221 | Within noise for `+ - *` computed as wrapping arithmetic plus an overflow mask; up to 1.3× for a grouped `sum` over 100,000 groups at 10M rows, 1.43× at 1M | The budget only |
-| m2 | Exact float statistics | M13, M4, OD-W | 0.9 to 1.9× for global `var`, `std`, `cov` and `corr`, up to 3.9× (about 12 ms per 10M rows) for `sum` and `mean`; 1.7 to 1.8× grouped over a few keys, 6.2 to 6.5× (4.4 to 6.75× at 1M rows) and 2.8× the memory over 100,000 groups; windows 1.2 to 3.9× (compensated 1.1 to 1.6×) | OD-W: exact or compensated windows; a budget exception or a leaner state for many groups |
-| m3 | Order-preserving merge | M1, #148 | Row-group merge with 8 batches per unit: 0.97 to 1.09× at 12 and 24 partitions, 1.18× at 4, 7 to 15 MiB more; contiguous ranges 2 to 4× | Buffer size and schedule |
-| m4 | Masked `&` and `\|` | M16, #252 | Errors kept as masks: within noise without failing rows, up to 1.5× with them. Today's checked plan raises in 21 of 24 cells with failing rows, depending on operand order | Which strategy M16 builds |
-| m4b | Pushdown lost to D10a | M16 | Filter kept above the keys' computation: no cost where statistics cannot prune, 59 to 265× on a lookup by a sorted key; kept above the operator, 1.2 to 2.3× and up to 1,440× | Where M16 places the filter; whether it proves keys infallible |
-| m5 | `assume_sorted` checked, no pruning | M3 | The check: 5 to 7% on top of D7's read, 1.2 to 1.8× on full scans; the lost pruning: 156 to 604× on a sort-key lookup | D7 as written, or a weaker check that keeps pruning |
-| m6 | `string_view` normalized | M18 | Plain at the scan: up to 1.3× on filters and grouping; cast at the root: 1.1 to 1.45× on string-heavy results; both hold 25 to 35% less memory on export | Where M18 normalizes |
+| m2 | Exact float statistics | M13, M4, OD-W | 0.9 to 2.0× for global `var`, `std`, `cov` and `corr`, up to 4.1× (about 12 ms per 10M rows) for `sum` and `mean`; 1.7 to 1.9× grouped over a few keys, 3.1 to 4.0× (4.3 to 4.9× at 1M rows) and 2.9× the memory over 100,000 groups; windows 1.3 to 3.8× (compensated 1.1 to 1.6×) | OD-W: exact or compensated windows; a budget exception or a leaner state for many groups |
+| m3 | Order-preserving merge | M1, #148 | Row-group merge on R3 with whole row groups buffered: 0.97 to 1.09× at 12 and 24 partitions, 1.18× at 4, 7 to 15 MiB more; with a buffer that binds, 1.4 to 2.1×; up to 1.66× on a file of 11 row groups. Contiguous ranges, the only schedule measured on CSV: 1.4 to 4.3× | How the buffer is bounded; a budget per reader |
+| m4 | Masked `&` and `\|` | M16, #252 | Errors kept as masks: within noise without failing rows, up to 1.6× with them. Today's checked plan raises in 22 of 24 cells with failing rows; the two that pass run the guard first at a 1% share | Which strategy M16 builds |
+| m4b | Pushdown lost to D10a | M16 | If every checked operation counts as fallible: filter kept above the keys' computation, no cost where statistics cannot prune, 59 to 265× on a repeated lookup by a sorted key and 7.5 to 22× on a first one; kept above the operator, 1.2 to 2.3× and up to 1,440× (117× first). Every measured key is infallible by its operand types | Where M16 places the filter; how it decides a key cannot fail |
+| m5 | `assume_sorted` checked, no pruning | M3 | The check: 5 to 7% on top of D7's read, 1.2 to 1.8× on full scans; the lost pruning: 156 to 604× on a repeated sort-key lookup, 70 to 245× on a first one | D7 as written, or a weaker check that keeps pruning |
+| m6 | `string_view` normalized | M18 | Plain at the scan: up to 1.3× on filters and grouping; cast at the root: 1.1 to 1.45× on string-heavy results; both hold 25 to 35% less memory on export at one partition, and between 14% less and 32% more at 12 | Where M18 normalizes |
 
 The two large costs are both lost row-group pruning (m4b and m5), and
 both come from rules that forbid a filter or a skip below a point the
 contract fixes. Apart from pruning, the worst measured costs are exact
-statistics: 3.9 times on a rolling `std` and on a global `sum` at one
-partition, and 6.5 times grouped over 100,000 groups (6.75 at 1M rows). Everything else
-costs at most about 1.5 times with the cheapest prototype measured.
+statistics: 3.8 times on a rolling `std`, 4.1 times on a global `mean`
+at one partition (12 ms more), and 3.1 to 4.9 times grouped over 100,000
+groups. Other costs above 1.5 times, with the cheapest prototype
+measured: m5's check at 1.7 to 1.8 times on full scans; m3's row-group
+merge once its buffer binds (1.4 to 2.1 times) and on a file with fewer
+row groups than partitions (1.66); contiguous ranges, the only CSV
+schedule measured (1.85 to 3.1); and m4's `optimistic` at 1.75 to 1.9
+times when a batch raises and is evaluated again.
 
 ## m1: checked integer arithmetic (gates M5, #221)
 
@@ -153,7 +166,16 @@ in superaccumulators and rounds once; windows retract by exact
 subtraction. `compensated` keeps them as double-doubles: deterministic for
 one row order and far more accurate than f64, but neither exact nor
 order-independent. It prices a weaker answer to OD-W (#276), not the
-contract. Partial aggregates exchange their sums serialized.
+contract. Partial aggregates exchange their sums serialized. A grouped
+accumulator reports its memory from a running total of what its sums
+allocate, because DataFusion asks for it after every batch.
+
+DataFusion 55 skips partial aggregation in a partition whose first
+100,000 rows hold more than 0.8 groups per row. Over 100,000 groups,
+whether that happens depends on how rows reached the partition, and on
+the skip path each row travels as a serialized one-row accumulator. m2's
+cells turn the skip off (`partial_skip=never`), so every run takes the
+same path; the skip path is not priced.
 
 **Results.** In-memory bench_core at 10M rows (`amount` is uniform in
 [0, 10000] at two decimals), streamed. Today's median at one partition,
@@ -163,54 +185,69 @@ partitions, and peak memory at 12 partitions. The smaller sizes are in
 
 | pipeline | terminal | off s (p=1) | exact × at p=1/2/4/12 | compensated × at p=1/2/4/12 | peak MiB p=12: off/exact/compensated |
 |---|---|---|---|---|---|
-| sum | stream | 0.004 | 3.88 / 2.74 / 1.99 / 1.23 | 11.74 / 7.81 / 4.80 / 1.92 | 1 / 1 / 1 |
-| mean | stream | 0.004 | 3.85 / 2.81 / 1.87 / 1.24 | 11.67 / 7.92 / 4.88 / 1.90 | 1 / 1 / 1 |
-| var | stream | 0.047 | 0.88 / 0.90 / 0.90 / 0.95 | 2.27 / 2.25 / 2.17 / 1.64 | 1 / 1 / 1 |
-| std | stream | 0.047 | 0.88 / 0.92 / 0.91 / 1.48 | 2.27 / 2.22 / 2.21 / 2.30 | 1 / 1 / 1 |
-| cov | stream | 0.050 | 1.46 / 1.44 / 1.42 / 1.94 | 3.22 / 3.16 / 3.04 / 2.92 | 1 / 1 / 1 |
-| corr | stream | 0.141 | 0.86 / 0.87 / 0.89 / 1.37 | 1.93 / 1.91 / 1.89 / 2.01 | 1 / 1 / 1 |
-| stats_by_category | stream | 0.145 | 1.76 / 1.75 / 1.73 / 1.84 | 1.34 / 1.33 / 1.28 / 1.33 | 0 / 0 / 0 |
-| stats_by_id_mod | stream | 0.174 | 6.25 / 6.53 / 6.23 / 6.34 | 1.31 / 5.17 / 1.54 / 2.28 | 196 / 546 / 332 |
-| sum_by_id_mod | stream | 0.097 | 1.58 / 2.59 / 3.37 / 2.72 | 1.13 / 1.24 / 1.46 / 1.37 | 61 / 118 / 86 |
-| rolling_sum | stream | 1.691 | 1.19 / 1.18 / 1.18 / 1.16 | 1.12 / 1.10 / 1.11 / 1.10 | 382 / 399 / 393 |
-| rolling_mean | stream | 1.290 | 2.25 / 2.04 / 2.10 / 2.00 | 1.47 / 1.39 / 1.42 / 1.39 | 390 / 391 / 390 |
-| rolling_std | stream | 1.342 | 3.90 / 3.33 / 3.28 / 3.20 | 1.63 / 1.53 / 1.52 / 1.51 | 385 / 393 / 394 |
-| rolling_mean_1000 | stream | 1.297 | 2.22 / 2.03 / 2.03 / 2.01 | 1.47 / 1.41 / 1.40 / 1.41 | 391 / 384 / 389 |
-| cum_sum | stream | 1.187 | 1.00 / 0.99 / 1.00 / 1.00 | 0.92 / 0.93 / 0.92 / 0.93 | 389 / 383 / 383 |
+| sum | stream | 0.004 | 3.92 / 2.89 / 1.85 / 1.18 | 11.85 / 8.16 / 4.83 / 1.88 | 0 / 1 / 1 |
+| mean | stream | 0.004 | 4.08 / 2.91 / 1.87 / 1.21 | 12.40 / 8.24 / 4.91 / 1.82 | 0 / 1 / 1 |
+| var | stream | 0.047 | 0.88 / 0.87 / 0.88 / 1.41 | 2.27 / 2.20 / 2.17 / 2.18 | 0 / 1 / 1 |
+| std | stream | 0.047 | 0.88 / 0.90 / 0.87 / 1.43 | 2.27 / 2.26 / 2.16 / 2.20 | 0 / 1 / 1 |
+| cov | stream | 0.050 | 1.44 / 1.41 / 1.42 / 2.03 | 3.22 / 3.13 / 3.05 / 3.09 | 1 / 1 / 1 |
+| corr | stream | 0.141 | 0.86 / 0.86 / 0.87 / 1.38 | 1.93 / 1.91 / 1.90 / 1.96 | 1 / 1 / 1 |
+| stats_by_category | stream | 0.143 | 1.73 / 1.74 / 1.76 / 1.86 | 1.34 / 1.33 / 1.37 / 1.33 | 0 / 0 / 0 |
+| stats_by_id_mod | stream | 0.171 | 3.13 / 4.01 / 3.94 / 3.99 | 1.32 / 1.51 / 1.54 / 1.65 | 192 / 553 / 364 |
+| sum_by_id_mod | stream | 0.093 | 1.40 / 1.89 / 2.48 / 2.08 | 1.18 / 1.22 / 1.40 / 1.38 | 51 / 122 / 85 |
+| rolling_sum | stream | 1.708 | 1.32 / 1.29 / 1.28 / 1.29 | 1.11 / 1.16 / 1.12 / 1.11 | 383 / 382 / 390 |
+| rolling_mean | stream | 1.275 | 2.30 / 2.03 / 2.02 / 2.04 | 1.51 / 1.41 / 1.41 / 1.39 | 392 / 384 / 395 |
+| rolling_std | stream | 1.384 | 3.74 / 3.38 / 3.27 / 3.28 | 1.59 / 1.53 / 1.47 / 1.50 | 395 / 390 / 384 |
+| rolling_mean_1000 | stream | 1.292 | 2.21 / 2.01 / 2.01 / 1.98 | 1.48 / 1.43 / 1.41 / 1.40 | 386 / 391 / 383 |
+| cum_sum | stream | 1.177 | 1.01 / 1.02 / 1.00 / 1.00 | 0.92 / 0.93 / 0.92 / 0.93 | 393 / 383 / 389 |
 
 **Reading.** Exact accumulation costs little where today's kernel already
 does real work per row, and most where it keeps a small state per group
 or per window.
 
-- Global statistics: exact `var`, `std` and `corr` take 0.86 to 0.92 of
-  today's time up to 4 partitions, since Welford's update divides on every
-  row. At 12 partitions a whole query takes 5 to 15 ms and the ratios
-  (0.95 to 1.48) are mostly noise. Exact `sum` and `mean` cost 3.9 times
-  at one partition and 1.2 at 12, but today's takes 4 ms per 10M rows, so
-  that is about 12 ms more. Exact `cov` costs 1.4 to 1.9 times.
-- Grouped statistics: 1.7 to 1.8 times over 5 categories; 6.2 to 6.5
-  times over 100,000 groups, where the exact state per group also takes
-  2.8 times the memory (546 MiB against 196 at 12 partitions). At 1M rows
-  the same pipeline costs 4.4 to 6.75 times (6.75 at one partition). The
-  prototype keeps a full superaccumulator per group. A grouped sum alone
-  costs 1.6 to 3.4 times.
-- Rolling windows: 1.2 times for `sum`, 2.0 to 2.25 for `mean` and 3.2
-  to 3.9 for `std`. A window of 1,000 rows costs the same as one of 20, so
+- Global statistics: up to 4 partitions, exact `var`, `std` and `corr`
+  take 0.86 to 0.90 of today's time, since Welford's update divides on
+  every row, and `cov` 1.4 times. Exact `sum` and `mean` cost 3.9 to 4.1
+  times at one partition, but today's takes 4 ms per 10M rows, so that
+  is about 12 ms more. At 12 partitions, where today's queries take 3
+  to 14 ms, exact costs 1.2 to 2.0 times; between runs these ratios
+  moved by up to 0.5.
+- Grouped statistics: 1.7 to 1.9 times over 5 categories. Over 100,000
+  groups, 3.1 to 4.0 times at 10M rows and 4.3 to 4.9 at 1M, where the
+  exact state per group also takes 2.9 times the memory (553 MiB against
+  192 at 12 partitions). The prototype keeps a full superaccumulator per
+  sum and group. A grouped sum alone costs 1.4 to 2.5 times. The first
+  run of this measurement gave 6.2 to 6.5 times over 100,000 groups: its
+  accumulator walked every group's heap after every batch to report its
+  size, which took a third to a half of the time.
+- Rolling windows: 1.3 times for `sum`, 2.0 to 2.3 for `mean` and 3.3
+  to 3.8 for `std`. A window of 1,000 rows costs the same as one of 20, so
   retraction does not grow with the window. `cum_sum` costs nothing: the
-  window operator, about 120 ns per row today, dominates it.
-- `compensated` costs 1.1 to 1.6 times on windows and 1.1 to 2.3 on
-  grouped statistics, except 5.2 over 100,000 groups at 2 partitions (in
-  each of five runs in that cell; not explained). On global aggregates it
-  costs more than `exact` (1.6 to 11.7 times today's), probably because a
+  window operator, about 120 ns per row today, dominates it. Exact
+  `rolling_sum` cost 1.14 to 1.20 times in the two earlier runs, at
+  `bfa963a` and `e168139`, and 1.28 to 1.43 in this one and in a second
+  run of its cells on the same build. The cause was not found. The
+  change between those builds makes the accumulator's allocating paths
+  return the bytes they allocate, which the window path ignores;
+  `rolling_mean`, which shares the window's update and retraction, did
+  not move; and a standalone benchmark of the accumulator, finish
+  included, times the old and new code the same.
+- `compensated` costs 1.1 to 1.6 times on windows and 1.2 to 1.7 on
+  grouped statistics (1.0 to 2.1 at 1M rows). On global aggregates it
+  costs more than `exact` (1.8 to 12.4 times today's), probably because a
   double-double addition is a longer dependency chain than a
-  superaccumulator update; this was not profiled.
+  superaccumulator update; this was not profiled. The first run's 5.2
+  times over 100,000 groups at 2 partitions most likely took the skip
+  path; with the skip off it is 1.5.
 
-For OD-W (#276) the trade is exact rolling `mean` and `std` at 2 to 3.9
+For OD-W (#276) the trade is exact rolling `mean` and `std` at 2.0 to 3.8
 times today's time against compensated ones at 1.4 to 1.6, which are
-deterministic for a fixed row order but not exact. Grouped statistics
-over many groups, at 6 to 6.75 times and nearly 3 times the memory, are
-the item most likely to need a budget exception or a leaner accumulator
-for M13.
+deterministic for a fixed row order but not exact. The prototype
+finishes each exact `mean` and `std` row through a BigInt division or
+square root, and this measurement does not separate that cost from
+accumulation, so a cheaper exact finish could narrow the gap. Grouped
+statistics over many groups, at 3.1 to 4.9 times and nearly 3 times the
+memory, are the item most likely to need a budget exception or a leaner
+accumulator for M13.
 
 ## m3: order-preserving merge (gates M1, #148)
 
@@ -249,6 +286,22 @@ buffer of 2 and 1.15 (106 MiB) with 4; at 24, 1.75 (181 MiB) and 1.09
 (179 MiB). Today's peak at 12 partitions was 39.5 MiB in the previous
 run, against 44.3 here.
 
+At the default batch size an R3 row group filtered to 75% leaves six
+batches, so a buffer of 8 holds a whole unit and never stops one. A
+check with 4,096-row batches, where a unit is 24 batches and every
+buffer binds ([results/checks/](results/checks/)), left today's time
+unchanged (0.071, 0.054 and 0.056 s at 4, 12 and 24 partitions). The
+row-group merge cost 1.96, 2.83 and 2.85 times there with a buffer of 2,
+and 1.42, 2.11 and 2.11 with a buffer of 8. Contiguous ranges cost 3.5 to
+4.3 times.
+
+Other readers were measured without the buffer sweep. On ClickBench's
+sample, 11 row groups for up to 12 partitions, the row-group merge costs
+0.77 to 1.20 times on a filter and up to 1.66 on a full scan
+(`hits_scan` at 12 partitions). bench_core's CSV has no row groups, so
+only contiguous ranges were measured there: 1.85, 3.09 and 2.71 times at
+2, 4 and 12 partitions.
+
 Writing Parquet, every mode took 0.94 to 1.10 times today's time;
 `concat` held 65 and 96 MiB at 12 and 24 partitions against today's 104
 and 171. `count` runs only today's plan: 1.0, 4.3, 7.9, 22.5 and 24.2 MiB
@@ -268,11 +321,18 @@ but not by concatenating today's ranges.
   partitions, 1.31 at 4 and 1.6 to 1.75 at 12 and 24. A buffer of 8
   batches brings it to 1.09 at 12 and 0.97 at 24, for 7 to 15 MiB more
   than today, but 1.18 remains at 4 partitions, where wider windows were
-  not tried. More units in flight do not help, and cost memory: about
-  110 MiB with 24 units and 180 with 48, at buffers of 2 and 4. At every
-  window tried the buffer of 8 had the lowest peak of the three, as it did
-  at 12 and 24 partitions in the previous run; this measurement does not
-  explain why.
+  not tried. Those figures hold only while the buffer holds a whole unit.
+  Holding a third of one, it costs 1.6 to 1.75 times at 12 and 24
+  partitions (a buffer of 2 at the default batch size) and 2.1 (a buffer
+  of 8 at 4,096 rows). So the merge stays near today's time by buffering
+  whole row groups' output, and its memory then grows with the row
+  group's output, not with a count of batches. The check does not
+  separate the binding from the four times as many batches the merge
+  hands on at 4,096 rows. More units in flight do not help, and cost
+  memory: about 110 MiB with 24 units and 180 with 48, at buffers of 2
+  and 4. At every window tried the buffer of 8 had the lowest peak of the
+  three, as it did at 12 and 24 partitions in the previous run; this
+  measurement does not explain why.
 - An ordered stream cannot start before the first unit does, so a slow
   start delays the first row (24 to 26 ms against 3 to 4 above). Today's
   early row comes from another partition, out of order. At 12 partitions
@@ -283,8 +343,13 @@ but not by concatenating today's ranges.
 - Writing Parquet is bound by the writer, so ordering costs nothing there,
   and `concat` holds about 40% less memory.
 
-For M1 the open choices are the buffer per unit, and whether about 1.2
-times at 4 partitions fits the budget or needs a different schedule.
+For M1 the open choices are how the buffer is bounded (by a row group's
+output, which keeps the cost near today's on R3, or by a count of
+batches, which costs 1.4 to 2.1 times once it binds), whether about 1.2
+times at 4 partitions fits the budget, and what the other inputs cost:
+up to 1.66 times on a Parquet file with fewer row groups than
+partitions, where no buffer was swept, and 1.85 to 3.1 on CSV, where
+only contiguous ranges were measured.
 
 ## m4: masked evaluation of `&` and `|` (gates M16, #252)
 
@@ -309,6 +374,16 @@ TRUE, holding the guard's share of rows, and two where one product is
 FALSE and, with failing rows on, the other overflows. With failing rows
 on, D10 decides whether the query raises.
 
+The operand order in a pipeline's name is the order its plan runs.
+DataFusion's optimizer reorders the operands of `&`: it moves a conjunct
+without function calls ahead of one with them, and checked arithmetic is
+a function call. Written as `(a1 * a2 > 0) & (g > 0)`, the product would
+run first in today's unchecked plan and second in every checked one. So
+`fallible_and_guard` writes its guard as `abs(g) > 0`, also a function
+call and the same predicate on this input (`g` is 0 or 1), which keeps
+the written order in every mode. The self-check asserts the executed
+order of both `&` forms in every mode. `|` is not reordered.
+
 **Results.** 1M rows at 12 partitions. Each cell lists the four shares of
 rows on which the fallible operand is demanded (1%, 20%, 50% and 99%):
 today's median in milliseconds, then each mode's time as a multiple of
@@ -318,34 +393,41 @@ Partition counts 1, 2 and 4 and the smaller sizes are in
 
 | pipeline | today ms | `select` × | `errors` × | `optimistic` × | today's checked plan, failing rows | `select` ×, failing | `errors` ×, failing | `optimistic` ×, failing |
 |---|---|---|---|---|---|---|---|---|
-| guard_and_fallible | 1.3 / 3.4 / 4.3 / 5.0 | 1.02 / 1.06 / 1.29 / 1.52 | 1.32 / 0.94 / 1.00 / 1.03 | 1.00 / 1.00 / 1.02 / 1.04 | raises at 20%, 50%, 99% | 0.96 / 1.03 / 1.25 / 1.70 | 1.50 / 0.94 / 1.00 / 1.02 | 0.94 / 1.00 / 1.10 / 1.10 |
-| fallible_and_guard | 1.8 / 3.5 / 4.5 / 5.1 | 0.69 / 1.02 / 1.19 / 1.66 | 0.96 / 0.91 / 0.96 / 1.00 | 0.72 / 0.99 / 0.95 / 1.01 | raises at 20%, 50%, 99% | 0.92 / 1.01 / 1.29 / 1.64 | 1.22 / 0.92 / 1.06 / 1.03 | 0.77 / 0.98 / 1.12 / 1.04 |
-| fallible_and_fallible | 1.7 / 3.7 / 4.6 / 5.3 | 1.03 / 1.02 / 1.22 / 1.47 | 1.13 / 0.90 / 0.99 / 1.03 | 0.91 / 0.99 / 0.97 / 1.03 | raises at 1%, 20%, 50%, 99% | 2.21 / 1.54 / 1.44 / 1.39 | 1.51 / 0.99 / 0.98 / 0.99 | 1.90 / 1.18 / 1.06 / 1.05 |
-| guard_or_fallible | 4.9 / 5.2 / 4.5 / 1.7 | 1.03 / 1.07 / 1.26 / 2.90 | 0.99 / 0.91 / 0.97 / 1.02 | 1.01 / 0.96 / 0.97 / 1.00 | raises at 20%, 50%, 99% | 1.02 / 1.07 / 1.25 / 2.83 | 1.06 / 0.94 / 0.98 / 1.08 | 0.97 / 1.06 / 1.11 / 1.42 |
-| fallible_or_guard | 5.1 / 5.3 / 4.4 / 1.8 | 0.98 / 1.01 / 1.24 / 2.78 | 1.01 / 0.92 / 0.98 / 0.93 | 0.99 / 0.96 / 1.01 / 0.96 | raises at 1%, 20%, 50%, 99% | 0.97 / 1.06 / 1.28 / 2.87 | 1.03 / 0.89 / 1.00 / 1.10 | 1.07 / 0.95 / 1.07 / 1.50 |
-| fallible_or_fallible | 5.2 / 5.3 / 4.6 / 1.9 | 0.99 / 1.07 / 1.21 / 2.65 | 1.01 / 0.95 / 1.02 / 1.00 | 1.03 / 1.01 / 1.01 / 1.01 | raises at 1%, 20%, 50%, 99% | 1.24 / 1.24 / 1.51 / 2.68 | 1.05 / 0.94 / 1.06 / 1.46 | 1.10 / 0.96 / 1.09 / 1.59 |
+| guard_and_fallible | 1.3 / 3.4 / 4.3 / 5.3 | 1.00 / 1.04 / 1.25 / 1.58 | 1.27 / 0.91 / 0.99 / 0.97 | 0.93 / 0.98 / 1.04 / 0.96 | raises at 20%, 50%, 99% | 0.94 / 1.08 / 1.27 / 1.50 | 1.49 / 0.95 / 1.05 / 1.00 | 1.10 / 1.08 / 1.16 / 1.02 |
+| fallible_and_guard | 1.6 / 3.5 / 4.4 / 5.1 | 0.96 / 1.06 / 1.20 / 1.59 | 1.08 / 0.91 / 0.99 / 1.03 | 0.99 / 1.01 / 1.00 / 1.04 | raises at 1%, 20%, 50%, 99% | 1.06 / 1.05 / 1.25 / 1.59 | 1.25 / 0.95 / 1.03 / 1.00 | 1.75 / 1.01 / 1.07 / 1.11 |
+| fallible_and_fallible | 1.6 / 3.7 / 4.6 / 5.3 | 1.03 / 1.03 / 1.21 / 1.47 | 1.18 / 0.92 / 1.04 / 1.04 | 0.95 / 0.99 / 0.98 / 1.02 | raises at 1%, 20%, 50%, 99% | 2.25 / 1.51 / 1.49 / 1.55 | 1.60 / 0.93 / 1.05 / 1.01 | 1.92 / 1.04 / 1.10 / 1.05 |
+| guard_or_fallible | 4.8 / 5.1 / 4.2 / 1.7 | 1.01 / 1.08 / 1.37 / 2.74 | 1.07 / 0.94 / 1.05 / 0.99 | 1.06 / 1.01 / 1.06 / 0.97 | raises at 20%, 50%, 99% | 1.03 / 1.09 / 1.33 / 2.79 | 1.08 / 0.93 / 1.07 / 1.09 | 1.00 / 0.99 / 1.08 / 1.45 |
+| fallible_or_guard | 5.0 / 5.1 / 4.4 / 1.6 | 1.00 / 1.17 / 1.32 / 2.99 | 1.06 / 0.90 / 0.98 / 1.06 | 1.02 / 1.04 / 1.01 / 1.15 | raises at 1%, 20%, 50%, 99% | 0.99 / 1.10 / 1.32 / 3.12 | 1.06 / 0.93 / 1.01 / 1.17 | 1.08 / 0.99 / 1.06 / 1.50 |
+| fallible_or_fallible | 5.3 / 5.4 / 4.6 / 1.9 | 0.98 / 1.05 / 1.25 / 2.58 | 1.04 / 0.91 / 1.01 / 0.98 | 0.95 / 0.95 / 0.99 / 1.04 | raises at 1%, 20%, 50%, 99% | 1.23 / 1.21 / 1.48 / 2.64 | 1.04 / 0.90 / 1.05 / 1.36 | 1.06 / 0.99 / 1.14 / 1.61 |
 
 **Reading.** D10 is affordable, and the strategy decides how affordable.
 
 - Today's behaviour is what #252 describes. With failing rows, today's
-  checked plan raised in 21 of 24 cells, and whether it raised depended on
-  the operand order and on the share. It did not raise in three cells,
-  all at 1%: both `&` forms with a guard, and `guard_or_fallible`, while
-  `fallible_or_guard` raised there. All three prototypes returned the rows
-  today's unchecked plan returns, in every cell.
-- `errors` costs nothing measurable without failing rows (0.90 to 1.13,
-  and 1.32 in one cell that takes 1.3 ms) and at most 1.5 times with them.
+  checked plan raised in 22 of 24 cells, and whether it raised depended on
+  the operand order and on the share. It did not raise in two, both at 1%
+  with the guard first (`guard_and_fallible` and `guard_or_fallible`),
+  where DataFusion evaluates the product only on the rows the guard
+  leaves open. With the fallible operand first it raised at every share,
+  for `&` as for `|`. All three prototypes returned the rows today's
+  unchecked plan returns, in every cell.
+- `errors` costs nothing measurable without failing rows (0.90 to 1.18,
+  and 1.27 in one cell that takes 1.3 ms) and at most 1.6 times with them.
   Every cell above 1.1 is one where today's plan takes under 2 ms.
-- `optimistic` also costs nothing without failing rows, and up to 1.9
-  times when a batch raises and is evaluated again.
+- `optimistic` also costs nothing without failing rows (0.93 to 1.15),
+  and up to 1.9 times when a batch raises and is evaluated again.
 - `select` costs more as more rows are left open, because it filters,
-  evaluates and scatters back: about 1.0 at 1% and 20%, 1.2 to 1.3 at
-  50%, 1.5 to 1.7 for `&` and 2.65 to 2.9 for `|` at 99%.
+  evaluates and scatters back: 0.94 to 1.23 at 1% and 20% (2.25 and 1.51
+  for `fallible_and_fallible` with failing rows), 1.2 to 1.5 at 50%, 1.5
+  to 1.6 for `&` and 2.6 to 3.1 for `|` at 99%.
 
-These queries take 1 to 8 ms, so a single ratio can move by about 0.2.
-At 1, 2 and 4 partitions with a 50% share, `select` is again the
-costliest (1.06 to 1.61) and the other two are within noise; at 10K and
-100K rows every mode is within about 0.2 of today.
+These queries take 1 to 6 ms, so a single ratio can move by about 0.2.
+m4 ran at `bfa963a` before; the cells whose plan did not change moved by
+0.04 at the median and 0.27 at most between the two runs. At 1, 2 and 4
+partitions with a 50% share, `select` is again the costliest (1.01 to
+1.46) and the other two are within noise, apart from one `optimistic`
+cell at 0.72. At 10K and 100K rows every mode is within about 0.2 of
+today, except `select` and `errors` on `fallible_or_fallible` at 100K
+rows (1.37 and 1.24, in a cell that takes 1.2 ms).
 
 ## m4b: filter pushdown lost past sort, aggregate and distinct (gates M16)
 
@@ -368,10 +450,15 @@ does not cross, logically or physically, in two placements:
   was not measured.
 - `keys`: between the operator and its input, so the filter crosses the
   operator but stays above the projection that computes the keys. This is
-  what an implementation that knows a key is fallible pays.
+  what D10a requires when a key or argument can fail.
 
-Every pipeline derives a key or argument with integer arithmetic, and
-checked arithmetic (m1) is on in every mode, so only the pushdown differs.
+The barrier goes in whatever the keys compute, so these timings price an
+implementation that treats every checked operation as fallible. None of
+the measured keys can fail. Each adds an `int` literal, which is `int64`
+(§17.2), to an `int32` column (`counterid` or `regionid`), and no `int32`
+value plus one overflows `int64`. A rule that reads only the operand
+types would keep today's pushdown in all four pipelines. Checked
+arithmetic (m1) is on in every mode, so only the pushdown differs.
 A control, `scan_filter_off`, keeps today's pushdown but turns off the
 scan's row filter and pruning (m5's `prune_off`). On the sample file no
 row group's statistics exclude the filter's value, so the control
@@ -394,7 +481,10 @@ median at one partition, each mode's time as a multiple of today's at 1,
 
 `user_totals` in seconds: today 0.003 to 0.004 at every partition count;
 `keys` 0.73, 0.38, 0.24 and 0.31; `operator` 4.0, 3.3, 2.0 and 1.3, with
-1.3 to 2.0 GiB peak. Against the run at `bfa963a`, the ratios of cells
+1.3 to 2.0 GiB peak. Today's first run takes 0.034 s at every partition
+count, ten times its median, because it reads the footer. By first runs,
+`keys` costs 22, 12, 7.5 and 9.5 times today's time and `operator` 117,
+94, 61 and 39 times. Against the run at `bfa963a`, the ratios of cells
 whose plan did not change moved by 0.04 at the median and 0.22 at most
 on the sample file, and by under 11% on `user_totals`, except its `keys`
 cell at 12 partitions (16%), which other processes contended.
@@ -429,13 +519,20 @@ M16 places the filter, not whether D10a is affordable.
   the gain is not the barrier's: on this file, a filter that keeps 20% of
   rows costs more inside the Parquet scan than after it. The real cost is
   the lost row-group pruning: `user_totals` reads every row group, 59 to
-  265 times today's time (0.24 to 0.73 s against 3 to 4 ms), with the
-  same memory except at 12 partitions (118 MiB against 40).
+  265 times today's time on a repeated lookup (0.24 to 0.73 s against 3
+  to 4 ms) and 7.5 to 22 times on a first one, with the same memory
+  except at 12 partitions (118 MiB against 40).
 
-The lost pruning is the same order as m5's (D7). It survives where an
-implementation can show a key cannot fail: hits_sorted's statistics bound
-`counterid` at 262,115, so `counterid + 1` cannot overflow. M16 has no
-such analysis, and whether to build one is part of deciding the placement.
+The lost pruning is the same order as m5's (D7), but D10a requires it
+only where a key or argument can fail, and none of these can. Their
+operand types show that without reading any data. Statistics would
+extend the proof to keys whose type allows overflow but whose values do
+not (hits_sorted bounds `counterid` at 262,115), but only with the bounds
+of every row group the filter would skip. M16 has neither analysis, and
+which to build is part of deciding the placement. A key that can fail,
+such as the sum of two `int64` columns, gets the same barrier over the
+same scan, since the barrier does not look at the keys, so its cost
+should be close to these figures; that was not measured.
 
 ## m5: `assume_sorted` validated without pruning (gates M3)
 
@@ -473,8 +570,9 @@ queries a sort declaration exists for.
 
 - A lookup on the first sort key reads one row group today and every row
   group under D7: 156 to 566 times today's time (165 to 604 with the
-  check), and 360 MiB instead of 22 at 12 partitions. The check adds 5 to
-  7% on top of that read.
+  check) when repeated, and 70 to 232 (73 to 245) as the first query on
+  the table, which also reads the footer. It holds 360 MiB instead of 22
+  at 12 partitions. The check adds 5 to 7% on top of that read.
 - Where statistics prune nothing, D7's read costs 1.17 to 1.24 times on
   `counter_events`, which loses the scan's row filter and page index, and
   nothing on `keys`, which has no filter. The check then costs 1.2 to 1.8
@@ -531,10 +629,14 @@ was `filter_contains` streamed at one partition with plain strings (1.38,
   not copy the string's bytes, and the plain decode copies every one.
   Exporting a string-heavy result costs 0.8 to 1.12 times today's time,
   except `url_title` at 12 partitions (1.2 to 1.3 in every run).
-- Both use less memory than today when a result is exported. A view keeps
-  the decoded page buffer it points into alive, so `to_arrow` of the
-  string columns holds 727 MiB today against 461 to 478 MiB with either
-  prototype, and the filtered export holds 97 MiB against 25 to 30.
+- Both use less memory than today when a result is exported from one
+  partition. A view keeps the decoded page buffer it points into alive,
+  so `to_arrow` of the string columns holds 727 MiB today against 461 to
+  478 MiB with either prototype, and the filtered export holds 97 MiB
+  against 25 to 30. The saving shrinks as partitions are added: at 12
+  partitions the string columns' export holds 0.86 to 0.97 of today's
+  peak, the filtered export 0.88 to 1.08, and `url_title`'s 1.27 to 1.32,
+  above today's from 2 partitions on.
 
 For M18 the choice is which pipelines pay about 1.3 times. A placement
 that decodes plain strings when the plan keeps most of them and casts at
@@ -548,26 +650,36 @@ cost ranges above are its inputs. The measurements also leave these
 decisions open:
 
 1. **D7 (M3).** A lookup on a sort key costs 156 to 604 times today's
-   time under D7 as written. Should the contract keep checking every
+   time under D7 as written when repeated, and 70 to 245 times as the
+   first query on a table. Should the contract keep checking every
    adjacent pair, or accept a weaker check that keeps pruning (only the
    row groups read, or the skipped ones by their statistics)? Neither
    alternative was prototyped.
 2. **D10a (M16).** Placing the filter between the operator and its input
-   costs nothing here except lost pruning on sorted keys. Should M16 also
-   prove keys infallible from statistics, so that pruning survives where
-   overflow is impossible?
+   costs nothing here except lost pruning on sorted keys: 59 to 265 times
+   today's time on a repeated lookup, 7.5 to 22 on a first one, if M16
+   treats every checked operation as fallible. None of the measured keys
+   can fail, and their operand types alone show it. Should M16 classify
+   keys by operand type, so that such keys keep today's pushdown, and
+   should it also use statistics where the type allows overflow but the
+   values do not?
 3. **D10 (M16).** Keeping errors as masks costs nothing measurable without
-   failing rows and up to 1.5 times with them. Evaluating the fallible
-   operand only on open rows costs up to 2.9 times. Is the mask strategy
+   failing rows and up to 1.6 times with them. Evaluating the fallible
+   operand only on open rows costs up to 3.1 times. Is the mask strategy
    the one M16 should build?
-4. **OD-W (#276).** Exact rolling `mean` and `std` cost 2 to 3.9 times
-   today's time, compensated ones 1.4 to 1.6. Which does the contract
-   require? And do exact grouped statistics over many groups (6 to 6.75
-   times, nearly 3 times the memory) get a budget exception, or a leaner
-   accumulator first?
-5. **M1.** With 8 batches per unit the row-group merge is within 10% of
-   today at 12 and 24 partitions but 1.18 times at 4. Is that within
-   budget, or should another schedule be prototyped first?
+4. **OD-W (#276).** Exact rolling `mean` and `std` cost 2.0 to 3.8 times
+   today's time with the prototype's BigInt finish, compensated ones 1.4
+   to 1.6. Which does the contract require? And do exact grouped
+   statistics over many groups (3.1 to 4.9 times, nearly 3 times the
+   memory) get a budget exception, or a leaner accumulator first?
+5. **M1.** M1 covers every reader. On R3 the row-group merge is within
+   10% of today at 12 and 24 partitions, and 1.18 times at 4, only while
+   its buffer holds a row group's whole output; held to 8 batches of
+   4,096 rows it costs 1.4 to 2.1 times. On the 11-row-group ClickBench
+   sample it costs up to 1.66 times, and on CSV only contiguous ranges
+   were measured (1.85 to 3.1 times). Should the budget be set per
+   reader, and should a merge whose buffer is bounded in rows or bytes,
+   and a CSV schedule, be prototyped before M1 starts?
 6. **M18.** Normalize at the scan, at the root, or by estimated
    selectivity (not prototyped)?
 
@@ -591,7 +703,8 @@ keeps 0.7%. #307 asks for it to be measured more widely.
   stops short. The ones that matter most here: m1 checks Int64 only, m4
   keeps errors as masks only for the expression shapes it measures, m5
   needs the keys among the scan's columns, m3's row-group merge covers
-  Parquet only, and m2's per-group state is unoptimized.
+  Parquet only, m2's per-group state is unoptimized, and m2 does not
+  price the path where DataFusion skips partial aggregation.
 - Window pipelines (`cum_sum`, `rolling`) run over the declared order on
   one partition whatever the partition count. At two or more partitions
   today's plan materializes the input first (about 385 MiB at 10M rows)
