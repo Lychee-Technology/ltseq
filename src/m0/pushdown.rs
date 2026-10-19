@@ -25,8 +25,13 @@
 //! passes batches through and, like any operator that does not say
 //! otherwise, no filters.
 //!
-//! It does not ask whether a key is fallible; the m4b pipelines are written
-//! so that one is (a derived integer under checked arithmetic).
+//! It does not ask whether a key is fallible: the barrier goes in under
+//! every such filter, whatever the keys compute, so the timings price an
+//! implementation that treats every checked operation as fallible. None of
+//! the m4b keys can fail. Each adds an `int` literal (`int64`, §17.2) to
+//! an `int32` column, which no value of the column overflows, so a rule
+//! that reads only the operand types would keep the pushdown in all four
+//! pipelines.
 
 use std::fmt;
 use std::sync::Arc;
