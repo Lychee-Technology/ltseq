@@ -16,8 +16,8 @@ acceptance criterion), and the questions for it are at the end.
 |---|---|
 | Machine | AMD Ryzen 5 5600G (6 cores, 12 threads), 27 GiB, Linux 7.2.8, NVMe |
 | Build | `maturin develop --release --features m0` (fat LTO), rustc 1.96.1, Python 3.13.15, pyarrow 25.0.1 |
-| Commit | `bfa963a` for every measurement, with a clean worktree; the branch's later commits add only this report, the results, a test and README notes (and drop a blank line in `report.py`) |
-| Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT |
+| Commit | `bfa963a` for every measurement except m4b, with a clean worktree. m4b ran again at `15209f4` after its `operator` placement over a sort was fixed, which changed only that placement's three plans over the sort. The branch's other later commits add this report, the results, a test, a stricter self-check, a CI step, README notes and comments (and drop a blank line in `report.py`) |
+| Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT; m4b again with `--only m4b`, started 2026-10-18 21:09 EDT |
 | Partitions | 1, 2, 4 and 12 (the CPU count) through #274's `pinned_engine`; m3 adds 24 for the baseline comment |
 | Data | bench_core's synthetic table at 10K, 100K and 1M rows (m1 and m2 add 10M); ClickBench's 1M-row sample and its 100M-row file sorted by `(userid, eventtime, watchid)` (16 GiB, 814 row groups); the R3 harness's 640 MiB input |
 
@@ -40,16 +40,18 @@ the time to the first non-empty batch of the Arrow C stream, which is what
 **Noise.** m1, m3, m4b, m5 and m6 also ran at an earlier commit with the
 same prototypes. Between the two runs a cell's ratio to today moved by
 0.03 to 0.07 at the median and 0.11 to 0.19 at the 90th percentile; the
-large m4b and m5 ratios moved by under 10%. Cells that take a few
+large m4b and m5 ratios moved by under 10%; m4b's third run is compared
+in its section. Cells that take a few
 milliseconds move most. Read a ratio within 0.1 of 1 as no difference,
 and within 0.2 for a cell under 10 ms.
 
 **Contention.** Other workloads share the machine. Before each cell the
 harness waited until the machine was at most 8% busy. When other
 processes kept more than half a core busy during a cell, it ran the cell
-again, up to three times, and kept the least contended attempt. 65 of
-1,894 cells ran more than once. 8 stayed contended (6 in m2 and 2 in m5,
-with at most one other core busy) and are flagged in `results/*.md`.
+again, up to three times, and kept the least contended attempt. 66 of
+1,894 cells ran more than once. 9 stayed contended (6 in m2, 2 in m5 and
+1 in m4b, with at most one other core busy) and are flagged in
+`results/*.md`.
 
 ## Summary
 
@@ -63,7 +65,7 @@ the same build with every prototype off.
 | m2 | Exact float statistics | M13, M4, OD-W | 0.9 to 1.9× for global `var`, `std`, `cov` and `corr`, up to 3.9× (about 12 ms per 10M rows) for `sum` and `mean`; 1.7 to 1.8× grouped over a few keys, 6.2 to 6.5× (4.4 to 6.75× at 1M rows) and 2.8× the memory over 100,000 groups; windows 1.2 to 3.9× (compensated 1.1 to 1.6×) | OD-W: exact or compensated windows; a budget exception or a leaner state for many groups |
 | m3 | Order-preserving merge | M1, #148 | Row-group merge with 8 batches per unit: 0.97 to 1.09× at 12 and 24 partitions, 1.18× at 4, 7 to 15 MiB more; contiguous ranges 2 to 4× | Buffer size and schedule |
 | m4 | Masked `&` and `\|` | M16, #252 | Errors kept as masks: within noise without failing rows, up to 1.5× with them. Today's checked plan raises in 21 of 24 cells with failing rows, depending on operand order | Which strategy M16 builds |
-| m4b | Pushdown lost to D10a | M16 | Filter kept above the keys' computation: no cost where statistics cannot prune, 56 to 260× on a lookup by a sorted key; kept above the operator, 1.2 to 2.4× and up to 1,400× | Where M16 places the filter; whether it proves keys infallible |
+| m4b | Pushdown lost to D10a | M16 | Filter kept above the keys' computation: no cost where statistics cannot prune, 59 to 265× on a lookup by a sorted key; kept above the operator, 1.2 to 2.3× and up to 1,440× | Where M16 places the filter; whether it proves keys infallible |
 | m5 | `assume_sorted` checked, no pruning | M3 | The check: 5 to 7% on top of D7's read, 1.2 to 1.8× on full scans; the lost pruning: 156 to 604× on a sort-key lookup | D7 as written, or a weaker check that keeps pruning |
 | m6 | `string_view` normalized | M18 | Plain at the scan: up to 1.3× on filters and grouping; cast at the root: 1.1 to 1.45× on string-heavy results; both hold 25 to 35% less memory on export | Where M18 normalizes |
 
@@ -359,7 +361,11 @@ before M16.
 does not cross, logically or physically, in two placements:
 
 - `operator`: above the operator, so the filter never crosses it. An upper
-  bound.
+  bound. Above a sort the filter reads the sort's merged output in one
+  partition: DataFusion would otherwise scatter that output round-robin
+  for the filter's sake, and the rows would leave unsorted (a #148 case).
+  Filtering each sorted partition before the merge would cost less; it
+  was not measured.
 - `keys`: between the operator and its input, so the filter crosses the
   operator but stays above the projection that computes the keys. This is
   what an implementation that knows a key is fallible pays.
@@ -381,34 +387,50 @@ median at one partition, each mode's time as a multiple of today's at 1,
 
 | pipeline | terminal | pushdown s (p=1) | operator × at p=1/2/4/12 | keys × at p=1/2/4/12 | scan_filter_off × at p=1/2/4/12 | peak MiB p=1: pushdown/operator/keys/scan_filter_off |
 |---|---|---|---|---|---|---|
-| sort_then_filter | stream | 0.126 | 1.57 / 1.74 / 1.55 / 2.41 | 0.77 / 0.85 / 0.83 / 1.01 | 0.77 / 0.81 / 0.86 / 1.01 | 111 / 171 / 54 / 54 |
-| group_then_filter | stream | 0.015 | 0.96 / 0.89 / 0.89 / 0.87 | 0.68 / 0.66 / 0.76 / 0.83 | 0.70 / 0.75 / 0.76 / 0.85 | 4 / 4 / 5 / 4 |
-| distinct_then_filter | stream | 0.019 | 1.21 / 1.33 / 1.16 / 1.44 | 0.78 / 0.83 / 0.78 / 0.84 | 0.73 / 0.81 / 0.79 / 0.87 | 2 / 5 / 2 / 2 |
-| user_totals | stream | 0.003 | 1375.47 / 878.47 / 479.37 / 278.81 | 260.41 / 100.95 / 55.68 / 64.05 | – / – / – / – | 38 / 1326 / 39 / – |
+| sort_then_filter | stream | 0.127 | 1.79 / 1.58 / 1.82 / 2.26 | 0.79 / 0.79 / 0.89 / 0.96 | 0.78 / 0.80 / 0.87 / 0.96 | 111 / 170 / 53 / 53 |
+| group_then_filter | stream | 0.015 | 0.98 / 1.05 / 0.88 / 0.87 | 0.80 / 0.80 / 0.76 / 0.79 | 0.72 / 0.81 / 0.83 / 0.81 | 5 / 4 / 4 / 4 |
+| distinct_then_filter | stream | 0.020 | 1.16 / 1.32 / 1.17 / 1.41 | 0.73 / 0.81 / 0.85 / 0.90 | 0.73 / 0.78 / 0.87 / 0.85 | 2 / 5 / 1 / 1 |
+| user_totals | stream | 0.003 | 1441.28 / 832.53 / 508.14 / 307.87 | 265.20 / 97.08 / 59.41 / 74.17 | – / – / – / – | 38 / 1328 / 38 / – |
 
-`user_totals` in seconds: today 0.003 to 0.005 at every partition count;
-`keys` 0.73, 0.37, 0.23 and 0.30; `operator` 3.9, 3.3, 2.0 and 1.3, with
-1.3 to 2.0 GiB peak. Across three runs the sample-file ratios moved by
-0.09 at the median, and `user_totals`' by under 10%.
+`user_totals` in seconds: today 0.003 to 0.004 at every partition count;
+`keys` 0.73, 0.38, 0.24 and 0.31; `operator` 4.0, 3.3, 2.0 and 1.3, with
+1.3 to 2.0 GiB peak. Against the run at `bfa963a`, the ratios of cells
+whose plan did not change moved by 0.04 at the median and 0.22 at most
+on the sample file, and by under 11% on `user_totals`, except its `keys`
+cell at 12 partitions (16%), which other processes contended.
+
+At one partition the sort's ratios depend on the allocator as much as on
+the placement. Today's plan took 0.126 and 0.127 s in the two full runs,
+but in a 15-run check it dropped from 0.13 to 0.09 s after its fourth
+run, and with glibc's mmap threshold fixed every mode stayed at the
+slower level ([results/checks/](results/checks/)). Across these runs
+`operator` costs 1.6 to 2.2 times at one partition, and `keys` and the
+control 0.77 to 1.13 (1.72, 0.96 and 0.99 with the threshold fixed).
+This was not traced further. At 2, 4 and 12 partitions the 15-run check
+agrees with the table within 0.16.
 
 **Reading.** The placement decides the price, so what this informs is how
 M16 places the filter, not whether D10a is affordable.
 
-- With the barrier above the operator, the sort costs 1.55 to 2.4 times
+- With the barrier above the operator, the sort costs 1.6 to 2.3 times
   today's time and 60 MiB more: it sorts all 1M rows instead of the 20%
-  the filter keeps. Distinct costs 1.16 to 1.44 times. Grouping costs
-  nothing, because the aggregate reduces the rows to one per region
-  before the filter. `user_totals` aggregates 100M rows instead of one row
-  group: 280 to 1,400 times today's time, and gigabytes of memory.
+  the filter keeps, and merges all of them into the one partition the
+  filter reads. That merge and the filter do not run in parallel, so its
+  time stops falling after 4 partitions (0.098 and 0.097 s at 4 and 12)
+  and the ratio is highest at 12. Distinct costs 1.16 to 1.41 times.
+  Grouping costs nothing, because the aggregate reduces the rows to one
+  per region before the filter. `user_totals` aggregates 100M rows instead
+  of one row group: 310 to 1,440 times today's time, and gigabytes of
+  memory.
 - With the barrier between the operator and its input, which is what
   D10a requires when a key is fallible, the sample-file pipelines take
-  0.66 to 1.01 times today's time. The control matches `keys` within 0.09
-  in every cell, so the gain is not the barrier's: on this file, a filter
-  that keeps 20% of rows costs more inside the Parquet scan than after it.
-  The real cost is the lost row-group pruning: `user_totals` reads every
-  row group, 56 to 260 times today's time (0.23 to 0.73 s against 3 to
-  5 ms), with the same memory except at 12 partitions (112 MiB against
-  40).
+  0.73 to 0.96 times today's time (the one-partition sort aside, above).
+  The control matches `keys` within 0.08 in every cell of the table, so
+  the gain is not the barrier's: on this file, a filter that keeps 20% of
+  rows costs more inside the Parquet scan than after it. The real cost is
+  the lost row-group pruning: `user_totals` reads every row group, 59 to
+  265 times today's time (0.24 to 0.73 s against 3 to 4 ms), with the
+  same memory except at 12 partitions (118 MiB against 40).
 
 The lost pruning is the same order as m5's (D7). It survives where an
 implementation can show a key cannot fail: hits_sorted's statistics bound
@@ -551,7 +573,7 @@ decisions open:
 
 One observation concerns today's engine rather than the contract. LTSeq
 turns on the Parquet scan's row filter (`pushdown_filters`). In m4b it
-cost up to 1.5 times on a filter that keeps 20% of rows. In m5, turning
+cost 1.04 to 1.4 times on a filter that keeps 20% of rows. In m5, turning
 it off together with the page index cost 17 to 24% on a filter that
 keeps 0.7%. Whoever owns the scan configuration may want that measured
 more widely.
