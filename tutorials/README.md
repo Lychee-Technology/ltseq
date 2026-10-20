@@ -12,11 +12,11 @@ A hands-on LTSeq cookbook you can run in Jupyter: 28 ordered-computing cases dra
 
 LTSeq 把表当作**有顺序的序列**而不是无序集合：`shift` 看邻居、`rolling` 滑窗、`group_ordered` 抓连续段、`asof_join` 对齐两条时间线、`fold` 传状态。凡是"顺序有业务含义"的数据——行情、埋点、日志、流水——用这套算子表达，比绕 SQL 窗口函数或手写循环直接得多。这 28 个案例就是这条主张的证据链。
 
-顺序必须显式声明：窗口函数之前没有 `sort()` 或 `assume_sorted()`，LTSeq 直接抛 `SortRequiredError`，而不是按不确定的顺序算出一个结果，所以结果总能复现。
+顺序必须显式声明：`shift`、`rolling`、`diff`、`cum_sum` 这类序列窗口，以及 `group_ordered`、`fold`，都沿表的声明顺序计算；之前没有 `sort()` 或 `assume_sorted()`，LTSeq 直接抛 `SortRequiredError`，而不是按行碰巧到达的顺序算出一个结果。显式写了 `.over(order_by=...)` 的窗口（`rank()`、`ntile()` 通常这样用）自带顺序，不需要先给全表排序。
 
 LTSeq treats tables as **ordered sequences** rather than unordered sets: `shift` sees neighbors, `rolling` slides, `group_ordered` captures runs, `asof_join` aligns two timelines, `fold` threads state. For data whose order carries business meaning — quotes, events, logs, transaction streams — these operators express the intent far more directly than SQL window gymnastics or hand-written loops. These 28 cases are the evidence.
 
-Order has to be declared: a window function without a prior `sort()` or `assume_sorted()` raises `SortRequiredError` instead of computing over an arbitrary order, so results are always reproducible.
+Order has to be declared. Sequence windows such as `shift`, `rolling`, `diff` and `cum_sum`, as well as `group_ordered` and `fold`, follow the table's declared order: without a prior `sort()` or `assume_sorted()` they raise `SortRequiredError` instead of computing over whatever order the rows arrived in. A window with an explicit `.over(order_by=...)`, the usual way to call `rank()` or `ntile()`, carries its own order and needs no table sort.
 
 ## 目录结构 · Layout
 
@@ -31,9 +31,9 @@ tutorials/
 
 ## 安装 · Install
 
-> LTSeq 要求 Python 3.13+，目前从源码安装。
+> LTSeq 要求 Python 3.13+，目前从源码安装：`uv sync` 会编译 Rust 内核，所以需要 [uv](https://docs.astral.sh/uv/) 和 stable 版 Rust 工具链（可用 [rustup](https://rustup.rs) 安装）。
 >
-> LTSeq requires Python 3.13+ and is installed from source for now.
+> LTSeq requires Python 3.13+ and is installed from source for now: `uv sync` compiles the Rust kernel, so you need [uv](https://docs.astral.sh/uv/) and a stable Rust toolchain (for example from [rustup](https://rustup.rs)).
 
 ```bash
 git clone https://github.com/Lychee-Technology/ltseq
@@ -58,7 +58,7 @@ t = LTSeq.from_dict({"date": ["D1", "D2", "D3", "D4"], "close": [10.0, 10.8, 10.
     t.sort("date")
      .derive(chg=lambda r: r.close - r.close.shift(1))     # 上一行 / previous row
      .cum_sum("chg")                                        # 累计 / running total
-).show()
+).show();
 ```
 
 ## 案例目录 · Case catalog

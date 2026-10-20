@@ -154,7 +154,7 @@ sessions.show();
   （`(g.last().ts - g.first().ts)` 会报错）——先把 `start` / `end` 折叠成两列，
   再在表级 `derive` 里相减。这是官方文档明确的当前限制与推荐绕行写法。
 - `group_ordered` 的分组键是 lambda（可以是表达式），组按出现顺序输出——与输入
-  顺序一致，无哈希开销。
+  顺序一致，汇总后不需要再 `sort`。
 
 ## 第三步 · 明细回填：flatten
 
@@ -206,7 +206,7 @@ labeled.show();
    表达式写法 `r.x.cum_sum(partition_by="user")`；上面用的表级 `cum_sum("col")`
    不接受 `partition_by`。
 3. **会话号 = 全局单调编号**：靠"先按 user 排序 + cum_sum 不回落"保证连续性；
-   表没有声明顺序时，窗口函数直接抛 `SortRequiredError`，不会默默算乱。但声明的顺序
+   表没有声明顺序时，序列窗口函数直接抛 `SortRequiredError`，不会默默算乱。但声明的顺序
    不以 `user` 开头（比如 `sort("ts")`）时不会报错：不同用户的会话交错，
    `group_ordered` 会把它们切碎。
 4. **限制要背**：`agg` 内聚合值不能做算术；拆两步（agg 出列 → derive 组合）是

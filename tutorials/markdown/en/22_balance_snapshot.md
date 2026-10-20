@@ -112,9 +112,9 @@ balances.show();
 
 ## Step 2 · Latest snapshot: group_sorted().last()
 
-The last row per group is the account's current balance. `group_sorted` groups
-in one pass and `last()` takes the tail row — richer than `group_by`
-aggregation because **entire rows survive**.
+The last row per group is the account's current balance. `group_sorted` makes
+one group per account and `last()` takes each group's tail row — richer than
+`group_by` aggregation because **entire rows survive**.
 
 ```python
 snapshot = (
@@ -142,8 +142,8 @@ snapshot.show();
 **Notes**
 
 - `group_sorted(key)` requires the key to **lead the declared sort**:
-  `sort("account", "seq")` leads with account, satisfying the constraint. It is
-  a single-pass ordered grouping with no hash overhead.
+  `sort("account", "seq")` leads with account, satisfying the constraint.
+  Groups are runs of equal keys in that order, as with `group_ordered`.
 - `last()` returns an ordinary LTSeq — the tail rows' **full columns,
   derived ones included** (balance). An aggregation keeps only values:
   `agg(balance=lambda g: g.balance.max())` returns one number per account

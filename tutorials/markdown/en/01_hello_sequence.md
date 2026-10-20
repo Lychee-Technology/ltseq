@@ -10,7 +10,7 @@
 
 - Build the core mental model: **a table is an ordered sequence, and order is a computation input**
 - Master the everyday chain `filter → derive → sort`
-- Meet your first window functions (`shift`, `cum_sum`) and understand why windows require a prior sort
+- Meet your first window functions (`shift`, `cum_sum`) and understand why sequence windows require a prior sort
 
 > 💡 **About outputs**: code cells ship without outputs. Each expected-output block is hand-written and checked against a real run on `main`; random data comes from fixed seeds, so reruns match.
 
@@ -114,10 +114,13 @@ print(t.sort_keys)        # declared order: [(column, descending?)]
 **Notes**
 
 - `sort_keys` returns `[(column, descending)]`, or `None` when order is unknown.
-- Calling a window function without a prior `sort()` (or `assume_sorted()`)
-  raises `SortRequiredError`. That is a **feature, not a bug**: order is an
-  input to computation, and LTSeq refuses to produce unreproducible results
-  when order is unknown.
+- Calling a sequence window (`shift`, `rolling`, `diff`, `cum_*`) without a
+  prior `sort()` (or `assume_sorted()`) raises `SortRequiredError`. That is a
+  **feature, not a bug**: order is an input to computation, and LTSeq refuses
+  to produce unreproducible results when order is unknown.
+- A window with an explicit `.over(order_by=...)`, the usual way to call
+  `rank()` or `ntile()`, carries its own order and needs no prior sort
+  (cases 09 and 13).
 - Data already sorted on disk (e.g. pre-sorted Parquet)? Declare it with
   `assume_sorted("col")` and skip the physical sort.
 

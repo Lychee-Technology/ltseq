@@ -188,9 +188,10 @@ best.show();
    group_ordered`. Consecutive rises, sessions, alert episodes, badge pairing —
    all the same skeleton with different skin.
 2. **group_ordered ≠ group_by**: the former groups **consecutive equal** keys
-   without reordering, one O(n) pass; the latter is hash grouping with no
-   order guarantee. For "group globally, keep order" use `group_sorted`
-   (grouping key must lead the declared sort — case 04).
+   and returns the groups in sequence order, so a key that comes back later
+   starts a new group; the latter gathers every row with the same key into
+   one group, with no order guarantee. For "group globally, keep order" use
+   `group_sorted` (grouping key must lead the declared sort — case 04).
 3. **NestedTable has four verbs**: `agg()` collapse / `derive()` broadcast /
    `filter()` group-level predicate (with `g.all()/any()/none()` quantifiers —
    case 11) / `flatten()` expand with `__group_id__` (case 10).

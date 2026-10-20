@@ -161,8 +161,8 @@ sessions.show();
   arithmetic over aggregates (`(g.last().ts - g.first().ts)` errors) — fold
   `start` / `end` into columns first, then subtract in a table-level `derive`.
   This is the documented current limitation and its standard workaround.
-- `group_ordered`'s key is a lambda (expressions allowed); groups emerge in
-  appearance order — no hashing, no reordering.
+- `group_ordered`'s key is a lambda (expressions allowed); groups come out in
+  appearance order, so the summary needs no trailing `sort`.
 
 ## Step 3 · Backfill details: flatten
 

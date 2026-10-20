@@ -103,8 +103,8 @@ balances.show();
 
 ## 第二步 · 最新快照：group_sorted().last()
 
-每组最后一行 = 该账户的当前余额。`group_sorted` 单趟分组后 `last()` 取组
-尾行——比 `group_by` 聚合多保留**整行的所有列**。
+每组最后一行 = 该账户的当前余额。`group_sorted` 每个账户分成一组，`last()`
+取组尾行——比 `group_by` 聚合多保留**整行的所有列**。
 
 ```python
 snapshot = (
@@ -132,8 +132,8 @@ snapshot.show();
 **解析**
 
 - `group_sorted(key)` 要求分组键是**声明排序的首键**：`sort("account",
-  "seq")` 首键恰是 account，满足约束。它是单趟扫描的有序分组，无哈希
-  开销。
+  "seq")` 首键恰是 account，满足约束。分组按这个顺序里键值相同的连续行
+  划分，和 `group_ordered` 一样。
 - `last()` 返回普通 LTSeq——组尾行的**全部原始列 + 派生列**（含 balance）。
   聚合只留数值：`agg(balance=lambda g: g.balance.max())` 每个账户只剩一个
   数，丢了 seq 与 delta 的上下文——而且这个数是历史最高余额（A1 为 100），
