@@ -27,3 +27,9 @@ build/
 .vscode/
 libltseq_core.dylib.dSYM/
 docs/superpowers/
+
+# Files the tutorial notebooks write next to themselves when run
+tutorials/*/stock.csv
+tutorials/*/access_log.csv
+tutorials/*/access_log.parquet
+.ipynb_checkpoints/
