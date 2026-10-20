@@ -2,19 +2,19 @@
 
 **中英双语合并排版 · Bilingual (Chinese + English in one page)**
 
-一组可以直接在 Jupyter 里跑的 LTSeq Cookbook：12 个来自真实业务场景的有序计算案例，覆盖**金融时序、电商用户行为、日志与时序监控**三大领域。
+一组可以直接在 Jupyter 里跑的 LTSeq Cookbook：28 个来自真实业务场景的有序计算案例，覆盖**金融时序、电商用户行为、日志与时序监控、IoT 传感器**四个领域。
 
-A hands-on LTSeq cookbook you can run in Jupyter: 12 ordered-computing cases drawn from real business scenarios, covering **financial time series, e-commerce user behavior, and log/monitoring streams**.
+A hands-on LTSeq cookbook you can run in Jupyter: 28 ordered-computing cases drawn from real business scenarios, covering **financial time series, e-commerce user behavior, log/monitoring streams, and IoT sensors**.
 
 ---
 
 ## 为什么是"序列思维" · Why "sequence thinking"
 
-LTSeq 把表当作**有顺序的序列**而不是无序集合：`shift` 看邻居、`rolling` 滑窗、`group_ordered` 抓连续段、`asof_join` 对齐两条时间线、`fold` 传状态。凡是"顺序有业务含义"的数据——行情、埋点、日志、流水——用这套算子表达，比绕 SQL 窗口函数或手写循环直接得多。这 12 个案例就是这条主张的证据链。
+LTSeq 把表当作**有顺序的序列**而不是无序集合：`shift` 看邻居、`rolling` 滑窗、`group_ordered` 抓连续段、`asof_join` 对齐两条时间线、`fold` 传状态。凡是"顺序有业务含义"的数据——行情、埋点、日志、流水——用这套算子表达，比绕 SQL 窗口函数或手写循环直接得多。这 28 个案例就是这条主张的证据链。
 
 顺序必须显式声明：窗口函数之前没有 `sort()` 或 `assume_sorted()`，LTSeq 直接抛 `SortRequiredError`，而不是按不确定的顺序算出一个结果，所以结果总能复现。
 
-LTSeq treats tables as **ordered sequences** rather than unordered sets: `shift` sees neighbors, `rolling` slides, `group_ordered` captures runs, `asof_join` aligns two timelines, `fold` threads state. For data whose order carries business meaning — quotes, events, logs, transaction streams — these operators express the intent far more directly than SQL window gymnastics or hand-written loops. These 12 cases are the evidence.
+LTSeq treats tables as **ordered sequences** rather than unordered sets: `shift` sees neighbors, `rolling` slides, `group_ordered` captures runs, `asof_join` aligns two timelines, `fold` threads state. For data whose order carries business meaning — quotes, events, logs, transaction streams — these operators express the intent far more directly than SQL window gymnastics or hand-written loops. These 28 cases are the evidence.
 
 Order has to be declared: a window function without a prior `sort()` or `assume_sorted()` raises `SortRequiredError` instead of computing over an arbitrary order, so results are always reproducible.
 
@@ -23,8 +23,10 @@ Order has to be declared: a window function without a prior `sort()` or `assume_
 ```
 tutorials/
 ├── README.md            ← 本页 / this page
-├── cn/                  ← 12 个中文笔记本
-└── en/                  ← 12 English notebooks (same code)
+├── cn/                  ← 28 个中文笔记本
+├── en/                  ← 28 English notebooks (same code)
+├── markdown/            ← 每个笔记本的 Markdown 版（生成）/ each notebook as a Markdown page (generated)
+└── render_markdown.py   ← 重新生成 markdown/ / regenerates markdown/
 ```
 
 ## 安装 · Install
@@ -75,9 +77,25 @@ t = LTSeq.from_dict({"date": ["D1", "D2", "D3", "D4"], "close": [10.0, 10.8, 10.
 | 10 | [会话切分](cn/10_sessionization.ipynb) | [Sessionization: Gap Detection](en/10_sessionization.ipynb) | 日志监控 | `shift(partition_by)` `group_ordered` `flatten` | ★★★ |
 | 11 | [错误风暴检测](cn/11_error_burst.ipynb) | [Error Burst Detection](en/11_error_burst.ipynb) | 日志监控 | `rolling(partition_by)` `g.all/any` | ★★★ |
 | 12 | [大文件流式处理](cn/12_streaming_cursor.ipynb) | [Streaming Big Files: Cursor](en/12_streaming_cursor.ipynb) | 通用/日志 | `scan` `Cursor` `scan_parquet` | ★★ |
+| 13 | [组内 TopN](cn/13_topn_within_group.ipynb) | [Top-N Within Groups](en/13_topn_within_group.ipynb) | 金融 | `sort` + `slice` `rank().over` `top_k` | ★★ |
+| 14 | [同比与环比](cn/14_yoy_mom.ipynb) | [YoY & MoM: shift(12)](en/14_yoy_mom.ipynb) | 金融 | `shift(n, partition_by)` `when` | ★★ |
+| 15 | [账期收口分组](cn/15_payment_cycle.ipynb) | [Payment-Cycle Grouping](en/15_payment_cycle.ipynb) | 金融 | `cum_sum(partition_by)` `group_ordered` | ★★★ |
+| 16 | [最长连涨区间](cn/16_longest_rising_span.ipynb) | [Longest Rising Span](en/16_longest_rising_span.ipynb) | 金融 | `group_ordered` `rank().over` | ★★ |
+| 17 | [榜单排名迁移](cn/17_rank_migration.ipynb) | [Rank Migration](en/17_rank_migration.ipynb) | 金融 | `rank().over` `join` `rename` | ★★★ |
+| 18 | [复合会话规则](cn/18_session_composite.ipynb) | [Composite Session Rules](en/18_session_composite.ipynb) | 电商行为 | `shift(partition_by)` `&` `\|` `cum_sum` | ★★★ |
+| 19 | [汇总分摊到明细](cn/19_alloc_summary.ipynb) | [Allocating Group Totals](en/19_alloc_summary.ipynb) | 电商行为 | `join` `group_sorted` `NestedTable.derive` | ★★ |
+| 20 | [稀疏报表置空](cn/20_sparse_report.ipynb) | [Sparse Reports](en/20_sparse_report.ipynb) | 电商行为 | `shift` `if_else` `fold` | ★ |
+| 21 | [购物篮同现对](cn/21_basket_pairs.ipynb) | [Basket Co-occurrence Pairs](en/21_basket_pairs.ipynb) | 电商行为 | 自连接 self `join` `group_by().agg` | ★★★ |
+| 22 | [余额快照](cn/22_balance_snapshot.ipynb) | [Balance Snapshot](en/22_balance_snapshot.ipynb) | 电商行为 | `cum_sum(partition_by)` `NestedTable.last` `g.any` | ★★ |
+| 23 | [重叠区间合并](cn/23_interval_merge.ipynb) | [Merging Overlapping Intervals](en/23_interval_merge.ipynb) | 日志监控 | `cum_max(partition_by)` `cum_sum` `group_by().agg` | ★★★ |
+| 24 | [进出事件配对](cn/24_pair_events.ipynb) | [Pairing In/Out Events](en/24_pair_events.ipynb) | 日志监控 | `shift(-1)` `fold(partition_by)` | ★★★ |
+| 25 | [告警冷却抑制](cn/25_alert_suppress.ipynb) | [Alert Cooldown](en/25_alert_suppress.ipynb) | 日志监控 | `fold(init, into, partition_by)` `count_if` | ★★★ |
+| 26 | [波动带异常检测](cn/26_sensor_anomaly.ipynb) | [Volatility-Band Anomalies](en/26_sensor_anomaly.ipynb) | IoT | `rolling(partition_by).mean/std` `count_if` | ★★ |
+| 27 | [重采样与日历对齐](cn/27_resample_align.ipynb) | [Resampling & Calendar Alignment](en/27_resample_align.ipynb) | IoT | `dt.diff` `align` `join(how="left")` `fold` | ★★★ |
+| 28 | [心跳离线段检测](cn/28_offline_segments.ipynb) | [Offline Segment Detection](en/28_offline_segments.ipynb) | IoT | `shift(partition_by)` `rank().over` `max_if` | ★★ |
 
-> 01–04 适合按顺序入门；05–12 可按业务领域跳读，每个笔记本开头注明了前置案例。
-> Cases 01–04 read best in order; 05–12 can be read by domain, and each notebook's header names its prerequisites.
+> 01–04 适合按顺序入门；05–28 可按业务领域跳读，每个笔记本开头注明了前置案例。
+> Cases 01–04 read best in order; 05–28 can be read by domain, and each notebook's header names its prerequisites.
 
 ## 每个笔记本的结构 · Notebook anatomy
 
@@ -102,6 +120,8 @@ t = LTSeq.from_dict({"date": ["D1", "D2", "D3", "D4"], "close": [10.0, 10.8, 10.
 - **从 pandas 来 · From pandas**：01 → 02 → 06 → 10（重点体会"顺序是元数据"与部分帧语义）
 - **从 SQL 来 · From SQL**：01 → 05 → 08 → 09（窗口函数与集合运算的对照最强烈）
 - **可观测性场景 · Observability**：10 → 11 → 12（会话化 → 事件段 → 大文件流式）
+- **状态机与配对 · State machines and pairing**：06 → 20 → 24 → 25（`fold` 传状态：前向填充 → 进出配对 → 告警冷却）
+- **IoT 传感器 · IoT sensors**：02 → 26 → 27 → 28（滚动波动带 → 重采样补点 → 离线段）
 
 ## 相关文档 · See also
 
