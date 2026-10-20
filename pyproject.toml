@@ -28,6 +28,7 @@ dev = [
     "pandas>=3.0.5",
     "ipdb>=0.13.13",  # Helpful for debugging
     "pyright>=1.1.411",
+    "nbmake>=1.5.5",
 ]
 bench = [
     "duckdb>=1.5.5",

@@ -64,6 +64,9 @@ jobs:
       - name: Run tests
         run: uv run pytest py-ltseq/tests/ -v
 
+      - name: Run tutorial notebooks
+        run: uv run pytest --nbmake tutorials/ -v
+
   memory-harness:
     # Peak-memory harness (#274): each run reads an input of ten budgets in a
     # process of its own, so it runs beside the main job, not inside it.
