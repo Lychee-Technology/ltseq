@@ -152,10 +152,15 @@ labeled.filter(lambda r: r.vol_20 > 0.018).select(
   筛出的是实际波动逼近这一水平的区间：从 2026-02-05 那天 −5.2% 的下跌开始。
 - `select` 会剪枝整个计划：`ma_20`、`ret_pct` 这类没被选中的列根本不会计算。
   `vol_20` 上的 `filter` 无法下推到产生它的窗口之下，只能在窗口之后执行。
+- 这里的行按日期顺序返回，是因为示例数据很小。输入较大、分布在多个分区上时，像这条
+  管道这样窗口之后再接 `derive` 或 `filter`，返回的行可能不按日期排列，`head(5)`
+  也就可能取到错误的 5 行，而 `sort_keys` 仍然报告 `date`（issue #311）。修复之前，
+  用真实数据跑这段代码时，请在 `head()` 之前再加一次 `.sort("date")`。
 
 ## 接入真实行情数据
 
-把数据源换成真实数据，其余代码一行不用改——只要列名对齐 `date` / `close`：
+把数据源换成真实数据，只要列名对齐 `date` / `close`。其余代码不用改，只是数据量大时
+要加上第 2 步最后一条解析里的重新排序：
 
 ```python
 # 三种常见接法（任选其一）：
@@ -171,7 +176,7 @@ labeled.filter(lambda r: r.vol_20 > 0.018).select(
 #    t = LTSeq.from_arrow(pa_table)
 #    t = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
 #
-# 将示例中的 stock 替换为以上任一数据源即可。
+# 将示例中的 stock 替换为以上任一数据源。
 ```
 
 ## 关键点解析

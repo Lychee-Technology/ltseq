@@ -164,11 +164,18 @@ labeled.filter(lambda r: r.vol_20 > 0.018).select(
 - `select` prunes the plan: unused columns such as `ma_20` and `ret_pct` are
   never computed. The `vol_20` filter cannot move below the window that
   produces it, so it runs after that window.
+- The rows come back in date order here because the sample is small. On a
+  large input spread over several partitions, a window followed by `derive`
+  or `filter`, as in this pipeline, can return rows out of date order, and
+  `head(5)` can then keep the wrong five, while `sort_keys` still reports
+  `date` (issue #311). Until that is fixed, repeat `.sort("date")` right
+  before `head()` when you run this on real data.
 
 ## Plugging in real market data
 
-Swap the data source without touching any other line — just align the column
-names to `date` / `close`:
+Swap the data source and align the column names to `date` / `close`. The
+other lines stay the same, apart from the re-sort that Step 2's last note
+adds for large inputs:
 
 ```python
 # Three common ways (pick one):
@@ -185,7 +192,7 @@ names to `date` / `close`:
 #    t = LTSeq.from_arrow(pa_table)
 #    t = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
 #
-# Replace `stock` with any of the sources above; nothing else changes.
+# Replace `stock` with any of the sources above.
 ```
 
 ## Key takeaways
