@@ -1,0 +1,5028 @@
+{
+ "host": {
+  "commit": "bfa963a97a0328424c19ad806f0f8639a6b847c8",
+  "worktree_dirty": false,
+  "branch": "bench/251-m0-feasibility",
+  "cpu": "AMD Ryzen 5 5600G with Radeon Graphics",
+  "cpu_count": 12,
+  "memory_bytes": 29271183360,
+  "kernel": "7.2.8-200.fc44.x86_64",
+  "python": "3.13.15",
+  "pyarrow": "25.0.1",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "m0_build": {
+   "debug_assertions": false
+  },
+  "command": "python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4",
+  "started": "2026-10-17T17:22:35-0400"
+ },
+ "measurement": "m3",
+ "title": "Order-preserving merge",
+ "gates": "M1, #148",
+ "cells": [
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.22709883586503565,
+      "ttfr": 0.00291314790956676,
+      "rows_out": 12582912,
+      "peak_above": 3284992
+     },
+     {
+      "seconds": 0.22576968208886683,
+      "ttfr": 0.0018642221111804247,
+      "rows_out": 12582912,
+      "peak_above": 122880
+     },
+     {
+      "seconds": 0.2261042920872569,
+      "ttfr": 0.0018443840090185404,
+      "rows_out": 12582912,
+      "peak_above": 8192
+     }
+    ],
+    "wall": 0.8242203560657799,
+    "busy_before": 0.013289036556157822,
+    "quiet_wait": 1.0006217961199582,
+    "other_cores": 0.05563196869088583,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.23147413693368435,
+      "ttfr": 0.0028651359025388956,
+      "rows_out": 12582912,
+      "peak_above": 2904064
+     },
+     {
+      "seconds": 0.22506801108829677,
+      "ttfr": 0.00177787896245718,
+      "rows_out": 12582912,
+      "peak_above": 90112
+     },
+     {
+      "seconds": 0.22471498511731625,
+      "ttfr": 0.002000949112698436,
+      "rows_out": 12582912,
+      "peak_above": 81920
+     }
+    ],
+    "wall": 0.8238700760994107,
+    "busy_before": 0.012500000031044086,
+    "quiet_wait": 1.000641382066533,
+    "other_cores": 0.10002062553684188,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.2360236467793584,
+      "ttfr": 0.0034931697882711887,
+      "rows_out": 12582912,
+      "peak_above": 4894720
+     },
+     {
+      "seconds": 0.2294034669175744,
+      "ttfr": 0.0025229628663510084,
+      "rows_out": 12582912,
+      "peak_above": 94208
+     },
+     {
+      "seconds": 0.2287949901074171,
+      "ttfr": 0.002280665095895529,
+      "rows_out": 12582912,
+      "peak_above": 0
+     }
+    ],
+    "wall": 0.855899800080806,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0004500919021666,
+    "other_cores": 0.13078283114545863,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1208694870583713,
+      "ttfr": 0.004504806129261851,
+      "rows_out": 12582912,
+      "peak_above": 9543680
+     },
+     {
+      "seconds": 0.1164569950196892,
+      "ttfr": 0.0019808821380138397,
+      "rows_out": 12582912,
+      "peak_above": 3211264
+     },
+     {
+      "seconds": 0.11413315800018609,
+      "ttfr": 0.0018499749712646008,
+      "rows_out": 12582912,
+      "peak_above": -98304
+     }
+    ],
+    "wall": 0.5269263370428234,
+    "busy_before": 0.014987510383457681,
+    "quiet_wait": 1.0002871239557862,
+    "other_cores": 0.2936956984403206,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.22670553508214653,
+      "ttfr": 0.003256313968449831,
+      "rows_out": 12582912,
+      "peak_above": 7053312
+     },
+     {
+      "seconds": 0.2203300150576979,
+      "ttfr": 0.0021176289301365614,
+      "rows_out": 12582912,
+      "peak_above": 2068480
+     },
+     {
+      "seconds": 0.2275728890672326,
+      "ttfr": 0.002771720988675952,
+      "rows_out": 12582912,
+      "peak_above": 2908160
+     }
+    ],
+    "wall": 0.8208206929266453,
+    "busy_before": 0.0033333334140479565,
+    "quiet_wait": 1.0006065361667424,
+    "other_cores": 0.1370616041525016,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.12950314907357097,
+      "ttfr": 0.0038064499385654926,
+      "rows_out": 12582912,
+      "peak_above": 12648448
+     },
+     {
+      "seconds": 0.12357899989001453,
+      "ttfr": 0.0026424569077789783,
+      "rows_out": 12582912,
+      "peak_above": 233472
+     },
+     {
+      "seconds": 0.12382160685956478,
+      "ttfr": 0.0026729339733719826,
+      "rows_out": 12582912,
+      "peak_above": 1490944
+     }
+    ],
+    "wall": 0.5239162070211023,
+    "busy_before": 0.008312551768113036,
+    "quiet_wait": 1.0005619719158858,
+    "other_cores": 0.11579332740809645,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06821058597415686,
+      "ttfr": 0.0035117659717798233,
+      "rows_out": 12582912,
+      "peak_above": 16015360
+     },
+     {
+      "seconds": 0.06145331705920398,
+      "ttfr": 0.0022167658898979425,
+      "rows_out": 12582912,
+      "peak_above": 679936
+     },
+     {
+      "seconds": 0.061980259139090776,
+      "ttfr": 0.002053628209978342,
+      "rows_out": 12582912,
+      "peak_above": 3084288
+     }
+    ],
+    "wall": 0.33797772298566997,
+    "busy_before": 0.0066500415693237745,
+    "quiet_wait": 1.000456543872133,
+    "other_cores": 0.11448979831953533,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.22392345406115055,
+      "ttfr": 0.0037942370399832726,
+      "rows_out": 12582912,
+      "peak_above": 12079104
+     },
+     {
+      "seconds": 0.2222606420982629,
+      "ttfr": 0.0022176881320774555,
+      "rows_out": 12582912,
+      "peak_above": 3018752
+     },
+     {
+      "seconds": 0.21900471905246377,
+      "ttfr": 0.0027522039599716663,
+      "rows_out": 12582912,
+      "peak_above": 5824512
+     }
+    ],
+    "wall": 0.8274157450068742,
+    "busy_before": 0.004999999888241291,
+    "quiet_wait": 1.0005696369335055,
+    "other_cores": 0.11042091022967712,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08108393498696387,
+      "ttfr": 0.003922398900613189,
+      "rows_out": 12582912,
+      "peak_above": 21618688
+     },
+     {
+      "seconds": 0.0814793889876455,
+      "ttfr": 0.0027444700244814157,
+      "rows_out": 12582912,
+      "peak_above": 8175616
+     },
+     {
+      "seconds": 0.08660237886942923,
+      "ttfr": 0.003346374025568366,
+      "rows_out": 12582912,
+      "peak_above": 6066176
+     }
+    ],
+    "wall": 0.3966781632043421,
+    "busy_before": 0.008312552076492667,
+    "quiet_wait": 1.0005878820084035,
+    "other_cores": 0.10799686768705233,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.05481451214291155,
+      "ttfr": 0.0042613171972334385,
+      "rows_out": 12582912,
+      "peak_above": 46403584
+     },
+     {
+      "seconds": 0.053406158927828074,
+      "ttfr": 0.003089018864557147,
+      "rows_out": 12582912,
+      "peak_above": 4624384
+     },
+     {
+      "seconds": 0.053051920840516686,
+      "ttfr": 0.0039576939307153225,
+      "rows_out": 12582912,
+      "peak_above": 6336512
+     }
+    ],
+    "wall": 0.3106940919533372,
+    "busy_before": 0.00582362715790195,
+    "quiet_wait": 1.0005754970479757,
+    "other_cores": 0.1945643732283259,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.22276166593655944,
+      "ttfr": 0.005331733031198382,
+      "rows_out": 12582912,
+      "peak_above": 35741696
+     },
+     {
+      "seconds": 0.21532969688996673,
+      "ttfr": 0.0035491050221025944,
+      "rows_out": 12582912,
+      "peak_above": 13631488
+     },
+     {
+      "seconds": 0.2168641861062497,
+      "ttfr": 0.003708154195919633,
+      "rows_out": 12582912,
+      "peak_above": 11100160
+     }
+    ],
+    "wall": 0.8194648979697376,
+    "busy_before": 0.008312551922946382,
+    "quiet_wait": 1.0005850249435753,
+    "other_cores": 0.3871807084872535,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.09345229086466134,
+      "ttfr": 0.0063597888220101595,
+      "rows_out": 12582912,
+      "peak_above": 66260992
+     },
+     {
+      "seconds": 0.09361458802595735,
+      "ttfr": 0.004560260102152824,
+      "rows_out": 12582912,
+      "peak_above": 18456576
+     },
+     {
+      "seconds": 0.09287611697800457,
+      "ttfr": 0.003791381837800145,
+      "rows_out": 12582912,
+      "peak_above": 25497600
+     }
+    ],
+    "wall": 0.4347895630635321,
+    "busy_before": 0.009975062276568988,
+    "quiet_wait": 1.00060372101143,
+    "other_cores": 0.20042799894325,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06346239103004336,
+      "ttfr": 0.007579908007755876,
+      "rows_out": 12582912,
+      "peak_above": 70918144
+     },
+     {
+      "seconds": 0.060848627937957644,
+      "ttfr": 0.004618719918653369,
+      "rows_out": 12582912,
+      "peak_above": 10260480
+     },
+     {
+      "seconds": 0.06064199912361801,
+      "ttfr": 0.005303109064698219,
+      "rows_out": 12582912,
+      "peak_above": 15867904
+     }
+    ],
+    "wall": 0.33606383902952075,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 2.000634051859379,
+    "other_cores": 0.23562189940811784,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.21163817308843136,
+      "ttfr": 0.012431245995685458,
+      "rows_out": 12582912,
+      "peak_above": 69246976
+     },
+     {
+      "seconds": 0.21156918304041028,
+      "ttfr": 0.005736075108870864,
+      "rows_out": 12582912,
+      "peak_above": 17440768
+     },
+     {
+      "seconds": 0.20955182309262455,
+      "ttfr": 0.006185081088915467,
+      "rows_out": 12582912,
+      "peak_above": 20131840
+     }
+    ],
+    "wall": 0.7824289950076491,
+    "busy_before": 0.012468827959905655,
+    "quiet_wait": 1.000561743043363,
+    "other_cores": 0.18445251866779266,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10268429201096296,
+      "ttfr": 0.01005895808339119,
+      "rows_out": 12582912,
+      "peak_above": 111226880
+     },
+     {
+      "seconds": 0.09615235798992217,
+      "ttfr": 0.009362146025523543,
+      "rows_out": 12582912,
+      "peak_above": 37404672
+     },
+     {
+      "seconds": 0.09649432194419205,
+      "ttfr": 0.009366804035380483,
+      "rows_out": 12582912,
+      "peak_above": 30330880
+     }
+    ],
+    "wall": 0.45387420197948813,
+    "busy_before": 0.009950248689368198,
+    "quiet_wait": 1.000609451904893,
+    "other_cores": 0.15089864009094978,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "count",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.08898467593826354,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 1003520
+     },
+     {
+      "seconds": 0.09136874694377184,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.08838782296516001,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.4130014721304178,
+    "busy_before": 0.005823627312864109,
+    "quiet_wait": 1.0005658001173288,
+    "other_cores": 0.13103827546003466,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "count",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.049295616103336215,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 4468736
+     },
+     {
+      "seconds": 0.045283428858965635,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 3039232
+     },
+     {
+      "seconds": 0.04472446511499584,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 1114112
+     }
+    ],
+    "wall": 0.28576640505343676,
+    "busy_before": 0.006661115743213546,
+    "quiet_wait": 1.0005785038229078,
+    "other_cores": 0.09891995264366253,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "count",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.028433019062504172,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 8265728
+     },
+     {
+      "seconds": 0.02683366509154439,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 1290240
+     },
+     {
+      "seconds": 0.025877103907987475,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 2588672
+     }
+    ],
+    "wall": 0.22924817400053144,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0003206981346011,
+    "other_cores": 0.027921709396040873,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "count",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.021481895120814443,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 23560192
+     },
+     {
+      "seconds": 0.01962342392653227,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 6414336
+     },
+     {
+      "seconds": 0.019706479972228408,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 6283264
+     }
+    ],
+    "wall": 0.207715705037117,
+    "busy_before": 0.006661115588122359,
+    "quiet_wait": 1.0002775969915092,
+    "other_cores": 0.09770566046245621,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "count",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.021699374075978994,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 25362432
+     },
+     {
+      "seconds": 0.018383548129349947,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 6811648
+     },
+     {
+      "seconds": 0.01898374897427857,
+      "ttfr": null,
+      "rows_out": 12582912,
+      "peak_above": 5976064
+     }
+    ],
+    "wall": 0.2071801950223744,
+    "busy_before": 0.007481296746135078,
+    "quiet_wait": 1.0005530449561775,
+    "other_cores": 0.1160390790673931,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.93061368400231,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 28925952
+     },
+     {
+      "seconds": 0.9353474311064929,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 15106048
+     },
+     {
+      "seconds": 0.8886109760496765,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 13094912
+     }
+    ],
+    "wall": 2.923003035830334,
+    "busy_before": 0.011637572785024941,
+    "quiet_wait": 1.0005972390063107,
+    "other_cores": 0.11586679756794199,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.8548025630880147,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 29097984
+     },
+     {
+      "seconds": 0.8790393560193479,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 11300864
+     },
+     {
+      "seconds": 0.9314075401052833,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 12681216
+     }
+    ],
+    "wall": 2.842222311999649,
+    "busy_before": 0.017456359177537413,
+    "quiet_wait": 1.0005321570206434,
+    "other_cores": 0.09676195891619911,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.8708407019730657,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 36605952
+     },
+     {
+      "seconds": 0.8502473619300872,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 21843968
+     },
+     {
+      "seconds": 0.9163307000417262,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 22282240
+     }
+    ],
+    "wall": 2.7954483069479465,
+    "busy_before": 0.004991680730209611,
+    "quiet_wait": 1.0005062990821898,
+    "other_cores": 0.10452348446727477,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7804028990212828,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 41824256
+     },
+     {
+      "seconds": 0.7687934299465269,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 22556672
+     },
+     {
+      "seconds": 0.7315366610419005,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 22609920
+     }
+    ],
+    "wall": 2.4369062380865216,
+    "busy_before": 0.00996677749447074,
+    "quiet_wait": 1.0002686700318009,
+    "other_cores": 0.13988761488368662,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7691896879114211,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 35934208
+     },
+     {
+      "seconds": 0.8390224678441882,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 24158208
+     },
+     {
+      "seconds": 0.8187683362048119,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 22134784
+     }
+    ],
+    "wall": 2.5858670969028026,
+    "busy_before": 0.0041631973976676605,
+    "quiet_wait": 1.000447487924248,
+    "other_cores": 0.12690675374438817,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.722267292207107,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 46002176
+     },
+     {
+      "seconds": 0.7727929139509797,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 24494080
+     },
+     {
+      "seconds": 0.7646494850050658,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 21938176
+     }
+    ],
+    "wall": 2.4213304489385337,
+    "busy_before": 0.012489592037911796,
+    "quiet_wait": 1.000583543209359,
+    "other_cores": 0.09049281166646832,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7298801511060447,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 58503168
+     },
+     {
+      "seconds": 0.8161164110060781,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 28983296
+     },
+     {
+      "seconds": 0.7403015210293233,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 26116096
+     }
+    ],
+    "wall": 2.44591421703808,
+    "busy_before": 0.006661115743213546,
+    "quiet_wait": 1.0005541380960494,
+    "other_cores": 0.0919975024828806,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7759674829430878,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 43442176
+     },
+     {
+      "seconds": 0.8142141881398857,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 27701248
+     },
+     {
+      "seconds": 0.8377007087692618,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 24440832
+     }
+    ],
+    "wall": 2.5845940911676735,
+    "busy_before": 0.01911886953116002,
+    "quiet_wait": 1.0005329782143235,
+    "other_cores": 0.08762575184281401,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.723607825813815,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 66387968
+     },
+     {
+      "seconds": 0.8160593330394477,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 28819456
+     },
+     {
+      "seconds": 0.8119994460139424,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 26087424
+     }
+    ],
+    "wall": 2.5115401230286807,
+    "busy_before": 0.00664451827910685,
+    "quiet_wait": 1.000551963923499,
+    "other_cores": 0.10581634680402792,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7294968289788812,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 109223936
+     },
+     {
+      "seconds": 0.7948609229642898,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 56102912
+     },
+     {
+      "seconds": 0.4962608839850873,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 38584320
+     }
+    ],
+    "wall": 2.1817481089383364,
+    "busy_before": 0.004166666728754838,
+    "quiet_wait": 1.0002993671223521,
+    "other_cores": 0.08428608202803267,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7791219670325518,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 68280320
+     },
+     {
+      "seconds": 0.8473614959511906,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 27975680
+     },
+     {
+      "seconds": 0.8025500869844109,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 26935296
+     }
+    ],
+    "wall": 2.588487555971369,
+    "busy_before": 0.008319467677066473,
+    "quiet_wait": 1.0005853369366378,
+    "other_cores": 0.18576716725399067,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7194842989556491,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 125952000
+     },
+     {
+      "seconds": 0.7813237328082323,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 61423616
+     },
+     {
+      "seconds": 0.7356556511949748,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 46555136
+     }
+    ],
+    "wall": 2.405231371987611,
+    "busy_before": 0.005818786392512471,
+    "quiet_wait": 1.0006696179043502,
+    "other_cores": 0.10303499410069404,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.785618243040517,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 178737152
+     },
+     {
+      "seconds": 0.9296935310121626,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 59928576
+     },
+     {
+      "seconds": 0.7763165219221264,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 62574592
+     }
+    ],
+    "wall": 2.6570576468948275,
+    "busy_before": 0.007499999987582366,
+    "quiet_wait": 1.0003028749488294,
+    "other_cores": 0.10705751859311226,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.782786909956485,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 100691968
+     },
+     {
+      "seconds": 0.7856623760890216,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 37343232
+     },
+     {
+      "seconds": 0.8129427230451256,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 30003200
+     }
+    ],
+    "wall": 2.543730058008805,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.000550600932911,
+    "other_cores": 0.08434424850765136,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "write_parquet",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.7427223119884729,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 180383744
+     },
+     {
+      "seconds": 0.7170451949350536,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 104427520
+     },
+     {
+      "seconds": 0.7983532620128244,
+      "ttfr": null,
+      "rows_out": null,
+      "peak_above": 34570240
+     }
+    ],
+    "wall": 2.456376883899793,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0005665619391948,
+    "other_cores": 0.21984370735574546,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 2,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w2_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1280846269801259,
+      "ttfr": 0.0038548908196389675,
+      "rows_out": 12582912,
+      "peak_above": 13549568
+     },
+     {
+      "seconds": 0.12354151904582977,
+      "ttfr": 0.0026832441799342632,
+      "rows_out": 12582912,
+      "peak_above": 696320
+     },
+     {
+      "seconds": 0.11884896014817059,
+      "ttfr": 0.0023704550694674253,
+      "rows_out": 12582912,
+      "peak_above": 2813952
+     }
+    ],
+    "wall": 0.5173856550827622,
+    "busy_before": 0.008326394640244135,
+    "quiet_wait": 1.0003878138959408,
+    "other_cores": 0.11163432627869112,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 2,
+    "order_buffer": 8
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w2_b8",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1265130981337279,
+      "ttfr": 0.0036894199438393116,
+      "rows_out": 12582912,
+      "peak_above": 9670656
+     },
+     {
+      "seconds": 0.11968818097375333,
+      "ttfr": 0.002335950033739209,
+      "rows_out": 12582912,
+      "peak_above": 2658304
+     },
+     {
+      "seconds": 0.1234202308114618,
+      "ttfr": 0.002838756889104843,
+      "rows_out": 12582912,
+      "peak_above": 5910528
+     }
+    ],
+    "wall": 0.5175521799828857,
+    "busy_before": 0.0066500415693237745,
+    "quiet_wait": 1.0005396811757237,
+    "other_cores": 0.06056394461633277,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 4,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w4_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07221847516484559,
+      "ttfr": 0.003719146130606532,
+      "rows_out": 12582912,
+      "peak_above": 22474752
+     },
+     {
+      "seconds": 0.07429946400225163,
+      "ttfr": 0.0025972630828619003,
+      "rows_out": 12582912,
+      "peak_above": 8331264
+     },
+     {
+      "seconds": 0.06683224905282259,
+      "ttfr": 0.0023781999479979277,
+      "rows_out": 12582912,
+      "peak_above": 1957888
+     }
+    ],
+    "wall": 0.36118970601819456,
+    "busy_before": 0.005823627312864109,
+    "quiet_wait": 1.0005639158189297,
+    "other_cores": 0.15927087232695264,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 4,
+    "order_buffer": 8
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w4_b8",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07288744486868382,
+      "ttfr": 0.003638333873823285,
+      "rows_out": 12582912,
+      "peak_above": 20652032
+     },
+     {
+      "seconds": 0.07372487196698785,
+      "ttfr": 0.0024913030210882425,
+      "rows_out": 12582912,
+      "peak_above": 913408
+     },
+     {
+      "seconds": 0.0699233221821487,
+      "ttfr": 0.003094830084592104,
+      "rows_out": 12582912,
+      "peak_above": 5128192
+     }
+    ],
+    "wall": 0.3627668560948223,
+    "busy_before": 0.0066500415693237745,
+    "quiet_wait": 1.0004764830227941,
+    "other_cores": 0.051085157178024074,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 12,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w12_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06352428696118295,
+      "ttfr": 0.006749604130163789,
+      "rows_out": 12582912,
+      "peak_above": 70725632
+     },
+     {
+      "seconds": 0.06054981518536806,
+      "ttfr": 0.00395787600427866,
+      "rows_out": 12582912,
+      "peak_above": 16683008
+     },
+     {
+      "seconds": 0.060240773018449545,
+      "ttfr": 0.005044412100687623,
+      "rows_out": 12582912,
+      "peak_above": 14860288
+     }
+    ],
+    "wall": 0.33508853893727064,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0005626759957522,
+    "other_cores": 0.23405157187343512,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 12,
+    "order_buffer": 8
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w12_b8",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.05971436109393835,
+      "ttfr": 0.007939806208014488,
+      "rows_out": 12582912,
+      "peak_above": 53452800
+     },
+     {
+      "seconds": 0.057559622917324305,
+      "ttfr": 0.0037005008198320866,
+      "rows_out": 12582912,
+      "peak_above": 14077952
+     },
+     {
+      "seconds": 0.05845160293392837,
+      "ttfr": 0.003747538896277547,
+      "rows_out": 12582912,
+      "peak_above": 8159232
+     }
+    ],
+    "wall": 0.32529988000169396,
+    "busy_before": 0.008312551922946382,
+    "quiet_wait": 1.0005677249282598,
+    "other_cores": 0.2744298579219545,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 24,
+    "order_buffer": 2
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w24_b2",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10600681998766959,
+      "ttfr": 0.011510822921991348,
+      "rows_out": 12582912,
+      "peak_above": 120688640
+     },
+     {
+      "seconds": 0.09630434401333332,
+      "ttfr": 0.008604387054219842,
+      "rows_out": 12582912,
+      "peak_above": 42266624
+     },
+     {
+      "seconds": 0.09823304717428982,
+      "ttfr": 0.006838981993496418,
+      "rows_out": 12582912,
+      "peak_above": 33984512
+     }
+    ],
+    "wall": 0.4569937780033797,
+    "busy_before": 0.008326394640244135,
+    "quiet_wait": 1.0002620480954647,
+    "other_cores": 0.2382286276888477,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 24,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w24_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0679657340515405,
+      "ttfr": 0.009084882913157344,
+      "rows_out": 12582912,
+      "peak_above": 110923776
+     },
+     {
+      "seconds": 0.061307471012696624,
+      "ttfr": 0.007726113079115748,
+      "rows_out": 12582912,
+      "peak_above": 17735680
+     },
+     {
+      "seconds": 0.06153036211617291,
+      "ttfr": 0.006810269085690379,
+      "rows_out": 12582912,
+      "peak_above": 20856832
+     }
+    ],
+    "wall": 0.34437934099696577,
+    "busy_before": 0.0041597336842156786,
+    "quiet_wait": 1.00028768600896,
+    "other_cores": 0.06859297146374321,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 24,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w24_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0670474641956389,
+      "ttfr": 0.008813572116196156,
+      "rows_out": 12582912,
+      "peak_above": 116215808
+     },
+     {
+      "seconds": 0.0608775420114398,
+      "ttfr": 0.0057678851298987865,
+      "rows_out": 12582912,
+      "peak_above": 16097280
+     },
+     {
+      "seconds": 0.06126772705465555,
+      "ttfr": 0.01003080396912992,
+      "rows_out": 12582912,
+      "peak_above": 8470528
+     }
+    ],
+    "wall": 0.34331471496261656,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0005963379517198,
+    "other_cores": 0.14605840050538096,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 24,
+    "order_buffer": 8
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w24_b8",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06538587505929172,
+      "ttfr": 0.012831439962610602,
+      "rows_out": 12582912,
+      "peak_above": 86323200
+     },
+     {
+      "seconds": 0.05913937813602388,
+      "ttfr": 0.009377584094181657,
+      "rows_out": 12582912,
+      "peak_above": 19050496
+     },
+     {
+      "seconds": 0.058409343007951975,
+      "ttfr": 0.0059844928327947855,
+      "rows_out": 12582912,
+      "peak_above": 8732672
+     }
+    ],
+    "wall": 0.33374296594411135,
+    "busy_before": 0.003330557949152366,
+    "quiet_wait": 1.0005716099403799,
+    "other_cores": 0.1943202012197748,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 48,
+    "order_buffer": 2
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w48_b2",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11462583485990763,
+      "ttfr": 0.01574114104732871,
+      "rows_out": 12582912,
+      "peak_above": 189751296
+     },
+     {
+      "seconds": 0.10678661917336285,
+      "ttfr": 0.008788254112005234,
+      "rows_out": 12582912,
+      "peak_above": 62017536
+     },
+     {
+      "seconds": 0.10129354218952358,
+      "ttfr": 0.015311371069401503,
+      "rows_out": 12582912,
+      "peak_above": 35143680
+     }
+    ],
+    "wall": 0.5026857028715312,
+    "busy_before": 0.007499999987582366,
+    "quiet_wait": 1.0005464458372444,
+    "other_cores": 0.059013014324729114,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 24,
+   "flags": {
+    "order": "interleaved",
+    "order_window": 48,
+    "order_buffer": 4
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved_w48_b4",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07433401001617312,
+      "ttfr": 0.02005787193775177,
+      "rows_out": 12582912,
+      "peak_above": 187535360
+     },
+     {
+      "seconds": 0.06486546411179006,
+      "ttfr": 0.006698298035189509,
+      "rows_out": 12582912,
+      "peak_above": 30396416
+     },
+     {
+      "seconds": 0.06658726697787642,
+      "ttfr": 0.008664039894938469,
+      "rows_out": 12582912,
+      "peak_above": 21757952
+     }
+    ],
+    "wall": 0.365943311015144,
+    "busy_before": 0.0041631975521131724,
+    "quiet_wait": 1.000571191078052,
+    "other_cores": 0.19736116710695273,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.084304368123412,
+      "ttfr": 0.00451417313888669,
+      "rows_out": 12582912,
+      "peak_above": 18198528
+     },
+     {
+      "seconds": 2.095332663040608,
+      "ttfr": 0.002771571045741439,
+      "rows_out": 12582912,
+      "peak_above": 811008
+     },
+     {
+      "seconds": 2.093426291132346,
+      "ttfr": 0.0025414570700377226,
+      "rows_out": 12582912,
+      "peak_above": 2269184
+     }
+    ],
+    "wall": 6.458851092029363,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0005600480362773,
+    "other_cores": 0.06519177998219879,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 4.48264795797877,
+      "ttfr": 0.02576339920051396,
+      "rows_out": 12582912,
+      "peak_above": 17678336
+     },
+     {
+      "seconds": 4.482747505884618,
+      "ttfr": 0.023649808019399643,
+      "rows_out": 12582912,
+      "peak_above": 3551232
+     },
+     {
+      "seconds": 4.474507274106145,
+      "ttfr": 0.02432569209486246,
+      "rows_out": 12582912,
+      "peak_above": 1495040
+     }
+    ],
+    "wall": 13.640638754935935,
+    "busy_before": 0.006655573894745086,
+    "quiet_wait": 1.0005861090030521,
+    "other_cores": 0.10141167324170114,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 2.2028924070764333,
+      "ttfr": 0.02641371521167457,
+      "rows_out": 12582912,
+      "peak_above": 25714688
+     },
+     {
+      "seconds": 2.2201244069729,
+      "ttfr": 0.02400964591652155,
+      "rows_out": 12582912,
+      "peak_above": 6225920
+     },
+     {
+      "seconds": 2.205921844113618,
+      "ttfr": 0.024286065949127078,
+      "rows_out": 12582912,
+      "peak_above": 5525504
+     }
+    ],
+    "wall": 6.799817163031548,
+    "busy_before": 0.009143807253175264,
+    "quiet_wait": 1.0005815690383315,
+    "other_cores": 0.0709044061997743,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "off",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.4461506579536945,
+      "ttfr": 0.007418944966048002,
+      "rows_out": 12582912,
+      "peak_above": 42704896
+     },
+     {
+      "seconds": 1.4450417200569063,
+      "ttfr": 0.0033107770141214132,
+      "rows_out": 12582912,
+      "peak_above": 6213632
+     },
+     {
+      "seconds": 1.440557410940528,
+      "ttfr": 0.003597706090658903,
+      "rows_out": 12582912,
+      "peak_above": 8970240
+     }
+    ],
+    "wall": 4.505768168019131,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0002511269412935,
+    "other_cores": 0.08028087201274554,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "concat",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 1.644161842064932,
+      "ttfr": 0.029015345964580774,
+      "rows_out": 12582912,
+      "peak_above": 40259584
+     },
+     {
+      "seconds": 1.645477349869907,
+      "ttfr": 0.025975869968533516,
+      "rows_out": 12582912,
+      "peak_above": 13099008
+     },
+     {
+      "seconds": 1.6418664681259543,
+      "ttfr": 0.024121796945109963,
+      "rows_out": 12582912,
+      "peak_above": 11104256
+     }
+    ],
+    "wall": 5.101208772975951,
+    "busy_before": 0.006672226707489348,
+    "quiet_wait": 1.0005681738257408,
+    "other_cores": 0.07364666265559226,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.r3_filter_select_derive",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "target/m0/r3",
+    "rows": 16777216
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/r3_warmup",
+    "rows": 8192
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved",
+    "slow_ms": 20
+   },
+   "repeat": 3,
+   "labels": {
+    "input_name": "r3",
+    "mode": "interleaved",
+    "slow_ms": 20
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.8682914210949093,
+      "ttfr": 0.027810326078906655,
+      "rows_out": 12582912,
+      "peak_above": 64897024
+     },
+     {
+      "seconds": 0.8759394569788128,
+      "ttfr": 0.024680840084329247,
+      "rows_out": 12582912,
+      "peak_above": 41631744
+     },
+     {
+      "seconds": 0.8594668479636312,
+      "ttfr": 0.025929261930286884,
+      "rows_out": 12582912,
+      "peak_above": 16072704
+     }
+    ],
+    "wall": 2.7908632510807365,
+    "busy_before": 0.006650041568294126,
+    "quiet_wait": 1.000493633095175,
+    "other_cores": 0.09828966016706937,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3318551108241081,
+      "ttfr": 0.017821970861405134,
+      "rows_out": 1000000,
+      "peak_above": 66940928
+     },
+     {
+      "seconds": 0.2887097701895982,
+      "ttfr": 0.01464579813182354,
+      "rows_out": 1000000,
+      "peak_above": 60780544
+     },
+     {
+      "seconds": 0.2909763790667057,
+      "ttfr": 0.01466346113011241,
+      "rows_out": 1000000,
+      "peak_above": 61304832
+     },
+     {
+      "seconds": 0.2908500209450722,
+      "ttfr": 0.014641528949141502,
+      "rows_out": 1000000,
+      "peak_above": 61345792
+     },
+     {
+      "seconds": 0.2807241070549935,
+      "ttfr": 0.014684590976685286,
+      "rows_out": 1000000,
+      "peak_above": 61345792
+     }
+    ],
+    "wall": 1.6349188920576125,
+    "busy_before": 0.004163197242576474,
+    "quiet_wait": 1.0004684361629188,
+    "other_cores": 0.08441703119123234,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.330641474109143,
+      "ttfr": 0.017750445986166596,
+      "rows_out": 1000000,
+      "peak_above": 65863680
+     },
+     {
+      "seconds": 0.28716587112285197,
+      "ttfr": 0.01443282701075077,
+      "rows_out": 1000000,
+      "peak_above": 59023360
+     },
+     {
+      "seconds": 0.2873545470647514,
+      "ttfr": 0.014590904116630554,
+      "rows_out": 1000000,
+      "peak_above": 59416576
+     },
+     {
+      "seconds": 0.2865299331024289,
+      "ttfr": 0.014458605088293552,
+      "rows_out": 1000000,
+      "peak_above": 59154432
+     },
+     {
+      "seconds": 0.2825533931609243,
+      "ttfr": 0.010711026145145297,
+      "rows_out": 1000000,
+      "peak_above": 47620096
+     }
+    ],
+    "wall": 1.642421712866053,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0005538491532207,
+    "other_cores": 0.07410824953412624,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.32790794502943754,
+      "ttfr": 0.018533129943534732,
+      "rows_out": 1000000,
+      "peak_above": 78225408
+     },
+     {
+      "seconds": 0.2852324789855629,
+      "ttfr": 0.010887187905609608,
+      "rows_out": 1000000,
+      "peak_above": 46624768
+     },
+     {
+      "seconds": 0.2771385330706835,
+      "ttfr": 0.010875466046854854,
+      "rows_out": 1000000,
+      "peak_above": 35549184
+     },
+     {
+      "seconds": 0.2795016940217465,
+      "ttfr": 0.010778362164273858,
+      "rows_out": 1000000,
+      "peak_above": 47947776
+     },
+     {
+      "seconds": 0.2811620819848031,
+      "ttfr": 0.010912535013630986,
+      "rows_out": 1000000,
+      "peak_above": 47271936
+     }
+    ],
+    "wall": 1.6049200638663024,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0005375370383263,
+    "other_cores": 0.1374784974807415,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.20693261991254985,
+      "ttfr": 0.018509386107325554,
+      "rows_out": 1000000,
+      "peak_above": 104181760
+     },
+     {
+      "seconds": 0.1955277461092919,
+      "ttfr": 0.011274948017671704,
+      "rows_out": 1000000,
+      "peak_above": 64434176
+     },
+     {
+      "seconds": 0.17166535812430084,
+      "ttfr": 0.01127035915851593,
+      "rows_out": 1000000,
+      "peak_above": 42524672
+     },
+     {
+      "seconds": 0.19083334412425756,
+      "ttfr": 0.015732865082100034,
+      "rows_out": 1000000,
+      "peak_above": 72671232
+     },
+     {
+      "seconds": 0.19053024309687316,
+      "ttfr": 0.01663190801627934,
+      "rows_out": 1000000,
+      "peak_above": 55083008
+     }
+    ],
+    "wall": 1.10986469197087,
+    "busy_before": 0.0041631975521131724,
+    "quiet_wait": 1.0005949439946562,
+    "other_cores": 0.07854741276583463,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.3039966041687876,
+      "ttfr": 0.018128949217498302,
+      "rows_out": 1000000,
+      "peak_above": 109441024
+     },
+     {
+      "seconds": 0.2839771150611341,
+      "ttfr": 0.015760848065838218,
+      "rows_out": 1000000,
+      "peak_above": 68665344
+     },
+     {
+      "seconds": 0.27426932915113866,
+      "ttfr": 0.01133244694210589,
+      "rows_out": 1000000,
+      "peak_above": 48566272
+     },
+     {
+      "seconds": 0.2742184530943632,
+      "ttfr": 0.01129706995561719,
+      "rows_out": 1000000,
+      "peak_above": 44228608
+     },
+     {
+      "seconds": 0.26732462691143155,
+      "ttfr": 0.011016522068530321,
+      "rows_out": 1000000,
+      "peak_above": 28073984
+     }
+    ],
+    "wall": 1.5595760520081967,
+    "busy_before": 0.002502085014919807,
+    "quiet_wait": 1.0006020579021424,
+    "other_cores": 0.09611073420302474,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1869477650616318,
+      "ttfr": 0.0206912849098444,
+      "rows_out": 1000000,
+      "peak_above": 89767936
+     },
+     {
+      "seconds": 0.15869207098148763,
+      "ttfr": 0.01590450806543231,
+      "rows_out": 1000000,
+      "peak_above": 60297216
+     },
+     {
+      "seconds": 0.15558967785909772,
+      "ttfr": 0.011359707918018103,
+      "rows_out": 1000000,
+      "peak_above": 42864640
+     },
+     {
+      "seconds": 0.15687172184698284,
+      "ttfr": 0.015663133934140205,
+      "rows_out": 1000000,
+      "peak_above": 67117056
+     },
+     {
+      "seconds": 0.16384288296103477,
+      "ttfr": 0.01320971199311316,
+      "rows_out": 1000000,
+      "peak_above": 32337920
+     }
+    ],
+    "wall": 0.9770776161458343,
+    "busy_before": 0.009143807099757685,
+    "quiet_wait": 1.0006346690934151,
+    "other_cores": 0.1122428757734041,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11851342907175422,
+      "ttfr": 0.020017355913296342,
+      "rows_out": 1000000,
+      "peak_above": 133443584
+     },
+     {
+      "seconds": 0.10656001209281385,
+      "ttfr": 0.013214181177318096,
+      "rows_out": 1000000,
+      "peak_above": 35364864
+     },
+     {
+      "seconds": 0.09579199901781976,
+      "ttfr": 0.01267724996432662,
+      "rows_out": 1000000,
+      "peak_above": 102477824
+     },
+     {
+      "seconds": 0.09623557492159307,
+      "ttfr": 0.014874728862196207,
+      "rows_out": 1000000,
+      "peak_above": 71913472
+     },
+     {
+      "seconds": 0.1017730450257659,
+      "ttfr": 0.013671402120962739,
+      "rows_out": 1000000,
+      "peak_above": 63012864
+     }
+    ],
+    "wall": 0.6776771100703627,
+    "busy_before": 0.0066555740497072444,
+    "quiet_wait": 1.0005394199397415,
+    "other_cores": 0.08926227263410527,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.26423791283741593,
+      "ttfr": 0.019286619033664465,
+      "rows_out": 1000000,
+      "peak_above": 171438080
+     },
+     {
+      "seconds": 0.24038394098170102,
+      "ttfr": 0.012308245059102774,
+      "rows_out": 1000000,
+      "peak_above": 103903232
+     },
+     {
+      "seconds": 0.23725407500751317,
+      "ttfr": 0.01342737302184105,
+      "rows_out": 1000000,
+      "peak_above": 56020992
+     },
+     {
+      "seconds": 0.23269307310692966,
+      "ttfr": 0.015002880012616515,
+      "rows_out": 1000000,
+      "peak_above": 24940544
+     },
+     {
+      "seconds": 0.23474167194217443,
+      "ttfr": 0.015835318015888333,
+      "rows_out": 1000000,
+      "peak_above": 58314752
+     }
+    ],
+    "wall": 1.368270537815988,
+    "busy_before": 0.0033305577940611797,
+    "quiet_wait": 1.0005830118898302,
+    "other_cores": 0.1051290638035544,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11626703687943518,
+      "ttfr": 0.0189873359631747,
+      "rows_out": 1000000,
+      "peak_above": 142848000
+     },
+     {
+      "seconds": 0.10970868309959769,
+      "ttfr": 0.015963870100677013,
+      "rows_out": 1000000,
+      "peak_above": 62304256
+     },
+     {
+      "seconds": 0.11067319009453058,
+      "ttfr": 0.016898561036214232,
+      "rows_out": 1000000,
+      "peak_above": 105992192
+     },
+     {
+      "seconds": 0.10888489102944732,
+      "ttfr": 0.017185141099616885,
+      "rows_out": 1000000,
+      "peak_above": 95875072
+     },
+     {
+      "seconds": 0.11055255308747292,
+      "ttfr": 0.016620658105239272,
+      "rows_out": 1000000,
+      "peak_above": 120352768
+     }
+    ],
+    "wall": 0.7297547650523484,
+    "busy_before": 0.004156275884056518,
+    "quiet_wait": 1.0006268850993365,
+    "other_cores": 0.07641608031071355,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07425044197589159,
+      "ttfr": 0.02895667403936386,
+      "rows_out": 1000000,
+      "peak_above": 269377536
+     },
+     {
+      "seconds": 0.07091942802071571,
+      "ttfr": 0.025144423125311732,
+      "rows_out": 1000000,
+      "peak_above": 244826112
+     },
+     {
+      "seconds": 0.06527117802761495,
+      "ttfr": 0.025118033168837428,
+      "rows_out": 1000000,
+      "peak_above": 97067008
+     },
+     {
+      "seconds": 0.06277427519671619,
+      "ttfr": 0.026533410185948014,
+      "rows_out": 1000000,
+      "peak_above": 48017408
+     },
+     {
+      "seconds": 0.062065460020676255,
+      "ttfr": 0.022691803984344006,
+      "rows_out": 1000000,
+      "peak_above": 69279744
+     }
+    ],
+    "wall": 0.503549181856215,
+    "busy_before": 0.025000000062088173,
+    "quiet_wait": 1.0005994730163366,
+    "other_cores": 0.2515682761325706,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.13067566812969744,
+      "ttfr": 0.028163981158286333,
+      "rows_out": 1000000,
+      "peak_above": 323837952
+     },
+     {
+      "seconds": 0.12423162907361984,
+      "ttfr": 0.029111426090821624,
+      "rows_out": 1000000,
+      "peak_above": 265441280
+     },
+     {
+      "seconds": 0.11921608215197921,
+      "ttfr": 0.022892922163009644,
+      "rows_out": 1000000,
+      "peak_above": 109322240
+     },
+     {
+      "seconds": 0.11632451484911144,
+      "ttfr": 0.02318318886682391,
+      "rows_out": 1000000,
+      "peak_above": 79491072
+     },
+     {
+      "seconds": 0.11260428815148771,
+      "ttfr": 0.02346120309084654,
+      "rows_out": 1000000,
+      "peak_above": 58994688
+     }
+    ],
+    "wall": 0.7737511990126222,
+    "busy_before": 0.008333333302289248,
+    "quiet_wait": 1.0006276271305978,
+    "other_cores": 0.1543545251170035,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_scan",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.11597465700469911,
+      "ttfr": 0.033859750954434276,
+      "rows_out": 1000000,
+      "peak_above": 316813312
+     },
+     {
+      "seconds": 0.10812239605002105,
+      "ttfr": 0.030498309060931206,
+      "rows_out": 1000000,
+      "peak_above": 270585856
+     },
+     {
+      "seconds": 0.10604282794520259,
+      "ttfr": 0.03501483704894781,
+      "rows_out": 1000000,
+      "peak_above": 127721472
+     },
+     {
+      "seconds": 0.10228464799001813,
+      "ttfr": 0.027508486062288284,
+      "rows_out": 1000000,
+      "peak_above": 67117056
+     },
+     {
+      "seconds": 0.10908049019053578,
+      "ttfr": 0.025231347186490893,
+      "rows_out": 1000000,
+      "peak_above": 67178496
+     }
+    ],
+    "wall": 0.7101177969016135,
+    "busy_before": 0.0033305577940611797,
+    "quiet_wait": 1.0005740448832512,
+    "other_cores": 0.08066549214030592,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10553562291897833,
+      "ttfr": 0.009055226808413863,
+      "rows_out": 6657,
+      "peak_above": 38342656
+     },
+     {
+      "seconds": 0.07747918390668929,
+      "ttfr": 0.006448547123000026,
+      "rows_out": 6657,
+      "peak_above": 29872128
+     },
+     {
+      "seconds": 0.07593866204842925,
+      "ttfr": 0.005835972959175706,
+      "rows_out": 6657,
+      "peak_above": 24698880
+     },
+     {
+      "seconds": 0.07499884208664298,
+      "ttfr": 0.0054876659996807575,
+      "rows_out": 6657,
+      "peak_above": 24801280
+     },
+     {
+      "seconds": 0.0750014369841665,
+      "ttfr": 0.005530858878046274,
+      "rows_out": 6657,
+      "peak_above": 24662016
+     }
+    ],
+    "wall": 0.5646285540424287,
+    "busy_before": 0.005818786237679125,
+    "quiet_wait": 1.0005750090349466,
+    "other_cores": 0.022273053403257352,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.10498648881912231,
+      "ttfr": 0.00925710704177618,
+      "rows_out": 6657,
+      "peak_above": 37957632
+     },
+     {
+      "seconds": 0.07496940717101097,
+      "ttfr": 0.0053874889854341745,
+      "rows_out": 6657,
+      "peak_above": 24674304
+     },
+     {
+      "seconds": 0.07571541098877788,
+      "ttfr": 0.005418255925178528,
+      "rows_out": 6657,
+      "peak_above": 24674304
+     },
+     {
+      "seconds": 0.07458849903196096,
+      "ttfr": 0.005542400060221553,
+      "rows_out": 6657,
+      "peak_above": 24645632
+     },
+     {
+      "seconds": 0.07526125502772629,
+      "ttfr": 0.005446708993986249,
+      "rows_out": 6657,
+      "peak_above": 24645632
+     }
+    ],
+    "wall": 0.561176102841273,
+    "busy_before": 0.010806317453380293,
+    "quiet_wait": 1.0005585849285126,
+    "other_cores": 0.05851995382758059,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.1034637400880456,
+      "ttfr": 0.009372995002195239,
+      "rows_out": 6657,
+      "peak_above": 38129664
+     },
+     {
+      "seconds": 0.07033462496474385,
+      "ttfr": 0.005574370035901666,
+      "rows_out": 6657,
+      "peak_above": 1802240
+     },
+     {
+      "seconds": 0.06910404795780778,
+      "ttfr": 0.005551426904276013,
+      "rows_out": 6657,
+      "peak_above": 294912
+     },
+     {
+      "seconds": 0.06928723305463791,
+      "ttfr": 0.005653708940371871,
+      "rows_out": 6657,
+      "peak_above": 471040
+     },
+     {
+      "seconds": 0.06813397095538676,
+      "ttfr": 0.005585871869698167,
+      "rows_out": 6657,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.5373389921151102,
+    "busy_before": 0.004166666728754838,
+    "quiet_wait": 1.0003630470018834,
+    "other_cores": 0.1012191566693741,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0679279319010675,
+      "ttfr": 0.009698607958853245,
+      "rows_out": 6657,
+      "peak_above": 56745984
+     },
+     {
+      "seconds": 0.054682484129443765,
+      "ttfr": 0.0072692029643803835,
+      "rows_out": 6657,
+      "peak_above": 48238592
+     },
+     {
+      "seconds": 0.05479768896475434,
+      "ttfr": 0.008442332036793232,
+      "rows_out": 6657,
+      "peak_above": 49045504
+     },
+     {
+      "seconds": 0.05701383505947888,
+      "ttfr": 0.009282265091314912,
+      "rows_out": 6657,
+      "peak_above": 43728896
+     },
+     {
+      "seconds": 0.06781567097641528,
+      "ttfr": 0.008901987923309207,
+      "rows_out": 6657,
+      "peak_above": 56143872
+     }
+    ],
+    "wall": 0.4592656570021063,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0005616429261863,
+    "other_cores": 0.1001598960116776,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07844258891418576,
+      "ttfr": 0.009672809857875109,
+      "rows_out": 6657,
+      "peak_above": 83001344
+     },
+     {
+      "seconds": 0.06389795197173953,
+      "ttfr": 0.008590070996433496,
+      "rows_out": 6657,
+      "peak_above": 58408960
+     },
+     {
+      "seconds": 0.06813214696012437,
+      "ttfr": 0.006001525092869997,
+      "rows_out": 6657,
+      "peak_above": 57094144
+     },
+     {
+      "seconds": 0.06432487606070936,
+      "ttfr": 0.00858685513958335,
+      "rows_out": 6657,
+      "peak_above": 57720832
+     },
+     {
+      "seconds": 0.06388393603265285,
+      "ttfr": 0.009241066873073578,
+      "rows_out": 6657,
+      "peak_above": 52195328
+     }
+    ],
+    "wall": 0.49192669917829335,
+    "busy_before": 0.010815307733922924,
+    "quiet_wait": 1.0002516489475965,
+    "other_cores": 0.07033975303824452,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06173238414339721,
+      "ttfr": 0.009865534026175737,
+      "rows_out": 6657,
+      "peak_above": 57757696
+     },
+     {
+      "seconds": 0.04634763300418854,
+      "ttfr": 0.0064876810647547245,
+      "rows_out": 6657,
+      "peak_above": 27217920
+     },
+     {
+      "seconds": 0.043689776910468936,
+      "ttfr": 0.008131616981700063,
+      "rows_out": 6657,
+      "peak_above": 20070400
+     },
+     {
+      "seconds": 0.03916807915084064,
+      "ttfr": 0.006067128153517842,
+      "rows_out": 6657,
+      "peak_above": 716800
+     },
+     {
+      "seconds": 0.04014019016176462,
+      "ttfr": 0.006161445984616876,
+      "rows_out": 6657,
+      "peak_above": 4042752
+     }
+    ],
+    "wall": 0.3895522409584373,
+    "busy_before": 0.0066666666728754835,
+    "quiet_wait": 1.000600887928158,
+    "other_cores": 0.11142023022578951,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.04792158794589341,
+      "ttfr": 0.011360930046066642,
+      "rows_out": 6657,
+      "peak_above": 88920064
+     },
+     {
+      "seconds": 0.032042716862633824,
+      "ttfr": 0.00740184192545712,
+      "rows_out": 6657,
+      "peak_above": 48537600
+     },
+     {
+      "seconds": 0.03582973009906709,
+      "ttfr": 0.008150551933795214,
+      "rows_out": 6657,
+      "peak_above": 21782528
+     },
+     {
+      "seconds": 0.030470215016976,
+      "ttfr": 0.007248954148963094,
+      "rows_out": 6657,
+      "peak_above": 22528000
+     },
+     {
+      "seconds": 0.032229528995230794,
+      "ttfr": 0.007503975182771683,
+      "rows_out": 6657,
+      "peak_above": 37318656
+     }
+    ],
+    "wall": 0.3461388049181551,
+    "busy_before": 0.005828476139607065,
+    "quiet_wait": 1.0005621840246022,
+    "other_cores": 0.1738031165531598,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.046840480994433165,
+      "ttfr": 0.01125305611640215,
+      "rows_out": 6657,
+      "peak_above": 102129664
+     },
+     {
+      "seconds": 0.04453675192780793,
+      "ttfr": 0.00885575101710856,
+      "rows_out": 6657,
+      "peak_above": 104554496
+     },
+     {
+      "seconds": 0.04076503682881594,
+      "ttfr": 0.010461614932864904,
+      "rows_out": 6657,
+      "peak_above": 73699328
+     },
+     {
+      "seconds": 0.039686025120317936,
+      "ttfr": 0.010305030969902873,
+      "rows_out": 6657,
+      "peak_above": 90910720
+     },
+     {
+      "seconds": 0.03831361001357436,
+      "ttfr": 0.008161884965375066,
+      "rows_out": 6657,
+      "peak_above": 56004608
+     }
+    ],
+    "wall": 0.36837723501957953,
+    "busy_before": 0.004156276038889864,
+    "quiet_wait": 1.0005425161216408,
+    "other_cores": 0.04510321778724617,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.04387679905630648,
+      "ttfr": 0.0116885369643569,
+      "rows_out": 6657,
+      "peak_above": 79806464
+     },
+     {
+      "seconds": 0.038651686860248446,
+      "ttfr": 0.008871580939739943,
+      "rows_out": 6657,
+      "peak_above": 73981952
+     },
+     {
+      "seconds": 0.039224185049533844,
+      "ttfr": 0.007506198948249221,
+      "rows_out": 6657,
+      "peak_above": 48631808
+     },
+     {
+      "seconds": 0.03200808190740645,
+      "ttfr": 0.009520222898572683,
+      "rows_out": 6657,
+      "peak_above": 30109696
+     },
+     {
+      "seconds": 0.03562622796744108,
+      "ttfr": 0.008191720815375447,
+      "rows_out": 6657,
+      "peak_above": 30760960
+     }
+    ],
+    "wall": 0.35131671908311546,
+    "busy_before": 0.012458471790736052,
+    "quiet_wait": 1.0005497389938682,
+    "other_cores": 0.026599934280000147,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03304178989492357,
+      "ttfr": 0.01596779888495803,
+      "rows_out": 6657,
+      "peak_above": 134066176
+     },
+     {
+      "seconds": 0.02533167600631714,
+      "ttfr": 0.0160450239200145,
+      "rows_out": 6657,
+      "peak_above": 133013504
+     },
+     {
+      "seconds": 0.02560253581032157,
+      "ttfr": 0.016193412942811847,
+      "rows_out": 6657,
+      "peak_above": 49856512
+     },
+     {
+      "seconds": 0.024581843055784702,
+      "ttfr": 0.015698459930717945,
+      "rows_out": 6657,
+      "peak_above": 16510976
+     },
+     {
+      "seconds": 0.02417624997906387,
+      "ttfr": 0.01752921915613115,
+      "rows_out": 6657,
+      "peak_above": 7581696
+     }
+    ],
+    "wall": 0.30169555894099176,
+    "busy_before": 0.009151414260236652,
+    "quiet_wait": 1.0005592377856374,
+    "other_cores": 0.23150489784515915,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.0354925449937582,
+      "ttfr": 0.019593877950683236,
+      "rows_out": 6657,
+      "peak_above": 144281600
+     },
+     {
+      "seconds": 0.027630816912278533,
+      "ttfr": 0.01789511786773801,
+      "rows_out": 6657,
+      "peak_above": 141271040
+     },
+     {
+      "seconds": 0.02542648511007428,
+      "ttfr": 0.017284828005358577,
+      "rows_out": 6657,
+      "peak_above": 42876928
+     },
+     {
+      "seconds": 0.025491397129371762,
+      "ttfr": 0.016995133133605123,
+      "rows_out": 6657,
+      "peak_above": 15818752
+     },
+     {
+      "seconds": 0.024073195178061724,
+      "ttfr": 0.017579794162884355,
+      "rows_out": 6657,
+      "peak_above": 11841536
+     }
+    ],
+    "wall": 0.3064575591124594,
+    "busy_before": 0.004987531215701167,
+    "quiet_wait": 1.0004688480403274,
+    "other_cores": 0.0871703039784974,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.hits_filter",
+   "terminal": "stream",
+   "input": {
+    "kind": "parquet",
+    "path": "benchmarks/data/hits_sample.parquet",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "parquet",
+    "path": "target/m0/warmup/hits_sample.parquet",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "interleaved"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "hits_sample",
+    "mode": "interleaved",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.034486180171370506,
+      "ttfr": 0.022421524161472917,
+      "rows_out": 6657,
+      "peak_above": 158081024
+     },
+     {
+      "seconds": 0.027150632115080953,
+      "ttfr": 0.018663133960217237,
+      "rows_out": 6657,
+      "peak_above": 140689408
+     },
+     {
+      "seconds": 0.025931666139513254,
+      "ttfr": 0.01853666710667312,
+      "rows_out": 6657,
+      "peak_above": 23740416
+     },
+     {
+      "seconds": 0.024600940058007836,
+      "ttfr": 0.01914225798100233,
+      "rows_out": 6657,
+      "peak_above": 33890304
+     },
+     {
+      "seconds": 0.025364848086610436,
+      "ttfr": 0.01860990491695702,
+      "rows_out": 6657,
+      "peak_above": 7753728
+     }
+    ],
+    "wall": 0.3066932950168848,
+    "busy_before": 0.0041597336842156786,
+    "quiet_wait": 1.0005679428577423,
+    "other_cores": 0.1692472607585021,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07114299898967147,
+      "ttfr": 0.0024059610441327095,
+      "rows_out": 900071,
+      "peak_above": 2392064
+     },
+     {
+      "seconds": 0.07021898799575865,
+      "ttfr": 0.0020753389690071344,
+      "rows_out": 900071,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 0.07082819612696767,
+      "ttfr": 0.002076632110401988,
+      "rows_out": 900071,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 0.07100641098804772,
+      "ttfr": 0.0020843958482146263,
+      "rows_out": 900071,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.07015724084340036,
+      "ttfr": 0.002073274925351143,
+      "rows_out": 900071,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.5074843449983746,
+    "busy_before": 0.0074812968998100695,
+    "quiet_wait": 1.0002907409798354,
+    "other_cores": 0.10779051452125447,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 1,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.07089885883033276,
+      "ttfr": 0.0024123138282448053,
+      "rows_out": 900071,
+      "peak_above": 2404352
+     },
+     {
+      "seconds": 0.07047214591875672,
+      "ttfr": 0.002018401864916086,
+      "rows_out": 900071,
+      "peak_above": 0
+     },
+     {
+      "seconds": 0.0704393140040338,
+      "ttfr": 0.0021207050886005163,
+      "rows_out": 900071,
+      "peak_above": 20480
+     },
+     {
+      "seconds": 0.0703175850212574,
+      "ttfr": 0.0020886349957436323,
+      "rows_out": 900071,
+      "peak_above": 4096
+     },
+     {
+      "seconds": 0.07070503407157958,
+      "ttfr": 0.0022473831195384264,
+      "rows_out": 900071,
+      "peak_above": 4096
+     }
+    ],
+    "wall": 0.5069071380421519,
+    "busy_before": 0.008319467523393517,
+    "quiet_wait": 1.0006205330137163,
+    "other_cores": 0.07595276897005317,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.03726989310234785,
+      "ttfr": 0.0026886239647865295,
+      "rows_out": 900071,
+      "peak_above": 4825088
+     },
+     {
+      "seconds": 0.03695597196929157,
+      "ttfr": 0.002277991035953164,
+      "rows_out": 900071,
+      "peak_above": 1597440
+     },
+     {
+      "seconds": 0.03711936017498374,
+      "ttfr": 0.002846220973879099,
+      "rows_out": 900071,
+      "peak_above": 2646016
+     },
+     {
+      "seconds": 0.03624751791357994,
+      "ttfr": 0.0023491540923714638,
+      "rows_out": 900071,
+      "peak_above": 1269760
+     },
+     {
+      "seconds": 0.03641935181804001,
+      "ttfr": 0.002314669778570533,
+      "rows_out": 900071,
+      "peak_above": 0
+     }
+    ],
+    "wall": 0.34072306496091187,
+    "busy_before": 0.004995836846182955,
+    "quiet_wait": 1.0004351150710136,
+    "other_cores": 0.01288730245684724,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 2,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06956952507607639,
+      "ttfr": 0.003082617186009884,
+      "rows_out": 900071,
+      "peak_above": 5496832
+     },
+     {
+      "seconds": 0.06833108211867511,
+      "ttfr": 0.002768445061519742,
+      "rows_out": 900071,
+      "peak_above": 2711552
+     },
+     {
+      "seconds": 0.06822162587195635,
+      "ttfr": 0.0026168099138885736,
+      "rows_out": 900071,
+      "peak_above": 3366912
+     },
+     {
+      "seconds": 0.06791176204569638,
+      "ttfr": 0.0024798009544610977,
+      "rows_out": 900071,
+      "peak_above": 2453504
+     },
+     {
+      "seconds": 0.06786455283872783,
+      "ttfr": 0.0027343910187482834,
+      "rows_out": 900071,
+      "peak_above": 2248704
+     }
+    ],
+    "wall": 0.49730637297034264,
+    "busy_before": 0.012468827961836246,
+    "quiet_wait": 1.0005572438240051,
+    "other_cores": 0.023249247816433685,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.019591443007811904,
+      "ttfr": 0.002643479034304619,
+      "rows_out": 900071,
+      "peak_above": 7507968
+     },
+     {
+      "seconds": 0.0198697280138731,
+      "ttfr": 0.0027060869615525007,
+      "rows_out": 900071,
+      "peak_above": 2613248
+     },
+     {
+      "seconds": 0.019598506158217788,
+      "ttfr": 0.0024769550655037165,
+      "rows_out": 900071,
+      "peak_above": 2764800
+     },
+     {
+      "seconds": 0.023306851973757148,
+      "ttfr": 0.0026265268679708242,
+      "rows_out": 900071,
+      "peak_above": 3682304
+     },
+     {
+      "seconds": 0.020158332074061036,
+      "ttfr": 0.0023731309920549393,
+      "rows_out": 900071,
+      "peak_above": 2408448
+     }
+    ],
+    "wall": 0.257794284960255,
+    "busy_before": 0.005828476294698251,
+    "quiet_wait": 1.0005611618980765,
+    "other_cores": 0.023976477536656413,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 4,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.06264592194929719,
+      "ttfr": 0.003376288805156946,
+      "rows_out": 900071,
+      "peak_above": 11960320
+     },
+     {
+      "seconds": 0.0635223239660263,
+      "ttfr": 0.002739951014518738,
+      "rows_out": 900071,
+      "peak_above": 6500352
+     },
+     {
+      "seconds": 0.061495165107771754,
+      "ttfr": 0.0029926360584795475,
+      "rows_out": 900071,
+      "peak_above": 4333568
+     },
+     {
+      "seconds": 0.060905905906111,
+      "ttfr": 0.002581282053142786,
+      "rows_out": 900071,
+      "peak_above": 2367488
+     },
+     {
+      "seconds": 0.061473415000364184,
+      "ttfr": 0.002471314975991845,
+      "rows_out": 900071,
+      "peak_above": 4366336
+     }
+    ],
+    "wall": 0.48330292594619095,
+    "busy_before": 0.006644518124402103,
+    "quiet_wait": 1.0002643319312483,
+    "other_cores": 0.07025200696875607,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "off"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "off",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.01692522084340453,
+      "ttfr": 0.0037989059928804636,
+      "rows_out": 900071,
+      "peak_above": 23953408
+     },
+     {
+      "seconds": 0.01414099708199501,
+      "ttfr": 0.0037502350751310587,
+      "rows_out": 900071,
+      "peak_above": 13623296
+     },
+     {
+      "seconds": 0.015023187967017293,
+      "ttfr": 0.003759040031582117,
+      "rows_out": 900071,
+      "peak_above": 10989568
+     },
+     {
+      "seconds": 0.015598101075738668,
+      "ttfr": 0.0036171930842101574,
+      "rows_out": 900071,
+      "peak_above": 10235904
+     },
+     {
+      "seconds": 0.015031313057988882,
+      "ttfr": 0.003784497966989875,
+      "rows_out": 900071,
+      "peak_above": 8282112
+     }
+    ],
+    "wall": 0.2335298489779234,
+    "busy_before": 0.004159733839177837,
+    "quiet_wait": 1.0005834531039,
+    "other_cores": 0.1969940902648013,
+    "attempt": 1
+   }
+  },
+  {
+   "measurement": "m3",
+   "pipeline": "m3.csv_chain",
+   "terminal": "stream",
+   "input": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_1000000.csv",
+    "rows": 1000000
+   },
+   "warmup": {
+    "kind": "csv",
+    "path": "target/m0/bench_core/data_10000.csv",
+    "rows": 10000
+   },
+   "partitions": 12,
+   "flags": {
+    "order": "concat"
+   },
+   "repeat": 5,
+   "labels": {
+    "input_name": "bench_core_csv_1m",
+    "mode": "concat",
+    "slow_ms": 0
+   },
+   "result": {
+    "aborted": false,
+    "error": null,
+    "runs": [
+     {
+      "seconds": 0.040719731943681836,
+      "ttfr": 0.0052653581369668245,
+      "rows_out": 900071,
+      "peak_above": 35360768
+     },
+     {
+      "seconds": 0.040745219914242625,
+      "ttfr": 0.004972816910594702,
+      "rows_out": 900071,
+      "peak_above": 25542656
+     },
+     {
+      "seconds": 0.04052791022695601,
+      "ttfr": 0.004364480031654239,
+      "rows_out": 900071,
+      "peak_above": 20283392
+     },
+     {
+      "seconds": 0.04139250889420509,
+      "ttfr": 0.005141634959727526,
+      "rows_out": 900071,
+      "peak_above": 21901312
+     },
+     {
+      "seconds": 0.04016744182445109,
+      "ttfr": 0.0038513748440891504,
+      "rows_out": 900071,
+      "peak_above": 21962752
+     }
+    ],
+    "wall": 0.35858116298913956,
+    "busy_before": 0.0066611158972716515,
+    "quiet_wait": 1.0002789800055325,
+    "other_cores": 0.2391257750267318,
+    "attempt": 1
+   }
+  }
+ ]
+}

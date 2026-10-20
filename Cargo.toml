@@ -39,6 +39,15 @@ tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 # columns. Already in the tree through arrow; the version follows it.
 chrono = { version = "0.4.45", default-features = false }
 
+# The m0 prototypes' query planner (DataFusion's planner traits are async).
+# Already in the tree through DataFusion; the version follows it.
+async-trait = { version = "0.1.92", optional = true }
+
+[features]
+# Prototypes that price the v0.5 contract's costly commitments (#251).
+# Only measurement builds enable it; see benchmarks/m0/README.md.
+m0 = ["dep:async-trait", "tokio/sync", "tokio/time"]
+
 # No profile may set `panic = "abort"`: `transpiler::resolve` catches a panic
 # in DataFusion's type coercion (#242) and reads it as "no common type".
 [profile.release]

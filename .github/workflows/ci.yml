@@ -33,6 +33,14 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+      # The #251 measurement prototypes (benchmarks/m0) compile only with the
+      # m0 feature, which no other step enables. The feature adds no
+      # dependency features, so this rebuilds only this crate.
+      - name: Run clippy and Rust tests on the m0 prototypes
+        run: |
+          cargo clippy --all-targets --features m0 -- -D warnings
+          cargo test --features m0 --lib m0::
+
       - name: Set up Python 3.13
         uses: actions/setup-python@v7
         with:
