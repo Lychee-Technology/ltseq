@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use tempfile::NamedTempFile;
 
 use crate::arrow_ffi::{
@@ -147,6 +147,44 @@ pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError
     output.commit(&path)
 }
 
+/// Refuse, before anything is written, a column Parquet cannot store: a
+/// `struct` without fields, which the parquet crate rejects only once the
+/// destination is open, and a `fixed_size_binary(0)`, on which it panics
+/// (#259). Both are refused at any depth of nesting.
+fn check_parquet_types(schema: &Schema) -> Result<(), LtseqError> {
+    for field in schema.fields() {
+        if let Some(reason) = unwritable_in_parquet(field.data_type()) {
+            return Err(LtseqError::TypeMismatch(format!(
+                "write_parquet cannot write column '{}' ({}): Parquet cannot store {}",
+                field.name(),
+                field.data_type(),
+                reason
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What makes `data_type`, or a type nested in it, unwritable to Parquet.
+fn unwritable_in_parquet(data_type: &DataType) -> Option<&'static str> {
+    match data_type {
+        DataType::FixedSizeBinary(0) => Some("a fixed_size_binary of width 0"),
+        DataType::Struct(fields) if fields.is_empty() => Some("a struct without fields"),
+        DataType::Struct(fields) => fields
+            .iter()
+            .find_map(|field| unwritable_in_parquet(field.data_type())),
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => unwritable_in_parquet(field.data_type()),
+        DataType::Dictionary(_, values) => unwritable_in_parquet(values),
+        DataType::RunEndEncoded(_, values) => unwritable_in_parquet(values.data_type()),
+        _ => None,
+    }
+}
+
 /// Write table data to a Parquet file using Arrow's native Parquet writer.
 ///
 /// Batches are streamed from DataFusion and written incrementally, avoiding
@@ -177,6 +215,7 @@ pub fn write_parquet_impl(
         let df_schema = df_clone.schema();
         let arrow_fields: Vec<_> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
         let schema = Arc::new(ArrowSchema::new(arrow_fields));
+        check_parquet_types(&schema)?;
 
         let comp = match compression.as_deref() {
             Some("snappy") => Compression::SNAPPY,

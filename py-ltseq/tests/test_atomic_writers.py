@@ -8,6 +8,11 @@ or a Parquet table that streams from the very file it replaces. Both now
 write to a temporary file in the same directory and rename it over `path`
 only after success.
 
+`write_parquet` also panicked on `fixed_size_binary(0)` inside the
+`parquet` crate, and a `PanicException` is not an `Exception`. It now
+refuses that type, and a `struct` without fields, at any depth, with
+`TypeError` before anything is written.
+
 Every failure case checks the destination's bytes and the directory's
 listing, so a temporary file left behind fails the test too.
 """
@@ -72,6 +77,19 @@ def divide_by_zero_on_last_row() -> LTSeq:
 # (writer, table, exception, message). Where the class is `Exception`, the
 # writers disagree on it (#266 settles classes); it still excludes a panic.
 FAILURES = {
+    # The types refused at the call.
+    "parquet struct<>": (
+        "write_parquet",
+        lambda: table(x=pa.array([{}], pa.struct([]))),
+        TypeError,
+        "Parquet cannot store",
+    ),
+    "parquet fixed_size_binary(0)": (
+        "write_parquet",
+        lambda: table(x=pa.array([b""], pa.binary(0))),
+        TypeError,
+        "Parquet cannot store",
+    ),
     # The CSV writer's own error, raised after the header was written.
     "csv list<int64>": (
         "write_csv",
@@ -119,6 +137,48 @@ def test_panic_during_write_keeps_existing_file(tmp_path):
     with pytest.raises(BaseException):
         t.write_parquet(str(path))
     assert_failed_cleanly(path, listing)
+
+
+REFUSED = {
+    "fixed_size_binary of width 0": (pa.binary(0), b""),
+    "struct without fields": (pa.struct([]), {}),
+}
+
+# Each place a table can hold a refused type, built from (type, value).
+CONTAINERS = {
+    "top level": lambda t, v: pa.array([v], t),
+    "0 rows": lambda t, v: pa.array([], t),
+    "list": lambda t, v: pa.array([[v]], pa.list_(t)),
+    "large_list": lambda t, v: pa.array([[v]], pa.large_list(t)),
+    "fixed_size_list": lambda t, v: pa.array([[v]], pa.list_(t, 1)),
+    "list_view": lambda t, v: pa.ListViewArray.from_arrays([0], [1], pa.array([v], t)),
+    "struct field": lambda t, v: pa.array(
+        [{"a": 1, "b": v}], pa.struct([("a", pa.int64()), ("b", t)])
+    ),
+    "map value": lambda t, v: pa.array([[("k", v)]], pa.map_(pa.string(), t)),
+    "list of struct": lambda t, v: pa.array([[{"b": v}]], pa.list_(pa.struct([("b", t)]))),
+    "dictionary values": lambda t, v: pa.array([v], t).dictionary_encode(),
+    "run-end values": lambda t, v: pa.RunEndEncodedArray.from_arrays([1], pa.array([v], t)),
+}
+
+
+@pytest.mark.parametrize(
+    ("kind", "where"),
+    [
+        (kind, where)
+        for kind in REFUSED
+        for where in CONTAINERS
+        # pyarrow does not dictionary-encode a struct.
+        if (kind, where) != ("struct without fields", "dictionary values")
+    ],
+)
+def test_parquet_refuses_unstorable_types(tmp_path, kind, where):
+    column = CONTAINERS[where](*REFUSED[kind])
+    path = tmp_path / "new.parquet"
+    t = table(ok=pa.array([1] * len(column), pa.int64()), bad=column)
+    with pytest.raises(TypeError, match=rf"column 'bad' .*Parquet cannot store a {kind}"):
+        t.write_parquet(str(path))
+    assert os.listdir(tmp_path) == []
 
 
 @pytest.mark.parametrize("writer", WRITERS)

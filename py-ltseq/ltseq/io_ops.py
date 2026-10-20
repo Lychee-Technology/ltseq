@@ -316,6 +316,9 @@ class IOMixin:
         Raises:
             RuntimeError: If write fails
             ValueError: If compression is not recognized
+            TypeError: If a column is or contains a ``struct`` without fields
+                or a ``fixed_size_binary`` of width 0, which Parquet cannot
+                store; raised before anything is written
 
         Example:
             >>> t.write_parquet("output.parquet")
