@@ -65,7 +65,7 @@ def render(nb_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report stale pages instead of writing them")
     args = parser.parse_args()
 
