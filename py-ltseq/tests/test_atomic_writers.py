@@ -301,6 +301,21 @@ def test_existing_file_keeps_its_mode(tmp_path, writer):
 
 @unix_only
 @pytest.mark.parametrize("writer", WRITERS)
+def test_existing_file_keeps_its_group(tmp_path, writer):
+    """The group bits keep applying to the group they were set for."""
+    others = [g for g in os.getgroups() if g != os.getegid()]
+    if not others:
+        pytest.skip("needs a supplementary group")
+    path = existing(tmp_path)
+    os.chown(path, -1, others[0])
+    path.chmod(0o640)
+    getattr(ints(), writer)(str(path))
+    st = path.stat()
+    assert (st.st_gid, stat.S_IMODE(st.st_mode)) == (others[0], 0o640)
+
+
+@unix_only
+@pytest.mark.parametrize("writer", WRITERS)
 def test_new_file_mode_follows_umask(tmp_path, writer):
     umask = os.umask(0o027)
     try:

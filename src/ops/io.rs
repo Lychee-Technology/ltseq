@@ -76,6 +76,46 @@ fn destination(path: &str) -> io::Result<PathBuf> {
     Ok(dest)
 }
 
+/// An empty temporary file in `dir` that will replace an existing file
+/// (`replaces`) or create a new one.
+///
+/// It never grants access the file at the destination will not: a
+/// descriptor opened on it keeps its access after a chmod. A new file gets
+/// `File::create`'s mode (0o666 less the umask) from the start. A
+/// replacement starts owner-only, tempfile's default, until [`keep_access`]
+/// gives it the old file's access.
+fn temporary(dir: &Path, replaces: bool) -> io::Result<NamedTempFile> {
+    // Hidden, short whatever the destination's name, and without its
+    // extension, so that a reader listing the directory for `.csv` or
+    // `.parquet` files skips it.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".ltseq-").suffix(".tmp");
+    #[cfg(unix)]
+    if !replaces {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    #[cfg(not(unix))]
+    let _ = replaces;
+    builder.tempfile_in(dir)
+}
+
+/// Give `file`, an owner-only temporary file, the `gid` and then the `mode`
+/// of the file it replaces, as truncating that file in place kept them.
+///
+/// A writer who cannot give it that group, one they are not a member of,
+/// leaves it owner-only: the group bits would otherwise grant the writer's
+/// own group what they granted the old file's.
+#[cfg(unix)]
+fn keep_access(file: &File, mode: u32, gid: u32) -> io::Result<()> {
+    use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
+    let mut mode = mode & 0o7777;
+    if file.metadata()?.gid() != gid && fchown(file, None, Some(gid)).is_err() {
+        mode &= 0o700;
+    }
+    file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
 impl Output {
     fn create(path: &str) -> Result<Self, LtseqError> {
         let fail = |e: io::Error| LtseqError::io(&format!("Failed to create file '{}'", path), e);
@@ -102,24 +142,11 @@ impl Output {
         let dir = dest
             .parent()
             .ok_or_else(|| fail(io::ErrorKind::IsADirectory.into()))?;
-        // Hidden, short whatever the destination's name, and without its
-        // extension, so that a reader listing the directory for `.csv` or
-        // `.parquet` files skips it.
-        let mut builder = tempfile::Builder::new();
-        builder.prefix(".ltseq-").suffix(".tmp");
-        // A new file gets `File::create`'s mode (0o666 less the umask)
-        // instead of tempfile's 0o600.
+        let tmp = temporary(dir, existing.is_some()).map_err(fail)?;
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            builder.permissions(fs::Permissions::from_mode(0o666));
-        }
-        let tmp = builder.tempfile_in(dir).map_err(fail)?;
-        if let Some(meta) = existing {
-            // An existing file keeps its mode, as truncating it in place did.
-            tmp.as_file()
-                .set_permissions(meta.permissions())
-                .map_err(fail)?;
+        if let Some(meta) = &existing {
+            use std::os::unix::fs::MetadataExt;
+            keep_access(tmp.as_file(), meta.mode(), meta.gid()).map_err(fail)?;
         }
         Ok(Output::Replace { tmp, dest })
     }
@@ -378,4 +405,48 @@ pub fn arrow_stream_impl(
         .block_on((**df).clone().execute_stream())
         .map_err(|e| LtseqError::with_context("Failed to execute plan", e))?;
     Ok(Box::new(DataFrameBatchReader::new(stream)))
+}
+
+// The Python tests check what a write leaves behind. These check what they
+// cannot see: the access a temporary file has until the next syscall, and a
+// group the writer is not a member of, which only root can set up.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    /// No other user can open a replacement's temporary file before it has
+    /// the old file's access: whatever they opened would keep its access,
+    /// and read what the writer writes next.
+    #[test]
+    fn replacement_starts_owner_only() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let tmp = temporary(dir.path(), true).expect("temporary file");
+        let mode = tmp.as_file().metadata().expect("metadata").mode();
+        assert_eq!(mode & 0o077, 0, "created with mode {:o}", mode & 0o777);
+    }
+
+    /// The group bits of a file whose group the writer cannot set would
+    /// apply to the writer's own group instead.
+    #[test]
+    fn group_that_cannot_be_kept_leaves_owner_only() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let tmp = temporary(dir.path(), true).expect("temporary file");
+        let file = tmp.as_file();
+        let before = file.metadata().expect("metadata");
+        if before.uid() == 0 {
+            eprintln!("skipped: root can give a file any group");
+            return;
+        }
+        // A group no account is a member of.
+        keep_access(file, 0o664, 0x7fff_fff0).expect("keep_access");
+        let after = file.metadata().expect("metadata");
+        let mode = after.mode() & 0o7777;
+        assert_eq!(
+            (after.gid(), mode),
+            (before.gid(), 0o600),
+            "mode {:o}",
+            mode
+        );
+    }
 }
