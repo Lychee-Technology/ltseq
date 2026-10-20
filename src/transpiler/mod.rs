@@ -9,6 +9,7 @@
 //! - `resolve`: expression types, from DataFusion's own coercion
 //! - `literal_policy`, `literals`, `exact`: how a literal is read next to the
 //!   value it meets, and exact comparison and value placement
+//! - `opaque_cast`: `cast()`, kept from DataFusion's rewrites unless lossless
 //! - `window_native`: Native DataFusion window expression builder (primary path)
 //!
 //! Constant expressions (`1 + 2 + r.col`, `x & True`) are left to DataFusion's
@@ -20,6 +21,7 @@ mod float_lists;
 pub(crate) mod floor_div;
 mod literal_policy;
 mod literals;
+mod opaque_cast;
 pub(crate) mod probe;
 mod resolve;
 pub(crate) mod window_native;
@@ -484,10 +486,7 @@ fn parse_call_type_ops(
                 "date32" | "date" => DataType::Date32,
                 _ => return Err(format!("Unsupported cast target type: {}", target_type)),
             };
-            Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(on_expr),
-                arrow_type,
-            )))
+            Ok(opaque_cast::cast(on_expr, arrow_type, rx))
         }
         "is_in" => {
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
