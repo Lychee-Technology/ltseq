@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import threading
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -217,6 +218,43 @@ def test_symlink_target_is_replaced(tmp_path, writer):
     assert link.is_symlink()
     assert read_back(writer, target) == [1, 2, 3]
     assert sorted(os.listdir(tmp_path)) == ["link", "target"]
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_relative_path_is_resolved_at_the_call(tmp_path, monkeypatch, writer):
+    """A relative `path` names a file in the working directory of the call.
+
+    The writers run with the GIL released, so another thread can change the
+    working directory before a write finishes. The file still goes where
+    `path` pointed at the call, as when `File::create` opened it there.
+    """
+    start, moved = tmp_path / "start", tmp_path / "moved"
+    start.mkdir()
+    moved.mkdir()
+    monkeypatch.chdir(start)
+    # Enough rows that the write is still running when the directory changes.
+    t = table(x=pa.array(range(2_000_000), pa.int64()))
+    failures = []
+
+    def write():
+        try:
+            getattr(t, writer)("out")
+        except BaseException as e:
+            failures.append(e)
+
+    thread = threading.Thread(target=write)
+    thread.start()
+    # The writer's first file in `start` shows the call has begun.
+    while not os.listdir(start) and thread.is_alive():
+        pass
+    os.chdir(moved)
+    changed_during_write = thread.is_alive()
+    thread.join()
+    if failures:
+        raise failures[0]
+    assert changed_during_write, "the write ended before the directory changed"
+    assert os.listdir(moved) == []
+    assert os.listdir(start) == ["out"]
 
 
 @unix_only

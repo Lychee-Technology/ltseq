@@ -10,6 +10,7 @@
 //! `gil::detached`): they take only plain Rust values and report failures as
 //! `LtseqError`.
 
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -44,13 +45,30 @@ enum Output {
     InPlace(File),
 }
 
+/// The file a write to `path` replaces or creates, resolved at the call.
+///
+/// It is absolute: the rename comes after the plan has run with the GIL
+/// released, and by then another thread may have changed the working
+/// directory. A symlink is followed, as `File::create` followed it, so that
+/// the rename replaces its target rather than the link.
+fn destination(path: &str) -> io::Result<PathBuf> {
+    if let Ok(dest) = fs::canonicalize(path) {
+        return Ok(dest);
+    }
+    let path = Path::new(path);
+    let dest = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    Ok(dest)
+}
+
 impl Output {
     fn create(path: &str) -> Result<Self, LtseqError> {
         let fail = |e: io::Error| LtseqError::io(&format!("Failed to create file '{}'", path), e);
 
-        // Follow a symlink, as `File::create` did, so that the rename replaces
-        // its target rather than the link.
-        let dest = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let dest = destination(path).map_err(fail)?;
         let existing = match fs::metadata(&dest) {
             Ok(meta) => Some(meta),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -68,10 +86,10 @@ impl Output {
             OpenOptions::new().write(true).open(&dest).map_err(fail)?;
         }
 
-        let dir = match dest.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir,
-            _ => Path::new("."),
-        };
+        // Only a root has no parent, and it is a directory.
+        let dir = dest
+            .parent()
+            .ok_or_else(|| fail(io::ErrorKind::IsADirectory.into()))?;
         // Hidden, short whatever the destination's name, and without its
         // extension, so that a reader listing the directory for `.csv` or
         // `.parquet` files skips it.
