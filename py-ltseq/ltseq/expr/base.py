@@ -836,7 +836,11 @@ class Expr(ABC):
         Cast the expression to a different data type.
 
         Supported types: "int32", "int64", "float32", "float64",
-        "utf8", "string", "bool", "date32", "timestamp"
+        "utf8", "string", "bool", "date32"
+
+        The cast is computed wherever it is used, comparisons included: a
+        value the target type cannot hold raises when the query runs, in a
+        filter as in a derived column.
 
         Args:
             dtype: Target data type name
