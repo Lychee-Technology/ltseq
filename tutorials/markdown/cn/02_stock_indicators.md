@@ -71,10 +71,8 @@ stock.head(3).show();
 第二次 `derive` 里。
 
 ```python
-from ltseq import LTSeq
-
 indicators = (
-    LTSeq.read_csv("stock.csv")
+    stock
     .sort("date")
     .derive(lambda r: {
         "prev_close": r.close.shift(1),
@@ -166,17 +164,17 @@ labeled.filter(lambda r: r.vol_20 > 0.018).select(
 # 三种常见接法（任选其一）：
 #
 # 1) 本地 CSV：行情软件 / akshare / yfinance 导出后重命名列
-#    t = LTSeq.read_csv("my_stock.csv")               # 列: date, close
+#    stock = LTSeq.read_csv("my_stock.csv")           # 列: date, close
 #
 # 2) Parquet（大体量 + 保留日期类型）：
-#    t = LTSeq.read_parquet("my_stock.parquet")
+#    stock = LTSeq.read_parquet("my_stock.parquet")
 #
 # 3) pandas / polars / duckdb 现有管道直接桥接（Arrow 来源零拷贝；pandas 先转成 Arrow）：
-#    t = LTSeq.from_pandas(df)
-#    t = LTSeq.from_arrow(pa_table)
-#    t = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
+#    stock = LTSeq.from_pandas(df)
+#    stock = LTSeq.from_arrow(pa_table)
+#    stock = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
 #
-# 将示例中的 stock 替换为以上任一数据源。
+# 用其中一种代替生成示例数据的单元格，再重新运行第一步和第二步。
 ```
 
 ## 关键点解析

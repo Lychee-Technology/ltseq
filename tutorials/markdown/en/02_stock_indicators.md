@@ -77,10 +77,8 @@ below explains why). Here `vol_20` is the rolling std of the new `ret`
 column, so it goes in a second `derive`.
 
 ```python
-from ltseq import LTSeq
-
 indicators = (
-    LTSeq.read_csv("stock.csv")
+    stock
     .sort("date")
     .derive(lambda r: {
         "prev_close": r.close.shift(1),
@@ -181,18 +179,18 @@ adds for large inputs:
 # Three common ways (pick one):
 #
 # 1) Local CSV exported from your broker / akshare / yfinance, columns renamed
-#    t = LTSeq.read_csv("my_stock.csv")               # columns: date, close
+#    stock = LTSeq.read_csv("my_stock.csv")           # columns: date, close
 #
 # 2) Parquet (bigger data + native date types):
-#    t = LTSeq.read_parquet("my_stock.parquet")
+#    stock = LTSeq.read_parquet("my_stock.parquet")
 #
 # 3) Bridge from an existing pandas / polars / duckdb pipeline
 #    (Arrow sources are zero-copy; pandas converts to Arrow first):
-#    t = LTSeq.from_pandas(df)
-#    t = LTSeq.from_arrow(pa_table)
-#    t = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
+#    stock = LTSeq.from_pandas(df)
+#    stock = LTSeq.from_arrow(pa_table)
+#    stock = LTSeq.from_arrow(duckdb.sql("SELECT date, close FROM quotes"))
 #
-# Replace `stock` with any of the sources above.
+# Use one of them in place of the sample-data cell, then rerun Steps 1 and 2.
 ```
 
 ## Key takeaways
