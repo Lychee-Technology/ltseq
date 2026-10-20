@@ -107,9 +107,9 @@ t = LTSeq.from_dict({"date": ["D1", "D2", "D3", "D4"], "close": [10.0, 10.8, 10.
 4. **关键点解析** — 易错语义、行为差异、当前限制 / gotchas, differences, limits
 5. **延伸练习** — 换口径、换数据、换算子的进阶路径 / where to go next
 
-> ⚠️ **关于输出块**：代码单元不附执行输出，"预期输出"是手写的 Markdown 块，已对照 `main` 的实际运行核对。随机数据都用固定种子（`random.Random(n)`）生成，重复运行结果一致；唯一的例外是案例 12 的游标批大小，它取决于机器的 CPU 核数。
+> ⚠️ **关于输出块**：代码单元不附执行输出，"预期输出"是手写的 Markdown 块，已对照 `main` 的实际运行核对。随机数据都用固定种子（`random.Random(n)`）生成，重复运行结果一致；唯一的例外是案例 12 的游标批大小：它取决于机器的 CPU 核数，同一台机器上也可能每次运行不同。
 >
-> ⚠️ **About outputs**: code cells ship without execution outputs. The expected outputs are hand-written Markdown blocks, checked against real runs on `main`. Random data comes from fixed seeds (`random.Random(n)`), so reruns give the same numbers. The one exception is the cursor batch sizes in case 12, which depend on the machine's CPU count.
+> ⚠️ **About outputs**: code cells ship without execution outputs. The expected outputs are hand-written Markdown blocks, checked against real runs on `main`. Random data comes from fixed seeds (`random.Random(n)`), so reruns give the same numbers. The one exception is the cursor batch sizes in case 12, which depend on the machine's CPU count and can differ between runs on the same machine.
 
 > **API 版本**：笔记本使用 `main` 上当前的 API，并随 v0.5 的实现同步迁移；CI 每次都会执行全部笔记本，保证它们在 `main` 上能跑。
 >
