@@ -283,6 +283,10 @@ class IOMixin:
         """
         Write the table to a CSV file.
 
+        The rows go to a temporary file in the same directory, which replaces
+        ``path`` only after the whole table is written: if the write fails,
+        a file already at ``path`` is left unchanged.
+
         Args:
             path: Path where the CSV file will be written
 
@@ -297,6 +301,11 @@ class IOMixin:
     def write_parquet(self, path: str, compression: str | None = None) -> None:
         """
         Write the table to a Parquet file.
+
+        The rows go to a temporary file in the same directory, which replaces
+        ``path`` only after the whole table is written: if the write fails,
+        a file already at ``path`` is left unchanged. The table may read
+        ``path`` itself.
 
         Args:
             path: Path where the Parquet file will be written

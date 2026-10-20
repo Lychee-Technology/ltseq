@@ -10,10 +10,14 @@
 //! `gil::detached`): they take only plain Rust values and report failures as
 //! `LtseqError`.
 
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use tempfile::NamedTempFile;
 
 use crate::arrow_ffi::{
     check_requested_schema, collected_reader, BoxedBatchReader, DataFrameBatchReader,
@@ -23,27 +27,113 @@ use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::LTSeqTable;
 
+/// The file a writer fills for `path` (#259).
+///
+/// A regular file, or a path that does not exist yet, is written through a
+/// temporary file in the same directory, which replaces `path` only on
+/// [`Output::commit`]. Dropping an uncommitted `Output`, after an error or
+/// while a writer's panic unwinds, deletes the temporary file, so a failed
+/// write leaves `path` as it was.
+enum Output {
+    Replace {
+        tmp: NamedTempFile,
+        dest: PathBuf,
+    },
+    /// An existing device or FIFO (`/dev/stdout`): it has no contents to keep
+    /// and a rename cannot replace it, so it is written directly.
+    InPlace(File),
+}
+
+impl Output {
+    fn create(path: &str) -> Result<Self, LtseqError> {
+        let fail = |e: io::Error| LtseqError::io(&format!("Failed to create file '{}'", path), e);
+
+        // Follow a symlink, as `File::create` did, so that the rename replaces
+        // its target rather than the link.
+        let dest = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let existing = match fs::metadata(&dest) {
+            Ok(meta) => Some(meta),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(fail(e)),
+        };
+        if let Some(meta) = &existing {
+            if meta.is_dir() {
+                return Err(fail(io::ErrorKind::IsADirectory.into()));
+            }
+            if !meta.is_file() {
+                return File::create(&dest).map(Output::InPlace).map_err(fail);
+            }
+            // A rename needs write access to the directory only. Keep the
+            // refusal `File::create` gave for a file the caller cannot write.
+            OpenOptions::new().write(true).open(&dest).map_err(fail)?;
+        }
+
+        let dir = match dest.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        // Hidden, short whatever the destination's name, and without its
+        // extension, so that a reader listing the directory for `.csv` or
+        // `.parquet` files skips it.
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".ltseq-").suffix(".tmp");
+        // A new file gets `File::create`'s mode (0o666 less the umask)
+        // instead of tempfile's 0o600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        let tmp = builder.tempfile_in(dir).map_err(fail)?;
+        if let Some(meta) = existing {
+            // An existing file keeps its mode, as truncating it in place did.
+            tmp.as_file()
+                .set_permissions(meta.permissions())
+                .map_err(fail)?;
+        }
+        Ok(Output::Replace { tmp, dest })
+    }
+
+    fn file(&mut self) -> &mut File {
+        match self {
+            Output::Replace { tmp, .. } => tmp.as_file_mut(),
+            Output::InPlace(file) => file,
+        }
+    }
+
+    /// Make what was written the contents of `path`.
+    fn commit(self, path: &str) -> Result<(), LtseqError> {
+        let Output::Replace { tmp, dest } = self else {
+            return Ok(());
+        };
+        let fail = |e: io::Error| LtseqError::io(&format!("Failed to replace '{}'", path), e);
+        // On disk before the rename, so that a crash cannot leave `path`
+        // naming a file whose data was never written.
+        tmp.as_file().sync_all().map_err(fail)?;
+        tmp.persist(&dest).map_err(|e| fail(e.error))?;
+        Ok(())
+    }
+}
+
 /// Write table data to a CSV file using Arrow's native CSV writer.
+///
+/// The write is atomic (see [`Output`]).
 ///
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     path: Path to the output CSV file
 pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError> {
     let df = table.require_df()?;
+    let mut output = Output::create(&path)?;
 
     RUNTIME.block_on(async {
         use datafusion::arrow::csv::WriterBuilder;
-        use std::fs::File;
 
         let df_clone = (**df).clone();
         let batches = df_clone.collect().await.map_err(LtseqError::collect)?;
 
-        let file = File::create(&path).map_err(|e| {
-            LtseqError::io(&format!("Failed to create file '{}'", path), e)
-        })?;
-
         let builder = WriterBuilder::new().with_header(true);
-        let mut writer = builder.build(file);
+        let mut writer = builder.build(output.file());
 
         for batch in &batches {
             writer.write(batch).map_err(|e| {
@@ -51,14 +141,17 @@ pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError
             })?;
         }
 
-        Ok(())
-    })
+        Ok::<_, LtseqError>(())
+    })?;
+
+    output.commit(&path)
 }
 
 /// Write table data to a Parquet file using Arrow's native Parquet writer.
 ///
 /// Batches are streamed from DataFusion and written incrementally, avoiding
-/// full in-memory materialization before the first write.
+/// full in-memory materialization before the first write. The write is
+/// atomic (see [`Output`]), so a plan may read the file it replaces.
 ///
 /// Args:
 ///     table: Reference to LTSeqTable
@@ -77,8 +170,6 @@ pub fn write_parquet_impl(
         use parquet::arrow::ArrowWriter;
         use parquet::basic::Compression;
         use parquet::file::properties::WriterProperties;
-        use std::fs::File;
-        use std::sync::Arc;
 
         let df_clone = (**df).clone();
 
@@ -105,19 +196,16 @@ pub fn write_parquet_impl(
             .set_compression(comp)
             .build();
 
+        let mut output = Output::create(&path)?;
+
         // Stream batches from DataFusion directly into the Parquet writer
         let mut stream = df_clone
             .execute_stream()
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
 
-        let file = File::create(&path).map_err(|e| {
-            LtseqError::io(&format!("Failed to create file '{}'", path), e)
-        })?;
-
-        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| {
-            LtseqError::Io(format!("Failed to create Parquet writer: {}", e))
-        })?;
+        let mut writer = ArrowWriter::try_new(output.file(), schema, Some(props))
+            .map_err(|e| LtseqError::Io(format!("Failed to create Parquet writer: {}", e)))?;
 
         let mut wrote_any = false;
         while let Some(batch_result) = stream.next().await {
@@ -133,8 +221,6 @@ pub fn write_parquet_impl(
         }
 
         if !wrote_any {
-            drop(writer);
-            let _ = std::fs::remove_file(&path);
             return Err(LtseqError::Validation("No data to write".into()));
         }
 
@@ -142,7 +228,7 @@ pub fn write_parquet_impl(
             LtseqError::Io(format!("Failed to close Parquet writer: {}", e))
         })?;
 
-        Ok(())
+        output.commit(&path)
     })
 }
 

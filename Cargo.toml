@@ -39,6 +39,10 @@ tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 # columns. Already in the tree through arrow; the version follows it.
 chrono = { version = "0.4.45", default-features = false }
 
+# Writers' temporary files, renamed over the destination on success (#259).
+# Already in the tree through DataFusion; the version follows it.
+tempfile = "3.27.0"
+
 # The m0 prototypes' query planner (DataFusion's planner traits are async).
 # Already in the tree through DataFusion; the version follows it.
 async-trait = { version = "0.1.92", optional = true }
