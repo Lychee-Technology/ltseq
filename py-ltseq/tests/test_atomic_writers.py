@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
 import threading
 
@@ -43,13 +44,17 @@ def ints() -> LTSeq:
     return table(x=pa.array([1, 2, 3], pa.int64()))
 
 
-def read_back(writer: str, path) -> list[int]:
-    """The `x` column of a written file."""
+def parse(writer: str, data: bytes) -> list[int]:
+    """The `x` column of what a writer wrote."""
     if writer == "write_parquet":
-        return pq.read_table(path).column("x").to_pylist()
-    lines = path.read_text().splitlines()
+        return pq.read_table(pa.BufferReader(data)).column("x").to_pylist()
+    lines = data.decode().splitlines()
     assert lines[0] == "x"
     return [int(v) for v in lines[1:]]
+
+
+def read_back(writer: str, path) -> list[int]:
+    return parse(writer, path.read_bytes())
 
 
 def existing(tmp_path, name="out"):
@@ -359,3 +364,51 @@ def test_missing_directory_is_refused(tmp_path, writer):
 def test_device_is_written_in_place(writer):
     getattr(ints(), writer)("/dev/null")
     assert stat.S_ISCHR(os.stat("/dev/null").st_mode)
+
+
+proc_fd = pytest.mark.skipif(
+    not os.path.isdir("/proc/self/fd"), reason="Linux /proc descriptor links"
+)
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/stdout"), reason="needs /dev/stdout")
+@pytest.mark.parametrize("writer", WRITERS)
+@pytest.mark.parametrize(
+    "path", ["/dev/stdout", pytest.param("/proc/self/fd/1", marks=proc_fd)]
+)
+def test_piped_stdout_is_written_in_place(writer, path):
+    """Standard output that is a pipe, as in a shell pipeline.
+
+    On Linux `/dev/stdout` links to `/proc/self/fd/1`, whose link text is
+    then `pipe:[inode]`, not a path. The write goes to the pipe.
+    """
+    code = (
+        "import pyarrow as pa\n"
+        "from ltseq import LTSeq\n"
+        "t = LTSeq.from_arrow(pa.table({'x': pa.array([1, 2, 3], pa.int64())}))\n"
+        f"t.{writer}({path!r})\n"
+    )
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True)
+    assert run.returncode == 0, run.stderr.decode()
+    assert parse(writer, run.stdout) == [1, 2, 3]
+
+
+@proc_fd
+@pytest.mark.parametrize("writer", WRITERS)
+def test_descriptor_link_to_deleted_file_is_written_in_place(tmp_path, writer):
+    """`/proc/self/fd/N` of a file deleted since it was opened.
+
+    Its link text, `.../out (deleted)`, names no file, so nothing can be
+    renamed over it. The write goes to the open file, as `File::create`'s
+    did, and nothing is created in the directory.
+    """
+    path = existing(tmp_path)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        path.unlink()
+        getattr(ints(), writer)(f"/proc/self/fd/{fd}")
+        written = os.pread(fd, os.fstat(fd).st_size, 0)
+    finally:
+        os.close(fd)
+    assert parse(writer, written) == [1, 2, 3]
+    assert os.listdir(tmp_path) == []

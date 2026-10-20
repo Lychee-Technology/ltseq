@@ -40,21 +40,24 @@ enum Output {
         tmp: NamedTempFile,
         dest: PathBuf,
     },
-    /// An existing device or FIFO (`/dev/stdout`): it has no contents to keep
-    /// and a rename cannot replace it, so it is written directly.
+    /// What a rename cannot replace, written directly: a device or FIFO
+    /// (`/dev/null`, `/dev/stdout` on a terminal or a pipe), which has no
+    /// contents to keep, or a file reached through a /proc descriptor link
+    /// whose text does not name it, such as a deleted file's.
     InPlace(File),
 }
 
-/// The file a write to `path` replaces or creates, resolved at the call.
+/// The absolute path a write to `path` creates when nothing exists there.
 ///
 /// It is absolute: the rename comes after the plan has run with the GIL
 /// released, and by then another thread may have changed the working
-/// directory. Symlinks are followed as `File::create` followed them, so the
-/// rename replaces a link's target rather than the link, and creates the
-/// target of a link that points to nothing yet.
-fn destination(path: &str) -> io::Result<PathBuf> {
-    if let Ok(dest) = fs::canonicalize(path) {
-        return Ok(dest);
+/// directory. Links are followed by hand, as `File::create` followed them,
+/// so that the rename creates the target of a link that points to nothing
+/// yet; `canonicalize` fails on such a link.
+fn new_file(path: &str) -> io::Result<PathBuf> {
+    // Joined to the working directory, "" would name that directory.
+    if path.is_empty() {
+        return Err(io::ErrorKind::NotFound.into());
     }
     let path = Path::new(path);
     let mut dest = if path.is_absolute() {
@@ -62,9 +65,9 @@ fn destination(path: &str) -> io::Result<PathBuf> {
     } else {
         env::current_dir()?.join(path)
     };
-    // Nothing exists at the end of the chain, or the chain is a cycle. 40 is
-    // Linux's limit; after a cycle `dest` is still a link, and reading its
-    // metadata fails with ELOOP, as `File::create` did.
+    // The kernel found nothing at the end of the chain, so the chain is
+    // within its limit of 40 links; the bound only matters if the links
+    // change meanwhile.
     for _ in 0..40 {
         let Ok(target) = fs::read_link(&dest) else {
             break;
@@ -74,6 +77,18 @@ fn destination(path: &str) -> io::Result<PathBuf> {
         dest.push(target);
     }
     Ok(dest)
+}
+
+/// Whether `path` names the file `meta` describes.
+#[cfg(unix)]
+fn same_file(meta: &fs::Metadata, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).is_ok_and(|other| (other.dev(), other.ino()) == (meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn same_file(_: &fs::Metadata, _: &Path) -> bool {
+    true
 }
 
 /// An empty temporary file in `dir` that will replace an existing file
@@ -119,20 +134,25 @@ fn keep_access(file: &File, mode: u32, gid: u32) -> io::Result<()> {
 impl Output {
     fn create(path: &str) -> Result<Self, LtseqError> {
         let fail = |e: io::Error| LtseqError::io(&format!("Failed to create file '{}'", path), e);
+        let in_place = || File::create(path).map(Output::InPlace).map_err(fail);
 
-        let dest = destination(path).map_err(fail)?;
-        let existing = match fs::metadata(&dest) {
-            Ok(meta) => Some(meta),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        // What `path` opens, as the kernel resolves it, before any link's
+        // text is read. A /proc descriptor link (`/dev/stdout` leads to one)
+        // resolves to the file it holds open, but its text can be `pipe:[…]`
+        // or `/x/out (deleted)`, which name no file. So an existing file is
+        // replaced at the path `canonicalize` gives only if that path is the
+        // same file.
+        let (dest, existing) = match fs::metadata(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (new_file(path).map_err(fail)?, None),
             Err(e) => return Err(fail(e)),
+            Ok(meta) if meta.is_dir() => return Err(fail(io::ErrorKind::IsADirectory.into())),
+            Ok(meta) if !meta.is_file() => return in_place(),
+            Ok(meta) => match fs::canonicalize(path) {
+                Ok(dest) if same_file(&meta, &dest) => (dest, Some(meta)),
+                _ => return in_place(),
+            },
         };
-        if let Some(meta) = &existing {
-            if meta.is_dir() {
-                return Err(fail(io::ErrorKind::IsADirectory.into()));
-            }
-            if !meta.is_file() {
-                return File::create(&dest).map(Output::InPlace).map_err(fail);
-            }
+        if existing.is_some() {
             // A rename needs write access to the directory only. Keep the
             // refusal `File::create` gave for a file the caller cannot write.
             OpenOptions::new().write(true).open(&dest).map_err(fail)?;
