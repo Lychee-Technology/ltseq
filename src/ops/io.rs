@@ -49,18 +49,30 @@ enum Output {
 ///
 /// It is absolute: the rename comes after the plan has run with the GIL
 /// released, and by then another thread may have changed the working
-/// directory. A symlink is followed, as `File::create` followed it, so that
-/// the rename replaces its target rather than the link.
+/// directory. Symlinks are followed as `File::create` followed them, so the
+/// rename replaces a link's target rather than the link, and creates the
+/// target of a link that points to nothing yet.
 fn destination(path: &str) -> io::Result<PathBuf> {
     if let Ok(dest) = fs::canonicalize(path) {
         return Ok(dest);
     }
     let path = Path::new(path);
-    let dest = if path.is_absolute() {
+    let mut dest = if path.is_absolute() {
         path.to_path_buf()
     } else {
         env::current_dir()?.join(path)
     };
+    // Nothing exists at the end of the chain, or the chain is a cycle. 40 is
+    // Linux's limit; after a cycle `dest` is still a link, and reading its
+    // metadata fails with ELOOP, as `File::create` did.
+    for _ in 0..40 {
+        let Ok(target) = fs::read_link(&dest) else {
+            break;
+        };
+        // A relative target is relative to the link's directory.
+        dest.pop();
+        dest.push(target);
+    }
     Ok(dest)
 }
 

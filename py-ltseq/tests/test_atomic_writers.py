@@ -220,6 +220,30 @@ def test_symlink_target_is_replaced(tmp_path, writer):
     assert sorted(os.listdir(tmp_path)) == ["link", "target"]
 
 
+@unix_only
+@pytest.mark.parametrize("writer", WRITERS)
+@pytest.mark.parametrize("chain", ["relative", "absolute", "through a second link"])
+def test_dangling_symlink_target_is_created(tmp_path, writer, chain):
+    """A link whose target does not exist yet gets its target written."""
+    (tmp_path / "data").mkdir()
+    target = tmp_path / "data" / "target"
+    link = tmp_path / "link"
+    if chain == "relative":
+        link.symlink_to("data/target")
+    elif chain == "absolute":
+        link.symlink_to(target)
+    else:
+        # Relative to its own directory, not to the first link's.
+        (tmp_path / "data" / "hop").symlink_to("target")
+        link.symlink_to("data/hop")
+    links = sorted(os.listdir(tmp_path / "data"))
+    getattr(ints(), writer)(str(link))
+    assert link.is_symlink()
+    assert read_back(writer, target) == [1, 2, 3]
+    assert sorted(os.listdir(tmp_path)) == ["data", "link"]
+    assert sorted(os.listdir(tmp_path / "data")) == sorted([*links, "target"])
+
+
 @pytest.mark.parametrize("writer", WRITERS)
 def test_relative_path_is_resolved_at_the_call(tmp_path, monkeypatch, writer):
     """A relative `path` names a file in the working directory of the call.
