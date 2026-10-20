@@ -64,6 +64,9 @@ jobs:
       - name: Run tests
         run: uv run pytest py-ltseq/tests/ -v
 
+      - name: Check the tutorial Markdown matches the notebooks
+        run: uv run python tutorials/render_markdown.py --check
+
       - name: Run tutorial notebooks
         run: uv run pytest --nbmake tutorials/ -v
 
