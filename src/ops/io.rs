@@ -115,20 +115,102 @@ fn temporary(dir: &Path, replaces: bool) -> io::Result<NamedTempFile> {
     builder.tempfile_in(dir)
 }
 
-/// Give `file`, an owner-only temporary file, the `gid` and then the `mode`
-/// of the file it replaces, as truncating that file in place kept them.
+/// Who may open the file a write replaces, read from a handle on it.
+#[cfg(unix)]
+struct Access {
+    mode: u32,
+    gid: u32,
+    /// Its POSIX access ACL, in the form the kernel stores it.
+    acl: Option<Vec<u8>>,
+}
+
+#[cfg(unix)]
+impl Access {
+    fn of(file: &File) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok(Access {
+            mode: meta.mode(),
+            gid: meta.gid(),
+            acl: acl::get(file)?,
+        })
+    }
+}
+
+/// Give `file`, an owner-only temporary file, the access of the file it
+/// replaces: its group, its ACL, then its mode, as truncating that file in
+/// place kept them.
 ///
 /// A writer who cannot give it that group, one they are not a member of,
-/// leaves it owner-only: the group bits would otherwise grant the writer's
-/// own group what they granted the old file's.
+/// leaves it owner-only: the group bits and the ACL's group entry would
+/// otherwise grant the writer's own group what they granted the old file's.
+/// The ACL is set before the mode, which would otherwise widen the mask of
+/// an ACL the file inherited from its directory's default ACL.
 #[cfg(unix)]
-fn keep_access(file: &File, mode: u32, gid: u32) -> io::Result<()> {
+fn keep_access(file: &File, old: &Access) -> io::Result<()> {
     use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
-    let mut mode = mode & 0o7777;
-    if file.metadata()?.gid() != gid && fchown(file, None, Some(gid)).is_err() {
+    let (mut mode, mut acl) = (old.mode & 0o7777, old.acl.as_deref());
+    if file.metadata()?.gid() != old.gid && fchown(file, None, Some(old.gid)).is_err() {
         mode &= 0o700;
+        acl = None;
     }
+    acl::set(file, acl)?;
     file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
+/// POSIX access ACLs, which Linux keeps in an extended attribute. A file
+/// renamed into place has none of the old file's, and may have one it
+/// inherited from its directory's default ACL.
+#[cfg(target_os = "linux")]
+mod acl {
+    use std::fs::File;
+    use std::io;
+
+    use rustix::fs::{fgetxattr, fremovexattr, fsetxattr, XattrFlags};
+    use rustix::io::Errno;
+
+    const NAME: &str = "system.posix_acl_access";
+
+    /// The ACL of `file`; `None` when it has only its mode, or its
+    /// filesystem has no ACLs.
+    pub(super) fn get(file: &File) -> io::Result<Option<Vec<u8>>> {
+        // The largest value an extended attribute can have (XATTR_SIZE_MAX).
+        let mut value = vec![0; 65536];
+        match fgetxattr(file, NAME, &mut value[..]) {
+            Ok(len) => {
+                value.truncate(len);
+                Ok(Some(value))
+            }
+            Err(Errno::NODATA | Errno::NOTSUP) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Make `acl` the ACL of `file`; `None` leaves it only its mode.
+    pub(super) fn set(file: &File, acl: Option<&[u8]>) -> io::Result<()> {
+        match acl {
+            Some(acl) => fsetxattr(file, NAME, acl, XattrFlags::empty()).map_err(Into::into),
+            None => match fremovexattr(file, NAME) {
+                Ok(()) | Err(Errno::NODATA | Errno::NOTSUP) => Ok(()),
+                Err(e) => Err(e.into()),
+            },
+        }
+    }
+}
+
+/// Elsewhere a replacement does not carry ACLs over.
+#[cfg(all(unix, not(target_os = "linux")))]
+mod acl {
+    use std::fs::File;
+    use std::io;
+
+    pub(super) fn get(_: &File) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    pub(super) fn set(_: &File, _: Option<&[u8]>) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Output {
@@ -142,31 +224,33 @@ impl Output {
         // or `/x/out (deleted)`, which name no file. So an existing file is
         // replaced at the path `canonicalize` gives only if that path is the
         // same file.
-        let (dest, existing) = match fs::metadata(path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (new_file(path).map_err(fail)?, None),
+        let (dest, replaces) = match fs::metadata(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (new_file(path).map_err(fail)?, false),
             Err(e) => return Err(fail(e)),
             Ok(meta) if meta.is_dir() => return Err(fail(io::ErrorKind::IsADirectory.into())),
             Ok(meta) if !meta.is_file() => return in_place(),
             Ok(meta) => match fs::canonicalize(path) {
-                Ok(dest) if same_file(&meta, &dest) => (dest, Some(meta)),
+                Ok(dest) if same_file(&meta, &dest) => (dest, true),
                 _ => return in_place(),
             },
         };
-        if existing.is_some() {
-            // A rename needs write access to the directory only. Keep the
-            // refusal `File::create` gave for a file the caller cannot write.
-            OpenOptions::new().write(true).open(&dest).map_err(fail)?;
-        }
+        // The file being replaced, opened for writing although a rename needs
+        // write access to the directory only: that keeps the refusal
+        // `File::create` gave for a file the caller cannot write.
+        let old = replaces
+            .then(|| OpenOptions::new().write(true).open(&dest))
+            .transpose()
+            .map_err(fail)?;
 
         // Only a root has no parent, and it is a directory.
         let dir = dest
             .parent()
             .ok_or_else(|| fail(io::ErrorKind::IsADirectory.into()))?;
-        let tmp = temporary(dir, existing.is_some()).map_err(fail)?;
+        let tmp = temporary(dir, old.is_some()).map_err(fail)?;
         #[cfg(unix)]
-        if let Some(meta) = &existing {
-            use std::os::unix::fs::MetadataExt;
-            keep_access(tmp.as_file(), meta.mode(), meta.gid()).map_err(fail)?;
+        if let Some(old) = &old {
+            let access = Access::of(old).map_err(fail)?;
+            keep_access(tmp.as_file(), &access).map_err(fail)?;
         }
         Ok(Output::Replace { tmp, dest })
     }
@@ -458,8 +542,13 @@ mod tests {
             eprintln!("skipped: root can give a file any group");
             return;
         }
-        // A group no account is a member of.
-        keep_access(file, 0o664, 0x7fff_fff0).expect("keep_access");
+        let old = Access {
+            mode: 0o664,
+            // A group no account is a member of.
+            gid: 0x7fff_fff0,
+            acl: None,
+        };
+        keep_access(file, &old).expect("keep_access");
         let after = file.metadata().expect("metadata");
         let mode = after.mode() & 0o7777;
         assert_eq!(

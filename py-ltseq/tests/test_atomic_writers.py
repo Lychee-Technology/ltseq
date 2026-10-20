@@ -19,8 +19,10 @@ listing, so a temporary file left behind fails the test too.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -317,6 +319,81 @@ def test_existing_file_keeps_its_group(tmp_path, writer):
     getattr(ints(), writer)(str(path))
     st = path.stat()
     assert (st.st_gid, stat.S_IMODE(st.st_mode)) == (others[0], 0o640)
+
+
+ACCESS_ACL, DEFAULT_ACL = "system.posix_acl_access", "system.posix_acl_default"
+
+
+def posix_acl(owner: int, user: int, group: int, other: int) -> bytes:
+    """An ACL in Linux's extended-attribute format (`posix_acl_xattr.h`).
+
+    It grants another user (our uid + 1) `user` permissions, with the mask
+    set to what that user and the group may do.
+    """
+    undefined = 0xFFFFFFFF
+    entries = [
+        (0x01, owner, undefined),  # user::
+        (0x02, user, os.getuid() + 1),  # user:<uid>:
+        (0x04, group, undefined),  # group::
+        (0x10, user | group, undefined),  # mask::
+        (0x20, other, undefined),  # other::
+    ]
+    return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+
+
+def set_acl(path, name: str, value: bytes) -> None:
+    try:
+        os.setxattr(path, name, value)
+    except OSError as e:
+        if e.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            pytest.skip("the filesystem has no POSIX ACLs")
+        raise
+
+
+def access_acl(path) -> bytes | None:
+    try:
+        return os.getxattr(path, ACCESS_ACL)
+    except OSError as e:
+        if e.errno == errno.ENODATA:
+            return None
+        raise
+
+
+linux_acls = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux POSIX ACLs")
+
+
+@linux_acls
+@pytest.mark.parametrize("writer", WRITERS)
+def test_existing_file_keeps_its_acl(tmp_path, writer):
+    """An ACL entry for another user keeps applying to that user alone.
+
+    The mode's group bits show the ACL's mask, so the mode without the ACL
+    would grant the file's group what only that user had.
+    """
+    path = existing(tmp_path)
+    path.chmod(0o600)
+    set_acl(path, ACCESS_ACL, posix_acl(owner=6, user=4, group=0, other=0))
+    before = access_acl(path)
+    getattr(ints(), writer)(str(path))
+    assert access_acl(path) == before
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+@linux_acls
+@pytest.mark.parametrize("writer", WRITERS)
+def test_directory_default_acl_grants_nothing_new(tmp_path, writer):
+    """A replacement does not take its directory's default ACL.
+
+    The old file was written before the default was set and has no ACL, so
+    the user the default names could not read it. A new file inherits the
+    default, as with `File::create`; a replacement keeps the old access.
+    """
+    path = existing(tmp_path)
+    path.chmod(0o640)
+    set_acl(tmp_path, DEFAULT_ACL, posix_acl(owner=7, user=6, group=5, other=5))
+    getattr(ints(), writer)(str(path))
+    assert access_acl(path) is None
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
 @unix_only

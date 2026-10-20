@@ -47,6 +47,11 @@ tempfile = "3.27.0"
 # Already in the tree through DataFusion; the version follows it.
 async-trait = { version = "0.1.92", optional = true }
 
+# The POSIX ACL of a file a writer replaces (#259). Already in the tree
+# through tempfile; the version follows it.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [features]
 # Prototypes that price the v0.5 contract's costly commitments (#251).
 # Only measurement builds enable it; see benchmarks/m0/README.md.
