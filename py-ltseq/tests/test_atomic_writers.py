@@ -160,6 +160,15 @@ CONTAINERS = {
     "list of struct": lambda t, v: pa.array([[{"b": v}]], pa.list_(pa.struct([("b", t)]))),
     "dictionary values": lambda t, v: pa.array([v], t).dictionary_encode(),
     "run-end values": lambda t, v: pa.RunEndEncodedArray.from_arrays([1], pa.array([v], t)),
+    # A union is refused itself only with #270; until then its members are checked.
+    "sparse union member": lambda t, v: pa.UnionArray.from_sparse(
+        pa.array([1], pa.int8()), [pa.array([0], pa.int64()), pa.array([v], t)]
+    ),
+    "dense union member": lambda t, v: pa.UnionArray.from_dense(
+        pa.array([1], pa.int8()),
+        pa.array([0], pa.int32()),
+        [pa.array([], pa.int64()), pa.array([v], t)],
+    ),
 }
 
 

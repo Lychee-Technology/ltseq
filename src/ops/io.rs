@@ -211,6 +211,10 @@ fn unwritable_in_parquet(data_type: &DataType) -> Option<&'static str> {
         | DataType::Map(field, _) => unwritable_in_parquet(field.data_type()),
         DataType::Dictionary(_, values) => unwritable_in_parquet(values),
         DataType::RunEndEncoded(_, values) => unwritable_in_parquet(values.data_type()),
+        // #270 refuses a union itself; until then its members are checked.
+        DataType::Union(fields, _) => fields
+            .iter()
+            .find_map(|(_, field)| unwritable_in_parquet(field.data_type())),
         _ => None,
     }
 }
