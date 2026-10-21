@@ -52,6 +52,12 @@ async-trait = { version = "0.1.92", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }
 
+# The extended ACL of a file a writer replaces, and the fsync fallback for
+# filesystems that refuse F_FULLFSYNC (#259). Already in the tree through
+# tokio and tempfile; the version follows the lockfile.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+
 [features]
 # Prototypes that price the v0.5 contract's costly commitments (#251).
 # Only measurement builds enable it; see benchmarks/m0/README.md.

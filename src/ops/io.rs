@@ -35,6 +35,23 @@ use crate::LTSeqTable;
 /// [`Output::commit`]. Dropping an uncommitted `Output`, after an error or
 /// while a writer's panic unwinds, deletes the temporary file, so a failed
 /// write leaves `path` as it was.
+///
+/// What the rename gives, and its limits:
+///
+/// - A reader opening `path` gets the old file or the new one, whole; one
+///   that has the old file open keeps reading it. Of two writes to the
+///   same path, each renames a complete file and the last one wins.
+/// - The data reaches storage before the rename ([`sync`]), so after a
+///   crash `path` holds the old contents or the new ones, never part of
+///   them, where the filesystem keeps its fsync promise. The directory is
+///   not flushed after the rename, so after a power loss a write that had
+///   returned can read as the old file again. A process killed during the
+///   write leaves `path` as it was, and its temporary file behind.
+/// - Paths are resolved when the write starts. Renaming, replacing or
+///   retargeting the destination's directory or links while it runs can
+///   make the rename fail, leaving the temporary file behind, or put the
+///   file where the link pointed at the start. Nothing here defends
+///   against another process changing them on purpose.
 enum Output {
     Replace {
         tmp: NamedTempFile,
@@ -42,8 +59,10 @@ enum Output {
     },
     /// What a rename cannot replace, written directly: a device or FIFO
     /// (`/dev/null`, `/dev/stdout` on a terminal or a pipe), which has no
-    /// contents to keep, or a file reached through a /proc descriptor link
-    /// whose text does not name it, such as a deleted file's.
+    /// contents to keep, a file reached through a /proc descriptor link
+    /// whose text does not name it, such as a deleted file's, or a macOS
+    /// /dev/fd descriptor. None of it is atomic: a failed write leaves what
+    /// was written before the error.
     InPlace(File),
 }
 
@@ -91,20 +110,61 @@ fn same_file(_: &fs::Metadata, _: &Path) -> bool {
     true
 }
 
+/// Whether `dest`, where `path` resolves, is a macOS /dev/fd node. It
+/// stands for the file a descriptor has open, which is what `stat` reports,
+/// but nothing can be created beside it, and opening it duplicates the
+/// descriptor, as `File::create` did.
+fn is_descriptor(dest: &Path) -> bool {
+    cfg!(target_os = "macos") && dest.parent() == Some(Path::new("/dev/fd"))
+}
+
+/// Flush `file`'s data and metadata to storage.
+fn sync(file: &File) -> io::Result<()> {
+    // On macOS `sync_all` is F_FULLFSYNC, which also flushes the drive's
+    // cache. fcntl(2) lists it for APFS, HFS, FAT and UDF only, and another
+    // filesystem can refuse it as unsupported; fsync is what that one
+    // offers. Any other error stands: a second flush after a failed one can
+    // report success for data that was lost.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = file.sync_all() {
+        use std::os::unix::io::AsRawFd;
+        if !matches!(
+            e.raw_os_error(),
+            Some(libc::ENOTSUP | libc::ENOTTY | libc::EINVAL)
+        ) {
+            return Err(e);
+        }
+        // SAFETY: the descriptor is open for as long as `file` is.
+        if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    file.sync_all()?;
+    Ok(())
+}
+
 /// An empty temporary file in `dir` that will replace an existing file
 /// (`replaces`) or create a new one.
 ///
 /// It never grants access the file at the destination will not: a
 /// descriptor opened on it keeps its access after a chmod. A new file gets
-/// `File::create`'s mode (0o666 less the umask) from the start. A
-/// replacement starts owner-only, tempfile's default, until [`keep_access`]
-/// gives it the old file's access.
+/// `File::create`'s mode (0o666 less the umask) and its directory's
+/// inherited ACL entries from the start. A replacement starts owner-only,
+/// tempfile's default, until [`keep_access`] gives it the old file's
+/// access; on macOS it also starts without inherited entries, whose allow
+/// entries would apply whatever the mode.
 fn temporary(dir: &Path, replaces: bool) -> io::Result<NamedTempFile> {
     // Hidden, short whatever the destination's name, and without its
     // extension, so that a reader listing the directory for `.csv` or
     // `.parquet` files skips it.
     let mut builder = tempfile::Builder::new();
     builder.prefix(".ltseq-").suffix(".tmp");
+    #[cfg(target_os = "macos")]
+    if replaces {
+        return builder.make_in(dir, acl::create_uninherited);
+    }
     #[cfg(unix)]
     if !replaces {
         use std::os::unix::fs::PermissionsExt;
@@ -120,8 +180,8 @@ fn temporary(dir: &Path, replaces: bool) -> io::Result<NamedTempFile> {
 struct Access {
     mode: u32,
     gid: u32,
-    /// Its POSIX access ACL, in the form the kernel stores it.
-    acl: Option<Vec<u8>>,
+    /// Its ACL: the POSIX access ACL on Linux, the extended ACL on macOS.
+    acl: Option<acl::Acl>,
 }
 
 #[cfg(unix)]
@@ -149,7 +209,7 @@ impl Access {
 #[cfg(unix)]
 fn keep_access(file: &File, old: &Access) -> io::Result<()> {
     use std::os::unix::fs::{fchown, MetadataExt, PermissionsExt};
-    let (mut mode, mut acl) = (old.mode & 0o7777, old.acl.as_deref());
+    let (mut mode, mut acl) = (old.mode & 0o7777, old.acl.as_ref());
     if file.metadata()?.gid() != old.gid && fchown(file, None, Some(old.gid)).is_err() {
         mode &= 0o700;
         acl = None;
@@ -171,9 +231,12 @@ mod acl {
 
     const NAME: &str = "system.posix_acl_access";
 
+    /// An ACL in the form the kernel stores it.
+    pub(super) type Acl = Vec<u8>;
+
     /// The ACL of `file`; `None` when it has only its mode, or its
     /// filesystem has no ACLs.
-    pub(super) fn get(file: &File) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn get(file: &File) -> io::Result<Option<Acl>> {
         // The largest value an extended attribute can have (XATTR_SIZE_MAX).
         let mut value = vec![0; 65536];
         match fgetxattr(file, NAME, &mut value[..]) {
@@ -187,7 +250,7 @@ mod acl {
     }
 
     /// Make `acl` the ACL of `file`; `None` leaves it only its mode.
-    pub(super) fn set(file: &File, acl: Option<&[u8]>) -> io::Result<()> {
+    pub(super) fn set(file: &File, acl: Option<&Acl>) -> io::Result<()> {
         match acl {
             Some(acl) => fsetxattr(file, NAME, acl, XattrFlags::empty()).map_err(Into::into),
             None => match fremovexattr(file, NAME) {
@@ -198,17 +261,176 @@ mod acl {
     }
 }
 
+/// Extended ACLs on macOS. A file renamed into place has none of the old
+/// file's, and may have entries it inherited from its directory. Unlike a
+/// POSIX ACL's, their allow entries apply whatever the mode, so a file
+/// created owner-only is open to the users an inherited entry names.
+#[cfg(target_os = "macos")]
+mod acl {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::fs::File;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::path::Path;
+
+    // From <sys/acl.h> and <sys/fcntl.h>; libSystem exports the functions.
+    type AclT = *mut c_void;
+    type FilesecT = *mut c_void;
+    type AclFlagsetT = *mut c_void;
+    const ACL_TYPE_EXTENDED: c_int = 0x100;
+    const ACL_FLAG_NO_INHERIT: c_int = 1 << 17;
+    const FILESEC_MODE: c_int = 4;
+    const FILESEC_ACL: c_int = 5;
+    const FILESEC_REMOVE_ACL: *const c_void = std::ptr::without_provenance(1);
+
+    extern "C" {
+        fn acl_init(count: c_int) -> AclT;
+        fn acl_free(obj: *mut c_void) -> c_int;
+        fn acl_get_fd_np(fd: c_int, ty: c_int) -> AclT;
+        fn acl_set_fd_np(fd: c_int, acl: AclT, ty: c_int) -> c_int;
+        fn acl_get_flagset_np(obj: *mut c_void, flagset: *mut AclFlagsetT) -> c_int;
+        fn acl_add_flag_np(flagset: AclFlagsetT, flag: c_int) -> c_int;
+        fn filesec_init() -> FilesecT;
+        fn filesec_free(fsec: FilesecT);
+        fn filesec_set_property(fsec: FilesecT, property: c_int, value: *const c_void) -> c_int;
+        fn fchmodx_np(fd: c_int, fsec: FilesecT) -> c_int;
+        fn openx_np(path: *const c_char, flags: c_int, fsec: FilesecT) -> c_int;
+    }
+
+    /// An ACL, freed on drop.
+    pub(super) struct Acl(AclT);
+
+    impl Drop for Acl {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from acl_init or acl_get_fd_np, and
+            // only this value frees it.
+            unsafe { acl_free(self.0) };
+        }
+    }
+
+    /// A file's security attributes to set, freed on drop.
+    struct Filesec(FilesecT);
+
+    impl Filesec {
+        fn new() -> io::Result<Self> {
+            // SAFETY: filesec_init takes no arguments; null means failure.
+            let fsec = unsafe { filesec_init() };
+            if fsec.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Filesec(fsec))
+        }
+
+        /// Set `property` from `value`, which points to the property's
+        /// type; the filesec copies it.
+        fn set(&self, property: c_int, value: *const c_void) -> io::Result<()> {
+            // SAFETY: `self.0` is a live filesec, and the callers pass a
+            // pointer to the type `property` takes, or FILESEC_REMOVE_ACL.
+            if unsafe { filesec_set_property(self.0, property, value) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Filesec {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from filesec_init, and only this
+            // value frees it.
+            unsafe { filesec_free(self.0) };
+        }
+    }
+
+    /// The ACL of `file`; `None` when it has only its mode, or its
+    /// filesystem has no ACLs.
+    pub(super) fn get(file: &File) -> io::Result<Option<Acl>> {
+        // SAFETY: the descriptor is open for as long as `file` is.
+        let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+        if !acl.is_null() {
+            return Ok(Some(Acl(acl)));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOATTR | libc::ENOTSUP) => Ok(None),
+            _ => Err(e),
+        }
+    }
+
+    /// Make `acl` the ACL of `file`, its inherited entries included; `None`
+    /// leaves it only its mode.
+    pub(super) fn set(file: &File, acl: Option<&Acl>) -> io::Result<()> {
+        let fd = file.as_raw_fd();
+        let done = match acl {
+            // SAFETY: the descriptor is open and `acl.0` is a live ACL.
+            Some(acl) => unsafe { acl_set_fd_np(fd, acl.0, ACL_TYPE_EXTENDED) },
+            None => {
+                let fsec = Filesec::new()?;
+                fsec.set(FILESEC_ACL, FILESEC_REMOVE_ACL)?;
+                // SAFETY: the descriptor is open and `fsec` is live.
+                unsafe { fchmodx_np(fd, fsec.0) }
+            }
+        };
+        if done == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        match (acl, e.raw_os_error()) {
+            (None, Some(libc::ENOTSUP)) => Ok(()),
+            _ => Err(e),
+        }
+    }
+
+    /// Create `path`, which must not exist, owner-only and without the
+    /// entries its directory passes to new files.
+    ///
+    /// An initial ACL flagged no-inherit is what turns inheritance off
+    /// (`kauth_acl_inherit` in XNU); [`set`] then replaces it.
+    pub(super) fn create_uninherited(path: &Path) -> io::Result<File> {
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: acl_init takes a capacity; null means failure.
+        let acl = unsafe { acl_init(1) };
+        if acl.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let acl = Acl(acl);
+        let mut flags: AclFlagsetT = std::ptr::null_mut();
+        // SAFETY: `acl.0` is a live ACL, and the flagset points into it.
+        let flagged = unsafe {
+            acl_get_flagset_np(acl.0, &mut flags) == 0
+                && acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT) == 0
+        };
+        if !flagged {
+            return Err(io::Error::last_os_error());
+        }
+        let fsec = Filesec::new()?;
+        let mode: libc::mode_t = 0o600;
+        fsec.set(FILESEC_MODE, (&mode as *const libc::mode_t).cast())?;
+        fsec.set(FILESEC_ACL, (&acl.0 as *const AclT).cast())?;
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
+        // SAFETY: `path` is a NUL-terminated string and `fsec` is live.
+        let fd = unsafe { openx_np(path.as_ptr(), flags, fsec.0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openx_np returned a new descriptor that nothing else owns.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
 /// Elsewhere a replacement does not carry ACLs over.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 mod acl {
     use std::fs::File;
     use std::io;
 
-    pub(super) fn get(_: &File) -> io::Result<Option<Vec<u8>>> {
+    pub(super) enum Acl {}
+
+    pub(super) fn get(_: &File) -> io::Result<Option<Acl>> {
         Ok(None)
     }
 
-    pub(super) fn set(_: &File, _: Option<&[u8]>) -> io::Result<()> {
+    pub(super) fn set(_: &File, _: Option<&Acl>) -> io::Result<()> {
         Ok(())
     }
 }
@@ -223,14 +445,14 @@ impl Output {
         // resolves to the file it holds open, but its text can be `pipe:[…]`
         // or `/x/out (deleted)`, which name no file. So an existing file is
         // replaced at the path `canonicalize` gives only if that path is the
-        // same file.
+        // same file, and not a macOS /dev/fd node standing for it.
         let (dest, replaces) = match fs::metadata(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (new_file(path).map_err(fail)?, false),
             Err(e) => return Err(fail(e)),
             Ok(meta) if meta.is_dir() => return Err(fail(io::ErrorKind::IsADirectory.into())),
             Ok(meta) if !meta.is_file() => return in_place(),
             Ok(meta) => match fs::canonicalize(path) {
-                Ok(dest) if same_file(&meta, &dest) => (dest, true),
+                Ok(dest) if same_file(&meta, &dest) && !is_descriptor(&dest) => (dest, true),
                 _ => return in_place(),
             },
         };
@@ -270,7 +492,7 @@ impl Output {
         let fail = |e: io::Error| LtseqError::io(&format!("Failed to replace '{}'", path), e);
         // On disk before the rename, so that a crash cannot leave `path`
         // naming a file whose data was never written.
-        tmp.as_file().sync_all().map_err(fail)?;
+        sync(tmp.as_file()).map_err(fail)?;
         tmp.persist(&dest).map_err(|e| fail(e.error))?;
         Ok(())
     }
