@@ -49,6 +49,12 @@ Benchmark and benchmark-gated autoresearch tooling live under `benchmarks/`.
 pip install ltseq
 ```
 
+### Supported platforms
+
+LTSeq supports Linux and macOS. CI builds and tests the extension on both: the full suite on Linux (x86-64), and the Rust tests and the file-writer tests on macOS (Apple Silicon).
+
+Windows is not supported natively, and the project does not build Windows wheels. On Windows, run LTSeq in [WSL2](https://learn.microsoft.com/windows/wsl/install) with a supported Linux distribution, and install Python, the Rust toolchain (to build from source) and LTSeq inside it. WSL2 runs the Linux build; that does not extend support to Windows filesystems. Keep projects and output files in the Linux filesystem (under `~`, not `/mnt/c`). Paths under `/mnt/c` are Windows drives mounted into Linux: permissions, symlinks, replacing a file by rename and flushing it to disk follow Windows rules there, and I/O is slower, so the writers' atomic replacement and permission handling are not guaranteed on them.
+
 ### Basic Usage
 ```python
 from ltseq import LTSeq
