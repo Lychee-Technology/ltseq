@@ -232,6 +232,7 @@ def test_symlink_target_is_replaced(tmp_path, writer):
     link.symlink_to(target)
     getattr(ints(), writer)(str(link))
     assert link.is_symlink()
+    assert os.readlink(link) == str(target)
     assert read_back(writer, target) == [1, 2, 3]
     assert sorted(os.listdir(tmp_path)) == ["link", "target"]
 
@@ -253,11 +254,73 @@ def test_dangling_symlink_target_is_created(tmp_path, writer, chain):
         (tmp_path / "data" / "hop").symlink_to("target")
         link.symlink_to("data/hop")
     links = sorted(os.listdir(tmp_path / "data"))
+    texts = link_texts(tmp_path)
     getattr(ints(), writer)(str(link))
     assert link.is_symlink()
+    assert link_texts(tmp_path) == texts
     assert read_back(writer, target) == [1, 2, 3]
     assert sorted(os.listdir(tmp_path)) == ["data", "link"]
     assert sorted(os.listdir(tmp_path / "data")) == sorted([*links, "target"])
+
+
+def link_texts(root) -> dict[str, str]:
+    """Every symlink under `root`, by path relative to it, with its text."""
+    return {
+        os.path.relpath(os.path.join(d, name), root): os.readlink(os.path.join(d, name))
+        for d, dirs, files in os.walk(root)
+        for name in dirs + files
+        if os.path.islink(os.path.join(d, name))
+    }
+
+
+def listings(root) -> dict[str, list[str]]:
+    """The listing of `root` and of every directory under it."""
+    return {os.path.relpath(d, root): sorted(dirs + files) for d, dirs, files in os.walk(root)}
+
+
+@unix_only
+@pytest.mark.parametrize("writer", WRITERS)
+@pytest.mark.parametrize("target", ["existing", "dangling"])
+def test_failed_write_through_symlink_keeps_link_and_target(tmp_path, writer, target):
+    """A write that fails after its temporary file exists leaves the link.
+
+    An existing target keeps its bytes, and a dangling link's target is
+    not created.
+    """
+    (tmp_path / "data").mkdir()
+    if target == "existing":
+        existing(tmp_path / "data", "target")
+    link = tmp_path / "link"
+    link.symlink_to("data/target")
+    before = listings(tmp_path)
+    t = divide_by_zero_on_last_row()
+    with pytest.raises(Exception, match="Divide by zero"):
+        getattr(t, writer)(str(link))
+    assert link_texts(tmp_path) == {"link": "data/target"}
+    assert listings(tmp_path) == before
+    if target == "existing":
+        assert (tmp_path / "data" / "target").read_bytes() == OLD
+
+
+@unix_only
+@pytest.mark.parametrize("writer", WRITERS)
+def test_symlink_cycle_is_refused(tmp_path, writer):
+    (tmp_path / "a").symlink_to("b")
+    (tmp_path / "b").symlink_to("a")
+    with pytest.raises(ValueError, match="Too many levels of symbolic links"):
+        getattr(ints(), writer)(str(tmp_path / "a"))
+    assert link_texts(tmp_path) == {"a": "b", "b": "a"}
+
+
+@unix_only
+@pytest.mark.parametrize("writer", WRITERS)
+def test_dangling_symlink_into_missing_directory_is_refused(tmp_path, writer):
+    """As with `File::create`, a link's missing directory is not created."""
+    (tmp_path / "link").symlink_to("missing/target")
+    with pytest.raises(ValueError, match="No such file or directory"):
+        getattr(ints(), writer)(str(tmp_path / "link"))
+    assert link_texts(tmp_path) == {"link": "missing/target"}
+    assert os.listdir(tmp_path) == ["link"]
 
 
 @pytest.mark.parametrize("writer", WRITERS)
@@ -396,6 +459,68 @@ def test_directory_default_acl_grants_nothing_new(tmp_path, writer):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+macos_acls = pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
+
+
+def macos_acl(path) -> list[str]:
+    """The entries of `path`'s macOS ACL, as `ls -le` lists them."""
+    listing = subprocess.run(
+        ["ls", "-led", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    return [line.split(": ", 1)[1] for line in listing.splitlines()[1:]]
+
+
+def add_macos_acl(path, entry: str) -> None:
+    subprocess.run(["chmod", "+a", entry, str(path)], check=True)
+
+
+@macos_acls
+@pytest.mark.parametrize("writer", WRITERS)
+def test_existing_file_keeps_its_macos_acl(tmp_path, writer):
+    """An entry that denies a user access keeps denying it.
+
+    The mode lets every user read the file, so without its ACL the file
+    would grant `nobody` what the ACL denied.
+    """
+    path = existing(tmp_path)
+    path.chmod(0o644)
+    add_macos_acl(path, "user:nobody deny read")
+    add_macos_acl(path, "user:daemon allow write")
+    before = macos_acl(path)
+    getattr(ints(), writer)(str(path))
+    assert macos_acl(path) == before
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+@macos_acls
+@pytest.mark.parametrize("writer", WRITERS)
+def test_directory_inherited_acl_grants_nothing_new_on_macos(tmp_path, writer):
+    """A replacement does not take the entries its directory gives new files.
+
+    The old file was written before the directory's entry was added, so
+    `nobody` could not read it. On macOS an allow entry applies whatever the
+    mode, so the replacement must not carry it even while owner-only.
+    """
+    path = existing(tmp_path)
+    path.chmod(0o600)
+    add_macos_acl(tmp_path, "user:nobody allow read,file_inherit")
+    getattr(ints(), writer)(str(path))
+    assert macos_acl(path) == []
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@macos_acls
+@pytest.mark.parametrize("writer", WRITERS)
+def test_new_file_inherits_directory_acl_on_macos(tmp_path, writer):
+    """A new file takes its directory's inherited entries, as `File::create`'s did."""
+    add_macos_acl(tmp_path, "user:nobody allow read,file_inherit")
+    control = tmp_path / "control"
+    control.write_bytes(b"")
+    path = tmp_path / "new"
+    getattr(ints(), writer)(str(path))
+    assert macos_acl(path) == macos_acl(control) != []
+
+
 @unix_only
 @pytest.mark.parametrize("writer", WRITERS)
 def test_new_file_mode_follows_umask(tmp_path, writer):
@@ -468,6 +593,30 @@ def test_piped_stdout_is_written_in_place(writer, path):
     run = subprocess.run([sys.executable, "-c", code], capture_output=True)
     assert run.returncode == 0, run.stderr.decode()
     assert parse(writer, run.stdout) == [1, 2, 3]
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/fd/1"), reason="needs /dev/fd")
+@pytest.mark.parametrize("writer", WRITERS)
+@pytest.mark.parametrize("path", ["/dev/stdout", "/dev/fd/1"])
+def test_stdout_redirected_to_a_file(tmp_path, writer, path):
+    """`python script.py > out`, where the script writes to standard output.
+
+    On Linux the descriptor link names `out`, which is replaced. On macOS
+    `/dev/fd/1` is the descriptor itself, in a directory where nothing can
+    be created, so it is written in place as `File::create` wrote it.
+    """
+    code = (
+        "import pyarrow as pa\n"
+        "from ltseq import LTSeq\n"
+        "t = LTSeq.from_arrow(pa.table({'x': pa.array([1, 2, 3], pa.int64())}))\n"
+        f"t.{writer}({path!r})\n"
+    )
+    out = tmp_path / "out"
+    with open(out, "wb") as stdout:
+        run = subprocess.run([sys.executable, "-c", code], stdout=stdout, stderr=subprocess.PIPE)
+    assert run.returncode == 0, run.stderr.decode()
+    assert read_back(writer, out) == [1, 2, 3]
+    assert os.listdir(tmp_path) == ["out"]
 
 
 @proc_fd

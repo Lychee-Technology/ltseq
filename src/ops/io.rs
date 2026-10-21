@@ -558,4 +558,34 @@ mod tests {
             mode
         );
     }
+
+    /// On macOS an allow entry applies whatever the mode, so an owner-only
+    /// replacement that took its directory's inherited entries could be
+    /// opened by the users they name before it has the old file's ACL. A
+    /// new file takes them, as `File::create`'s did.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_inherits_no_directory_acl() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let added = Command::new("chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(dir.path())
+            .status()
+            .expect("chmod");
+        assert!(added.success());
+        // `ls -le` lists one line per ACL entry after the file's own.
+        let entries = |tmp: &NamedTempFile| {
+            let ls = Command::new("ls")
+                .arg("-led")
+                .arg(tmp.path())
+                .output()
+                .expect("ls");
+            String::from_utf8_lossy(&ls.stdout).lines().count() - 1
+        };
+        let new = temporary(dir.path(), false).expect("new file");
+        assert_eq!(entries(&new), 1, "the directory's entry is not inherited");
+        let replacement = temporary(dir.path(), true).expect("replacement");
+        assert_eq!(entries(&replacement), 0);
+    }
 }
