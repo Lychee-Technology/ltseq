@@ -695,3 +695,52 @@ def test_dev_fd_of_deleted_file_is_written_in_place(tmp_path, writer):
         os.close(fd)
     assert parse(writer, written) == [1, 2, 3]
     assert os.listdir(tmp_path) == []
+
+
+def can_bind_mount(tmp_path) -> bool:
+    """Whether this user may bind-mount in a namespace of its own."""
+    probe = tmp_path / "probe"
+    probe.write_bytes(b"")
+    try:
+        run = subprocess.run(
+            ["unshare", "-rm", "mount", "--bind", str(probe), str(probe)], capture_output=True
+        )
+    except FileNotFoundError:
+        return False
+    finally:
+        probe.unlink()
+    return run.returncode == 0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux mount namespaces")
+@pytest.mark.parametrize("writer", WRITERS)
+def test_mount_point_is_not_replaced(tmp_path, writer):
+    """A file that is itself a mount point, as in a Docker single-file bind mount.
+
+    No rename can replace it, and unlike a device it is not written in
+    place, as `File::create` wrote it: the write fails with EBUSY once the
+    table is written. The mounted file is unchanged and no temporary file
+    is left. The write runs in a user and mount namespace (`unshare -rm`)
+    where `out` is a bind mount of `mounted`.
+    """
+    if not can_bind_mount(tmp_path):
+        pytest.skip("needs unshare -rm, Linux mount namespaces without root")
+    mounted = tmp_path / "mounted"
+    mounted.write_bytes(b"mounted file\n")
+    path = existing(tmp_path)
+    listing = sorted(os.listdir(tmp_path))
+    code = (
+        "import sys, pyarrow as pa\n"
+        "from ltseq import LTSeq\n"
+        "t = LTSeq.from_arrow(pa.table({'x': pa.array([1, 2, 3], pa.int64())}))\n"
+        f"t.{writer}(sys.argv[1])\n"
+    )
+    script = 'mount --bind "$1" "$2" && exec "$3" -c "$4" "$2"'
+    run = subprocess.run(
+        ["unshare", "-rm", "sh", "-c", script, "sh", mounted, path, sys.executable, code],
+        capture_output=True,
+    )
+    assert run.returncode != 0
+    assert f"(os error {errno.EBUSY})" in run.stderr.decode()
+    assert mounted.read_bytes() == b"mounted file\n"
+    assert_failed_cleanly(path, listing)

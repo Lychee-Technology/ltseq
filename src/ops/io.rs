@@ -52,6 +52,10 @@ use crate::LTSeqTable;
 ///   make the rename fail, leaving the temporary file behind, or put the
 ///   file where the link pointed at the start. Nothing here defends
 ///   against another process changing them on purpose.
+/// - A regular file that is itself a mount point, such as a single-file
+///   bind mount, cannot be renamed over either, but is not written in
+///   place: the rename fails with EBUSY after the whole write and leaves
+///   `path` as it was, where `File::create` overwrote it.
 enum Output {
     Replace {
         tmp: NamedTempFile,

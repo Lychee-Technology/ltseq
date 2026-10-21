@@ -297,6 +297,10 @@ class IOMixin:
         or a pipe), a deleted file reached through ``/proc/self/fd/N`` on
         Linux, and on macOS any ``/dev/fd/N``, so ``/dev/stdout`` redirected
         to a file is written in place there. On Linux that file is replaced.
+        A file that is itself a mount point, such as a Docker single-file
+        bind mount, cannot be renamed over either, but is not written
+        directly: the write fails once the whole table is written, and the
+        file is left as it was. Mount its directory instead.
 
         The guarantee's limits:
 
