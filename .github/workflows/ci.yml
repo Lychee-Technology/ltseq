@@ -70,6 +70,67 @@ jobs:
       - name: Run tutorial notebooks
         run: uv run pytest --nbmake tutorials/ -v
 
+  macos:
+    # macOS is supported alongside Linux, and its file semantics differ:
+    # extended ACLs, /dev/fd, F_FULLFSYNC, a new file taking its directory's
+    # group. This job compiles and lints the macOS-only code, runs the Rust
+    # tests, and runs the writer tests, whose only skips may be Linux-only
+    # ones. macos-15 is Apple Silicon (arm64).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      # Without the project: maturin develop builds the extension below, and
+      # installing the project would build it again in release mode.
+      - name: Install Python dependencies
+        run: uv sync --group dev --no-install-project
+
+      - name: Build Rust extension
+        run: uv run --no-sync maturin develop
+
+      - name: Import the package
+        run: uv run --no-sync python -c "import ltseq, ltseq.ltseq_core; print(ltseq.__file__)"
+
+      - name: Run writer tests
+        run: |
+          uv run --no-sync pytest py-ltseq/tests/test_atomic_writers.py -v -rs --junitxml=writers.xml
+          uv run --no-sync python - <<'EOF'
+          import xml.etree.ElementTree as ET
+          skipped = [s.get("message", "") for s in ET.parse("writers.xml").iter("skipped")]
+          others = [m for m in skipped if "Linux" not in m]
+          assert not others, f"tests skipped on macOS: {others}"
+          print(f"{len(skipped)} Linux-only tests skipped")
+          EOF
+
   memory-harness:
     # Peak-memory harness (#274): each run reads an input of ten budgets in a
     # process of its own, so it runs beside the main job, not inside it.
