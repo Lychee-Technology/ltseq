@@ -110,10 +110,12 @@ fn same_file(_: &fs::Metadata, _: &Path) -> bool {
     true
 }
 
-/// Whether `dest`, where `path` resolves, is a macOS /dev/fd node. It
-/// stands for the file a descriptor has open, which is what `stat` reports,
-/// but nothing can be created beside it, and opening it duplicates the
-/// descriptor, as `File::create` did.
+/// Whether `dest`, where `path` resolves, is a macOS /dev/fd node, which
+/// stands for the file a descriptor has open. macOS's realpath gives such a
+/// node `/dev/fd/` and the open file's own name, which names nothing unless
+/// that name is a descriptor's number, as for standard output redirected to
+/// a file named `1`. Nothing can be created beside the node, and opening it
+/// duplicates the descriptor, as `File::create` did.
 fn is_descriptor(dest: &Path) -> bool {
     cfg!(target_os = "macos") && dest.parent() == Some(Path::new("/dev/fd"))
 }

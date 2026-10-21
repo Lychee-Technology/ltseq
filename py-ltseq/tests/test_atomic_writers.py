@@ -628,12 +628,15 @@ def test_piped_stdout_is_written_in_place(writer, path):
 @pytest.mark.skipif(not os.path.exists("/dev/fd/1"), reason="needs /dev/fd")
 @pytest.mark.parametrize("writer", WRITERS)
 @pytest.mark.parametrize("path", ["/dev/stdout", "/dev/fd/1"])
-def test_stdout_redirected_to_a_file(tmp_path, writer, path):
+@pytest.mark.parametrize("name", ["out", "1"])
+def test_stdout_redirected_to_a_file(tmp_path, writer, path, name):
     """`python script.py > out`, where the script writes to standard output.
 
     On Linux the descriptor link names `out`, which is replaced. On macOS
     `/dev/fd/1` is the descriptor itself, in a directory where nothing can
-    be created, so it is written in place as `File::create` wrote it.
+    be created, so it is written in place as `File::create` wrote it. There
+    `realpath` gives `/dev/fd/out`, which names no file, but for a file
+    named `1` it gives `/dev/fd/1`, the descriptor.
     """
     code = (
         "import pyarrow as pa\n"
@@ -641,12 +644,12 @@ def test_stdout_redirected_to_a_file(tmp_path, writer, path):
         "t = LTSeq.from_arrow(pa.table({'x': pa.array([1, 2, 3], pa.int64())}))\n"
         f"t.{writer}({path!r})\n"
     )
-    out = tmp_path / "out"
+    out = tmp_path / name
     with open(out, "wb") as stdout:
         run = subprocess.run([sys.executable, "-c", code], stdout=stdout, stderr=subprocess.PIPE)
     assert run.returncode == 0, run.stderr.decode()
     assert read_back(writer, out) == [1, 2, 3]
-    assert os.listdir(tmp_path) == ["out"]
+    assert os.listdir(tmp_path) == [name]
 
 
 @proc_fd
@@ -676,10 +679,13 @@ def test_dev_fd_of_deleted_file_is_written_in_place(tmp_path, writer):
     """`/dev/fd/N` of a file deleted since it was opened.
 
     Linux links `/dev/fd` to `/proc/self/fd`. On macOS opening `/dev/fd/N`
-    duplicates the descriptor, so it must be open for writing. Either way
-    the file has no name to rename over, and the write goes to it.
+    duplicates the descriptor, so it must be open for writing, and the
+    write starts at its offset without truncating, as `File::create`'s did;
+    the file starts empty so that both read the same. Either way the file
+    has no name to rename over, and the write goes to it.
     """
-    path = existing(tmp_path)
+    path = tmp_path / "out"
+    path.write_bytes(b"")
     fd = os.open(path, os.O_RDWR)
     try:
         path.unlink()
