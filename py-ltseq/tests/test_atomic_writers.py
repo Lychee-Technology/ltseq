@@ -133,15 +133,24 @@ def test_failed_write_keeps_existing_file(tmp_path, case):
     assert_failed_cleanly(path, listing)
 
 
-def test_panic_during_write_keeps_existing_file(tmp_path):
+UNIONS = {
+    "sparse": lambda: pa.UnionArray.from_sparse(pa.array([0], pa.int8()), [pa.array([1])]),
+    "dense": lambda: pa.UnionArray.from_dense(
+        pa.array([0], pa.int8()), pa.array([0], pa.int32()), [pa.array([1])]
+    ),
+}
+
+
+@pytest.mark.parametrize("union", UNIONS)
+def test_panic_during_write_keeps_existing_file(tmp_path, union):
     """A panic unwinds through the writer and still removes its temporary file.
 
-    A sparse union panics inside the `parquet` crate. #270 refuses it at the
-    call, after which this only checks the refusal.
+    Sparse and dense unions both panic inside the `parquet` crate. #270
+    refuses a union at the call, after which this only checks the refusal.
     """
     path = existing(tmp_path)
     listing = sorted(os.listdir(tmp_path))
-    t = table(x=pa.UnionArray.from_sparse(pa.array([0], pa.int8()), [pa.array([1])]))
+    t = table(x=UNIONS[union]())
     with pytest.raises(BaseException):
         t.write_parquet(str(path))
     assert_failed_cleanly(path, listing)
