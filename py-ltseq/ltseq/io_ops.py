@@ -283,6 +283,45 @@ class IOMixin:
         """
         Write the table to a CSV file.
 
+        When ``path`` is a regular file or does not exist yet, the rows go to
+        a hidden temporary file (``.ltseq-*.tmp``) in the same directory,
+        which is flushed to disk and renamed over ``path`` only after the
+        whole table is written. If the write fails, a file already at
+        ``path`` is left unchanged and the temporary file is removed. A
+        symlink at ``path`` is followed: its target is replaced, or created
+        if it does not exist yet, and the link stays.
+
+        What a rename cannot replace is written directly, with no such
+        guarantee: a failed write can leave part of the output there. That
+        is a device or a pipe (``/dev/null``, ``/dev/stdout`` on a terminal
+        or a pipe), a deleted file reached through ``/proc/self/fd/N`` on
+        Linux, and on macOS any ``/dev/fd/N``, so ``/dev/stdout`` redirected
+        to a file is written in place there. On Linux that file is replaced.
+        A file that is itself a mount point, such as a Docker single-file
+        bind mount, cannot be renamed over either, but is not written
+        directly: the write fails once the whole table is written, and the
+        file is left as it was. Mount its directory instead.
+
+        The guarantee's limits:
+
+        - Readers see the old file or the new one, never part of one. After
+          a crash or a power loss ``path`` holds the old contents or the new
+          ones in full, provided the filesystem keeps its flush promise; the
+          rename itself is not flushed, so a write that had returned can
+          read as the old file after a power loss. A process killed during
+          the write leaves its temporary file behind.
+        - ``path`` is resolved when the call starts. Renaming or replacing
+          the destination's directory, retargeting a link on the way, or
+          taking away write access to the directory while the write runs
+          can make it fail and leave the temporary file behind, or put the
+          file where the link pointed at the start.
+        - The file is replaced, not rewritten. It keeps its mode, its group
+          and its ACL (POSIX on Linux, extended on macOS); a writer who
+          cannot set that group gets a file only its owner can open. It is
+          owned by the writer and loses other extended attributes, hard
+          links to it keep the old contents, and replacing it needs write
+          access to its directory.
+
         Args:
             path: Path where the CSV file will be written
 
@@ -298,6 +337,20 @@ class IOMixin:
         """
         Write the table to a Parquet file.
 
+        When ``path`` is a regular file or does not exist yet, the rows go to
+        a hidden temporary file (``.ltseq-*.tmp``) in the same directory,
+        which is flushed to disk and renamed over ``path`` only after the
+        whole table is written. If the write fails, a file already at
+        ``path`` is left unchanged and the temporary file is removed. Until
+        the rename the old file stays in place, so the table may read
+        ``path`` itself. A symlink at ``path`` is followed: its target is
+        replaced, or created if it does not exist yet, and the link stays.
+
+        A device, a pipe or a descriptor path that a rename cannot replace
+        is written directly, with no such guarantee: a failed write can
+        leave part of the output there. :meth:`write_csv` lists those
+        paths, and the guarantee's limits.
+
         Args:
             path: Path where the Parquet file will be written
             compression: Optional compression algorithm.
@@ -307,6 +360,9 @@ class IOMixin:
         Raises:
             RuntimeError: If write fails
             ValueError: If compression is not recognized
+            TypeError: If a column is or contains a ``struct`` without fields
+                or a ``fixed_size_binary`` of width 0, which Parquet cannot
+                store; raised before anything is written
 
         Example:
             >>> t.write_parquet("output.parquet")

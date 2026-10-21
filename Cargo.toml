@@ -39,9 +39,24 @@ tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 # columns. Already in the tree through arrow; the version follows it.
 chrono = { version = "0.4.45", default-features = false }
 
+# Writers' temporary files, renamed over the destination on success (#259).
+# Already in the tree through DataFusion; the version follows it.
+tempfile = "3.27.0"
+
 # The m0 prototypes' query planner (DataFusion's planner traits are async).
 # Already in the tree through DataFusion; the version follows it.
 async-trait = { version = "0.1.92", optional = true }
+
+# The POSIX ACL of a file a writer replaces (#259). Already in the tree
+# through tempfile; the version follows it.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+# The extended ACL of a file a writer replaces, and the fsync fallback for
+# filesystems that refuse F_FULLFSYNC (#259). Already in the tree through
+# tokio and tempfile; the version follows the lockfile.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 
 [features]
 # Prototypes that price the v0.5 contract's costly commitments (#251).
