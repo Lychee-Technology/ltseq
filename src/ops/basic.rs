@@ -206,7 +206,7 @@ pub fn search_first_impl(
     table: &LTSeqTable,
     expr_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let schema = table.require_schema()?;
 
     // Deserialize the expression
     let py_expr = dict_to_py_expr(expr_dict)?;
@@ -215,9 +215,11 @@ pub fn search_first_impl(
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(LtseqError::Validation)?;
 
-    // Apply filter and limit to first result (plan building only)
-    let result_df = (**df)
-        .clone()
+    // Apply filter and limit to first result (plan building only). "First"
+    // is in table order, so the limit goes above the order; DataFusion moves
+    // the filter beneath it.
+    let result_df = table
+        .ordered_df()?
         .filter(df_expr)
         .map_err(|e| LtseqError::Runtime(format!("Filter failed: {}", e)))?
         .limit(0, Some(1))
@@ -250,9 +252,9 @@ pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
-    let (df, schema) = table.require_df_and_schema()?;
+    let schema = table.require_schema()?;
     let batches = crate::engine::RUNTIME
-        .block_on((**df).clone().collect())
+        .block_on(table.ordered_df()?.collect())
         .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
 
     // The data now lives in memory, so from_batches drops source_parquet_path

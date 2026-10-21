@@ -298,7 +298,7 @@ pub(crate) fn original_column_exprs(schema: &ArrowSchema) -> Vec<Expr> {
 /// window exec re-partitions rows by the PARTITION BY key, so the output
 /// order is otherwise unspecified. (__group_id__, __rn__) ascending is by
 /// construction the input order of the flattened table.
-fn original_order() -> Vec<datafusion::logical_expr::SortExpr> {
+pub(crate) fn original_order() -> Vec<datafusion::logical_expr::SortExpr> {
     vec![
         datafusion::logical_expr::SortExpr::new(
             Expr::Column(Column::new_unqualified("__group_id__")),
@@ -372,13 +372,15 @@ pub fn derive_group_window_impl(
         .and_then(|df| df.select(final_exprs))
         .map_err(|e| LtseqError::Runtime(format!("Group derive failed: {}", e)))?;
 
-    // Row order is preserved by the projection, so the declared sort survives.
+    // Row order is preserved by the projection, so the declared sort survives;
+    // the sort by group and row number delivers it at the root.
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,
         table.sort_specs.clone(),
         None,
-    ))
+    )
+    .with_plan_in_order())
 }
 
 /// NestedTable.filter(): staged native filter on a group-level predicate.
@@ -417,5 +419,6 @@ pub fn filter_group_window_impl(
         result_df,
         table.sort_specs.clone(),
         None,
-    ))
+    )
+    .with_plan_in_order())
 }

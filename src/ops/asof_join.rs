@@ -93,8 +93,8 @@ pub fn asof_join_impl(
     right_by_cols: Vec<String>,
 ) -> Result<LTSeqTable, LtseqError> {
     // 1. Validate both tables have data
-    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
-    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
+    let (_, stored_schema_left) = table.require_df_and_schema()?;
+    let (_, stored_schema_right) = other.require_df_and_schema()?;
 
     // 2. Validate direction
     match direction {
@@ -107,11 +107,13 @@ pub fn asof_join_impl(
         }
     }
 
-    // 3. Collect both DataFrames to batches
+    // 3. Collect both DataFrames to batches, in table order: the search
+    // relies on each side's sort by its time column.
+    let (left_ordered, right_ordered) = (table.ordered_df()?, other.ordered_df()?);
     let (left_batches, right_batches) = RUNTIME
         .block_on(async {
-            let left_future = (**df_left).clone().collect();
-            let right_future = (**df_right).clone().collect();
+            let left_future = left_ordered.collect();
+            let right_future = right_ordered.collect();
 
             let left_result = left_future
                 .await

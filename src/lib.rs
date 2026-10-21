@@ -52,6 +52,12 @@ pub struct LTSeqTable {
     schema: Option<Arc<ArrowSchema>>,
     sort_specs: Vec<SortSpec>, // Declared row order (column + direction), drives window ORDER BY
     source_parquet_path: Option<String>, // Parquet file path for assume_sorted optimization
+    // The plan's root already delivers rows in the declared order, sorted by
+    // keys DataFusion cannot tell give the same order: the group operations
+    // sort by group and row number. `ordered_df` then adds no sort. Only
+    // those operations set it (`with_plan_in_order`); every other result,
+    // including a transform of theirs, starts without it.
+    plan_in_order: bool,
 }
 
 /// Helper constructors for LTSeqTable (non-PyO3).
@@ -79,6 +85,7 @@ impl LTSeqTable {
             schema: Some(schema),
             sort_specs,
             source_parquet_path,
+            plan_in_order: false,
         }
     }
 
@@ -97,6 +104,7 @@ impl LTSeqTable {
             schema: Some(schema),
             sort_specs,
             source_parquet_path,
+            plan_in_order: false,
         }
     }
 
@@ -106,6 +114,9 @@ impl LTSeqTable {
     /// exact schema the data was built with); `schema` is what a zero-batch
     /// result keeps, so it is still a queryable zero-row table. The data lives
     /// in memory, so the raw-file fast-path token is never carried over.
+    ///
+    /// The batches must be in the order `sort_specs` declares: the MemTable
+    /// passes it to DataFusion, so executing the table does not sort again.
     pub(crate) fn from_batches(
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
@@ -113,8 +124,12 @@ impl LTSeqTable {
         sort_specs: Vec<SortSpec>,
     ) -> Result<Self, LtseqError> {
         let schema = batches.first().map_or(schema, |batch| batch.schema());
-        let mem_table = MemTable::try_new(Arc::clone(&schema), vec![batches])
+        let mut mem_table = MemTable::try_new(Arc::clone(&schema), vec![batches])
             .map_err(|e| LtseqError::with_context("Failed to create table", e))?;
+        if !sort_specs.is_empty() {
+            mem_table =
+                mem_table.with_sort_order(metadata::sort_specs_to_file_sort_order(&sort_specs));
+        }
 
         let result_df = session
             .read_table(Arc::new(mem_table))
@@ -126,6 +141,7 @@ impl LTSeqTable {
             schema: Some(schema),
             sort_specs,
             source_parquet_path: None,
+            plan_in_order: false,
         })
     }
 
@@ -155,7 +171,15 @@ impl LTSeqTable {
             schema: None,
             sort_specs: Vec::new(),
             source_parquet_path: None,
+            plan_in_order: false,
         }
+    }
+
+    /// Mark the plan as delivering rows in the declared order at its root
+    /// (see the `plan_in_order` field).
+    pub(crate) fn with_plan_in_order(mut self) -> Self {
+        self.plan_in_order = true;
+        self
     }
 
     /// Get a reference to the DataFrame, or `LtseqError::NoData` if the table
@@ -177,6 +201,30 @@ impl LTSeqTable {
         &self,
     ) -> Result<(&Arc<DataFrame>, &Arc<ArrowSchema>), LtseqError> {
         Ok((self.require_df()?, self.require_schema()?))
+    }
+
+    /// The plan to execute when rows are read in table order: the table's
+    /// plan with its declared order (`sort_specs`) required at the root.
+    ///
+    /// A `sort` deep in the plan does not keep its order for the operators
+    /// above it: DataFusion records an order requirement only directly above
+    /// the topmost sort, so it is free to repartition a later filter,
+    /// projection or window, and the partitions then come back in arrival
+    /// order (#311). A sort at the root is the requirement that holds for the
+    /// whole plan. Where the partitions are already sorted, DataFusion plans
+    /// it as a merge of them, and drops it where the input is already in
+    /// order; a plan that ends in the order already (a `sort`, a slice of
+    /// one, or a group operation's result, `plan_in_order`) gets none.
+    /// Every terminal, writer and positional operation reads rows through
+    /// this; `count()` and transforms that do not depend on order use
+    /// `require_df`.
+    pub(crate) fn ordered_df(&self) -> Result<DataFrame, LtseqError> {
+        let df = (**self.require_df()?).clone();
+        if self.sort_specs.is_empty() || self.plan_in_order {
+            return Ok(df);
+        }
+        ops::sort::sort_unless_ordered(df, metadata::sort_specs_to_df_sort_exprs(&self.sort_specs))
+            .map_err(|e| LtseqError::with_context("Failed to order rows", e))
     }
 }
 
@@ -317,8 +365,8 @@ impl LTSeqTable {
     /// Returns:
     ///     Formatted table as string
     fn show(&self, py: Python<'_>, n: usize) -> PyResult<String> {
-        let (df, schema) = self.require_df_and_schema()?;
-        let df_clone = (**df).clone();
+        let schema = self.require_schema()?;
+        let df_clone = self.ordered_df()?;
 
         // Full-table collect + formatting: release the GIL.
         detached(py, || {
@@ -424,21 +472,21 @@ impl LTSeqTable {
         })
     }
 
-    /// Return optimized logical and physical plans for debugging.
+    /// Return optimized logical and physical plans for debugging: the plans
+    /// a terminal executes, with the declared order at the root.
     fn explain_plan(&self, py: Python<'_>) -> PyResult<(String, String)> {
-        let df = self.require_df()?;
+        let df = self.ordered_df()?;
 
-        let logical = (**df)
+        let logical = df
             .clone()
             .into_optimized_plan()
             .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
         let logical_text = format!("{}", logical.display_indent());
 
         // Physical planning lists files / reads footers for file sources.
-        let df_clone = (**df).clone();
         let physical_text = detached(py, || {
             let plan = RUNTIME
-                .block_on(df_clone.create_physical_plan())
+                .block_on(df.create_physical_plan())
                 .map_err(|e| LtseqError::with_context("Failed to create physical plan", e))?;
             let text = displayable(plan.as_ref()).indent(true).to_string();
             Ok(text)
@@ -699,14 +747,12 @@ impl LTSeqTable {
             return Ok(LTSeqTable::unloaded(Arc::clone(&self.session)));
         }
 
-        // Get DataFrame
-        let df = self.require_df()?;
-
         // Apply slice: DataFusion's limit(skip, fetch) only builds the plan.
+        // The limit counts rows in table order, so it goes above the order.
         let skip = offset as usize;
         let fetch = length.map(|len| len as usize);
-        let sliced_df = (**df)
-            .clone()
+        let sliced_df = self
+            .ordered_df()?
             .limit(skip, fetch)
             .map_err(|e| LtseqError::Runtime(format!("Slice execution failed: {}", e)))?;
 

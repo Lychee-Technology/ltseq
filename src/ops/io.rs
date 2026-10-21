@@ -551,14 +551,13 @@ impl Output {
 ///     table: Reference to LTSeqTable
 ///     path: Path to the output CSV file
 pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError> {
-    let df = table.require_df()?;
+    let df = table.ordered_df()?;
     let mut output = Output::create(&path)?;
 
     RUNTIME.block_on(async {
         use datafusion::arrow::csv::WriterBuilder;
 
-        let df_clone = (**df).clone();
-        let batches = df_clone.collect().await.map_err(LtseqError::collect)?;
+        let batches = df.collect().await.map_err(LtseqError::collect)?;
 
         let builder = WriterBuilder::new().with_header(true);
         let mut writer = builder.build(output.file());
@@ -632,7 +631,7 @@ pub fn write_parquet_impl(
     path: String,
     compression: Option<String>,
 ) -> Result<(), LtseqError> {
-    let df = table.require_df()?;
+    let df = table.ordered_df()?;
 
     RUNTIME.block_on(async {
         use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -641,10 +640,8 @@ pub fn write_parquet_impl(
         use parquet::basic::Compression;
         use parquet::file::properties::WriterProperties;
 
-        let df_clone = (**df).clone();
-
         // Extract Arrow schema before consuming the DataFrame
-        let df_schema = df_clone.schema();
+        let df_schema = df.schema();
         let arrow_fields: Vec<_> = df_schema.fields().iter().map(|f| (**f).clone()).collect();
         let schema = Arc::new(ArrowSchema::new(arrow_fields));
         check_parquet_types(&schema)?;
@@ -670,7 +667,7 @@ pub fn write_parquet_impl(
         let mut output = Output::create(&path)?;
 
         // Stream batches from DataFusion directly into the Parquet writer
-        let mut stream = df_clone
+        let mut stream = df
             .execute_stream()
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
@@ -734,11 +731,11 @@ fn schema_or_empty(table: &LTSeqTable) -> SchemaRef {
 /// boundary) and hands the batches to pyarrow without re-encoding them. A
 /// table with no plan yields an empty reader carrying its schema, if any.
 pub fn collect_arrow_reader_impl(table: &LTSeqTable) -> Result<BoxedBatchReader, LtseqError> {
-    let Some(df) = table.dataframe.as_ref() else {
+    if table.dataframe.is_none() {
         return Ok(collected_reader(schema_or_empty(table), Vec::new()));
-    };
+    }
     let batches = RUNTIME
-        .block_on((**df).clone().collect())
+        .block_on(table.ordered_df()?.collect())
         .map_err(LtseqError::collect)?;
     // Batches from one execution share a schema; prefer it over the logical
     // schema so nullability/metadata match what pyarrow will see per batch.
@@ -769,11 +766,11 @@ pub fn arrow_stream_impl(
     if let Some(requested) = requested_schema {
         check_requested_schema(&schema, requested)?;
     }
-    let Some(df) = table.dataframe.as_ref() else {
+    if table.dataframe.is_none() {
         return Ok(collected_reader(schema, Vec::new()));
-    };
+    }
     let stream = RUNTIME
-        .block_on((**df).clone().execute_stream())
+        .block_on(table.ordered_df()?.execute_stream())
         .map_err(|e| LtseqError::with_context("Failed to execute plan", e))?;
     Ok(Box::new(DataFrameBatchReader::new(stream)))
 }
