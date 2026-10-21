@@ -360,6 +360,36 @@ def test_relative_path_is_resolved_at_the_call(tmp_path, monkeypatch, writer):
     assert os.listdir(start) == ["out"]
 
 
+@pytest.mark.parametrize("writer", WRITERS)
+def test_concurrent_writes_leave_one_complete_file(tmp_path, writer):
+    """Two writes to one path each rename a whole file; the last one wins.
+
+    `File::create` gave both writers the same file, so their output could
+    interleave. Whichever order the writes finish in, the file is one of
+    the two tables, whole.
+    """
+    path = existing(tmp_path)
+    sizes = {"a": 300_000, "b": 200_000}
+    tables = {k: table(x=pa.array(range(n), pa.int64())) for k, n in sizes.items()}
+    failures = []
+
+    def write(t):
+        try:
+            getattr(t, writer)(str(path))
+        except BaseException as e:
+            failures.append(e)
+
+    threads = [threading.Thread(target=write, args=(t,)) for t in tables.values()]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if failures:
+        raise failures[0]
+    assert read_back(writer, path) in [list(range(n)) for n in sizes.values()]
+    assert os.listdir(tmp_path) == ["out"]
+
+
 @unix_only
 @pytest.mark.parametrize("writer", WRITERS)
 def test_existing_file_keeps_its_mode(tmp_path, writer):
@@ -633,6 +663,27 @@ def test_descriptor_link_to_deleted_file_is_written_in_place(tmp_path, writer):
     try:
         path.unlink()
         getattr(ints(), writer)(f"/proc/self/fd/{fd}")
+        written = os.pread(fd, os.fstat(fd).st_size, 0)
+    finally:
+        os.close(fd)
+    assert parse(writer, written) == [1, 2, 3]
+    assert os.listdir(tmp_path) == []
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd"), reason="needs /dev/fd")
+@pytest.mark.parametrize("writer", WRITERS)
+def test_dev_fd_of_deleted_file_is_written_in_place(tmp_path, writer):
+    """`/dev/fd/N` of a file deleted since it was opened.
+
+    Linux links `/dev/fd` to `/proc/self/fd`. On macOS opening `/dev/fd/N`
+    duplicates the descriptor, so it must be open for writing. Either way
+    the file has no name to rename over, and the write goes to it.
+    """
+    path = existing(tmp_path)
+    fd = os.open(path, os.O_RDWR)
+    try:
+        path.unlink()
+        getattr(ints(), writer)(f"/dev/fd/{fd}")
         written = os.pread(fd, os.fstat(fd).st_size, 0)
     finally:
         os.close(fd)
