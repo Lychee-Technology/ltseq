@@ -311,9 +311,10 @@ class IOMixin:
           read as the old file after a power loss. A process killed during
           the write leaves its temporary file behind.
         - ``path`` is resolved when the call starts. Renaming or replacing
-          the destination's directory, or retargeting a link on the way,
-          while the write runs can make it fail, or put the file where the
-          link pointed at the start.
+          the destination's directory, retargeting a link on the way, or
+          taking away write access to the directory while the write runs
+          can make it fail and leave the temporary file behind, or put the
+          file where the link pointed at the start.
         - The file is replaced, not rewritten. It keeps its mode, its group
           and its ACL (POSIX on Linux, extended on macOS); a writer who
           cannot set that group gets a file only its owner can open. It is

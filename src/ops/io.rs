@@ -48,9 +48,10 @@ use crate::LTSeqTable;
 ///   returned can read as the old file again. A process killed during the
 ///   write leaves `path` as it was, and its temporary file behind.
 /// - Paths are resolved when the write starts. Renaming, replacing or
-///   retargeting the destination's directory or links while it runs can
-///   make the rename fail, leaving the temporary file behind, or put the
-///   file where the link pointed at the start. Nothing here defends
+///   retargeting the destination's directory or links, or taking away
+///   write access to the directory, while it runs can make the rename
+///   fail, leaving the temporary file behind, or put the file where the
+///   link pointed at the start. Nothing here defends
 ///   against another process changing them on purpose.
 /// - A regular file that is itself a mount point, such as a single-file
 ///   bind mount, cannot be renamed over either, but is not written in
