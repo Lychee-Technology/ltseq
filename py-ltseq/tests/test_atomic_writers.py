@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import stat
 import struct
 import subprocess
@@ -397,6 +398,112 @@ def test_concurrent_writes_leave_one_complete_file(tmp_path, writer):
         raise failures[0]
     assert read_back(writer, path) in [list(range(n)) for n in sizes.values()]
     assert os.listdir(tmp_path) == ["out"]
+
+
+# Preloaded, it renames $SWAP_DIR/0, then /1, ... over $SWAP_PATH each time
+# the writer resolves that path, as another write's commit would, until none
+# is left. That lands the commit between the writer's look at what `path`
+# opens and its look at where `path` leads, which threads hit only by chance.
+SWAP_SHIM = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+char *realpath(const char *path, char *resolved) {
+    static char *(*real)(const char *, char *);
+    static int next;
+    const char *target = getenv("SWAP_PATH"), *dir = getenv("SWAP_DIR");
+    if (!real)
+        real = (char *(*)(const char *, char *))dlsym(RTLD_NEXT, "realpath");
+    if (target && dir && strcmp(path, target) == 0) {
+        char from[4096];
+        snprintf(from, sizeof from, "%s/%d", dir, next);
+        if (rename(from, target) == 0)
+            next++;
+    }
+    return real(path, resolved);
+}
+"""
+
+
+@pytest.fixture(scope="module")
+def swap_shim(tmp_path_factory):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux LD_PRELOAD")
+    if shutil.which("cc") is None:
+        pytest.skip("needs cc to build the LD_PRELOAD library on Linux")
+    root = tmp_path_factory.mktemp("shim")
+    src, lib = root / "swap.c", root / "swap.so"
+    src.write_text(SWAP_SHIM)
+    subprocess.run(["cc", "-shared", "-fPIC", "-o", lib, src, "-ldl"], check=True)
+    return lib
+
+
+def write_while_committed(tmp_path, swap_shim, writer: str, commits: int):
+    """Write a failing table to `out` while `commits` other writes replace it.
+
+    Each commit is a complete file the same writer wrote, and `out` must
+    end up holding one, with nothing else left in the directory. Returns
+    the commits left unused and the error the write raised.
+    """
+    path = existing(tmp_path)
+    swap = tmp_path / "swap"
+    swap.mkdir()
+    getattr(ints(), writer)(str(swap / "0"))
+    committed = (swap / "0").read_bytes()
+    for k in range(1, commits):
+        (swap / str(k)).write_bytes(committed)
+    code = (
+        "import sys, pyarrow as pa\n"
+        "from ltseq import LTSeq\n"
+        "t = LTSeq.from_arrow(pa.table({'n': pa.array([1, 2]), 'd': pa.array([1, 0])}))\n"
+        "t = t.derive(lambda r: {'q': r.n // r.d})\n"
+        "try:\n"
+        "    getattr(t, sys.argv[1])(sys.argv[2])\n"
+        "except Exception as e:\n"
+        "    print(f'{type(e).__name__}: {e}')\n"
+        "    sys.exit(3)\n"
+    )
+    env = dict(os.environ, LD_PRELOAD=str(swap_shim), SWAP_PATH=str(path), SWAP_DIR=str(swap))
+    run = subprocess.run(
+        [sys.executable, "-c", code, writer, str(path)], env=env, capture_output=True
+    )
+    # An Exception, not a panic or a crash.
+    assert run.returncode == 3, run.stderr.decode()
+    assert sorted(os.listdir(tmp_path)) == ["out", "swap"]
+    assert path.read_bytes() == committed
+    return os.listdir(swap), run.stdout.decode()
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_write_committed_while_path_is_checked_survives_a_failed_write(
+    tmp_path, swap_shim, writer
+):
+    """Another write replaces `path` while this one checks it, then this one fails.
+
+    The two looks then see different files. That used to be taken for a
+    /proc descriptor link and written in place, so `File::create` truncated
+    the other write's complete file before this one's plan failed. This one
+    looks again, finds a regular file, and goes through a temporary file.
+    """
+    unused, error = write_while_committed(tmp_path, swap_shim, writer, commits=1)
+    assert unused == []
+    assert "Divide by zero" in error
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_write_replaced_at_every_check_fails_untouched(tmp_path, swap_shim, writer):
+    """Writes that keep replacing `path` while this one checks it.
+
+    It gives up before writing anything, and `path` holds the last of their
+    complete files.
+    """
+    unused, error = write_while_committed(tmp_path, swap_shim, writer, commits=100)
+    assert unused, "the write outlasted every other write instead of giving up"
+    assert error.startswith("ValueError:")
+    assert "replaced each time it was checked" in error
 
 
 @unix_only

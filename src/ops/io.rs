@@ -40,7 +40,9 @@ use crate::LTSeqTable;
 ///
 /// - A reader opening `path` gets the old file or the new one, whole; one
 ///   that has the old file open keeps reading it. Of two writes to the
-///   same path, each renames a complete file and the last one wins.
+///   same path, each renames a complete file and the last one wins. One
+///   that finds `path` replaced while it checks what is there looks again
+///   ([`destination`]), and fails without touching it if every look does.
 /// - The data reaches storage before the rename ([`sync`]), so after a
 ///   crash `path` holds the old contents or the new ones, never part of
 ///   them, where the filesystem keeps its fsync promise. The directory is
@@ -442,34 +444,70 @@ mod acl {
     }
 }
 
+/// Where a write to `path` goes, as found when it starts.
+enum Destination {
+    /// Nothing is there: a new file at this absolute path.
+    New(PathBuf),
+    /// A regular file, open for writing, replaced at this absolute path.
+    Replace(File, PathBuf),
+    /// What a rename cannot replace (see [`Output::InPlace`]).
+    InPlace,
+}
+
+/// What `path` opens, as the kernel resolves it, before any link's text is
+/// read; `None` if another write replaced it meanwhile.
+///
+/// A /proc descriptor link (`/dev/stdout` leads to one) resolves to the
+/// file it holds open, but its text can be `pipe:[…]` or `/x/out (deleted)`,
+/// which name no file. So a regular file is replaced at the path
+/// `canonicalize` gives only if that path is the same file, and not a macOS
+/// /dev/fd node standing for it. When it is not, `path` either is such a
+/// link, and still opens the same file, or was replaced by another write
+/// between the two looks, which only another look can tell from a link.
+fn destination(path: &str) -> io::Result<Option<Destination>> {
+    match fs::metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(Some(Destination::New(new_file(path)?)))
+        }
+        Err(e) => return Err(e),
+        Ok(meta) if meta.is_dir() => return Err(io::ErrorKind::IsADirectory.into()),
+        Ok(meta) if !meta.is_file() => return Ok(Some(Destination::InPlace)),
+        Ok(_) => {}
+    }
+    // Opened for writing although a rename needs write access to the
+    // directory only: that keeps the refusal `File::create` gave for a
+    // file the caller cannot write. Held open, it also keeps its inode
+    // number from going to another file while `path` is compared with it.
+    let old = match OpenOptions::new().write(true).open(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        old => old?,
+    };
+    let meta = old.metadata()?;
+    Ok(match fs::canonicalize(path) {
+        Ok(dest) if is_descriptor(&dest) => Some(Destination::InPlace),
+        Ok(dest) if same_file(&meta, &dest) => Some(Destination::Replace(old, dest)),
+        _ if same_file(&meta, Path::new(path)) => Some(Destination::InPlace),
+        _ => None,
+    })
+}
+
 impl Output {
     fn create(path: &str) -> Result<Self, LtseqError> {
         let fail = |e: io::Error| LtseqError::io(&format!("Failed to create file '{}'", path), e);
-        let in_place = || File::create(path).map(Output::InPlace).map_err(fail);
 
-        // What `path` opens, as the kernel resolves it, before any link's
-        // text is read. A /proc descriptor link (`/dev/stdout` leads to one)
-        // resolves to the file it holds open, but its text can be `pipe:[…]`
-        // or `/x/out (deleted)`, which name no file. So an existing file is
-        // replaced at the path `canonicalize` gives only if that path is the
-        // same file, and not a macOS /dev/fd node standing for it.
-        let (dest, replaces) = match fs::metadata(path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (new_file(path).map_err(fail)?, false),
-            Err(e) => return Err(fail(e)),
-            Ok(meta) if meta.is_dir() => return Err(fail(io::ErrorKind::IsADirectory.into())),
-            Ok(meta) if !meta.is_file() => return in_place(),
-            Ok(meta) => match fs::canonicalize(path) {
-                Ok(dest) if same_file(&meta, &dest) && !is_descriptor(&dest) => (dest, true),
-                _ => return in_place(),
-            },
+        // Each write that replaces `path` while it is checked leaves a
+        // whole file there, so looking again settles it. Writes that keep
+        // landing inside those few system calls fail this one instead,
+        // before it touches `path`.
+        let (dest, old) = match (0..8)
+            .find_map(|_| destination(path).transpose())
+            .unwrap_or_else(|| Err(io::Error::other("it was replaced each time it was checked")))
+            .map_err(fail)?
+        {
+            Destination::New(dest) => (dest, None),
+            Destination::Replace(old, dest) => (dest, Some(old)),
+            Destination::InPlace => return File::create(path).map(Output::InPlace).map_err(fail),
         };
-        // The file being replaced, opened for writing although a rename needs
-        // write access to the directory only: that keeps the refusal
-        // `File::create` gave for a file the caller cannot write.
-        let old = replaces
-            .then(|| OpenOptions::new().write(true).open(&dest))
-            .transpose()
-            .map_err(fail)?;
 
         // Only a root has no parent, and it is a directory.
         let dir = dest
