@@ -622,6 +622,13 @@ class TransformMixin(LookupMixin, LTSeqLike):
         sorted in the declared order. Incorrect metadata will produce
         wrong results.
 
+        On a table read straight from Parquet the declaration is metadata
+        only. Any other table (CSV, in-memory, or the result of a
+        transform) is collected, in its declared order if it has one and
+        otherwise on one partition, which reads each file, row group and
+        batch in order. The declaration then describes the rows in that
+        order.
+
         Like sort(), the declared order truncates at the first computed
         key — only leading plain-column keys count.
 

@@ -1,7 +1,7 @@
 # ADR 0008: 显式排序元数据（宁可报错，不做猜测）
 
 - 状态：已采纳（Accepted）
-- 决策日期：早于本记录 · 记录日期：2026-07-26 · 修订：2026-10-22（声明顺序也是行返回的顺序，#311）
+- 决策日期：早于本记录 · 记录日期：2026-07-26 · 修订：2026-10-22（声明顺序也是行返回的顺序，#311；`assume_sorted` 按输入顺序 collect 行，#148）
 
 [English](0008-explicit-sort-metadata.md)
 
@@ -15,7 +15,7 @@
 
 子决策：
 
-- **`assume_sorted(*keys, desc=...)` 逃生口。** 声明排序而不做物理排序，用于已预排序的输入（如已排序的 Parquet），否则要为解锁窗口/merge join 支付一次冗余排序。这是显式的信任契约：正确性由调用方负责，错误的元数据产出错误的结果。基准测试依赖它在计时轮之外声明已知顺序。实现注记：只有 Parquet 路径是纯元数据操作；非 Parquet 数据源上 `assume_sorted()` 当前会 collect 并重建带排序信息的 `MemTable`（`src/ops/sort.rs`，见 [ADR 0005](0005-no-materialization-rule.cn.md)）。
+- **`assume_sorted(*keys, desc=...)` 逃生口。** 声明排序而不做物理排序，用于已预排序的输入（如已排序的 Parquet），否则要为解锁窗口/merge join 支付一次冗余排序。这是显式的信任契约：正确性由调用方负责，错误的元数据产出错误的结果。基准测试依赖它在计时轮之外声明已知顺序。实现注记：只有 Parquet 路径是纯元数据操作；非 Parquet 数据源上 `assume_sorted()` 当前会 collect 并重建带排序信息的 `MemTable`（`src/ops/sort.rs`，见 [ADR 0005](0005-no-materialization-rule.cn.md)）。没有声明顺序的表在单个分区上 collect，按先文件、后行的顺序读取每个数据源，因此声明描述的正是按这一顺序排列的行（#148）。
 - **计算键会物理排序，但不计入声明顺序。** `sort_keys` 在第一个计算键处截断：`sort("a", lambda r: r.b*2, "c")` 只声明 `[a]`；单独的计算键什么都不声明（因此 `cum_sum` 仍抛 `SortRequiredError`）。文档给出的替代写法：`.derive(k=...).sort("k")`。已接受的取舍：截断之后，在声明前缀上并列的行顺序不作保证，窗口执行可能重排并列行。
 - **排序元数据是语义，不只是优化。** 部分操作会保持它（许多 filter/derive/slice）；重排或结构全新的表会作废它。它还解锁 sorted-Parquet 直扫与线性/并行扫描快速路径（[ADR 0006](0006-multi-path-execution-strategy.cn.md)）。
 - **声明顺序就是返回顺序（#311）。** 所有终端操作、写出操作和按位置的操作都经 `LTSeqTable::ordered_df` 读表，它在计划根部要求 `sort_specs`：计划深处的排序挡不住 DataFusion 在其上方加入的重分区。因此错误的元数据如今不只误导窗口计算，还会让行按错误的键重排；一个操作只有在该列取值不变时才能保留对应的排序键。

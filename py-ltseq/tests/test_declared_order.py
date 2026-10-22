@@ -1,4 +1,5 @@
-"""A sorted table returns its rows in order from every consumer (#311).
+"""A table with a declared order returns its rows in that order from every
+consumer (#311, #148).
 
 DataFusion keeps a sort's order only up to the next operator it chooses to
 repartition, so a filter, a computed column or a window after `sort` used to
@@ -6,20 +7,24 @@ return rows in partition arrival order while `sort_keys` still reported the
 sort. The table's declared order is now required at the root of every plan
 that reads rows in table order.
 
-The tests follow #321's ordering acceptance, items 1 and 3:
+The tests follow #321's ordering acceptance, items 1 and 3, and #148's 0.3.0
+slice:
 
 - seven pipelines, each read through every consumer and compared row for row
   with a pandas reference: at 100 rows under every engine layout (partition
   counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the default) and
   every input layout, and at 40,000 rows at 2 and 2×CPU partitions;
+- the same consumers after `assume_sorted`, on every input layout, with a
+  transform before or after the declaration, at 100 and 100,000 rows;
 - the operations that count rows in table order (`rvs`, `step`, `distinct`,
   the positional mutations, `asof_join`'s search, an offset `slice`);
 - a projection that drops or replaces a sort key;
-- seeded chains of transforms, after which every terminal's rows are sorted
-  by `sort_keys`.
+- seeded chains of transforms after a `sort` or an `assume_sorted`, after
+  which every terminal's rows are sorted by `sort_keys`.
 
-The input rows arrive shuffled, so every order in an output comes from the
-pipeline's `sort`.
+The input rows of a `sort` arrive shuffled, so every order in an output comes
+from the pipeline's `sort`. The rows of an `assume_sorted` arrive in the order
+it declares, as its contract requires.
 """
 
 from __future__ import annotations
@@ -290,6 +295,82 @@ def test_every_consumer_reads_rows_in_order_at_scale(
 
 
 # ---------------------------------------------------------------------------
+# Order declared with assume_sorted (#148)
+# ---------------------------------------------------------------------------
+
+
+def in_date_order(n: int) -> pa.Table:
+    """`input_rows(n)` in the order `assume_sorted("date")` declares."""
+    return input_rows(n).sort_by("date")
+
+
+def filtered_reference(df: pd.DataFrame) -> pd.DataFrame:
+    return by_date(df[df.volume % 3 != 0])
+
+
+def halves_then_declared(t: LTSeq) -> LTSeq:
+    """The earlier and the later half of the rows, concatenated by `union`."""
+    half = len(t) // 2
+    earlier = t.filter(lambda r: r.date < half)
+    later = t.filter(lambda r: r.date >= half)
+    return earlier.union(later).assume_sorted("date")
+
+
+# On Parquet, `assume_sorted` reads the files again with their order declared.
+# On any other input, or after a transform, it collects the rows and declares
+# the order on them, so the rows must be collected in the input's order.
+ASSUMED = {
+    "declared": Pipeline(lambda t: t.assume_sorted("date"), by_date, "volume"),
+    "declared_then_computed": Pipeline(
+        lambda t: t.assume_sorted("date").derive(z=lambda r: r.close * 2 + r.volume),
+        computed_derive_reference,
+        "volume",
+    ),
+    "declared_then_partitioned_shift": Pipeline(
+        lambda t: t.assume_sorted("date").derive(
+            prev=lambda r: r.close.shift(1, partition_by="g")
+        ),
+        partitioned_shift_reference,
+        "volume",
+    ),
+    "filtered_then_declared": Pipeline(
+        lambda t: t.filter(lambda r: r.volume % 3 != 0).assume_sorted("date"),
+        filtered_reference,
+        "volume",
+    ),
+    "computed_then_declared": Pipeline(
+        lambda t: t.derive(z=lambda r: r.close * 2 + r.volume).assume_sorted("date"),
+        computed_derive_reference,
+        "volume",
+    ),
+    "halves_then_declared": Pipeline(halves_then_declared, by_date, "volume"),
+}
+
+
+@pytest.mark.parametrize("name", list(ASSUMED))
+def test_every_consumer_reads_the_assumed_order(name, engine_layout, data_layout, tmp_path, capsys):
+    pipeline = ASSUMED[name]
+    rows = in_date_order(100)
+    t = pipeline.build(data_layout(rows))
+    check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
+
+
+@pytest.mark.parametrize("partitions", [2, 2 * CPUS], ids=["p2", "p2xcpu"])
+@pytest.mark.parametrize("name", ["declared", "filtered_then_declared"])
+def test_every_consumer_reads_the_assumed_order_at_scale(
+    name, partitions, engine_config, data_layout, tmp_path, capsys
+):
+    """100,000 rows at the default batch size. Each Parquet layout then holds
+    more than 1 MiB, from which DataFusion may split its files into byte
+    ranges that it reads in parallel."""
+    engine_config(target_partitions=partitions)
+    pipeline = ASSUMED[name]
+    rows = in_date_order(100_000)
+    t = pipeline.build(data_layout(rows))
+    check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
+
+
+# ---------------------------------------------------------------------------
 # Operations that count rows in table order
 # ---------------------------------------------------------------------------
 
@@ -513,19 +594,30 @@ STEPS: dict[str, Callable[[LTSeq, int], LTSeq]] = {
 }
 
 
-def chain(seed: int) -> tuple[Callable[[LTSeq], LTSeq], str]:
-    """A seeded sort followed by one to four steps."""
+def chain(seed: int, declare: str) -> tuple[Callable[[LTSeq], LTSeq], str, pa.Table]:
+    """A seeded order, declared by `sort` or `assume_sorted`, followed by one
+    to four steps, and the rows to build the table from.
+
+    A `sort` gets the shuffled rows. An `assume_sorted` gets them in the order
+    it declares, with ties in their shuffled order.
+    """
     rng = np.random.default_rng(seed)
     keys, desc = ORDERS[seed % len(ORDERS)]
     names = list(rng.choice(sorted(STEPS), size=int(rng.integers(1, 5))))
+    rows = input_rows(100)
+    if declare == "assume_sorted":
+        descending = desc if isinstance(desc, list) else [desc] * len(keys)
+        rows = rows.sort_by(
+            [(key, "descending" if d else "ascending") for key, d in zip(keys, descending)]
+        )
 
     def build(t: LTSeq) -> LTSeq:
-        t = t.sort(*keys, desc=desc)
+        t = getattr(t, declare)(*keys, desc=desc)
         for i, name in enumerate(names):
             t = STEPS[name](t, i)
         return t
 
-    return build, f"sort{keys} → {' → '.join(names)}"
+    return build, f"{declare}{keys} → {' → '.join(names)}", rows
 
 
 def assert_sorted_by(table: pa.Table, keys: list[tuple[str, bool]], rows: int, what: str) -> None:
@@ -543,11 +635,12 @@ def assert_sorted_by(table: pa.Table, keys: list[tuple[str, bool]], rows: int, w
             break
 
 
+@pytest.mark.parametrize("declare", ["sort", "assume_sorted"])
 @pytest.mark.parametrize("seed", range(40))
-def test_terminals_are_sorted_by_sort_keys(seed, engine_layout, tmp_path):
-    build, description = chain(seed)
+def test_terminals_are_sorted_by_sort_keys(seed, declare, engine_layout, tmp_path):
+    build, description, rows = chain(seed, declare)
     layout = LAYOUTS[seed % len(LAYOUTS)]
-    t = build(layouts.build(layout, input_rows(100), tmp_path / "input"))
+    t = build(layouts.build(layout, rows, tmp_path / "input"))
     keys = t.sort_keys
     if keys is None:
         # Only a step that drops or replaces the first key clears them all.

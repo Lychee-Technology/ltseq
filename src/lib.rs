@@ -160,10 +160,9 @@ impl LTSeqTable {
     /// read as one stream is never split: its declared order needs no sort,
     /// and a table without keys (after a projection dropped them, #311) keeps
     /// its rows in the order they were collected. `collect()` builds tables
-    /// this way. `assume_sorted()` on in-memory data does not: it declares an
-    /// order for rows collected from an input whose order across partitions
-    /// is not kept (#148), and a MemTable that DataFusion splits loses the
-    /// declaration and gets sorted where it is read.
+    /// this way. `assume_sorted()` on data that is not read from Parquet
+    /// builds a MemTable instead, so a large one that DataFusion splits loses
+    /// the declaration and gets sorted where it is read (#212).
     pub(crate) fn from_collected(
         session: Arc<SessionContext>,
         batches: Vec<RecordBatch>,
