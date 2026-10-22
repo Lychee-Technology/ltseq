@@ -361,8 +361,8 @@ def test_every_consumer_reads_the_assumed_order_at_scale(
     name, partitions, engine_config, data_layout, tmp_path, capsys
 ):
     """100,000 rows at the default batch size. Each Parquet layout then holds
-    more than 1 MiB, from which DataFusion splits its files into byte ranges
-    that it reads in parallel."""
+    more than 1 MiB, from which DataFusion may split its files into byte
+    ranges that it reads in parallel."""
     engine_config(target_partitions=partitions)
     pipeline = ASSUMED[name]
     rows = in_date_order(100_000)
