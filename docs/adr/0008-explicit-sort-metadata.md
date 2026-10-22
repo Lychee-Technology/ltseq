@@ -1,7 +1,7 @@
 # ADR 0008: Explicit Sort Metadata (Fail Rather Than Guess)
 
 - Status: Accepted
-- Decision date: predates this record · Recorded: 2026-07-26 · Amended: 2026-10-22 (declared order is also the order rows come back in, #311)
+- Decision date: predates this record · Recorded: 2026-07-26 · Amended: 2026-10-22 (declared order is also the order rows come back in, #311; `assume_sorted` collects rows in their input order, #148)
 
 [中文版](0008-explicit-sort-metadata.cn.md)
 
@@ -15,7 +15,7 @@ Track sort state explicitly and **never infer order implicitly**. The Rust kerne
 
 Sub-decisions:
 
-- **`assume_sorted(*keys, desc=...)` escape hatch.** Declares sort order without physically sorting, for pre-sorted inputs (e.g. sorted Parquet) that would otherwise pay a redundant sort. This is an explicit trust-the-user contract: the caller is responsible for correctness, and wrong metadata produces wrong results. Benchmarks rely on it to declare known order outside timed rounds. Implementation note: only the Parquet path is metadata-only; for non-Parquet sources `assume_sorted()` currently collects and rebuilds a `MemTable` with the sort order attached (`src/ops/sort.rs`, see [ADR 0005](0005-no-materialization-rule.md)).
+- **`assume_sorted(*keys, desc=...)` escape hatch.** Declares sort order without physically sorting, for pre-sorted inputs (e.g. sorted Parquet) that would otherwise pay a redundant sort. This is an explicit trust-the-user contract: the caller is responsible for correctness, and wrong metadata produces wrong results. Benchmarks rely on it to declare known order outside timed rounds. Implementation note: only the Parquet path is metadata-only; for non-Parquet sources `assume_sorted()` currently collects and rebuilds a `MemTable` with the sort order attached (`src/ops/sort.rs`, see [ADR 0005](0005-no-materialization-rule.md)). A table without a declared order is collected on one partition, which reads every source in file-then-row order, so the declaration describes the rows in that order (#148).
 - **Computed sort keys sort physically but are not tracked as declared order.** `sort_keys` truncates at the first computed key: `sort("a", lambda r: r.b*2, "c")` declares only `[a]`; a lone computed key declares nothing (so `cum_sum` still raises `SortRequiredError`). Documented workaround: `.derive(k=...).sort("k")`. Accepted trade-off: after truncation, tie order on the declared prefix is unspecified, and window execution may reorder ties.
 - **Sort metadata is semantics, not just an optimization.** Some operations preserve it (many filters/derives/slices); reordering or structurally-new tables invalidate it. It also unlocks sorted-Parquet direct-scan and linear/parallel-scan fast paths ([ADR 0006](0006-multi-path-execution-strategy.md)).
 - **Declared order is delivered order (#311).** Every terminal, writer and positional operation reads a table through `LTSeqTable::ordered_df`, which requires `sort_specs` at the plan's root: a sort deep in a plan does not survive the repartitions DataFusion adds above it. So wrong metadata now reorders rows as well as misleading windows, and an operation keeps a spec only while the column's values are unchanged.

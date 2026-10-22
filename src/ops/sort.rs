@@ -172,6 +172,27 @@ pub fn sort_impl(
     ))
 }
 
+/// `table`'s plan, set to return its rows in table order for `assume_sorted`
+/// to collect, in partition order.
+///
+/// A declared order is table order (`ordered_df`). A table without one has
+/// an order only at one partition: across several, a scan of several files
+/// or byte ranges, a split MemTable and a repartitioned filter or projection
+/// return their partitions in arrival order, so the declaration would
+/// describe rows that are not in it (#148). Planned at one partition, every
+/// source is read in file-then-row order. An operator with several inputs
+/// can still return one partition per input: a union returns its inputs'
+/// partitions in their order.
+fn in_table_order(table: &LTSeqTable) -> Result<DataFrame, LtseqError> {
+    let df = table.ordered_df()?;
+    if !table.sort_specs.is_empty() {
+        return Ok(df);
+    }
+    let (mut state, plan) = df.into_parts();
+    state.config_mut().options_mut().execution.target_partitions = 1;
+    Ok(DataFrame::new(state, plan))
+}
+
 /// Declare sort order metadata without physically sorting the data.
 ///
 /// Use this when the data is already sorted (e.g., pre-sorted Parquet files).
@@ -186,7 +207,8 @@ pub fn sort_impl(
 /// to skip the sort.
 ///
 /// **Non-Parquet fallback (materializing):** Collects the DataFrame into
-/// batches and creates a `MemTable` with `with_sort_order()`.
+/// batches in table order (`in_table_order`) and creates a `MemTable` with
+/// `with_sort_order()`.
 ///
 /// # Safety
 /// The caller is responsible for ensuring the data is actually sorted in the
@@ -254,11 +276,14 @@ pub fn assume_sorted_impl(
 
     // Non-Parquet fallback: collect batches and create MemTable with sort
     // order. The declaration is about the rows in their current table order.
-    let ordered = table.ordered_df()?;
+    let in_order = in_table_order(table)?;
     let batches = detached(py, || {
-        RUNTIME.block_on(ordered.collect()).map_err(|e| {
-            LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))
-        })
+        RUNTIME
+            .block_on(in_order.collect_partitioned())
+            .map(|partitions| partitions.into_iter().flatten().collect::<Vec<_>>())
+            .map_err(|e| {
+                LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))
+            })
     })?;
 
     // A filtered-to-empty table must stay queryable (PR #126 review):
