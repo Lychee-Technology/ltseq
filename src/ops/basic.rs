@@ -19,8 +19,14 @@
 
 use crate::error::LtseqError;
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
-use crate::types::dict_to_py_expr;
+use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::catalog::streaming::StreamingTable;
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::PartitionStream;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -78,12 +84,17 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // 1. Get schema
     let schema = table.require_schema()?;
 
-    // 2. Deserialize and transpile all expressions
+    // 2. Deserialize and transpile all expressions, noting the columns that
+    // pass through unchanged
     let mut df_exprs = Vec::new();
+    let mut passed = std::collections::HashSet::new();
 
     for expr_dict in exprs {
         // Deserialize
         let py_expr = dict_to_py_expr(&expr_dict)?;
+        if let PyExpr::Column(name) = &py_expr {
+            passed.insert(name.clone());
+        }
 
         // Transpile
         let df_expr = pyexpr_to_named_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
@@ -91,32 +102,30 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         df_exprs.push(df_expr);
     }
 
-    // 3. Get DataFrame
-    let df = table.require_df()?;
-
-    // 4. Apply select (plan building only; nothing executes here)
-    let selected_df = (**df)
-        .clone()
-        .select(df_exprs)
-        .map_err(|e| LtseqError::Runtime(format!("Select execution failed: {}", e)))?;
-
-    // 5. Keep the longest prefix of sort keys whose columns survived the
-    // projection: a table sorted by (a, b) is still sorted by (a) after b is
-    // projected away, but nothing is guaranteed past the first missing column.
-    let result_schema = LTSeqTable::schema_from_df(selected_df.schema());
+    // 3. Keep the longest prefix of sort keys that pass through: a table
+    // sorted by (a, b) is still sorted by (a) after b is projected away, but
+    // nothing is declared past the first key that is dropped. A computed
+    // column can carry a key's name (a cast keeps its input's), so a key
+    // survives only as a column reference.
     let sort_specs: Vec<crate::SortSpec> = table
         .sort_specs
         .iter()
-        .take_while(|spec| {
-            result_schema
-                .fields()
-                .iter()
-                .any(|f| f.name() == &spec.column)
-        })
+        .take_while(|spec| passed.contains(&spec.column))
         .cloned()
         .collect();
 
-    // 6. Return new LTSeqTable with recomputed schema
+    // 4. Apply select (plan building only; nothing executes here), keeping
+    // the input's full order in this result when it drops a key
+    let df = table.require_df()?;
+    let selected_df = crate::ops::common::select_in_order(
+        (**df).clone(),
+        df_exprs,
+        &table.sort_specs,
+        sort_specs.len(),
+    )
+    .map_err(|e| LtseqError::Runtime(format!("Select execution failed: {}", e)))?;
+
+    // 5. Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         selected_df,
@@ -236,10 +245,10 @@ pub fn search_first_impl(
 
 /// Helper function to materialize the lazy plan into an in-memory table
 ///
-/// Executes the pending DataFusion plan once and snapshots all batches into a
-/// single-partition MemTable-backed DataFrame, so downstream operations reuse
-/// the computed data instead of re-executing the plan. Rows, schema, and row
-/// order are unchanged, so sort metadata is carried over.
+/// Executes the pending DataFusion plan once, in table order, and snapshots
+/// all batches into one in-order partition (`Collected`), so downstream
+/// operations reuse the computed data instead of re-executing the plan. Rows,
+/// schema, and row order are unchanged, so sort metadata is carried over.
 ///
 /// Runs with the GIL released (`lib.rs::materialize` wraps it in
 /// `gil::detached`), so it takes no Python objects and returns `LtseqError`.
@@ -257,13 +266,61 @@ pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
         .block_on(table.ordered_df()?.collect())
         .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
 
-    // The data now lives in memory, so from_batches drops source_parquet_path
-    // and downstream ops scan the snapshot instead of re-reading the file. A
-    // 0-row plan still materializes to a scannable zero-row table.
-    LTSeqTable::from_batches(
-        Arc::clone(&table.session),
-        batches,
-        Arc::clone(schema),
-        table.sort_specs.clone(),
+    // The data now lives in memory, so the snapshot drops source_parquet_path
+    // and downstream ops scan it instead of re-reading the file. A 0-row plan
+    // still materializes to a scannable zero-row table.
+    let schema = batches
+        .first()
+        .map_or_else(|| Arc::clone(schema), |b| b.schema());
+    let sort_order = crate::metadata::sort_specs_to_df_sort_exprs(&table.sort_specs);
+    let snapshot = StreamingTable::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Collected {
+            schema: Arc::clone(&schema),
+            batches: batches.into(),
+        })],
     )
+    .map_err(|e| LtseqError::with_context("Failed to create table", e))?
+    .with_sort_order(sort_order);
+    let df = table
+        .session
+        .read_table(Arc::new(snapshot))
+        .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        df,
+        schema,
+        table.sort_specs.clone(),
+        None,
+    ))
+}
+
+/// The rows `collect()` snapshot, read back as one partition in the order
+/// they were collected.
+///
+/// DataFusion splits a `MemTable` into partitions once it has as many
+/// batches as the session has target partitions, and the partitions come
+/// back in any order. A table with declared keys would get its order back
+/// from the root sort, but a table whose keys a projection dropped has
+/// none to sort by (#311). A streaming source is never split, and its
+/// declared order spares the root sort.
+#[derive(Debug)]
+struct Collected {
+    schema: SchemaRef,
+    batches: Arc<[RecordBatch]>,
+}
+
+impl PartitionStream for Collected {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let batches = Arc::clone(&self.batches);
+        let rows = (0..batches.len()).map(move |i| Ok(batches[i].clone()));
+        Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&self.schema),
+            futures_util::stream::iter(rows),
+        ))
+    }
 }

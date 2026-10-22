@@ -11,7 +11,8 @@ use crate::error::LtseqError;
 use crate::metadata::SortSpec;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::common::Column;
-use datafusion::logical_expr::Expr;
+use datafusion::dataframe::DataFrame;
+use datafusion::logical_expr::{Expr, SortExpr};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -212,6 +213,60 @@ pub fn truncate_specs_at_overwrite(
         .take_while(|spec| !derived_names.contains(&spec.column))
         .cloned()
         .collect()
+}
+
+/// Project `exprs` over `df`, a table declared in `specs` order, of which the
+/// result declares only the first `kept` keys because the projection drops
+/// or replaces the next one.
+///
+/// The result's rows must still come in the input's order, but the root sort
+/// of `LTSeqTable::ordered_df` can restore only the keys the result declares.
+/// So the projection carries a copy of every key under a hidden name, sorts
+/// by the copies and drops them: `select(outputs) <- sort(copies) <-
+/// select(exprs, copies)`. The expressions are computed beneath the sort, so
+/// the projection above it only picks columns, which DataFusion does not
+/// repartition. Later transforms keep only the declared keys' order (#311).
+pub fn select_in_order(
+    df: DataFrame,
+    exprs: Vec<Expr>,
+    specs: &[SortSpec],
+    kept: usize,
+) -> datafusion::error::Result<DataFrame> {
+    if kept == specs.len() {
+        return df.select(exprs);
+    }
+    let outputs = exprs.len();
+    let names: HashSet<String> = df
+        .clone()
+        .select(exprs.clone())?
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let mut hidden = (0..)
+        .map(|i| format!("__ltseq_order_{i}"))
+        .filter(|n| !names.contains(n));
+    let mut stage = exprs;
+    let mut order = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let name = hidden.next().expect("an unbounded range has a free name");
+        stage.push(Expr::Column(Column::new_unqualified(&spec.column)).alias(&name));
+        order.push(SortExpr::new(
+            Expr::Column(Column::new_unqualified(name)),
+            !spec.descending,
+            spec.nulls_first,
+        ));
+    }
+    let stage = df.select(stage)?;
+    let picked: Vec<Expr> = stage
+        .schema()
+        .columns()
+        .into_iter()
+        .take(outputs)
+        .map(Expr::Column)
+        .collect();
+    stage.sort(order)?.select(picked)
 }
 
 

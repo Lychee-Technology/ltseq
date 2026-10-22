@@ -100,6 +100,11 @@ def computed_derive_reference(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def dropped_key_reference(df: pd.DataFrame) -> pd.DataFrame:
+    d = by_date(df)
+    return pd.DataFrame({"volume": d.volume, "close2": d.close * 2})
+
+
 def partitioned_shift_reference(df: pd.DataFrame) -> pd.DataFrame:
     d = by_date(df)
     d["prev"] = d.groupby("g").close.shift(1)
@@ -141,6 +146,13 @@ PIPELINES = {
     "computed_derive": Pipeline(
         lambda t: t.sort("date").derive(z=lambda r: r.close * 2 + r.volume),
         computed_derive_reference,
+        "volume",
+    ),
+    # `sort_keys` is None after the select, yet the select's rows keep the
+    # order of the sort before it.
+    "dropped_key": Pipeline(
+        lambda t: t.sort("date").select(lambda r: [r.volume, r.close * 2]),
+        dropped_key_reference,
         "volume",
     ),
     "partitioned_shift": Pipeline(
@@ -241,6 +253,7 @@ def test_every_consumer_reads_rows_in_order(name, engine_layout, data_layout, tm
     check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
 
 
+
 # ---------------------------------------------------------------------------
 # Operations that count rows in table order
 # ---------------------------------------------------------------------------
@@ -301,3 +314,36 @@ def test_sort_after_an_offset_slice_keeps_the_slice(engine_layout):
     assert dates(t.tail(5).sort("date")) == [95, 96, 97, 98, 99]
     assert dates(t.slice(3, 4).sort("date")) == [3, 4, 5, 6]
     assert dates(t.slice(3, 4).slice(1, 2)) == [4, 5]
+
+
+# ---------------------------------------------------------------------------
+# Projections that drop or replace a sort key
+# ---------------------------------------------------------------------------
+
+
+def test_dropping_a_later_key_keeps_the_full_order(engine_layout):
+    """`sort_keys` keeps the keys before the dropped one; the rows of the
+    projection itself keep every key's order, ties on `g` included."""
+    rows = input_rows(100)
+    t = LTSeq.from_arrow(rows).sort("g", "date").select(lambda r: [r.g, r.volume, r.close * 2])
+    assert t.sort_keys == [("g", False)]
+    expected = rows.to_pandas().sort_values(["g", "date"], kind="stable")
+    assert t.to_arrow().column("volume").to_pylist() == expected.volume.tolist()
+
+
+def test_replacing_a_key_keeps_the_input_order(engine_layout):
+    t = LTSeq.from_arrow(input_rows(100)).sort("date")
+    negated = t.derive(date=lambda r: 0 - r.date, z=lambda r: r.close * 2)
+    assert negated.sort_keys is None
+    assert dates(negated) == [-d for d in range(100)]
+    shifted = t.derive(date=lambda r: r.date.shift(1))
+    assert shifted.sort_keys is None
+    assert dates(shifted) == [None, *range(99)]
+
+
+def test_a_computed_column_named_like_a_key_does_not_keep_the_key(engine_layout):
+    """A cast keeps its input's name. Its values sort differently, so it is
+    not the key, and its rows keep the input's order."""
+    t = LTSeq.from_arrow(input_rows(100)).sort("date").select(lambda r: [r.date.cast("string")])
+    assert t.sort_keys is None
+    assert t.to_arrow().column(0).to_pylist() == [str(d) for d in range(100)]

@@ -495,8 +495,9 @@ impl LTSeqTable {
         Ok((logical_text, physical_text))
     }
 
-    /// Materialize the lazy plan into an in-memory table (single-partition
-    /// MemTable snapshot). Preserves row order, schema, and sort metadata.
+    /// Materialize the lazy plan into an in-memory table (a snapshot read
+    /// back as one in-order partition). Preserves row order, schema, and sort
+    /// metadata.
     ///
     /// Returns:
     ///     New LTSeqTable backed by the materialized data
