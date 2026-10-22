@@ -54,7 +54,7 @@ def input_rows(n: int) -> pa.Table:
     one answer. `close` repeats every 41 dates, which gives `rank` ties.
     There is no string column: read back from Parquet in small batches,
     one makes `group_ordered().filter()` take minutes on 100 rows, a
-    slowdown unrelated to order.
+    slowdown unrelated to order (#338).
     """
     date = np.arange(n, dtype=np.int64)
     g: list[int] = []

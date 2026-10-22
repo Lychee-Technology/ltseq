@@ -130,12 +130,6 @@ compounded.select("day", "nav", "ret", "cum_return").tail(3).show();
   materialization** — clearly slower than windows on big tables. Official
   guidance: **prefer windows whenever they can express the computation**;
   reach for fold only when you truly need arbitrary state.
-- `fold` threads its state through the rows in the order they come back. On a
-  large input spread over several partitions, the windows in `nav_t` and
-  `with_ret` can return rows out of `day` order while `sort_keys` still
-  reports it (issue #311), and `cum_return` then compounds in the wrong
-  order. Until that is fixed, call `.sort("day")` right before `fold` on
-  real data.
 - `partition_by="fund"` resets state to `init` at each partition start —
   multi-fund compounding in one call (see exercises).
 

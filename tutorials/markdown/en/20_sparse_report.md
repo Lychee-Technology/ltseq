@@ -199,12 +199,6 @@ filled.select("region_show", "city_show", "sales", "region_fill").show();
   the display columns first would drop the sort-key columns, and the declared
   order with them: `fold` would raise `SortRequiredError`. The `select` comes
   after, for display only.
-- `fold` threads its state through the rows in the order they come back. On a
-  large input spread over several partitions, the `shift` windows in `sparse1`
-  and `sparse2` can return rows out of declared order while `sort_keys` still
-  reports it (issue #311), and `region_fill` then carries a region into rows
-  of another region. Until that is fixed, call
-  `.sort("region", "city", "sales")` right before `fold` on real data.
 - fold's lambda operates on **Python values** (the row is a read-only view:
   `r["region_show"]` or `r.region_show`), so `is not None` is an ordinary
   Python check — distinct from `.is_null()` in expression lambdas (case 25
