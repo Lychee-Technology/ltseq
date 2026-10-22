@@ -21,12 +21,6 @@ use crate::error::LtseqError;
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::catalog::streaming::StreamingTable;
-use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::streaming::PartitionStream;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -246,7 +240,7 @@ pub fn search_first_impl(
 /// Helper function to materialize the lazy plan into an in-memory table
 ///
 /// Executes the pending DataFusion plan once, in table order, and snapshots
-/// all batches into one in-order partition (`Collected`), so downstream
+/// all batches into one in-order partition (`from_collected`), so downstream
 /// operations reuse the computed data instead of re-executing the plan. Rows,
 /// schema, and row order are unchanged, so sort metadata is carried over.
 ///
@@ -269,58 +263,10 @@ pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     // The data now lives in memory, so the snapshot drops source_parquet_path
     // and downstream ops scan it instead of re-reading the file. A 0-row plan
     // still materializes to a scannable zero-row table.
-    let schema = batches
-        .first()
-        .map_or_else(|| Arc::clone(schema), |b| b.schema());
-    let sort_order = crate::metadata::sort_specs_to_df_sort_exprs(&table.sort_specs);
-    let snapshot = StreamingTable::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(Collected {
-            schema: Arc::clone(&schema),
-            batches: batches.into(),
-        })],
-    )
-    .map_err(|e| LtseqError::with_context("Failed to create table", e))?
-    .with_sort_order(sort_order);
-    let df = table
-        .session
-        .read_table(Arc::new(snapshot))
-        .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
-    Ok(LTSeqTable::from_df_with_schema(
+    LTSeqTable::from_collected(
         Arc::clone(&table.session),
-        df,
-        schema,
+        batches,
+        Arc::clone(schema),
         table.sort_specs.clone(),
-        None,
-    ))
-}
-
-/// The rows `collect()` snapshot, read back as one partition in the order
-/// they were collected.
-///
-/// DataFusion splits a `MemTable` into partitions once it has as many
-/// batches as the session has target partitions, and the partitions come
-/// back in any order. A table with declared keys would get its order back
-/// from the root sort, but a table whose keys a projection dropped has
-/// none to sort by (#311). A streaming source is never split, and its
-/// declared order spares the root sort.
-#[derive(Debug)]
-struct Collected {
-    schema: SchemaRef,
-    batches: Arc<[RecordBatch]>,
-}
-
-impl PartitionStream for Collected {
-    fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-
-    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let batches = Arc::clone(&self.batches);
-        let rows = (0..batches.len()).map(move |i| Ok(batches[i].clone()));
-        Box::pin(RecordBatchStreamAdapter::new(
-            Arc::clone(&self.schema),
-            futures_util::stream::iter(rows),
-        ))
-    }
+    )
 }

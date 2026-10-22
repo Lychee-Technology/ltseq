@@ -1,9 +1,13 @@
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::arrow::pyarrow::IntoPyArrow;
+use datafusion::catalog::streaming::StreamingTable;
 use datafusion::common::DFSchema;
 use datafusion::datasource::MemTable;
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::displayable;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::prelude::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -145,6 +149,45 @@ impl LTSeqTable {
         })
     }
 
+    /// Create a table from batches collected in the order `sort_specs`
+    /// declares (or in table order, if it declares none), read back as one
+    /// partition in that order.
+    ///
+    /// `from_batches` builds a MemTable, which DataFusion splits into
+    /// partitions once it holds as many batches as the session has target
+    /// partitions; the partitions then come back in any order, and the split
+    /// drops the declared order, so every read would sort again. A snapshot
+    /// read as one stream is never split: its declared order needs no sort,
+    /// and a table without keys (after a projection dropped them, #311) keeps
+    /// its rows in the order they were collected. `collect()` builds tables
+    /// this way. `assume_sorted()` on in-memory data does not: it declares an
+    /// order for rows collected from an input whose order across partitions
+    /// is not kept (#148), and a MemTable that DataFusion splits loses the
+    /// declaration and gets sorted where it is read.
+    pub(crate) fn from_collected(
+        session: Arc<SessionContext>,
+        batches: Vec<RecordBatch>,
+        schema: Arc<ArrowSchema>,
+        sort_specs: Vec<SortSpec>,
+    ) -> Result<Self, LtseqError> {
+        let schema = batches.first().map_or(schema, |batch| batch.schema());
+        let snapshot = StreamingTable::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Collected {
+                schema: Arc::clone(&schema),
+                batches: batches.into(),
+            })],
+        )
+        .map_err(|e| LtseqError::with_context("Failed to create table", e))?
+        .with_sort_order(metadata::sort_specs_to_df_sort_exprs(&sort_specs));
+        let df = session
+            .read_table(Arc::new(snapshot))
+            .map_err(|e| LtseqError::with_context("Failed to read table", e))?;
+        Ok(LTSeqTable::from_df_with_schema(
+            session, df, schema, sort_specs, None,
+        ))
+    }
+
     /// Create a zero-row table with the given schema.
     ///
     /// This is the early-return value of queries that find no rows (e.g. a
@@ -225,6 +268,29 @@ impl LTSeqTable {
         }
         ops::sort::sort_unless_ordered(df, metadata::sort_specs_to_df_sort_exprs(&self.sort_specs))
             .map_err(|e| LtseqError::with_context("Failed to order rows", e))
+    }
+}
+
+/// The batches of `LTSeqTable::from_collected`, streamed in their order on
+/// every execution.
+#[derive(Debug)]
+struct Collected {
+    schema: SchemaRef,
+    batches: Arc<[RecordBatch]>,
+}
+
+impl PartitionStream for Collected {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let batches = Arc::clone(&self.batches);
+        let rows = (0..batches.len()).map(move |i| Ok(batches[i].clone()));
+        Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&self.schema),
+            futures_util::stream::iter(rows),
+        ))
     }
 }
 
