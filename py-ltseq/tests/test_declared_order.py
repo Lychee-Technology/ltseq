@@ -6,11 +6,20 @@ return rows in partition arrival order while `sort_keys` still reported the
 sort. The table's declared order is now required at the root of every plan
 that reads rows in table order.
 
-These are #321's ordering acceptance pipelines and consumers. Each output is
-compared row for row with a pandas reference, under every engine layout
-(partition counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the
-default) and every input layout. The input rows arrive shuffled, so every
-order in an output comes from the pipeline's `sort`.
+The tests follow #321's ordering acceptance, items 1 and 3:
+
+- six pipelines, each read through every consumer and compared row for row
+  with a pandas reference: at 100 rows under every engine layout (partition
+  counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the default) and
+  every input layout, and at 40,000 rows at 2 and 2×CPU partitions;
+- the operations that count rows in table order (`rvs`, `step`, `distinct`,
+  the positional mutations, `asof_join`'s search, an offset `slice`);
+- a projection that drops or replaces a sort key;
+- seeded chains of transforms, after which every terminal's rows are sorted
+  by `sort_keys`.
+
+The input rows arrive shuffled, so every order in an output comes from the
+pipeline's `sort`.
 """
 
 from __future__ import annotations
@@ -27,6 +36,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from ltseq import LTSeq, rank
+
+from . import layouts
+from .layouts import CPUS, LAYOUTS
 
 # Consecutive runs of `g` in date order: lengths cycle through these, labels
 # through LABELS, so neighbouring runs always differ and some runs are a
@@ -253,6 +265,18 @@ def test_every_consumer_reads_rows_in_order(name, engine_layout, data_layout, tm
     check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
 
 
+@pytest.mark.parametrize("partitions", [2, 2 * CPUS], ids=["p2", "p2xcpu"])
+@pytest.mark.parametrize("name", list(PIPELINES))
+def test_every_consumer_reads_rows_in_order_at_scale(
+    name, partitions, engine_config, data_layout, tmp_path, capsys
+):
+    """40,000 rows at the default batch size: several batches per partition."""
+    engine_config(target_partitions=partitions)
+    pipeline = PIPELINES[name]
+    rows = input_rows(40_000)
+    t = pipeline.build(data_layout(rows))
+    check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
+
 
 # ---------------------------------------------------------------------------
 # Operations that count rows in table order
@@ -347,3 +371,144 @@ def test_a_computed_column_named_like_a_key_does_not_keep_the_key(engine_layout)
     t = LTSeq.from_arrow(input_rows(100)).sort("date").select(lambda r: [r.date.cast("string")])
     assert t.sort_keys is None
     assert t.to_arrow().column(0).to_pylist() == [str(d) for d in range(100)]
+
+
+# ---------------------------------------------------------------------------
+# Property: whenever sort_keys is not None, every terminal is sorted by it
+# ---------------------------------------------------------------------------
+
+# Orders a chain starts from: unique and tied keys, both directions.
+ORDERS = (
+    (("date",), False),
+    (("g", "date"), False),
+    (("g", "close"), [False, True]),
+    (("close",), True),
+    (("volume",), False),
+)
+
+
+def _derived(name: str) -> Callable[[LTSeq, int], LTSeq]:
+    """A step that adds one column, named after its position in the chain."""
+    exprs = {
+        "computed": lambda r: r.close * 2 + r.volume,
+        "shift": lambda r: r.close.shift(1),
+        "partitioned_shift": lambda r: r.close.shift(1, partition_by="g"),
+        "rolling": lambda r: r.close.rolling(3).mean(),
+        "rank": lambda r: rank().over(order_by=r.volume),
+    }
+    return lambda t, i: t.derive(**{f"{name}_{i}": exprs[name]})
+
+
+def _in_order(step: Callable[[LTSeq, int], LTSeq]) -> Callable[[LTSeq, int], LTSeq]:
+    """A step that needs declared keys, skipped once an earlier step cleared them."""
+    return lambda t, i: step(t, i) if t.sort_keys else t
+
+
+def _reads(*columns: str, step: Callable[[LTSeq, int], LTSeq]) -> Callable[[LTSeq, int], LTSeq]:
+    """A step skipped once an earlier step dropped or renamed a column it reads."""
+    return lambda t, i: step(t, i) if set(columns) <= set(t.columns) else t
+
+
+def _drop_last_key(t: LTSeq, i: int) -> LTSeq:
+    keys = [key for key, _ in t.sort_keys or []]
+    if len(keys) < 2:
+        return t
+    return t.select(*[c for c in t.columns if c != keys[-1]])
+
+
+def _replace_first_key(t: LTSeq, i: int) -> LTSeq:
+    keys = [key for key, _ in t.sort_keys or []]
+    if not keys or t.schema[keys[0]] not in ("int64", "float64"):
+        return t
+    return t.derive(**{keys[0]: lambda r: 0 - getattr(r, keys[0])})
+
+
+def _rename_first_key(t: LTSeq, i: int) -> LTSeq:
+    keys = [key for key, _ in t.sort_keys or []]
+    return t.rename({keys[0]: f"renamed_{i}"}) if keys else t
+
+
+STEPS: dict[str, Callable[[LTSeq, int], LTSeq]] = {
+    "filter": _reads("volume", step=lambda t, i: t.filter(lambda r: r.volume % 3 != 0)),
+    "computed": _reads("close", "volume", step=_derived("computed")),
+    "shift": _reads("close", step=_in_order(_derived("shift"))),
+    "partitioned_shift": _reads("close", "g", step=_in_order(_derived("partitioned_shift"))),
+    "rolling": _reads("close", step=_in_order(_derived("rolling"))),
+    "rank": _reads("volume", step=_derived("rank")),
+    "cum_sum": _reads(
+        "volume",
+        step=_in_order(
+            lambda t, i: t.cum_sum("volume") if "volume_cumsum" not in t.columns else t
+        ),
+    ),
+    "drop_last_key": _drop_last_key,
+    "replace_first_key": _replace_first_key,
+    "rename_first_key": _rename_first_key,
+    "head": lambda t, i: t.head(70),
+    "tail": lambda t, i: t.tail(70),
+    "slice": lambda t, i: t.slice(5, 60),
+    "collect": lambda t, i: t.collect(),
+    "group_derive": _reads(
+        "g",
+        step=_in_order(
+            lambda t, i: t.group_ordered(lambda r: r.g).derive(
+                lambda g: {f"size_{i}": g.count()}
+            )
+        ),
+    ),
+    "semi_join": _reads(
+        "volume",
+        step=lambda t, i: t.semi_join(
+            LTSeq.from_arrow(input_rows(100)).filter(lambda r: r.volume % 2 == 0),
+            on="volume",
+        ),
+    ),
+}
+
+
+def chain(seed: int) -> tuple[Callable[[LTSeq], LTSeq], str]:
+    """A seeded sort followed by one to four steps."""
+    rng = np.random.default_rng(seed)
+    keys, desc = ORDERS[seed % len(ORDERS)]
+    names = list(rng.choice(sorted(STEPS), size=int(rng.integers(1, 5))))
+
+    def build(t: LTSeq) -> LTSeq:
+        t = t.sort(*keys, desc=desc)
+        for i, name in enumerate(names):
+            t = STEPS[name](t, i)
+        return t
+
+    return build, f"sort{keys} → {' → '.join(names)}"
+
+
+def assert_sorted_by(table: pa.Table, keys: list[tuple[str, bool]], what: str) -> None:
+    """Adjacent rows do not sort after each other under `keys`."""
+    columns = [table.column(key).to_pylist() for key, _ in keys]
+    for row in range(1, table.num_rows):
+        for column, (key, descending) in zip(columns, keys):
+            before, after = column[row - 1], column[row]
+            if before == after:
+                continue
+            assert (before > after) if descending else (before < after), (what, key, row, before, after)
+            break
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_terminals_are_sorted_by_sort_keys(seed, engine_layout, tmp_path):
+    build, description = chain(seed)
+    layout = LAYOUTS[seed % len(LAYOUTS)]
+    t = build(layouts.build(layout, input_rows(100), tmp_path / "input"))
+    keys = t.sort_keys
+    if keys is None:
+        # Only a step that drops or replaces the first key clears them all.
+        assert "replace_first_key" in description, description
+        return
+    what = f"{description} over {layout}"
+    assert_sorted_by(t.to_arrow(), keys, f"to_arrow: {what}")
+    assert_sorted_by(pa.Table.from_pandas(t.to_pandas()), keys, f"to_pandas: {what}")
+    assert_sorted_by(pa.Table.from_pylist(t.to_dicts()), keys, f"to_dicts: {what}")
+    assert_sorted_by(pa.Table.from_pylist(list(t)), keys, f"iteration: {what}")
+    assert_sorted_by(pa.table(t), keys, f"pa.table: {what}")
+    assert_sorted_by(t.collect().to_arrow(), keys, f"collect: {what}")
+    assert_sorted_by(write_and_read_parquet(t, tmp_path), keys, f"write_parquet: {what}")
+    assert_sorted_by(write_and_read_csv(t, tmp_path), keys, f"write_csv: {what}")
