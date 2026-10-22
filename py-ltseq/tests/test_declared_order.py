@@ -453,6 +453,15 @@ def _drop_last_key(t: LTSeq, i: int) -> LTSeq:
     return t.select(*[c for c in t.columns if c != keys[-1]])
 
 
+def _drop_a_non_key(t: LTSeq, i: int) -> LTSeq:
+    """A select that keeps every key and only picks columns."""
+    keys = {key for key, _ in t.sort_keys or []}
+    others = [c for c in t.columns if c not in keys]
+    if not keys or not others:
+        return t
+    return t.select(*[c for c in t.columns if c != others[-1]])
+
+
 def _replace_first_key(t: LTSeq, i: int) -> LTSeq:
     keys = [key for key, _ in t.sort_keys or []]
     if not keys or t.schema[keys[0]] not in ("int64", "float64"):
@@ -479,6 +488,7 @@ STEPS: dict[str, Callable[[LTSeq, int], LTSeq]] = {
         ),
     ),
     "drop_last_key": _drop_last_key,
+    "drop_non_key": _drop_a_non_key,
     "replace_first_key": _replace_first_key,
     "rename_first_key": _rename_first_key,
     "head": lambda t, i: t.head(70),
@@ -518,8 +528,11 @@ def chain(seed: int) -> tuple[Callable[[LTSeq], LTSeq], str]:
     return build, f"sort{keys} → {' → '.join(names)}"
 
 
-def assert_sorted_by(table: pa.Table, keys: list[tuple[str, bool]], what: str) -> None:
-    """Adjacent rows do not sort after each other under `keys`."""
+def assert_sorted_by(table: pa.Table, keys: list[tuple[str, bool]], rows: int, what: str) -> None:
+    """`table` has `rows` rows, and adjacent ones do not sort after each
+    other under `keys`. The count keeps a terminal that lost rows from
+    passing: an empty table is sorted by anything."""
+    assert table.num_rows == rows, (what, table.num_rows, rows)
     columns = [table.column(key).to_pylist() for key, _ in keys]
     for row in range(1, table.num_rows):
         for column, (key, descending) in zip(columns, keys):
@@ -541,11 +554,13 @@ def test_terminals_are_sorted_by_sort_keys(seed, engine_layout, tmp_path):
         assert "replace_first_key" in description, description
         return
     what = f"{description} over {layout}"
-    assert_sorted_by(t.to_arrow(), keys, f"to_arrow: {what}")
-    assert_sorted_by(pa.Table.from_pandas(t.to_pandas()), keys, f"to_pandas: {what}")
-    assert_sorted_by(pa.Table.from_pylist(t.to_dicts()), keys, f"to_dicts: {what}")
-    assert_sorted_by(pa.Table.from_pylist(list(t)), keys, f"iteration: {what}")
-    assert_sorted_by(pa.table(t), keys, f"pa.table: {what}")
-    assert_sorted_by(t.collect().to_arrow(), keys, f"collect: {what}")
-    assert_sorted_by(write_and_read_parquet(t, tmp_path), keys, f"write_parquet: {what}")
-    assert_sorted_by(write_and_read_csv(t, tmp_path), keys, f"write_csv: {what}")
+    # `len` counts through the plan without the root sort.
+    rows = len(t)
+    assert_sorted_by(t.to_arrow(), keys, rows, f"to_arrow: {what}")
+    assert_sorted_by(pa.Table.from_pandas(t.to_pandas()), keys, rows, f"to_pandas: {what}")
+    assert_sorted_by(pa.Table.from_pylist(t.to_dicts()), keys, rows, f"to_dicts: {what}")
+    assert_sorted_by(pa.Table.from_pylist(list(t)), keys, rows, f"iteration: {what}")
+    assert_sorted_by(pa.table(t), keys, rows, f"pa.table: {what}")
+    assert_sorted_by(t.collect().to_arrow(), keys, rows, f"collect: {what}")
+    assert_sorted_by(write_and_read_parquet(t, tmp_path), keys, rows, f"write_parquet: {what}")
+    assert_sorted_by(write_and_read_csv(t, tmp_path), keys, rows, f"write_csv: {what}")
