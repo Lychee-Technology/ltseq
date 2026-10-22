@@ -233,6 +233,11 @@ class TransformMixin(LookupMixin, LTSeqLike):
         """
         Project specified columns or expressions.
 
+        ``sort_keys`` keeps the leading keys that are selected as plain
+        columns and drops the rest from the first key that is not. The rows of
+        the result still come in the input's full order; transforms after it
+        keep only the order of the keys that remain.
+
         Args:
             *cols: Column names (str) or lambdas returning expressions
 
@@ -280,7 +285,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
         (stable column order, no duplicates — Polars ``with_columns``
         semantics); the expression reads the ORIGINAL column values.
         Overwriting a sort key invalidates the declared sort order from
-        that key onward (``sort_keys`` prefix-truncates).
+        that key onward (``sort_keys`` prefix-truncates); the rows of the
+        result still come in the input's order, as ``select``'s do.
 
         Args:
             *args: Single callable returning dict of {col_name: expr}
@@ -545,14 +551,20 @@ class TransformMixin(LookupMixin, LTSeqLike):
         """
         Sort by one or more keys.
 
+        The column keys become the declared order (``sort_keys``). Every call
+        that returns rows returns them in that order, whatever filters,
+        derives or windows follow the sort.
+
         Computed keys (e.g. ``lambda r: r.a * 2``) sort the data physically
         but cannot be tracked as declared order: sort metadata truncates at
         the first computed key, so a computed-only sort declares no order and
         ordered APIs (``cum_sum``, ``group_ordered``, window expressions)
-        will still raise ``SortRequiredError``. Derive the key as a column
-        first (``.derive(k=...).sort("k")``) to use it as declared order.
-        After truncation, the order of rows tied on the declared prefix is
-        unspecified.
+        will still raise ``SortRequiredError``. The rows come back in a
+        computed key's order only when read straight after the sort. Once
+        another transform follows, only the column keys before the first
+        computed one are kept, and the order of rows tied on them is
+        unspecified. Derive the key as a column first
+        (``.derive(k=...).sort("k")``) to keep its order.
 
         Args:
             *keys: Column names or expressions to sort by

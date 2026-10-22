@@ -19,7 +19,7 @@
 
 use crate::error::LtseqError;
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
-use crate::types::dict_to_py_expr;
+use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -78,12 +78,17 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // 1. Get schema
     let schema = table.require_schema()?;
 
-    // 2. Deserialize and transpile all expressions
+    // 2. Deserialize and transpile all expressions, noting the columns that
+    // pass through unchanged
     let mut df_exprs = Vec::new();
+    let mut passed = std::collections::HashSet::new();
 
     for expr_dict in exprs {
         // Deserialize
         let py_expr = dict_to_py_expr(&expr_dict)?;
+        if let PyExpr::Column(name) = &py_expr {
+            passed.insert(name.clone());
+        }
 
         // Transpile
         let df_expr = pyexpr_to_named_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
@@ -91,32 +96,30 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
         df_exprs.push(df_expr);
     }
 
-    // 3. Get DataFrame
-    let df = table.require_df()?;
-
-    // 4. Apply select (plan building only; nothing executes here)
-    let selected_df = (**df)
-        .clone()
-        .select(df_exprs)
-        .map_err(|e| LtseqError::Runtime(format!("Select execution failed: {}", e)))?;
-
-    // 5. Keep the longest prefix of sort keys whose columns survived the
-    // projection: a table sorted by (a, b) is still sorted by (a) after b is
-    // projected away, but nothing is guaranteed past the first missing column.
-    let result_schema = LTSeqTable::schema_from_df(selected_df.schema());
+    // 3. Keep the longest prefix of sort keys that pass through: a table
+    // sorted by (a, b) is still sorted by (a) after b is projected away, but
+    // nothing is declared past the first key that is dropped. A computed
+    // column can carry a key's name (a cast keeps its input's), so a key
+    // survives only as a column reference.
     let sort_specs: Vec<crate::SortSpec> = table
         .sort_specs
         .iter()
-        .take_while(|spec| {
-            result_schema
-                .fields()
-                .iter()
-                .any(|f| f.name() == &spec.column)
-        })
+        .take_while(|spec| passed.contains(&spec.column))
         .cloned()
         .collect();
 
-    // 6. Return new LTSeqTable with recomputed schema
+    // 4. Apply select (plan building only; nothing executes here), keeping
+    // the input's full order in this result when it drops a key
+    let df = table.require_df()?;
+    let selected_df = crate::ops::common::select_in_order(
+        (**df).clone(),
+        df_exprs,
+        &table.sort_specs,
+        sort_specs.len(),
+    )
+    .map_err(|e| LtseqError::Runtime(format!("Select execution failed: {}", e)))?;
+
+    // 5. Return new LTSeqTable with recomputed schema
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         selected_df,
@@ -206,7 +209,7 @@ pub fn search_first_impl(
     table: &LTSeqTable,
     expr_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let schema = table.require_schema()?;
 
     // Deserialize the expression
     let py_expr = dict_to_py_expr(expr_dict)?;
@@ -215,9 +218,11 @@ pub fn search_first_impl(
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(LtseqError::Validation)?;
 
-    // Apply filter and limit to first result (plan building only)
-    let result_df = (**df)
-        .clone()
+    // Apply filter and limit to first result (plan building only). "First"
+    // is in table order, so the limit goes above the order; DataFusion moves
+    // the filter beneath it.
+    let result_df = table
+        .ordered_df()?
         .filter(df_expr)
         .map_err(|e| LtseqError::Runtime(format!("Filter failed: {}", e)))?
         .limit(0, Some(1))
@@ -234,10 +239,10 @@ pub fn search_first_impl(
 
 /// Helper function to materialize the lazy plan into an in-memory table
 ///
-/// Executes the pending DataFusion plan once and snapshots all batches into a
-/// single-partition MemTable-backed DataFrame, so downstream operations reuse
-/// the computed data instead of re-executing the plan. Rows, schema, and row
-/// order are unchanged, so sort metadata is carried over.
+/// Executes the pending DataFusion plan once, in table order, and snapshots
+/// all batches into one in-order partition (`from_collected`), so downstream
+/// operations reuse the computed data instead of re-executing the plan. Rows,
+/// schema, and row order are unchanged, so sort metadata is carried over.
 ///
 /// Runs with the GIL released (`lib.rs::materialize` wraps it in
 /// `gil::detached`), so it takes no Python objects and returns `LtseqError`.
@@ -250,15 +255,15 @@ pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
 
-    let (df, schema) = table.require_df_and_schema()?;
+    let schema = table.require_schema()?;
     let batches = crate::engine::RUNTIME
-        .block_on((**df).clone().collect())
+        .block_on(table.ordered_df()?.collect())
         .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
 
-    // The data now lives in memory, so from_batches drops source_parquet_path
-    // and downstream ops scan the snapshot instead of re-reading the file. A
-    // 0-row plan still materializes to a scannable zero-row table.
-    LTSeqTable::from_batches(
+    // The data now lives in memory, so the snapshot drops source_parquet_path
+    // and downstream ops scan it instead of re-reading the file. A 0-row plan
+    // still materializes to a scannable zero-row table.
+    LTSeqTable::from_collected(
         Arc::clone(&table.session),
         batches,
         Arc::clone(schema),

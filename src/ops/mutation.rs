@@ -41,7 +41,7 @@ fn insert_row_exec(
 ) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let batches = collect_all(df)?;
+    let batches = collect_all(table)?;
 
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let pos = pos.clamp(0, num_rows as i64) as usize;
@@ -100,7 +100,7 @@ fn insert_row_exec(
 pub fn delete_rows_impl(table: &LTSeqTable, pos: i64) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let batches = collect_all(df)?;
+    let batches = collect_all(table)?;
 
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
@@ -246,7 +246,7 @@ fn modify_row_exec(
 ) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
-    let batches = collect_all(df)?;
+    let batches = collect_all(table)?;
 
     let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
@@ -310,12 +310,11 @@ fn modify_row_exec(
 // Helpers
 // ============================================================================
 
-/// Full-table collect for the copy-on-write mutations.
-fn collect_all(
-    df: &Arc<datafusion::dataframe::DataFrame>,
-) -> Result<Vec<RecordBatch>, LtseqError> {
+/// Full-table collect for the copy-on-write mutations, in table order: the
+/// positional ones count rows in it.
+fn collect_all(table: &LTSeqTable) -> Result<Vec<RecordBatch>, LtseqError> {
     RUNTIME
-        .block_on((**df).clone().collect())
+        .block_on(table.ordered_df()?.collect())
         .map_err(|e| LtseqError::with_context("Failed to collect data", e))
 }
 

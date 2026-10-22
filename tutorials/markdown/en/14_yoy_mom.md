@@ -191,12 +191,8 @@ multi.filter(lambda r: r.shop == "S2").show();
   window resets at group boundaries. This is LTSeq's spelling of SQL's
   `LAG() OVER (PARTITION BY shop ORDER BY month)`.
 - Note `sort("shop", "month")`: the partitioned window orders each shop's rows
-  by the declared sort, so `month` must be in it. Leading with `shop` also keeps
-  the output in declared order: a partitioned window returns its rows grouped
-  by partition whatever the sort says (issue #202). That holds for a small
-  input like this one. On a large input spread over several partitions, the
-  shops' rows can come back out of declared order while `sort_keys` still
-  reports `shop` and `month` (issue #311); sort again before displaying them.
+  by the declared sort, so `month` must be in it. Leading with `shop` lists each
+  shop's rows together, because rows come back in the declared order.
 - Deriving `prev_gmv` first and referencing it in the next step avoids writing
   `shift` twice — new columns inside one `derive` cannot reference each other
   (a hard LTSeq rule, see case 02).

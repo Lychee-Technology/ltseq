@@ -123,10 +123,6 @@ compounded.select("day", "nav", "ret", "cum_return").tail(3).show();
   它都能做。
 - 代价是**逐行 Python 回调、非惰性、整表物化**，大表上明显慢于窗口表达式。
   官方建议：**能用窗口表达就不要用 fold**；只有真正需要"任意状态"时才上。
-- `fold` 按行返回的顺序传递状态。输入较大、分布在多个分区上时，`nav_t` 和
-  `with_ret` 里的窗口可能让行不按 `day` 顺序返回，而 `sort_keys` 仍然报告这个顺序
-  （issue #311），`cum_return` 就会按错误的顺序复利。修复之前，用真实数据时请在
-  `fold` 之前再调用一次 `.sort("day")`。
 - `partition_by="fund"` 可以让状态在每组开头重置为 `init`——多基金并行复利一行
   搞定（见延伸）。
 

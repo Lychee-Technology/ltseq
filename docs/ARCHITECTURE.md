@@ -241,6 +241,7 @@ This metadata enables:
 - validation for sequence operators
 - validation for merge-style sorted joins
 - sort-preserving behavior across safe transforms
+- the order rows come back in: terminals, writers and positional operations require the declared order at the plan's root (`LTSeqTable::ordered_df`, #311)
 - sorted Parquet optimizations and direct scan fast paths
 
 The rule: ordered operators require known order. If order is unknown, LTSeq fails rather than silently producing misleading results.

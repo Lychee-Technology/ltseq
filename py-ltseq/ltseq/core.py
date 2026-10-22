@@ -466,6 +466,12 @@ class LTSeq(
         Returns the list of (column_name, is_descending) tuples representing
         the sort order, or None if the sort order is unknown.
 
+        Every call that returns rows (``to_arrow``, ``to_pandas``,
+        ``to_dicts``, iteration, ``show``, ``head``, ``tail``, ``slice``,
+        ``search_first``, ``fold``, ``collect`` and the writers) returns them
+        sorted by these keys, after any filter, derive or window. The order
+        of rows tied on every key is unspecified.
+
         Returns:
             List of (column_name, is_desc) tuples, or None if unknown
 

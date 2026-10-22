@@ -243,11 +243,15 @@ fn native_window_derive(
     let plan = build_staged_plan(schema, parsed_cols);
 
     // Overwriting a sort key invalidates the declared order from that key on
-    // (issue #125 finding 4).
+    // (issue #125 finding 4); the rows of this result still come in the
+    // input's order (`select_in_order`).
     let derived_names: std::collections::HashSet<String> =
         parsed_cols.iter().map(|(name, _)| name.clone()).collect();
     let result_specs =
         crate::ops::common::truncate_specs_at_overwrite(&table.sort_specs, &derived_names);
+    let select = |df: DataFrame, exprs: Vec<Expr>| {
+        crate::ops::common::select_in_order(df, exprs, &table.sort_specs, result_specs.len())
+    };
 
     // Fast path: no nested windows — the existing single lazy projection.
     // Replace-or-add: an existing name is replaced in place, new names append.
@@ -259,12 +263,8 @@ fn native_window_derive(
             derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
         }
         let all_exprs = crate::ops::common::merge_derived_columns(schema, derived);
-        let result_df = (**df)
-            .clone()
-            .select(all_exprs)
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Native window derive failed: {}", e))
-            })?;
+        let result_df = select((**df).clone(), all_exprs)
+            .map_err(|e| LtseqError::Runtime(format!("Native window derive failed: {}", e)))?;
         return Ok(LTSeqTable::from_df(
             Arc::clone(&table.session),
             result_df,
@@ -301,8 +301,7 @@ fn native_window_derive(
         derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
     }
     let stage2 = crate::ops::common::merge_derived_columns(schema, derived);
-    let result_df = stage_df
-        .select(stage2)
+    let result_df = select(stage_df, stage2)
         .map_err(|e| LtseqError::Runtime(format!("Native window derive failed: {}", e)))?;
 
     Ok(LTSeqTable::from_df(

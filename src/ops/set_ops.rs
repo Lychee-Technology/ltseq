@@ -117,20 +117,17 @@ fn row_position_expr() -> Expr {
 /// fewer and registers nothing.
 fn snapshot_single_partition(
     table: &LTSeqTable,
-    df: &Arc<datafusion::dataframe::DataFrame>,
 ) -> Result<datafusion::dataframe::DataFrame, LtseqError> {
-    let batches = RUNTIME
-        .block_on((**df).clone().collect())
-        .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to collect for position snapshot: {}", e))
-        })?;
+    // Positions count rows in table order.
+    let df = table.ordered_df()?;
+    let plan_schema = Arc::clone(df.schema().inner());
+    let batches = RUNTIME.block_on(df.collect()).map_err(|e| {
+        LtseqError::Runtime(format!("Failed to collect for position snapshot: {}", e))
+    })?;
 
     // A zero-row plan can collect to no batches: snapshot an empty batch with
     // the plan's schema then, so the result is a zero-row table, not NoData.
-    let schema = batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::clone(df.schema().inner()));
+    let schema = batches.first().map(|b| b.schema()).unwrap_or(plan_schema);
     let combined = datafusion::arrow::compute::concat_batches(&schema, &batches)
         .map_err(|e| LtseqError::Runtime(format!("Failed to combine batches: {}", e)))?;
 
@@ -171,7 +168,7 @@ pub fn distinct_impl(
     let key_cols = extract_key_cols_from_exprs(&key_exprs, schema)?;
 
     // Snapshot + window plan: pure Rust, GIL released
-    detached(py, || distinct_with_keys(table, df, schema, &key_cols))
+    detached(py, || distinct_with_keys(table, schema, &key_cols))
 }
 
 /// Simple distinct on all columns
@@ -235,7 +232,6 @@ fn extract_key_cols_from_exprs(
 /// does not preserve input order.
 fn distinct_with_keys(
     table: &LTSeqTable,
-    df: &Arc<datafusion::dataframe::DataFrame>,
     schema: &Arc<ArrowSchema>,
     key_cols: &[String],
 ) -> Result<LTSeqTable, LtseqError> {
@@ -254,7 +250,7 @@ fn distinct_with_keys(
         .map_err(|e| LtseqError::Runtime(format!("Failed to build distinct window: {}", e)))?
         .alias("__distinct_rn__");
 
-    let distinct_df = snapshot_single_partition(table, df)?
+    let distinct_df = snapshot_single_partition(table)?
         .select(stage)
         .and_then(|d| {
             let mut with_rn = all_column_exprs(schema);
@@ -388,12 +384,12 @@ fn semi_anti_on_keys(
 ///
 /// Runs with the GIL released (`lib.rs::rvs` wraps it in `gil::detached`).
 pub fn rvs_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let (_, schema) = table.require_df_and_schema()?;
 
     let mut stage = all_column_exprs(schema);
     stage.push(row_position_expr().alias("__rvs_pos__"));
 
-    let result_df = snapshot_single_partition(table, df)?
+    let result_df = snapshot_single_partition(table)?
         .select(stage)
         .and_then(|d| {
             d.sort(vec![SortExpr::new(col("__rvs_pos__"), false, true)])
@@ -418,16 +414,19 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> Result<LTSeqTable, LtseqError>
         return Err(LtseqError::Validation("step() n must be >= 1".into()));
     }
 
-    let (df, schema) = table.require_df_and_schema()?;
+    let (_, schema) = table.require_df_and_schema()?;
 
     let mut stage = all_column_exprs(schema);
     stage.push(row_position_expr().alias("__step_pos__"));
 
-    let result_df = snapshot_single_partition(table, df)?
+    // The sort by position keeps the kept rows in input order: DataFusion
+    // may repartition the filter, and nothing above it requires an order.
+    let result_df = snapshot_single_partition(table)?
         .select(stage)
         .and_then(|d| {
             d.filter((col("__step_pos__") % lit(n as i64)).eq(lit(0i64)))
         })
+        .and_then(|d| d.sort(vec![SortExpr::new(col("__step_pos__"), true, false)]))
         .and_then(|d| d.select(all_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("step failed: {}", e)))?;
 

@@ -9,12 +9,100 @@ use crate::metadata::{sort_specs_to_file_sort_order, SortSpec};
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::common::Column;
+use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::datasource::MemTable;
-use datafusion::logical_expr::SortExpr;
+use datafusion::logical_expr::{Expr, LogicalPlan, Projection, SortExpr};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
+
+/// Sort `df` by `order` unless its plan already ends in that order: a sort
+/// whose keys start with `order`, under nothing but limits and projections
+/// that only pick or rename columns.
+///
+/// Such a sort would be redundant, and directly above a limit with an offset
+/// it is also planned wrongly: DataFusion 55 cuts the limit's fetch by its
+/// offset, so `sort("a").derive(<window>).slice(95, 5)` read through another
+/// sort by `a` returned no rows (#311, #339). The optimizer removes a
+/// projection that keeps every column, so `sort("a").tail(5).select(...)`
+/// put the outer sort on the limit as well.
+pub(crate) fn sort_unless_ordered(
+    df: DataFrame,
+    order: Vec<SortExpr>,
+) -> datafusion::error::Result<DataFrame> {
+    if ends_in_order(df.logical_plan(), &order) {
+        return Ok(df);
+    }
+    df.sort(order)
+}
+
+fn ends_in_order(plan: &LogicalPlan, order: &[SortExpr]) -> bool {
+    match plan {
+        LogicalPlan::Limit(limit) => ends_in_order(&limit.input, order),
+        LogicalPlan::Projection(projection) => through_projection(projection, order)
+            .is_some_and(|order| ends_in_order(&projection.input, &order)),
+        LogicalPlan::Sort(sort) => {
+            sort.expr.len() >= order.len()
+                && sort
+                    .expr
+                    .iter()
+                    .zip(order)
+                    .all(|(have, want)| same_key(have, want))
+        }
+        _ => false,
+    }
+}
+
+/// `order` in the column names of `projection`'s input, when the projection
+/// only picks or renames columns and outputs each key once.
+///
+/// A projection that computes a column is not transparent: DataFusion may
+/// repartition it, which loses the order beneath (#311).
+fn through_projection(projection: &Projection, order: &[SortExpr]) -> Option<Vec<SortExpr>> {
+    let sources = projection
+        .expr
+        .iter()
+        .map(|expr| match expr {
+            Expr::Alias(alias) => alias.expr.try_as_col(),
+            expr => expr.try_as_col(),
+        })
+        .collect::<Option<Vec<&Column>>>()?;
+    order
+        .iter()
+        .map(|want| {
+            let Expr::Column(key) = &want.expr else {
+                return None;
+            };
+            let mut found = projection
+                .schema
+                .fields()
+                .iter()
+                .zip(&sources)
+                .filter(|(field, _)| field.name() == &key.name)
+                .map(|(_, source)| *source);
+            let source = found.next()?;
+            if found.next().is_some() {
+                return None;
+            }
+            Some(SortExpr {
+                expr: Expr::Column(source.clone()),
+                ..want.clone()
+            })
+        })
+        .collect()
+}
+
+/// The plan's sort keys are normalized to qualified columns; the ones built
+/// from `SortSpec`s are not.
+fn same_key(have: &SortExpr, want: &SortExpr) -> bool {
+    let same_expr = match (&have.expr, &want.expr) {
+        (Expr::Column(have), Expr::Column(want)) => have.name == want.name,
+        (have, want) => have == want,
+    };
+    same_expr && have.asc == want.asc && have.nulls_first == want.nulls_first
+}
 
 /// Helper function to sort rows by one or more key expressions
 ///
@@ -67,9 +155,7 @@ pub fn sort_impl(
     }
 
     // Apply sort (plan building only; nothing executes here)
-    let sorted_df = (**df)
-        .clone()
-        .sort(df_sort_exprs)
+    let sorted_df = sort_unless_ordered((**df).clone(), df_sort_exprs)
         .map_err(|e| LtseqError::Runtime(format!("Sort execution failed: {}", e)))?;
 
     // Return new LTSeqTable with sorted data and captured sort specs
@@ -166,9 +252,11 @@ pub fn assume_sorted_impl(
         ));
     }
 
-    // Non-Parquet fallback: collect batches and create MemTable with sort order
+    // Non-Parquet fallback: collect batches and create MemTable with sort
+    // order. The declaration is about the rows in their current table order.
+    let ordered = table.ordered_df()?;
     let batches = detached(py, || {
-        RUNTIME.block_on((**df).clone().collect()).map_err(|e| {
+        RUNTIME.block_on(ordered.collect()).map_err(|e| {
             LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))
         })
     })?;

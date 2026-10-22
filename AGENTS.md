@@ -122,6 +122,8 @@ col("age").gt(lit(18))
 
 Sequence window functions default to table order and require a prior `.sort()`, or `.assume_sorted()` for data that is already physically sorted. Ranking functions and windows with an explicit `.over(order_by=...)` carry their own order and need no prior sort. The declared order is owned by the Rust kernel (`sort_specs`); Python's `_sort_keys` reads it over FFI.
 
+The declared order is also the order rows come back in (#311). DataFusion keeps a sort's order only up to the next operator it chooses to repartition, so code that reads a table's rows in table order (a terminal, a writer, a positional operation, an internal collect that counts positions) executes `LTSeqTable::ordered_df()`, which requires `sort_specs` at the plan's root, not `require_df()`. Because that root sort reorders rows by whatever `sort_specs` claims, an op may keep a spec only while the column's values are unchanged.
+
 ## Testing
 
 Tests are in `py-ltseq/tests/`. Key test files:

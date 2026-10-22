@@ -83,16 +83,20 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     // #125 finding 4): an existing name is replaced in place, new names
     // append — never a duplicate column.
     let all_exprs = crate::ops::common::merge_derived_columns(schema, derived_exprs);
-    // Plan building only; nothing executes here.
-    let result_df = (**df)
-        .clone()
-        .select(all_exprs)
-        .map_err(|e| LtseqError::Runtime(format!("Derive execution failed: {}", e)))?;
-
-    // 6. Return new LTSeqTable with derived columns added (schema recomputed).
-    // Overwriting a sort key invalidates the declared order from that key on.
+    // Overwriting a sort key invalidates the declared order from that key on;
+    // the rows of this result still come in the input's order.
     let sort_specs =
         crate::ops::common::truncate_specs_at_overwrite(&table.sort_specs, &derived_names);
+    // Plan building only; nothing executes here.
+    let result_df = crate::ops::common::select_in_order(
+        (**df).clone(),
+        all_exprs,
+        &table.sort_specs,
+        sort_specs.len(),
+    )
+    .map_err(|e| LtseqError::Runtime(format!("Derive execution failed: {}", e)))?;
+
+    // 6. Return new LTSeqTable with derived columns added (schema recomputed).
     Ok(LTSeqTable::from_df(
         Arc::clone(&table.session),
         result_df,

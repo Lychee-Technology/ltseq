@@ -24,7 +24,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::group_window::original_column_exprs;
+use crate::ops::group_window::{original_column_exprs, original_order};
 use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
 use crate::transpiler::pyexpr_to_datafusion;
@@ -299,10 +299,18 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
     final_exprs.push(group_count_expr.alias("__group_count__"));
     final_exprs.push(rn_expr.alias("__rn__"));
 
+    // The windows partition by group, so their output can come back in any
+    // order of groups; the sort by group and row number restores the
+    // declared order (`with_plan_in_order` below), as the group window
+    // operations end with.
     let result_df = df_with_group_id
         .select(final_exprs)
+        .and_then(|df| df.sort(original_order()))
         .map_err(|e| {
-            LtseqError::Runtime(format!("Failed to add __group_count__ and __rn__ columns: {}", e))
+            LtseqError::Runtime(format!(
+                "Failed to add __group_count__ and __rn__ columns: {}",
+                e
+            ))
         })?;
 
     // Build result schema with internal columns
@@ -334,7 +342,8 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         result_schema,
         table.sort_specs.clone(),
         None, // row set / columns diverge from the raw file: drop fast-path token
-    ))
+    )
+    .with_plan_in_order())
 }
 
 /// Get only the first row of each group

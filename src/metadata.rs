@@ -13,6 +13,13 @@
 //! only `assume_sorted`:
 //! any op that changes the row set must clear it so Parquet fast paths
 //! cannot scan stale raw data.
+//!
+//! Declared order is also delivered order (#311): every path that reads
+//! rows in table order executes `LTSeqTable::ordered_df`, which requires
+//! `sort_specs` at the plan's root. A spec that no longer describes the
+//! rows therefore reorders them, so an op keeps a spec only while the
+//! column's values are unchanged. A projection that drops or replaces a
+//! key keeps the input's full order in its own rows (`select_in_order`).
 
 use datafusion::common::Column;
 use datafusion::logical_expr::expr::Sort;
