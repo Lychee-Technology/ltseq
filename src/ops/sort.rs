@@ -9,22 +9,25 @@ use crate::metadata::{sort_specs_to_file_sort_order, SortSpec};
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::datasource::MemTable;
-use datafusion::logical_expr::{Expr, LogicalPlan, SortExpr};
+use datafusion::logical_expr::{Expr, LogicalPlan, Projection, SortExpr};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
 /// Sort `df` by `order` unless its plan already ends in that order: a sort
-/// whose keys start with `order`, under nothing but limits.
+/// whose keys start with `order`, under nothing but limits and projections
+/// that only pick or rename columns.
 ///
 /// Such a sort would be redundant, and directly above a limit with an offset
-/// it is also planned wrongly: when a window sits below the inner sort,
-/// DataFusion 55 cuts the limit's fetch by its offset, so
-/// `sort("a").derive(<window>).slice(95, 5)` read through another sort by
-/// `a` returned no rows (#311).
+/// it is also planned wrongly: DataFusion 55 cuts the limit's fetch by its
+/// offset, so `sort("a").derive(<window>).slice(95, 5)` read through another
+/// sort by `a` returned no rows (#311, #339). The optimizer removes a
+/// projection that keeps every column, so `sort("a").tail(5).select(...)`
+/// put the outer sort on the limit as well.
 pub(crate) fn sort_unless_ordered(
     df: DataFrame,
     order: Vec<SortExpr>,
@@ -38,6 +41,8 @@ pub(crate) fn sort_unless_ordered(
 fn ends_in_order(plan: &LogicalPlan, order: &[SortExpr]) -> bool {
     match plan {
         LogicalPlan::Limit(limit) => ends_in_order(&limit.input, order),
+        LogicalPlan::Projection(projection) => through_projection(projection, order)
+            .is_some_and(|order| ends_in_order(&projection.input, &order)),
         LogicalPlan::Sort(sort) => {
             sort.expr.len() >= order.len()
                 && sort
@@ -48,6 +53,45 @@ fn ends_in_order(plan: &LogicalPlan, order: &[SortExpr]) -> bool {
         }
         _ => false,
     }
+}
+
+/// `order` in the column names of `projection`'s input, when the projection
+/// only picks or renames columns and outputs each key once.
+///
+/// A projection that computes a column is not transparent: DataFusion may
+/// repartition it, which loses the order beneath (#311).
+fn through_projection(projection: &Projection, order: &[SortExpr]) -> Option<Vec<SortExpr>> {
+    let sources = projection
+        .expr
+        .iter()
+        .map(|expr| match expr {
+            Expr::Alias(alias) => alias.expr.try_as_col(),
+            expr => expr.try_as_col(),
+        })
+        .collect::<Option<Vec<&Column>>>()?;
+    order
+        .iter()
+        .map(|want| {
+            let Expr::Column(key) = &want.expr else {
+                return None;
+            };
+            let mut found = projection
+                .schema
+                .fields()
+                .iter()
+                .zip(&sources)
+                .filter(|(field, _)| field.name() == &key.name)
+                .map(|(_, source)| *source);
+            let source = found.next()?;
+            if found.next().is_some() {
+                return None;
+            }
+            Some(SortExpr {
+                expr: Expr::Column(source.clone()),
+                ..want.clone()
+            })
+        })
+        .collect()
 }
 
 /// The plan's sort keys are normalized to qualified columns; the ones built

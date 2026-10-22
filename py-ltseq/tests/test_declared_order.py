@@ -8,7 +8,7 @@ that reads rows in table order.
 
 The tests follow #321's ordering acceptance, items 1 and 3:
 
-- six pipelines, each read through every consumer and compared row for row
+- seven pipelines, each read through every consumer and compared row for row
   with a pandas reference: at 100 rows under every engine layout (partition
   counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the default) and
   every input layout, and at 40,000 rows at 2 and 2×CPU partitions;
@@ -117,6 +117,10 @@ def dropped_key_reference(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({"volume": d.volume, "close2": d.close * 2})
 
 
+def sliced_select_reference(df: pd.DataFrame) -> pd.DataFrame:
+    return by_date(df).tail(70)[["date", "close", "volume"]].reset_index(drop=True)
+
+
 def partitioned_shift_reference(df: pd.DataFrame) -> pd.DataFrame:
     d = by_date(df)
     d["prev"] = d.groupby("g").close.shift(1)
@@ -165,6 +169,13 @@ PIPELINES = {
     "dropped_key": Pipeline(
         lambda t: t.sort("date").select(lambda r: [r.volume, r.close * 2]),
         dropped_key_reference,
+        "volume",
+    ),
+    # The select keeps the key, so it adds no sort of its own above the
+    # tail's offset limit, and DataFusion drops its projection as a no-op.
+    "sliced_select": Pipeline(
+        lambda t: t.sort("date").tail(70).select("date", "close", "volume"),
+        sliced_select_reference,
         "volume",
     ),
     "partitioned_shift": Pipeline(
@@ -338,6 +349,32 @@ def test_sort_after_an_offset_slice_keeps_the_slice(engine_layout):
     assert dates(t.tail(5).sort("date")) == [95, 96, 97, 98, 99]
     assert dates(t.slice(3, 4).sort("date")) == [3, 4, 5, 6]
     assert dates(t.slice(3, 4).slice(1, 2)) == [4, 5]
+
+
+def test_a_projection_after_an_offset_slice_keeps_the_slice(engine_layout):
+    """A select that only picks columns leaves a projection between the
+    slice's limit and the root sort. DataFusion drops it as a no-op, so a
+    root sort there stacks on the limit, which DataFusion 55 then plans
+    short by its offset even with no window below."""
+    t = LTSeq.from_arrow(input_rows(100)).sort("date")
+    assert dates(t.tail(5).select("date", "close")) == [95, 96, 97, 98, 99]
+    assert dates(t.tail(70).select("date", "volume")) == list(range(30, 100))
+    assert dates(t.slice(10, 5).select("date", "close")) == list(range(10, 15))
+    assert dates(t.slice(50, 50).select("date").select("date")) == list(range(50, 100))
+    assert dates(t.tail(5).select("date", "close").sort("date")) == [95, 96, 97, 98, 99]
+    renamed = t.slice(10, 5).select("date", "close").rename(date="day")
+    assert renamed.sort_keys == [("day", False)]
+    assert renamed.to_arrow().column("day").to_pylist() == list(range(10, 15))
+    assert renamed.collect().to_arrow().column("day").to_pylist() == list(range(10, 15))
+
+    two_keys = LTSeq.from_arrow(input_rows(100)).sort("g", "date")
+    expected = by_date(input_rows(100).to_pandas()).sort_values("g", kind="stable")
+    sliced = two_keys.slice(20, 30).select("g", "date", "close")
+    assert dates(sliced) == expected.date.tolist()[20:50]
+    # Dropping the second key keeps the order through hidden copies of both.
+    assert sliced.select("g", "close").to_arrow().column("close").to_pylist() == (
+        expected.close.tolist()[20:50]
+    )
 
 
 # ---------------------------------------------------------------------------
