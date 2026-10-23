@@ -1,5 +1,5 @@
 """A table with a declared order returns its rows in that order from every
-consumer (#311, #148).
+consumer (#311, #148, #325).
 
 DataFusion keeps a sort's order only up to the next operator it chooses to
 repartition, so a filter, a computed column or a window after `sort` used to
@@ -7,7 +7,7 @@ return rows in partition arrival order while `sort_keys` still reported the
 sort. The table's declared order is now required at the root of every plan
 that reads rows in table order.
 
-The tests follow #321's ordering acceptance, items 1 and 3, and the 0.3.0
+The tests follow #321's ordering acceptance, items 1 to 3, and the 0.3.0
 slices of #148 and #202:
 
 - ten pipelines, each read through every consumer and compared row for row
@@ -19,6 +19,9 @@ slices of #148 and #202:
   #202's own examples run at every engine layout;
 - the same consumers after `assume_sorted`, on every input layout, with a
   transform before or after the declaration, at 100 and 100,000 rows;
+- a limit on a declared-sorted Parquet file of many row groups and directory
+  of many files, with a filter that matches the first row group in part:
+  `head`, `slice` and `search_first` read the first rows (#325);
 - the operations that count rows in table order (`rvs`, `step`, `distinct`,
   the positional mutations, `asof_join`'s search, an offset `slice`);
 - a projection that drops or replaces a sort key;
@@ -475,6 +478,56 @@ def test_every_consumer_reads_the_assumed_order_at_scale(
     rows = in_date_order(100_000)
     t = pipeline.build(data_layout(rows))
     check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
+
+
+# ---------------------------------------------------------------------------
+# A limit on declared-sorted Parquet (#325)
+# ---------------------------------------------------------------------------
+
+# One file of many row groups, and a directory of files of several row groups
+# each: (files, row groups per file).
+DECLARED_PARQUET = {"row_groups": (1, 10), "files": (4, 9)}
+
+
+def read_declared(name: str, n: int, directory: Path) -> LTSeq:
+    files, row_groups = DECLARED_PARQUET[name]
+    path = layouts.write_parquet(in_date_order(n), directory, files=files, row_groups=row_groups)
+    return LTSeq.read_parquet(str(path)).assume_sorted("date")
+
+
+def check_first_rows(t: LTSeq, n: int) -> None:
+    """A limit reads the first rows of `t`, dates 0 to n - 1 in file order,
+    and the first rows from date 1 on.
+
+    Only date 0 fails the filter, so the first row group matches in part and
+    the next ones in whole. A scan that may reorder its reads skips such a
+    row group for the next one, and its files for a sibling partition's.
+    """
+    matching = t.filter(lambda r: r.date >= 1)
+    assert dates(t.head(3)) == [0, 1, 2]
+    assert dates(t.slice(0, 3)) == [0, 1, 2]
+    assert dates(matching.head(3)) == [1, 2, 3]
+    assert dates(matching.slice(0, 3)) == [1, 2, 3]
+    assert dates(t.search_first(lambda r: r.date >= 1)) == [1]
+    assert dates(matching) == list(range(1, n))
+    assert dates(t) == list(range(n))
+
+
+@pytest.mark.parametrize("name", list(DECLARED_PARQUET))
+def test_a_limit_reads_the_first_rows_of_declared_parquet(name, engine_layout, tmp_path):
+    check_first_rows(read_declared(name, 100, tmp_path), 100)
+
+
+@pytest.mark.parametrize("partitions", [2, 2 * CPUS], ids=["p2", "p2xcpu"])
+@pytest.mark.parametrize("name", list(DECLARED_PARQUET))
+def test_a_limit_reads_the_first_rows_of_declared_parquet_at_scale(
+    name, partitions, engine_config, tmp_path
+):
+    """100,000 rows at the default batch size. The single file then holds
+    more than 1 MiB, from which DataFusion splits it into byte ranges that
+    it reads in parallel."""
+    engine_config(target_partitions=partitions)
+    check_first_rows(read_declared(name, 100_000, tmp_path), 100_000)
 
 
 # ---------------------------------------------------------------------------
