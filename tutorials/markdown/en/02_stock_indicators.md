@@ -166,8 +166,7 @@ labeled.filter(lambda r: r.vol_20 > 0.018).select(
 ## Plugging in real market data
 
 Swap the data source and align the column names to `date` / `close`. The
-other lines stay the same, apart from the re-sort that Step 2's last note
-adds for large inputs:
+other lines stay the same:
 
 ```python
 # Three common ways (pick one):

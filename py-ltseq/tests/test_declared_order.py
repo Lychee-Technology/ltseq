@@ -7,13 +7,16 @@ return rows in partition arrival order while `sort_keys` still reported the
 sort. The table's declared order is now required at the root of every plan
 that reads rows in table order.
 
-The tests follow #321's ordering acceptance, items 1 and 3, and #148's 0.3.0
-slice:
+The tests follow #321's ordering acceptance, items 1 and 3, and the 0.3.0
+slices of #148 and #202:
 
-- seven pipelines, each read through every consumer and compared row for row
+- ten pipelines, each read through every consumer and compared row for row
   with a pandas reference: at 100 rows under every engine layout (partition
   counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the default) and
   every input layout, and at 40,000 rows at 2 and 2×CPU partitions;
+- among them, five windows that compute their values in an order other than
+  the table's (#202); each result also keeps the sort's `sort_keys`, and
+  #202's own examples run at every engine layout;
 - the same consumers after `assume_sorted`, on every input layout, with a
   transform before or after the declaration, at 100 and 100,000 rows;
 - the operations that count rows in table order (`rvs`, `step`, `distinct`,
@@ -40,7 +43,7 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import pytest
 
-from ltseq import LTSeq, rank
+from ltseq import LTSeq, rank, row_number
 
 from . import layouts
 from .layouts import CPUS, LAYOUTS
@@ -138,6 +141,26 @@ def ranked_reference(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def row_number_reference(df: pd.DataFrame) -> pd.DataFrame:
+    d = by_date(df)
+    # `volume` is unique, so its row numbers have one answer.
+    d["rn"] = d.volume.rank(method="first").astype("int64")
+    return d
+
+
+def partitioned_rolling_reference(df: pd.DataFrame) -> pd.DataFrame:
+    d = by_date(df)
+    # As in the Quickstart, over the rows the window has so far.
+    d["ma"] = d.groupby("g").close.transform(lambda s: s.rolling(3, min_periods=1).mean())
+    return d
+
+
+def partitioned_cum_sum_reference(df: pd.DataFrame) -> pd.DataFrame:
+    d = by_date(df)
+    d["running"] = d.groupby("g").volume.cumsum()
+    return d
+
+
 def kept_runs_reference(df: pd.DataFrame) -> pd.DataFrame:
     """Runs of `g` longer than one row, renumbered as `flatten` does."""
 
@@ -191,6 +214,21 @@ PIPELINES = {
     "ranked": Pipeline(
         lambda t: t.sort("date").derive(rk=lambda r: rank().over(order_by=r.close)),
         ranked_reference,
+        "volume",
+    ),
+    "row_number": Pipeline(
+        lambda t: t.sort("date").derive(rn=lambda r: row_number().over(order_by=r.volume)),
+        row_number_reference,
+        "volume",
+    ),
+    "partitioned_rolling": Pipeline(
+        lambda t: t.sort("date").derive(ma=lambda r: r.close.rolling(3, partition_by="g").mean()),
+        partitioned_rolling_reference,
+        "volume",
+    ),
+    "partitioned_cum_sum": Pipeline(
+        lambda t: t.sort("date").derive(running=lambda r: r.volume.cum_sum(partition_by="g")),
+        partitioned_cum_sum_reference,
         "volume",
     ),
     "kept_runs": Pipeline(
@@ -292,6 +330,75 @@ def test_every_consumer_reads_rows_in_order_at_scale(
     rows = input_rows(40_000)
     t = pipeline.build(data_layout(rows))
     check_consumers(t, pipeline, pipeline.reference(rows.to_pandas()), tmp_path, capsys)
+
+
+# ---------------------------------------------------------------------------
+# Windows that carry their own order or partition (#202)
+# ---------------------------------------------------------------------------
+
+# The window kinds of #202's 0.3.0 slice. DataFusion computes each by sorting
+# or hash-repartitioning the rows on the window's own keys, and the result
+# used to return them in that order, at every partition count.
+WINDOWS = (
+    "partitioned_shift",
+    "partitioned_rolling",
+    "partitioned_cum_sum",
+    "ranked",
+    "row_number",
+)
+
+
+@pytest.mark.parametrize("name", WINDOWS)
+def test_a_window_keeps_the_sort_keys(name):
+    """The pipelines' rows come back in date order (above), and the result
+    still declares that order."""
+    t = PIPELINES[name].build(LTSeq.from_arrow(input_rows(100)))
+    assert t.sort_keys == [("date", False)]
+
+
+def test_issue_reproduction(engine_layout):
+    """#202's examples: the windows' values follow `x` or the partitions of
+    `g`, and the rows stay in the declared order whichever window ran last.
+
+    In `x` order the rows are `i = [2, 3, 4, 1]`, the order the issue saw.
+    """
+
+    def column(t: LTSeq, name: str) -> list:
+        return t.to_arrow().column(name).to_pylist()
+
+    t = LTSeq.from_arrow(pa.table({"i": [1, 2, 3, 4], "x": [40, 10, 20, 30]})).sort("i")
+    numbered = t.derive(o=lambda r: row_number().over(order_by=r.x))
+    previous = t.derive(o=lambda r: r.x.shift(1).over(order_by=r.x))
+    for result, values in ((numbered, [4, 1, 2, 3]), (previous, [30, None, 10, 20])):
+        assert column(result, "i") == [1, 2, 3, 4]
+        assert column(result, "o") == values
+        assert result.sort_keys == [("i", False)]
+
+    s = LTSeq.from_arrow(
+        pa.table(
+            {
+                "id": [0, 1, 2, 3, 4, 5],
+                "g": [1, 0, 1, 0, 1, 0],
+                "v": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            }
+        )
+    ).sort("id")
+    partitioned = s.derive(p=lambda r: r.v.shift(1, partition_by=r.g))
+    assert column(partitioned, "id") == [0, 1, 2, 3, 4, 5]
+    assert column(partitioned, "p") == [None, None, 10.0, 11.0, 12.0, 13.0]
+    assert partitioned.sort_keys == [("id", False)]
+    assert column(partitioned.head(3), "id") == [0, 1, 2]
+    assert column(partitioned.search_first(lambda r: r.v > 11), "id") == [2]
+
+    table_order_last = partitioned.derive(q=lambda r: r.v.shift(1))
+    partitioned_last = s.derive(q=lambda r: r.v.shift(1)).derive(
+        p=lambda r: r.v.shift(1, partition_by=r.g)
+    )
+    for result in (table_order_last, partitioned_last):
+        assert column(result, "id") == [0, 1, 2, 3, 4, 5]
+        assert column(result, "p") == [None, None, 10.0, 11.0, 12.0, 13.0]
+        assert column(result, "q") == [None, 10.0, 11.0, 12.0, 13.0, 14.0]
+        assert result.sort_keys == [("id", False)]
 
 
 # ---------------------------------------------------------------------------
