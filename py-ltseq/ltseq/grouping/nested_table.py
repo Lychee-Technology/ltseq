@@ -67,7 +67,8 @@ class NestedTable:
         """
         Get the first row of each group.
 
-        Returns an LTSeq containing only the first row within each group.
+        Returns an LTSeq containing only the first row within each group,
+        with the groups in sequence order. Its sort_keys is None.
         The returned LTSeq has a fast path for .count() that avoids
         materializing per-row metadata arrays.
 
@@ -81,7 +82,8 @@ class NestedTable:
         """
         Get the last row of each group.
 
-        Returns an LTSeq containing only the last row within each group.
+        Returns an LTSeq containing only the last row within each group,
+        with the groups in sequence order. Its sort_keys is None.
 
         Example:
             >>> grouped.last()  # Returns LTSeq with last row per group
