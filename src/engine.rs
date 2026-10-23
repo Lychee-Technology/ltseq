@@ -185,7 +185,7 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
 /// apache/datafusion#26434 makes a scan with an output ordering always read
 /// in order; remove this rule with the upgrade that includes it (56).
 #[derive(Debug)]
-pub(crate) struct KeepFileOrder;
+struct KeepFileOrder;
 
 impl PhysicalOptimizerRule for KeepFileOrder {
     fn optimize(
@@ -194,11 +194,11 @@ impl PhysicalOptimizerRule for KeepFileOrder {
         _config: &ConfigOptions,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|node| {
-            let unordered = node
+            let lost_order = node
                 .downcast_ref::<DataSourceExec>()
                 .and_then(|scan| scan.data_source().downcast_ref::<FileScanConfig>())
                 .is_some_and(|scan| !scan.output_ordering.is_empty() && !scan.preserve_order);
-            if !unordered {
+            if !lost_order {
                 return Ok(Transformed::no(node));
             }
             Ok(match node.with_preserve_order(true) {

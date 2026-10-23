@@ -19,9 +19,10 @@ slices of #148 and #202:
   #202's own examples run at every engine layout;
 - the same consumers after `assume_sorted`, on every input layout, with a
   transform before or after the declaration, at 100 and 100,000 rows;
-- a limit on a declared-sorted Parquet file of many row groups and directory
-  of many files, with a filter that matches the first row group in part:
-  `head`, `slice` and `search_first` read the first rows (#325);
+- a limit on a declared-sorted Parquet file of many row groups and a
+  directory of files of several, with a filter that matches the first row
+  group in part: `head`, `slice` and `search_first` read the first rows
+  (#325);
 - the operations that count rows in table order (`rvs`, `step`, `distinct`,
   the positional mutations, `asof_join`'s search, an offset `slice`);
 - a projection that drops or replaces a sort key;
@@ -485,7 +486,8 @@ def test_every_consumer_reads_the_assumed_order_at_scale(
 # ---------------------------------------------------------------------------
 
 # One file of many row groups, and a directory of files of several row groups
-# each: (files, row groups per file).
+# each: (files, row groups per file). `data_layout`'s directory has one row
+# group per file, which a limit never skips this way.
 DECLARED_PARQUET = {"row_groups": (1, 10), "files": (4, 9)}
 
 
@@ -500,8 +502,8 @@ def check_first_rows(t: LTSeq, n: int) -> None:
     and the first rows from date 1 on.
 
     Only date 0 fails the filter, so the first row group matches in part and
-    the next ones in whole. A scan that may reorder its reads skips such a
-    row group for the next one, and its files for a sibling partition's.
+    the next ones in whole. A scan that prunes by the limit skips such a row
+    group for the next one.
     """
     matching = t.filter(lambda r: r.date >= 1)
     assert dates(t.head(3)) == [0, 1, 2]
@@ -524,8 +526,9 @@ def test_a_limit_reads_the_first_rows_of_declared_parquet_at_scale(
     name, partitions, engine_config, tmp_path
 ):
     """100,000 rows at the default batch size. The single file then holds
-    more than 1 MiB, from which DataFusion splits it into byte ranges that
-    it reads in parallel."""
+    more than 1 MiB, from which DataFusion splits a file into byte ranges
+    that it reads in parallel; at 100 rows only the directory is read by
+    several partitions."""
     engine_config(target_partitions=partitions)
     check_first_rows(read_declared(name, 100_000, tmp_path), 100_000)
 
