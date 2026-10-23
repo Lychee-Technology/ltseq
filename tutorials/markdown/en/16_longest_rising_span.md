@@ -158,9 +158,10 @@ longest.show();
   the longest" in business reporting usually means ties included.
 - `rank().over(order_by=r.days, descending=True)` needs no prior `sort()`
   (ranking functions carry their own order, see case 13).
-- The final `sort("start")` puts the tied spans in date order: the ranking
-  window returns rows in window order (issue #202), and rows tied on `days`
-  have no defined order among themselves.
+- The final `sort("start")` puts the tied spans in date order. A window keeps
+  a table's declared order (issue #202), but `spans` comes from `agg` and
+  declares none (`sort_keys` is `None`), so the ranked rows come back in no
+  defined order.
 - Want the "top two lengths" rather than "all tied longest"? Use `dense_rank()`
   then `filter(rk <= 2)` — settle the business definition first, then pick the
   function.
