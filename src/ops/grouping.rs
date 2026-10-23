@@ -19,8 +19,9 @@
 //!
 //! ## first_row_impl / last_row_impl
 //!
-//! Filters table to only first/last row per group. Requires `__group_id__` column
-//! from prior flatten() call. Uses ROW_NUMBER() OVER (PARTITION BY __group_id__).
+//! Filters table to only first/last row per group, in group order. Requires
+//! `__group_id__` column from prior flatten() call. Uses ROW_NUMBER() OVER
+//! (PARTITION BY __group_id__).
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -395,20 +396,29 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         }
     };
 
-    let filtered = (**df).clone().filter(predicate).map_err(|e| {
-        LtseqError::Runtime(format!("Failed to filter {} rows: {}", which, e))
-    })?;
+    // The rows come back in group order (#196). A flatten() product ends in
+    // that order, but this filter sits above its sort, and DataFusion is free
+    // to repartition a filter above a sort (#311): the order reached the
+    // result only when DataFusion pushed the filter beneath the sort. The
+    // result declares no sort_specs, so no root sort restores it either.
+    // Where the filter is pushed down, the input is already in this order and
+    // DataFusion plans no second sort.
+    let picked = (**df)
+        .clone()
+        .filter(predicate)
+        .and_then(|df| df.sort(original_order()))
+        .map_err(|e| LtseqError::Runtime(format!("Failed to filter {} rows: {}", which, e)))?;
 
     // Drop the grouping columns by exact name (issue #214): a user column
     // such as `__rn_x` is not one of them.
-    let keep_cols = original_column_exprs(filtered.schema().as_arrow());
+    let keep_cols = original_column_exprs(picked.schema().as_arrow());
 
     // If no user columns remain (metadata-only table from linear scan),
     // return the filtered DF as-is — count() still works on it.
     let result = if keep_cols.is_empty() {
-        filtered
+        picked
     } else {
-        filtered.select(keep_cols).map_err(|e| {
+        picked.select(keep_cols).map_err(|e| {
             LtseqError::Runtime(format!("Failed to project {}_row result: {}", which, e))
         })?
     };
@@ -419,4 +429,67 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
         Vec::new(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::create_session_context;
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field};
+
+    /// A table with the columns of a `flatten()` product, its rows in reverse
+    /// group order: groups 3, 2 and 1, each in row order. `v` is ten times
+    /// the group id plus the row number.
+    fn flattened_in_reverse_group_order() -> LTSeqTable {
+        let groups: Vec<i64> = vec![3, 3, 2, 1, 1, 1];
+        let counts: Vec<i64> = vec![2, 2, 1, 3, 3, 3];
+        let rns: Vec<i64> = vec![1, 2, 1, 1, 2, 3];
+        let values = groups.iter().zip(&rns).map(|(g, r)| g * 10 + r).collect();
+        let schema = Arc::new(ArrowSchema::new(
+            ["v", "__group_id__", "__group_count__", "__rn__"]
+                .map(|name| Field::new(name, DataType::Int64, false))
+                .to_vec(),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            [values, groups, counts, rns]
+                .into_iter()
+                .map(|column| Arc::new(Int64Array::from(column)) as _)
+                .collect(),
+        )
+        .expect("valid batch");
+        LTSeqTable::from_batches(create_session_context(), vec![batch], schema, Vec::new())
+            .expect("table")
+    }
+
+    /// `v` of the rows a terminal reads from `table`, in the order it reads them.
+    fn values(table: &LTSeqTable) -> Vec<i64> {
+        let df = table.ordered_df().expect("plan");
+        RUNTIME
+            .block_on(df.collect())
+            .expect("collect")
+            .iter()
+            .flat_map(|b| {
+                b.column_by_name("v")
+                    .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                    .expect("v column")
+                    .values()
+                    .to_vec()
+            })
+            .collect()
+    }
+
+    /// #196: first_row and last_row put their rows in group order
+    /// themselves. A `flatten()` product ends with that order, but their
+    /// filter sits above it, so the order reached their result only when
+    /// DataFusion pushed the filter beneath the sort.
+    #[test]
+    fn first_and_last_rows_come_back_in_group_order() {
+        let table = flattened_in_reverse_group_order();
+        let first = first_row_impl(&table).expect("first_row");
+        let last = last_row_impl(&table).expect("last_row");
+        assert_eq!(values(&first), vec![11, 21, 31]);
+        assert_eq!(values(&last), vec![13, 21, 32]);
+    }
 }
