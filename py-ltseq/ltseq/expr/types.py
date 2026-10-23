@@ -202,9 +202,12 @@ class CallExpr(Expr):
         Works with both ranking functions (row_number, rank, dense_rank, ntile)
         and sequence windows (shift, diff, cum_*, rolling(n).agg()). Window
         expressions default to table order; ``.over()`` overrides partition/order.
-        Only the window's values follow that partition and order: the result
-        keeps the table's rows in the table's order, and its ``sort_keys``
-        unless the derived column replaces a sort key.
+        On a table with a declared order (``sort_keys`` is not ``None``), only
+        the window's values follow that partition and order: the result keeps
+        the rows in the declared order, and its ``sort_keys`` unless the
+        derived column replaces a sort key. A table with no declared order has
+        none for the window to keep, so its rows can come back in the window's
+        order.
 
         Args:
             partition_by: Column(s) to partition by (optional)
