@@ -162,6 +162,10 @@ OTHER_ORDERS: dict[str, tuple[Shape, Reference]] = {
         lambda s: s.sort("volume", "date"),
         lambda d: d.sort_values(["volume", "date"]),
     ),
+    "computed sort": (
+        lambda s: s.sort(lambda r: r.volume * -1),
+        lambda d: d.sort_values("volume", ascending=False),
+    ),
 }
 
 
@@ -372,14 +376,11 @@ def test_an_offset_slice_of_a_two_key_order(layout, engine_layout, tmp_path):
 QUOTE_TIMES = np.arange(0, 3 * N, 3, dtype=np.int64)
 
 # The shapes #339 lists as unaffected, which the change must keep that way:
-# (call, reference, whether the result has an order to compare).
+# (call, reference, whether the result has an order to compare). A re-sort
+# in another order is unaffected only after a slice with a length; after one
+# without, it is B2 (`OTHER_ORDERS`).
+RESORTS = {"sort(volume)": OTHER_ORDERS["sort(volume)"], "computed sort": OTHER_ORDERS["computed sort"]}
 UNAFFECTED: dict[str, tuple[Shape, Reference, bool]] = {
-    "sort(volume)": (lambda s: s.sort("volume"), lambda d: d.sort_values("volume"), True),
-    "computed sort": (
-        lambda s: s.sort(lambda r: r.volume * -1),
-        lambda d: d.sort_values("volume", ascending=False),
-        True,
-    ),
     "filter().sort()": (
         lambda s: s.filter(lambda r: r.close > 105).sort("date", "volume"),
         lambda d: d[d.close > 105],
@@ -430,6 +431,9 @@ def test_the_shapes_an_offset_slice_never_broke_still_work(layout, engine_layout
     cuts += [c for c in offset_slices() if c.what in ("slice(1, None)", "slice(50, None)", "slice(99, None)")]
     for cut in cuts:
         s, d = cut.cut(t), cut.cut_reference(ref)
+        if cut.bounded:
+            for name, (shape, reference) in RESORTS.items():
+                check(shape(s), reference(d), f"{cut.what}.{name}")
         for name, (shape, reference, ordered) in UNAFFECTED.items():
             what = f"{cut.what}.{name}"
             result, expected = shape(s).to_pandas(), reference(d)
