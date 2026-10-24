@@ -3,7 +3,8 @@
 //! This module provides:
 //! - Global Tokio runtime for async operations
 //! - Configured SessionContext factory for optimal performance
-//! - ltseq's optimizer rules (`FloatListZeros`, #245; `KeepFileOrder`, #325)
+//! - ltseq's optimizer rules (`FloatListZeros`, #245; `KeepFileOrder`, #325;
+//!   `KeepSortsAboveOffsets`, #339)
 //! - Test-only overrides of the session layout (`LayoutOverrides`)
 
 use datafusion::common::config::ConfigOptions;
@@ -13,6 +14,7 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::config::SessionConfig;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use pyo3::exceptions::PyValueError;
@@ -133,6 +135,8 @@ impl LayoutOverrides {
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
 ///   declared order reads its files in order however DataFusion planned
 ///   it (#325)
+/// - `KeepSortsAboveOffsets`: First physical optimizer rule, so a sort
+///   required above a slice is not planned beneath its offset (#339)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -159,12 +163,67 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     // Appended to DataFusion's rules, so it runs after the ones that build
     // IN lists in every pass.
     session.add_optimizer_rule(Arc::new(FloatListZeros));
-    // Appended to DataFusion's physical rules, so it runs after
-    // `LimitPushdown`.
-    let state = SessionStateBuilder::new_from_existing(session.state())
-        .with_physical_optimizer_rule(Arc::new(KeepFileOrder))
+    // `KeepSortsAboveOffsets` goes before DataFusion's physical rules, so
+    // `EnsureRequirements` sees its limits; `KeepFileOrder` after them, so
+    // it runs after `LimitPushdown`.
+    let state = session.state();
+    let rules = std::iter::once(Arc::new(KeepSortsAboveOffsets) as _)
+        .chain(state.physical_optimizers().iter().cloned())
+        .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
+        .collect();
+    let state = SessionStateBuilder::new_from_existing(state)
+        .with_physical_optimizer_rules(rules)
         .build();
     Arc::new(SessionContext::new_with_state(state))
+}
+
+/// Puts a limit with the same fetch and no offset over every limit that
+/// skips rows, so that an order required above an offset is sorted above it
+/// (#339).
+///
+/// DataFusion 55's `EnsureRequirements` pushes an order requirement down
+/// through a `GlobalLimitExec` with a fetch, and gives the operator below it
+/// the limit's fetch without its offset. `sort("a").tail(5).sort("a", "b")`
+/// then sorted only the first 5 rows by `(a, b)` beneath the limit, which
+/// skipped all of them; above a slice of a table with no declared order,
+/// any sort did the same. A window's sort and the kernels' own sorts after
+/// a slice lost rows the same way. `EnsureRequirements` does not push a
+/// requirement that carries a fetch through an operator that drops rows, so
+/// under the outer limit the requirement stops at the offset limit and is
+/// sorted above it. The outer limit passes on every row the inner one
+/// returns, and `LimitPushdown` folds it into what is above.
+///
+/// Remove it with the DataFusion upgrade that stops pushing a requirement
+/// through such a limit, once #339's tests pass without it.
+#[derive(Debug)]
+struct KeepSortsAboveOffsets;
+
+impl PhysicalOptimizerRule for KeepSortsAboveOffsets {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        plan.transform_up(|node| {
+            let fetch = node
+                .downcast_ref::<GlobalLimitExec>()
+                .filter(|limit| limit.skip() > 0)
+                .and_then(GlobalLimitExec::fetch);
+            Ok(match fetch {
+                Some(fetch) => Transformed::yes(Arc::new(GlobalLimitExec::new(node, 0, Some(fetch))) as _),
+                None => Transformed::no(node),
+            })
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "ltseq_keep_sorts_above_offsets"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
 }
 
 /// Makes every file scan that declares an output ordering read its files,
