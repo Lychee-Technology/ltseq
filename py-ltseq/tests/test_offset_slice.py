@@ -505,9 +505,12 @@ def assert_slice_of_ties(
 
 @pytest.mark.parametrize("desc", [False, True], ids=["asc", "desc"])
 @pytest.mark.parametrize("layout", INPUTS)
-def test_an_extended_sort_after_an_offset_slice_of_ties_and_nulls(
+def test_an_order_that_extends_the_key_after_an_offset_slice_of_ties_and_nulls(
     layout, desc, engine_layout, tmp_path
 ):
+    """A sort by `(a, b)` and a window partitioned by `a` and ordered by `b`
+    after a slice of `sort("a")`: both orders extend the slice's, the B1
+    shape (#339's `sort("g").tail(10).derive(rk=...)`)."""
     rows = tied_rows(N)
     t = layouts.build(layout, rows, tmp_path / "input").sort("a", desc=desc)
     frame = rows.to_pandas()
@@ -526,6 +529,14 @@ def test_an_extended_sort_after_an_offset_slice_of_ties_and_nulls(
         assert len(s) == len(expected), (cut.what, "len")
         for name, shape in shapes.items():
             assert_slice_of_ties(shape(s).to_arrow(), frame, expected, desc, f"{cut.what}.{name}")
+
+        what = f"{cut.what}.rank().over(partition_by=a, order_by=b)"
+        ranked = s.derive(rk=lambda r: rank().over(partition_by=r.a, order_by=r.b)).to_pandas()
+        assert len(ranked) == len(expected) and ranked.id.is_unique, what
+        assert sorted(ranked.a.fillna(-1)) == sorted(expected.a.fillna(-1)), what
+        # Ranked within the rows the slice kept: NULL keys are one partition.
+        own = ranked.groupby(ranked.a.fillna(-1)).b.rank(method="min").astype("int64")
+        assert ranked.rk.tolist() == own.tolist(), what
 
 
 # ---------------------------------------------------------------------------
