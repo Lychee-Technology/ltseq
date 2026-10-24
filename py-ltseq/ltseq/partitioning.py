@@ -38,22 +38,32 @@ def _positions(keys: list[Any]) -> dict[Any, int]:
     return {_lookup_key(key): position for position, key in enumerate(keys)}
 
 
-def _one_partition(key_rows: Any, positions: list[int]) -> bool:
-    """Whether the distinct key rows at ``positions``, which Python looks up
-    as one key, hold the rows of one partition.
+def _compared_columns(key_rows: Any) -> list[Any]:
+    """The key columns that distinct keys Python looks up alike must agree
+    in to hold the rows of one partition, each one array with any dictionary
+    decoded.
 
-    They do when they differ only in floating-point columns: a float converts
-    to Python exactly, so two that look up alike are NaNs, whose partition
-    holds every NaN row, or equal values. Any other column that differs lost
-    precision in Python, as ``time64[ns]`` does below a microsecond.
+    Floating-point columns are left out: a float converts to Python exactly,
+    so two that look up alike are NaNs, whose partition holds every NaN row,
+    or equal values. Any other column that differs lost precision in Python,
+    as ``time64[ns]`` does below a microsecond.
     """
     import pyarrow as pa
 
+    columns = []
     for column in key_rows.columns:
         if pa.types.is_dictionary(column.type):
             column = column.cast(column.type.value_type)
-        if pa.types.is_floating(column.type):
-            continue
+        if not pa.types.is_floating(column.type):
+            columns.append(column.combine_chunks())
+    return columns
+
+
+def _one_partition(columns: list[Any], positions: list[int]) -> bool:
+    """Whether the distinct key rows at ``positions``, which Python looks up
+    as one key, hold the rows of one partition: whether they agree in each
+    of ``columns``, from ``_compared_columns``."""
+    for column in columns:
         first = column.slice(positions[0], 1)
         if not all(column.slice(p, 1).equals(first) for p in positions[1:]):
             return False
@@ -183,9 +193,11 @@ class SQLPartitionedTable:
                 groups.setdefault(_lookup_key(key), []).append(position)
         except TypeError:  # a list or struct key is unhashable: none is merged
             groups = {}
-        if 0 < len(groups) < len(keys):
-            for positions in groups.values():
-                if not _one_partition(pa_table, positions):
+        collisions = [positions for positions in groups.values() if len(positions) > 1]
+        if collisions:
+            compared = _compared_columns(pa_table)
+            for positions in collisions:
+                if not _one_partition(compared, positions):
                     columns = ", ".join(repr(c) for c in self._columns)
                     raise ValueError(
                         f"partition({columns}) has {len(positions)} distinct keys "
