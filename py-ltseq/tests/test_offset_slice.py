@@ -26,6 +26,9 @@ and none, and `tail` at offsets 99, 95 and 1:
 - `group_ordered`'s count fast path (the linear scan), twenty runs for
   three slices with a length and one for the others;
 - slices of slices, and a two-key order;
+- the shapes #339 lists as unaffected, after both kinds of slice; and the
+  plans of `tail(5)` followed by a sort that extends the key, and of
+  `slice(10)`;
 - (derived) the same after `assume_sorted` on Parquet; a sort or window
   after a slice with a length of a table with no declared order keeps the
   slice's rows.
@@ -51,6 +54,7 @@ from .test_declared_order import (
     assert_rows,
     by_date,
     input_rows,
+    kept_runs_reference,
     partitioned_cum_sum_reference,
     partitioned_rolling_reference,
     partitioned_shift_reference,
@@ -363,6 +367,85 @@ def test_an_offset_slice_of_a_two_key_order(layout, engine_layout, tmp_path):
             check(s.sort("volume"), d.sort_values("volume"), f"{what}.sort(volume)")
             filtered = s.filter(lambda r: r.close > 105)
             assert len(filtered) == filtered.count() == int((d.close > 105).sum()), what
+
+
+QUOTE_TIMES = np.arange(0, 3 * N, 3, dtype=np.int64)
+
+# The shapes #339 lists as unaffected, which the change must keep that way:
+# (call, reference, whether the result has an order to compare).
+UNAFFECTED: dict[str, tuple[Shape, Reference, bool]] = {
+    "sort(volume)": (lambda s: s.sort("volume"), lambda d: d.sort_values("volume"), True),
+    "computed sort": (
+        lambda s: s.sort(lambda r: r.volume * -1),
+        lambda d: d.sort_values("volume", ascending=False),
+        True,
+    ),
+    "filter().sort()": (
+        lambda s: s.filter(lambda r: r.close > 105).sort("date", "volume"),
+        lambda d: d[d.close > 105],
+        True,
+    ),
+    "derive().sort()": (
+        lambda s: s.derive(z=lambda r: r.close * 2).sort("date", "volume"),
+        lambda d: d.assign(z=d.close * 2),
+        True,
+    ),
+    "shift": (
+        lambda s: s.derive(prev=lambda r: r.close.shift(1)),
+        lambda d: d.assign(prev=d.close.shift(1)),
+        True,
+    ),
+    "cum_sum": (lambda s: s.cum_sum("volume"), lambda d: d.assign(volume_cumsum=d.volume.cumsum()), True),
+    "kept runs": (
+        lambda s: s.group_ordered(lambda r: r.g).filter(lambda g: g.count() > 1).flatten(),
+        kept_runs_reference,
+        True,
+    ),
+    "rvs": (lambda s: s.rvs(), lambda d: d.iloc[::-1], True),
+    "step(3)": (lambda s: s.step(3), lambda d: d.iloc[::3], True),
+    "fold": (
+        lambda s: s.fold(lambda state, row: state + 1, init=0, into="n"),
+        lambda d: d.assign(n=np.arange(1, len(d) + 1)),
+        True,
+    ),
+    "head(2)": (lambda s: s.head(2), lambda d: d.head(2), True),
+    "tail(2)": (lambda s: s.tail(2), lambda d: d.tail(2), True),
+    "slice(1, 2)": (lambda s: s.slice(1, 2), lambda d: d.iloc[1:3], True),
+    # These declare no order.
+    "distinct(g)": (lambda s: s.distinct("g"), lambda d: d.drop_duplicates("g"), False),
+    "delete(0)": (lambda s: s.delete(0), lambda d: d.iloc[1:], False),
+    "group_by(g).agg": (
+        lambda s: s.group_by("g").agg(total=lambda r: r.volume.sum()),
+        lambda d: d.groupby("g", as_index=False).agg(total=("volume", "sum")),
+        False,
+    ),
+}
+
+
+@pytest.mark.parametrize("layout", INPUTS)
+def test_the_shapes_an_offset_slice_never_broke_still_work(layout, engine_layout, tmp_path):
+    t, ref = declared(layout, tmp_path)
+    quotes = LTSeq.from_arrow(pa.table({"time": QUOTE_TIMES, "px": QUOTE_TIMES / 2})).sort("time")
+    cuts = [c for c in offset_slices() if c.what in ("tail(5)", "slice(3, 5)", "slice(99, 5)")]
+    cuts += [c for c in offset_slices() if c.what in ("slice(1, None)", "slice(50, None)", "slice(99, None)")]
+    for cut in cuts:
+        s, d = cut.cut(t), cut.cut_reference(ref)
+        for name, (shape, reference, ordered) in UNAFFECTED.items():
+            what = f"{cut.what}.{name}"
+            result, expected = shape(s).to_pandas(), reference(d)
+            if not ordered:
+                key = list(expected.columns)[0]
+                result, expected = result.sort_values(key), expected.sort_values(key)
+            assert_rows(pa.Table.from_pandas(result, preserve_index=False), expected, what)
+        first = s.search_first(lambda r: r.close > 105)
+        matches = d[d.close > 105].head(1)
+        if first is None:
+            assert matches.empty, cut.what
+        else:
+            check(first, matches, f"{cut.what}.search_first")
+        joined = s.asof_join(quotes, left_on="date", right_on="time").to_pandas().sort_values("date")
+        assert joined.date.tolist() == d.date.tolist(), cut.what
+        assert joined.time.tolist() == [v - v % 3 for v in d.date], cut.what
 
 
 def test_a_sort_after_tail_is_planned_above_the_offset():
