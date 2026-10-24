@@ -648,14 +648,19 @@ class LTSeq(
         groups all rows with the same key value regardless of their position
         in the table.
 
-        Smart dispatch:
-        - String arguments use fast SQL path (column-based partitioning)
-        - Callable argument uses flexible Python path (lambda-based partitioning)
+        The keys are the distinct values of the key columns (a tuple for
+        several columns), found when the keys are first used. Each partition
+        holds the rows whose key columns equal its key, compared as values of
+        the columns' own types; a NULL key holds the NULL rows. A key is
+        looked up as Python compares it, except that an aware ``datetime``
+        is looked up by its instant, so the two occurrences of a repeated
+        hour are two keys, and NaN is one key that any NaN finds and that
+        holds every NaN row.
 
         Args:
             *args: Either column name(s) as strings, or a single callable.
-                   - Strings: Use SQL-based partitioning (faster)
-                   - Callable: Use Python-based partitioning (more flexible)
+                   - Strings: The key columns
+                   - Callable: A lambda naming one column (lambda r: r.region)
             by: Alternative way to pass a callable for partitioning.
                 (e.g., by=lambda r: r.region)
 
@@ -663,8 +668,9 @@ class LTSeq(
             A PartitionedTable that supports dict-like access and iteration.
 
         Raises:
-            ValueError: If schema is not initialized
-            AttributeError: If any column doesn't exist (for SQL path)
+            ValueError: If schema is not initialized, or the callable is not
+                a single column
+            AttributeError: If any column doesn't exist
             TypeError: If arguments are invalid
 
         Example:
