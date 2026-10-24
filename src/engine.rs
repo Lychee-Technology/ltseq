@@ -178,16 +178,16 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
 }
 
 /// Puts a limit with the same fetch and no offset over every limit that
-/// skips rows, so that an order required above an offset is sorted above it
-/// (#339).
+/// skips rows and has a fetch, so that an order required above the offset
+/// is sorted above it (#339).
 ///
 /// DataFusion 55's `EnsureRequirements` pushes an order requirement down
 /// through a `GlobalLimitExec` with a fetch, and gives the operator below it
 /// the limit's fetch without its offset. `sort("a").tail(5).sort("a", "b")`
-/// then sorted only the first 5 rows by `(a, b)` beneath the limit, which
-/// skipped all of them; above a slice of a table with no declared order,
-/// any sort did the same. A window's sort and the kernels' own sorts after
-/// a slice lost rows the same way. `EnsureRequirements` does not push a
+/// then kept the first 5 rows by `(a, b)` beneath the limit, which skipped
+/// all of them; above a slice of a table with no declared order, any sort
+/// did the same. A window's sort and the kernels' own sorts after a slice
+/// lost rows the same way. `EnsureRequirements` does not push a
 /// requirement that carries a fetch through an operator that drops rows, so
 /// under the outer limit the requirement stops at the offset limit and is
 /// sorted above it. The outer limit passes on every row the inner one
