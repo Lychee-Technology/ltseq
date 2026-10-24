@@ -22,12 +22,11 @@ use std::sync::Arc;
 /// whose keys start with `order`, under nothing but limits and projections
 /// that only pick or rename columns.
 ///
-/// Such a sort would be redundant, and directly above a limit with an offset
-/// it is also planned wrongly: DataFusion 55 cuts the limit's fetch by its
-/// offset, so `sort("a").derive(<window>).slice(95, 5)` read through another
-/// sort by `a` returned no rows (#311, #339). The optimizer removes a
+/// Such a sort would be redundant. A slice is where #311 met one: DataFusion
+/// 55 planned it beneath the slice's offset, which `KeepSortsAboveOffsets`
+/// and `slice` now prevent for any sort (#339). The optimizer removes a
 /// projection that keeps every column, so `sort("a").tail(5).select(...)`
-/// put the outer sort on the limit as well.
+/// ends in the slice's order as well.
 pub(crate) fn sort_unless_ordered(
     df: DataFrame,
     order: Vec<SortExpr>,
