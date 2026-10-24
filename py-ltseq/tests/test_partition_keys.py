@@ -34,7 +34,6 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pyarrow as pa
@@ -44,9 +43,8 @@ from ltseq import LTSeq
 
 from . import layouts
 
-NEW_YORK = ZoneInfo("America/New_York")
-# 01:30 EDT and 01:30 EST on 2024-11-03: an hour apart, equal as values of
-# one ZoneInfo (PEP 495).
+# 01:30 EDT and 01:30 EST in New York on 2024-11-03: an hour apart, but
+# equal as values of one ZoneInfo (PEP 495).
 FOLD_EARLIER = datetime(2024, 11, 3, 5, 30, tzinfo=timezone.utc)
 FOLD_LATER = datetime(2024, 11, 3, 6, 30, tzinfo=timezone.utc)
 # A NaN with its sign bit set, as x86 arithmetic gives (`inf - inf`).
