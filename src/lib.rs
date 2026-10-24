@@ -808,31 +808,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with selected row range
     fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
-        // A never-loaded table slices to another never-loaded table
-        if self.dataframe.is_none() {
-            return Ok(LTSeqTable::unloaded(Arc::clone(&self.session)));
-        }
-
-        // Apply slice: DataFusion's limit(skip, fetch) only builds the plan.
-        // The limit counts rows in table order, so it goes above the order.
-        let skip = offset as usize;
-        let fetch = length.map(|len| len as usize);
-        let sliced_df = self
-            .ordered_df()?
-            .limit(skip, fetch)
-            .map_err(|e| LtseqError::Runtime(format!("Slice execution failed: {}", e)))?;
-
-        // Return new LTSeqTable with sliced data (schema unchanged).
-        // Row subset preserves order → keep sort_specs; the raw file no
-        // longer matches the row set → drop the Parquet fast-path token.
-        let schema = self.require_schema()?;
-        Ok(LTSeqTable::from_df_with_schema(
-            Arc::clone(&self.session),
-            sliced_df,
-            Arc::clone(schema),
-            self.sort_specs.clone(),
-            None,
-        ))
+        crate::ops::basic::slice_impl(self, offset, length)
     }
 
     /// Add cumulative sum columns for specified columns

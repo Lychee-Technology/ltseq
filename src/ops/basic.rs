@@ -1,4 +1,4 @@
-//! Basic table operations: filter, select, search_first
+//! Basic table operations: filter, select, search_first, slice
 //!
 //! This module contains helper functions for basic table operations.
 //! The actual methods are implemented in the #[pymethods] impl block in lib.rs
@@ -15,14 +15,22 @@
 //! - **filter_impl**: Filter rows based on a predicate expression
 //! - **select_impl**: Select columns or derived expressions
 //! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
+//! - **slice_impl**: Select a contiguous range of rows in table order
 //! - **materialize_impl**: Execute the lazy plan and snapshot the result into memory
 
 use crate::error::LtseqError;
+use crate::metadata::{sort_specs_to_window_sorts, SortSpec};
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::common::Column;
+use datafusion::dataframe::DataFrame;
+use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::{Expr, ExprFunctionExt};
+use datafusion::prelude::lit;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Helper function to filter rows based on a predicate expression
@@ -235,6 +243,93 @@ pub fn search_first_impl(
         table.sort_specs.clone(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
+}
+
+/// Helper function to select a contiguous range of rows in table order
+///
+/// A slice is a limit above the declared order, except a slice without a
+/// length that skips rows of a table with a declared order: that one numbers
+/// the rows in the order and keeps those after the offset (#339).
+///
+/// DataFusion 55 meets an order required above a limit that skips rows
+/// beneath the limit. `KeepSortsAboveOffsets` stops that for a limit with a
+/// fetch, but a requirement above a limit without one carries no fetch to
+/// stop. A sort or window in another order then ran before the offset, so
+/// `sort("a").slice(95).sort("b")` kept the wrong 5 rows, and where nothing
+/// above needed the order, as in `len()` after a filter, the sort beneath
+/// the offset was dropped. The window needs the order, and a sort above its
+/// filter stays above it. A fetch standing in for "no length" would let the
+/// rule stop the requirement too, but DataFusion then runs the sort beneath
+/// as a top-k heap, which took 7 times as long as the sort on 5 million rows;
+/// the window took 1.6 times as long. A table with no declared order has no
+/// order to number its rows in, so its slice stays a limit.
+///
+/// Args:
+///     table: Reference to LTSeqTable
+///     offset: First row to keep (0-based, validated in Python)
+///     length: Number of rows to keep; None keeps the rest
+pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
+    // A never-loaded table slices to another never-loaded table
+    if table.dataframe.is_none() {
+        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
+    }
+
+    // Plan building only. The rows are counted in table order, so the slice
+    // goes above the order.
+    let skip = offset as usize;
+    let fetch = length.map(|len| len as usize);
+    let ordered = table.ordered_df()?;
+    let sliced_df = if skip > 0 && fetch.is_none() && !table.sort_specs.is_empty() {
+        after_offset(ordered, skip, &table.sort_specs)
+    } else {
+        ordered.limit(skip, fetch)
+    }
+    .map_err(|e| LtseqError::Runtime(format!("Slice execution failed: {}", e)))?;
+
+    // Return new LTSeqTable with sliced data (schema unchanged).
+    // Row subset preserves order → keep sort_specs; the raw file no
+    // longer matches the row set → drop the Parquet fast-path token.
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        sliced_df,
+        Arc::clone(table.require_schema()?),
+        table.sort_specs.clone(),
+        None,
+    ))
+}
+
+/// `df`'s rows after the first `skip` in the order of `specs`.
+///
+/// The row numbers go in a column named unlike every column of `df`, since
+/// no column name is reserved (contract §6.4).
+fn after_offset(
+    df: DataFrame,
+    skip: usize,
+    specs: &[SortSpec],
+) -> datafusion::error::Result<DataFrame> {
+    let names: HashSet<&str> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let position = (0..)
+        .map(|i| format!("__ltseq_slice_pos_{i}"))
+        .find(|n| !names.contains(n.as_str()))
+        .expect("an unbounded range has a free name");
+    let columns: Vec<Expr> = df
+        .schema()
+        .columns()
+        .into_iter()
+        .map(Expr::Column)
+        .collect();
+    let numbered = row_number()
+        .order_by(sort_specs_to_window_sorts(specs))
+        .build()?
+        .alias(&position);
+    df.window(vec![numbered])?
+        .filter(Expr::Column(Column::new_unqualified(position)).gt(lit(skip as u64)))?
+        .select(columns)
 }
 
 /// Helper function to materialize the lazy plan into an in-memory table
