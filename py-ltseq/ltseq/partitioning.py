@@ -5,11 +5,16 @@ Unlike group_ordered() which handles consecutive groups, partition() groups
 all rows with the same key value regardless of position.
 """
 
+import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 if TYPE_CHECKING:
     from .core import LTSeq
+
+# What a NaN key is looked up by: NaN equals no value, itself included.
+_NAN_KEY = object()
+
 
 def _lookup_key(key: Any) -> Any:
     """The value a partition key is looked up by.
@@ -17,12 +22,14 @@ def _lookup_key(key: Any) -> Any:
     Python compares two datetimes that share a tzinfo by wall clock and
     ignores ``fold`` (PEP 495), so the two occurrences of a repeated hour,
     01:30 EDT and 01:30 EST, compare and hash equal. An aware key is looked
-    up by its UTC instant, which tells them apart.
+    up by its UTC instant, which tells them apart; a NaN key is one value.
     """
     if isinstance(key, tuple):
         return tuple(_lookup_key(value) for value in key)
     if isinstance(key, datetime) and key.utcoffset() is not None:
         return key.astimezone(timezone.utc)
+    if isinstance(key, float) and math.isnan(key):
+        return _NAN_KEY
     return key
 
 
@@ -45,7 +52,7 @@ class SQLPartitionedTable:
     - Mapping: partitioned.map(lambda t: t.agg(...))
 
     A key is looked up as Python compares it, except that an aware
-    ``datetime`` is looked up by its instant.
+    ``datetime`` is looked up by its instant and any NaN finds the NaN key.
 
     Example:
         >>> t = LTSeq.read_csv("sales.csv")
@@ -138,6 +145,20 @@ class SQLPartitionedTable:
             columns = [pa_table.column(c).to_pylist() for c in self._columns]
             for i in range(pa_table.num_rows):
                 keys.append(tuple(columns[j][i] for j in range(len(self._columns))))
+
+        # Keys looked up as one value are listed once. `distinct` keeps NaNs
+        # of other bits apart (#290), and a NaN key's partition holds every
+        # NaN row.
+        first: dict[Any, int] = {}
+        try:
+            for position, key in enumerate(keys):
+                first.setdefault(_lookup_key(key), position)
+        except TypeError:  # a list or struct key is unhashable: none is merged
+            first = {}
+        if 0 < len(first) < len(keys):
+            kept = list(first.values())
+            keys = [keys[position] for position in kept]
+            pa_table = pa_table.take(kept)
 
         self._key_rows = pa_table
         self._keys_cache = keys

@@ -9,28 +9,34 @@ layout:
 
 - each key `keys()` lists holds exactly the rows whose key equals it, in
   table order and with the table's `sort_keys`, for date, naive and aware
-  timestamp, binary, signed-zero, string and NULL keys, before and after
-  `map()`;
+  timestamp, binary, NaN, signed-zero, string and NULL keys, before and
+  after `map()`;
 - `p[k].count()` and `map()` agree with `filter(r.k == k)` wherever that
-  filter has the literal;
+  filter has the literal and returns the right rows;
 - dates that `read_csv` infers as `date32` (the common way to meet the bug);
 - (derived) the other Arrow key types `filter` has no literal for (`date64`,
   `time64`, `duration`, `uint64` past Int64, fixed-size and large binary,
   ...) and those it has;
 - (derived) the two occurrences of a repeated hour are two keys, found by
   the value `keys()` lists and by their UTC instants, also after `map()`,
-  where a dict keyed by them kept one.
+  where a dict keyed by them kept one;
+- (derived) NaN is one key whose partition holds every NaN row, whatever
+  its bits, also on Parquet, where `filter(r.k == nan)` loses them to
+  row-group pruning (#291); any NaN looks the key up.
 
 The reference groups the input's rows in Python, by the key value as
-`to_pylist` returns it, with an aware value taken as its instant.
+`to_pylist` returns it, with an aware value taken as its instant and every
+NaN as one value.
 """
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pyarrow as pa
 import pytest
 
@@ -43,13 +49,20 @@ NEW_YORK = ZoneInfo("America/New_York")
 # one ZoneInfo (PEP 495).
 FOLD_EARLIER = datetime(2024, 11, 3, 5, 30, tzinfo=timezone.utc)
 FOLD_LATER = datetime(2024, 11, 3, 6, 30, tzinfo=timezone.utc)
+# A NaN with its sign bit set, as x86 arithmetic gives (`inf - inf`).
+NEGATIVE_NAN = -math.nan
 INPUTS = ("many_batches", "parquet_row_groups", "parquet_files")
 N = 24
+
+_NAN = object()
+
 
 def lookup(value):
     """The value the reference groups a key by."""
     if isinstance(value, datetime) and value.utcoffset() is not None:
         return value.astimezone(timezone.utc)
+    if isinstance(value, float) and math.isnan(value):
+        return _NAN
     return value
 
 
@@ -85,7 +98,7 @@ def key_rows() -> pa.Table:
                 pa.timestamp("us", tz="America/New_York"),
             ),
             "blob": pa.array(cycle([b"a", b"b'c", b""], 2), pa.binary()),
-            "x": pa.array(cycle([1.5, 2.0, 0.0, -0.0], 3), pa.float64()),
+            "x": pa.array(cycle([1.5, math.nan, 0.0, -0.0], 3), pa.float64()),
             "s": pa.array(cycle(["it's", "West", None], 2), pa.string()),
         }
     )
@@ -120,7 +133,8 @@ def test_each_key_holds_the_rows_of_its_value(layout, engine_layout, tmp_path):
 
 def test_a_partition_counts_as_the_filter_on_its_key(engine_layout):
     """The issue's acceptance: `p[k].count()` and `map` match
-    `filter(r.k == k)`, here for the key types that have a literal."""
+    `filter(r.k == k)`, here for the key types that have a literal, in
+    memory, where that filter is right for NaN too (#291 is Parquet's)."""
     rows = key_rows()
     t = layouts.build("many_batches", rows, None)
     for column in ("day", "at", "local", "x", "s"):
@@ -154,7 +168,7 @@ OTHER_TYPES = {
     "int8": pa.array([-128, 127], pa.int8()),
     "decimal128": pa.array([Decimal("1.50"), Decimal("-2.25")], pa.decimal128(5, 2)),
     "decimal256": pa.array([Decimal("1.5"), Decimal("2.5")], pa.decimal256(40, 1)),
-    "float32": pa.array([0.1, 2.5], pa.float32()),
+    "float32": pa.array([0.1, float("nan")], pa.float32()),
     "bool": pa.array([True, False], pa.bool_()),
     "large_string": pa.array(["x", "y'z"], pa.large_string()),
     "string_view": pa.array(["x", "y"], pa.string_view()),
@@ -190,6 +204,19 @@ def test_a_repeated_hour_is_two_keys():
     assert len(mapped) == 2
     assert [ids(mapped[k]) for k in (earlier, later)] == [[0, 2], [1]]
     assert len(mapped.map(lambda part: part)) == 2
+
+
+@pytest.mark.parametrize("dictionary", (False, True), ids=("plain", "dictionary"))
+def test_nan_is_one_key_holding_every_nan_row(dictionary, engine_layout, tmp_path):
+    x = pa.array([1.0, math.nan, 2.0, NEGATIVE_NAN, 1.0, math.nan], pa.float64())
+    assert math.copysign(1.0, x[3].as_py()) == -1.0
+    rows = pa.table({"v": pa.array(range(6), pa.int64()), "x": x.dictionary_encode() if dictionary else x})
+    for layout in ("many_batches", "parquet_row_groups"):
+        t = layouts.build(layout, rows, tmp_path / layout).sort("v")
+        check_partitions(t, rows, "x")
+        p = t.partition("x")
+        for nan in (math.nan, float("nan"), NEGATIVE_NAN, np.float64("nan")):
+            assert ids(p[nan]) == [1, 3, 5], (layout, nan)
 
 
 def test_keys_are_looked_up_as_python_compares_them():

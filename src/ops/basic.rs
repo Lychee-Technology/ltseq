@@ -27,6 +27,7 @@ use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
+use datafusion::functions::math::expr_fn::isnan;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, ExprFunctionExt};
@@ -83,6 +84,10 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
 /// a scalar of its column's own Arrow type. It never passes through a
 /// Python value or SQL text, which read a date as integer arithmetic and had
 /// no notation for timestamps, binary or NaN.
+///
+/// A NaN key matches every NaN row, whatever its bits: `partition` lists one
+/// NaN key (contract §18), and `= NaN` would also lose NaN rows to Parquet
+/// row-group pruning, whose float statistics leave NaN out (#291).
 pub fn filter_key_row_impl(
     table: &LTSeqTable,
     key: ImportedStream,
@@ -107,6 +112,8 @@ pub fn filter_key_row_impl(
             let value = ScalarValue::try_from_array(values, 0)?;
             Ok(if value.is_null() {
                 column.is_null()
+            } else if is_nan(&value) {
+                isnan(column)
             } else {
                 column.eq(lit(value))
             })
@@ -128,6 +135,16 @@ pub fn filter_key_row_impl(
         table.sort_specs.clone(),
         None, // row set diverges from the raw file: drop fast-path token
     ))
+}
+
+fn is_nan(value: &ScalarValue) -> bool {
+    match value {
+        ScalarValue::Float16(Some(v)) => v.is_nan(),
+        ScalarValue::Float32(Some(v)) => v.is_nan(),
+        ScalarValue::Float64(Some(v)) => v.is_nan(),
+        ScalarValue::Dictionary(_, value) => is_nan(value),
+        _ => false,
+    }
 }
 
 /// Helper function to select columns or derived expressions
