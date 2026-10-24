@@ -669,7 +669,9 @@ class LTSeq(
 
         Raises:
             ValueError: If schema is not initialized, or the callable is not
-                a single column
+                a single column. Also raised when the keys are first used if
+                distinct keys convert to one Python value, as ``time64[ns]``
+                values less than a microsecond apart do
             AttributeError: If any column doesn't exist
             TypeError: If arguments are invalid
 

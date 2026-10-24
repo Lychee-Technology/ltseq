@@ -38,6 +38,28 @@ def _positions(keys: list[Any]) -> dict[Any, int]:
     return {_lookup_key(key): position for position, key in enumerate(keys)}
 
 
+def _one_partition(key_rows: Any, positions: list[int]) -> bool:
+    """Whether the distinct key rows at ``positions``, which Python looks up
+    as one key, hold the rows of one partition.
+
+    They do when they differ only in floating-point columns: a float converts
+    to Python exactly, so two that look up alike are NaNs, whose partition
+    holds every NaN row, or equal values. Any other column that differs lost
+    precision in Python, as ``time64[ns]`` does below a microsecond.
+    """
+    import pyarrow as pa
+
+    for column in key_rows.columns:
+        if pa.types.is_dictionary(column.type):
+            column = column.cast(column.type.value_type)
+        if pa.types.is_floating(column.type):
+            continue
+        first = column.slice(positions[0], 1)
+        if not all(column.slice(p, 1).equals(first) for p in positions[1:]):
+            return False
+    return True
+
+
 class SQLPartitionedTable:
     """
     Column-based partitioned table.
@@ -148,15 +170,24 @@ class SQLPartitionedTable:
 
         # Keys looked up as one value are listed once. `distinct` keeps NaNs
         # of other bits apart (#290), and a NaN key's partition holds every
-        # NaN row.
-        first: dict[Any, int] = {}
+        # NaN row. Keys that convert to one Python value but select other
+        # rows could be neither listed nor looked up apart, so they raise.
+        groups: dict[Any, list[int]] = {}
         try:
             for position, key in enumerate(keys):
-                first.setdefault(_lookup_key(key), position)
+                groups.setdefault(_lookup_key(key), []).append(position)
         except TypeError:  # a list or struct key is unhashable: none is merged
-            first = {}
-        if 0 < len(first) < len(keys):
-            kept = list(first.values())
+            groups = {}
+        if 0 < len(groups) < len(keys):
+            for positions in groups.values():
+                if not _one_partition(pa_table, positions):
+                    columns = ", ".join(repr(c) for c in self._columns)
+                    raise ValueError(
+                        f"partition({columns}) has {len(positions)} distinct keys "
+                        f"that all convert to the Python value "
+                        f"{keys[positions[0]]!r}, so they cannot be told apart"
+                    )
+            kept = [positions[0] for positions in groups.values()]
             keys = [keys[position] for position in kept]
             pa_table = pa_table.take(kept)
 

@@ -22,7 +22,11 @@ layout:
   where a dict keyed by them kept one;
 - (derived) NaN is one key whose partition holds every NaN row, whatever
   its bits, also on Parquet, where `filter(r.k == nan)` loses them to
-  row-group pruning (#291); any NaN looks the key up.
+  row-group pruning (#291); any NaN looks the key up;
+- (derived) distinct keys that convert to one Python value, such as
+  `time64[ns]` values under a microsecond apart, raise rather than list one
+  key and lose the other's rows; NaNs are one key only where the rest of the
+  key is one value.
 
 The reference groups the input's rows in Python, by the key value as
 `to_pylist` returns it, with an aware value taken as its instant and every
@@ -215,6 +219,34 @@ def test_nan_is_one_key_holding_every_nan_row(dictionary, engine_layout, tmp_pat
         p = t.partition("x")
         for nan in (math.nan, float("nan"), NEGATIVE_NAN, np.float64("nan")):
             assert ids(p[nan]) == [1, 3, 5], (layout, nan)
+
+
+@pytest.mark.parametrize("layout", ("many_batches", "parquet_row_groups"))
+def test_keys_that_python_cannot_tell_apart_raise(layout, engine_layout, tmp_path):
+    """(derived) `time64[ns]` values under a microsecond apart convert to one
+    `datetime.time`. Listing one of them lost the other's rows; they raise."""
+    rows = pa.table({"v": pa.array(range(3), pa.int64()), "k": pa.array([1, 2, 1], pa.time64("ns"))})
+    t = layouts.build(layout, rows, tmp_path)
+    uses = (len, list, lambda p: p.keys(), lambda p: p[time(0)], lambda p: p.map(lambda part: part))
+    for use in uses:
+        with pytest.raises(ValueError, match=r"2 distinct keys .* datetime\.time\(0, 0\)"):
+            use(t.partition("k"))
+
+
+@pytest.mark.parametrize("dictionary", (False, True), ids=("plain", "dictionary"))
+def test_nan_keys_merge_only_where_the_rest_of_the_key_is_one_value(dictionary):
+    """(derived) Two NaNs are one key only when the other key columns hold
+    one value, not just one Python value."""
+    x = pa.array([math.nan, NEGATIVE_NAN, math.nan, NEGATIVE_NAN], pa.float64())
+    s = pa.array(["a"] * 4)
+    columns = {"v": pa.array(range(4), pa.int64()), "x": x, "s": s.dictionary_encode() if dictionary else s}
+    same = LTSeq.from_arrow(pa.table({**columns, "k": pa.array([1] * 4, pa.time64("ns"))})).sort("v")
+    p = same.partition("x", "s", "k")
+    [key] = p.keys()
+    assert ids(p[key]) == [0, 1, 2, 3]
+    apart = LTSeq.from_arrow(pa.table({**columns, "k": pa.array([1, 2, 1, 2], pa.time64("ns"))}))
+    with pytest.raises(ValueError, match="2 distinct keys"):
+        len(apart.partition("x", "s", "k"))
 
 
 def test_keys_are_looked_up_as_python_compares_them():
