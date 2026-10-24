@@ -224,7 +224,7 @@ lookup 表达式重写逻辑。它让 derive 表达式内部可以触发 join �
 
 ### `py-ltseq/ltseq/partitioning.py`
 
-分区视图与 SQL-backed 分区行为的实现文件。
+分区视图的实现文件；每个分区是按其键值过滤的惰性查询。
 
 以下功能都应优先从这里开始：
 

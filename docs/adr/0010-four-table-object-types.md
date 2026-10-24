@@ -18,7 +18,7 @@ The API deliberately returns **different wrapper types to signal semantics**, an
 - **`LinkedTable`**: this table, enriched by another table, still lazy (see [ADR 0011](0011-link-lazy-prefix-aliased-join.md)).
 - **`PartitionedTable`**: dict-like grouped access by key. `partition(*cols)` / `partition(by=callable)`; a callable key **must be a simple column expression** (`lambda r: r.region`); derived expressions (`lambda r: r.price + 1`) raise `ValueError` because they would force internal materialization, violating [ADR 0005](0005-no-materialization-rule.md).
 
-These are **semantic roles**, not a laziness guarantee. `LTSeq`, `NestedTable`, and `LinkedTable` defer their plans until consumed ([ADR 0004](0004-lazy-execution-immutable-tables.md)); partitioning is only partially lazy: discovering the partition keys executes a distinct query (`to_arrow()` in `partitioning.py`), the concrete class behind string-key partitioning is `SQLPartitionedTable` (per-partition *access* stays a lazy SQL-backed query), and `PartitionedTable.map()` returns a `_PrecomputedPartitionedTable`, explicitly documented as having no lazy evaluation.
+These are **semantic roles**, not a laziness guarantee. `LTSeq`, `NestedTable`, and `LinkedTable` defer their plans until consumed ([ADR 0004](0004-lazy-execution-immutable-tables.md)); partitioning is only partially lazy: discovering the partition keys executes a distinct query (`to_arrow()` in `partitioning.py`), the concrete class behind string-key partitioning is `SQLPartitionedTable` (per-partition *access* stays a lazy query, a filter on the key's values), and `PartitionedTable.map()` returns a `_PrecomputedPartitionedTable`, explicitly documented as having no lazy evaluation.
 
 ## Consequences
 

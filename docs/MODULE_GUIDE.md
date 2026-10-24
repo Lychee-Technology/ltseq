@@ -226,7 +226,7 @@ If the bug involves linked tables suddenly turning into flat tables or schema mi
 
 ### `py-ltseq/ltseq/partitioning.py`
 
-Implements partitioned views and SQL-backed partition behavior.
+Implements partitioned views; each partition is a lazy filter on its key's values.
 
 Read this when working on:
 
