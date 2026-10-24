@@ -210,7 +210,9 @@ impl PhysicalOptimizerRule for KeepSortsAboveOffsets {
                 .filter(|limit| limit.skip() > 0)
                 .and_then(GlobalLimitExec::fetch);
             Ok(match fetch {
-                Some(fetch) => Transformed::yes(Arc::new(GlobalLimitExec::new(node, 0, Some(fetch))) as _),
+                Some(fetch) => {
+                    Transformed::yes(Arc::new(GlobalLimitExec::new(node, 0, Some(fetch))) as _)
+                }
                 None => Transformed::no(node),
             })
         })
