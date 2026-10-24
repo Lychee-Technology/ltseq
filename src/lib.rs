@@ -625,6 +625,14 @@ impl LTSeqTable {
         crate::ops::basic::filter_impl(self, expr_dict)
     }
 
+    /// Keep the rows whose columns equal `key`, one row of the table's
+    /// distinct keys as any `__arrow_c_stream__` object: the partition of
+    /// that key. Its stream is taken under the GIL and read detached.
+    fn filter_key_row(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
+        let key = crate::arrow_ffi::ImportedStream::from_py(key)?;
+        detached(py, || crate::ops::basic::filter_key_row_impl(self, key))
+    }
+
     /// Find the first row matching a predicate
     ///
     /// This is an optimized version of filter() that returns only the first matching row.
