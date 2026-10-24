@@ -26,7 +26,9 @@ layout:
 - (derived) distinct keys that convert to one Python value, such as
   `time64[ns]` values under a microsecond apart, raise rather than list one
   key and lose the other's rows; NaNs are one key only where the rest of the
-  key is one value.
+  key is one value;
+- (derived) changing the list `keys()` returns leaves every partition with
+  its key.
 
 The reference groups the input's rows in Python, by the key value as
 `to_pylist` returns it, with an aware value taken as its instant and every
@@ -276,6 +278,28 @@ def test_keys_are_looked_up_as_python_compares_them():
         zeros[2.0]
     with pytest.raises(KeyError):
         t.partition("a")["X"]
+
+
+@pytest.mark.parametrize("looked_up", (False, True), ids=("before_lookup", "after_lookup"))
+@pytest.mark.parametrize("by", ("column", "callable"))
+def test_changing_the_listed_keys_keeps_each_partition(by, looked_up):
+    """(derived) A partition is fetched by its key's position, so reordering
+    the list `keys()` returned relabeled the partitions."""
+    t = LTSeq.from_arrow(pa.table({"v": [0, 1, 2], "k": ["a", "b", "a"]})).sort("v")
+    p = t.partition("k") if by == "column" else t.partition(by=lambda r: r.k)
+    if looked_up:
+        p["b"]
+    listed = p.keys()
+    order = list(listed)
+    listed.reverse()
+    assert p.keys() == order
+    assert (ids(p["a"]), ids(p["b"])) == ([0, 2], [1])
+    assert {k: ids(part) for k, part in p.items()} == {"a": [0, 2], "b": [1]}
+    mapped = p.map(lambda part: part)
+    listed.clear()
+    mapped.keys().clear()
+    assert len(p) == len(mapped) == 2
+    assert (ids(mapped["a"]), ids(mapped["b"])) == ([0, 2], [1])
 
 
 def test_the_issue_reproduction():

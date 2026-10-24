@@ -117,7 +117,7 @@ class SQLPartitionedTable:
 
     def _position(self, key: Any) -> int:
         """The position in keys() of the key that ``key`` looks up."""
-        keys = self.keys()
+        keys = self._keys()
         if self._positions is None:
             self._positions = _positions(keys)
         if len(self._columns) == 1 and isinstance(key, tuple) and len(key) == 1:
@@ -136,7 +136,7 @@ class SQLPartitionedTable:
                 inner = self._ltseq._inner.filter_key_row(key_row)
             except Exception as e:
                 raise KeyError(
-                    f"Failed to access partition for key {self.keys()[position]}: {e}"
+                    f"Failed to access partition for key {self._keys()[position]}: {e}"
                 )
             partition = type(self._ltseq)._from_inner(inner)
             self._partitions_cache[position] = partition
@@ -149,6 +149,11 @@ class SQLPartitionedTable:
         Returns:
             List of unique partition key values
         """
+        return list(self._keys())
+
+    def _keys(self) -> list[Any]:
+        """The keys, row i of ``_key_rows`` holding the i-th. Not a copy:
+        callers must not change it, or keys would name other rows."""
         if self._keys_cache is None:
             self._compute_keys()
         return self._keys_cache  # type: ignore[return-value]
@@ -201,7 +206,7 @@ class SQLPartitionedTable:
         Returns:
             List of LTSeq objects, one per partition
         """
-        return [self._partition(i) for i in range(len(self.keys()))]
+        return [self._partition(i) for i in range(len(self._keys()))]
 
     def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
         """
@@ -210,7 +215,7 @@ class SQLPartitionedTable:
         Returns:
             Iterator of (partition_key, partition_table) tuples
         """
-        for position, key in enumerate(self.keys()):
+        for position, key in enumerate(self._keys()):
             yield key, self._partition(position)
 
     def __iter__(self) -> Iterator["LTSeq"]:
@@ -229,10 +234,7 @@ class SQLPartitionedTable:
         Returns:
             Count of distinct partition keys
         """
-        if self._keys_cache is None:
-            self._compute_keys()
-        assert self._keys_cache is not None
-        return len(self._keys_cache)
+        return len(self._keys())
 
     def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
         """
