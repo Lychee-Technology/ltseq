@@ -23,12 +23,14 @@ use crate::metadata::{sort_specs_to_window_sorts, SortSpec};
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt};
-use datafusion::prelude::{col, lit};
+use datafusion::prelude::lit;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Helper function to filter rows based on a predicate expression
@@ -297,15 +299,36 @@ pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyRes
 }
 
 /// `df`'s rows after the first `skip` in the order of `specs`.
-fn after_offset(df: DataFrame, skip: usize, specs: &[SortSpec]) -> datafusion::error::Result<DataFrame> {
-    const POSITION: &str = "__slice_pos__";
-    let columns: Vec<Expr> = df.schema().columns().into_iter().map(Expr::Column).collect();
-    let position = row_number()
+///
+/// The row numbers go in a column named unlike every column of `df`, since
+/// no column name is reserved (contract §6.4).
+fn after_offset(
+    df: DataFrame,
+    skip: usize,
+    specs: &[SortSpec],
+) -> datafusion::error::Result<DataFrame> {
+    let names: HashSet<&str> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let position = (0..)
+        .map(|i| format!("__ltseq_slice_pos_{i}"))
+        .find(|n| !names.contains(n.as_str()))
+        .expect("an unbounded range has a free name");
+    let columns: Vec<Expr> = df
+        .schema()
+        .columns()
+        .into_iter()
+        .map(Expr::Column)
+        .collect();
+    let numbered = row_number()
         .order_by(sort_specs_to_window_sorts(specs))
         .build()?
-        .alias(POSITION);
-    df.window(vec![position])?
-        .filter(col(POSITION).gt(lit(skip as u64)))?
+        .alias(&position);
+    df.window(vec![numbered])?
+        .filter(Expr::Column(Column::new_unqualified(position)).gt(lit(skip as u64)))?
         .select(columns)
 }
 

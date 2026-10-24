@@ -31,7 +31,8 @@ and none, and `tail` at offsets 99, 95 and 1:
   `slice(10)`;
 - (derived) the same after `assume_sorted` on Parquet; a sort or window
   after a slice with a length of a table with no declared order keeps the
-  slice's rows.
+  slice's rows; a user column with a name `slice(k)` could number its rows
+  in stays.
 
 Results are compared with a pandas reference for their rows, values and
 order, and `len()` of each slice and count with the rows a terminal returns.
@@ -624,3 +625,29 @@ def test_a_sort_after_an_offset_slice_of_an_unsorted_table_keeps_its_rows(
             assert_rows(result, reference(kept), what)
             if read is not None:
                 assert sorted(kept.date) == read, what
+
+
+# ---------------------------------------------------------------------------
+# (derived) A user column with the name the slice numbers its rows in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "names",
+    [("__slice_pos__",), ("__ltseq_slice_pos_0",), ("__ltseq_slice_pos_0", "__ltseq_slice_pos_1")],
+    ids=["old name", "first name", "first two names"],
+)
+def test_an_offset_slice_keeps_a_column_with_its_internal_name(names):
+    """`slice(k)` without a length of a table with a declared order numbers
+    the rows in a column of its own and drops it. No column name is reserved
+    (contract §6.4), so a user column with a name that column could take
+    stays, with its values, and the slice keeps its rows."""
+    rows = input_rows(N)
+    for i, name in enumerate(names):
+        rows = rows.append_column(name, pa.array(np.arange(N, dtype=np.int64) * 10 + i))
+    t = LTSeq.from_arrow(rows).sort("date")
+    ref = by_date(rows.to_pandas())
+    for k in OFFSETS:
+        s, d = t.slice(k), rows_from(ref, k, None)
+        check_slice(s, d, f"slice({k})")
+        check(s.sort("volume"), d.sort_values("volume"), f"slice({k}).sort(volume)")
