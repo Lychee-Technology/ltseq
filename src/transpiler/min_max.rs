@@ -26,9 +26,10 @@
 //! [`min`] and [`max`] are the aggregates every plan uses, in `agg`,
 //! `group_by`, `pivot`, the group dialect and windows. For a float argument
 //! they compare values through their representatives, on which IEEE
-//! totalOrder is the contract's order, and they are never answered from
-//! statistics. Every other type keeps DataFusion's accumulators, and its
-//! answers from statistics.
+//! totalOrder is the contract's order. They are never answered from
+//! statistics, and a running one claims no order of its output. Every other
+//! type keeps DataFusion's accumulators, its answers from statistics and its
+//! claims.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -256,9 +257,16 @@ impl AggregateUDFImpl for MinMax {
         self.datafusion().value_from_stats(args)
     }
 
+    /// DataFusion reads this as an order of the window's output in its own
+    /// sort order, IEEE totalOrder for floats, and drops a later sort it
+    /// satisfies. A float running extreme is monotonic only in the
+    /// contract's order: a running `max` of `[1.0, -NaN]` is `-NaN`, below
+    /// `1.0` in totalOrder, and a representative can sort below the bits it
+    /// replaces. So floats claim none.
     fn set_monotonicity(&self, data_type: &DataType) -> SetMonotonicity {
-        // A running max never decreases and a running min never increases in
-        // the contract's order, as in DataFusion's.
+        if is_float(data_type) {
+            return SetMonotonicity::NotMonotonic;
+        }
         self.datafusion().set_monotonicity(data_type)
     }
 
@@ -779,6 +787,21 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn only_non_floats_claim_an_order_of_a_running_extreme() {
+        for (udaf, claim) in [
+            (&*MIN, SetMonotonicity::Decreasing),
+            (&*MAX, SetMonotonicity::Increasing),
+        ] {
+            let monotonicity = |data_type| udaf.inner().set_monotonicity(&data_type);
+            for float in [DataType::Float16, DataType::Float32, DataType::Float64] {
+                assert_eq!(monotonicity(float), SetMonotonicity::NotMonotonic);
+            }
+            assert_eq!(monotonicity(DataType::Int64), claim);
+            assert_eq!(monotonicity(DataType::Utf8), claim);
         }
     }
 
