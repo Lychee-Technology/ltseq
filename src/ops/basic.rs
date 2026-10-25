@@ -13,11 +13,13 @@
 //! # Operations Provided
 //!
 //! - **filter_impl**: Filter rows based on a predicate expression
+//! - **filter_key_row_impl**: Keep the rows of one partition key
 //! - **select_impl**: Select columns or derived expressions
 //! - **search_first_impl**: Find the first row matching a predicate (optimized filter + limit 1)
 //! - **slice_impl**: Select a contiguous range of rows in table order
 //! - **materialize_impl**: Execute the lazy plan and snapshot the result into memory
 
+use crate::arrow_ffi::ImportedStream;
 use crate::error::LtseqError;
 use crate::metadata::{sort_specs_to_window_sorts, SortSpec};
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
@@ -25,9 +27,12 @@ use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
+use datafusion::functions::math::expr_fn::isnan;
 use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, ExprFunctionExt};
 use datafusion::prelude::lit;
+use datafusion::scalar::ScalarValue;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashSet;
@@ -70,6 +75,76 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
         table.sort_specs.clone(),
         None, // row set / columns diverge from the raw file: drop fast-path token
     ))
+}
+
+/// Keep the rows whose columns equal the one row of `key`, a NULL matching
+/// NULL: the partition of that key (#258).
+///
+/// `key` is a row of the table's distinct keys, so each value is compared as
+/// a scalar of its column's own Arrow type. It never passes through a
+/// Python value or SQL text, which read a date as integer arithmetic and had
+/// no notation for timestamps, binary or NaN.
+///
+/// A NaN key matches every NaN row, whatever its bits: `partition` lists one
+/// NaN key (contract §18), and `= NaN` would also lose NaN rows to Parquet
+/// row-group pruning, whose float statistics leave NaN out (#291).
+pub fn filter_key_row_impl(
+    table: &LTSeqTable,
+    key: ImportedStream,
+) -> Result<LTSeqTable, LtseqError> {
+    let (key_schema, batches) = key.read_all()?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let Some(row) = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .filter(|_| rows == 1)
+    else {
+        return Err(LtseqError::Validation(format!(
+            "a partition key is one row, got {rows}"
+        )));
+    };
+    let conditions = key_schema
+        .fields()
+        .iter()
+        .zip(row.columns())
+        .map(|(field, values)| {
+            let column = Expr::Column(Column::new_unqualified(field.name()));
+            let value = ScalarValue::try_from_array(values, 0)?;
+            Ok(if value.is_null() {
+                column.is_null()
+            } else if is_nan(&value) {
+                isnan(column)
+            } else {
+                column.eq(lit(value))
+            })
+        })
+        .collect::<datafusion::error::Result<Vec<_>>>()
+        .map_err(|e| LtseqError::with_context("Failed to read the partition key", e))?;
+    let predicate = conjunction(conditions)
+        .ok_or_else(|| LtseqError::Validation("a partition key has no columns".into()))?;
+
+    let filtered_df = (**table.require_df()?)
+        .clone()
+        .filter(predicate)
+        .map_err(|e| LtseqError::Runtime(format!("Partition filter failed: {}", e)))?;
+
+    Ok(LTSeqTable::from_df_with_schema(
+        Arc::clone(&table.session),
+        filtered_df,
+        Arc::clone(table.require_schema()?),
+        table.sort_specs.clone(),
+        None, // row set diverges from the raw file: drop fast-path token
+    ))
+}
+
+fn is_nan(value: &ScalarValue) -> bool {
+    match value {
+        ScalarValue::Float16(Some(v)) => v.is_nan(),
+        ScalarValue::Float32(Some(v)) => v.is_nan(),
+        ScalarValue::Float64(Some(v)) => v.is_nan(),
+        ScalarValue::Dictionary(_, value) => is_nan(value),
+        _ => false,
+    }
 }
 
 /// Helper function to select columns or derived expressions

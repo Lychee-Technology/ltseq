@@ -5,29 +5,93 @@ Unlike group_ordered() which handles consecutive groups, partition() groups
 all rows with the same key value regardless of position.
 """
 
+import math
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 if TYPE_CHECKING:
     from .core import LTSeq
 
+# What a NaN key is looked up by: NaN equals no value, itself included.
+_NAN_KEY = object()
+
+
+def _lookup_key(key: Any) -> Any:
+    """The value a partition key is looked up by.
+
+    Python compares two datetimes that share a tzinfo by wall clock and
+    ignores ``fold`` (PEP 495), so the two occurrences of a repeated hour,
+    01:30 EDT and 01:30 EST, compare and hash equal. An aware key is looked
+    up by its UTC instant, which tells them apart; a NaN key is one value.
+    """
+    if isinstance(key, tuple):
+        return tuple(_lookup_key(value) for value in key)
+    if isinstance(key, datetime) and key.utcoffset() is not None:
+        return key.astimezone(timezone.utc)
+    if isinstance(key, float) and math.isnan(key):
+        return _NAN_KEY
+    return key
+
+
+def _positions(keys: list[Any]) -> dict[Any, int]:
+    """Each key's position in ``keys``, by the value it is looked up by."""
+    return {_lookup_key(key): position for position, key in enumerate(keys)}
+
+
+def _compared_columns(key_rows: Any) -> list[Any]:
+    """The key columns that distinct keys Python looks up alike must agree
+    in to hold the rows of one partition, each one array with any dictionary
+    decoded.
+
+    Floating-point columns are left out: a float converts to Python exactly,
+    so two that look up alike are NaNs, whose partition holds every NaN row,
+    or equal values. Any other column that differs lost precision in Python,
+    as ``time64[ns]`` does below a microsecond.
+    """
+    import pyarrow as pa
+
+    columns = []
+    for column in key_rows.columns:
+        if pa.types.is_dictionary(column.type):
+            column = column.cast(column.type.value_type)
+        if not pa.types.is_floating(column.type):
+            columns.append(column.combine_chunks())
+    return columns
+
+
+def _one_partition(columns: list[Any], positions: list[int]) -> bool:
+    """Whether the distinct key rows at ``positions``, which Python looks up
+    as one key, hold the rows of one partition: whether they agree in each
+    of ``columns``, from ``_compared_columns``."""
+    for column in columns:
+        first = column.slice(positions[0], 1)
+        if not all(column.slice(p, 1).equals(first) for p in positions[1:]):
+            return False
+    return True
+
+
 class SQLPartitionedTable:
     """
-    SQL-based partitioned table for fast column-based partitioning.
+    Column-based partitioned table.
 
-    This implementation uses SQL (DISTINCT, WHERE) for partitioning instead
-    of evaluating Python lambdas on each row. Much faster for large datasets.
+    The distinct keys are found with one query; each partition is a lazy
+    filter on its key's values, compared as values of the key columns' own
+    types (a NULL key matches NULL). Python lambdas never run per row.
 
     Supports the same interface as PartitionedTable:
     - Dict-like access: partitioned[key]
     - Iteration: for key, table in partitioned.items()
     - Mapping: partitioned.map(lambda t: t.agg(...))
 
+    A key is looked up as Python compares it, except that an aware
+    ``datetime`` is looked up by its instant and any NaN finds the NaN key.
+
     Example:
         >>> t = LTSeq.read_csv("sales.csv")
-        >>> partitions = t.partition_by("region")
+        >>> partitions = t.partition("region")
         >>> west_sales = partitions["West"]  # Single column: key is the value
-        >>> partitions = t.partition_by("year", "region")
-        >>> 2023_west = partitions[(2023, "West")]  # Multiple columns: key is tuple
+        >>> partitions = t.partition("year", "region")
+        >>> west_2023 = partitions[(2023, "West")]  # Multiple columns: key is tuple
     """
 
     def __init__(self, ltseq_instance: "LTSeq", columns: tuple[str, ...]):
@@ -41,7 +105,10 @@ class SQLPartitionedTable:
         self._ltseq = ltseq_instance
         self._columns = columns
         self._keys_cache: list[Any] | None = None
-        self._partitions_cache: dict[Any, "LTSeq"] | None = None
+        # The distinct keys as Arrow, row i holding keys()[i]
+        self._key_rows: Any = None
+        self._positions: dict[Any, int] | None = None
+        self._partitions_cache: dict[int, "LTSeq"] = {}
 
     def __getitem__(self, key: Any) -> "LTSeq":
         """
@@ -56,50 +123,34 @@ class SQLPartitionedTable:
         Raises:
             KeyError: If the key doesn't exist in the partitions
         """
-        if self._partitions_cache is None:
-            self._partitions_cache = {}
+        return self._partition(self._position(key))
 
-        key_tuple = self._normalize_key(key)
-
-        if self._keys_cache is None:
-            self._compute_keys()
-        assert self._keys_cache is not None
-        if key not in self._keys_cache and key_tuple not in self._keys_cache:
+    def _position(self, key: Any) -> int:
+        """The position in keys() of the key that ``key`` looks up."""
+        keys = self._keys()
+        if self._positions is None:
+            self._positions = _positions(keys)
+        if len(self._columns) == 1 and isinstance(key, tuple) and len(key) == 1:
+            key = key[0]
+        position = self._positions.get(_lookup_key(key))
+        if position is None:
             raise KeyError(f"Partition key '{key}' not found")
+        return position
 
-        # Check cache first
-        if key_tuple in self._partitions_cache:
-            return self._partitions_cache[key_tuple]
-
-        # Build WHERE clause for this key
-        conditions = []
-        for col, val in zip(self._columns, key_tuple):
-            if val is None:
-                conditions.append(f'"{col}" IS NULL')
-            elif isinstance(val, str):
-                escaped_val = val.replace("'", "''")
-                conditions.append(f"\"{col}\" = '{escaped_val}'")
-            elif isinstance(val, bool):
-                conditions.append(f'"{col}" = {str(val).lower()}')
-            else:
-                conditions.append(f'"{col}" = {val}')
-
-        where_clause = " AND ".join(conditions)
-
-        # Use filter_where to get the partition
-        try:
-            filtered_inner = self._ltseq._inner.filter_where(where_clause)
-            partition = self._ltseq.__class__()
-            partition._inner = filtered_inner
-            self._partitions_cache[key_tuple] = partition
-            return partition
-        except Exception as e:
-            raise KeyError(f"Failed to access partition for key {key}: {e}")
-
-    def _normalize_key(self, key: Any) -> tuple[Any, ...]:
-        if len(self._columns) == 1:
-            return (key,) if not isinstance(key, tuple) else key
-        return key if isinstance(key, tuple) else (key,)
+    def _partition(self, position: int) -> "LTSeq":
+        """The rows of the key at ``position`` in keys(), built once."""
+        partition = self._partitions_cache.get(position)
+        if partition is None:
+            key_row = self._key_rows.slice(position, 1)
+            try:
+                inner = self._ltseq._inner.filter_key_row(key_row)
+            except Exception as e:
+                raise KeyError(
+                    f"Failed to access partition for key {self._keys()[position]}: {e}"
+                )
+            partition = type(self._ltseq)._from_inner(inner)
+            self._partitions_cache[position] = partition
+        return partition
 
     def keys(self) -> list[Any]:
         """
@@ -108,6 +159,11 @@ class SQLPartitionedTable:
         Returns:
             List of unique partition key values
         """
+        return list(self._keys())
+
+    def _keys(self) -> list[Any]:
+        """The keys, row i of ``_key_rows`` holding the i-th. Not a copy:
+        callers must not change it, or keys would name other rows."""
         if self._keys_cache is None:
             self._compute_keys()
         return self._keys_cache  # type: ignore[return-value]
@@ -127,6 +183,32 @@ class SQLPartitionedTable:
             for i in range(pa_table.num_rows):
                 keys.append(tuple(columns[j][i] for j in range(len(self._columns))))
 
+        # Keys looked up as one value are listed once. `distinct` keeps NaNs
+        # of other bits apart (#290), and a NaN key's partition holds every
+        # NaN row. Keys that convert to one Python value but select other
+        # rows could be neither listed nor looked up apart, so they raise.
+        groups: dict[Any, list[int]] = {}
+        try:
+            for position, key in enumerate(keys):
+                groups.setdefault(_lookup_key(key), []).append(position)
+        except TypeError:  # a list or struct key is unhashable: none is merged
+            groups = {}
+        collisions = [positions for positions in groups.values() if len(positions) > 1]
+        if collisions:
+            compared = _compared_columns(pa_table)
+            for positions in collisions:
+                if not _one_partition(compared, positions):
+                    columns = ", ".join(repr(c) for c in self._columns)
+                    raise ValueError(
+                        f"partition({columns}) has {len(positions)} distinct keys "
+                        f"that all convert to the Python value "
+                        f"{keys[positions[0]]!r}, so they cannot be told apart"
+                    )
+            kept = [positions[0] for positions in groups.values()]
+            keys = [keys[position] for position in kept]
+            pa_table = pa_table.take(kept)
+
+        self._key_rows = pa_table
         self._keys_cache = keys
 
     def values(self) -> list["LTSeq"]:
@@ -136,10 +218,7 @@ class SQLPartitionedTable:
         Returns:
             List of LTSeq objects, one per partition
         """
-        if self._keys_cache is None:
-            self._compute_keys()
-
-        return [self[key] for key in self._keys_cache]  # type: ignore[union-attr]
+        return [self._partition(i) for i in range(len(self._keys()))]
 
     def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
         """
@@ -148,12 +227,8 @@ class SQLPartitionedTable:
         Returns:
             Iterator of (partition_key, partition_table) tuples
         """
-        if self._keys_cache is None:
-            self._compute_keys()
-        assert self._keys_cache is not None
-
-        for key in self._keys_cache:
-            yield key, self[key]
+        for position, key in enumerate(self._keys()):
+            yield key, self._partition(position)
 
     def __iter__(self) -> Iterator["LTSeq"]:
         """
@@ -171,10 +246,7 @@ class SQLPartitionedTable:
         Returns:
             Count of distinct partition keys
         """
-        if self._keys_cache is None:
-            self._compute_keys()
-        assert self._keys_cache is not None
-        return len(self._keys_cache)
+        return len(self._keys())
 
     def map(self, fn: Callable[["LTSeq"], "LTSeq"]) -> "PartitionedTable":
         """
@@ -186,18 +258,7 @@ class SQLPartitionedTable:
         Returns:
             New PartitionedTable with transformed partitions
         """
-        if self._keys_cache is None:
-            self._compute_keys()
-
-        transformed_partitions: dict[Any, "LTSeq"] = {}
-        for key in self._keys_cache:  # type: ignore[union-attr]
-            try:
-                result = fn(self[key])
-                transformed_partitions[key] = result
-            except Exception as e:
-                raise RuntimeError(f"Error applying function to partition '{key}': {e}")
-
-        return _PrecomputedPartitionedTable(transformed_partitions)
+        return _map_partitions(self.items(), fn)
 
     def to_list(self) -> list["LTSeq"]:
         """
@@ -241,7 +302,6 @@ class PartitionedTable:
         """
         self._ltseq = ltseq_instance
         self._partition_fn = partition_fn
-        self._partitions_cache: dict[Any, "LTSeq"] | None = None
         self._delegate = self._build_delegate()
 
     def _build_delegate(self) -> SQLPartitionedTable:
@@ -355,16 +415,7 @@ class PartitionedTable:
             >>> for region, total_row in totals.items():
             ...     print(f"{region}: {total_row}")
         """
-        transformed_partitions: dict[Any, "LTSeq"] = {}
-        for key, partition_table in self._delegate.items():
-            try:
-                result = fn(partition_table)
-                transformed_partitions[key] = result
-            except Exception as e:
-                raise RuntimeError(f"Error applying function to partition '{key}': {e}")
-
-        # Return a new PartitionedTable wrapper with transformed data
-        return _PrecomputedPartitionedTable(transformed_partitions)
+        return _map_partitions(self.items(), fn)
 
     def to_list(self) -> list["LTSeq"]:
         """
@@ -387,44 +438,61 @@ def _partition_expr_to_columns(expr_dict: dict[str, Any]) -> tuple[str, ...] | N
     return None
 
 
+def _map_partitions(
+    items: Iterator[tuple[Any, "LTSeq"]], fn: Callable[["LTSeq"], "LTSeq"]
+) -> "_PrecomputedPartitionedTable":
+    """Apply ``fn`` to each partition, keeping every key, in order."""
+    keys: list[Any] = []
+    results: list["LTSeq"] = []
+    for key, partition in items:
+        try:
+            results.append(fn(partition))
+        except Exception as e:
+            raise RuntimeError(f"Error applying function to partition '{key}': {e}")
+        keys.append(key)
+    return _PrecomputedPartitionedTable(keys, results)
+
+
 class _PrecomputedPartitionedTable(PartitionedTable):
     """
     A PartitionedTable with pre-computed partitions (no lazy evaluation).
 
     Used internally by map() to return results without recomputing partitions.
+    Keys are looked up as in SQLPartitionedTable, so the partitions of two keys
+    that Python compares equal, such as the two occurrences of a repeated hour,
+    stay apart.
     """
 
-    def __init__(self, precomputed_partitions: dict[Any, "LTSeq"]):
+    def __init__(self, keys: list[Any], partitions: list["LTSeq"]):
         """
-        Initialize with pre-computed partition dictionary.
+        Initialize with pre-computed partitions.
 
         Args:
-            precomputed_partitions: Dict mapping partition keys to LTSeq tables
+            keys: The partition keys
+            partitions: The table of each key, in the order of ``keys``
         """
         # Don't call super().__init__() since we don't have partition_fn
         self._ltseq = None
         self._partition_fn = None
-        self._partitions_cache = precomputed_partitions
+        self._keys = keys
+        self._partitions = partitions
+        self._positions = _positions(keys)
         self._delegate = None
 
     def __getitem__(self, key: Any) -> "LTSeq":
-        assert self._partitions_cache is not None
-        if key not in self._partitions_cache:
+        position = self._positions.get(_lookup_key(key))
+        if position is None:
             raise KeyError(f"Partition key '{key}' not found")
-        return self._partitions_cache[key]
+        return self._partitions[position]
 
     def keys(self) -> list[Any]:
-        assert self._partitions_cache is not None
-        return list(self._partitions_cache.keys())
+        return list(self._keys)
 
     def values(self) -> list["LTSeq"]:
-        assert self._partitions_cache is not None
-        return list(self._partitions_cache.values())
+        return list(self._partitions)
 
     def items(self) -> Iterator[tuple[Any, "LTSeq"]]:
-        assert self._partitions_cache is not None
-        return iter(self._partitions_cache.items())
+        return iter(zip(self._keys, self._partitions))
 
     def __len__(self) -> int:
-        assert self._partitions_cache is not None
-        return len(self._partitions_cache)
+        return len(self._keys)

@@ -293,7 +293,7 @@ Examples include:
 
 ### Partitioning
 
-`partition()` exposes logical partition access. The implementation favors capturable expressions and SQL-backed behavior over arbitrary Python execution so the system can stay on the query path.
+`partition()` exposes logical partition access. The implementation accepts only column keys, and each partition is a lazy filter on its key's values rather than arbitrary Python execution, so the system can stay on the query path.
 
 ---
 
