@@ -6,6 +6,36 @@ if TYPE_CHECKING:
     from .core import LTSeq
 
 
+def _bare_lookup(col_name: str, expr_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return the Lookup node of a derived column that is ``r.<column>.lookup(...)``.
+
+    derive() joins the target table on the key column and replaces the
+    derived column with the joined target column. That evaluates the lookup
+    only when it is the column's whole expression and its key is a column; for
+    any other shape it would drop the rest of the expression, so it raises
+    instead (#223).
+
+    Raises:
+        ValueError: If the lookup is inside a larger expression or its key is
+            not a column
+    """
+    if expr_dict.get("type") != "Lookup":
+        raise ValueError(
+            f"Column {col_name!r}: lookup() is supported only as the whole "
+            "expression of a derived column, not inside a larger expression. "
+            "Derive the looked-up value as a column of its own and build on it "
+            "in a later derive(), or use join()."
+        )
+    if expr_dict["on"].get("type") != "Column":
+        raise ValueError(
+            f"Column {col_name!r}: lookup() needs a column as its key, as in "
+            "r.<column>.lookup(...), not a computed value. Derive the key as a "
+            "column first and look it up in a later derive(), or use join()."
+        )
+    return expr_dict
+
+
 class LookupMixin:
     """Mixin providing lookup resolution for derive operations."""
 
@@ -18,7 +48,7 @@ class LookupMixin:
     @property
     def _sort_keys(self) -> Any: ...
 
-    def _contains_lookup(self, expr_dict: dict[str, Any]) -> bool:
+    def _contains_lookup(self, expr_dict: Any) -> bool:
         """
         Recursively check if expression contains a Lookup.
 
@@ -28,76 +58,15 @@ class LookupMixin:
         Returns:
             True if expression contains a Lookup type
         """
-        if not isinstance(expr_dict, dict):
-            return False
-        if expr_dict.get("type") == "Lookup":
-            return True
-        # Check nested expressions
-        for key in ["on", "left", "right", "operand"]:
-            if key in expr_dict and self._contains_lookup(expr_dict[key]):
-                return True
-        # Check args list
-        for arg in expr_dict.get("args", []):
-            if self._contains_lookup(arg):
-                return True
-        # Check kwargs values
-        for kwarg_val in expr_dict.get("kwargs", {}).values():
-            if self._contains_lookup(kwarg_val):
-                return True
+        # Walk every field, so a lookup under a window, an argument list or
+        # any other node is found and _bare_lookup can reject it.
+        if isinstance(expr_dict, dict):
+            return expr_dict.get("type") == "Lookup" or any(
+                self._contains_lookup(value) for value in expr_dict.values()
+            )
+        if isinstance(expr_dict, list):
+            return any(self._contains_lookup(item) for item in expr_dict)
         return False
-
-    def _extract_lookup_info(
-        self, expr_dict: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """
-        Extract lookup information from an expression.
-
-        Args:
-            expr_dict: Serialized expression dict
-
-        Returns:
-            Dict with lookup info, or None if not a Lookup
-        """
-        if not isinstance(expr_dict, dict):
-            return None
-
-        if expr_dict.get("type") == "Lookup":
-            # Extract the source column from the 'on' expression
-            on_expr = expr_dict.get("on", {})
-            on_column = None
-
-            if on_expr.get("type") == "Column":
-                on_column = on_expr.get("name")
-            # For chained calls like r.product_id.lower().lookup(...)
-            # we need to find the root column
-            elif on_expr.get("type") == "Call":
-                inner = on_expr.get("on", {})
-                while inner.get("type") == "Call":
-                    inner = inner.get("on", {})
-                if inner.get("type") == "Column":
-                    on_column = inner.get("name")
-
-            return {
-                "on_column": on_column,
-                "on_expr": on_expr,
-                "target_name": expr_dict.get("target_name"),
-                "target_columns": expr_dict.get("target_columns", []),
-                "join_key": expr_dict.get("join_key"),
-            }
-
-        # Recursively check nested expressions
-        for key in ["on", "left", "right", "operand"]:
-            if key in expr_dict:
-                nested = self._extract_lookup_info(expr_dict[key])
-                if nested:
-                    return nested
-
-        for arg in expr_dict.get("args", []):
-            nested = self._extract_lookup_info(arg)
-            if nested:
-                return nested
-
-        return None
 
     def _resolve_lookups(
         self, derived_cols: dict[str, dict]
@@ -129,12 +98,7 @@ class LookupMixin:
                 simplified[col_name] = expr_dict
                 continue
 
-            # Extract lookup info
-            lookup_info = self._extract_lookup_info(expr_dict)
-            if lookup_info is None:
-                simplified[col_name] = expr_dict
-                continue
-
+            lookup_info = _bare_lookup(col_name, expr_dict)
             target_name = lookup_info["target_name"]
             target_table = LookupExpr.get_table(target_name)
 
@@ -151,14 +115,8 @@ class LookupMixin:
             # Only join each target once
             if target_name not in joined_targets:
                 # Determine join keys
-                on_column = lookup_info["on_column"]
+                on_column = lookup_info["on"]["name"]
                 join_key = lookup_info["join_key"]
-
-                if on_column is None:
-                    raise ValueError(
-                        f"Could not determine source column for lookup on '{target_name}'. "
-                        "The lookup must be called on a column expression."
-                    )
 
                 # If no explicit join_key, use the first target column
                 if join_key is None:

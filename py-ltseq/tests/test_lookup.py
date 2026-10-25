@@ -1,5 +1,6 @@
 """Tests for lookup() expression functionality."""
 
+import pyarrow as pa
 import pytest
 from ltseq import LTSeq
 from ltseq.expr.types import ColumnExpr, CallExpr, LookupExpr
@@ -300,3 +301,109 @@ class TestLookupExecution:
                 assert row["product_name"] == "Widget"
             elif row["product_id"] == "P002":
                 assert row["product_name"] == "Gadget"
+
+
+def _orders():
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "oid": [1, 2, 3],
+                "pid": pa.array([10, 20, 99], pa.int64()),
+                "code": ["TEN", "twenty", "x"],
+                "qty": [3, 5, 1],
+            }
+        )
+    )
+
+
+def _products():
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "pid": pa.array([10, 20], pa.int64()),
+                "code": ["ten", "twenty"],
+                "name": ["ten", "twenty"],
+                "price": [2.0, 4.0],
+            }
+        )
+    )
+
+
+def _by_oid(table):
+    # A derive with a lookup declares no order, so compare rows by key.
+    return sorted(table.to_dicts(), key=lambda row: row["oid"])
+
+
+class TestLookupShape:
+    """derive() evaluates a lookup only as a derived column's whole expression,
+    keyed by a column; any other shape raises at the call (#223)."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda p: lambda r: r.pid.lookup(p, "name") == "ten",
+            lambda p: lambda r: r.pid.lookup(p, "name").is_null(),
+            lambda p: lambda r: r.pid.lookup(p, "price") * r.qty,
+            lambda p: lambda r: r.qty * r.pid.lookup(p, "price"),
+            lambda p: lambda r: r.pid.lookup(p, "price").fill_null(0.0),
+            lambda p: lambda r: r.qty.fill_null(r.pid.lookup(p, "price")),
+            lambda p: lambda r: r.pid.lookup(p, "price").cast("int64"),
+            lambda p: lambda r: ~(r.pid.lookup(p, "name") == "ten"),
+        ],
+        ids=["eq", "is_null", "mul", "rmul", "fill_null", "fill_null_arg", "cast", "invert"],
+    )
+    def test_lookup_inside_an_expression_raises(self, build):
+        # These used to return the bare looked-up value.
+        orders, products = _orders(), _products()
+
+        with pytest.raises(ValueError, match=r"Column 'x': lookup\(\) .* larger expression"):
+            orders.derive(x=build(products))
+
+    def test_lookup_inside_an_expression_raises_in_dict_form(self):
+        orders, products = _orders(), _products()
+
+        with pytest.raises(ValueError, match=r"Column 'x': lookup\(\) .* larger expression"):
+            orders.derive(lambda r: {"x": r.pid.lookup(products, "name") == "ten"})
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda p: lambda r: r.code.s.lower().lookup(p, "name", join_key="code"),
+            lambda p: lambda r: (r.pid + 0).lookup(p, "name"),
+            lambda p: lambda r: r.pid.lookup(p, "pid").lookup(p, "name"),
+        ],
+        ids=["method", "arithmetic", "lookup"],
+    )
+    def test_lookup_on_a_computed_key_raises(self, build):
+        # The key used to be the column under the computed value, so
+        # r.code.s.lower().lookup(...) compared "TEN" with "ten" and found
+        # no match.
+        orders, products = _orders(), _products()
+
+        with pytest.raises(ValueError, match=r"Column 'x': lookup\(\) needs a column as its key"):
+            orders.derive(x=build(products))
+
+    def test_a_later_derive_builds_on_the_looked_up_column(self):
+        # The workaround the errors name.
+        orders, products = _orders(), _products()
+
+        result = (
+            orders.derive(price=lambda r: r.pid.lookup(products, "price"))
+            .derive(
+                total=lambda r: r.price * r.qty,
+                missing=lambda r: r.price.is_null(),
+            )
+        )
+
+        rows = _by_oid(result)
+        assert [row["total"] for row in rows] == [6.0, 20.0, None]
+        assert [row["missing"] for row in rows] == [False, False, True]
+
+    def test_a_computed_key_derived_first_is_looked_up(self):
+        orders, products = _orders(), _products()
+
+        result = orders.derive(key=lambda r: r.code.s.lower()).derive(
+            name=lambda r: r.key.lookup(products, "name", join_key="code")
+        )
+
+        assert [row["name"] for row in _by_oid(result)] == ["ten", "twenty", None]
