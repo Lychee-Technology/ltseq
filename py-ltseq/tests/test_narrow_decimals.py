@@ -291,3 +291,94 @@ def test_every_aggregate_path_sums_a_narrow_decimal_as_decimal128(narrow):
     assert got == runs("w")
     assert got[0] == (f"decimal128({narrow.precision + 10}, 2)", [Decimal("10000001.49"), Decimal("0.01")])
     assert got[3][1] == [Decimal("1.50"), Decimal("10000001.49"), Decimal("10000001.50"), Decimal("10000001.50")]
+
+
+# ---- Join keys and set operations ----
+
+
+def keyed(narrow, integer):
+    """A narrow key `x`, its decimal128 twin `w`, and a table keyed by an integer `i`."""
+    keys = [Decimal("7.00"), Decimal("1.50"), None]
+    left = LTSeq.from_arrow(pa.table({
+        "x": pa.array(keys, narrow),
+        "w": pa.array(keys, wide(narrow)),
+        "n": pa.array([0, 1, 2], pa.int64()),
+    }))
+    right = LTSeq.from_arrow(pa.table({"i": pa.array([7, 1], integer), "v": ["seven", "one"]}))
+    return left, right
+
+
+def rows(t, *columns):
+    out = t.to_arrow()
+    return sorted(zip(*(out.column(c).to_pylist() for c in columns)), key=repr)
+
+
+@pytest.mark.parametrize("integer", INTEGERS, ids=str)
+@pytest.mark.parametrize("narrow", NARROW, ids=str)
+def test_a_narrow_decimal_key_joins_an_integer_key_by_value(narrow, integer):
+    """`int32` 7 joins `Decimal("7.00")` and 1 does not join 1.50 (contract
+    acceptance J1); the join used to cast 1.50 to the integer 1."""
+    left, right = keyed(narrow, integer)
+    for d in ("x", "w"):
+        on = lambda a, b, d=d: getattr(a, d) == b.i  # noqa: E731
+        assert rows(left.join(right, on=on), "n", "v") == [(0, "seven")], d
+        assert rows(left.join(right, left_on=d, right_on="i", how="left"), "n", "v") == [
+            (0, "seven"), (1, None), (2, None),
+        ], d
+        assert rows(left.semi_join(right, on=on), "n") == [(0,)], d
+        assert rows(left.anti_join(right, on=on), "n") == [(1,), (2,)], d
+        linked = left.link(right, on=on, as_="r", join_type="left").to_ltseq()
+        assert rows(linked, "n", "r_v") == [(0, "seven"), (1, None), (2, None)], d
+        looked_up = left.derive(v=lambda r, d=d: getattr(r, d).lookup(right, "v", join_key="i"))
+        assert rows(looked_up, "n", "v") == [(0, "seven"), (1, None), (2, None)], d
+    joined = left.join(right, on=lambda a, b: a.x == b.i).to_arrow()
+    assert str(joined.schema.field("x").type) == str(narrow)
+
+
+@pytest.mark.parametrize("narrow", NARROW, ids=str)
+def test_narrow_decimal_keys_of_one_type_join_by_name(narrow):
+    left = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.50"), Decimal("2.00")], narrow)}))
+    right = LTSeq.from_arrow(pa.table({"x": pa.array([Decimal("1.50")], narrow), "v": ["a"]}))
+    assert rows(left.join(right, on="x"), "x", "v") == [(Decimal("1.50"), "a")]
+    assert rows(left.intersect(right.select("x")), "x") == [(Decimal("1.50"),)]
+
+
+@pytest.mark.parametrize("integer", [pa.int32(), pa.int64(), pa.uint64()], ids=str)
+@pytest.mark.parametrize("narrow", NARROW, ids=str)
+def test_set_operations_compare_a_narrow_decimal_with_an_integer_by_value(narrow, integer):
+    """1.50 was cast to 1 against an integer column: union returned the
+    integers 1 and 2 for 1.50 and 2.00, intersect kept 1.50, and except_ and
+    is_subset missed it."""
+    ints = LTSeq.from_arrow(pa.table({"v": pa.array([1, 2], integer)}))
+
+    def union(a, b):
+        kind, values = typed(a.union(b).to_arrow())["v"]
+        return kind, sorted(values)
+
+    def outcomes(t):
+        return [
+            union(t, ints),
+            union(ints, t),
+            rows(t.intersect(ints), "v"),
+            rows(t.except_(ints), "v"),
+            rows(t.intersect(ints, on=lambda r: r.v), "v"),
+            t.is_subset(ints),
+        ]
+
+    values = [Decimal("1.50"), Decimal("2.00")]
+    narrow_side = LTSeq.from_arrow(pa.table({"v": pa.array(values, narrow)}))
+    wide_side = LTSeq.from_arrow(pa.table({"v": pa.array(values, wide(narrow))}))
+    got = outcomes(narrow_side)
+    assert got == outcomes(wide_side)
+    assert got[0][1] == [Decimal("1.00"), Decimal("1.50"), Decimal("2.00"), Decimal("2.00")]
+    assert got[2:] == [[(Decimal("2.00"),)], [(Decimal("1.50"),)], [(Decimal("2.00"),)], False]
+
+
+def test_a_union_of_narrow_decimals_of_two_scales_holds_both():
+    """decimal32(9, 2) and decimal32(9, 3) met at decimal32(9, 3), which does
+    not hold 9999999.99. Two columns of one narrow type stay that type."""
+    a = LTSeq.from_arrow(pa.table({"v": pa.array([Decimal("9999999.99")], pa.decimal32(9, 2))}))
+    b = LTSeq.from_arrow(pa.table({"v": pa.array([Decimal("1.500")], pa.decimal32(9, 3))}))
+    kind, values = typed(a.union(b).to_arrow())["v"]
+    assert (kind, sorted(values)) == ("decimal128(10, 3)", [Decimal("1.500"), Decimal("9999999.990")])
+    assert typed(a.union(a).to_arrow())["v"][0] == "decimal32(9, 2)"

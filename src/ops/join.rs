@@ -21,6 +21,7 @@ use crate::error::LtseqError;
 use crate::ops::common::{
     build_prefixed_join_schema, build_suffixed_join_schema, right_rename_map, JoinType,
 };
+use crate::transpiler::narrow_decimals;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -169,6 +170,87 @@ fn extract_and_validate_join_keys(
     Ok((left_col_names, right_col_names))
 }
 
+/// The types of each key pair, looked up by name.
+fn key_types(
+    left_schema: &ArrowSchema,
+    left_cols: &[String],
+    right_schema: &ArrowSchema,
+    right_cols: &[String],
+) -> Result<Vec<(DataType, DataType)>, LtseqError> {
+    let type_of = |schema: &ArrowSchema, name: &str, side: &str| {
+        schema
+            .field_with_name(name)
+            .map(|f| f.data_type().clone())
+            .map_err(|e| LtseqError::Runtime(format!("{side} join key '{name}' not found: {e}")))
+    };
+    left_cols
+        .iter()
+        .zip(right_cols)
+        .map(|(left, right)| {
+            Ok((type_of(left_schema, left, "Left")?, type_of(right_schema, right, "Right")?))
+        })
+        .collect()
+}
+
+/// `left == right` for a key pair of types `left_type` and `right_type`. A
+/// decimal32/64 key that meets a key of another integer or decimal type is
+/// widened to decimal128 (#241): DataFusion's join coercion casts it to the
+/// integer type instead, so `1.50` matched `1`.
+fn key_equality(left: Expr, left_type: &DataType, right: Expr, right_type: &DataType) -> Expr {
+    if narrow_decimals::widens([left_type, right_type]) {
+        narrow_decimals::widened(left, left_type).eq(narrow_decimals::widened(right, right_type))
+    } else {
+        left.eq(right)
+    }
+}
+
+/// The key equalities to join on when some key pair has a narrow decimal to
+/// widen ([`key_equality`]); `None` when none has, and the keys are joined
+/// by name as they always were.
+pub(crate) fn widened_key_equalities(
+    keys: Vec<(Expr, Expr)>,
+    key_types: &[(DataType, DataType)],
+) -> Option<Vec<Expr>> {
+    if !key_types.iter().any(|(l, r)| narrow_decimals::widens([l, r])) {
+        return None;
+    }
+    let equalities = keys
+        .into_iter()
+        .zip(key_types)
+        .map(|((left, right), (left_type, right_type))| key_equality(left, left_type, right, right_type))
+        .collect();
+    Some(equalities)
+}
+
+/// Join `left` and `right` on equal key columns, by name, unless a key pair
+/// needs a narrow decimal widened ([`widened_key_equalities`]). The key
+/// names must each name one column of the two inputs together.
+fn join_on_keys(
+    left: DataFrame,
+    right: DataFrame,
+    join_type: datafusion::logical_expr::JoinType,
+    left_cols: &[String],
+    right_cols: &[String],
+    key_types: &[(DataType, DataType)],
+) -> Result<DataFrame, LtseqError> {
+    let keys = left_cols
+        .iter()
+        .zip(right_cols)
+        .map(|(l, r)| (Expr::Column(Column::new_unqualified(l)), Expr::Column(Column::new_unqualified(r))))
+        .collect();
+    match widened_key_equalities(keys, key_types) {
+        Some(on) => left.join_on(right, join_type, on),
+        None => left.join(
+            right,
+            join_type,
+            &left_cols.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            &right_cols.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            None, // No additional filter
+        ),
+    }
+    .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))
+}
+
 /// Rename right-table columns that collide with the left table by appending
 /// `suffix` (Polars semantics: only conflicting columns are renamed). Returns
 /// the renamed DataFrame, the `(old, new)` rename map, and the renamed names of
@@ -283,17 +365,17 @@ pub fn join_impl(
         &right_col_names,
     )?;
 
-    // Build the native join plan (nothing executes here)
-    let joined_df = (**df_left)
-        .clone()
-        .join(
-            renamed_right_df,
-            df_join_type,
-            &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            None, // No additional filter
-        )
-        .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))?;
+    // Build the native join plan (nothing executes here). The renamed right
+    // keys name no left column.
+    let types = key_types(stored_schema_left, &left_col_names, stored_schema_right, &right_col_names)?;
+    let joined_df = join_on_keys(
+        (**df_left).clone(),
+        renamed_right_df,
+        df_join_type,
+        &left_col_names,
+        &new_right_keys,
+        &types,
+    )?;
 
     // For inner/left joins the right equi-key duplicates the left key, so drop
     // it (Polars coalesce default). Right/full keep both keys — the left key can
@@ -386,16 +468,15 @@ pub fn join_prefixed_impl(
         .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
 
     // Plan building only; nothing executes here.
-    let result_df = (**df_left)
-        .clone()
-        .join(
-            renamed_right_df,
-            df_join_type,
-            &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            &new_right_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            None,
-        )
-        .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))?;
+    let types = key_types(stored_schema_left, &left_col_names, stored_schema_right, &right_col_names)?;
+    let result_df = join_on_keys(
+        (**df_left).clone(),
+        renamed_right_df,
+        df_join_type,
+        &left_col_names,
+        &new_right_keys,
+        &types,
+    )?;
 
     let expected_schema =
         build_prefixed_join_schema(stored_schema_left, stored_schema_right, alias);
@@ -462,8 +543,8 @@ fn join_on_mismatched_keys(
                 (true, false) => try_cast(left_expr, right_type.clone()).eq(right_expr),
                 (false, true) => left_expr.eq(try_cast(right_expr, left_type.clone())),
                 // string-vs-string or non-string pairs: DataFusion's own
-                // comparison coercion is lossless here.
-                _ => left_expr.eq(right_expr),
+                // comparison coercion, once a narrow decimal is widened.
+                _ => key_equality(left_expr, left_type, right_expr, right_type),
             }
         })
         .collect();
@@ -501,23 +582,12 @@ fn semi_anti_join_impl(
 
     // One field-lookup pass over the key pairs; drives all three join
     // strategies below.
-    let key_types: Vec<(DataType, DataType)> = left_col_names
-        .iter()
-        .zip(&right_col_names)
-        .map(|(left, right)| {
-            let left_type = stored_schema_left
-                .field_with_name(left)
-                .map_err(|e| LtseqError::Runtime(format!("Left join key '{}' not found: {}", left, e)))?
-                .data_type()
-                .clone();
-            let right_type = stored_schema_right
-                .field_with_name(right)
-                .map_err(|e| LtseqError::Runtime(format!("Right join key '{}' not found: {}", right, e)))?
-                .data_type()
-                .clone();
-            Ok((left_type, right_type))
-        })
-        .collect::<Result<_, LtseqError>>()?;
+    let key_types = key_types(
+        stored_schema_left,
+        &left_col_names,
+        stored_schema_right,
+        &right_col_names,
+    )?;
 
     let key_has_null_type = key_types
         .iter()
