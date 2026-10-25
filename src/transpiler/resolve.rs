@@ -20,9 +20,10 @@
 //! ltseq computes no common or widened type itself (design review of #225,
 //! decision D-a), with one override from the v0.5 contract (§17.4 rule 2):
 //! before DataFusion coerces a node, a `decimal32` or `decimal64` operand
-//! is widened to `decimal128` where DataFusion would otherwise round it to
-//! an integer or clamp its precision (`narrow_decimals`, #241). Nothing
-//! outside this module calls `get_type` on a lowered expression.
+//! of arithmetic, `sum` or `avg`, or one that meets another integer or
+//! decimal type, is widened to `decimal128`, which DataFusion would
+//! otherwise truncate to an integer or clamp (`narrow_decimals`, #241).
+//! Nothing outside this module calls `get_type` on a lowered expression.
 //!
 //! [`Resolver::literal`] decides what counts as a literal: a literal node,
 //! or a constant expression DataFusion's simplifier folds into one, so the

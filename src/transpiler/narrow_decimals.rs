@@ -26,11 +26,12 @@
 //! A literal is not a value it meets: a literal among shared values takes
 //! the type of the others and never widens it (§17.5 rule 1), and a literal
 //! in a comparison is placed among the operand's own values
-//! (`literals::placement`), at the operand's type. Nor is a float: DataFusion
-//! computes a narrow decimal next to a float in `float64`, the type §17.4
-//! rule 1 gives arithmetic and shared values, where a `decimal128` would meet
-//! the float at `decimal(30, 15)` and fail on NaN, infinity and values past
-//! 10^15 (#228, which owns the float pairing). A narrow decimal that meets
+//! (`literals::placement`), at the operand's type. A float among the values
+//! leaves them all to DataFusion, which computes a narrow decimal next to a
+//! float in `float64`, the type §17.4 rule 1 gives shared values, where a
+//! `decimal128` would meet the float at `decimal(30, 15)` and fail on NaN,
+//! infinity and values past 10^15 (#228, which owns the float pairing).
+//! Arithmetic with a float is `float64` either way. A narrow decimal that meets
 //! only values of its own type keeps its type, so an untouched `decimal32`
 //! column stays `decimal32`.
 //!
@@ -119,13 +120,25 @@ pub(crate) fn widen(expr: Expr, type_of: &TypeOf<'_>) -> Transformed<Expr> {
                 Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right)))
             })
         }
-        Expr::Between(Between { expr, negated, low, high }) => {
-            rebuild(meeting(vec![*expr, *low, *high], type_of), |values| {
-                let [expr, low, high]: [Expr; 3] = values.try_into().expect("three values");
-                Expr::Between(Between::new(Box::new(expr), negated, Box::new(low), Box::new(high)))
-            })
-        }
-        Expr::InList(InList { expr, list, negated }) => {
+        Expr::Between(Between {
+            expr,
+            negated,
+            low,
+            high,
+        }) => rebuild(meeting(vec![*expr, *low, *high], type_of), |values| {
+            let [expr, low, high]: [Expr; 3] = values.try_into().expect("three values");
+            Expr::Between(Between::new(
+                Box::new(expr),
+                negated,
+                Box::new(low),
+                Box::new(high),
+            ))
+        }),
+        Expr::InList(InList {
+            expr,
+            list,
+            negated,
+        }) => {
             let values = std::iter::once(*expr).chain(list).collect();
             rebuild(meeting(values, type_of), |mut values| {
                 let expr = values.remove(0);
@@ -147,8 +160,7 @@ pub(crate) fn widen(expr: Expr, type_of: &TypeOf<'_>) -> Transformed<Expr> {
                 Expr::AggregateFunction(AggregateFunction { func, params })
             })
         }
-        Expr::WindowFunction(mut window)
-            if matches!(&window.fun, WindowFunctionDefinition::AggregateUDF(f) if is_sum_or_mean(f.name())) =>
+        Expr::WindowFunction(mut window) if matches!(&window.fun, WindowFunctionDefinition::AggregateUDF(f) if is_sum_or_mean(f.name())) =>
         {
             let args = every_narrow(std::mem::take(&mut window.params.args), type_of);
             rebuild(args, |args| {
@@ -163,7 +175,11 @@ pub(crate) fn widen(expr: Expr, type_of: &TypeOf<'_>) -> Transformed<Expr> {
 /// A CASE: its operand and WHEN values are compared with one another, and
 /// its THEN and ELSE values share the result column.
 fn widen_case(case: Case, type_of: &TypeOf<'_>) -> Transformed<Expr> {
-    let Case { expr, when_then_expr, else_expr } = case;
+    let Case {
+        expr,
+        when_then_expr,
+        else_expr,
+    } = case;
     let (whens, thens): (Vec<Expr>, Vec<Expr>) =
         when_then_expr.into_iter().map(|(w, t)| (*w, *t)).unzip();
     let (operand, whens, compared) = match expr {
@@ -176,7 +192,10 @@ fn widen_case(case: Case, type_of: &TypeOf<'_>) -> Transformed<Expr> {
         None => (None, whens, false),
     };
     let branches = thens.len();
-    let shared = meeting(thens.into_iter().chain(else_expr.map(|e| *e)).collect(), type_of);
+    let shared = meeting(
+        thens.into_iter().chain(else_expr.map(|e| *e)).collect(),
+        type_of,
+    );
     let transformed = compared || shared.transformed;
     let mut values = shared.data;
     let else_expr = (values.len() > branches).then(|| Box::new(values.pop().expect("an ELSE")));
@@ -185,7 +204,10 @@ fn widen_case(case: Case, type_of: &TypeOf<'_>) -> Transformed<Expr> {
         .zip(values)
         .map(|(w, t)| (Box::new(w), Box::new(t)))
         .collect();
-    Transformed::new_transformed(Expr::Case(Case::new(operand, when_then_expr, else_expr)), transformed)
+    Transformed::new_transformed(
+        Expr::Case(Case::new(operand, when_then_expr, else_expr)),
+        transformed,
+    )
 }
 
 /// `values` with every narrow decimal among them widened.
@@ -224,7 +246,10 @@ fn meeting(values: Vec<Expr>, type_of: &TypeOf<'_>) -> Transformed<Vec<Expr>> {
 }
 
 /// The node `build` makes of `operands`, transformed when they were.
-fn rebuild(operands: Transformed<Vec<Expr>>, build: impl FnOnce(Vec<Expr>) -> Expr) -> Transformed<Expr> {
+fn rebuild(
+    operands: Transformed<Vec<Expr>>,
+    build: impl FnOnce(Vec<Expr>) -> Expr,
+) -> Transformed<Expr> {
     Transformed::new_transformed(build(operands.data), operands.transformed)
 }
 
@@ -283,14 +308,20 @@ mod tests {
     }
 
     fn wide(name: &str, precision: u8, scale: i8) -> Expr {
-        Expr::Cast(Cast::new(Box::new(col(name)), T::Decimal128(precision, scale)))
+        Expr::Cast(Cast::new(
+            Box::new(col(name)),
+            T::Decimal128(precision, scale),
+        ))
     }
 
     /// The type of a column, a literal or a cast; the operands these tests
     /// build are nothing else.
     fn type_of(expr: &Expr) -> Option<DataType> {
         match expr {
-            Expr::Column(c) => schema().field_with_unqualified_name(&c.name).ok().map(|f| f.data_type().clone()),
+            Expr::Column(c) => schema()
+                .field_with_unqualified_name(&c.name)
+                .ok()
+                .map(|f| f.data_type().clone()),
             Expr::Literal(value, _) => Some(value.data_type()),
             Expr::Cast(cast) => Some(cast.field.data_type().clone()),
             _ => None,
@@ -308,9 +339,18 @@ mod tests {
         check(col("d32").gt(col("i64")), wide("d32", 9, 2).gt(col("i64")));
         check(col("i64").eq(col("d64")), col("i64").eq(wide("d64", 18, 2)));
         // Of another scale, and of another width.
-        check(col("d32").lt(col("d32s3")), wide("d32", 9, 2).lt(wide("d32s3", 9, 3)));
-        check(col("d32").eq(col("d128")), wide("d32", 9, 2).eq(col("d128")));
-        check(col("dict").eq(col("i64")), wide("dict", 9, 2).eq(col("i64")));
+        check(
+            col("d32").lt(col("d32s3")),
+            wide("d32", 9, 2).lt(wide("d32s3", 9, 3)),
+        );
+        check(
+            col("d32").eq(col("d128")),
+            wide("d32", 9, 2).eq(col("d128")),
+        );
+        check(
+            col("dict").eq(col("i64")),
+            wide("dict", 9, 2).eq(col("i64")),
+        );
         check(
             col("d32").in_list(vec![col("i64"), lit(1i64)], false),
             wide("d32", 9, 2).in_list(vec![col("i64"), lit(1i64)], false),
@@ -324,12 +364,21 @@ mod tests {
             coalesce(vec![wide("d32", 9, 2), col("i64")]),
         );
         check(
-            case(col("b")).when(lit(true), col("i64")).otherwise(col("d32")).unwrap(),
-            case(col("b")).when(lit(true), col("i64")).otherwise(wide("d32", 9, 2)).unwrap(),
+            case(col("b"))
+                .when(lit(true), col("i64"))
+                .otherwise(col("d32"))
+                .unwrap(),
+            case(col("b"))
+                .when(lit(true), col("i64"))
+                .otherwise(wide("d32", 9, 2))
+                .unwrap(),
         );
         check(
             case(col("d32")).when(col("i64"), lit(1i64)).end().unwrap(),
-            case(wide("d32", 9, 2)).when(col("i64"), lit(1i64)).end().unwrap(),
+            case(wide("d32", 9, 2))
+                .when(col("i64"), lit(1i64))
+                .end()
+                .unwrap(),
         );
     }
 
@@ -353,7 +402,10 @@ mod tests {
 
     #[test]
     fn arithmetic_and_sums_always_widen() {
-        check(col("d32") + col("d32"), wide("d32", 9, 2) + wide("d32", 9, 2));
+        check(
+            col("d32") + col("d32"),
+            wide("d32", 9, 2) + wide("d32", 9, 2),
+        );
         check(col("d64") * lit(2i64), wide("d64", 18, 2) * lit(2i64));
         check(col("d32") - col("f64"), wide("d32", 9, 2) - col("f64"));
         check(col("d128") + col("i64"), col("d128") + col("i64"));
