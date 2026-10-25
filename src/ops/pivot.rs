@@ -209,7 +209,8 @@ fn build_case_expr(pivot_col: &str, values: &[ScalarValue], value_col: &str) -> 
 
 /// Build aggregate expression from function name and input expression
 fn build_agg_expr(agg_fn: &str, expr: Expr) -> Expr {
-    use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, sum};
+    use crate::transpiler::min_max::{max, min};
+    use datafusion::functions_aggregate::expr_fn::{avg, count, sum};
 
     match agg_fn {
         "SUM" => sum(expr),

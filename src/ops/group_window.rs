@@ -17,7 +17,7 @@
 
 use crate::error::LtseqError;
 use crate::transpiler::window_native::aggregate_to_window;
-use crate::transpiler::Resolver;
+use crate::transpiler::{min_max, Resolver};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
@@ -205,8 +205,8 @@ fn lower_group_node_once(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, Str
         GroupNode::Agg { func, column, arg } => {
             let col_expr = Expr::Column(Column::new_unqualified(&column));
             let agg = match func.as_str() {
-                "max" => agg_fn::max(col_expr),
-                "min" => agg_fn::min(col_expr),
+                "max" => min_max::max(col_expr),
+                "min" => min_max::min(col_expr),
                 "sum" => agg_fn::sum(col_expr),
                 "avg" | "mean" => agg_fn::avg(col_expr),
                 "median" => agg_fn::median(col_expr),
@@ -257,9 +257,9 @@ fn lower_group_node_once(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, Str
             // any  → MAX(CASE...) OVER (...) = 1  (some row passed)
             // none → MAX(CASE...) OVER (...) = 0  (no row passed)
             let (agg, expected) = match quant {
-                Quant::All => (agg_fn::min(case_expr), 1i64),
-                Quant::Any => (agg_fn::max(case_expr), 1i64),
-                Quant::None_ => (agg_fn::max(case_expr), 0i64),
+                Quant::All => (min_max::min(case_expr), 1i64),
+                Quant::Any => (min_max::max(case_expr), 1i64),
+                Quant::None_ => (min_max::max(case_expr), 0i64),
             };
             let window = aggregate_to_window(agg, group_partition(), vec![], full_frame())?;
             Ok(window.eq(lit(expected)))
