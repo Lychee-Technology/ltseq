@@ -130,6 +130,8 @@ impl LayoutOverrides {
 /// - `information_schema`: Disabled (not needed, saves memory)
 /// - `repartition_joins`: Enabled for parallel join execution
 /// - `repartition_aggregations`: Enabled for parallel aggregations
+/// - `enable_aggregate_dynamic_filter_pushdown`: Disabled, so a scan keeps
+///   the values a float `min` or `max` needs (#253)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
@@ -158,6 +160,16 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     // Enable Parquet filter pushdown for predicate skipping
     config.options_mut().execution.parquet.pushdown_filters = true;
     config.options_mut().execution.parquet.reorder_filters = true;
+    // DataFusion 55 tells an ungrouped `min` or `max` by its name and pushes
+    // `x < min so far` or `x > max so far` into the scan, which compares
+    // floats in DataFusion's order. That drops values the contract's order
+    // needs (`transpiler::min_max`): a NaN with the sign bit set is below
+    // `2.0` there, so `max` lost it, and `min` lost `0.0` once it had seen
+    // `-0.0`. The filter is chosen by name alone, so it is off for every type.
+    config
+        .options_mut()
+        .optimizer
+        .enable_aggregate_dynamic_filter_pushdown = false;
 
     let session = new_session(config);
     // Appended to DataFusion's rules, so it runs after the ones that build

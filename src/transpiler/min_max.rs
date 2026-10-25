@@ -29,7 +29,8 @@
 //! totalOrder is the contract's order. They are never answered from
 //! statistics, and a running one claims no order of its output. Every other
 //! type keeps DataFusion's accumulators, its answers from statistics and its
-//! claims.
+//! claims. The session turns off the scan filter DataFusion plans for any
+//! aggregate named `min` or `max` (`engine.rs`).
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;

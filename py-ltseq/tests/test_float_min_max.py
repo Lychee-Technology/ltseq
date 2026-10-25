@@ -198,6 +198,29 @@ def test_ungrouped_parquet_is_not_answered_from_statistics(engine_config, partit
         assert_same(row["hi"], contract_max(case), f"max of {case}")
 
 
+@pytest.mark.parametrize("partitions", [2, layouts.PARTITION_COUNTS["p2xcpu"]])
+@pytest.mark.parametrize(
+    "case",
+    [[-0.0, 1.0, 0.0], [2.0, 1.0, NEG_NAN], [2.0, 1.0, PAYLOAD_NAN, NAN]],
+    ids=repr,
+)
+def test_ungrouped_parquet_scan_keeps_every_value(engine_config, partitions, case, tmp_path):
+    """DataFusion pushes `x < min so far` or `x > max so far` into the scan
+    of an ungrouped `min` or `max` over several partitions, and compares
+    floats there in its own order, so later batches lost `0.0` once `-0.0`
+    was seen, or a sign-bit NaN once `2.0` was. Each file is read one row at
+    a time, so its first value sets that bound before the rest are read."""
+    engine_config(target_partitions=partitions, batch_size=1)
+    for index in range(2):
+        pq.write_table(pa.table({"x": pa.array(case, pa.float64())}), tmp_path / f"{index}.parquet")
+    t = LTSeq.read_parquet(str(tmp_path))
+    # One aggregate each: `min` and `max` together pass a row outside both bounds.
+    [lo] = t.agg(v=lambda g: g.x.min()).to_dicts()
+    [hi] = t.agg(v=lambda g: g.x.max()).to_dicts()
+    assert_same(lo["v"], contract_min(case), f"min of {case}")
+    assert_same(hi["v"], contract_max(case), f"max of {case}")
+
+
 @pytest.mark.parametrize(
     ("formula", "make_nan"),
     [
