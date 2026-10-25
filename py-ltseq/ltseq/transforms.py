@@ -333,12 +333,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
             result_inner = table._inner.derive(derived_cols)
 
         result = LTSeq._from_inner(result_inner)
-        # A lookup's join adds every target column; keep only the derived ones.
-        joined = [
-            col
-            for col in table._schema
-            if col not in self._schema and col not in derived_cols
-        ]
+        # A lookup's join adds every target column, under names no input or
+        # derived column has (_resolve_lookups); drop them all.
+        joined = [col for col in table._schema if col not in self._schema]
         return result.drop(*joined) if joined else result
 
     # Alias for discoverability (Polars users expect with_columns)

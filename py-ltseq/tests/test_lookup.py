@@ -463,6 +463,59 @@ class TestLookupResult:
             ("two", "one"),
         ]
 
+    @pytest.mark.parametrize("name", ["_lkp0_name", "_lkp0_pid"])
+    def test_input_column_named_like_a_join_column_is_kept(self, name):
+        # The first join's columns were _lkp0_<column> whatever the input
+        # held, so this column made the join fail as ambiguous.
+        orders = LTSeq.from_arrow(
+            pa.table({"oid": [1, 2], "pid": [10, 99], name: ["a", "b"]})
+        )
+        products = _products()
+
+        result = orders.derive(x=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.columns == ["oid", "pid", name, "x"]
+        assert [(row[name], row["x"]) for row in _by_oid(result)] == [
+            ("a", "ten"),
+            ("b", None),
+        ]
+
+    def test_derived_column_named_like_a_join_column_is_appended(self):
+        # It used to take the join column's place, ahead of the lookup.
+        orders, products = _orders(), _products()
+
+        result = orders.derive(
+            x=lambda r: r.pid.lookup(products, "name"),
+            _lkp0_name=lambda r: r.qty + 1,
+        )
+
+        assert result.columns == ["oid", "pid", "code", "qty", "x", "_lkp0_name"]
+        assert [(row["x"], row["_lkp0_name"]) for row in _by_oid(result)] == [
+            ("ten", 4),
+            ("twenty", 6),
+            (None, 2),
+        ]
+
+    def test_joins_skip_names_taken_by_input_and_derived_columns(self):
+        # The input takes _lkp0 and a derived column _lkp1, so the joins
+        # are _lkp2 and _lkp3.
+        pairs = LTSeq.from_arrow(
+            pa.table({"oid": [1, 2], "a": [1, 2], "b": [2, 1], "_lkp0_v": ["p", "q"]})
+        )
+        names = LTSeq.from_arrow(pa.table({"k": [1, 2], "v": ["one", "two"]}))
+
+        result = pairs.derive(
+            va=lambda r: r.a.lookup(names, "v", join_key="k"),
+            _lkp1_k=lambda r: r.a * 10,
+            vb=lambda r: r.b.lookup(names, "v", join_key="k"),
+        )
+
+        assert result.columns == ["oid", "a", "b", "_lkp0_v", "va", "_lkp1_k", "vb"]
+        assert [
+            (row["_lkp0_v"], row["va"], row["_lkp1_k"], row["vb"])
+            for row in _by_oid(result)
+        ] == [("p", "one", 10, "two"), ("q", "two", 20, "one")]
+
     def test_lookup_of_a_missing_target_column_names_it(self):
         orders, products = _orders(), _products()
 

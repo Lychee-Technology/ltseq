@@ -76,8 +76,10 @@ class LookupMixin:
 
         Each distinct lookup (target table, key column, target key) is one
         left join, which adds every target column as ``{alias}_{column}``;
-        a lookup column is rewritten to reference its joined column. The
-        caller removes the joined columns from its result.
+        a lookup column is rewritten to reference its joined column. No
+        joined column has the name of an input or derived column, so the
+        caller can drop every column of the joined table that its input does
+        not have.
 
         Args:
             derived_cols: Dict mapping column names to serialized expressions
@@ -94,6 +96,7 @@ class LookupMixin:
         simplified = {}
         # Alias of the join for each (target, key column, target key)
         aliases: dict[tuple[str, str, str], str] = {}
+        n = 0  # number of the next alias to try
 
         for col_name, expr_dict in derived_cols.items():
             if not self._contains_lookup(expr_dict):
@@ -135,7 +138,15 @@ class LookupMixin:
 
             join = (target_name, on_column, join_key)
             if join not in aliases:
-                aliases[join] = f"_lkp{len(aliases)}"
+                # Skip an alias that would give a joined column the name of a
+                # column of the table (the input's or an earlier join's) or of
+                # a derived one: the join would fail as ambiguous, or the
+                # derived column would take the joined column's place.
+                taken = set(current._schema) | set(derived_cols)
+                while any(f"_lkp{n}_{col}" in taken for col in target_schema):
+                    n += 1
+                aliases[join] = f"_lkp{n}"
+                n += 1
                 current = current._perform_lookup_join(
                     target_table, on_column, join_key, aliases[join]
                 )
