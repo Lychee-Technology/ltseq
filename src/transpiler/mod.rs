@@ -7,6 +7,8 @@
 //! ## Module Structure
 //!
 //! - `resolve`: expression types, from DataFusion's own coercion
+//! - `narrow_decimals`: `decimal32`/`decimal64` widened to `decimal128`
+//!   before that coercion (#241)
 //! - `literal_policy`, `literals`, `exact`: how a literal is read next to the
 //!   value it meets, and exact comparison and value placement
 //! - `opaque_cast`: `cast()`, kept from DataFusion's rewrites unless lossless
@@ -21,6 +23,7 @@ mod float_lists;
 pub(crate) mod floor_div;
 mod literal_policy;
 mod literals;
+pub(crate) mod narrow_decimals;
 mod opaque_cast;
 pub(crate) mod probe;
 mod resolve;
@@ -1078,6 +1081,8 @@ pub fn is_numeric_type(data_type: &DataType) -> bool {
             | DataType::UInt64
             | DataType::Float32
             | DataType::Float64
+            | DataType::Decimal32(_, _)
+            | DataType::Decimal64(_, _)
             | DataType::Decimal128(_, _)
             | DataType::Decimal256(_, _)
             | DataType::Null // Allow Null type for empty tables

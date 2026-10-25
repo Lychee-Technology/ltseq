@@ -10,7 +10,11 @@ not affected.)
 
 ltseq also computes no common or widened type of its own. DataFusion's
 helpers that compute one (`comparison_coercion`, `type_union_resolution`,
-`get_coerce_type_for_*`, ...) are not called. Two `type_coercion` items are
+`get_coerce_type_for_*`, ...) are not called. The one override is the v0.5
+contract's §17.4 rule 2 (#241): `transpiler::narrow_decimals` casts a
+decimal32/64 operand to the decimal128 of its own precision and scale before
+DataFusion coerces the node, asking the resolver for the operand types; the
+common type is still DataFusion's. Two `type_coercion` items are
 allowed, both only in the resolver, which turns a panic in them into "no
 answer" (DataFusion's decimal precision arithmetic overflows on valid
 types):

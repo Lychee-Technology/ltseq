@@ -296,12 +296,38 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
     }
 
     // Plan building only; nothing executes here.
-    let union_df = (**df1)
-        .clone()
-        .union((**df2).clone())
+    let union_df = widened_for_union(df1, schema1, schema2)
+        .and_then(|left| left.union(widened_for_union(df2, schema2, schema1)?))
         .map_err(|e| LtseqError::Runtime(format!("Union failed: {}", e)))?;
 
     Ok(create_result_table(&table1.session, union_df))
+}
+
+/// `df` with each decimal32/64 column cast to decimal128 where the other
+/// input's column of that position has another integer or decimal type
+/// (#241). DataFusion's union coercion would otherwise cast the decimal to
+/// the integer type, or clamp the precision two narrow decimals meet at.
+fn widened_for_union(
+    df: &Arc<datafusion::dataframe::DataFrame>,
+    schema: &ArrowSchema,
+    other: &ArrowSchema,
+) -> datafusion::error::Result<datafusion::dataframe::DataFrame> {
+    use crate::transpiler::narrow_decimals::{widened, widens};
+    let pairs = schema.fields().iter().zip(other.fields());
+    if !pairs.clone().any(|(f, o)| widens([f.data_type(), o.data_type()])) {
+        return Ok((**df).clone());
+    }
+    let columns: Vec<Expr> = pairs
+        .map(|(field, other)| {
+            let column = Expr::Column(Column::new_unqualified(field.name()));
+            if widens([field.data_type(), other.data_type()]) {
+                widened(column, field.data_type()).alias(field.name())
+            } else {
+                column
+            }
+        })
+        .collect();
+    (**df).clone().select(columns)
 }
 
 /// Intersect: Return rows present in both tables
@@ -367,14 +393,51 @@ fn semi_anti_on_keys(
     join_type: JoinType,
 ) -> PyResult<datafusion::dataframe::DataFrame> {
     let (df1, schema1) = table1.require_df_and_schema()?;
-    let (df2, _schema2) = table2.require_df_and_schema()?;
+    let (df2, schema2) = table2.require_df_and_schema()?;
     let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
+    let failed = |e| LtseqError::Runtime(format!("Set operation join failed: {}", e)).into();
+    if let Some(on) = widened_set_keys(&compare_cols, schema1, schema2) {
+        // Both sides name each key alike, so they are told apart by alias.
+        return (**df1)
+            .clone()
+            .alias(LEFT)
+            .and_then(|left| left.join_on((**df2).clone().alias(RIGHT)?, join_type, on))
+            .map_err(failed);
+    }
     let keys: Vec<&str> = compare_cols.iter().map(|s| s.as_str()).collect();
     (**df1)
         .clone()
         .join((**df2).clone(), join_type, &keys, &keys, None)
-        .map_err(|e| LtseqError::Runtime(format!("Set operation join failed: {}", e)).into())
+        .map_err(failed)
+}
+
+const LEFT: &str = "__ltseq_left";
+const RIGHT: &str = "__ltseq_right";
+
+/// The equalities of the compared columns when one pair has a decimal32/64
+/// to widen to decimal128 (`join::widened_key_equalities`, #241), on the
+/// inputs aliased [`LEFT`] and [`RIGHT`]; `None` otherwise, and when a
+/// compared column is missing from the right table, whose join by name
+/// reports that.
+fn widened_set_keys(
+    compare_cols: &[String],
+    schema1: &ArrowSchema,
+    schema2: &ArrowSchema,
+) -> Option<Vec<Expr>> {
+    let mut keys = Vec::with_capacity(compare_cols.len());
+    let mut types = Vec::with_capacity(compare_cols.len());
+    for name in compare_cols {
+        types.push((
+            schema1.field_with_name(name).ok()?.data_type().clone(),
+            schema2.field_with_name(name).ok()?.data_type().clone(),
+        ));
+        keys.push((
+            Expr::Column(Column::new(Some(LEFT), name)),
+            Expr::Column(Column::new(Some(RIGHT), name)),
+        ));
+    }
+    crate::ops::join::widened_key_equalities(keys, &types)
 }
 
 /// Reverse: Return rows in reversed order

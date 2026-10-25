@@ -13,6 +13,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::transpiler::{narrow_decimals, Resolver};
 use crate::types::{arg, dict_to_py_expr, Arg, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -115,7 +116,16 @@ fn pyexpr_to_agg_plan(
             let col_expr = crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?;
 
             let (true_val, false_val) = match func.as_str() {
-                "sum_if" => (col_expr.clone(), lit(0i64)),
+                // DataFusion's CASE coercion would truncate a decimal32/64
+                // column to the Int64 of the 0; widened first, it is summed
+                // as decimal128, as `sum` sums it (#241).
+                "sum_if" => {
+                    let summed = match Resolver::new(schema)?.value_type(&col_expr) {
+                        Ok(value_type) => narrow_decimals::widened(col_expr, &value_type),
+                        Err(_) => col_expr,
+                    };
+                    (summed, lit(0i64))
+                }
                 _ => (col_expr.clone(), lit(ScalarValue::Null)),
             };
 
@@ -359,6 +369,11 @@ pub fn agg_impl(
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
+    // Each aggregate is resolved as an expression is, so its arguments are
+    // coerced (a decimal32/64 widened for `sum` and `mean`, #241) before
+    // the Aggregate stores its schema.
+    let rx = Resolver::new(schema).map_err(LtseqError::Validation)?;
+    let resolve = |expr: Expr| rx.resolve(expr).map_err(LtseqError::Validation);
 
     // Plan each requested aggregate.
     let mut agg_exprs: Vec<Expr> = Vec::new();
@@ -383,13 +398,13 @@ pub fn agg_impl(
             .map_err(LtseqError::Validation)?
         {
             AggPlan::Plain(expr) => {
-                agg_exprs.push(expr.alias(&key_str));
+                agg_exprs.push(resolve(expr)?.alias(&key_str));
                 staged_posts.push((key_str, None));
             }
             AggPlan::Staged { parts, post } => {
                 any_staged = true;
                 for (hidden_name, part_expr) in parts {
-                    agg_exprs.push(part_expr.alias(hidden_name));
+                    agg_exprs.push(resolve(part_expr)?.alias(hidden_name));
                 }
                 staged_posts.push((key_str, Some(post)));
             }

@@ -356,6 +356,9 @@ fn native_cum_sum(
 
     // Build sort expressions from sort specs (direction-aware)
     let order_by: Vec<Sort> = crate::metadata::sort_specs_to_window_sorts(&table.sort_specs);
+    // The running sum is resolved as `derive`'s windows are, so a
+    // decimal32/64 column is summed as decimal128 (#241).
+    let rx = crate::transpiler::Resolver::new(schema).map_err(LtseqError::Transpile)?;
 
     // Add cumulative sum columns for each input column
     for (idx, expr_item) in cum_exprs.iter().enumerate() {
@@ -416,6 +419,7 @@ fn native_cum_sum(
             order_by.clone(),
             frame,
         )
+        .and_then(|window| rx.resolve(window))
         .map_err(LtseqError::Transpile)?;
 
         let cumsum_col_name = format!("{}_cumsum", col_name);

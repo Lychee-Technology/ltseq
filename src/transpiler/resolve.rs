@@ -18,8 +18,12 @@
 //!   schema it executes.
 //!
 //! ltseq computes no common or widened type itself (design review of #225,
-//! decision D-a). Nothing outside this module calls `get_type` on a lowered
-//! expression.
+//! decision D-a), with one override from the v0.5 contract (§17.4 rule 2):
+//! before DataFusion coerces a node, a `decimal32` or `decimal64` operand
+//! of arithmetic, `sum` or `avg`, or one that meets another integer or
+//! decimal type, is widened to `decimal128`, which DataFusion would
+//! otherwise truncate to an integer or clamp (`narrow_decimals`, #241).
+//! Nothing outside this module calls `get_type` on a lowered expression.
 //!
 //! [`Resolver::literal`] decides what counts as a literal: a literal node,
 //! or a constant expression DataFusion's simplifier folds into one, so the
@@ -68,6 +72,8 @@ use datafusion::logical_expr::{Expr, ExprSchemable, Operator, Volatility};
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercionRewriter;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::scalar::ScalarValue;
+
+use super::narrow_decimals;
 
 /// Why DataFusion did not answer a type question.
 enum Unanswered {
@@ -181,7 +187,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// The analyzer's coercion of `expr`, node by node from the leaves up
-    /// (`TypeCoercionRewriter`), except that a subexpression lowering
+    /// (`TypeCoercionRewriter`), each node's narrow decimals widened first
+    /// (`narrow_decimals::widen`), except that a subexpression lowering
     /// remembers is replaced by its coerced form. Coercion is a function of
     /// the expression and the schema, so that is the form coercing it again
     /// would give.
@@ -189,6 +196,7 @@ impl<'a> Resolver<'a> {
         let known = self.known.borrow();
         let mut rewriter = Coercion {
             analyzer: TypeCoercionRewriter::new(&self.schema),
+            schema: &self.schema,
             known: &known,
             substituted: false,
             coerced: &self.coerced,
@@ -331,9 +339,11 @@ fn folded(expr: &Expr, stable: bool) -> bool {
         .unwrap_or(true)
 }
 
-/// The analyzer's coercion, with remembered subexpressions substituted.
+/// The analyzer's coercion, after widening narrow decimals, with remembered
+/// subexpressions substituted.
 struct Coercion<'r> {
     analyzer: TypeCoercionRewriter<'r>,
+    schema: &'r DFSchema,
     known: &'r Known,
     /// The node `f_down` just replaced, which `f_up` then leaves alone.
     substituted: bool,
@@ -358,7 +368,13 @@ impl TreeNodeRewriter for Coercion<'_> {
             return Ok(Transformed::no(expr));
         }
         self.coerced.set(self.coerced.get() + 1);
-        self.analyzer.f_up(expr)
+        // The operands are coerced already, so `get_type` is the type each
+        // executes as.
+        let schema = self.schema;
+        let widened = narrow_decimals::widen(expr, &|operand| operand.get_type(schema).ok());
+        let coerced = self.analyzer.f_up(widened.data)?;
+        let transformed = widened.transformed || coerced.transformed;
+        Ok(Transformed::new(coerced.data, transformed, coerced.tnr))
     }
 }
 
