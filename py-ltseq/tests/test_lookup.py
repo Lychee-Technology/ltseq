@@ -407,3 +407,66 @@ class TestLookupShape:
         )
 
         assert [row["name"] for row in _by_oid(result)] == ["ten", "twenty", None]
+
+
+class TestLookupResult:
+    """derive() with a lookup adds the derived columns and nothing else (#223)."""
+
+    def test_bare_lookup_returns_the_looked_up_value(self):
+        orders, products = _orders(), _products()
+
+        result = orders.derive(x=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.columns == ["oid", "pid", "code", "qty", "x"]
+        rows = _by_oid(result)
+        assert [row["x"] for row in rows] == ["ten", "twenty", None]
+        assert all(list(row) == result.columns for row in rows)
+
+    def test_lookup_replacing_its_key_column(self):
+        orders, products = _orders(), _products()
+
+        result = orders.derive(pid=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.columns == ["oid", "pid", "code", "qty"]
+        assert [row["pid"] for row in _by_oid(result)] == ["ten", "twenty", None]
+
+    def test_lookups_beside_other_derived_columns(self):
+        orders, products = _orders(), _products()
+
+        result = orders.derive(
+            name=lambda r: r.pid.lookup(products, "name"),
+            double=lambda r: r.qty * 2,
+            price=lambda r: r.pid.lookup(products, "price"),
+        )
+
+        assert result.columns == ["oid", "pid", "code", "qty", "name", "double", "price"]
+        rows = _by_oid(result)
+        assert [(row["name"], row["double"], row["price"]) for row in rows] == [
+            ("ten", 6, 2.0),
+            ("twenty", 10, 4.0),
+            (None, 2, None),
+        ]
+
+    def test_lookups_on_different_keys_of_one_target(self):
+        # The second lookup used to reuse the join on the first one's key.
+        pairs = LTSeq.from_arrow(pa.table({"oid": [1, 2], "a": [1, 2], "b": [2, 1]}))
+        names = LTSeq.from_arrow(pa.table({"k": [1, 2], "v": ["one", "two"]}))
+
+        result = pairs.derive(
+            va=lambda r: r.a.lookup(names, "v", join_key="k"),
+            vb=lambda r: r.b.lookup(names, "v", join_key="k"),
+        )
+
+        assert result.columns == ["oid", "a", "b", "va", "vb"]
+        assert [(row["va"], row["vb"]) for row in _by_oid(result)] == [
+            ("one", "two"),
+            ("two", "one"),
+        ]
+
+    def test_lookup_of_a_missing_target_column_names_it(self):
+        orders, products = _orders(), _products()
+
+        with pytest.raises(ValueError, match="'nope'") as err:
+            orders.derive(x=lambda r: r.pid.lookup(products, "nope"))
+
+        assert "_lkp" not in str(err.value)

@@ -74,8 +74,10 @@ class LookupMixin:
         """
         Resolve lookup expressions by joining with target tables.
 
-        This method transforms lookup expressions into actual joins,
-        then rewrites the expressions to reference the joined columns.
+        Each distinct lookup (target table, key column, target key) is one
+        left join, which adds every target column as ``{alias}_{column}``;
+        a lookup column is rewritten to reference its joined column. The
+        caller removes the joined columns from its result.
 
         Args:
             derived_cols: Dict mapping column names to serialized expressions
@@ -85,12 +87,13 @@ class LookupMixin:
             - joined_table: LTSeq with target tables joined in
             - simplified_derived_cols: Expressions rewritten to use joined columns
         """
-        from .core import LTSeq
+        from .exceptions import ColumnNotFoundError
         from .expr.types import LookupExpr
 
         current = cast("LTSeq", self)
         simplified = {}
-        joined_targets = {}  # Track which targets we've already joined
+        # Alias of the join for each (target, key column, target key)
+        aliases: dict[tuple[str, str, str], str] = {}
 
         for col_name, expr_dict in derived_cols.items():
             if not self._contains_lookup(expr_dict):
@@ -108,47 +111,40 @@ class LookupMixin:
                     "Make sure the table is passed to lookup()."
                 )
 
-            # Generate alias for joined columns
-            # Rust join creates columns as {alias}_{column}, so use simpler alias
-            alias = f"_lkp_{target_name}"
-
-            # Only join each target once
-            if target_name not in joined_targets:
-                # Determine join keys
-                on_column = lookup_info["on"]["name"]
-                join_key = lookup_info["join_key"]
-
-                # If no explicit join_key, use the first target column
-                if join_key is None:
-                    # Default: assume we're joining on a column with same name
-                    # or the first target column
-                    target_schema = getattr(target_table, "_schema", {})
-                    if on_column in target_schema:
-                        join_key = on_column
-                    else:
-                        # Try first column of target as join key
-                        target_cols = list(target_schema.keys())
-                        if target_cols:
-                            join_key = target_cols[0]
-                        else:
-                            raise ValueError(
-                                f"Cannot determine join key for lookup on '{target_name}'. "
-                                f"Please specify join_key explicitly."
-                            )
-
-                # Perform left join to bring in lookup columns
-                # Use the existing join infrastructure
-                current = current._perform_lookup_join(
-                    target_table, on_column, join_key, alias
+            on_column = lookup_info["on"]["name"]
+            [target_col] = lookup_info["target_columns"]
+            target_schema = target_table._schema
+            if target_col not in target_schema:
+                raise ColumnNotFoundError(
+                    f"Column {col_name!r}: the lookup() target has no column "
+                    f"{target_col!r}. Available columns: {list(target_schema)}"
                 )
-                joined_targets[target_name] = alias
 
-            # Rewrite expression to reference joined column
-            alias = joined_targets[target_name]
-            for target_col in lookup_info["target_columns"]:
-                # Rust join creates columns as {alias}_{column}
-                joined_col_name = f"{alias}_{target_col}"
-                simplified[col_name] = {"type": "Column", "name": joined_col_name}
+            join_key = lookup_info["join_key"]
+            if join_key is None:
+                # Default: the key column's own name, or the target's first column
+                if on_column in target_schema:
+                    join_key = on_column
+                elif target_schema:
+                    join_key = next(iter(target_schema))
+                else:
+                    raise ValueError(
+                        f"Cannot determine join key for lookup on '{target_name}'. "
+                        f"Please specify join_key explicitly."
+                    )
+
+            join = (target_name, on_column, join_key)
+            if join not in aliases:
+                aliases[join] = f"_lkp{len(aliases)}_{target_name}"
+                current = current._perform_lookup_join(
+                    target_table, on_column, join_key, aliases[join]
+                )
+
+            # Rust join creates columns as {alias}_{column}
+            simplified[col_name] = {
+                "type": "Column",
+                "name": f"{aliases[join]}_{target_col}",
+            }
 
         return current, simplified
 
