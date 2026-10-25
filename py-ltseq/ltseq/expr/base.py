@@ -962,37 +962,43 @@ class Expr(ABC):
         self, target_table: Any, column: str, join_key: str | None = None
     ) -> "LookupExpr":
         """
-        Lookup a value in another table using this expression as the join key.
+        Look up a value in another table, using this column as the join key.
 
-        Used to fetch a single column from a related table in derived expressions.
-        Works on any expression type (column reference, method call result, etc.).
+        Fetches one column of a related table as a derived column: derive()
+        left-joins the target on the key, so a key without a match gives NULL.
+        The lookup must be the derived column's whole expression and must be
+        called on a column; derive() raises ValueError otherwise. To build on
+        a looked-up value, or to look up a computed key, derive it as a column
+        first and use it in a later derive(). Operations other than derive()
+        do not accept a lookup.
 
         Args:
             target_table: The target table object (LTSeq instance)
             column: Column name to fetch from the target table
-            join_key: Column name in target table to join on (optional)
+            join_key: Column name in target table to join on (optional). By
+                default, the key column's own name if the target has it,
+                otherwise the target's first column
 
         Returns:
-            A LookupExpr that can be used in derive() or other expressions
+            A LookupExpr, to be the whole expression of a derived column
 
         Example:
             >>> orders = LTSeq.read_csv("orders.csv")
             >>> products = LTSeq.read_csv("products.csv")
-            >>> # Simple lookup on column
             >>> enriched = orders.derive(
             ...     product_name=lambda r: r.product_id.lookup(products, "name")
             ... )
-            >>> # Lookup on transformed value
-            >>> enriched = orders.derive(
-            ...     product_name=lambda r: r.product_id.lower().lookup(products, "name")
-            ... )
+            >>> # Build on a looked-up value in a later derive()
+            >>> priced = orders.derive(
+            ...     price=lambda r: r.product_id.lookup(products, "price")
+            ... ).derive(total=lambda r: r.price * r.quantity)
         """
         from .types import LookupExpr
 
-        # Generate a unique target name based on table identity
-        target_name = getattr(target_table, "_name", None)
-        if target_name is None:
-            target_name = f"lookup_table_{id(target_table)}"
+        # Name the target by its identity: derive() finds a lookup's table by
+        # this name, and tables read from files of the same name share _name.
+        name = getattr(target_table, "_name", None) or "lookup_table"
+        target_name = f"{name}_{id(target_table)}"
 
         return LookupExpr(
             on=cast(Any, self),

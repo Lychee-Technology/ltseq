@@ -311,46 +311,32 @@ class TransformMixin(LookupMixin, LTSeqLike):
             args, kwargs, self._schema, self._capture_expr
         )
 
+        table = cast("LTSeq", self)
         # Check for lookup expressions (method from LookupMixin)
-        has_lookup = any(self._contains_lookup(expr) for expr in derived_cols.values())
-
-        if has_lookup:
-            # Resolve lookups by performing joins (method from LookupMixin)
+        if any(self._contains_lookup(expr) for expr in derived_cols.values()):
+            # Resolve lookups by joining their targets (method from LookupMixin)
             try:
-                resolved_table, simplified_cols = self._resolve_lookups(derived_cols)
-
-                # Continue with derive on the joined table
-                has_window = resolved_table._has_window_functions(simplified_cols)
-                if (
-                    resolved_table._has_implicit_order_window(simplified_cols)
-                    and not resolved_table._sort_keys
-                ):
-                    raise _window_sort_required_error()
-                if has_window:
-                    result_inner = resolved_table._inner.derive_with_window_functions(
-                        simplified_cols
-                    )
-                else:
-                    result_inner = resolved_table._inner.derive(simplified_cols)
-
-                return LTSeq._from_inner(result_inner)
+                table, derived_cols = self._resolve_lookups(derived_cols)
             finally:
-                # Always clear the registry after derive completes
+                # Always clear the registry once the lookups are resolved
                 LookupExpr.clear_registry()
 
-        # Normal derive path (no lookups)
-        has_window = self._has_window_functions(derived_cols)
+        has_window = table._has_window_functions(derived_cols)
 
-        if self._has_implicit_order_window(derived_cols) and not self._sort_keys:
+        if table._has_implicit_order_window(derived_cols) and not table._sort_keys:
             raise _window_sort_required_error()
         if has_window:
-            result_inner = self._inner.derive_with_window_functions(
+            result_inner = table._inner.derive_with_window_functions(
                 derived_cols
             )
         else:
-            result_inner = self._inner.derive(derived_cols)
+            result_inner = table._inner.derive(derived_cols)
 
-        return LTSeq._from_inner(result_inner)
+        result = LTSeq._from_inner(result_inner)
+        # A lookup's join adds every target column, under names no input or
+        # derived column has (_resolve_lookups); drop them all.
+        joined = [col for col in table._schema if col not in self._schema]
+        return result.drop(*joined) if joined else result
 
     # Alias for discoverability (Polars users expect with_columns)
     with_columns = derive
