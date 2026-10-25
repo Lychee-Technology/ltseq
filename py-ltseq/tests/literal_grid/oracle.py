@@ -631,9 +631,9 @@ def same(a, b):
 class Expectation:
     """What a cell must produce.
 
-    ``kind`` is ``values`` (``type`` is the parsed result type and ``rows``
-    the exact value of every row; ``type`` is None only where the authorized
-    type is itself an open issue, #241), ``error`` (raised at ``stage``, of
+    ``kind`` is ``values`` (``type`` is the parsed result type, or None to
+    accept any type, and ``rows`` the exact value of every row), ``error``
+    (raised at ``stage``, of
     a class in ``cls``, with a message ``msg`` matches: the cause),
     ``null_arithmetic`` (every row NULL in whatever type DataFusion gives a
     NULL operand, or the planning error ``stage``, ``cls`` and ``msg``
@@ -930,6 +930,10 @@ def _as_f64(t, value):
 def _exact_arithmetic(t, lit, pos, column, literal):
     lk = literal_kind(lit)
     sign = 1 if pos == "add" else -1
+    if t[0] == "decimal" and t[3] in (32, 64):
+        # §17.4 rule 2 (#241): a decimal32/64 operand is the decimal128 of its
+        # precision and scale before any arithmetic.
+        t = ("decimal", t[1], t[2], 128)
     if lk in ("float", "special"):
         rows = []
         for x in column:
@@ -946,9 +950,6 @@ def _exact_arithmetic(t, lit, pos, column, literal):
             return _values(("int", 64, True), rows, "integer arithmetic at Int64, wrapping (DataFusion's coercion)")
         if t[0] == "int":  # UInt64 next to Int64: both become Decimal128(20, 0)
             return _decimal_arithmetic(("decimal", 20, 0, 128), ("decimal", 20, 0, 128), column, literal, sign)
-        if t[3] in (32, 64):
-            rows = [None if x is None else num(x[1] + sign * literal[1]) for x in column]
-            return _values(None, rows, "#241: the exact sum; DataFusion truncates a decimal32/64 column to Int64 next to an integer")
         return _decimal_arithmetic(t, ("decimal", 20, 0, t[3]), column, literal, sign)
     wire = literal_wire(lit)
     if t[0] == "int":

@@ -35,18 +35,9 @@ HEADER, MAIN = grid.load(BASELINE)
 
 # Cells whose outcome is a known, unfixed defect shared with main. Each one is
 # pinned: the gate expects exactly these PREEXISTING_BUG cells, and the
-# invariant tests expect exactly these cells to break.
-PREEXISTING = {
-    # DataFusion has no decimal32/64 type for an Int64, so a decimal32/64 column plus an
-    # integer is computed at Int64 with the column truncated toward zero.
-    **{
-        cell_id(ctx, lit, pos): "#241"
-        for ctx in ("d32", "d64")
-        for lit in literals()
-        if oracle.literal_kind(lit) == "int"
-        for pos in grid.ARITHMETIC_POSITIONS
-    },
-}
+# invariant tests expect exactly these cells to break. None is pinned since
+# #241 was fixed.
+PREEXISTING: dict[str, str] = {}
 
 CONTEXTS = list(grid.CONTEXTS)
 LITERALS = list(literals())

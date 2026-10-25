@@ -179,11 +179,11 @@ RULES = [
         _is(ck="float", lit="fm0", pos="isin2"),
     ),
     Rule(
-        "decimal32_64_integer_arithmetic", "PREEXISTING_BUG", "#241",
-        "DataFusion has no decimal32/64 type for an Int64, so it computes the sum at Int64 "
-        "and truncates the column toward zero (9999999.99 + 1 is 10000000); main and this "
-        "branch agree",
-        lambda c: c.ctx in ("d32", "d64") and c.lk == "int" and c.pos in grid.ARITHMETIC_POSITIONS,
+        "decimal32_64_arithmetic_widened", BY_MAIN, "#241 (contract §17.4 rule 2)",
+        "a decimal32/64 operand is the decimal128 of its precision and scale before any "
+        "arithmetic. DataFusion has no decimal32/64 type for an Int64, so main computed the "
+        "sum at Int64 and truncated the column toward zero (9999999.99 + 1 was 10000000)",
+        lambda c: c.ctx in ("d32", "d64") and c.pos in grid.ARITHMETIC_POSITIONS,
     ),
     Rule(
         "temporal_vs_number", "INTENDED_CHANGE", "D-l (U4)",

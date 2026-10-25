@@ -107,7 +107,8 @@ CONTROLS = [
     ("ts_ns/date2300/fill", error(msg="2300-01-01 is outside the range of column 'ts_ns' (Timestamp(ns))")),
     ("ts_s/dt_1_5s/shift_def", error(msg="Transpilation error: column 'ts_s' cannot hold the shift() default 1970-01-01 00:00:01.500 exactly (Timestamp(s))")),
     ("i8/fnan/eq", error(msg="column 'i8' is Int8, which has no value for NaN; NaN and infinity meet only float columns")),
-    ("d32/D38nines/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot coerce arithmetic expression Decimal32(9, 2) + Decimal128(38, 0) to valid types")),
+    # Widened to decimal128 (#241), as d38 overflows rather than refusing to coerce.
+    ("d32/D38nines/add", error("collect", msg="Failed to collect results: Arrow error: Arithmetic overflow: Overflow happened on: 99999999999999999999999999999999999999 * 100")),
     ("i8/none/add", values("int8", [NULL] * 6)),
     ("date32/none/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot coerce arithmetic expression Date32 + Null to valid types")),
     ("ts_ms/none/add", error(cls="RuntimeError", msg="Derive execution failed: Error during planning: Cannot get result type for temporal operation Timestamp(ms) + Timestamp(ms): Invalid argument error: Invalid tim")),
@@ -309,12 +310,18 @@ def test_an_exact_value_in_another_type_is_an_intended_change():
     assert classification.main_wrong(classification.cell("i8", "i1", "fill", MAIN["i8/i1/fill"], head)) is False
 
 
-def test_a_pinned_cell_is_preexisting_and_fixing_it_needs_unpinning():
+def test_the_unpinned_narrow_decimal_arithmetic_cell_is_a_fixed_bug():
+    """#241 was pinned until decimal32/64 operands were widened to decimal128: main's
+    sum, computed at Int64 with the column truncated, is now undecided, and the exact
+    decimal128 sum a fixed bug."""
     cell = "d32/i1/add"
     assert judged(cell, MAIN[cell])[0] == "violation"
-    assert classified(cell, MAIN[cell]).status == "PREEXISTING_BUG"
-    corrected = values("decimal128(11, 2)", ["Decimal(10000000.99)", NULL, "Decimal(0.99)", "Decimal(2.50)", NULL, "Decimal(1.00)"])
-    assert classified(cell, corrected).status == "REGRESSION"
+    assert classified(cell, MAIN[cell]).status == "UNDECIDED"
+    corrected = values("decimal128(23, 2)", ["Decimal(10000000.99)", NULL, "Decimal(0.99)", "Decimal(2.50)", NULL, "Decimal(1.00)"])
+    k = classified(cell, corrected)
+    assert (k.status, k.rule) == ("BUG_FIXED", "decimal32_64_arithmetic_widened")
+    # The exact values at a narrow type are not the decimal128 the rule gives.
+    assert classified(cell, values("decimal32(9, 2)", corrected["values"])).status == "REGRESSION"
 
 
 def test_the_unpinned_negative_zero_cell_is_a_fixed_bug():
