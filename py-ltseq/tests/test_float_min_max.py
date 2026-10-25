@@ -269,6 +269,62 @@ def test_rolling_frames_as_nans_enter_and_leave(small_batches):
             assert_same(row["hi"], contract_max(frame), f"rolling({width}) max at {row['i']}")
 
 
+def sorted_rows(t, keys, desc):
+    """`t` sorted by `keys`, whole and with a fetch (a TopK sort), as its
+    keys with floats as bits: rows tied on the keys have the same bits."""
+    sorted_t = t.sort(*keys, desc=desc)
+    return [
+        [
+            tuple(bits(v) if isinstance(v, float) else v for v in map(row.get, keys))
+            for row in table.to_dicts()
+        ]
+        for table in (sorted_t, sorted_t.slice(0, len(t) - 1))
+    ]
+
+
+@pytest.mark.parametrize("window", ["cum_min", "cum_max"])
+def test_sorting_by_a_running_extreme_sorts(small_batches, window):
+    """When an aggregate says its value only rises (`max`) or falls (`min`)
+    as the frame grows, DataFusion takes the window column as sorted in its
+    own order, totalOrder for floats, and drops a later sort by it. A float
+    running extreme is monotonic only in the contract's order: the running
+    `max` of `[1.0, -nan]` is `-nan`, below `1.0` in totalOrder, and that of
+    `[PAYLOAD_NAN, nan]` is `float("nan")`, below `PAYLOAD_NAN`. So the sort
+    runs, and the rows come back as they do once the same values are
+    collected."""
+    cases = CASES + [[PAYLOAD_NAN, NAN]]
+    t = (
+        LTSeq.from_arrow(grouped_rows(cases))
+        .sort("g", "i")
+        .derive(m=lambda r: getattr(r.x, window)(partition_by="g"))
+    )
+    snapshot = t.collect()
+    for desc in (False, True):
+        expected = sorted_rows(snapshot, ("g", "m"), [False, desc])
+        assert sorted_rows(t, ("g", "m"), [False, desc]) == expected, f"desc={desc}"
+
+
+@pytest.mark.parametrize("extreme", ["min", "max"])
+def test_sorting_by_a_rolling_extreme_sorts(small_batches, extreme):
+    """The same for a sliding frame over values in their sort order, where
+    DataFusion also reads the aggregate's monotonicity. The rolling `max` of
+    two NaNs whose payloads differ is `float("nan")`, below both in
+    totalOrder."""
+    payload_2 = struct.unpack("<d", struct.pack("<Q", 0x7FF8_0000_0000_0002))[0]
+    xs = [1.0, NEG_NAN, 2.0, None, -0.0, 0.0, PAYLOAD_NAN, payload_2, -INF, INF]
+    rows = pa.table({"x": pa.array(xs, pa.float64())})
+    for x_desc in (False, True):
+        t = (
+            LTSeq.from_arrow(rows)
+            .sort("x", desc=x_desc)
+            .derive(m=lambda r: getattr(r.x.rolling(2), extreme)())
+        )
+        snapshot = t.collect()
+        for desc in (False, True):
+            expected = sorted_rows(snapshot, ("m",), desc)
+            assert sorted_rows(t, ("m",), desc) == expected, f"x desc={x_desc}, desc={desc}"
+
+
 def test_float32_and_dictionary_columns():
     values = [1.0, NEG_NAN, 2.0]
     t = LTSeq.from_arrow(
