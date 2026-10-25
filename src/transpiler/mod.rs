@@ -1081,6 +1081,8 @@ pub fn is_numeric_type(data_type: &DataType) -> bool {
             | DataType::UInt64
             | DataType::Float32
             | DataType::Float64
+            | DataType::Decimal32(_, _)
+            | DataType::Decimal64(_, _)
             | DataType::Decimal128(_, _)
             | DataType::Decimal256(_, _)
             | DataType::Null // Allow Null type for empty tables

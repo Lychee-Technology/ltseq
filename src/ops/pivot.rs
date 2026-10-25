@@ -8,6 +8,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::transpiler::Resolver;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::compute::cast;
@@ -124,14 +125,19 @@ pub fn pivot_impl(
     let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
 
     // One conditional aggregate per output column:
-    // AGG(CASE WHEN pivot_col IN (values) THEN value_col END)
+    // AGG(CASE WHEN pivot_col IN (values) THEN value_col END), resolved as an
+    // expression is, so a decimal32/64 value column is summed and averaged
+    // as decimal128 (#241).
+    let rx = Resolver::new(schema).map_err(LtseqError::Validation)?;
     let agg_exprs: Vec<Expr> = pivot_columns
         .iter()
         .map(|(name, values)| {
             let case_expr = build_case_expr(&pivot_col, values, &value_col);
-            build_agg_expr(&agg_fn_upper, case_expr).alias(name)
+            let agg_expr = rx.resolve(build_agg_expr(&agg_fn_upper, case_expr))?;
+            Ok(agg_expr.alias(name))
         })
-        .collect();
+        .collect::<Result<_, String>>()
+        .map_err(LtseqError::Validation)?;
 
     // Execute native aggregate — stays lazy until collect
     let result_df = RUNTIME

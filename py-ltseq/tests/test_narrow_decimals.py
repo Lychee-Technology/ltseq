@@ -18,7 +18,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, coalesce, if_else, when
+from ltseq import LTSeq, avg_if, coalesce, if_else, sum_if, when
 
 NARROW = [pa.decimal32(9, 2), pa.decimal64(18, 2)]
 INTEGERS = [
@@ -227,3 +227,67 @@ def test_group_expressions_compute_as_decimal128(narrow):
     assert derived("x")[2][1] == [Decimal("0.50")] * 2 + [Decimal("0.01")] * 2
     kept = t.group_ordered(lambda r: r.g).filter(lambda g: g.first().x > g.first().i).flatten()
     assert kept.to_arrow().column("k").to_pylist() == [0, 1, 2, 3]
+
+
+# ---- Aggregates: sum and mean see decimal128 ----
+
+
+def sums(narrow):
+    """`x` narrow, `w` its decimal128 twin; 9999999.99 + 1.50 needs ten digits."""
+    values = [Decimal("1.50"), Decimal("9999999.99"), Decimal("0.01"), None]
+    return LTSeq.from_arrow(pa.table({
+        "k": pa.array(range(4), pa.int64()),
+        "g": pa.array(["a", "a", "b", "b"]),
+        "c": pa.array(["p", "q", "p", "q"]),
+        "x": pa.array(values, narrow),
+        "w": pa.array(values, wide(narrow)),
+    }))
+
+
+def typed(out):
+    return {f.name: (str(f.type), out.column(f.name).to_pylist()) for f in out.schema}
+
+
+@pytest.mark.parametrize("narrow", NARROW, ids=str)
+def test_sum_and_mean_of_a_narrow_decimal_are_decimal128(narrow):
+    """The sum of decimal32(9, 2) was a decimal32(9, 2) holding 10000001.50,
+    which the type cannot hold, and its mean overflowed; §14.2 gives
+    decimal(p + 10, s) and decimal(p + 4, s + 4) with P = 38 for both widths.
+    min and max keep the input type."""
+    t = sums(narrow)
+    p = narrow.precision
+
+    def aggregated(d):
+        return typed(t.agg(
+            s=lambda g: getattr(g, d).sum(),
+            m=lambda g: getattr(g, d).mean(),
+            lo=lambda g: getattr(g, d).min(),
+        ).to_arrow())
+
+    got = aggregated("x")
+    assert got["s"] == (f"decimal128({min(p + 10, 38)}, 2)", [Decimal("10000001.50")])
+    assert got["m"] == (f"decimal128({p + 4}, 6)", [Decimal("3333333.833333")])
+    assert got["lo"] == (str(narrow), [Decimal("0.01")])
+    want = aggregated("w")
+    assert (got["s"][1], got["m"][1]) == (want["s"][1], want["m"][1])
+
+
+@pytest.mark.parametrize("narrow", NARROW, ids=str)
+def test_every_aggregate_path_sums_a_narrow_decimal_as_decimal128(narrow):
+    t = sums(narrow)
+
+    def runs(d):
+        return [
+            typed(t.group_by("g").agg(s=lambda g: getattr(g, d).sum()).sort("g").to_arrow())["s"],
+            typed(t.agg(s=lambda g: sum_if(g.k < 2, getattr(g, d))).to_arrow())["s"],
+            typed(t.agg(s=lambda g: avg_if(g.k < 2, getattr(g, d))).to_arrow())["s"],
+            typed(t.sort("k").cum_sum(d).select(f"{d}_cumsum").to_arrow())[f"{d}_cumsum"],
+            column(t.sort("k"), lambda r: getattr(r, d).cum_sum()),
+            typed(t.pivot(index="g", columns="c", values=d, agg_fn="sum").sort("g").to_arrow())["p"],
+            typed(t.pivot(index="g", columns="c", values=d, agg_fn="mean").sort("g").to_arrow())["p"],
+        ]
+
+    got = runs("x")
+    assert got == runs("w")
+    assert got[0] == (f"decimal128({narrow.precision + 10}, 2)", [Decimal("10000001.49"), Decimal("0.01")])
+    assert got[3][1] == [Decimal("1.50"), Decimal("10000001.49"), Decimal("10000001.50"), Decimal("10000001.50")]
