@@ -995,10 +995,10 @@ class Expr(ABC):
         """
         from .types import LookupExpr
 
-        # Generate a unique target name based on table identity
-        target_name = getattr(target_table, "_name", None)
-        if target_name is None:
-            target_name = f"lookup_table_{id(target_table)}"
+        # Name the target by its identity: derive() finds a lookup's table by
+        # this name, and tables read from files of the same name share _name.
+        name = getattr(target_table, "_name", None) or "lookup_table"
+        target_name = f"{name}_{id(target_table)}"
 
         return LookupExpr(
             on=cast(Any, self),

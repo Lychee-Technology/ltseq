@@ -35,7 +35,7 @@ class TestLookupExprCreation:
 
         result = col.lookup(mock_table, "name")
 
-        assert result.target_name == "products"
+        assert result.target_name == f"products_{id(mock_table)}"
 
     def test_lookup_stores_column(self):
         """lookup() should store the target column name."""
@@ -70,9 +70,9 @@ class TestLookupExprCreation:
         col = ColumnExpr("product_id")
         mock_table = type("MockTable", (), {"_name": "products"})()
 
-        col.lookup(mock_table, "name")
+        result = col.lookup(mock_table, "name")
 
-        assert LookupExpr.get_table("products") is mock_table
+        assert LookupExpr.get_table(result.target_name) is mock_table
         LookupExpr.clear_registry()
 
     def test_lookup_default_target_name(self):
@@ -98,7 +98,7 @@ class TestLookupExprSerialization:
         serialized = result.serialize()
 
         assert serialized["type"] == "Lookup"
-        assert serialized["target_name"] == "products"
+        assert serialized["target_name"] == f"products_{id(mock_table)}"
         assert serialized["target_columns"] == ["name"]
         assert serialized["join_key"] == "id"
         # Check that 'on' is serialized
@@ -470,3 +470,34 @@ class TestLookupResult:
             orders.derive(x=lambda r: r.pid.lookup(products, "nope"))
 
         assert "_lkp" not in str(err.value)
+
+    def test_targets_read_from_files_of_one_name(self, tmp_path):
+        # Both tables are named "products"; both lookups used to read the
+        # second one.
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        (tmp_path / "a" / "products.csv").write_text("pid,name\n10,from_a\n")
+        (tmp_path / "b" / "products.csv").write_text("pid,name\n10,from_b\n")
+        a = LTSeq.read_csv(str(tmp_path / "a" / "products.csv"))
+        b = LTSeq.read_csv(str(tmp_path / "b" / "products.csv"))
+        orders = LTSeq.from_arrow(pa.table({"oid": [1], "pid": [10]}))
+
+        result = orders.derive(
+            x=lambda r: r.pid.lookup(a, "name"),
+            y=lambda r: r.pid.lookup(b, "name"),
+        )
+
+        assert result.to_dicts() == [{"oid": 1, "pid": 10, "x": "from_a", "y": "from_b"}]
+
+    @pytest.mark.parametrize("file_name", ["Products.csv", "products.v2.csv"])
+    def test_target_file_name_is_not_a_column_name(self, tmp_path, file_name):
+        # The join columns were named after the file, and DataFusion read an
+        # uppercase or dotted name as another column.
+        path = tmp_path / file_name
+        path.write_text("pid,name\n10,ten\n")
+        products = LTSeq.read_csv(str(path))
+        orders = LTSeq.from_arrow(pa.table({"oid": [1], "pid": [10]}))
+
+        result = orders.derive(x=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.to_dicts() == [{"oid": 1, "pid": 10, "x": "ten"}]

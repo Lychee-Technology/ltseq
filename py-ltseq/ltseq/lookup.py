@@ -135,7 +135,7 @@ class LookupMixin:
 
             join = (target_name, on_column, join_key)
             if join not in aliases:
-                aliases[join] = f"_lkp{len(aliases)}_{target_name}"
+                aliases[join] = f"_lkp{len(aliases)}"
                 current = current._perform_lookup_join(
                     target_table, on_column, join_key, aliases[join]
                 )
