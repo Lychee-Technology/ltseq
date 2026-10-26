@@ -136,8 +136,7 @@ pub fn create_cursor_from_csv(
     RUNTIME.block_on(async {
         // Read CSV into DataFrame with has_header option
         let options = CsvReadOptions::new().has_header(has_header);
-        let df = session
-            .read_csv(path, options)
+        let df = crate::source::read_files(&session, path, options)
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to read CSV: {}", e)))?;
 
@@ -161,8 +160,7 @@ pub fn create_cursor_from_parquet(
 ) -> Result<LTSeqCursor, LtseqError> {
     RUNTIME.block_on(async {
         // Read Parquet into DataFrame
-        let df = session
-            .read_parquet(path, ParquetReadOptions::default())
+        let df = crate::source::read_files(&session, path, ParquetReadOptions::default())
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet: {}", e)))?;
 
