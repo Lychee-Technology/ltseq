@@ -12,6 +12,8 @@
 //! - `literal_policy`, `literals`, `exact`: how a literal is read next to the
 //!   value it meets, and exact comparison and value placement
 //! - `opaque_cast`: `cast()`, kept from DataFusion's rewrites unless lossless
+//! - `min_max`: the `min` and `max` aggregates, in the contract's float order
+//!   (#253)
 //! - `window_native`: Native DataFusion window expression builder (primary path)
 //!
 //! Constant expressions (`1 + 2 + r.col`, `x & True`) are left to DataFusion's
@@ -23,6 +25,7 @@ mod float_lists;
 pub(crate) mod floor_div;
 mod literal_policy;
 mod literals;
+pub(crate) mod min_max;
 pub(crate) mod narrow_decimals;
 mod opaque_cast;
 pub(crate) mod probe;

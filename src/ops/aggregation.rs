@@ -13,7 +13,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::transpiler::{narrow_decimals, Resolver};
+use crate::transpiler::{min_max, narrow_decimals, Resolver};
 use crate::types::{arg, dict_to_py_expr, Arg, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -67,8 +67,8 @@ fn pyexpr_to_agg_plan(
             let agg_expr = match func.as_str() {
                 "sum" => agg_fn::sum(col_expr),
                 "count" => agg_fn::count(col_expr),
-                "min" => agg_fn::min(col_expr),
-                "max" => agg_fn::max(col_expr),
+                "min" => min_max::min(col_expr),
+                "max" => min_max::max(col_expr),
                 "avg" | "mean" => agg_fn::avg(col_expr),
                 "median" => agg_fn::median(col_expr),
                 "variance" | "var" => agg_fn::var_sample(col_expr),
@@ -137,8 +137,8 @@ fn pyexpr_to_agg_plan(
             let agg_expr = match func.as_str() {
                 "sum_if" => agg_fn::sum(case_expr),
                 "avg_if" => agg_fn::avg(case_expr),
-                "min_if" => agg_fn::min(case_expr),
-                "max_if" => agg_fn::max(case_expr),
+                "min_if" => min_max::min(case_expr),
+                "max_if" => min_max::max(case_expr),
                 _ => unreachable!(),
             };
             Ok(AggPlan::Plain(agg_expr))

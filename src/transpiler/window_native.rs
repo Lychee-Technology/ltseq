@@ -32,7 +32,8 @@ use datafusion::scalar::ScalarValue;
 use datafusion::functions_window::expr_fn::{dense_rank, lag, lead, ntile, rank, row_number};
 
 // Aggregate function constructors (for rolling windows and cum_sum)
-use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, stddev, sum};
+use super::min_max::{max, min};
+use datafusion::functions_aggregate::expr_fn::{avg, count, stddev, sum};
 
 // Window frame types
 use datafusion::logical_expr::WindowFrame;
