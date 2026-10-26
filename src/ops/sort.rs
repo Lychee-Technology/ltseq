@@ -11,7 +11,6 @@ use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
-use datafusion::datasource::file_format::options::ParquetReadOptions;
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection, SortExpr};
 use pyo3::prelude::*;
@@ -199,11 +198,11 @@ fn in_table_order(table: &LTSeqTable) -> Result<DataFrame, LtseqError> {
 /// actually communicates the sort order to DataFusion's optimizer so that
 /// downstream `.sort()` calls can be elided (no redundant SortExec).
 ///
-/// **Parquet path (lazy):** If the table was loaded from a Parquet file,
-/// re-registers the source with `ParquetReadOptions::file_sort_order` set.
-/// This flows through `ListingOptions` → `ListingTable` →
-/// `EquivalenceProperties`, enabling the `enforce_sorting` optimizer pass
-/// to skip the sort.
+/// **Parquet path (lazy):** If the table was loaded from Parquet, builds
+/// the scan of the files its reader listed again with
+/// `ListingOptions::file_sort_order` set (`source::with_file_sort_order`).
+/// This flows through `ListingTable` → `EquivalenceProperties`, enabling
+/// the `enforce_sorting` optimizer pass to skip the sort.
 ///
 /// **Non-Parquet fallback (materializing):** Collects the DataFrame into
 /// batches in table order (`in_table_order`) and creates a `MemTable` with
@@ -243,34 +242,24 @@ pub fn assume_sorted_impl(
     // Build DataFusion sort order for the optimizer
     let sort_order = sort_specs_to_file_sort_order(&captured_specs);
 
-    // Parsing is done; both paths below do real I/O or a collect, so they
-    // run with the GIL released.
-
-    // Try Parquet re-read path first (fully lazy, no materialization)
-    if let Some(ref path) = table.source_parquet_path {
-        let parquet_path = path.clone();
-        let session = Arc::clone(&table.session);
-        let result_df = detached(py, || {
-            RUNTIME.block_on(async {
-                let options = ParquetReadOptions::default().file_sort_order(sort_order);
-                session.read_parquet(&parquet_path, options).await.map_err(|e| {
-                    LtseqError::Runtime(format!(
-                        "Failed to re-read Parquet with sort order: {}",
-                        e
-                    ))
-                })
-            })
-        })?;
-
-        let result_schema = LTSeqTable::schema_from_df(result_df.schema());
-
-        return Ok(LTSeqTable::from_df_with_schema(
-            Arc::clone(&table.session),
-            result_df,
-            result_schema,
-            captured_specs,
-            table.source_parquet_path.clone(),
-        ));
+    // Parquet path (fully lazy, no materialization): the files the reader
+    // listed at its call (#262), with the declared order. It builds a plan
+    // and reads nothing, so it keeps the GIL.
+    if table.source_parquet_path.is_some() {
+        let declared = crate::source::with_file_sort_order(&table.session, df, sort_order.clone())
+            .map_err(|e| {
+                LtseqError::Runtime(format!("Failed to declare the Parquet sort order: {}", e))
+            })?;
+        if let Some(result_df) = declared {
+            let result_schema = LTSeqTable::schema_from_df(result_df.schema());
+            return Ok(LTSeqTable::from_df_with_schema(
+                Arc::clone(&table.session),
+                result_df,
+                result_schema,
+                captured_specs,
+                table.source_parquet_path.clone(),
+            ));
+        }
     }
 
     // Non-Parquet fallback: collect batches and create MemTable with sort
