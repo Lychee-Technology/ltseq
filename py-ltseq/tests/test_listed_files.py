@@ -160,9 +160,11 @@ def test_a_listed_file_is_read_by_its_name(tmp_path, fmt):
     """Whatever characters it holds, glob and URL ones included."""
     d = tmp_path / "data"
     d.mkdir()
+    # Read as a glob, the name would match the other file and not itself;
+    # read as a URL, `%20` would be a space and `#` would end the path.
     odd = d / f"a b%20[1]#?*é.{fmt}"
     write(odd, FIRST)
-    write(d / f"a b%201.{fmt}", SECOND)
+    write(d / f"a b%201#xé.{fmt}", SECOND)
     t = read(fmt, str(d))
     assert xs(t) == FIRST + SECOND
 
