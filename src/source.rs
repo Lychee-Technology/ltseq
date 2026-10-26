@@ -66,6 +66,7 @@ pub(crate) async fn read_files<'a>(
             url.as_str()
         );
     }
+    let url = as_collection_if_directory(url)?;
 
     let state = session.state();
     let store = state.runtime_env().object_store(&url)?;
@@ -126,6 +127,25 @@ pub(crate) fn with_file_sort_order(
     session.read_table(Arc::new(table)).map(Some)
 }
 
+/// `url` with the trailing `/` of a collection if it is a `file` URL of a
+/// directory.
+///
+/// `ListingTableUrl::parse` ends a path of a directory with `/`, but takes a
+/// URL as written. DataFusion lists a URL without the `/` as a directory
+/// when looking it up as a file finds none, which [`LocalFiles`] makes an
+/// error, so the reader resolves the directory here, at the call.
+fn as_collection_if_directory(url: ListingTableUrl) -> Result<ListingTableUrl> {
+    let is_directory = !url.is_collection()
+        && url.scheme() == "file"
+        && url.get_url().to_file_path().is_ok_and(|path| path.is_dir());
+    if !is_directory {
+        return Ok(url);
+    }
+    let mut directory = url.get_url().clone();
+    directory.set_path(&format!("{}/", directory.path()));
+    ListingTableUrl::try_new(directory, url.get_glob().clone())
+}
+
 /// The URL of the listed file at `location`, in the store of `base`.
 ///
 /// Each segment is percent-encoded, `%` included, so the URL decodes back to
@@ -141,16 +161,19 @@ fn file_url(base: &ListingTableUrl, location: &Path) -> Result<ListingTableUrl> 
 }
 
 /// The local file store of LTSeq's sessions (`engine`): DataFusion's
-/// `LocalFileSystem`, except that a missing file is an error when a listing
-/// looks it up.
+/// `LocalFileSystem`, except that a listing that looks up a file and finds
+/// none gets an error.
 ///
 /// DataFusion lists a file's URL by looking the file up (`head`), and on
 /// `NotFound` lists the URL as a directory instead, which finds nothing, so a
 /// listed file that had been deleted read as no rows. This store reports
 /// that miss as a `Generic` error, which the listing passes on, so the
-/// execution fails and names the file. In DataFusion 55 only that listing
-/// looks a file up this way; reading a missing file's contents is
-/// `NotFound` as before.
+/// execution fails and names the file. A directory at the file's name is
+/// such a miss too (`LocalFileSystem` reports it as `NotFound`), so an
+/// execution never reads the files in it; a reader resolves a directory it
+/// is given before any lookup ([`as_collection_if_directory`]). In
+/// DataFusion 55 only that listing looks a file up this way; reading a
+/// missing file's contents is `NotFound` as before.
 #[derive(Debug, Default)]
 pub(crate) struct LocalFiles(LocalFileSystem);
 
@@ -262,6 +285,27 @@ mod tests {
             let url = file_url(&base, &location).expect("file URL");
             assert_eq!(url.prefix(), &location, "{name}");
             assert!(url.get_glob().is_none() && !url.is_collection(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_file_url_of_a_directory_is_its_collection() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        std::fs::write(dir.path().join("file.csv"), "x\n1\n").expect("write");
+        for name in ["plain.csv", "a b%20#é.csv"] {
+            std::fs::create_dir(dir.path().join(name)).expect("directory");
+        }
+        for name in ["plain.csv", "a b%20#é.csv", "file.csv", "missing.csv"] {
+            let path = dir.path().join(name);
+            // A path of a directory gets its `/`; the URL as written has none.
+            let parsed = ListingTableUrl::parse(path.to_str().expect("UTF-8")).expect("path");
+            let url = ListingTableUrl::parse(parsed.as_str().trim_end_matches('/')).expect("url");
+            assert!(!url.is_collection(), "{name}");
+
+            let resolved = as_collection_if_directory(url.clone()).expect("resolved");
+            let expected = if path.is_dir() { &parsed } else { &url };
+            assert_eq!(resolved.as_str(), expected.as_str(), "{name}");
+            assert_eq!(resolved.prefix(), url.prefix(), "{name}");
         }
     }
 }

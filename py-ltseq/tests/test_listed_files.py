@@ -45,9 +45,10 @@ def rewrite(path: Path, xs: list[int], writer=write) -> None:
 
 
 def read(fmt: str, source: str) -> LTSeq:
-    if "*" in source:
-        # read_csv and read_parquet return an empty table for a glob without
-        # calling the kernel (#261), so call the kernel's reader directly.
+    if "*" in source or source.startswith("file:"):
+        # read_csv and read_parquet return an empty table for a glob or a URL
+        # without calling the kernel (#261), so call the kernel's reader
+        # directly.
         inner = (
             ltseq_core.LTSeqTable.from_csv(source, True)
             if fmt == "csv"
@@ -170,6 +171,48 @@ def test_a_listed_file_is_read_by_its_name(tmp_path, fmt):
 
     odd.unlink()
     with raises_naming(odd):
+        t.count()
+
+
+def url_of_directory(tmp_path: Path, fmt: str) -> tuple[str, list[Path]]:
+    """A `file` URL of a directory, without the trailing `/` that the reader
+    gives a path of one. Its name ends with the format's extension, which the
+    reader requires of a URL that does not end with `/`."""
+    d = tmp_path / f"data.{fmt}"
+    d.mkdir()
+    files = [d / f"first.{fmt}", d / f"second.{fmt}"]
+    for path, values in zip(files, [FIRST, SECOND]):
+        write(path, values)
+    return d.as_uri(), files
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_url_of_a_directory_lists_the_directory(tmp_path, fmt):
+    url, files = url_of_directory(tmp_path, fmt)
+    t = read(fmt, url)
+    assert xs(t) == FIRST + SECOND
+
+    files[0].unlink()
+    with raises_naming(files[0]):
+        t.count()
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_cursor_lists_a_url_of_a_directory(tmp_path, fmt):
+    url, _ = url_of_directory(tmp_path, fmt)
+    cursor = LTSeq.scan(url) if fmt == "csv" else LTSeq.scan_parquet(url)
+    assert sorted(cursor.to_arrow().column("x").to_pylist()) == FIRST + SECOND
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_file_replaced_by_a_directory_fails_the_next_execution(source, fmt):
+    """The directory is not a listed file, whatever files it holds."""
+    s = source(fmt)
+    t = s.read()
+    s.files[0].unlink()
+    s.files[0].mkdir()
+    write(s.files[0] / f"inner.{fmt}", [100])
+    with raises_naming(s.files[0]):
         t.count()
 
 
