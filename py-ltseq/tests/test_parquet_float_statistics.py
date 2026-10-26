@@ -47,7 +47,8 @@ def floats(values, type_=pa.float64()):
 
 def numbered(values, type_=pa.float64()):
     """``values`` as column ``x``, with ``i`` numbering the rows."""
-    return pa.table({"i": pa.array(range(len(values)), pa.int64()), "x": floats(values, type_)})
+    numbers = pa.array(range(len(values)), pa.int64())
+    return pa.table({"i": numbers, "x": floats(values, type_)})
 
 
 def ids(t):
@@ -73,11 +74,12 @@ FILTERS = {
 
 # Row groups of 1, 3 and every row, with and without a page index and a
 # bloom filter.
+BLOOM = {"x": {"ndv": 16, "fpp": 0.01}}
 WRITES = {
-    f"groups-of-{size or 'all'}{'-page-index' if index else ''}{'-bloom' if bloom else ''}": {
+    f"groups-of-{size or 'all'}{'-page-index' * index}{'-bloom' * bloom}": {
         "row_group_size": size,
         "write_page_index": index,
-        "bloom_filter_options": {"x": {"ndv": 16, "fpp": 0.01}} if bloom else None,
+        "bloom_filter_options": BLOOM if bloom else None,
     }
     for size in (1, 3, None)
     for index in (False, True)
@@ -86,7 +88,9 @@ WRITES = {
 
 
 @pytest.mark.parametrize("write", list(WRITES.values()), ids=list(WRITES))
-@pytest.mark.parametrize("values, type_, predicate, kept", list(FILTERS.values()), ids=list(FILTERS))
+@pytest.mark.parametrize(
+    "values, type_, predicate, kept", list(FILTERS.values()), ids=list(FILTERS)
+)
 def test_a_filter_keeps_nan_rows(values, type_, predicate, kept, write, tmp_path):
     rows = numbered(values, FLOAT_TYPES[type_])
     path = tmp_path / "t.parquet"
@@ -97,10 +101,10 @@ def test_a_filter_keeps_nan_rows(values, type_, predicate, kept, write, tmp_path
 
 def test_a_bloom_filter_keeps_a_zero_of_the_other_sign(tmp_path):
     """`x == r.z` on a derived `z = -0.0` reaches the scan as `x = -0.0`,
-    which takes `0.0` to be equal."""
+    which holds for `0.0`; the bloom filter, which hashes bits, has no `-0.0`."""
     rows = numbered([0.0, 1.0, 2.0])
     path = tmp_path / "t.parquet"
-    pq.write_table(rows, path, bloom_filter_options={"x": {"ndv": 16, "fpp": 0.01}})
+    pq.write_table(rows, path, bloom_filter_options=BLOOM)
 
     def zeros(t):
         return ids(t.derive(z=lambda r: LiteralExpr(-0.0)).filter(lambda r: r.x == r.z))
