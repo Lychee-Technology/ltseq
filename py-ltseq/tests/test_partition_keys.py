@@ -21,8 +21,8 @@ layout:
   the value `keys()` lists and by their UTC instants, also after `map()`,
   where a dict keyed by them kept one;
 - (derived) NaN is one key whose partition holds every NaN row, whatever
-  its bits, also on Parquet, where `filter(r.k == nan)` loses them to
-  row-group pruning (#291); any NaN looks the key up;
+  its bits, also on Parquet, whose row-group pruning lost them before #291;
+  any NaN looks the key up;
 - (derived) distinct keys that convert to one Python value, such as
   `time64[ns]` values under a microsecond apart, raise rather than list one
   key and lose the other's rows; NaNs are one key only where the rest of the
@@ -140,7 +140,7 @@ def test_each_key_holds_the_rows_of_its_value(layout, engine_layout, tmp_path):
 def test_a_partition_counts_as_the_filter_on_its_key(engine_layout):
     """The issue's acceptance: `p[k].count()` and `map` match
     `filter(r.k == k)`, here for the key types that have a literal, in
-    memory, where that filter is right for NaN too (#291 is Parquet's)."""
+    memory."""
     rows = key_rows()
     t = layouts.build("many_batches", rows, None)
     for column in ("day", "at", "local", "x", "s"):
