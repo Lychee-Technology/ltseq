@@ -5,7 +5,9 @@
 //! table reads exactly those: a file that its directory or glob matches only
 //! later is never read. Each execution looks every listed file up again, so
 //! it reads the file as it is at that moment, and one that has disappeared
-//! fails the execution ([`LocalFiles`]).
+//! fails the execution ([`LocalFiles`]). DataFusion still reuses a Parquet
+//! footer, and the statistics read from it, while the file's size and
+//! modification time are unchanged (#359).
 //!
 //! DataFusion's `SessionContext::read_csv` and `read_parquet` build a table
 //! over the path instead, which DataFusion lists again at each execution.
