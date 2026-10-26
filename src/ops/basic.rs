@@ -86,8 +86,7 @@ pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResul
 /// no notation for timestamps, binary or NaN.
 ///
 /// A NaN key matches every NaN row, whatever its bits: `partition` lists one
-/// NaN key (contract §18), and `= NaN` would also lose NaN rows to Parquet
-/// row-group pruning, whose float statistics leave NaN out (#291).
+/// NaN key (contract §18), and `= NaN` compares a NaN bit for bit (#290).
 pub fn filter_key_row_impl(
     table: &LTSeqTable,
     key: ImportedStream,

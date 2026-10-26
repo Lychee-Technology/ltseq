@@ -4,7 +4,7 @@
 //! - Global Tokio runtime for async operations
 //! - Configured SessionContext factory for optimal performance
 //! - ltseq's optimizer rules (`FloatListZeros`, #245; `KeepFileOrder`, #325;
-//!   `KeepSortsAboveOffsets`, #339)
+//!   `KeepSortsAboveOffsets`, #339; `DropFloatStatistics`, #291)
 //! - Test-only overrides of the session layout (`LayoutOverrides`)
 
 use datafusion::common::config::ConfigOptions;
@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use tokio::runtime::Runtime;
 
+use crate::float_statistics::DropFloatStatistics;
 use crate::transpiler::FloatListZeros;
 
 /// Default batch size for DataFusion operations.
@@ -137,8 +138,11 @@ impl LayoutOverrides {
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
 ///   declared order reads its files in order however DataFusion planned
 ///   it (#325)
-/// - `KeepSortsAboveOffsets`: First physical optimizer rule, so a sort
-///   required above a slice is not planned beneath its offset (#339)
+/// - `DropFloatStatistics`: First physical optimizer rule, so no Parquet
+///   scan skips or replaces float values by statistics that leave NaN out
+///   or by bloom filters that tell the zeros apart (#291)
+/// - `KeepSortsAboveOffsets`: Next, so a sort required above a slice is not
+///   planned beneath its offset (#339)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -175,14 +179,19 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     // Appended to DataFusion's rules, so it runs after the ones that build
     // IN lists in every pass.
     session.add_optimizer_rule(Arc::new(FloatListZeros));
-    // `KeepSortsAboveOffsets` goes before DataFusion's physical rules, so
-    // `EnsureRequirements` sees its limits; `KeepFileOrder` after them, so
-    // it runs after `LimitPushdown`.
+    // `DropFloatStatistics` goes before DataFusion's physical rules, so the
+    // ones that read a scan's statistics see what the scan reads, and
+    // `KeepSortsAboveOffsets` too, so `EnsureRequirements` sees its limits;
+    // `KeepFileOrder` after them, so it runs after `LimitPushdown`.
     let state = session.state();
-    let rules = std::iter::once(Arc::new(KeepSortsAboveOffsets) as _)
-        .chain(state.physical_optimizers().iter().cloned())
-        .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
-        .collect();
+    let rules = [
+        Arc::new(DropFloatStatistics) as _,
+        Arc::new(KeepSortsAboveOffsets) as _,
+    ]
+    .into_iter()
+    .chain(state.physical_optimizers().iter().cloned())
+    .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
+    .collect();
     let state = SessionStateBuilder::new_from_existing(state)
         .with_physical_optimizer_rules(rules)
         .build();
