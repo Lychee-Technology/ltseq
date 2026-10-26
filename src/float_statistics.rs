@@ -34,9 +34,9 @@
 //! before. Null counts stay, since NaN is not NULL.
 //!
 //! Remove the rule with the DataFusion upgrade whose scans stop reading
-//! float statistics as bounds on NaN (apache/datafusion#15812, #26490), once
-//! #291's and #355's tests pass without it, and check bloom filters against
-//! how `=` then compares floats.
+//! float statistics as bounds on NaN (apache/datafusion#15812 and
+//! apache/datafusion#26490), once #291's and #355's tests pass without it,
+//! and check bloom filters against how `=` then compares floats.
 
 use std::ops::Range;
 use std::sync::Arc;
