@@ -12,6 +12,7 @@ use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::config::SessionConfig;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::limit::GlobalLimitExec;
@@ -26,6 +27,7 @@ use std::sync::{Arc, LazyLock};
 use tokio::runtime::Runtime;
 
 use crate::float_statistics::DropFloatStatistics;
+use crate::source::LocalFiles;
 use crate::transpiler::FloatListZeros;
 
 /// Default batch size for DataFusion operations.
@@ -143,6 +145,8 @@ impl LayoutOverrides {
 ///   or by bloom filters that tell the zeros apart (#291)
 /// - `KeepSortsAboveOffsets`: Next, so a sort required above a slice is not
 ///   planned beneath its offset (#339)
+/// - `LocalFiles`: The store of local files, so an execution that looks up
+///   a file a reader listed fails if the file has disappeared (#262)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -195,7 +199,12 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     let state = SessionStateBuilder::new_from_existing(state)
         .with_physical_optimizer_rules(rules)
         .build();
-    Arc::new(SessionContext::new_with_state(state))
+    let session = SessionContext::new_with_state(state);
+    session.register_object_store(
+        ObjectStoreUrl::local_filesystem().as_ref(),
+        Arc::new(LocalFiles::default()),
+    );
+    Arc::new(session)
 }
 
 /// Puts a limit with the same fetch and no offset over every limit that

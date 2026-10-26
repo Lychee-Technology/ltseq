@@ -43,6 +43,11 @@ class IOMixin:
         """
         Load a CSV file and return an LTSeq table.
 
+        The table reads the files found at the call: a file, or the `.csv`
+        files of a directory at that moment, so a file added to the
+        directory later is not read. Each execution reads those files as
+        they are then, and raises if one of them no longer exists.
+
         Args:
             path: Path to the CSV file
             has_header: Whether the first row is a header (default: True).
@@ -84,6 +89,14 @@ class IOMixin:
     def read_parquet(cls, path: str) -> "LTSeq":
         """
         Load a Parquet file and return an LTSeq table.
+
+        The table reads the files found at the call: a file, or the
+        `.parquet` files of a directory at that moment, so a file added to
+        the directory later is not read. Each execution reads those files as
+        they are then, and raises if one of them no longer exists. A file's
+        footer and statistics are read again only when its size or
+        modification time has changed, so a rewrite that keeps both is read
+        by the old footer (#359).
 
         Args:
             path: Path to the Parquet file

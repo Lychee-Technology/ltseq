@@ -47,9 +47,10 @@ chrono = { version = "0.4.45", default-features = false }
 # Already in the tree through DataFusion; the version follows it.
 tempfile = "3.27.0"
 
-# The m0 prototypes' query planner (DataFusion's planner traits are async).
-# Already in the tree through DataFusion; the version follows it.
-async-trait = { version = "0.1.92", optional = true }
+# The local file store of every session (`source::LocalFiles`, #262), and
+# the m0 prototypes' query planner: object_store's and DataFusion's traits
+# are async. Already in the tree through DataFusion; the version follows it.
+async-trait = "0.1.92"
 
 # The POSIX ACL of a file a writer replaces (#259). Already in the tree
 # through tempfile; the version follows it.
@@ -65,7 +66,7 @@ libc = "0.2.189"
 [features]
 # Prototypes that price the v0.5 contract's costly commitments (#251).
 # Only measurement builds enable it; see benchmarks/m0/README.md.
-m0 = ["dep:async-trait", "tokio/sync", "tokio/time"]
+m0 = ["tokio/sync", "tokio/time"]
 
 # No profile may set `panic = "abort"`: `transpiler::resolve` catches a panic
 # in DataFusion's type coercion (#242) and reads it as "no common type".

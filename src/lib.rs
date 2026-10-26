@@ -25,6 +25,7 @@ pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
+pub(crate) mod source; // File sources listed at the call (issue #262)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization
 
@@ -313,8 +314,7 @@ impl LTSeqTable {
         let df = detached(py, || {
             RUNTIME.block_on(async {
                 let options = CsvReadOptions::new().has_header(has_header);
-                session
-                    .read_csv(&path, options)
+                crate::source::read_files(&session, &path, options)
                     .await
                     .map_err(|e| LtseqError::io("Failed to read CSV", e))
             })
@@ -335,8 +335,7 @@ impl LTSeqTable {
         let session = Arc::clone(&self.session);
         let df = detached(py, || {
             RUNTIME.block_on(async {
-                session
-                    .read_parquet(&path, ParquetReadOptions::default())
+                crate::source::read_files(&session, &path, ParquetReadOptions::default())
                     .await
                     .map_err(|e| LtseqError::io("Failed to read Parquet", e))
             })
