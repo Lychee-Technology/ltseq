@@ -18,6 +18,7 @@ pub(crate) mod arrow_ffi; // Arrow C Data Interface boundary with pyarrow (issue
 pub(crate) mod cursor; // Streaming cursor for lazy iteration
 pub(crate) mod engine; // DataFusion session and Tokio runtime
 mod error;
+pub(crate) mod float_statistics; // Parquet scans that read no float statistics (issue #291)
 pub(crate) mod format; // Formatting and display functions
 pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 #[cfg(feature = "m0")]

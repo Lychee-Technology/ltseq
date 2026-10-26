@@ -22,6 +22,10 @@ num-traits = "0.2"
 # async executor utilities
 futures-util = "0.3.34"
 
+# The byte buffers of the Parquet reader `float_statistics` wraps (#291).
+# Already in the tree through DataFusion; the version follows it.
+bytes = "1.12.1"
+
 # Parallel iteration for sequence engine
 rayon = "1.12.0"
 
