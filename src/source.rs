@@ -5,9 +5,9 @@
 //! table reads exactly those: a file that its directory or glob matches only
 //! later is never read. Each execution looks every listed file up again, so
 //! it reads the file as it is at that moment, and one that has disappeared
-//! fails the execution ([`LocalFiles`]). DataFusion still reuses a Parquet
-//! footer, and the statistics read from it, while the file's size and
-//! modification time are unchanged (#359).
+//! fails the execution ([`LocalFiles`]). The lookup also drops the file's
+//! cached Parquet footer, so the execution reads the footer, and the
+//! statistics in it, afresh; the partitions of one execution share it.
 //!
 //! DataFusion's `SessionContext::read_csv` and `read_parquet` build a table
 //! over the path instead, which DataFusion lists again at each execution.
@@ -29,6 +29,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::options::ReadOptions;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::source_as_provider;
+use datafusion::execution::cache::cache_manager::FileMetadataCache;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{LogicalPlan, SortExpr};
 use datafusion::object_store::local::LocalFileSystem;
@@ -93,8 +94,10 @@ pub(crate) async fn read_files<'a>(
     let config = ListingTableConfig::new_with_multi_paths(paths)
         .with_listing_options(options)
         .with_schema(schema);
-    let table = ListingTable::try_new(config)?
-        .with_cache(state.runtime_env().cache_manager.get_file_statistic_cache());
+    // No statistics cache: each execution reads a file's statistics from the
+    // footer it reads afresh ([`LocalFiles`]), where a cached copy would
+    // outlive that footer.
+    let table = ListingTable::try_new(config)?;
     session.read_table(Arc::new(table))
 }
 
@@ -118,12 +121,7 @@ pub(crate) fn with_file_sort_order(
     let config = ListingTableConfig::new_with_multi_paths(table.table_paths().clone())
         .with_listing_options(table.options().clone().with_file_sort_order(order))
         .with_schema(table.schema());
-    let table = ListingTable::try_new(config)?.with_cache(
-        session
-            .runtime_env()
-            .cache_manager
-            .get_file_statistic_cache(),
-    );
+    let table = ListingTable::try_new(config)?;
     session.read_table(Arc::new(table)).map(Some)
 }
 
@@ -174,12 +172,33 @@ fn file_url(base: &ListingTableUrl, location: &Path) -> Result<ListingTableUrl> 
 /// is given before any lookup ([`as_collection_if_directory`]). In
 /// DataFusion 55 only that listing looks a file up this way; reading a
 /// missing file's contents is `NotFound` as before.
-#[derive(Debug, Default)]
-pub(crate) struct LocalFiles(LocalFileSystem);
+///
+/// The lookup also drops the file's footer from the session's footer cache.
+/// DataFusion reuses a cached Parquet footer while the file's size and
+/// modification time are unchanged, so a rewrite that kept both was read by
+/// the old footer: `count()` gave its row count, and a filter lost the rows
+/// that its statistics pruned (#359). An execution looks up each listed file
+/// before it reads the file's footer, so it reads the footer afresh; its
+/// partitions then share the copy DataFusion caches.
+#[derive(Debug)]
+pub(crate) struct LocalFiles {
+    files: LocalFileSystem,
+    footers: Arc<FileMetadataCache>,
+}
+
+impl LocalFiles {
+    /// The store of a session whose footer cache is `footers`.
+    pub(crate) fn new(footers: Arc<FileMetadataCache>) -> Self {
+        LocalFiles {
+            files: LocalFileSystem::default(),
+            footers,
+        }
+    }
+}
 
 impl fmt::Display for LocalFiles {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        self.files.fmt(f)
     }
 }
 
@@ -187,7 +206,10 @@ impl fmt::Display for LocalFiles {
 impl ObjectStore for LocalFiles {
     async fn get_opts(&self, location: &Path, options: GetOptions) -> StoreResult<GetResult> {
         let head = options.head;
-        self.0
+        if head {
+            self.footers.remove(location);
+        }
+        self.files
             .get_opts(location, options)
             .await
             .map_err(|e| match e {
@@ -205,7 +227,7 @@ impl ObjectStore for LocalFiles {
         payload: PutPayload,
         opts: PutOptions,
     ) -> StoreResult<PutResult> {
-        self.0.put_opts(location, payload, opts).await
+        self.files.put_opts(location, payload, opts).await
     }
 
     async fn put_multipart_opts(
@@ -213,22 +235,22 @@ impl ObjectStore for LocalFiles {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> StoreResult<Box<dyn MultipartUpload>> {
-        self.0.put_multipart_opts(location, opts).await
+        self.files.put_multipart_opts(location, opts).await
     }
 
     async fn get_ranges(&self, location: &Path, ranges: &[Range<u64>]) -> StoreResult<Vec<Bytes>> {
-        self.0.get_ranges(location, ranges).await
+        self.files.get_ranges(location, ranges).await
     }
 
     fn delete_stream(
         &self,
         locations: BoxStream<'static, StoreResult<Path>>,
     ) -> BoxStream<'static, StoreResult<Path>> {
-        self.0.delete_stream(locations)
+        self.files.delete_stream(locations)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
-        self.0.list(prefix)
+        self.files.list(prefix)
     }
 
     fn list_with_offset(
@@ -236,19 +258,19 @@ impl ObjectStore for LocalFiles {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, StoreResult<ObjectMeta>> {
-        self.0.list_with_offset(prefix, offset)
+        self.files.list_with_offset(prefix, offset)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> StoreResult<ListResult> {
-        self.0.list_with_delimiter(prefix).await
+        self.files.list_with_delimiter(prefix).await
     }
 
     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> StoreResult<()> {
-        self.0.copy_opts(from, to, options).await
+        self.files.copy_opts(from, to, options).await
     }
 
     async fn rename_opts(&self, from: &Path, to: &Path, options: RenameOptions) -> StoreResult<()> {
-        self.0.rename_opts(from, to, options).await
+        self.files.rename_opts(from, to, options).await
     }
 }
 
@@ -263,7 +285,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary directory");
         let path = dir.path().join("gone.csv");
         let location = Path::from_absolute_path(&path).expect("location");
-        let store = LocalFiles::default();
+        let footers = SessionContext::new()
+            .runtime_env()
+            .cache_manager
+            .get_file_metadata_cache();
+        let store = LocalFiles::new(footers);
 
         let head = RUNTIME.block_on(store.head(&location)).unwrap_err();
         assert!(matches!(head, StoreError::Generic { .. }), "{head}");
