@@ -16,8 +16,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::{DataType, FieldRef, Schema, SchemaRef, TimeUnit};
+use datafusion::arrow::array::{
+    Array, ArrayRef, ArrowNativeTypeOp, ArrowPrimitiveType, AsArray, BooleanBufferBuilder,
+    GenericListArray, GenericListViewArray, OffsetSizeTrait, PrimitiveArray, RecordBatch,
+};
+use datafusion::arrow::buffer::NullBuffer;
+use datafusion::arrow::datatypes::{
+    ArrowNativeType, DataType, FieldRef, RunEndIndexType, Schema, SchemaRef, TimeUnit,
+};
+use datafusion::arrow::error::ArrowError;
 use tempfile::NamedTempFile;
 
 use crate::arrow_ffi::{
@@ -625,7 +632,8 @@ fn unwritable_in_parquet(data_type: &DataType) -> Option<&'static str> {
 /// pyarrow, pandas and DuckDB read integers. The writer stores such
 /// values in milliseconds instead, as pyarrow does, at any depth of nesting.
 /// The conversion is `cast`'s exact one (contract §16.5, §17.6): a
-/// `timestamp[s]` value whose milliseconds do not fit `int64` fails.
+/// `timestamp[s]` value whose milliseconds do not fit `int64` fails
+/// ([`in_milliseconds`]).
 struct ParquetUnits {
     /// The schema written, with each second unit in milliseconds.
     schema: SchemaRef,
@@ -649,13 +657,6 @@ impl ParquetUnits {
     }
 
     fn convert(&self, batch: &RecordBatch) -> Result<RecordBatch, LtseqError> {
-        use datafusion::arrow::compute::{cast_with_options, CastOptions};
-
-        // Not `safe`, which would turn a value that does not fit into NULL.
-        let options = CastOptions {
-            safe: false,
-            ..Default::default()
-        };
         let schema = batch.schema();
         let columns = batch
             .columns()
@@ -663,14 +664,15 @@ impl ParquetUnits {
             .zip(&self.columns)
             .zip(schema.fields())
             .map(|((column, to), field)| match to {
-                Some(to) => cast_with_options(column, to, &options).map_err(|e| {
-                    LtseqError::Validation(format!(
+                Some(to) => in_milliseconds(column, to, None).map_err(|e| match e {
+                    ArrowError::ArithmeticOverflow(_) => LtseqError::Validation(format!(
                         "write_parquet cannot write column '{}' ({}): Parquet has no \
                          second unit, so it is written in milliseconds: {}",
                         field.name(),
                         column.data_type(),
                         e
-                    ))
+                    )),
+                    e => LtseqError::runtime("Failed to convert a Parquet batch", e),
                 }),
                 None => Ok(Arc::clone(column)),
             })
@@ -739,6 +741,257 @@ fn in_parquet_units(data_type: &DataType) -> Option<DataType> {
         // A union makes the writer panic whatever its members (#270).
         _ => None,
     }
+}
+
+/// `array` in `to`, the type [`in_parquet_units`] gives for its type: each
+/// second count times 1000, inside containers built with `to`'s own fields.
+///
+/// Not Arrow's `cast`, for two reasons. A container holds values that no
+/// row holds: under a null struct, list or map slot, outside a slice, or in
+/// a dictionary entry no key uses. They can be anything, and `cast` checks
+/// them all, so a table whose rows all fit would fail to write. And `cast`
+/// gives a run-end encoded array default child fields, which the batch's
+/// schema rejects when the table's differ.
+///
+/// `live` marks the slots of `array` that a row holds, all of them when
+/// `None`. Only the values in those slots are checked and converted; the
+/// others become 0, since no row reads them.
+fn in_milliseconds(
+    array: &ArrayRef,
+    to: &DataType,
+    live: Option<NullBuffer>,
+) -> Result<ArrayRef, ArrowError> {
+    use datafusion::arrow::array::{FixedSizeListArray, MapArray, StructArray};
+    use datafusion::arrow::datatypes::{
+        Int16Type, Int32Type, Int64Type, Time32MillisecondType, Time32SecondType,
+        TimestampMillisecondType, TimestampSecondType,
+    };
+
+    if array.data_type() == to {
+        return Ok(Arc::clone(array));
+    }
+    let live = NullBuffer::union(array.nulls(), live.as_ref());
+    match (array.data_type(), to) {
+        (DataType::Timestamp(TimeUnit::Second, _), DataType::Timestamp(_, tz)) => {
+            let converted =
+                times_thousand::<TimestampSecondType, TimestampMillisecondType>(array, live)?;
+            Ok(Arc::new(converted.with_timezone_opt(tz.clone())))
+        }
+        (DataType::Time32(TimeUnit::Second), _) => Ok(Arc::new(times_thousand::<
+            Time32SecondType,
+            Time32MillisecondType,
+        >(array, live)?)),
+        (DataType::List(_), DataType::List(item)) => list::<i32>(array, item, live),
+        (DataType::LargeList(_), DataType::LargeList(item)) => list::<i64>(array, item, live),
+        (DataType::ListView(_), DataType::ListView(item)) => list_view::<i32>(array, item, live),
+        (DataType::LargeListView(_), DataType::LargeListView(item)) => {
+            list_view::<i64>(array, item, live)
+        }
+        (DataType::FixedSizeList(..), DataType::FixedSizeList(item, size)) => {
+            let list = array.as_fixed_size_list();
+            let live = live.map(|live| live.expand(list.value_length() as usize));
+            let values = in_milliseconds(list.values(), item.data_type(), live)?;
+            let converted = FixedSizeListArray::try_new_with_length(
+                Arc::clone(item),
+                *size,
+                values,
+                list.nulls().cloned(),
+                list.len(),
+            )?;
+            Ok(Arc::new(converted))
+        }
+        (DataType::Struct(_), DataType::Struct(fields)) => {
+            let parent = array.as_struct();
+            let columns = parent
+                .columns()
+                .iter()
+                .zip(fields.iter())
+                .map(|(column, field)| in_milliseconds(column, field.data_type(), live.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let converted = StructArray::try_new_with_length(
+                fields.clone(),
+                columns,
+                parent.nulls().cloned(),
+                parent.len(),
+            )?;
+            Ok(Arc::new(converted))
+        }
+        (DataType::Map(..), DataType::Map(field, sorted)) => {
+            let map = array.as_map();
+            let entries: ArrayRef = Arc::new(map.entries().clone());
+            let ranges = map
+                .offsets()
+                .windows(2)
+                .map(|w| (w[0] as usize, w[1] as usize));
+            let live = Some(reached(ranges, live.as_ref(), entries.len()));
+            let entries = in_milliseconds(&entries, field.data_type(), live)?;
+            let converted = MapArray::try_new(
+                Arc::clone(field),
+                map.offsets().clone(),
+                entries.as_struct().clone(),
+                map.nulls().cloned(),
+                *sorted,
+            )?;
+            Ok(Arc::new(converted))
+        }
+        (DataType::Dictionary(..), DataType::Dictionary(_, values)) => {
+            let dictionary = array.as_any_dictionary();
+            let len = dictionary.values().len();
+            let mut used = BooleanBufferBuilder::new(len);
+            used.append_n(len, false);
+            if len > 0 {
+                for (slot, key) in dictionary.normalized_keys().into_iter().enumerate() {
+                    if live.as_ref().is_none_or(|live| live.is_valid(slot)) {
+                        used.set_bit(key, true);
+                    }
+                }
+            }
+            let used = Some(NullBuffer::new(used.finish()));
+            Ok(dictionary.with_values(in_milliseconds(dictionary.values(), values, used)?))
+        }
+        (DataType::RunEndEncoded(run_ends, _), _) => match run_ends.data_type() {
+            DataType::Int16 => run_end_encoded::<Int16Type>(array, to, live),
+            DataType::Int32 => run_end_encoded::<Int32Type>(array, to, live),
+            DataType::Int64 => run_end_encoded::<Int64Type>(array, to, live),
+            other => Err(ArrowError::InvalidArgumentError(format!(
+                "run ends of type {other}"
+            ))),
+        },
+        (from, to) => Err(ArrowError::CastError(format!(
+            "no conversion from {from} to {to}"
+        ))),
+    }
+}
+
+/// `array`'s values times 1000, as `T`, with `array`'s nulls. A value in a
+/// `live` slot that does not fit fails with `ArithmeticOverflow`; the other
+/// slots become 0.
+fn times_thousand<F, T>(
+    array: &ArrayRef,
+    live: Option<NullBuffer>,
+) -> Result<PrimitiveArray<T>, ArrowError>
+where
+    F: ArrowPrimitiveType,
+    T: ArrowPrimitiveType<Native = F::Native>,
+{
+    let seconds = array.as_primitive::<F>();
+    let thousand = F::Native::usize_as(1000);
+    // `try_unary` computes only the slots its input's nulls leave valid.
+    let held = PrimitiveArray::<F>::new(seconds.values().clone(), live);
+    let converted = held.try_unary::<_, T, _>(|value| value.mul_checked(thousand))?;
+    Ok(PrimitiveArray::new(
+        converted.values().clone(),
+        seconds.nulls().cloned(),
+    ))
+}
+
+fn list<O: OffsetSizeTrait>(
+    array: &ArrayRef,
+    item: &FieldRef,
+    live: Option<NullBuffer>,
+) -> Result<ArrayRef, ArrowError> {
+    let list = array.as_list::<O>();
+    let ranges = list
+        .offsets()
+        .windows(2)
+        .map(|w| (w[0].as_usize(), w[1].as_usize()));
+    let live = Some(reached(ranges, live.as_ref(), list.values().len()));
+    let values = in_milliseconds(list.values(), item.data_type(), live)?;
+    let converted = GenericListArray::<O>::try_new(
+        Arc::clone(item),
+        list.offsets().clone(),
+        values,
+        list.nulls().cloned(),
+    )?;
+    Ok(Arc::new(converted))
+}
+
+fn list_view<O: OffsetSizeTrait>(
+    array: &ArrayRef,
+    item: &FieldRef,
+    live: Option<NullBuffer>,
+) -> Result<ArrayRef, ArrowError> {
+    let list = array.as_list_view::<O>();
+    let ranges = list
+        .offsets()
+        .iter()
+        .zip(list.sizes().iter())
+        .map(|(offset, size)| (offset.as_usize(), offset.as_usize() + size.as_usize()));
+    let live = Some(reached(ranges, live.as_ref(), list.values().len()));
+    let values = in_milliseconds(list.values(), item.data_type(), live)?;
+    let converted = GenericListViewArray::<O>::try_new(
+        Arc::clone(item),
+        list.offsets().clone(),
+        list.sizes().clone(),
+        values,
+        list.nulls().cloned(),
+    )?;
+    Ok(Arc::new(converted))
+}
+
+/// The values a run-end encoded array's `live` slots reach are those of the
+/// runs they fall in.
+fn run_end_encoded<R: RunEndIndexType>(
+    array: &ArrayRef,
+    to: &DataType,
+    live: Option<NullBuffer>,
+) -> Result<ArrayRef, ArrowError> {
+    use datafusion::arrow::array::make_array;
+
+    let DataType::RunEndEncoded(_, values) = to else {
+        return Err(ArrowError::CastError(format!(
+            "no conversion from {} to {to}",
+            array.data_type()
+        )));
+    };
+    let runs = array.as_run::<R>();
+    let ends = runs.run_ends();
+    let (offset, len) = (ends.offset(), ends.len());
+    let mut used = BooleanBufferBuilder::new(runs.values().len());
+    used.append_n(runs.values().len(), false);
+    if len > 0 {
+        for run in ends.get_start_physical_index()..=ends.get_end_physical_index() {
+            let start = match run {
+                0 => 0,
+                _ => ends.values()[run - 1].as_usize(),
+            };
+            // The run's slots, within the slice.
+            let start = start.max(offset) - offset;
+            let end = ends.values()[run].as_usize().min(offset + len) - offset;
+            let held = live
+                .as_ref()
+                .is_none_or(|live| live.slice(start, end - start).null_count() < end - start);
+            used.set_bit(run, held);
+        }
+    }
+    let used = Some(NullBuffer::new(used.finish()));
+    let values = in_milliseconds(runs.values(), values.data_type(), used)?;
+    // The array's own run ends, slice and `to`'s fields.
+    let data = runs.to_data();
+    let run_ends = data.child_data()[0].clone();
+    let data = data
+        .into_builder()
+        .data_type(to.clone())
+        .child_data(vec![run_ends, values.to_data()])
+        .build()?;
+    Ok(make_array(data))
+}
+
+/// The values of a child of `len` values that the `live` slots of a list
+/// reach, given each slot's range in the child.
+fn reached(
+    ranges: impl Iterator<Item = (usize, usize)>,
+    live: Option<&NullBuffer>,
+    len: usize,
+) -> NullBuffer {
+    let mut reached = BooleanBufferBuilder::new(len);
+    reached.append_n(len, false);
+    for (slot, (start, end)) in ranges.enumerate() {
+        if live.is_none_or(|live| live.is_valid(slot)) {
+            (start..end).for_each(|value| reached.set_bit(value, true));
+        }
+    }
+    NullBuffer::new(reached.finish())
 }
 
 /// Write table data to a Parquet file using Arrow's native Parquet writer.
@@ -955,6 +1208,51 @@ mod tests {
             "mode {:o}",
             mode
         );
+    }
+
+    /// A run-end encoded column in seconds keeps its child fields when it is
+    /// converted to milliseconds. Arrow's `cast` gave it default ones, which
+    /// the converted batch's schema, keeping the table's, rejected. pyarrow
+    /// cannot build such a column, but another `__arrow_c_stream__` producer
+    /// can.
+    #[test]
+    fn run_end_encoded_keeps_its_fields() {
+        use datafusion::arrow::array::{make_array, Int32Array, RunArray, TimestampSecondArray};
+        use datafusion::arrow::datatypes::{Field, Int32Type, TimestampMillisecondType};
+        use std::collections::HashMap;
+
+        let run_ends = Arc::new(Field::new("ends", DataType::Int32, false));
+        let values = |unit| {
+            Arc::new(
+                Field::new("v", DataType::Timestamp(unit, None), false)
+                    .with_metadata(HashMap::from([("k".to_string(), "v".to_string())])),
+            )
+        };
+        let runs = RunArray::<Int32Type>::try_new(
+            &Int32Array::from(vec![2, 3]),
+            &TimestampSecondArray::from(vec![1, -1]),
+        )
+        .expect("run array");
+        let seconds = DataType::RunEndEncoded(Arc::clone(&run_ends), values(TimeUnit::Second));
+        let column = runs
+            .into_data()
+            .into_builder()
+            .data_type(seconds.clone())
+            .build()
+            .expect("run array with its own fields");
+        let schema = Schema::new(vec![Field::new("x", seconds, false)]);
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![make_array(column)])
+            .expect("batch");
+
+        let units = ParquetUnits::of(&schema).expect("a column in seconds");
+        let converted = units.convert(&batch).expect("converted batch");
+        let milliseconds = DataType::RunEndEncoded(run_ends, values(TimeUnit::Millisecond));
+        assert_eq!(converted.column(0).data_type(), &milliseconds);
+        assert_eq!(units.schema.field(0).data_type(), &milliseconds);
+        let runs = converted.column(0).as_run::<Int32Type>();
+        assert_eq!(runs.run_ends().values(), &[2, 3]);
+        let values = runs.values().as_primitive::<TimestampMillisecondType>();
+        assert_eq!(values.values(), &[1000, -1000]);
     }
 
     /// On macOS an allow entry applies whatever the mode, so an owner-only

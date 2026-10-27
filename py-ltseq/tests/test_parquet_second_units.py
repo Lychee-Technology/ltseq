@@ -251,6 +251,71 @@ def test_seconds_beyond_milliseconds_raise_and_keep_path(tmp_path, value, nested
     assert os.listdir(tmp_path) == ["out.parquet"]
 
 
+def sliced(array, hidden):
+    return array.slice(1) if hidden else array
+
+
+SECOND = pa.timestamp("s")
+
+# Each builds a column holding 0 and `v` in seconds. When `hidden`, `v` sits
+# where a container keeps a value that no row holds: under a null slot,
+# outside a slice, or in a dictionary entry no key uses. Otherwise a row
+# holds it.
+HOLDERS = {
+    "struct under a null row": lambda v, hidden: pa.StructArray.from_arrays(
+        [pa.array([0, v], SECOND)], names=["b"], mask=pa.array([False, hidden])
+    ),
+    "list slot that is null": lambda v, hidden: pa.ListArray.from_arrays(
+        pa.array([0, 1, 2], pa.int32()), pa.array([0, v], SECOND), mask=pa.array([False, hidden])
+    ),
+    "list outside a slice": lambda v, hidden: sliced(
+        pa.array([[v], [0]], pa.list_(SECOND)), hidden
+    ),
+    "fixed_size_list slot that is null": lambda v, hidden: pa.FixedSizeListArray.from_arrays(
+        pa.array([0, v], SECOND), 1, mask=pa.array([False, hidden])
+    ),
+    "list_view outside every view": lambda v, hidden: pa.ListViewArray.from_arrays(
+        [0], [1 if hidden else 2], pa.array([0, v], SECOND)
+    ),
+    "map slot that is null": lambda v, hidden: pa.MapArray.from_arrays(
+        [0, 1, 2], pa.array(["a", "b"]), pa.array([0, v], SECOND), mask=pa.array([False, hidden])
+    ),
+    "dictionary entry no key uses": lambda v, hidden: pa.DictionaryArray.from_arrays(
+        pa.array([0, 0 if hidden else 1], pa.int32()), pa.array([0, v], SECOND)
+    ),
+    "run-end values outside a slice": lambda v, hidden: sliced(
+        pa.RunEndEncodedArray.from_arrays([1, 2], pa.array([v, 0], SECOND)), hidden
+    ),
+    "struct in a list slot that is null": lambda v, hidden: pa.ListArray.from_arrays(
+        pa.array([0, 1, 2], pa.int32()),
+        pa.StructArray.from_arrays([pa.array([0, v], SECOND)], names=["b"]),
+        mask=pa.array([False, hidden]),
+    ),
+}
+
+
+@pytest.mark.parametrize("where", HOLDERS)
+def test_values_no_row_holds_are_not_checked(tmp_path, where):
+    """A container's values that no row holds can be anything, so one beyond
+    the limit does not fail the write. Arrow's `cast` checked them all."""
+    source = HOLDERS[where](LIMIT + 1, True)
+    path = write(tmp_path, x=source)
+
+    assert bare_integer_leaves(path) == []
+    assert pq.read_table(path).column("x").to_pylist() == source.to_pylist()
+    back = LTSeq.read_parquet(str(path)).to_arrow().column("x")
+    assert back.to_pylist() == source.to_pylist()
+
+
+@pytest.mark.parametrize("where", HOLDERS)
+def test_values_a_row_holds_are_checked(tmp_path, where):
+    path = tmp_path / "out.parquet"
+    t = LTSeq.from_arrow(pa.table({"x": HOLDERS[where](LIMIT + 1, False)}))
+    with pytest.raises(ValueError, match=r"column 'x' .*milliseconds"):
+        t.write_parquet(str(path))
+    assert os.listdir(tmp_path) == []
+
+
 def test_sorted_rows_keep_their_order(tmp_path, engine_layout):
     seconds = [(i * 7919) % 101 for i in range(101)]
     t = LTSeq.from_arrow(
