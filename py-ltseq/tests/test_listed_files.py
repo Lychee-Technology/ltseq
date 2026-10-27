@@ -44,6 +44,23 @@ def rewrite(path: Path, xs: list[int], writer=write) -> None:
     os.utime(path, ns=(after, after))
 
 
+# FIRST's values rewritten to a file of the same size; Parquet's has a row more.
+SAME_SIZE = {"csv": [7, 8, 9], "parquet": [7, 7, 8, 9]}
+
+
+def rewrite_keeping_size_and_time(path: Path, xs: list[int]) -> None:
+    """Write `xs` over `path`, keeping its size and modification time.
+
+    A rewrite on a filesystem with coarse timestamps, or by a tool that sets
+    the time, can keep both. DataFusion then read the new file by the old
+    one's Parquet footer, its row count and statistics included (#359).
+    """
+    before = path.stat()
+    write(path, xs)
+    assert path.stat().st_size == before.st_size, "the rewrite must keep the size"
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
 def read(fmt: str, source: str) -> LTSeq:
     if "*" in source or source.startswith("file:"):
         # read_csv and read_parquet return an empty table for a glob or a URL
@@ -157,6 +174,20 @@ def test_a_rewritten_file_is_read_as_it_is_now(source, fmt):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_a_rewrite_that_keeps_the_size_and_time_is_read_as_it_is_now(source, fmt):
+    s = source(fmt)
+    t = s.read()
+    assert t.count() == len(FIRST + s.rest)
+    assert t.filter(lambda r: r.x > 6).count() == 0
+
+    new = SAME_SIZE[fmt]
+    rewrite_keeping_size_and_time(s.files[0], new)
+    assert t.count() == len(new + s.rest)
+    assert t.filter(lambda r: r.x > 6).count() == len(new)
+    assert xs(t) == sorted(new + s.rest)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_a_listed_file_is_read_by_its_name(tmp_path, fmt):
     """Whatever characters it holds, glob and URL ones included."""
     d = tmp_path / "data"
@@ -241,6 +272,15 @@ class TestAssumeSorted:
             t.count()
         with raises_naming(s.files[0]):
             t.head(2).to_arrow()
+
+    def test_reads_a_rewrite_that_keeps_the_size_and_time(self, source):
+        s = source("parquet")
+        t = s.read().assume_sorted("x")
+        assert t.filter(lambda r: r.x > 6).count() == 0
+
+        rewrite_keeping_size_and_time(s.files[0], SAME_SIZE["parquet"])
+        assert t.count() == 4 + len(s.rest)
+        assert t.filter(lambda r: r.x > 6).count() == 4
 
 
 class TestParquetFastPaths:

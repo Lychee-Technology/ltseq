@@ -146,7 +146,8 @@ impl LayoutOverrides {
 /// - `KeepSortsAboveOffsets`: Next, so a sort required above a slice is not
 ///   planned beneath its offset (#339)
 /// - `LocalFiles`: The store of local files, so an execution that looks up
-///   a file a reader listed fails if the file has disappeared (#262)
+///   a file a reader listed fails if the file has disappeared (#262), and
+///   reads its Parquet footer afresh (#359)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -200,9 +201,13 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
         .with_physical_optimizer_rules(rules)
         .build();
     let session = SessionContext::new_with_state(state);
+    let footers = session
+        .runtime_env()
+        .cache_manager
+        .get_file_metadata_cache();
     session.register_object_store(
         ObjectStoreUrl::local_filesystem().as_ref(),
-        Arc::new(LocalFiles::default()),
+        Arc::new(LocalFiles::new(footers)),
     );
     Arc::new(session)
 }
