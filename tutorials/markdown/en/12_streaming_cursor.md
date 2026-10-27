@@ -151,10 +151,11 @@ print("parquet rows:", cursor.count())
 
 - `write_parquet(path, compression=)` supports `snappy / zstd / gzip / lz4 /
   none`; zstd balances ratio and speed for log-like data.
-- Parquet is columnar and stores its schema, so types come back exactly as
-  written and downstream `dt.*` needs no casts. CSV types are re-inferred
-  from text: ISO dates and timestamps survive, but a decimal comes back as
-  float64 and a date like `2024/01/02` as a string.
+- Parquet is columnar and stores its schema, so types come back as written
+  and downstream `dt.*` needs no casts. A timestamp or time in seconds
+  comes back in milliseconds, because Parquet has no second unit. CSV types
+  are re-inferred from text: ISO dates and timestamps survive, but a decimal
+  comes back as float64 and a date like `2024/01/02` as a string.
 - **Pre-sorted Parquet + windows** are a golden combo:
   `LTSeq.read_parquet(...)` then `assume_sorted("ts")` skips the physical
   sort and goes straight into window computation (a cursor has no
