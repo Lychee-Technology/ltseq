@@ -3,7 +3,7 @@
 Parquet has no second unit. The `parquet` crate wrote a `timestamp[s]` or
 `time32[s]` column as a bare INT64 or INT32 with no logical type, so only
 a reader that restores types from the stored Arrow schema, as LTSeq's
-does, saw a time; pyarrow, pandas, Polars, DuckDB and Spark read integers.
+does, saw a time; pyarrow, pandas and DuckDB read integers.
 `read_csv` infers `timestamp[s]` for text such as `2024-01-01 10:00:00`,
 so an ordinary CSV-to-Parquet conversion wrote such files.
 
@@ -74,6 +74,25 @@ def test_csv_timestamps_read_as_datetimes(tmp_path):
     ]
 
 
+def test_pandas_seconds_read_as_datetimes(tmp_path):
+    df = pd.DataFrame(
+        {
+            "ts": pd.Series(pd.to_datetime(["2024-01-01 10:00:00", None])).astype("datetime64[s]"),
+            "z": pd.Series(pd.to_datetime(["2024-01-01 10:00:00", "2024-06-01 00:00:00"]))
+            .dt.tz_localize("Europe/Berlin")
+            .astype("datetime64[s, Europe/Berlin]"),
+        }
+    )
+    path = tmp_path / "out.parquet"
+    LTSeq.from_pandas(df).write_parquet(str(path))
+
+    back = pd.read_parquet(path)
+    assert str(back["ts"].dtype) == "datetime64[ms]"
+    assert str(back["z"].dtype) == "datetime64[ms, Europe/Berlin]"
+    expected = df.astype({"ts": "datetime64[ms]", "z": "datetime64[ms, Europe/Berlin]"})
+    pd.testing.assert_frame_equal(back, expected)
+
+
 INSTANTS = [dt.datetime(2024, 1, 1, 10, 0, 1), None, dt.datetime(1969, 12, 31, 23, 59, 59)]
 TIMES = [dt.time(10, 0, 1), None, dt.time(0, 0), dt.time(23, 59, 59)]
 
@@ -120,7 +139,9 @@ CONTAINERS = {
     "large_list": lambda t, v: pa.array([[v]], pa.large_list(t)),
     "fixed_size_list": lambda t, v: pa.array([[v, v]], pa.list_(t, 2)),
     "list_view": lambda t, v: pa.ListViewArray.from_arrays([0], [1], pa.array([v], t)),
-    "struct field": lambda t, v: pa.array([{"a": "x", "b": v}], pa.struct([("a", pa.string()), ("b", t)])),
+    "struct field": lambda t, v: pa.array(
+        [{"a": "x", "b": v}], pa.struct([("a", pa.string()), ("b", t)])
+    ),
     "map key": lambda t, v: pa.array([[(v, "x")]], pa.map_(t, pa.string())),
     "map value": lambda t, v: pa.array([[("k", v)]], pa.map_(pa.string(), t)),
     "list of struct": lambda t, v: pa.array([[{"b": v}]], pa.list_(pa.struct([("b", t)]))),
@@ -130,7 +151,10 @@ CONTAINERS = {
 
 NESTED_UNITS = {
     "timestamp[s]": (pa.timestamp("s"), dt.datetime(2024, 1, 1, 10, 0, 1)),
-    "timestamp[s, Europe/Berlin]": (pa.timestamp("s", tz="Europe/Berlin"), dt.datetime(2024, 1, 1, 10, 0, 1)),
+    "timestamp[s, Europe/Berlin]": (
+        pa.timestamp("s", tz="Europe/Berlin"),
+        dt.datetime(2024, 1, 1, 10, 0, 1),
+    ),
     "time32[s]": (pa.time32("s"), dt.time(10, 0, 1)),
 }
 
