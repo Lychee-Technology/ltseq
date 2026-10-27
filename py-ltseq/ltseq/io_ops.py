@@ -362,6 +362,16 @@ class IOMixin:
         leave part of the output there. :meth:`write_csv` lists those
         paths, and the guarantee's limits.
 
+        Parquet has no second unit, so a ``timestamp`` or ``time32`` in
+        seconds is written in milliseconds, as pyarrow writes it, also
+        inside a list, struct, map, dictionary or run-end encoded column.
+        Readers that go by Parquet's types, such as pandas and DuckDB, read
+        it as a time, and :meth:`read_parquet` reads it back as
+        ``timestamp[ms]`` or ``time32[ms]``, with the same values and time
+        zone. A ``timestamp[s]`` value beyond ±9223372036854775 seconds
+        (about 292 million years from 1970) has no millisecond count in
+        int64 and fails the write.
+
         Args:
             path: Path where the Parquet file will be written
             compression: Optional compression algorithm.
@@ -370,7 +380,9 @@ class IOMixin:
 
         Raises:
             RuntimeError: If write fails
-            ValueError: If compression is not recognized
+            ValueError: If compression is not recognized, or if a
+                ``timestamp[s]`` value has no millisecond count in int64;
+                ``path`` is left as it was
             TypeError: If a column is or contains a ``struct`` without fields
                 or a ``fixed_size_binary`` of width 0, which Parquet cannot
                 store; raised before anything is written

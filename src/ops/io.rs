@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, FieldRef, Schema, SchemaRef, TimeUnit};
 use tempfile::NamedTempFile;
 
 use crate::arrow_ffi::{
@@ -616,11 +616,137 @@ fn unwritable_in_parquet(data_type: &DataType) -> Option<&'static str> {
     }
 }
 
+/// The columns `write_parquet` stores in another unit than the table's
+/// (#324).
+///
+/// Parquet has no second unit. The `parquet` crate writes a `timestamp` or
+/// `time32` in seconds as a bare INT64 or INT32 with no logical type, which
+/// only a reader that trusts the stored Arrow schema reads as a time, so
+/// pyarrow, pandas and DuckDB read integers. The writer stores such
+/// values in milliseconds instead, as pyarrow does, at any depth of nesting.
+/// The conversion is `cast`'s exact one (contract §16.5, §17.6): a
+/// `timestamp[s]` value whose milliseconds do not fit `int64` fails.
+struct ParquetUnits {
+    /// The schema written, with each second unit in milliseconds.
+    schema: SchemaRef,
+    /// The type each column is converted to, for the columns that change.
+    columns: Vec<Option<DataType>>,
+}
+
+impl ParquetUnits {
+    /// `None` when `schema` holds no second unit and is written as it is.
+    fn of(schema: &Schema) -> Option<Self> {
+        let columns: Vec<_> = schema
+            .fields()
+            .iter()
+            .map(|field| in_parquet_units(field.data_type()))
+            .collect();
+        if columns.iter().all(Option::is_none) {
+            return None;
+        }
+        let schema = with_types(schema, &columns);
+        Some(Self { schema, columns })
+    }
+
+    fn convert(&self, batch: &RecordBatch) -> Result<RecordBatch, LtseqError> {
+        use datafusion::arrow::compute::{cast_with_options, CastOptions};
+
+        // Not `safe`, which would turn a value that does not fit into NULL.
+        let options = CastOptions {
+            safe: false,
+            ..Default::default()
+        };
+        let schema = batch.schema();
+        let columns = batch
+            .columns()
+            .iter()
+            .zip(&self.columns)
+            .zip(schema.fields())
+            .map(|((column, to), field)| match to {
+                Some(to) => cast_with_options(column, to, &options).map_err(|e| {
+                    LtseqError::Validation(format!(
+                        "write_parquet cannot write column '{}' ({}): Parquet has no \
+                         second unit, so it is written in milliseconds: {}",
+                        field.name(),
+                        column.data_type(),
+                        e
+                    ))
+                }),
+                None => Ok(Arc::clone(column)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // The batch's own schema, not `self.schema`: the writer never required
+        // a batch to match the plan's schema exactly (in a nested field's
+        // nullability, say), and `try_new` checks each column against it.
+        RecordBatch::try_new(with_types(&schema, &self.columns), columns)
+            .map_err(|e| LtseqError::runtime("Failed to convert a Parquet batch", e))
+    }
+}
+
+/// `schema` with each column that `columns` gives a type converted to it.
+fn with_types(schema: &Schema, columns: &[Option<DataType>]) -> SchemaRef {
+    let fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .zip(columns)
+        .map(|(field, to)| match to {
+            Some(to) => Arc::new(field.as_ref().clone().with_data_type(to.clone())),
+            None => Arc::clone(field),
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
+/// `data_type` with each second unit in it in milliseconds, or `None` when
+/// it holds none. Nested fields keep their names, nullability and metadata.
+fn in_parquet_units(data_type: &DataType) -> Option<DataType> {
+    let field = |field: &FieldRef| {
+        in_parquet_units(field.data_type())
+            .map(|to| Arc::new(field.as_ref().clone().with_data_type(to)))
+    };
+    match data_type {
+        DataType::Timestamp(TimeUnit::Second, tz) => {
+            Some(DataType::Timestamp(TimeUnit::Millisecond, tz.clone()))
+        }
+        DataType::Time32(TimeUnit::Second) => Some(DataType::Time32(TimeUnit::Millisecond)),
+        DataType::List(item) => field(item).map(DataType::List),
+        DataType::LargeList(item) => field(item).map(DataType::LargeList),
+        DataType::ListView(item) => field(item).map(DataType::ListView),
+        DataType::LargeListView(item) => field(item).map(DataType::LargeListView),
+        DataType::FixedSizeList(item, size) => {
+            field(item).map(|item| DataType::FixedSizeList(item, *size))
+        }
+        DataType::Map(entries, sorted) => {
+            field(entries).map(|entries| DataType::Map(entries, *sorted))
+        }
+        DataType::Struct(fields) => {
+            let converted: Vec<_> = fields.iter().map(field).collect();
+            converted.iter().any(Option::is_some).then(|| {
+                DataType::Struct(
+                    fields
+                        .iter()
+                        .zip(converted)
+                        .map(|(old, new)| new.unwrap_or_else(|| Arc::clone(old)))
+                        .collect(),
+                )
+            })
+        }
+        DataType::Dictionary(keys, values) => in_parquet_units(values)
+            .map(|values| DataType::Dictionary(keys.clone(), Box::new(values))),
+        DataType::RunEndEncoded(run_ends, values) => {
+            field(values).map(|values| DataType::RunEndEncoded(Arc::clone(run_ends), values))
+        }
+        // A union makes the writer panic whatever its members (#270).
+        _ => None,
+    }
+}
+
 /// Write table data to a Parquet file using Arrow's native Parquet writer.
 ///
 /// Batches are streamed from DataFusion and written incrementally, avoiding
 /// full in-memory materialization before the first write. The write is
 /// atomic (see [`Output`]), so a plan may read the file it replaces.
+/// Columns in seconds are written in milliseconds ([`ParquetUnits`]).
 ///
 /// Args:
 ///     table: Reference to LTSeqTable
@@ -672,7 +798,11 @@ pub fn write_parquet_impl(
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
 
-        let mut writer = ArrowWriter::try_new(output.file(), schema, Some(props))
+        let units = ParquetUnits::of(&schema);
+        let written = units
+            .as_ref()
+            .map_or(schema, |units| Arc::clone(&units.schema));
+        let mut writer = ArrowWriter::try_new(output.file(), written, Some(props))
             .map_err(|e| LtseqError::Io(format!("Failed to create Parquet writer: {}", e)))?;
 
         let mut wrote_any = false;
@@ -680,6 +810,10 @@ pub fn write_parquet_impl(
             let batch = batch_result.map_err(|e| {
                 LtseqError::Io(format!("Failed to read batch: {}", e))
             })?;
+            let batch = match &units {
+                Some(units) => units.convert(&batch)?,
+                None => batch,
+            };
             if batch.num_rows() > 0 {
                 writer.write(&batch).map_err(|e| {
                     LtseqError::Io(format!("Failed to write Parquet batch: {}", e))
