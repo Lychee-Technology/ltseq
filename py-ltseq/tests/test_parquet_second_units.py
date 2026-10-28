@@ -294,6 +294,14 @@ HOLDERS = {
 }
 
 
+# pyarrow before 26 cannot read a fixed_size_list with a null slot from
+# Parquet, not even from a file it wrote itself ("Expected all lists to be
+# of size=1 but index 2 had size=0"). CI installs 25.0.1.
+PYARROW_CANNOT_READ = (
+    {"fixed_size_list slot that is null"} if int(pa.__version__.split(".")[0]) < 26 else set()
+)
+
+
 @pytest.mark.parametrize("where", HOLDERS)
 def test_values_no_row_holds_are_not_checked(tmp_path, where):
     """A container's values that no row holds can be anything, so one beyond
@@ -302,7 +310,8 @@ def test_values_no_row_holds_are_not_checked(tmp_path, where):
     path = write(tmp_path, x=source)
 
     assert bare_integer_leaves(path) == []
-    assert pq.read_table(path).column("x").to_pylist() == source.to_pylist()
+    if where not in PYARROW_CANNOT_READ:
+        assert pq.read_table(path).column("x").to_pylist() == source.to_pylist()
     back = LTSeq.read_parquet(str(path)).to_arrow().column("x")
     assert back.to_pylist() == source.to_pylist()
 
