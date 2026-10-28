@@ -385,5 +385,6 @@ def test_country_example_runs(monkeypatch, tmp_path, capsys):
     script = Path(__file__).resolve().parents[2] / "examples" / "country.py"
     monkeypatch.chdir(tmp_path)
     runpy.run_path(str(script), run_name="__main__")
-    out = capsys.readouterr().out
-    assert "CountryCode" in out
+    out = capsys.readouterr().out.splitlines()
+    assert "Switzerland: German(63.6%), French(19.2%), Italian(7.7%), Romansh(0.6%)" in out
+    assert "South Africa: Zulu(22.7%), Xhosa(17.7%), Afrikaans(14.3%), English(8.5%)" in out
