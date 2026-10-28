@@ -18,11 +18,13 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{
     Array, ArrayRef, ArrowNativeTypeOp, ArrowPrimitiveType, AsArray, BooleanBufferBuilder,
-    GenericListArray, GenericListViewArray, OffsetSizeTrait, PrimitiveArray, RecordBatch,
+    DictionaryArray, GenericListArray, GenericListViewArray, OffsetSizeTrait, PrimitiveArray,
+    RecordBatch,
 };
 use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{
-    ArrowNativeType, DataType, FieldRef, RunEndIndexType, Schema, SchemaRef, TimeUnit,
+    ArrowDictionaryKeyType, ArrowNativeType, DataType, FieldRef, RunEndIndexType, Schema,
+    SchemaRef, TimeUnit,
 };
 use datafusion::arrow::error::ArrowError;
 use tempfile::NamedTempFile;
@@ -758,9 +760,10 @@ fn in_parquet_units(data_type: &DataType) -> Option<DataType> {
 /// others become 0, since no row reads them.
 ///
 /// A slice of a list, map, list view or run-end encoded array keeps its
-/// parent's whole child, and so does each batch cut from one array. Such a
-/// child is cut to the values the slots reach before it is converted, so a
-/// batch costs its own rows, not the column it was cut from.
+/// parent's whole child, a slice of a dictionary array all its entries, and
+/// so does each batch cut from one array. Such a child is cut to the values
+/// the slots reach before it is converted, so a batch costs its own rows,
+/// not the column it was cut from.
 fn in_milliseconds(
     array: &ArrayRef,
     to: &DataType,
@@ -771,6 +774,7 @@ fn in_milliseconds(
         Int16Type, Int32Type, Int64Type, Time32MillisecondType, Time32SecondType,
         TimestampMillisecondType, TimestampSecondType,
     };
+    use datafusion::arrow::downcast_dictionary_array;
 
     if array.data_type() == to {
         return Ok(Arc::clone(array));
@@ -836,19 +840,13 @@ fn in_milliseconds(
             Ok(Arc::new(converted))
         }
         (DataType::Dictionary(..), DataType::Dictionary(_, values)) => {
-            let dictionary = array.as_any_dictionary();
-            let len = dictionary.values().len();
-            let mut used = BooleanBufferBuilder::new(len);
-            used.append_n(len, false);
-            if len > 0 {
-                for (slot, key) in dictionary.normalized_keys().into_iter().enumerate() {
-                    if live.as_ref().is_none_or(|live| live.is_valid(slot)) {
-                        used.set_bit(key, true);
-                    }
-                }
-            }
-            let used = Some(NullBuffer::new(used.finish()));
-            Ok(dictionary.with_values(in_milliseconds(dictionary.values(), values, used)?))
+            let array = array.as_ref();
+            downcast_dictionary_array!(
+                array => dictionary(array, values, live),
+                other => Err(ArrowError::CastError(format!(
+                    "no conversion from {other} to {to}"
+                )))
+            )
         }
         (DataType::RunEndEncoded(run_ends, _), _) => match run_ends.data_type() {
             DataType::Int16 => run_end_encoded::<Int16Type>(array, to, live),
@@ -958,6 +956,44 @@ fn list_view<O: OffsetSizeTrait>(
         list.nulls().cloned(),
     )?;
     Ok(Arc::new(converted))
+}
+
+/// `dictionary` with only the entries its `live` slots use, in `to`. The
+/// keys of the other slots point at the first entry kept.
+fn dictionary<K: ArrowDictionaryKeyType>(
+    dictionary: &DictionaryArray<K>,
+    to: &DataType,
+    live: Option<NullBuffer>,
+) -> Result<ArrayRef, ArrowError> {
+    use datafusion::arrow::array::UInt64Array;
+    use datafusion::arrow::compute::take;
+
+    let (keys, values) = (dictionary.keys(), dictionary.values());
+    let mut used: Vec<usize> = keys
+        .values()
+        .iter()
+        .enumerate()
+        .filter(|&(slot, _)| live.as_ref().is_none_or(|live| live.is_valid(slot)))
+        .map(|(_, key)| key.as_usize())
+        .collect();
+    used.sort_unstable();
+    used.dedup();
+    if used.len() == values.len() {
+        let values = in_milliseconds(values, to, None)?;
+        return Ok(Arc::new(dictionary.with_values(values)));
+    }
+    // With no entry used, the first is kept for the other slots' keys, and
+    // becomes 0.
+    let (used, held) = match used.is_empty() {
+        true => (vec![0], Some(NullBuffer::new_null(1))),
+        false => (used, None),
+    };
+    let entries = UInt64Array::from_iter_values(used.iter().map(|&entry| entry as u64));
+    let values = in_milliseconds(&take(values.as_ref(), &entries, None)?, to, held)?;
+    // A slot no row holds may have a key whose entry was not kept.
+    let entry = |key: K::Native| used.binary_search(&key.as_usize()).unwrap_or(0);
+    let keys = keys.unary::<_, K>(|key| K::Native::usize_as(entry(key)));
+    Ok(Arc::new(DictionaryArray::try_new(keys, values)?))
 }
 
 /// The values a run-end encoded array's `live` slots reach are those of the
@@ -1336,10 +1372,10 @@ mod tests {
     }
 
     /// A slice of a list, map, list view or run-end encoded array keeps its
-    /// parent's whole child, and so does each batch cut from one array. The
-    /// conversion builds only the values the slice reaches, so a few rows of
-    /// a large column, or each of many batches sharing its child, cost those
-    /// rows and not the column.
+    /// parent's whole child, a slice of a dictionary array all its entries,
+    /// and so does each batch cut from one array. The conversion builds only
+    /// the values the slice reaches, so a few rows of a large column, or each
+    /// of many batches sharing its child, cost those rows and not the column.
     #[test]
     fn a_slice_converts_only_the_values_it_reaches() {
         use datafusion::arrow::array::{
@@ -1483,6 +1519,17 @@ mod tests {
             },
             (400, 20),
             |a| a.as_run::<Int32Type>().values().len(),
+            20,
+        );
+        check(
+            // An entry for each value, in reverse order.
+            "dictionary",
+            |unit| {
+                let keys = Int32Array::from_iter_values((0..(ROWS * PER) as i32).rev());
+                Arc::new(DictionaryArray::<Int32Type>::new(keys, leaf(unit)))
+            },
+            (400, 20),
+            |a| a.as_any_dictionary().values().len(),
             20,
         );
     }

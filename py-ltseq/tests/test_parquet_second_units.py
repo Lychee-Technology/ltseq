@@ -283,6 +283,12 @@ HOLDERS = {
     "dictionary entry no key uses": lambda v, hidden: pa.DictionaryArray.from_arrays(
         pa.array([0, 0 if hidden else 1], pa.int32()), pa.array([0, v], SECOND)
     ),
+    # A key under a null row still points at its entry.
+    "dictionary under a null row": lambda v, hidden: pa.StructArray.from_arrays(
+        [pa.DictionaryArray.from_arrays(pa.array([0], pa.int32()), pa.array([v], SECOND))],
+        names=["b"],
+        mask=pa.array([hidden]),
+    ),
     "run-end values outside a slice": lambda v, hidden: sliced(
         pa.RunEndEncodedArray.from_arrays([1, 2], pa.array([v, 0], SECOND)), hidden
     ),
@@ -327,8 +333,9 @@ def test_values_a_row_holds_are_checked(tmp_path, where):
 
 # Each builds a column holding the second counts `vs`, one to a row. A slice
 # of a list, map, list view or run-end encoded array keeps its whole child,
-# and so does each batch pyarrow cuts from one array. The writer converts
-# only the values a batch's rows reach, so the offsets into them change.
+# a slice of a dictionary array all its entries, and so does each batch
+# pyarrow cuts from one array. The writer converts only the values a batch's
+# rows reach, so the offsets or keys into them change.
 CUT = {
     "list": lambda vs: pa.array([[v, None] for v in vs], pa.list_(SECOND)),
     "large_list": lambda vs: pa.array([[v] for v in vs], pa.large_list(SECOND)),
@@ -340,6 +347,10 @@ CUT = {
     "list of lists": lambda vs: pa.array([[[v], []] for v in vs], pa.list_(pa.list_(SECOND))),
     "run-end values": lambda vs: pa.RunEndEncodedArray.from_arrays(
         list(range(2, 2 * len(vs) + 1, 2)), pa.array(vs, SECOND)
+    ),
+    # Entries in reverse order, so the keys change.
+    "dictionary values": lambda vs: pa.DictionaryArray.from_arrays(
+        pa.array(range(len(vs))[::-1], pa.int32()), pa.array(vs[::-1], SECOND)
     ),
 }
 
