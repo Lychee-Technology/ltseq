@@ -277,6 +277,9 @@ HOLDERS = {
     "list_view outside every view": lambda v, hidden: pa.ListViewArray.from_arrays(
         [0], [1 if hidden else 2], pa.array([0, v], SECOND)
     ),
+    "list_view between two views": lambda v, hidden: pa.ListViewArray.from_arrays(
+        [0, 2 if hidden else 1], [1, 1], pa.array([0, v, 0], SECOND)
+    ),
     "map slot that is null": lambda v, hidden: pa.MapArray.from_arrays(
         [0, 1, 2], pa.array(["a", "b"]), pa.array([0, v], SECOND), mask=pa.array([False, hidden])
     ),
@@ -334,8 +337,9 @@ def test_values_a_row_holds_are_checked(tmp_path, where):
 # Each builds a column holding the second counts `vs`, one to a row. A slice
 # of a list, map, list view or run-end encoded array keeps its whole child,
 # a slice of a dictionary array all its entries, and so does each batch
-# pyarrow cuts from one array. The writer converts only the values a batch's
-# rows reach, so the offsets or keys into them change.
+# pyarrow cuts from one array. A null list slot can span values, and list
+# views can leave values between them. The writer converts only the values
+# a batch's rows reach, so the offsets or keys into them change.
 CUT = {
     "list": lambda vs: pa.array([[v, None] for v in vs], pa.list_(SECOND)),
     "large_list": lambda vs: pa.array([[v] for v in vs], pa.large_list(SECOND)),
@@ -351,6 +355,34 @@ CUT = {
     # Entries in reverse order, so the keys change.
     "dictionary values": lambda vs: pa.DictionaryArray.from_arrays(
         pa.array(range(len(vs))[::-1], pa.int32()), pa.array(vs[::-1], SECOND)
+    ),
+    # Every third slot is null over its value, and every fourth value is
+    # null, in a child sliced one value in.
+    "list with null slots": lambda vs: pa.ListArray.from_arrays(
+        pa.array(range(len(vs) + 1), pa.int32()),
+        pa.array([0] + [None if v % 4 == 0 else v for v in vs], SECOND).slice(1),
+        mask=pa.array([i % 3 == 1 for i in range(len(vs))]),
+    ),
+    # A view on every other value.
+    "list_view with gaps": lambda vs: pa.ListViewArray.from_arrays(
+        list(range(0, 2 * len(vs), 2)),
+        [1] * len(vs),
+        pa.array([x for v in vs for x in (v, 0)], SECOND),
+    ),
+    # Every third slot null over its struct, every fifth struct null, and
+    # fields that hold no second unit cut to the same rows.
+    "list of struct with null slots": lambda vs: pa.ListArray.from_arrays(
+        pa.array(range(len(vs) + 1), pa.int32()),
+        pa.StructArray.from_arrays(
+            [
+                pa.array(vs, SECOND),
+                pa.array([[str(v)] for v in vs], pa.list_(pa.string())),
+                pa.array([str(v % 5) for v in vs]).dictionary_encode(),
+            ],
+            names=["b", "s", "d"],
+            mask=pa.array([v % 5 == 0 for v in vs]),
+        ),
+        mask=pa.array([i % 3 == 1 for i in range(len(vs))]),
     ),
 }
 
