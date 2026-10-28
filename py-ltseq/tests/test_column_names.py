@@ -11,7 +11,9 @@ Each test runs one operation twice: on tables whose columns have plain
 lowercase names, and on the same tables with those columns renamed, on
 every input, to names with uppercase letters, spaces, dots, double quotes
 or non-ASCII characters. The second run must give the first run's result
-under the new names.
+under the new names. Names are case-sensitive (contract §6.4), so a name
+that matches a column only when lowercased, or not at all, raises
+`ColumnNotFoundError` naming it.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from typing import Any, Callable, NamedTuple
 import pytest
 
 from ltseq import LTSeq
+from ltseq.exceptions import ColumnNotFoundError
 from ltseq.expr import rank
 
 
@@ -80,7 +83,7 @@ def comparable(value: Any, names: Names | None = None) -> Any:
             return name
         return _PLAIN_NAME.sub(lambda m: dict(zip(PLAIN, names))[m.group()], name)
 
-    if isinstance(value, LTSeq):
+    if hasattr(value, "to_dicts"):
         rows = [{rename(k): v for k, v in row.items()} for row in value.to_dicts()]
         return [rename(c) for c in value.columns], sorted(rows, key=repr)
     if isinstance(value, (list, tuple)):
@@ -272,6 +275,16 @@ def test_window_partition_by(names, window, form):
     check(op, names)
 
 
+def test_group_ordered_by_a_partitioned_shift(names):
+    def op(n: Names) -> list:
+        groups = left(n).sort(n.tm).group_ordered(
+            lambda r: col(r, n.key) != col(r, n.key).shift(1, partition_by=n.txt)
+        )
+        return [groups.first(), groups.first().count(), groups.flatten()]
+
+    check(op, names)
+
+
 def test_over_partition_by(names):
     check(
         lambda n: left(n).derive(
@@ -302,6 +315,66 @@ def test_search_pattern_count(names):
 
 def test_rename(names):
     check(lambda n: left(n).rename({n.key: "id", n.val: n.val + "!"}), names)
+
+
+# -- names that name no column -----------------------------------------------
+
+
+def _other(n: Names) -> LTSeq:
+    """`right(n)` without `n.key`, which it calls `other`."""
+    return right(n).rename({n.key: "other"})
+
+
+MISSING = {
+    "join on=": lambda n, x: left(n).join(right(n), on=x),
+    "join on= list": lambda n, x: left(n).join(right(n), on=[n.key, x]),
+    "join on= missing on the right": lambda n, x: left(n).join(_other(n), on=n.key),
+    "join left_on=": lambda n, x: left(n).join(right(n), left_on=x, right_on=n.key),
+    "join right_on=": lambda n, x: left(n).join(right(n), left_on=n.key, right_on=x),
+    "semi_join on=": lambda n, x: left(n).semi_join(right(n), on=x),
+    "anti_join on= list": lambda n, x: left(n).anti_join(right(n), on=[x]),
+    "asof_join on=": lambda n, x: left(n).asof_join(right(n), on=x),
+    "asof_join by=": lambda n, x: left(n).asof_join(right(n), on=n.tm, by=x),
+    "intersect on=": lambda n, x: left(n).intersect(right(n), on=x),
+    "intersect on= missing on the right": lambda n, x: left(n).intersect(_other(n), on=n.key),
+    "except_ on=": lambda n, x: left(n).except_(right(n), on=x),
+    "xunion on=": lambda n, x: left(n).xunion(right(n), on=x),
+    "is_subset on=": lambda n, x: left(n).is_subset(right(n), on=x),
+    "lookup join_key=": lambda n, x: left(n).derive(
+        out=lambda r: col(r, n.key).lookup(right(n), n.txt, join_key=x)
+    ),
+    "pivot index=": lambda n, x: left(n).pivot(index=x, columns=n.txt, values=n.val),
+    "pivot columns=": lambda n, x: left(n).pivot(index=n.key, columns=x, values=n.val),
+    "pivot values=": lambda n, x: left(n).pivot(index=n.key, columns=n.txt, values=x),
+    "partition": lambda n, x: left(n).partition(x),
+    "shift partition_by=": lambda n, x: left(n).sort(n.tm).derive(
+        out=lambda r: col(r, n.val).shift(1, partition_by=x)
+    ),
+    "rolling partition_by= in an expression": lambda n, x: left(n).sort(n.tm).derive(
+        out=lambda r: col(r, n.val).rolling(2, partition_by=x).sum() + 1
+    ),
+    "search_pattern partition_by=": lambda n, x: left(n).sort(n.tm).search_pattern(
+        lambda r: col(r, n.val) > 0, partition_by=x
+    ),
+    "search_pattern_count partition_by=": lambda n, x: left(n).sort(n.tm).search_pattern_count(
+        lambda r: col(r, n.val) > 0, partition_by=x
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(MISSING))
+def test_a_name_of_no_column_raises(names, case):
+    absent = names.key + "2"
+    named = names.key if "missing on the right" in case else absent
+    with pytest.raises(ColumnNotFoundError, match=re.escape(f"'{named}'")):
+        MISSING[case](names, absent)
+
+
+@pytest.mark.parametrize("case", [c for c in MISSING if "missing on the right" not in c])
+def test_names_are_case_sensitive(case):
+    """A name that matches a column only when lowercased names no column."""
+    with pytest.raises(ColumnNotFoundError, match="'TXT'"):
+        MISSING[case](PLAIN, "TXT")
 
 
 # -- the example the issue names ---------------------------------------------

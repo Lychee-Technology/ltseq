@@ -672,7 +672,8 @@ class LTSeq(
                 a single column. Also raised when the keys are first used if
                 distinct keys convert to one Python value, as ``time64[ns]``
                 values less than a microsecond apart do
-            AttributeError: If any column doesn't exist
+            ColumnNotFoundError: If a name is not a column (a subclass of
+                AttributeError)
             TypeError: If arguments are invalid
 
         Example:
@@ -705,7 +706,9 @@ class LTSeq(
                         f"Use partition(by=func) for callable-based partitioning."
                     )
                 if col not in self._schema:
-                    raise AttributeError(
+                    from .exceptions import ColumnNotFoundError
+
+                    raise ColumnNotFoundError(
                         f"Column '{col}' not found in schema. "
                         f"Available columns: {list(self._schema.keys())}"
                     )

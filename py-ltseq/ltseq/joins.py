@@ -3,6 +3,7 @@
 from typing import Any, Callable, TYPE_CHECKING
 
 from ._typing import LTSeqLike
+from .exceptions import ColumnNotFoundError
 if TYPE_CHECKING:
     from .core import LTSeq
 
@@ -109,7 +110,7 @@ def _resolve_join_keys(
 def _check_cols(cols: list[str], schema: dict[str, str], side: str) -> None:
     for c in cols:
         if c not in schema:
-            raise ValueError(
+            raise ColumnNotFoundError(
                 f"Join column '{c}' not found in {side} table. "
                 f"Available columns: {list(schema.keys())}"
             )
@@ -200,6 +201,8 @@ class JoinMixin(LTSeqLike):
             Joined LTSeq with columns from both tables
 
         Raises:
+            ColumnNotFoundError: If a key name given as a string is not a
+                column of its table
             ValueError: If strategy="merge" and tables are not sorted by join keys
             TypeError: If the on= lambda tests a value against None with
                 ``is`` / ``is not``; filter nulls before or after the join instead
@@ -440,7 +443,7 @@ class JoinMixin(LTSeqLike):
             (right_time_col, other._schema, "right"),
         ):
             if col_name not in schema:
-                raise ValueError(
+                raise ColumnNotFoundError(
                     f"asof_join time column '{col_name}' not found in {side} table. "
                     f"Available columns: {list(schema.keys())}"
                 )
@@ -453,9 +456,9 @@ class JoinMixin(LTSeqLike):
             by_cols = [by] if isinstance(by, str) else list(by)
             for c in by_cols:
                 if c not in self._schema:
-                    raise ValueError(f"asof_join by= column '{c}' not found in left table")
+                    raise ColumnNotFoundError(f"asof_join by= column '{c}' not found in left table")
                 if c not in other._schema:
-                    raise ValueError(f"asof_join by= column '{c}' not found in right table")
+                    raise ColumnNotFoundError(f"asof_join by= column '{c}' not found in right table")
             left_by = right_by = by_cols
 
         left_table = self
