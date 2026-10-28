@@ -325,6 +325,44 @@ def test_values_a_row_holds_are_checked(tmp_path, where):
     assert os.listdir(tmp_path) == []
 
 
+# Each builds a column holding the second counts `vs`, one to a row. A slice
+# of a list, map, list view or run-end encoded array keeps its whole child,
+# and so does each batch pyarrow cuts from one array. The writer converts
+# only the values a batch's rows reach, so the offsets into them change.
+CUT = {
+    "list": lambda vs: pa.array([[v, None] for v in vs], pa.list_(SECOND)),
+    "large_list": lambda vs: pa.array([[v] for v in vs], pa.large_list(SECOND)),
+    # Views in reverse order, so the first row's is not the lowest.
+    "list_view": lambda vs: pa.ListViewArray.from_arrays(
+        list(range(len(vs)))[::-1], [1] * len(vs), pa.array(vs[::-1], SECOND)
+    ),
+    "map value": lambda vs: pa.array([[("k", v)] for v in vs], pa.map_(pa.string(), SECOND)),
+    "list of lists": lambda vs: pa.array([[[v], []] for v in vs], pa.list_(pa.list_(SECOND))),
+    "run-end values": lambda vs: pa.RunEndEncodedArray.from_arrays(
+        list(range(2, 2 * len(vs) + 1, 2)), pa.array(vs, SECOND)
+    ),
+}
+
+
+@pytest.mark.parametrize("cut", ["a few rows", "many batches"])
+@pytest.mark.parametrize("where", CUT)
+def test_rows_cut_from_a_column_are_written_as_they_are(tmp_path, where, cut):
+    table = pa.table({"x": CUT[where](list(range(100)))})
+    if cut == "a few rows":
+        table = table.slice(41, 3)
+    else:
+        table = pa.Table.from_batches(table.to_batches(max_chunksize=7))
+    with pinned_engine(target_partitions=1):
+        t = LTSeq.from_arrow(table)
+    path = tmp_path / "out.parquet"
+    t.write_parquet(str(path))
+
+    expected = table.column("x").to_pylist()
+    assert bare_integer_leaves(path) == []
+    assert pq.read_table(path).column("x").to_pylist() == expected
+    assert LTSeq.read_parquet(str(path)).to_arrow().column("x").to_pylist() == expected
+
+
 def test_sorted_rows_keep_their_order(tmp_path, engine_layout):
     seconds = [(i * 7919) % 101 for i in range(101)]
     t = LTSeq.from_arrow(

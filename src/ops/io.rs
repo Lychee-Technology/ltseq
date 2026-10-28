@@ -20,7 +20,7 @@ use datafusion::arrow::array::{
     Array, ArrayRef, ArrowNativeTypeOp, ArrowPrimitiveType, AsArray, BooleanBufferBuilder,
     GenericListArray, GenericListViewArray, OffsetSizeTrait, PrimitiveArray, RecordBatch,
 };
-use datafusion::arrow::buffer::NullBuffer;
+use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{
     ArrowNativeType, DataType, FieldRef, RunEndIndexType, Schema, SchemaRef, TimeUnit,
 };
@@ -756,6 +756,11 @@ fn in_parquet_units(data_type: &DataType) -> Option<DataType> {
 /// `live` marks the slots of `array` that a row holds, all of them when
 /// `None`. Only the values in those slots are checked and converted; the
 /// others become 0, since no row reads them.
+///
+/// A slice of a list, map, list view or run-end encoded array keeps its
+/// parent's whole child, and so does each batch cut from one array. Such a
+/// child is cut to the values the slots reach before it is converted, so a
+/// batch costs its own rows, not the column it was cut from.
 fn in_milliseconds(
     array: &ArrayRef,
     to: &DataType,
@@ -819,15 +824,11 @@ fn in_milliseconds(
         (DataType::Map(..), DataType::Map(field, sorted)) => {
             let map = array.as_map();
             let entries: ArrayRef = Arc::new(map.entries().clone());
-            let ranges = map
-                .offsets()
-                .windows(2)
-                .map(|w| (w[0] as usize, w[1] as usize));
-            let live = Some(reached(ranges, live.as_ref(), entries.len()));
-            let entries = in_milliseconds(&entries, field.data_type(), live)?;
+            let (offsets, entries, live) = in_reach(map.offsets(), &entries, live.as_ref());
+            let entries = in_milliseconds(&entries, field.data_type(), Some(live))?;
             let converted = MapArray::try_new(
                 Arc::clone(field),
-                map.offsets().clone(),
+                offsets,
                 entries.as_struct().clone(),
                 map.nulls().cloned(),
                 *sorted,
@@ -891,19 +892,32 @@ fn list<O: OffsetSizeTrait>(
     live: Option<NullBuffer>,
 ) -> Result<ArrayRef, ArrowError> {
     let list = array.as_list::<O>();
-    let ranges = list
-        .offsets()
+    let (offsets, values, live) = in_reach(list.offsets(), list.values(), live.as_ref());
+    let values = in_milliseconds(&values, item.data_type(), Some(live))?;
+    let converted =
+        GenericListArray::<O>::try_new(Arc::clone(item), offsets, values, list.nulls().cloned())?;
+    Ok(Arc::new(converted))
+}
+
+/// For a list or map with these `offsets` into `values`: the offsets into
+/// the values its slots reach, those values, and which of them the `live`
+/// slots reach.
+fn in_reach<O: OffsetSizeTrait>(
+    offsets: &OffsetBuffer<O>,
+    values: &ArrayRef,
+    live: Option<&NullBuffer>,
+) -> (OffsetBuffer<O>, ArrayRef, NullBuffer) {
+    let first = offsets[0];
+    let len = (offsets[offsets.len() - 1] - first).as_usize();
+    let offsets = match first.as_usize() {
+        0 => offsets.clone(),
+        _ => OffsetBuffer::new(offsets.iter().map(|offset| *offset - first).collect()),
+    };
+    let ranges = offsets
         .windows(2)
         .map(|w| (w[0].as_usize(), w[1].as_usize()));
-    let live = Some(reached(ranges, live.as_ref(), list.values().len()));
-    let values = in_milliseconds(list.values(), item.data_type(), live)?;
-    let converted = GenericListArray::<O>::try_new(
-        Arc::clone(item),
-        list.offsets().clone(),
-        values,
-        list.nulls().cloned(),
-    )?;
-    Ok(Arc::new(converted))
+    let live = reached(ranges, live, len);
+    (offsets, values.slice(first.as_usize(), len), live)
 }
 
 fn list_view<O: OffsetSizeTrait>(
@@ -912,16 +926,33 @@ fn list_view<O: OffsetSizeTrait>(
     live: Option<NullBuffer>,
 ) -> Result<ArrayRef, ArrowError> {
     let list = array.as_list_view::<O>();
-    let ranges = list
+    let views = list
         .offsets()
         .iter()
         .zip(list.sizes().iter())
+        .map(|(offset, size)| (offset.as_usize(), size.as_usize()));
+    // The values the views reach lie between the lowest start and the
+    // highest end of a view that is not empty.
+    let (start, end) = views
+        .clone()
+        .filter(|&(_, size)| size > 0)
+        .map(|(offset, size)| (offset, offset + size))
+        .reduce(|(start, end), (s, e)| (start.min(s), end.max(e)))
+        .unwrap_or((0, 0));
+    // An empty view may start anywhere in the values, so it starts at 0.
+    let offsets: ScalarBuffer<O> = views
+        .map(|(offset, size)| O::usize_as(if size > 0 { offset - start } else { 0 }))
+        .collect();
+    let ranges = offsets
+        .iter()
+        .zip(list.sizes().iter())
         .map(|(offset, size)| (offset.as_usize(), offset.as_usize() + size.as_usize()));
-    let live = Some(reached(ranges, live.as_ref(), list.values().len()));
-    let values = in_milliseconds(list.values(), item.data_type(), live)?;
+    let live = Some(reached(ranges, live.as_ref(), end - start));
+    let values = list.values().slice(start, end - start);
+    let values = in_milliseconds(&values, item.data_type(), live)?;
     let converted = GenericListViewArray::<O>::try_new(
         Arc::clone(item),
-        list.offsets().clone(),
+        offsets,
         list.sizes().clone(),
         values,
         list.nulls().cloned(),
@@ -938,7 +969,7 @@ fn run_end_encoded<R: RunEndIndexType>(
 ) -> Result<ArrayRef, ArrowError> {
     use datafusion::arrow::array::make_array;
 
-    let DataType::RunEndEncoded(_, values) = to else {
+    let DataType::RunEndEncoded(_, values_field) = to else {
         return Err(ArrowError::CastError(format!(
             "no conversion from {} to {to}",
             array.data_type()
@@ -947,32 +978,41 @@ fn run_end_encoded<R: RunEndIndexType>(
     let runs = array.as_run::<R>();
     let ends = runs.run_ends();
     let (offset, len) = (ends.offset(), ends.len());
-    let mut used = BooleanBufferBuilder::new(runs.values().len());
-    used.append_n(runs.values().len(), false);
-    if len > 0 {
-        for run in ends.get_start_physical_index()..=ends.get_end_physical_index() {
-            let start = match run {
-                0 => 0,
-                _ => ends.values()[run - 1].as_usize(),
-            };
-            // The run's slots, within the slice.
-            let start = start.max(offset) - offset;
-            let end = ends.values()[run].as_usize().min(offset + len) - offset;
-            let held = live
-                .as_ref()
-                .is_none_or(|live| live.slice(start, end - start).null_count() < end - start);
-            used.set_bit(run, held);
-        }
+    // The runs the slice falls in.
+    let (first, last) = match len {
+        0 => (0, 0),
+        _ => (
+            ends.get_start_physical_index(),
+            ends.get_end_physical_index() + 1,
+        ),
+    };
+    let mut used = BooleanBufferBuilder::new(last - first);
+    used.append_n(last - first, false);
+    for run in first..last {
+        let start = match run {
+            0 => 0,
+            _ => ends.values()[run - 1].as_usize(),
+        };
+        // The run's slots, within the slice.
+        let start = start.max(offset) - offset;
+        let end = ends.values()[run].as_usize().min(offset + len) - offset;
+        let held = live
+            .as_ref()
+            .is_none_or(|live| live.slice(start, end - start).null_count() < end - start);
+        used.set_bit(run - first, held);
     }
     let used = Some(NullBuffer::new(used.finish()));
-    let values = in_milliseconds(runs.values(), values.data_type(), used)?;
-    // The array's own run ends, slice and `to`'s fields.
-    let data = runs.to_data();
-    let run_ends = data.child_data()[0].clone();
-    let data = data
+    let values = runs.values().slice(first, last - first);
+    let values = in_milliseconds(&values, values_field.data_type(), used)?;
+    // The array's own slice and `to`'s fields, over those runs. A new run
+    // ends array, not a slice of the old one's data: an array read from
+    // `ArrayData` ignores its run ends' offset.
+    let run_ends = PrimitiveArray::<R>::new(ends.inner().slice(first, last - first), None);
+    let data = runs
+        .to_data()
         .into_builder()
         .data_type(to.clone())
-        .child_data(vec![run_ends, values.to_data()])
+        .child_data(vec![run_ends.into_data(), values.to_data()])
         .build()?;
     Ok(make_array(data))
 }
@@ -1293,6 +1333,158 @@ mod tests {
         assert_eq!(back.schema().field(0).data_type(), &milliseconds);
         let values = back.column(0).as_primitive::<TimestampMillisecondType>();
         assert_eq!(values.values(), &[1000, 1000, -1000]);
+    }
+
+    /// A slice of a list, map, list view or run-end encoded array keeps its
+    /// parent's whole child, and so does each batch cut from one array. The
+    /// conversion builds only the values the slice reaches, so a few rows of
+    /// a large column, or each of many batches sharing its child, cost those
+    /// rows and not the column.
+    #[test]
+    fn a_slice_converts_only_the_values_it_reaches() {
+        use datafusion::arrow::array::{
+            Int32Array, LargeListArray, ListArray, ListViewArray, MapArray, RunArray, StructArray,
+            TimestampMillisecondArray, TimestampSecondArray,
+        };
+        use datafusion::arrow::datatypes::{Field, Fields, Int32Type};
+
+        // 100 rows of 10 values.
+        const ROWS: usize = 100;
+        const PER: usize = 10;
+        let leaf = |unit| -> ArrayRef {
+            let seconds = 0..(ROWS * PER) as i64;
+            match unit {
+                TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter_values(seconds)),
+                _ => Arc::new(TimestampMillisecondArray::from_iter_values(
+                    seconds.map(|s| s * 1000),
+                )),
+            }
+        };
+        let field = |name, unit| Field::new(name, DataType::Timestamp(unit, None), true);
+        let item = |unit| Arc::new(field("item", unit));
+        let rows = || OffsetBuffer::<i32>::from_lengths(std::iter::repeat_n(PER, ROWS));
+        let list = |item: FieldRef, values| -> ArrayRef {
+            Arc::new(ListArray::new(item, rows(), values, None))
+        };
+        // Converts rows `offset..offset + len` of the column `build` gives,
+        // which must equal the same rows built in milliseconds, and checks
+        // that the leaf `built` measures holds the `reached` values.
+        fn check(
+            name: &str,
+            build: impl Fn(TimeUnit) -> ArrayRef,
+            (offset, len): (usize, usize),
+            built: fn(&ArrayRef) -> usize,
+            reached: usize,
+        ) {
+            let seconds = build(TimeUnit::Second).slice(offset, len);
+            let expected = build(TimeUnit::Millisecond).slice(offset, len);
+            let to = in_parquet_units(seconds.data_type()).expect("a type in seconds");
+            let converted = in_milliseconds(&seconds, &to, None).expect(name);
+            assert_eq!(converted.as_ref(), expected.as_ref(), "{name}");
+            assert_eq!(built(&converted), reached, "{name}");
+        }
+        check(
+            "list",
+            |unit| list(item(unit), leaf(unit)),
+            (40, 2),
+            |a| a.as_list::<i32>().values().len(),
+            20,
+        );
+        check(
+            "large list",
+            |unit| {
+                let rows = OffsetBuffer::<i64>::from_lengths(std::iter::repeat_n(PER, ROWS));
+                Arc::new(LargeListArray::new(item(unit), rows, leaf(unit), None))
+            },
+            (40, 2),
+            |a| a.as_list::<i64>().values().len(),
+            20,
+        );
+        check(
+            // Views in reverse order, so the first row's is not the lowest.
+            "list view",
+            |unit| {
+                let offsets: ScalarBuffer<i32> =
+                    (0..ROWS).rev().map(|row| (row * PER) as i32).collect();
+                let sizes = ScalarBuffer::from(vec![PER as i32; ROWS]);
+                Arc::new(ListViewArray::new(
+                    item(unit),
+                    offsets,
+                    sizes,
+                    leaf(unit),
+                    None,
+                ))
+            },
+            (40, 2),
+            |a| a.as_list_view::<i32>().values().len(),
+            20,
+        );
+        check(
+            "map",
+            |unit| {
+                let keys = Field::new("key", DataType::Int32, false);
+                let entries = StructArray::new(
+                    Fields::from(vec![keys, field("value", unit)]),
+                    vec![
+                        Arc::new(Int32Array::from_iter_values(0..(ROWS * PER) as i32)),
+                        leaf(unit),
+                    ],
+                    None,
+                );
+                let entries_field = Field::new("entries", entries.data_type().clone(), false);
+                Arc::new(MapArray::new(
+                    Arc::new(entries_field),
+                    rows(),
+                    entries,
+                    None,
+                    false,
+                ))
+            },
+            (40, 2),
+            |a| a.as_map().entries().column(1).len(),
+            20,
+        );
+        check(
+            "list of struct",
+            |unit| {
+                let fields = Fields::from(vec![field("b", unit)]);
+                let structs = StructArray::new(fields.clone(), vec![leaf(unit)], None);
+                list(
+                    Arc::new(Field::new("item", DataType::Struct(fields), true)),
+                    Arc::new(structs),
+                )
+            },
+            (40, 2),
+            |a| a.as_list::<i32>().values().as_struct().column(0).len(),
+            20,
+        );
+        check(
+            // 10 rows of 10 lists of 10 values.
+            "list of lists",
+            |unit| {
+                let inner = list(item(unit), leaf(unit));
+                let item = Arc::new(Field::new("item", inner.data_type().clone(), true));
+                let rows = OffsetBuffer::<i32>::from_lengths(std::iter::repeat_n(PER, ROWS / PER));
+                Arc::new(ListArray::new(item, rows, inner, None))
+            },
+            (4, 1),
+            |a| {
+                let inner = a.as_list::<i32>().values();
+                inner.as_list::<i32>().values().len()
+            },
+            100,
+        );
+        check(
+            // A run of one row for each value.
+            "run-end encoded",
+            |unit| {
+                let ends = Int32Array::from_iter_values(1..=(ROWS * PER) as i32);
+                Arc::new(RunArray::<Int32Type>::try_new(&ends, leaf(unit).as_ref()).unwrap())
+            },
+            (400, 20),
+            |a| a.as_run::<Int32Type>().values().len(),
+            20,
+        );
     }
 
     /// On macOS an allow entry applies whatever the mode, so an owner-only
