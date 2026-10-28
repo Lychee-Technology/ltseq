@@ -1210,49 +1210,89 @@ mod tests {
         );
     }
 
-    /// A run-end encoded column in seconds keeps its child fields when it is
-    /// converted to milliseconds. Arrow's `cast` gave it default ones, which
-    /// the converted batch's schema, keeping the table's, rejected. pyarrow
+    /// A run-end encoded column `x` in seconds whose child fields are not
+    /// Arrow's defaults, with the field `unit` gives its values. pyarrow
     /// cannot build such a column, but another `__arrow_c_stream__` producer
     /// can.
-    #[test]
-    fn run_end_encoded_keeps_its_fields() {
+    fn run_end_encoded_seconds() -> (RecordBatch, impl Fn(TimeUnit) -> DataType) {
         use datafusion::arrow::array::{make_array, Int32Array, RunArray, TimestampSecondArray};
-        use datafusion::arrow::datatypes::{Field, Int32Type, TimestampMillisecondType};
+        use datafusion::arrow::datatypes::{Field, Int32Type};
         use std::collections::HashMap;
 
-        let run_ends = Arc::new(Field::new("ends", DataType::Int32, false));
-        let values = |unit| {
-            Arc::new(
-                Field::new("v", DataType::Timestamp(unit, None), false)
-                    .with_metadata(HashMap::from([("k".to_string(), "v".to_string())])),
-            )
+        let in_unit = |unit| {
+            let run_ends = Field::new("ends", DataType::Int32, false);
+            let values = Field::new("v", DataType::Timestamp(unit, None), false)
+                .with_metadata(HashMap::from([("k".to_string(), "v".to_string())]));
+            DataType::RunEndEncoded(Arc::new(run_ends), Arc::new(values))
         };
         let runs = RunArray::<Int32Type>::try_new(
             &Int32Array::from(vec![2, 3]),
             &TimestampSecondArray::from(vec![1, -1]),
         )
         .expect("run array");
-        let seconds = DataType::RunEndEncoded(Arc::clone(&run_ends), values(TimeUnit::Second));
         let column = runs
             .into_data()
             .into_builder()
-            .data_type(seconds.clone())
+            .data_type(in_unit(TimeUnit::Second))
             .build()
             .expect("run array with its own fields");
-        let schema = Schema::new(vec![Field::new("x", seconds, false)]);
-        let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![make_array(column)])
-            .expect("batch");
+        let schema = Schema::new(vec![Field::new("x", in_unit(TimeUnit::Second), false)]);
+        let batch =
+            RecordBatch::try_new(Arc::new(schema), vec![make_array(column)]).expect("batch");
+        (batch, in_unit)
+    }
 
-        let units = ParquetUnits::of(&schema).expect("a column in seconds");
+    /// Converted to milliseconds, the column keeps its child fields. Arrow's
+    /// `cast` gave it default ones, which the converted batch's schema,
+    /// keeping the table's, rejected.
+    #[test]
+    fn run_end_encoded_keeps_its_fields() {
+        use datafusion::arrow::datatypes::{Int32Type, TimestampMillisecondType};
+
+        let (batch, in_unit) = run_end_encoded_seconds();
+        let units = ParquetUnits::of(&batch.schema()).expect("a column in seconds");
         let converted = units.convert(&batch).expect("converted batch");
-        let milliseconds = DataType::RunEndEncoded(run_ends, values(TimeUnit::Millisecond));
+        let milliseconds = in_unit(TimeUnit::Millisecond);
         assert_eq!(converted.column(0).data_type(), &milliseconds);
         assert_eq!(units.schema.field(0).data_type(), &milliseconds);
         let runs = converted.column(0).as_run::<Int32Type>();
         assert_eq!(runs.run_ends().values(), &[2, 3]);
         let values = runs.values().as_primitive::<TimestampMillisecondType>();
         assert_eq!(values.values(), &[1000, -1000]);
+    }
+
+    /// The whole write of such a column succeeds, and the file reads back
+    /// the same instants in milliseconds.
+    #[test]
+    fn run_end_encoded_with_its_own_fields_round_trips() {
+        use crate::engine::create_session_context;
+        use datafusion::arrow::datatypes::TimestampMillisecondType;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let (batch, _) = run_end_encoded_seconds();
+        let schema = batch.schema();
+        let table =
+            LTSeqTable::from_batches(create_session_context(), vec![batch], schema, Vec::new())
+                .expect("table");
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("out.parquet");
+        write_parquet_impl(&table, path.to_string_lossy().into_owned(), None)
+            .expect("write_parquet");
+
+        let file = File::open(&path).expect("written file");
+        let back = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("Parquet file")
+            .build()
+            .expect("reader")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("batches");
+        let back = datafusion::arrow::compute::concat_batches(&back[0].schema(), &back)
+            .expect("one batch");
+        // The `parquet` crate reads run-end encoded values back decoded.
+        let milliseconds = DataType::Timestamp(TimeUnit::Millisecond, None);
+        assert_eq!(back.schema().field(0).data_type(), &milliseconds);
+        let values = back.column(0).as_primitive::<TimestampMillisecondType>();
+        assert_eq!(values.values(), &[1000, 1000, -1000]);
     }
 
     /// On macOS an allow entry applies whatever the mode, so an owner-only
