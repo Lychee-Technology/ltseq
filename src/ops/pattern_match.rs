@@ -565,7 +565,7 @@ pub fn search_pattern_impl(
                     .iter()
                     .any(|f| f.name() == col_name.as_str())
             })
-            .map(|col_name| col(col_name.as_str()))
+            .map(|col_name| ident(col_name.as_str()))
             .collect();
 
         if select_exprs.is_empty() {
@@ -960,7 +960,7 @@ fn collect_projected_sorted(
                 .iter()
                 .any(|f| f.name() == col_name.as_str())
         })
-        .map(|col_name| col(col_name.as_str()))
+        .map(|col_name| ident(col_name.as_str()))
         .collect();
 
     if select_exprs.is_empty() {

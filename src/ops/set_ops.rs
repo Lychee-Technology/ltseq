@@ -33,6 +33,7 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::gil::detached;
+use crate::ops::common::join_on_columns;
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::Column;
@@ -406,10 +407,7 @@ fn semi_anti_on_keys(
             .map_err(failed);
     }
     let keys: Vec<&str> = compare_cols.iter().map(|s| s.as_str()).collect();
-    (**df1)
-        .clone()
-        .join((**df2).clone(), join_type, &keys, &keys, None)
-        .map_err(failed)
+    join_on_columns((**df1).clone(), (**df2).clone(), join_type, &keys, &keys).map_err(failed)
 }
 
 const LEFT: &str = "__ltseq_left";

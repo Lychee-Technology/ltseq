@@ -14,7 +14,7 @@ use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Case;
-use datafusion::logical_expr::{col, lit, Expr};
+use datafusion::logical_expr::{ident, lit, Expr};
 use datafusion::scalar::ScalarValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -101,7 +101,7 @@ pub fn pivot_impl(
         .block_on(async {
             let distinct_df = (**df)
                 .clone()
-                .select(vec![col(&pivot_col)])
+                .select(vec![ident(&pivot_col)])
                 .map_err(|e| LtseqError::Runtime(format!("Failed to select pivot column: {}", e)))?
                 .distinct()
                 .map_err(|e| LtseqError::Runtime(format!("Failed to get distinct values: {}", e)))?;
@@ -122,7 +122,7 @@ pub fn pivot_impl(
         .map_err(|e| LtseqError::Runtime(format!("Failed to discover pivot values: {}", e)))?;
 
     // Build group-by expressions for index columns
-    let group_exprs: Vec<Expr> = index_cols.iter().map(col).collect();
+    let group_exprs: Vec<Expr> = index_cols.iter().map(ident).collect();
 
     // One conditional aggregate per output column:
     // AGG(CASE WHEN pivot_col IN (values) THEN value_col END), resolved as an
@@ -199,10 +199,10 @@ pub fn pivot_impl(
 /// recursively, so 512 patterns overflowed the stack.
 fn build_case_expr(pivot_col: &str, values: &[ScalarValue], value_col: &str) -> Expr {
     let list = values.iter().cloned().map(lit).collect();
-    let matches = col(pivot_col).in_list(list, false);
+    let matches = ident(pivot_col).in_list(list, false);
     Expr::Case(Case::new(
         None,
-        vec![(Box::new(matches), Box::new(col(value_col)))],
+        vec![(Box::new(matches), Box::new(ident(value_col)))],
         None,
     ))
 }

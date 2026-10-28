@@ -6,6 +6,7 @@
 //! text), joined against the lazy table plan.
 
 use crate::error::LtseqError;
+use crate::ops::common::join_on_columns;
 use crate::LTSeqTable;
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
 use datafusion::arrow::compute::CastOptions;
@@ -187,23 +188,22 @@ pub fn align_impl(
         .collect();
 
     // Plan building only; nothing executes here.
-    let result_df = ref_df
-        .join(
-            (**df).clone(),
-            JoinType::Left,
-            &["__ref_key__"],
-            &[key_col],
-            None,
-        )
-        .and_then(|d| {
-            d.sort(vec![SortExpr::new(
-                Expr::Column(Column::new_unqualified("__pos__")),
-                true,
-                false,
-            )])
-        })
-        .and_then(|d| d.select(table_cols))
-        .map_err(|e| LtseqError::Runtime(format!("Align join failed: {}", e)))?;
+    let result_df = join_on_columns(
+        ref_df,
+        (**df).clone(),
+        JoinType::Left,
+        &["__ref_key__"],
+        &[key_col],
+    )
+    .and_then(|d| {
+        d.sort(vec![SortExpr::new(
+            Expr::Column(Column::new_unqualified("__pos__")),
+            true,
+            false,
+        )])
+    })
+    .and_then(|d| d.select(table_cols))
+    .map_err(|e| LtseqError::Runtime(format!("Align join failed: {}", e)))?;
 
     // Alignment defines a new row order driven by the reference sequence:
     // no sort metadata, no fast-path token.
