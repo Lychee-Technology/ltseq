@@ -1,5 +1,6 @@
 """Tests for lookup() expression functionality."""
 
+import random
 import re
 from decimal import Decimal
 
@@ -7,6 +8,8 @@ import pyarrow as pa
 import pytest
 from ltseq import LTSeq, rand
 from ltseq.expr.types import ColumnExpr, CallExpr, LookupExpr
+
+from .layouts import CPUS
 
 
 class TestLookupExprCreation:
@@ -726,3 +729,119 @@ class TestLookupRepeatedKey:
         assert by_k.to_dicts() == [{"oid": 1, "a": 2, "code": "b", "v": "y"}]
         with pytest.raises(ValueError, match=_repeated("g", "'a'")):
             by_g.to_dicts()
+
+
+def _shuffled_orders(n):
+    """`n` orders in a shuffled order, so every order in a result comes from
+    a sort. `oid` is unique and `copy` repeats it; `grp` takes 4 values.
+    `pid` takes 9, and every 11th one is NULL."""
+    oids = list(range(n))
+    random.Random(350).shuffle(oids)
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "oid": oids,
+                "copy": oids,
+                "grp": [i % 4 for i in oids],
+                "pid": pa.array([None if i % 11 == 0 else i % 9 for i in oids], pa.int64()),
+            }
+        )
+    )
+
+
+def _names(key, n):
+    """A target that names keys 0 to n - 1 of column `key`."""
+    return LTSeq.from_arrow(pa.table({key: list(range(n)), "name": [f"{key}{i}" for i in range(n)]}))
+
+
+class TestLookupOrder:
+    """A derive with a lookup keeps the table's sort_keys and returns its
+    rows in that order, as every derive does (#350)."""
+
+    def test_the_issue_reproduction(self, engine_layout):
+        # The result had sort_keys None, and at 2+ partitions its rows came
+        # back in the order the join produced them.
+        n = 3000
+        orders = LTSeq.from_arrow(
+            pa.table({"oid": list(range(n)), "pid": [i % 7 for i in range(n)]})
+        ).sort("oid", desc=True)
+        products = LTSeq.from_arrow(
+            pa.table({"pid": list(range(7)), "name": [str(i) for i in range(7)]})
+        )
+
+        result = orders.derive(x=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.sort_keys == [("oid", True)]
+        rows = result.to_dicts()
+        assert [row["oid"] for row in rows] == list(range(n - 1, -1, -1))
+        assert all(row["x"] == str(row["pid"]) for row in rows)
+
+    def test_two_lookups_keep_an_order_of_two_keys(self, engine_layout):
+        # Each lookup is a join of its own. pid 7 and 8 and the NULL pids
+        # match no target row, and those rows keep their place.
+        n = 3000
+        orders = _shuffled_orders(n).sort("grp", "oid", desc=[True, False])
+        by_pid, by_grp = _names("pid", 7), _names("grp", 3)
+
+        result = orders.derive(
+            product=lambda r: r.pid.lookup(by_pid, "name"),
+            group=lambda r: r.grp.lookup(by_grp, "name"),
+        )
+
+        assert result.sort_keys == [("grp", True), ("oid", False)]
+        rows = result.to_dicts()
+        assert [row["oid"] for row in rows] == sorted(range(n), key=lambda i: (-(i % 4), i))
+        for row in rows:
+            pid, grp = row["pid"], row["grp"]
+            assert row["product"] == (f"pid{pid}" if pid is not None and pid < 7 else None)
+            assert row["group"] == (f"grp{grp}" if grp < 3 else None)
+
+    def test_a_window_beside_a_lookup_reads_the_table_order(self, engine_layout):
+        # The lookup's join left no sort_keys, so the window raised
+        # SortRequiredError on a sorted table.
+        products = _names("pid", 2)
+        orders = LTSeq.from_arrow(pa.table({"oid": [3, 1, 2], "pid": [1, 0, 0]})).sort("oid")
+
+        result = orders.derive(
+            x=lambda r: r.pid.lookup(products, "name"), prev=lambda r: r.oid.shift(1)
+        )
+
+        assert result.sort_keys == [("oid", False)]
+        assert result.to_dicts() == [
+            {"oid": 1, "pid": 0, "x": "pid0", "prev": None},
+            {"oid": 2, "pid": 0, "x": "pid0", "prev": 1},
+            {"oid": 3, "pid": 1, "x": "pid1", "prev": 2},
+        ]
+
+    def test_a_lookup_replacing_a_sort_key_keeps_the_input_order(self, engine_layout):
+        # Replacing oid ends sort_keys before it, as any derive does; the
+        # rows still come in the order of both keys.
+        n = 3000
+        orders = _shuffled_orders(n).sort("grp", "oid")
+        products = _names("pid", 9)
+
+        result = orders.derive(oid=lambda r: r.pid.lookup(products, "name"))
+
+        assert result.sort_keys == [("grp", False)]
+        assert [row["copy"] for row in result.to_dicts()] == sorted(
+            range(n), key=lambda i: (i % 4, i)
+        )
+
+    def test_a_large_target_keeps_the_order(self, engine_config):
+        # A target this large is past DataFusion's limit for collecting the
+        # join's build side into one partition, so the join hash-partitions
+        # both sides on the key.
+        engine_config(target_partitions=2 * CPUS)
+        n, keys = 20_000, 200_000
+        orders = LTSeq.from_arrow(
+            pa.table({"oid": list(range(n)), "pid": [(i * 7919) % keys for i in range(n)]})
+        ).sort("oid", desc=True)
+        products = LTSeq.from_arrow(
+            pa.table({"pid": list(range(keys)), "price": [float(i) for i in range(keys)]})
+        )
+
+        result = orders.derive(price=lambda r: r.pid.lookup(products, "price"))
+
+        rows = result.to_dicts()
+        assert [row["oid"] for row in rows] == list(range(n - 1, -1, -1))
+        assert all(row["price"] == row["pid"] for row in rows)

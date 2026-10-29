@@ -177,7 +177,9 @@ class LookupMixin:
         The join adds every target column as ``{alias}_{column}``, and a key
         without a match gets NULL. A target that holds a key in more than one
         row would repeat each input row that matches it, so the joined table
-        raises when it executes instead (#351).
+        raises when it executes instead (#351). Each input row is then joined
+        once, so the joined table keeps this table's ``sort_keys`` and
+        returns its rows in that order (#350).
 
         Args:
             target_table: The table to join with

@@ -966,6 +966,8 @@ class Expr(ABC):
 
         Fetches one column of a related table as a derived column: derive()
         left-joins the target on the key, so a key without a match gives NULL.
+        The result keeps the table's sort_keys, and its rows come in the
+        table's order, as derive()'s always do.
         The target must hold each key in one row at most. A key in more rows
         would repeat every input row that matches it, so the result raises
         instead when it executes, naming the key. A terminal that reads the
