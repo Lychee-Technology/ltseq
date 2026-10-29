@@ -117,8 +117,6 @@ class TestReadParquet:
         assert t._name == "test_data"
 
     def test_read_parquet_nonexistent(self):
-        """Reading non-existent file returns empty table (DataFusion glob behavior)."""
-        # DataFusion treats file paths as globs; non-matching globs = 0 rows
-        t = LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
-        assert t._schema == {}
-        assert t.count() == 0
+        """Reading non-existent file raises FileNotFoundError naming it (#261)."""
+        with pytest.raises(FileNotFoundError, match="/nonexistent/path/to/file.parquet"):
+            LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
