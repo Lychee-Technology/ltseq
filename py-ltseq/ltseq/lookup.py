@@ -135,6 +135,11 @@ class LookupMixin:
                         f"Cannot determine join key for lookup on '{target_name}'. "
                         f"Please specify join_key explicitly."
                     )
+            elif join_key not in target_schema:
+                raise ColumnNotFoundError(
+                    f"Column {col_name!r}: the lookup() target has no join_key column "
+                    f"{join_key!r}. Available columns: {list(target_schema)}"
+                )
 
             join = (target_name, on_column, join_key)
             if join not in aliases:

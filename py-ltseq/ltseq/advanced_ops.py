@@ -3,20 +3,28 @@
 from typing import Any, Callable, TYPE_CHECKING, cast
 
 from ._typing import LTSeqLike
+from .exceptions import ColumnNotFoundError
 
 if TYPE_CHECKING:
     from .core import LTSeq
 
 
-def _resolve_set_op_key(on: "Callable | str | None", capture_expr_fn: Callable) -> dict | None:
+def _resolve_set_op_key(on: "Callable | str | None", table: Any, other: Any) -> dict | None:
     """Resolve a set-op key selector: None (all columns), a column-name string,
-    or a single-arg lambda. Strings and lambdas converge on the same dict shape."""
+    or a single-arg lambda. Strings and lambdas converge on the same dict shape.
+    A string must name a column of both tables."""
     if on is None:
         return None
     if isinstance(on, str):
+        for schema, side in ((table._schema, "left"), (other._schema, "right")):
+            if on not in schema:
+                raise ColumnNotFoundError(
+                    f"Column '{on}' not found in {side} table. "
+                    f"Available columns: {list(schema)}"
+                )
         return {"type": "Column", "name": on}
     if callable(on):
-        return capture_expr_fn(on)
+        return table._capture_expr(on)
     raise TypeError(f"'on' must be a column name, callable, or None, got {type(on).__name__}")
 
 
@@ -86,7 +94,7 @@ class SetOpsMixin(LTSeqLike):
                 f"intersect() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = _resolve_set_op_key(on, self._capture_expr)
+        on_expr = _resolve_set_op_key(on, self, other)
 
         result_inner = self._inner.intersect(other._inner, on_expr)
 
@@ -119,7 +127,7 @@ class SetOpsMixin(LTSeqLike):
                 f"except_() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = _resolve_set_op_key(on, self._capture_expr)
+        on_expr = _resolve_set_op_key(on, self, other)
 
         result_inner = self._inner.diff(other._inner, on_expr)
 
@@ -254,7 +262,7 @@ class SetOpsMixin(LTSeqLike):
                 f"is_subset() argument must be LTSeq, got {type(other).__name__}"
             )
 
-        on_expr = _resolve_set_op_key(on, self._capture_expr)
+        on_expr = _resolve_set_op_key(on, self, other)
 
         return self._inner.is_subset(other._inner, on_expr)
 
@@ -390,17 +398,17 @@ class AdvancedOpsMixin(LTSeqLike):
 
         for col in index_cols:
             if col not in self._schema:
-                raise AttributeError(
+                raise ColumnNotFoundError(
                     f"Index column '{col}' not found. Available: {list(self._schema.keys())}"
                 )
 
         if columns not in self._schema:
-            raise AttributeError(
+            raise ColumnNotFoundError(
                 f"Columns column '{columns}' not found. Available: {list(self._schema.keys())}"
             )
 
         if values not in self._schema:
-            raise AttributeError(
+            raise ColumnNotFoundError(
                 f"Values column '{values}' not found. Available: {list(self._schema.keys())}"
             )
 

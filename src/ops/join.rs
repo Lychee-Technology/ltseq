@@ -4,7 +4,9 @@
 //!
 //! # Design
 //!
-//! Uses DataFusion's native DataFrame::join() API for lazy evaluation.
+//! Builds DataFusion's native join plan for lazy evaluation, naming every
+//! column exactly as the schema has it (`join_on_columns`, `ident`), never by
+//! a string DataFusion would read as a SQL identifier (#322).
 //! Right table columns are renamed before joining to avoid duplicate-column conflicts,
 //! then the result is projected to match the expected aliased schema.
 //!
@@ -19,7 +21,8 @@
 
 use crate::error::LtseqError;
 use crate::ops::common::{
-    build_prefixed_join_schema, build_suffixed_join_schema, right_rename_map, JoinType,
+    build_prefixed_join_schema, build_suffixed_join_schema, join_on_columns, right_rename_map,
+    JoinType,
 };
 use crate::transpiler::narrow_decimals;
 use crate::types::{dict_to_py_expr, PyExpr};
@@ -240,12 +243,12 @@ fn join_on_keys(
         .collect();
     match widened_key_equalities(keys, key_types) {
         Some(on) => left.join_on(right, join_type, on),
-        None => left.join(
+        None => join_on_columns(
+            left,
             right,
             join_type,
             &left_cols.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             &right_cols.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            None, // No additional filter
         ),
     }
     .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))
@@ -273,9 +276,9 @@ fn rename_right_df_for_join(
         .iter()
         .map(|(old, new)| {
             if old == new {
-                col(old)
+                ident(old)
             } else {
-                col(old).alias(new)
+                ident(old).alias(new)
             }
         })
         .collect();
@@ -390,13 +393,13 @@ pub fn join_impl(
     let mut proj: Vec<Expr> = stored_schema_left
         .fields()
         .iter()
-        .map(|f| col(f.name()))
+        .map(|f| ident(f.name()))
         .collect();
     for (old, new) in &rename_map {
         if drop_right.contains(old) {
             continue;
         }
-        proj.push(col(new));
+        proj.push(ident(new));
     }
     let result_df = joined_df
         .select(proj)
@@ -452,7 +455,7 @@ pub fn join_prefixed_impl(
     for field in stored_schema_right.fields() {
         let old_name = field.name();
         let new_name = format!("{}_{}", alias, old_name);
-        select_exprs.push(col(old_name).alias(&new_name));
+        select_exprs.push(ident(old_name).alias(&new_name));
     }
     // Build join keys in `right_col_names` (pairing) order so they line up
     // positionally with `left_col_names` — scanning schema-field order instead
@@ -608,16 +611,20 @@ fn semi_anti_join_impl(
         }
         .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))?
     } else if key_types_match {
-        (**df_left)
-            .clone()
-            .join(
-                (**df_right).clone(),
-                df_join_type,
-                &left_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                &right_col_names.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                None, // No additional filter
-            )
-            .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))?
+        join_on_columns(
+            (**df_left).clone(),
+            (**df_right).clone(),
+            df_join_type,
+            &left_col_names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            &right_col_names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| LtseqError::Runtime(format!("Native semi/anti join failed: {}", e)))?
     } else {
         join_on_mismatched_keys(
             (**df_left).clone(),

@@ -14,6 +14,7 @@ import sysconfig
 import types
 from typing import Any, Callable, Iterator, NamedTuple, cast
 
+from ..exceptions import ColumnNotFoundError
 from .base import Expr
 from .proxy import SchemaProxy
 
@@ -806,12 +807,43 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
             keys.append({"type": "Literal", "value": key, "dtype": "String"})
             values.append(value.serialize())
 
-        return {"type": "Dict", "keys": keys, "values": values}
+        expr_dict = {"type": "Dict", "keys": keys, "values": values}
     elif isinstance(result, Expr):
         # Handle Expr returns: lambda r: r.age > 18
-        return result.serialize()
+        expr_dict = result.serialize()
     else:
         raise TypeError(
             f"Lambda must return an Expr or dict, got {type(result).__name__}. "
             f"Did you forget to use the 'r' parameter?{_none_check_hint(result)}"
         )
+    _check_partition_by_names(expr_dict, schema)
+    return expr_dict
+
+
+def _require_partition_by_column(name: str, schema: dict[str, str]) -> None:
+    """Raise ``ColumnNotFoundError`` unless ``name``, given as
+    ``partition_by=``, is a column of ``schema``."""
+    if name not in schema:
+        raise ColumnNotFoundError(
+            f"partition_by column '{name}' not found in schema. "
+            f"Available columns: {list(schema)}"
+        )
+
+
+def _check_partition_by_names(node: Any, schema: dict[str, str]) -> None:
+    """Check every window's ``partition_by="name"`` in a serialized expression.
+
+    The row proxy checks the names a lambda reads as ``r.name``; a name given
+    as a string reaches Rust as a literal, which the window planner reads as
+    a column name, so it is checked here.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _check_partition_by_names(item, schema)
+    elif isinstance(node, dict):
+        if node.get("type") == "Call":
+            part = (node.get("kwargs") or {}).get("partition_by") or {}
+            if part.get("type") == "Literal" and isinstance(part.get("value"), str):
+                _require_partition_by_column(part["value"], schema)
+        for value in node.values():
+            _check_partition_by_names(value, schema)

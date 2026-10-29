@@ -224,7 +224,7 @@ pub fn rename_columns_impl(
     table: &LTSeqTable,
     mapping: &std::collections::HashMap<String, String>,
 ) -> PyResult<LTSeqTable> {
-    use datafusion::logical_expr::col;
+    use datafusion::logical_expr::ident;
 
     let schema = table.require_schema()?;
 
@@ -246,8 +246,8 @@ pub fn rename_columns_impl(
         .map(|f| {
             let name = f.name();
             match mapping.get(name) {
-                Some(new_name) => col(format!("\"{}\"", name)).alias(new_name),
-                None => col(format!("\"{}\"", name)),
+                Some(new_name) => ident(name).alias(new_name),
+                None => ident(name),
             }
         })
         .collect();

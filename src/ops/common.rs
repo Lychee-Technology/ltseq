@@ -3,6 +3,7 @@
 //! Shared, SQL-free helpers used across operation modules:
 //! - Type-safe domain types (JoinType)
 //! - Join schema construction (build_aliased_join_schema)
+//! - Joins on key columns named exactly (join_on_columns)
 //!
 //! The SQL temp-table guards and column-list builders that used to live here
 //! died with the SQL round-trip paths (issue #91).
@@ -12,7 +13,7 @@ use crate::metadata::SortSpec;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
-use datafusion::logical_expr::{Expr, SortExpr};
+use datafusion::logical_expr::{Expr, LogicalPlanBuilder, SortExpr};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -161,6 +162,36 @@ pub fn build_suffixed_join_schema(
     }
 
     Ok(Arc::new(ArrowSchema::new(fields)))
+}
+
+/// `left.join(right, ...)` on equal key columns, each named exactly as
+/// given. `DataFrame::join` reads every key name as a SQL identifier, so it
+/// would look up `Name` as `name` and `a.b` as column `b` of a table `a`
+/// (#322).
+pub fn join_on_columns(
+    left: DataFrame,
+    right: DataFrame,
+    join_type: datafusion::logical_expr::JoinType,
+    left_cols: &[&str],
+    right_cols: &[&str],
+) -> datafusion::error::Result<DataFrame> {
+    let columns = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| Column::from_name(*name))
+            .collect::<Vec<_>>()
+    };
+    let (state, plan) = left.into_parts();
+    let (_, right_plan) = right.into_parts();
+    let plan = LogicalPlanBuilder::from(plan)
+        .join(
+            right_plan,
+            join_type,
+            (columns(left_cols), columns(right_cols)),
+            None,
+        )?
+        .build()?;
+    Ok(DataFrame::new(state, plan))
 }
 
 // ============================================================================

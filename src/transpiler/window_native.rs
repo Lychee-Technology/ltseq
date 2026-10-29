@@ -64,9 +64,9 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
 
 /// Extract `partition_by` from kwargs and convert to `Vec<Expr>`.
 ///
-/// Handles these forms from the Python side:
-/// - `partition_by="col"` → a `String` literal → `col("col")`
-/// - `partition_by=r.col` → `PyExpr::Column("col")` → `col("col")`
+/// `partition_by="col"` arrives as a `String` literal and `partition_by=r.col`
+/// as `PyExpr::Column("col")`; both name the column exactly, as every other
+/// column reference does (#322). Any other expression is lowered as it is.
 ///
 /// Returns an empty Vec if no `partition_by` kwarg is present.
 fn extract_partition_by(
@@ -77,17 +77,13 @@ fn extract_partition_by(
         Some(pb) => pb,
         None => return Ok(vec![]),
     };
-    match pb {
-        // partition_by="col_name" — string literal used as column name
-        PyExpr::Literal(LiteralValue::String(name)) => Ok(vec![col(name)]),
-        // partition_by=r.col — column expression
-        PyExpr::Column(name) => Ok(vec![col(name)]),
-        // Any other expression — try converting through the standard path
-        other => {
-            let expr = super::lower_expr(other.clone(), rx)?;
-            Ok(vec![expr])
+    let expr = match pb {
+        PyExpr::Literal(LiteralValue::String(name)) => {
+            super::lower_expr(PyExpr::Column(name.clone()), rx)?
         }
-    }
+        other => super::lower_expr(other.clone(), rx)?,
+    };
+    Ok(vec![expr])
 }
 
 /// Convert an aggregate `Expr` (e.g., `sum(col)`) into a window function `Expr`.

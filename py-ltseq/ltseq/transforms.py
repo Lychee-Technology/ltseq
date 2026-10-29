@@ -6,7 +6,11 @@ from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
 
-from .expr.transforms import _invoke_row_lambda, _none_check_hint
+from .expr.transforms import (
+    _invoke_row_lambda,
+    _none_check_hint,
+    _require_partition_by_column,
+)
 from .lookup import LookupMixin
 
 
@@ -914,6 +918,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         if not step_predicates:
             raise ValueError("search_pattern requires at least one step predicate")
+        if partition_by is not None:
+            _require_partition_by_column(partition_by, self._schema)
 
         step_dicts = [self._capture_expr(p) for p in step_predicates]
         result_inner = self._inner.search_pattern(step_dicts, partition_by)
@@ -950,6 +956,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         if not step_predicates:
             raise ValueError("search_pattern_count requires at least one step predicate")
+        if partition_by is not None:
+            _require_partition_by_column(partition_by, self._schema)
 
         step_dicts = [self._capture_expr(p) for p in step_predicates]
         return self._inner.search_pattern_count(step_dicts, partition_by)
