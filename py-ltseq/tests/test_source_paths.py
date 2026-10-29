@@ -11,7 +11,9 @@ v0.5 raises `SourceNotFoundError`, a subclass of it (#266).
 import glob
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -30,16 +32,28 @@ def write(path: Path, xs: list[int]) -> None:
         path.write_text("x\n" + "".join(f"{x}\n" for x in xs))
 
 
-def read(fmt: str, path: str) -> list[int]:
-    t = LTSeq.read_csv(path) if fmt == "csv" else LTSeq.read_parquet(path)
-    return sorted(t.to_arrow().column("x").to_pylist())
+def open_table(fmt: str, path: str) -> LTSeq:
+    return LTSeq.read_csv(path) if fmt == "csv" else LTSeq.read_parquet(path)
 
 
-def scan(fmt: str, path: str) -> list[int]:
-    cursor = LTSeq.scan(path) if fmt == "csv" else LTSeq.scan_parquet(path)
-    return sorted(x for batch in cursor for x in batch.column("x").to_pylist())
+def open_cursor(fmt: str, path: str):
+    return LTSeq.scan(path) if fmt == "csv" else LTSeq.scan_parquet(path)
 
 
+@dataclass(frozen=True)
+class Reader:
+    """A reader's call alone (`open`), which raises for a path that names no
+    file before anything reads the table, and the sorted values it reads."""
+
+    open: Callable[[str, str], Any]
+    values: Callable[[Any], list[int]]
+
+    def __call__(self, fmt: str, path: str) -> list[int]:
+        return sorted(self.values(self.open(fmt, path)))
+
+
+read = Reader(open_table, lambda t: t.to_arrow().column("x").to_pylist())
+scan = Reader(open_cursor, lambda c: [x for b in c for x in b.column("x").to_pylist()])
 READERS = {"read": read, "scan": scan}
 
 
@@ -160,14 +174,14 @@ def raises_not_found(path: str):
 def test_a_missing_path_raises_naming_it(tmp_path, fmt, reader, missing):
     path = str(tmp_path / missing.format(fmt=fmt)) + ("/" if missing.endswith("/") else "")
     with raises_not_found(path):
-        reader(fmt, path)
+        reader.open(fmt, path)
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_a_missing_file_url_raises_naming_it(tmp_path, fmt, reader):
     url = (tmp_path / f"typo.{fmt}").as_uri()
     with raises_not_found(url):
-        reader(fmt, url)
+        reader.open(fmt, url)
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
@@ -177,7 +191,7 @@ def test_a_glob_that_matches_no_file_of_the_format_raises(tmp_path, fmt, reader)
     (d / "notes.txt").write_text("x\n1\n")
     for pattern in [f"{d}/z*.{fmt}", f"{d}/*.txt", f"{d}/no*/*.{fmt}", f"{d}/*.{fmt}"]:
         with raises_not_found(pattern):
-            reader(fmt, pattern)
+            reader.open(fmt, pattern)
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
@@ -189,7 +203,7 @@ def test_a_directory_without_a_file_of_the_format_raises(tmp_path, fmt, reader):
     (other / "notes.txt").write_text("x\n1\n")
     for d in [empty, other]:
         with raises_not_found(str(d)):
-            reader(fmt, str(d))
+            reader.open(fmt, str(d))
 
 
 class TestExistingFilesAreNotMissing:
@@ -232,4 +246,4 @@ def test_a_relative_path_resolves_against_the_working_directory(
     assert reader(fmt, "../d") == [1, 2]
     assert reader(fmt, f"c.{fmt}") == [3]
     with raises_not_found(f"../d/z*.{fmt}"):
-        reader(fmt, f"../d/z*.{fmt}")
+        reader.open(fmt, f"../d/z*.{fmt}")
