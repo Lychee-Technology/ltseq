@@ -47,6 +47,11 @@ chrono = { version = "0.4.45", default-features = false }
 # Already in the tree through DataFusion; the version follows it.
 tempfile = "3.27.0"
 
+# A reader's glob, matched as Python's `glob.glob` matches it
+# (`source::glob_files`, #261). Already in the tree through DataFusion; the
+# version follows it.
+glob = "0.3.4"
+
 # The local file store of every session (`source::LocalFiles`, #262), and
 # the engine's query planner: object_store's and DataFusion's traits
 # are async. Already in the tree through DataFusion; the version follows it.

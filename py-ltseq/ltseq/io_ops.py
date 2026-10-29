@@ -43,39 +43,40 @@ class IOMixin:
         """
         Load a CSV file and return an LTSeq table.
 
-        The table reads the files found at the call: a file, or the `.csv`
-        files of a directory at that moment, so a file added to the
-        directory later is not read. Each execution reads those files as
-        they are then, and raises if one of them no longer exists.
+        `path` is a file, a directory, whose `.csv` files are read, or a
+        glob. An existing file or directory is read as itself, even when its
+        name holds `*`, `?` or `[`; any other path that holds them is a glob,
+        which reads the `.csv` files it matches. `*`, `?` and `[...]` match
+        within one path segment, `**` across directories, and a name that
+        starts with `.` only by a literal `.`, as in Python's
+        `glob.glob(path, recursive=True)`.
+
+        The table reads the files found at the call, so a file added to the
+        directory later, or matched by the glob later, is not read. Each
+        execution reads those files as they are then, and raises if one of
+        them no longer exists.
 
         Args:
-            path: Path to the CSV file
+            path: Path to a CSV file, a directory or a glob
             has_header: Whether the first row is a header (default: True).
                        If False, columns are named column_0, column_1, etc.
 
         Returns:
-            New LTSeq instance with loaded data. A missing path returns an
-            empty table (LTSeq's historical lazy-empty behavior).
+            New LTSeq instance with loaded data
 
         Raises:
+            FileNotFoundError: If `path` names no file: it does not exist, or
+                it is a directory or a glob without a `.csv` file. The
+                message names `path`.
             ValueError: If CSV parsing fails
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
             >>> t_no_header = LTSeq.read_csv("data.csv", has_header=False)
+            >>> t_days = LTSeq.read_csv("logs/2024-*.csv")
         """
         from .core import LTSeq
         import os
-
-        # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
-        # historical lazy-empty behavior for file reads. from_arrow (allowed in
-        # construction APIs) yields a real empty table, so count()/len() work.
-        if not os.path.exists(path):
-            import pyarrow as pa
-
-            t = LTSeq.from_arrow(pa.table({}))
-            t._name = os.path.splitext(os.path.basename(path))[0]
-            return t
 
         # Use Rust static constructor to load CSV directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_csv(path, has_header)
@@ -90,37 +91,33 @@ class IOMixin:
         """
         Load a Parquet file and return an LTSeq table.
 
-        The table reads the files found at the call: a file, or the
-        `.parquet` files of a directory at that moment, so a file added to
-        the directory later is not read. Each execution reads those files as
-        they are then, their footers included, and raises if one of them no
-        longer exists.
+        `path` is a file, a directory, whose `.parquet` files are read, or a
+        glob, which reads the `.parquet` files it matches. It resolves as in
+        `read_csv`.
+
+        The table reads the files found at the call, so a file added to the
+        directory later, or matched by the glob later, is not read. Each
+        execution reads those files as they are then, their footers
+        included, and raises if one of them no longer exists.
 
         Args:
-            path: Path to the Parquet file
+            path: Path to a Parquet file, a directory or a glob
 
         Returns:
-            New LTSeq instance with loaded data. A missing path returns an
-            empty table (LTSeq's historical lazy-empty behavior).
+            New LTSeq instance with loaded data
 
         Raises:
+            FileNotFoundError: If `path` names no file: it does not exist, or
+                it is a directory or a glob without a `.parquet` file. The
+                message names `path`.
             RuntimeError: If Parquet parsing fails
 
         Example:
             >>> t = LTSeq.read_parquet("data.parquet")
+            >>> t_parts = LTSeq.read_parquet("data/part-*.parquet")
         """
         from .core import LTSeq
         import os
-
-        # DataFusion 54 rejects missing paths during planning. Preserve LTSeq's
-        # historical lazy-empty behavior for file reads. from_arrow (allowed in
-        # construction APIs) yields a real empty table, so count()/len() work.
-        if not os.path.exists(path):
-            import pyarrow as pa
-
-            t = LTSeq.from_arrow(pa.table({}))
-            t._name = os.path.splitext(os.path.basename(path))[0]
-            return t
 
         # Use Rust static constructor to load Parquet directly without empty init overhead
         inner = ltseq_core.LTSeqTable.from_parquet(path)
@@ -136,13 +133,17 @@ class IOMixin:
         Create a streaming cursor for a CSV file.
 
         Enables lazy iteration over large files without loading into memory.
+        `path` resolves as in `read_csv`.
 
         Args:
-            path: Path to the CSV file
+            path: Path to a CSV file, a directory or a glob
             has_header: Whether the first row is a header (default: True)
 
         Returns:
             Cursor for streaming iteration
+
+        Raises:
+            FileNotFoundError: If `path` names no file, as in `read_csv`
 
         Example:
             >>> cursor = LTSeq.scan("large.csv")
@@ -159,11 +160,16 @@ class IOMixin:
         """
         Create a streaming cursor for a Parquet file.
 
+        `path` resolves as in `read_parquet`.
+
         Args:
-            path: Path to the Parquet file
+            path: Path to a Parquet file, a directory or a glob
 
         Returns:
             Cursor for streaming iteration
+
+        Raises:
+            FileNotFoundError: If `path` names no file, as in `read_parquet`
 
         Example:
             >>> cursor = LTSeq.scan_parquet("large.parquet")

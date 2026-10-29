@@ -3,9 +3,10 @@
 //!
 //! A reader lists its files once, at the call ([`read_files`]), and the
 //! table reads exactly those: a file that its directory or glob matches only
-//! later is never read. Each execution looks every listed file up again, so
-//! it reads the file as it is at that moment, and one that has disappeared
-//! fails the execution ([`LocalFiles`]). The lookup also drops the file's
+//! later is never read, and a path that names no file fails the call
+//! (#261). Each execution looks every listed file up again, so it reads the
+//! file as it is at that moment, and one that has disappeared fails the
+//! execution ([`LocalFiles`]). The lookup also drops the file's
 //! cached Parquet footer, so the execution reads the footer, and the
 //! statistics in it, afresh; the partitions of one execution share it.
 //!
@@ -19,12 +20,13 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion::catalog::TableProvider;
-use datafusion::common::{exec_err, plan_err, DataFusionError, Result};
+use datafusion::common::{exec_datafusion_err, DataFusionError, Result};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::options::ReadOptions;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
@@ -41,47 +43,59 @@ use datafusion::object_store::{
 };
 use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
+use glob::MatchOptions;
+
+/// Why a reader built no table.
+#[derive(Debug)]
+pub(crate) enum ReadError {
+    /// The path names no file to read: it does not exist, or it is a
+    /// directory or a glob without a file of the format. The message names
+    /// the path. v0.5 raises `SourceNotFoundError` for it (contract §4.1,
+    /// #266).
+    NotFound(String),
+    /// Resolving the path, listing its files or inferring their schema
+    /// failed.
+    Failed(DataFusionError),
+}
+
+impl From<DataFusionError> for ReadError {
+    fn from(error: DataFusionError) -> Self {
+        ReadError::Failed(error)
+    }
+}
 
 /// The table `SessionContext::read_csv` or `read_parquet` builds for `path`,
 /// over the files `path` names now.
 ///
-/// `path` resolves as DataFusion resolves it: a file, the files with the
-/// format's extension in a directory, or the files a glob matches. The table
-/// lists each of them by its own URL, so an execution looks up each file and
-/// no directory. The schema is inferred from these files as DataFusion
-/// infers it from its listing; `options` carry none, as LTSeq's readers
-/// give none.
+/// `path` is a file, a directory whose files with the format's extension
+/// are read, or a glob ([`locate`]). The table lists each file by its own
+/// URL, so an execution looks up each file and no directory. The schema is
+/// inferred from these files as DataFusion infers it from its listing;
+/// `options` carry none, as LTSeq's readers give none.
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
     path: &str,
     options: impl ReadOptions<'a>,
-) -> Result<DataFrame> {
-    let url = ListingTableUrl::parse(path)?;
+) -> Result<DataFrame, ReadError> {
     let options =
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
-    // `SessionContext::read_csv` and `read_parquet` refuse such a file too.
-    if !url.is_collection() && !url.as_str().ends_with(extension) {
-        return exec_err!(
-            "File path '{}' does not match the expected extension '{extension}'",
-            url.as_str()
-        );
-    }
-    let url = as_collection_if_directory(url)?;
+    let urls = locate(path, extension)?;
 
     let state = session.state();
-    let store = state.runtime_env().object_store(&url)?;
-    let files: Vec<ObjectMeta> = url
-        .list_all_files(&state, store.as_ref(), extension)
-        .await?
-        .try_collect()
-        .await?;
+    let store = state.runtime_env().object_store(&urls[0])?;
+    let mut files: Vec<ObjectMeta> = Vec::new();
+    for url in &urls {
+        let listed = url
+            .list_all_files(&state, store.as_ref(), extension)
+            .await?;
+        files.extend(listed.try_collect::<Vec<_>>().await?);
+    }
     // From here on as `ListingOptions::infer_schema`, over these files.
     if files.is_empty() {
-        return plan_err!(
-            "No files found at {url}. Cannot infer schema from an empty location; \
-             either add data files or declare an explicit schema for the table."
-        );
+        return Err(ReadError::NotFound(format!(
+            "No {extension} file in the directory '{path}'"
+        )));
     }
     // An empty file cannot add to the schema, and may fail when read for it.
     let sized: Vec<ObjectMeta> = files.iter().filter(|f| f.size > 0).cloned().collect();
@@ -89,7 +103,7 @@ pub(crate) async fn read_files<'a>(
 
     let paths = files
         .iter()
-        .map(|file| file_url(&url, &file.location))
+        .map(|file| file_url(&urls[0], &file.location))
         .collect::<Result<Vec<_>>>()?;
     let config = ListingTableConfig::new_with_multi_paths(paths)
         .with_listing_options(options)
@@ -98,7 +112,116 @@ pub(crate) async fn read_files<'a>(
     // footer it reads afresh ([`LocalFiles`]), where a cached copy would
     // outlive that footer.
     let table = ListingTable::try_new(config)?;
-    session.read_table(Arc::new(table))
+    Ok(session.read_table(Arc::new(table))?)
+}
+
+/// The URLs of what `path` names now (contract §4.1), each a file or a
+/// directory to list, or `NotFound` if it names nothing.
+///
+/// A local path that names an existing file or directory is read as itself,
+/// even when its name holds `*`, `?` or `[`. Any other local path that holds
+/// them is a glob ([`glob_files`]). A URL is taken as written, as
+/// `ListingTableUrl::parse` takes it.
+fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
+    let local = std::path::Path::new(path);
+    let url = if local.exists() {
+        local_url(local)?
+    } else {
+        let url = ListingTableUrl::parse(path)?;
+        // `parse` reads a glob only in a path without a scheme.
+        if url.get_glob().is_some() {
+            return glob_files(path, extension);
+        }
+        if matches!(url.get_url().to_file_path(), Ok(file) if !file.exists()) {
+            return Err(ReadError::NotFound(format!(
+                "No such file or directory: '{path}'"
+            )));
+        }
+        url
+    };
+    // `SessionContext::read_csv` and `read_parquet` refuse such a file too.
+    if !url.is_collection() && !url.as_str().ends_with(extension) {
+        return Err(exec_datafusion_err!(
+            "File path '{}' does not match the expected extension '{extension}'",
+            url.as_str()
+        )
+        .into());
+    }
+    Ok(vec![as_collection_if_directory(url)?])
+}
+
+/// The URLs of the files with the format's `extension` that the glob
+/// `pattern` matches now, or `NotFound` if there are none.
+///
+/// `pattern` matches as Python's `glob.glob(pattern, recursive=True)`
+/// matches it: `*`, `?` and `[...]` within one path segment, `**` across
+/// directories, and a name that starts with `.` only by a literal `.`.
+/// `ListingTableUrl`'s own glob matches the whole pattern against the first
+/// segment below its directory, so it matches nothing for `d/s*/x.parquet`,
+/// and the files of `d`'s subdirectories for `d/*`.
+fn glob_files(pattern: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
+    let external = |e: Box<dyn std::error::Error + Send + Sync>| DataFusionError::External(e);
+    // `glob_with` that requires a literal leading `.` skips every name that
+    // starts with one, also where the pattern spells it, so it walks every
+    // name, and the whole pattern then decides each match.
+    let walk = MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    let strict = MatchOptions {
+        require_literal_leading_dot: true,
+        ..walk
+    };
+    // Without `.` components and repeated separators, which the walk's
+    // matches may drop or keep.
+    let normal = |path: &std::path::Path| {
+        let names = path.components().filter(|c| *c != Component::CurDir);
+        names.collect::<PathBuf>()
+    };
+    let whole = normal(std::path::Path::new(pattern));
+    let whole = glob::Pattern::new(&whole.to_string_lossy()).map_err(|e| external(Box::new(e)))?;
+
+    let mut urls = Vec::new();
+    let matches = glob::glob_with(pattern, walk).map_err(|e| external(Box::new(e)))?;
+    for matched in matches {
+        // An error is a directory the pattern reaches but that cannot be read.
+        let matched = matched.map_err(|e| external(Box::new(e)))?;
+        if matched.is_file()
+            && matched.to_str().is_some_and(|f| f.ends_with(extension))
+            && whole.matches_path_with(&normal(&matched), strict)
+        {
+            urls.push(local_url(&matched)?);
+        }
+    }
+    if urls.is_empty() {
+        return Err(ReadError::NotFound(format!(
+            "No {extension} file matches '{pattern}'"
+        )));
+    }
+    Ok(urls)
+}
+
+/// The URL of the existing local file or directory `path`, naming it as it
+/// is written.
+///
+/// It is the URL `ListingTableUrl::parse` gives a path without glob
+/// characters: absolute against the working directory, with `.` and `..`
+/// resolved without following links, and a directory's ending with `/`. It
+/// carries no glob, so a name with `*`, `?` or `[` is that file.
+fn local_url(path: &std::path::Path) -> Result<ListingTableUrl> {
+    let mut absolute = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            Component::ParentDir => {
+                absolute.pop();
+            }
+            component => absolute.push(component),
+        }
+    }
+    let location =
+        Path::from_absolute_path(&absolute).map_err(|e| DataFusionError::External(Box::new(e)))?;
+    as_collection_if_directory(file_url(&ListingTableUrl::parse("file:///")?, &location)?)
 }
 
 /// The table `df` reads with `order` declared as the order of each file's
