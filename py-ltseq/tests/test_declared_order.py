@@ -1,5 +1,5 @@
 """A table with a declared order returns its rows in that order from every
-consumer (#311, #148, #325).
+consumer (#311, #148, #325, #350).
 
 DataFusion keeps a sort's order only up to the next operator it chooses to
 repartition, so a filter, a computed column or a window after `sort` used to
@@ -10,13 +10,15 @@ that reads rows in table order.
 The tests follow #321's ordering acceptance, items 1 to 3, and the 0.3.0
 slices of #148 and #202:
 
-- ten pipelines, each read through every consumer and compared row for row
+- eleven pipelines, each read through every consumer and compared row for row
   with a pandas reference: at 100 rows under every engine layout (partition
   counts 1, 2 and twice the CPU count, batch sizes 1, 7 and the default) and
   every input layout, and at 40,000 rows at 2 and 2×CPU partitions;
 - among them, five windows that compute their values in an order other than
   the table's (#202); each result also keeps the sort's `sort_keys`, and
   #202's own examples run at every engine layout;
+- among them, a lookup, whose join returns rows in an order of its own,
+  with a window beside it (#350);
 - the same consumers after `assume_sorted`, on every input layout, with a
   transform before or after the declaration, at 100 and 100,000 rows;
 - a limit on a declared-sorted Parquet file of many row groups and a
@@ -165,6 +167,23 @@ def partitioned_cum_sum_reference(df: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+NAMES = {1: "one", 2: "two", 3: "three"}
+
+
+def looked_up(t: LTSeq) -> LTSeq:
+    """A lookup of each `g`'s name beside a window, on a table `t` declared
+    in date order."""
+    names = LTSeq.from_arrow(pa.table({"g": list(NAMES), "name": list(NAMES.values())}))
+    return t.derive(name=lambda r: r.g.lookup(names, "name"), prev=lambda r: r.close.shift(1))
+
+
+def looked_up_reference(df: pd.DataFrame) -> pd.DataFrame:
+    d = by_date(df)
+    d["name"] = d.g.map(NAMES)
+    d["prev"] = d.close.shift(1)
+    return d
+
+
 def kept_runs_reference(df: pd.DataFrame) -> pd.DataFrame:
     """Runs of `g` longer than one row, renumbered as `flatten` does."""
 
@@ -235,6 +254,7 @@ PIPELINES = {
         partitioned_cum_sum_reference,
         "volume",
     ),
+    "looked_up": Pipeline(lambda t: looked_up(t.sort("date")), looked_up_reference, "volume"),
     "kept_runs": Pipeline(
         lambda t: t.sort("date")
         .group_ordered(lambda r: r.g)
@@ -443,6 +463,9 @@ ASSUMED = {
         ),
         partitioned_shift_reference,
         "volume",
+    ),
+    "declared_then_looked_up": Pipeline(
+        lambda t: looked_up(t.assume_sorted("date")), looked_up_reference, "volume"
     ),
     "filtered_then_declared": Pipeline(
         lambda t: t.filter(lambda r: r.volume % 3 != 0).assume_sorted("date"),

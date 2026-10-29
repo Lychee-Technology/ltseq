@@ -443,6 +443,8 @@ pub fn join_prefixed_impl(
         stored_schema_right,
     )?;
 
+    // A link's join can repeat a left row for each match, drop it or add
+    // right rows, so its result declares no order (ADR 0011).
     prefixed_join(
         table,
         other,
@@ -450,10 +452,12 @@ pub fn join_prefixed_impl(
         &right_col_names,
         join_type,
         alias,
+        Vec::new(),
     )
 }
 
-/// [`join_prefixed_impl`] on key columns that both tables have.
+/// [`join_prefixed_impl`] on key columns that both tables have, declaring
+/// the result's rows in `sort_specs` order.
 pub(crate) fn prefixed_join(
     table: &LTSeqTable,
     other: &LTSeqTable,
@@ -461,6 +465,7 @@ pub(crate) fn prefixed_join(
     right_col_names: &[String],
     join_type: JoinType,
     alias: &str,
+    sort_specs: Vec<crate::SortSpec>,
 ) -> PyResult<LTSeqTable> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
@@ -506,7 +511,7 @@ pub(crate) fn prefixed_join(
     let expected_schema =
         build_prefixed_join_schema(stored_schema_left, stored_schema_right, alias);
 
-    build_result_table_from_df(&table.session, result_df, expected_schema, Vec::new())
+    build_result_table_from_df(&table.session, result_df, expected_schema, sort_specs)
 }
 
 /// Semi-join: Return rows from left table where keys exist in right table

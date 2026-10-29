@@ -67,8 +67,9 @@ use crate::LTSeqTable;
 
 /// `lookup()`'s join: the left join of `table` with `other` on `key ==
 /// target_key`, every column of `other` prefixed with `{alias}_`, as
-/// `join_prefixed` builds it. The query fails during execution when
-/// `target_key` holds a key in more than one row of `other`.
+/// `join_prefixed` builds it, in `table`'s declared order. The query fails
+/// during execution when `target_key` holds a key in more than one row of
+/// `other`.
 pub fn lookup_join_impl(
     table: &LTSeqTable,
     other: &LTSeqTable,
@@ -98,6 +99,10 @@ pub fn lookup_join_impl(
         None,
     );
 
+    // With the check, the left join returns each input row once with its
+    // columns unchanged, so the input's declared order still describes the
+    // rows; the root sort of `ordered_df` restores the order the join loses
+    // (#350).
     prefixed_join(
         table,
         &checked,
@@ -105,6 +110,7 @@ pub fn lookup_join_impl(
         &[target_key.to_string()],
         JoinType::Left,
         alias,
+        table.sort_specs.clone(),
     )
 }
 
