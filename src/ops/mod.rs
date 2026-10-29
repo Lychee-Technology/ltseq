@@ -9,6 +9,7 @@
 //! - **sort**: Sort operations
 //! - **grouping**: Consecutive group identification, first/last row selection
 //! - **join**: Cross-table join operations
+//! - **lookup**: The join of `lookup()`, which checks the target's key
 //! - **asof_join**: Time-series as-of join operations
 //! - **aggregation**: SQL GROUP BY and filtering
 //! - **pivot**: Long-to-wide table transformation
@@ -59,6 +60,7 @@ pub(crate) mod align;
 pub(crate) mod asof_join;
 pub(crate) mod grouping;
 pub(crate) mod join;
+pub(crate) mod lookup;
 pub(crate) mod mutation;
 pub(crate) mod pivot;
 pub(crate) mod sort;

@@ -966,6 +966,10 @@ class Expr(ABC):
 
         Fetches one column of a related table as a derived column: derive()
         left-joins the target on the key, so a key without a match gives NULL.
+        The target must hold each key in one row at most. A key in more rows
+        would repeat every input row that matches it, so the result raises
+        instead when it executes, naming the key, whether or not an input row
+        matches it; NULL keys match nothing and may repeat.
         The lookup must be the derived column's whole expression and must be
         called on a column; derive() raises ValueError otherwise. To build on
         a looked-up value, or to look up a computed key, derive it as a column
