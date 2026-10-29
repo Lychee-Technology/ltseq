@@ -936,6 +936,19 @@ impl LTSeqTable {
         )
     }
 
+    /// The join of `lookup()`: `join_prefixed` as a left join on
+    /// `key == target_key`, which fails during execution when the target
+    /// holds a key in more than one row (#351).
+    fn lookup_join(
+        &self,
+        other: &LTSeqTable,
+        key: &str,
+        target_key: &str,
+        alias: &str,
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::lookup::lookup_join_impl(self, other, key, target_key, alias)
+    }
+
     /// As-of Join: Time-series join matching each left row with nearest right row
     ///
     /// This operation finds, for each row in the left table, the "nearest" matching

@@ -39,7 +39,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{DFSchemaRef, Result};
-use datafusion::execution::context::QueryPlanner;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{
     Expr, Extension, Filter, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore,
@@ -50,7 +49,7 @@ use datafusion::physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     ReplaceChildrenOptions,
 };
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
 use super::Restrict;
 
@@ -223,8 +222,9 @@ impl ExecutionPlan for BarrierExec {
     }
 }
 
-/// Plans a [`Barrier`] as a [`BarrierExec`].
-struct BarrierPlanner;
+/// Plans a [`Barrier`] as a [`BarrierExec`]; the engine's query planner
+/// holds it (`engine::QueryPlanner`).
+pub(crate) struct BarrierPlanner;
 
 #[async_trait]
 impl ExtensionPlanner for BarrierPlanner {
@@ -242,22 +242,5 @@ impl ExtensionPlanner for BarrierPlanner {
                 input: Arc::clone(&physical_inputs[0]),
             }) as Arc<dyn ExecutionPlan>
         }))
-    }
-}
-
-/// DataFusion's planner plus [`BarrierPlanner`].
-#[derive(Debug)]
-pub(crate) struct BarrierQueryPlanner;
-
-#[async_trait]
-impl QueryPlanner for BarrierQueryPlanner {
-    async fn create_physical_plan(
-        &self,
-        logical_plan: &LogicalPlan,
-        session: &dyn datafusion::catalog::Session,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(BarrierPlanner)])
-            .create_physical_plan(logical_plan, session)
-            .await
     }
 }

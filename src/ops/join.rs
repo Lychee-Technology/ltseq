@@ -429,8 +429,8 @@ pub fn join_prefixed_impl(
     join_type_str: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
-    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
-    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
+    let (_, stored_schema_left) = table.require_df_and_schema()?;
+    let (_, stored_schema_right) = other.require_df_and_schema()?;
 
     let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
@@ -442,6 +442,28 @@ pub fn join_prefixed_impl(
         stored_schema_left,
         stored_schema_right,
     )?;
+
+    prefixed_join(
+        table,
+        other,
+        &left_col_names,
+        &right_col_names,
+        join_type,
+        alias,
+    )
+}
+
+/// [`join_prefixed_impl`] on key columns that both tables have.
+pub(crate) fn prefixed_join(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    left_col_names: &[String],
+    right_col_names: &[String],
+    join_type: JoinType,
+    alias: &str,
+) -> PyResult<LTSeqTable> {
+    let (df_left, stored_schema_left) = table.require_df_and_schema()?;
+    let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
     let df_join_type = match join_type {
         JoinType::Inner => datafusion::logical_expr::JoinType::Inner,
@@ -471,12 +493,12 @@ pub fn join_prefixed_impl(
         .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
 
     // Plan building only; nothing executes here.
-    let types = key_types(stored_schema_left, &left_col_names, stored_schema_right, &right_col_names)?;
+    let types = key_types(stored_schema_left, left_col_names, stored_schema_right, right_col_names)?;
     let result_df = join_on_keys(
         (**df_left).clone(),
         renamed_right_df,
         df_join_type,
-        &left_col_names,
+        left_col_names,
         &new_right_keys,
         &types,
     )?;

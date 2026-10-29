@@ -7,6 +7,8 @@
 //!   `KeepSortsAboveOffsets`, #339; `DropFloatStatistics`, #291)
 //! - Test-only overrides of the session layout (`LayoutOverrides`)
 
+use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::datasource::physical_plan::FileScanConfig;
@@ -14,9 +16,11 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::config::SessionConfig;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -27,6 +31,7 @@ use std::sync::{Arc, LazyLock};
 use tokio::runtime::Runtime;
 
 use crate::float_statistics::DropFloatStatistics;
+use crate::ops::lookup::OneRowPerKeyPlanner;
 use crate::source::LocalFiles;
 use crate::transpiler::FloatListZeros;
 
@@ -148,6 +153,8 @@ impl LayoutOverrides {
 /// - `LocalFiles`: The store of local files, so an execution that looks up
 ///   a file a reader listed fails if the file has disappeared (#262), and
 ///   reads its Parquet footer afresh (#359)
+/// - `QueryPlanner`: DataFusion's planner plus those of LTSeq's own plan
+///   nodes, such as the check under a lookup's join (#351)
 ///
 /// `LayoutOverrides` replaces the first two when a test has set them.
 pub fn create_session_context() -> Arc<SessionContext> {
@@ -199,6 +206,7 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     .collect();
     let state = SessionStateBuilder::new_from_existing(state)
         .with_physical_optimizer_rules(rules)
+        .with_query_planner(Arc::new(QueryPlanner))
         .build();
     let session = SessionContext::new_with_state(state);
     let footers = session
@@ -210,6 +218,29 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
         Arc::new(LocalFiles::new(footers)),
     );
     Arc::new(session)
+}
+
+/// DataFusion's planner, plus the planners of the plan nodes LTSeq adds.
+#[derive(Debug)]
+struct QueryPlanner;
+
+#[async_trait]
+impl datafusion::execution::context::QueryPlanner for QueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session: &dyn Session,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        let planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
+            Arc::new(OneRowPerKeyPlanner),
+            // A measurement build's filter barrier (`crate::m0`).
+            #[cfg(feature = "m0")]
+            Arc::new(crate::m0::pushdown::BarrierPlanner),
+        ];
+        DefaultPhysicalPlanner::with_extension_planners(planners)
+            .create_physical_plan(logical_plan, session)
+            .await
+    }
 }
 
 /// Puts a limit with the same fetch and no offset over every limit that

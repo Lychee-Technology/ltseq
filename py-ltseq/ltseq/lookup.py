@@ -174,6 +174,11 @@ class LookupMixin:
         """
         Perform a left join with a target table for lookup resolution.
 
+        The join adds every target column as ``{alias}_{column}``, and a key
+        without a match gets NULL. A target that holds a key in more than one
+        row would repeat each input row that matches it, so the joined table
+        raises when it executes instead (#351).
+
         Args:
             target_table: The table to join with
             on_column: Column name in self to join on
@@ -185,17 +190,8 @@ class LookupMixin:
         """
         from .core import LTSeq
 
-        # Use the prefix-aliased join path: lookup addresses target columns as
-        # `{alias}_{col}`, so it needs prefix-all naming (not join()'s suffix).
-        left_key_expr = {"type": "Column", "name": on_column}
-        right_key_expr = {"type": "Column", "name": join_key}
-
-        result_inner = self._inner.join_prefixed(
-            target_table._inner,
-            left_key_expr,
-            right_key_expr,
-            "left",  # Use left join so unmatched rows get NULL
-            alias,
+        result_inner = self._inner.lookup_join(
+            target_table._inner, on_column, join_key, alias
         )
 
         # The executed join's real schema comes from the Rust kernel.
