@@ -48,7 +48,7 @@ chrono = { version = "0.4.45", default-features = false }
 tempfile = "3.27.0"
 
 # The local file store of every session (`source::LocalFiles`, #262), and
-# the m0 prototypes' query planner: object_store's and DataFusion's traits
+# the engine's query planner: object_store's and DataFusion's traits
 # are async. Already in the tree through DataFusion; the version follows it.
 async-trait = "0.1.92"
 

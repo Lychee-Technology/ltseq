@@ -1,10 +1,11 @@
 """Tests for lookup() expression functionality."""
 
+import re
 from decimal import Decimal
 
 import pyarrow as pa
 import pytest
-from ltseq import LTSeq
+from ltseq import LTSeq, rand
 from ltseq.expr.types import ColumnExpr, CallExpr, LookupExpr
 
 
@@ -573,10 +574,9 @@ class TestLookupRepeatedKey:
         [
             lambda t: t.to_dicts(),
             lambda t: t.count(),
-            lambda t: t.head(1).to_dicts(),
             lambda t: t.select("oid").to_arrow(),
         ],
-        ids=["to_dicts", "count", "head", "select"],
+        ids=["to_dicts", "count", "select"],
     )
     def test_a_repeated_key_raises_when_the_result_executes(self, engine_layout, terminal):
         # The two rows of key 1 used to make one input row two: 2 rows
@@ -589,9 +589,45 @@ class TestLookupRepeatedKey:
         with pytest.raises(ValueError, match=_repeated("k", "1")):
             terminal(result)
 
+    def test_head_returns_no_repeated_row(self, engine_layout):
+        # head() may stop before the check reaches the second row of key 1,
+        # but that row never reaches the join: order 1 comes back once. The
+        # two rows of key 1 come first, so they used to be the first two.
+        prices = LTSeq.from_arrow(pa.table({"k": [1, 1, 2], "v": ["x", "y", "z"]}))
+        orders = LTSeq.from_arrow(pa.table({"oid": [1, 2], "a": [1, 2]}))
+
+        result = orders.derive(v=lambda r: r.a.lookup(prices, "v", join_key="k"))
+
+        try:
+            rows = result.head(2).to_dicts()
+        except ValueError as e:
+            assert re.search(_repeated("k", "1"), str(e))
+        else:
+            assert sorted(row["oid"] for row in rows) == [1, 2]
+
+    def test_a_volatile_key_is_checked_as_the_join_reads_it(self):
+        # Each execution draws the target's keys afresh. A check that read
+        # the target's plan a second time drew other keys than the join, so
+        # it could pass while the join saw True twice and returned 3 rows.
+        source = LTSeq.from_arrow(pa.table({"id": [1, 2]}))
+        target = source.derive(k=lambda r: rand() > 0.5)
+        orders = LTSeq.from_arrow(pa.table({"k": [True, False]}))
+
+        result = orders.derive(v=lambda r: r.k.lookup(target, "id", join_key="k"))
+
+        for _ in range(64):
+            try:
+                rows = result.to_dicts()
+            except ValueError as e:
+                assert re.search(_repeated("k", "(true|false)"), str(e))
+            else:
+                # One key drew True and the other False.
+                assert len(rows) == 2
+                assert {row["v"] for row in rows} == {1, 2}
+
     def test_a_repeated_key_raises_whichever_input_rows_match(self):
-        # The target is checked as a whole, as join(validate="m:1") checks
-        # its right side (contract §12.1): no input row has key 1.
+        # A query that reads the target to its end checks every key: no
+        # input row has key 1.
         prices = LTSeq.from_arrow(pa.table({"k": [1, 2, 1], "v": ["x", "z", "y"]}))
         orders = LTSeq.from_arrow(pa.table({"oid": [1, 2], "a": [2, 3]}))
 
@@ -600,13 +636,13 @@ class TestLookupRepeatedKey:
         with pytest.raises(ValueError, match=_repeated("k", "1")):
             result.to_dicts()
 
-    def test_the_error_counts_the_other_repeated_keys(self):
+    def test_the_error_names_one_of_several_repeated_keys(self, engine_layout):
         prices = LTSeq.from_arrow(pa.table({"k": [3, 1, 3, 2, 1, 2, 4], "v": list("abcdefg")}))
         orders = LTSeq.from_arrow(pa.table({"oid": [1], "a": [4]}))
 
         result = orders.derive(v=lambda r: r.a.lookup(prices, "v", join_key="k"))
 
-        with pytest.raises(ValueError, match=r"holds [123] in more than one row \(2 other keys repeat too\)"):
+        with pytest.raises(ValueError, match=_repeated("k", "[123]")):
             result.to_dicts()
 
     def test_repeated_null_keys_do_not_raise(self):

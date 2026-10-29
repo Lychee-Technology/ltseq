@@ -449,9 +449,7 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
         // Must run before `PushDownFilter`, so it goes first.
         let mut rules = Optimizer::new().rules;
         rules.insert(0, Arc::new(pushdown::RestrictPushdown(p.restrict_pushdown)));
-        builder = builder
-            .with_optimizer_rules(rules)
-            .with_query_planner(Arc::new(pushdown::BarrierQueryPlanner));
+        builder = builder.with_optimizer_rules(rules);
     }
     if p.checked != Checked::Off {
         builder = builder.with_optimizer_rule(Arc::new(checked::CheckedArithmetic::new(p.checked)));
