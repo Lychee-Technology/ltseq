@@ -4,6 +4,7 @@ Tests the asof_join() method which performs as-of (nearest time) joins
 commonly used in time-series and financial data processing.
 """
 
+import pyarrow as pa
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -418,3 +419,16 @@ class TestAsofJoinDirectionSemantics:
             # 1006 is only 1 away, should be picked
             assert df.iloc[0]["time_right"] == 1006
             assert df.iloc[0]["bid"] == 96.0
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("right_has_rows", [True, False])
+def test_a_left_table_without_rows_joins_to_a_table_without_rows(by, right_has_rows):
+    """A plan without rows collects to no batches (#207)."""
+    left = LTSeq.from_arrow(pa.table({"t": [1, 2], "g": ["A", "A"], "a": [10, 20]}))
+    right = LTSeq.from_arrow(pa.table({"t": [1], "g": ["A"], "b": [5]}))
+    if not right_has_rows:
+        right = right.filter(lambda r: r.t < 0)
+    joined = left.filter(lambda r: r.t < 0).asof_join(right, on="t", by=by)
+    assert joined.columns == ["t", "g", "a", "t_right", "g_right", "b"]
+    assert joined.to_dicts() == []

@@ -58,6 +58,24 @@ def test_a_right_null_time_is_never_a_match(direction, expected, nulls):
     assert matched_rids(joined) == dict(enumerate(expected))
 
 
+@pytest.mark.parametrize(
+    "direction, expected",
+    [
+        ("backward", [None, 0, 0, 0, 2]),
+        ("forward", [0, 0, 2, 2, None]),
+        ("nearest", [0, 0, 0, 2, 2]),
+    ],
+)
+@pytest.mark.parametrize("by", [None, "g"])
+def test_a_right_null_time_between_others_is_never_a_match(direction, expected, by):
+    """No sort by time puts a NULL between two times, but a table declared
+    sorted can hold one there."""
+    left = LTSeq.from_arrow(pa.table({"id": range(5), "t": [1, 3, 4, 6, 9], "g": ["A"] * 5}))
+    right = LTSeq.from_arrow(pa.table({"rid": range(3), "t": [3, None, 7], "g": ["A"] * 3}))
+    joined = left.asof_join(right, on="t", by=by, strategy=direction, is_sorted=True)
+    assert matched_rids(joined) == dict(enumerate(expected))
+
+
 @pytest.mark.parametrize("direction", DIRECTIONS)
 def test_a_left_null_time_has_no_match(direction):
     left = LTSeq.from_arrow(pa.table({"id": [0, 1], "t": [None, 6]}))
@@ -138,12 +156,16 @@ def random_rows(rng, n, key, unique_times):
 
 
 def in_order(rows, order, rng):
-    """``rows`` shuffled, or sorted by time with their NULL times first or
-    last."""
+    """``rows`` shuffled, or sorted by time with their NULL times first,
+    last, or at random places among the others."""
     if order == "shuffled":
         return rng.sample(rows, len(rows))
     valid = sorted((r for r in rows if r["t"] is not None), key=lambda r: r["t"])
     nulls = [r for r in rows if r["t"] is None]
+    if order == "nulls between":
+        for row in nulls:
+            valid.insert(rng.randint(0, len(valid)), row)
+        return valid
     return nulls + valid if order == "nulls first" else valid + nulls
 
 
@@ -159,12 +181,12 @@ def as_table(rows, key):
     )
 
 
-@pytest.mark.parametrize("order", ["shuffled", "nulls first", "nulls last"])
+@pytest.mark.parametrize("order", ["shuffled", "nulls first", "nulls last", "nulls between"])
 @pytest.mark.parametrize("by", [None, "g"])
 @pytest.mark.parametrize("direction", DIRECTIONS)
 def test_each_direction_equals_a_brute_force_reference(engine_layout, direction, by, order):
-    """Shuffled inputs go through ``is_sorted=False``, which sorts them;
-    sorted ones through ``is_sorted=True``, which searches them as given."""
+    """Shuffled inputs go through ``is_sorted=False``, which sorts them; the
+    others through ``is_sorted=True``, which searches them as given."""
     rng = random.Random(f"{direction}-{by}-{order}")
     for _ in range(4):
         left = random_rows(rng, rng.randint(1, 12), "id", unique_times=False)
