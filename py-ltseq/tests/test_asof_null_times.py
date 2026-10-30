@@ -178,3 +178,10 @@ def test_each_direction_equals_a_brute_force_reference(engine_layout, direction,
         )
         assert matched_rids(joined) == reference(left, right, direction, by)
 
+
+def test_nearest_picks_the_closer_time_across_the_whole_int64_range():
+    """The distances to these two times differ by more than ``2**63``."""
+    left = LTSeq.from_arrow(pa.table({"id": [0], "t": [2**62]}))
+    right = LTSeq.from_arrow(pa.table({"rid": [0, 1], "t": [-(2**62) - 1, 2**63 - 1]}))
+    joined = left.asof_join(right, on="t", strategy="nearest", is_sorted=True)
+    assert matched_rids(joined) == {0: 1}

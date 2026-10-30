@@ -421,8 +421,9 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
         (Some(b), None) => Some(b),
         (None, Some(f)) => Some(f),
         (Some(b), Some(f)) => {
-            let diff_back = target - right_times[b];
-            let diff_fwd = right_times[f] - target;
+            // As u64, a distance between any two i64 times fits.
+            let diff_back = target.abs_diff(right_times[b]);
+            let diff_fwd = right_times[f].abs_diff(target);
             if diff_back <= diff_fwd {
                 Some(b)
             } else {
