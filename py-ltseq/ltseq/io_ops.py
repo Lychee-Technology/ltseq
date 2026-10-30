@@ -49,7 +49,8 @@ class IOMixin:
         which reads the `.csv` files it matches. `*`, `?` and `[...]` match
         within one path segment, `**` across directories, and a name that
         starts with `.` only by a literal `.`, as in Python's
-        `glob.glob(path, recursive=True)`.
+        `glob.glob(path, recursive=True)`. A directory the glob has to list
+        but cannot read raises, where Python's glob skips it.
 
         The table reads the files found at the call, so a file added to the
         directory later, or matched by the glob later, is not read. Each
