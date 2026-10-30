@@ -12,14 +12,20 @@
 //! * `backward`: Find largest right.time where right.time <= left.time
 //! * `forward`: Find smallest right.time where right.time >= left.time  
 //! * `nearest`: Find closest right.time (backward bias on ties)
+//!
+//! A NULL time on either side never matches.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::common::right_rename_map;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
-use datafusion::arrow::array::{Array, ArrayRef, RecordBatch};
-use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, PrimitiveArray, RecordBatch};
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, DataType, Date32Type, Date64Type, Field, Float64Type, Int32Type, Int64Type,
+    Schema as ArrowSchema, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
+};
 use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -170,7 +176,7 @@ pub fn asof_join_impl(
         })?;
 
     // 6. Flatten batches and extract time values
-    let mut left_times: Vec<i64> = Vec::new();
+    let mut left_times: Vec<Option<i64>> = Vec::new();
 
     for batch in left_batches.iter() {
         let time_col = batch.column(left_time_idx);
@@ -178,7 +184,7 @@ pub fn asof_join_impl(
         left_times.extend(times);
     }
 
-    let mut right_times: Vec<i64> = Vec::new();
+    let mut right_times: Vec<Option<i64>> = Vec::new();
 
     for batch in right_batches.iter() {
         let time_col = batch.column(right_time_idx);
@@ -188,10 +194,12 @@ pub fn asof_join_impl(
 
     // 7. For each left row, find the matching right row via binary search.
     //
-    // Without `by=`, the search runs over the whole (time-sorted) right table.
-    // With `by=`, each left row only matches right rows sharing its group key:
-    // we bucket right row indices by group (times stay ascending because the
-    // table is time-sorted) and search within the left row's own bucket.
+    // A NULL time never matches (#263): a left row with one has no match, and
+    // the search runs over a bucket of right rows that leaves out those with
+    // one, so their times stay ascending wherever the sort put the NULLs.
+    // Without `by=`, one bucket holds all right rows. With `by=`, each left
+    // row only matches right rows sharing its group key: we bucket right rows
+    // by group and search within the left row's own bucket.
     let mut matched_right_indices: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
 
     let find = |target: i64, times: &[i64]| match direction {
@@ -200,10 +208,25 @@ pub fn asof_join_impl(
         "nearest" => find_asof_nearest(target, times),
         _ => unreachable!(),
     };
+    // A bucket: the non-NULL times of its right rows, and their row indices.
+    type Bucket = (Vec<i64>, Vec<usize>);
+    let add = |(times, rows): &mut Bucket, row: usize| {
+        if let Some(time) = right_times[row] {
+            times.push(time);
+            rows.push(row);
+        }
+    };
+    let search = |left_time: Option<i64>, (times, rows): &Bucket| {
+        left_time.and_then(|t| find(t, times)).map(|i| rows[i])
+    };
 
     if left_by_cols.is_empty() && right_by_cols.is_empty() {
+        let mut all = Bucket::default();
+        for row in 0..right_times.len() {
+            add(&mut all, row);
+        }
         for &left_time in &left_times {
-            matched_right_indices.push(find(left_time, &right_times));
+            matched_right_indices.push(search(left_time, &all));
         }
     } else {
         if left_by_cols.len() != right_by_cols.len() {
@@ -225,23 +248,19 @@ pub fn asof_join_impl(
         let left_keys = extract_group_keys(&converter, &left_batches, &left_by_idx)?;
         let right_keys = extract_group_keys(&converter, &right_batches, &right_by_idx)?;
 
-        // Bucket right rows by group: key -> (ascending times, original indices).
-        // Consume right_keys (unused afterward) so each OwnedRow moves into the
-        // map instead of being cloned per row.
-        let mut groups: HashMap<OwnedRow, (Vec<i64>, Vec<usize>)> = HashMap::new();
-        for (idx, key) in right_keys.into_iter().enumerate() {
-            let entry = groups.entry(key).or_default();
-            entry.0.push(right_times[idx]);
-            entry.1.push(idx);
+        // Bucket right rows by group. Consume right_keys (unused afterward) so
+        // each OwnedRow moves into the map instead of being cloned per row.
+        let mut groups: HashMap<OwnedRow, Bucket> = HashMap::new();
+        for (row, key) in right_keys.into_iter().enumerate() {
+            add(groups.entry(key).or_default(), row);
         }
 
         for (i, &left_time) in left_times.iter().enumerate() {
-            match groups.get(&left_keys[i]) {
-                Some((times, orig)) => {
-                    matched_right_indices.push(find(left_time, times).map(|g| orig[g]));
-                }
-                None => matched_right_indices.push(None),
-            }
+            matched_right_indices.push(
+                groups
+                    .get(&left_keys[i])
+                    .and_then(|bucket| search(left_time, bucket)),
+            );
         }
     }
 
@@ -413,147 +432,47 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
     }
 }
 
-/// Extract time values from an Arrow array column as i64
-fn extract_time_values(col: &Arc<dyn Array>) -> Result<Vec<i64>, LtseqError> {
-    let len = col.len();
-    let mut values = Vec::with_capacity(len);
-
-    match col.data_type() {
-        DataType::Int64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Int64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Int64Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i)
-                });
-            }
+/// Extract time values from an Arrow array column as i64, `None` where the
+/// time is NULL.
+fn extract_time_values(col: &ArrayRef) -> Result<Vec<Option<i64>>, LtseqError> {
+    let values = match col.data_type() {
+        DataType::Int64 => col.as_primitive::<Int64Type>().iter().collect(),
+        DataType::Int32 => widen(col.as_primitive::<Int32Type>(), i64::from),
+        DataType::Float64 => widen(col.as_primitive::<Float64Type>(), |v| v as i64),
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            col.as_primitive::<TimestampSecondType>().iter().collect()
         }
-        DataType::Int32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Int32Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Int32Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Float64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation(
-                        "Failed to cast to Float64Array".into(),
-                    )
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Timestamp(_, _) => {
-            // Try various timestamp types
-            if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampMicrosecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampNanosecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampMillisecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col.as_any().downcast_ref::<array::TimestampSecondArray>() {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else {
-                return Err(LtseqError::Validation(
-                    "Unsupported timestamp type for asof join time column".into(),
-                ));
-            }
-        }
-        DataType::Date32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Date32Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Date32Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Date64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Date64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Date64Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i)
-                });
-            }
-        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => col
+            .as_primitive::<TimestampMillisecondType>()
+            .iter()
+            .collect(),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => col
+            .as_primitive::<TimestampMicrosecondType>()
+            .iter()
+            .collect(),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => col
+            .as_primitive::<TimestampNanosecondType>()
+            .iter()
+            .collect(),
+        DataType::Date32 => widen(col.as_primitive::<Date32Type>(), i64::from),
+        DataType::Date64 => col.as_primitive::<Date64Type>().iter().collect(),
         other => {
             return Err(LtseqError::Validation(format!(
                 "Unsupported data type '{}' for asof join time column",
                 other
             )));
         }
-    }
+    };
 
     Ok(values)
+}
+
+/// The values of `arr` converted to i64, `None` where a value is NULL.
+fn widen<T: ArrowPrimitiveType>(
+    arr: &PrimitiveArray<T>,
+    convert: impl Fn(T::Native) -> i64,
+) -> Vec<Option<i64>> {
+    arr.iter().map(|v| v.map(&convert)).collect()
 }
 
 
