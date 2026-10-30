@@ -28,6 +28,7 @@ pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
+pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization

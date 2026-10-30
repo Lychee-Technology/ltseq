@@ -43,7 +43,9 @@ use datafusion::object_store::{
 };
 use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
-use glob::MatchOptions;
+use url::{ParseError, Url};
+
+use crate::python_glob;
 
 /// Why a reader built no table.
 #[derive(Debug)]
@@ -120,18 +122,17 @@ pub(crate) async fn read_files<'a>(
 ///
 /// A local path that names an existing file or directory is read as itself,
 /// even when its name holds `*`, `?` or `[`. Any other local path that holds
-/// them is a glob ([`glob_files`]). A URL is taken as written, as
-/// `ListingTableUrl::parse` takes it.
+/// them is a glob ([`glob_files`]), which `ListingTableUrl::parse` never
+/// sees: its glob crate rejects patterns Python accepts, such as `a**.csv`.
+/// A URL is taken as written, as `ListingTableUrl::parse` takes it.
 fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
     let local = std::path::Path::new(path);
     let url = if local.exists() {
         local_url(local)?
+    } else if is_local(path) && path.contains(['*', '?', '[']) {
+        return glob_files(path, extension);
     } else {
         let url = ListingTableUrl::parse(path)?;
-        // `parse` reads a glob only in a path without a scheme.
-        if url.get_glob().is_some() {
-            return glob_files(path, extension);
-        }
         if matches!(url.get_url().to_file_path(), Ok(file) if !file.exists()) {
             return Err(ReadError::NotFound(format!(
                 "No such file or directory: '{path}'"
@@ -150,50 +151,35 @@ fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError
     Ok(vec![as_collection_if_directory(url)?])
 }
 
+/// Whether `ListingTableUrl::parse` reads `path` as a local path, not a
+/// URL: it is absolute, or has no scheme.
+fn is_local(path: &str) -> bool {
+    std::path::Path::new(path).is_absolute()
+        || matches!(Url::parse(path), Err(ParseError::RelativeUrlWithoutBase))
+}
+
 /// The URLs of the files with the format's `extension` that the glob
-/// `pattern` matches now, or `NotFound` if there are none.
+/// `pattern` matches now, in the order of their paths and each once, or
+/// `NotFound` if there are none.
 ///
 /// `pattern` matches as Python's `glob.glob(pattern, recursive=True)`
-/// matches it: `*`, `?` and `[...]` within one path segment, `**` across
-/// directories, and a name that starts with `.` only by a literal `.`.
-/// `ListingTableUrl`'s own glob matches the whole pattern against the first
-/// segment below its directory, so it matches nothing for `d/s*/x.parquet`,
-/// and the files of `d`'s subdirectories for `d/*`.
+/// matches it ([`python_glob`]): `*`, `?` and `[...]` within one path
+/// segment, `**` across directories, and a name that starts with `.` only
+/// by a literal `.`. `ListingTableUrl`'s own glob matches the whole pattern
+/// against the first segment below its directory, so it matches nothing for
+/// `d/s*/x.parquet`, and the files of `d`'s subdirectories for `d/*`.
 fn glob_files(pattern: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
-    let external = |e: Box<dyn std::error::Error + Send + Sync>| DataFusionError::External(e);
-    // `glob_with` that requires a literal leading `.` skips every name that
-    // starts with one, also where the pattern spells it, so it walks every
-    // name, and the whole pattern then decides each match.
-    let walk = MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: true,
-        require_literal_leading_dot: false,
-    };
-    let strict = MatchOptions {
-        require_literal_leading_dot: true,
-        ..walk
-    };
-    // Without `.` components and repeated separators, which the walk's
-    // matches may drop or keep.
-    let normal = |path: &std::path::Path| {
-        let names = path.components().filter(|c| *c != Component::CurDir);
-        names.collect::<PathBuf>()
-    };
-    let whole = normal(std::path::Path::new(pattern));
-    let whole = glob::Pattern::new(&whole.to_string_lossy()).map_err(|e| external(Box::new(e)))?;
-
     let mut urls = Vec::new();
-    let matches = glob::glob_with(pattern, walk).map_err(|e| external(Box::new(e)))?;
-    for matched in matches {
-        // An error is a directory the pattern reaches but that cannot be read.
-        let matched = matched.map_err(|e| external(Box::new(e)))?;
-        if matched.is_file()
-            && matched.to_str().is_some_and(|f| f.ends_with(extension))
-            && whole.matches_path_with(&normal(&matched), strict)
-        {
-            urls.push(local_url(&matched)?);
+    for path in python_glob::glob(pattern).map_err(DataFusionError::from)? {
+        let file = std::path::Path::new(&path);
+        if file.is_file() && path.ends_with(extension) {
+            urls.push(local_url(file)?);
         }
     }
+    // Contract §4.1's order. Matches that differ only by `.`, `..` or
+    // repeated `/`, or that `**/**` gives twice, are one file.
+    urls.sort_by(|a, b| a.prefix().as_ref().cmp(b.prefix().as_ref()));
+    urls.dedup_by(|a, b| a.prefix() == b.prefix());
     if urls.is_empty() {
         return Err(ReadError::NotFound(format!(
             "No {extension} file matches '{pattern}'"
