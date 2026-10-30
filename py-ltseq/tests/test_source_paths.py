@@ -91,6 +91,7 @@ LAYOUT = [
     "a.{fmt}",
     "b.{fmt}",
     "ab.{fmt}",
+    "x[y.{fmt}",
     ".hidden.{fmt}",
     "notes.txt",
     "sub/c.{fmt}",
@@ -117,6 +118,12 @@ PATTERNS = [
     "sub/.private/*.{fmt}",
     "**/.private/*.{fmt}",
     "s*/.p*/*.{fmt}",
+    "**",
+    "sub/**",
+    "a**.{fmt}",
+    "x[*.{fmt}",
+    "**/**/*.{fmt}",
+    "*/../*.{fmt}",
 ]
 
 
@@ -130,14 +137,76 @@ def test_a_glob_matches_the_files_python_glob_matches(tmp_path, fmt, pattern):
         write(path, [i])
         values[str(path)] = i
     pattern = f"{d}/{pattern.format(fmt=fmt)}"
-    matched = [
+    # A file that Python's glob gives twice, as `**/**` does, is read once.
+    matched = {
         values[os.path.normpath(p)]
         for p in glob.glob(pattern, recursive=True)
         if os.path.isfile(p) and p.endswith(f".{fmt}")
-    ]
+    }
     assert matched, "every pattern here matches a file of the format"
 
     assert read(fmt, pattern) == sorted(matched)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_final_double_star_reads_the_files_below_it(tmp_path, fmt, reader):
+    d = tmp_path / "d"
+    write(d / f"a.{fmt}", [1])
+    write(d / "sub" / f"b.{fmt}", [2])
+    write(d / "sub" / "deeper" / f"c.{fmt}", [3])
+    write(d / ".hidden" / f"e.{fmt}", [4])
+
+    # As in Python's glob, a last segment of `**` matches files as well as
+    # directories, but no name that starts with `.`.
+    assert reader(fmt, f"{d}/**") == [1, 2, 3]
+    assert reader(fmt, f"{d}/sub/**") == [2, 3]
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_glob_python_accepts_is_matched_as_python_matches_it(tmp_path, fmt, reader):
+    d = tmp_path / "d"
+    write(d / f"a.{fmt}", [1])
+    write(d / f"ab.{fmt}", [2])
+    write(d / f"foo[bar.{fmt}", [3])
+
+    # `**` within a segment is `*`, and a `[` that no `]` closes is itself.
+    assert reader(fmt, f"{d}/a**.{fmt}") == [1, 2]
+    assert reader(fmt, f"{d}/a***b.{fmt}") == [2]
+    assert reader(fmt, f"{d}/foo[*.{fmt}") == [3]
+    for pattern in [f"{d}/z**.{fmt}", f"{d}/x[*.{fmt}", f"{tmp_path}/no[/a.{fmt}"]:
+        with raises_not_found(pattern):
+            reader.open(fmt, pattern)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory without permissions")
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_glob_lists_no_directory_it_excludes(tmp_path, fmt, reader):
+    d = tmp_path / "d"
+    write(d / f"a.{fmt}", [1])
+    write(d / "sub" / f"b.{fmt}", [2])
+    write(d / ".private" / f"c.{fmt}", [3])
+    write(d / "sub" / ".cache" / f"e.{fmt}", [4])
+    locked = [d / ".private", d / "sub" / ".cache"]
+    for directory in locked:
+        directory.chmod(0)
+    try:
+        # `*` and `**` match no name that starts with `.`, so these globs
+        # never list the directories that cannot be read.
+        assert reader(fmt, f"{d}/**/*.{fmt}") == [1, 2]
+        assert reader(fmt, f"{d}/*/*.{fmt}") == [2]
+        assert reader(fmt, f"{d}/**") == [1, 2]
+        # A glob lists one it names, and fails naming it where Python's glob
+        # would skip it; it is not missing.
+        pattern = f"{d}/.private/*.{fmt}"
+        with pytest.raises((ValueError, RuntimeError), match=re.escape(f"'{d}/.private'")):
+            reader.open(fmt, pattern)
+    finally:
+        for directory in locked:
+            directory.chmod(0o755)
+
+    assert reader(fmt, f"{d}/.private/*.{fmt}") == [3]
+    assert reader(fmt, f"{d}/**/.cache/*.{fmt}") == [4]
+    assert reader(fmt, f"{d}/*/.c*/*.{fmt}") == [4]
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
