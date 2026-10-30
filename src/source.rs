@@ -83,6 +83,12 @@ pub(crate) async fn read_files<'a>(
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
     let urls = locate(path, extension)?;
+    for url in urls.iter().filter(|url| url.is_collection()) {
+        let dir = url.get_url().to_file_path();
+        if let Some(dir) = dir.as_ref().ok().and_then(|dir| dir.to_str()) {
+            look_up_files(dir, extension)?;
+        }
+    }
 
     let state = session.state();
     let store = state.runtime_env().object_store(&urls[0])?;
@@ -198,6 +204,23 @@ fn glob_files(pattern: &str, extension: &str) -> Result<Vec<ListingTableUrl>, Re
         )));
     }
     Ok(urls)
+}
+
+/// Fails naming the first name in the local directory `dir` with the
+/// format's `extension` that cannot be looked up, or `dir` if it cannot be
+/// listed.
+///
+/// DataFusion's listing skips such a name as if it were a link to nothing,
+/// so a directory that can be listed but not searched read as holding no
+/// file, and its path raised `NotFound` (#261). The cost is one more lookup
+/// of each file the listing reads.
+fn look_up_files(dir: &str, extension: &str) -> Result<()> {
+    for entry in python_glob::listdir(dir)? {
+        if entry.name.ends_with(extension) {
+            python_glob::metadata(std::path::Path::new(dir).join(&entry.name))?;
+        }
+    }
+    Ok(())
 }
 
 /// The URL of the existing local file or directory `path`, naming it as it

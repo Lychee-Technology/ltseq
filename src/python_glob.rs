@@ -127,8 +127,8 @@ fn rlistdir(dir: &str, prefix: &str, dironly: bool, paths: &mut Vec<String>) -> 
 }
 
 /// A name in a directory that [`listdir`] gives.
-struct Entry {
-    name: String,
+pub(crate) struct Entry {
+    pub(crate) name: String,
     /// Its type, unless it is a link or the directory's listing did not
     /// give it.
     kind: Option<fs::FileType>,
@@ -148,7 +148,7 @@ impl Entry {
 /// The UTF-8 names in `dir`, the working directory if it is `""`. Like
 /// Python's glob, a `dir` that does not exist or is not a directory has
 /// none; any other error is returned, naming `dir`.
-fn listdir(dir: &str) -> io::Result<Vec<Entry>> {
+pub(crate) fn listdir(dir: &str) -> io::Result<Vec<Entry>> {
     let dir = if dir.is_empty() { "." } else { dir };
     let cannot = |e: io::Error| io::Error::new(e.kind(), format!("Cannot list '{dir}': {e}"));
     let entries = match fs::read_dir(dir) {

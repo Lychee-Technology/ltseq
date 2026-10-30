@@ -248,6 +248,27 @@ def test_a_path_that_cannot_be_looked_up_raises_naming_it(tmp_path, fmt, reader)
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root looks up a file without permissions")
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_a_directory_whose_files_cannot_be_looked_up_raises_naming_one(
+    tmp_path, fmt, reader
+):
+    d = tmp_path / "d"
+    write(d / f"a.{fmt}", [1])
+    # Its names can be listed, but none of them looked up, so it is not a
+    # directory without a file of the format.
+    d.chmod(0o444)
+    try:
+        with raises_cannot_access(f"{d}/a.{fmt}"):
+            reader.open(fmt, str(d))
+    finally:
+        d.chmod(0o755)
+
+    # A link to nothing in it is still no file.
+    (d / f"gone.{fmt}").symlink_to(tmp_path / f"nowhere.{fmt}")
+    assert reader(fmt, str(d)) == [1]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root looks up a file without permissions")
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_a_link_the_glob_cannot_follow_raises_and_a_dangling_one_is_skipped(
     tmp_path, fmt, reader
 ):
