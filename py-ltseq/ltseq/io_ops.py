@@ -114,7 +114,7 @@ class IOMixin:
             FileNotFoundError: If `path` names no file: it does not exist, or
                 it is a directory or a glob without a `.parquet` file. The
                 message names `path`.
-            RuntimeError: If Parquet parsing fails
+            ValueError: If Parquet parsing fails, or a path cannot be accessed
 
         Example:
             >>> t = LTSeq.read_parquet("data.parquet")
@@ -148,6 +148,7 @@ class IOMixin:
 
         Raises:
             FileNotFoundError: If `path` names no file, as in `read_csv`
+            RuntimeError: If CSV parsing fails, or a path cannot be accessed
 
         Example:
             >>> cursor = LTSeq.scan("large.csv")
@@ -174,6 +175,8 @@ class IOMixin:
 
         Raises:
             FileNotFoundError: If `path` names no file, as in `read_parquet`
+            RuntimeError: If Parquet parsing fails, or a path cannot be
+                accessed
 
         Example:
             >>> cursor = LTSeq.scan_parquet("large.parquet")
