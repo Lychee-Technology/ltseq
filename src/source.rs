@@ -124,19 +124,25 @@ pub(crate) async fn read_files<'a>(
 /// even when its name holds `*`, `?` or `[`. Any other local path that holds
 /// them is a glob ([`glob_files`]), which `ListingTableUrl::parse` never
 /// sees: its glob crate rejects patterns Python accepts, such as `a**.csv`.
-/// A URL is taken as written, as `ListingTableUrl::parse` takes it.
+/// A URL is taken as written, as `ListingTableUrl::parse` takes it. A path
+/// that cannot be looked up, such as one in a directory that cannot be
+/// searched, is an error, not `NotFound` ([`python_glob::metadata`]).
 fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
     let local = std::path::Path::new(path);
-    let url = if local.exists() {
+    let exists =
+        |path: &std::path::Path| -> Result<bool> { Ok(python_glob::metadata(path)?.is_some()) };
+    let url = if exists(local)? {
         local_url(local)?
     } else if is_local(path) && path.contains(['*', '?', '[']) {
         return glob_files(path, extension);
     } else {
         let url = ListingTableUrl::parse(path)?;
-        if matches!(url.get_url().to_file_path(), Ok(file) if !file.exists()) {
-            return Err(ReadError::NotFound(format!(
-                "No such file or directory: '{path}'"
-            )));
+        if let Ok(file) = url.get_url().to_file_path() {
+            if !exists(&file)? {
+                return Err(ReadError::NotFound(format!(
+                    "No such file or directory: '{path}'"
+                )));
+            }
         }
         url
     };
@@ -168,12 +174,18 @@ fn is_local(path: &str) -> bool {
 /// by a literal `.`. `ListingTableUrl`'s own glob matches the whole pattern
 /// against the first segment below its directory, so it matches nothing for
 /// `d/s*/x.parquet`, and the files of `d`'s subdirectories for `d/*`.
+///
+/// A match that cannot be looked up is an error, not a match that is not a
+/// file: the table would read fewer files than the glob matches.
 fn glob_files(pattern: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
     let mut urls = Vec::new();
     for path in python_glob::glob(pattern).map_err(DataFusionError::from)? {
-        let file = std::path::Path::new(&path);
-        if file.is_file() && path.ends_with(extension) {
-            urls.push(local_url(file)?);
+        if !path.ends_with(extension) {
+            continue;
+        }
+        let meta = python_glob::metadata(&path).map_err(DataFusionError::from)?;
+        if meta.is_some_and(|meta| meta.is_file()) {
+            urls.push(local_url(std::path::Path::new(&path))?);
         }
     }
     // Contract §4.1's order. Matches that differ only by `.`, `..` or

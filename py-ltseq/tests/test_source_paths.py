@@ -187,8 +187,11 @@ def test_a_glob_lists_no_directory_it_excludes(tmp_path, fmt, reader):
     write(d / ".private" / f"c.{fmt}", [3])
     write(d / "sub" / ".cache" / f"e.{fmt}", [4])
     locked = [d / ".private", d / "sub" / ".cache"]
-    for directory in locked:
-        directory.chmod(0)
+    # `.private` can be searched but not listed, so the path the pattern
+    # below spells can be looked up and the glob gets to list `.private`;
+    # nothing in `.cache` can be listed or looked up.
+    locked[0].chmod(0o111)
+    locked[1].chmod(0)
     try:
         # `*` and `**` match no name that starts with `.`, so these globs
         # never list the directories that cannot be read.
@@ -207,6 +210,72 @@ def test_a_glob_lists_no_directory_it_excludes(tmp_path, fmt, reader):
     assert reader(fmt, f"{d}/.private/*.{fmt}") == [3]
     assert reader(fmt, f"{d}/**/.cache/*.{fmt}") == [4]
     assert reader(fmt, f"{d}/*/.c*/*.{fmt}") == [4]
+
+
+def raises_cannot_access(path: str):
+    return pytest.raises((ValueError, RuntimeError), match=re.escape(f"'{path}'"))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root looks up a file without permissions")
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_path_that_cannot_be_looked_up_raises_naming_it(tmp_path, fmt, reader):
+    d = tmp_path / "d"
+    write(d / "good" / f"a.{fmt}", [1])
+    write(d / "locked" / f"a.{fmt}", [2])
+    locked = d / "locked"
+    # Its names can be listed, but none of them looked up: the glob finds
+    # `a` in it and cannot tell whether it is a file.
+    locked.chmod(0o444)
+    try:
+        for pattern in [
+            f"{d}/*/*.{fmt}",
+            f"{d}/*/a.{fmt}",
+            f"{d}/**/*.{fmt}",
+            f"{d}/**",
+            f"{locked}/a.{fmt}",
+        ]:
+            with raises_cannot_access(f"{locked}/a.{fmt}"):
+                reader.open(fmt, pattern)
+        # Whether a file is called `[a].{fmt}` cannot be told, so the path is
+        # not read as a glob either, which would match `a.{fmt}`.
+        with raises_cannot_access(f"{locked}/[a].{fmt}"):
+            reader.open(fmt, f"{locked}/[a].{fmt}")
+    finally:
+        locked.chmod(0o755)
+
+    assert reader(fmt, f"{d}/*/*.{fmt}") == [1, 2]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root looks up a file without permissions")
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_a_link_the_glob_cannot_follow_raises_and_a_dangling_one_is_skipped(
+    tmp_path, fmt, reader
+):
+    d = tmp_path / "d"
+    vault = tmp_path / "vault"
+    write(d / "sub" / f"a.{fmt}", [1])
+    write(vault / "inner" / f"b.{fmt}", [2])
+    (d / "link").symlink_to(vault / "inner")
+    (d / "gone").symlink_to(tmp_path / "nowhere")
+    (d / f"gone.{fmt}").symlink_to(tmp_path / f"nowhere.{fmt}")
+
+    # Nothing is at the end of a dangling link: it is not a directory to
+    # list, nor a file to read.
+    assert reader(fmt, f"{d}/*/*.{fmt}") == [1, 2]
+    assert reader(fmt, f"{d}/**/*.{fmt}") == [1, 2]
+    with raises_not_found(f"{d}/*.{fmt}"):
+        reader.open(fmt, f"{d}/*.{fmt}")
+
+    # Whether `link` is a directory cannot be looked up, so whether it holds
+    # a match cannot be told.
+    vault.chmod(0)
+    try:
+        for pattern in [f"{d}/*/*.{fmt}", f"{d}/**/*.{fmt}", f"{d}/**"]:
+            with raises_cannot_access(f"{d}/link"):
+                reader.open(fmt, pattern)
+        assert reader(fmt, f"{d}/s*/*.{fmt}") == [1]
+    finally:
+        vault.chmod(0o755)
 
 
 @pytest.mark.parametrize("fmt", FORMATS)

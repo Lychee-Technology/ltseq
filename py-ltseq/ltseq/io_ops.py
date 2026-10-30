@@ -49,8 +49,11 @@ class IOMixin:
         which reads the `.csv` files it matches. `*`, `?` and `[...]` match
         within one path segment, `**` across directories, and a name that
         starts with `.` only by a literal `.`, as in Python's
-        `glob.glob(path, recursive=True)`. A directory the glob has to list
-        but cannot read raises, where Python's glob skips it.
+        `glob.glob(path, recursive=True)`. A path that cannot be accessed
+        raises an error naming it, not `FileNotFoundError`: `path` itself, a
+        directory the glob has to list, or a name in one that it has to look
+        up, such as a file in a directory without search permission. Python's
+        glob skips such a path, so the glob would read fewer files.
 
         The table reads the files found at the call, so a file added to the
         directory later, or matched by the glob later, is not read. Each
@@ -69,7 +72,7 @@ class IOMixin:
             FileNotFoundError: If `path` names no file: it does not exist, or
                 it is a directory or a glob without a `.csv` file. The
                 message names `path`.
-            ValueError: If CSV parsing fails
+            ValueError: If CSV parsing fails, or a path cannot be accessed
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")
