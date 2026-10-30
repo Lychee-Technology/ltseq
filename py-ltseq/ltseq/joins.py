@@ -333,6 +333,8 @@ class JoinMixin(LTSeqLike):
         As-of join for time-series data (Polars join_asof aligned).
 
         For each left row, finds the nearest right row by a time column.
+        A NULL time never matches: a right row whose time is NULL is never a
+        match, and a left row whose time is NULL gets NULL right columns.
 
         Args:
             other: Another LTSeq table
