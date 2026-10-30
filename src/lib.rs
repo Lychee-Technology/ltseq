@@ -3,12 +3,15 @@ use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datafusion::arrow::pyarrow::IntoPyArrow;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::common::DFSchema;
+use datafusion::datasource::file_format::options::ReadOptions;
 use datafusion::datasource::MemTable;
+use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::prelude::*;
+use pyo3::exceptions::PyFileNotFoundError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -25,6 +28,7 @@ pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
+pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization
@@ -44,6 +48,25 @@ fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
         .iter()
         .map(|d| dict_to_py_expr(d).map_err(PyErr::from))
         .collect()
+}
+
+/// [`source::read_files`] with the GIL released. A path that names no file
+/// raises `FileNotFoundError` naming it (#261); any other failure raises the
+/// error `failed` makes of it.
+fn read_source<'a>(
+    py: Python<'_>,
+    session: &SessionContext,
+    path: &str,
+    options: impl ReadOptions<'a> + Send,
+    failed: impl FnOnce(DataFusionError) -> LtseqError,
+) -> PyResult<DataFrame> {
+    let read = detached(py, || {
+        Ok(RUNTIME.block_on(source::read_files(session, path, options)))
+    })?;
+    read.map_err(|e| match e {
+        source::ReadError::NotFound(message) => PyFileNotFoundError::new_err(message),
+        source::ReadError::Failed(e) => failed(e).into(),
+    })
 }
 
 /// LTSeqTable: Holds DataFusion SessionContext and loaded data
@@ -309,15 +332,9 @@ impl LTSeqTable {
     ///     has_header: Whether the CSV file has a header row (default: true)
     #[pyo3(signature = (path, has_header=true))]
     fn read_csv(&mut self, py: Python<'_>, path: String, has_header: bool) -> PyResult<()> {
-        // File scan + schema inference: release the GIL for the read.
-        let session = Arc::clone(&self.session);
-        let df = detached(py, || {
-            RUNTIME.block_on(async {
-                let options = CsvReadOptions::new().has_header(has_header);
-                crate::source::read_files(&session, &path, options)
-                    .await
-                    .map_err(|e| LtseqError::io("Failed to read CSV", e))
-            })
+        let options = CsvReadOptions::new().has_header(has_header);
+        let df = read_source(py, &self.session, &path, options, |e| {
+            LtseqError::io("Failed to read CSV", e)
         })?;
 
         self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
@@ -332,14 +349,13 @@ impl LTSeqTable {
     ///     path: Path to Parquet file
     #[pyo3(signature = (path))]
     fn read_parquet(&mut self, py: Python<'_>, path: String) -> PyResult<()> {
-        let session = Arc::clone(&self.session);
-        let df = detached(py, || {
-            RUNTIME.block_on(async {
-                crate::source::read_files(&session, &path, ParquetReadOptions::default())
-                    .await
-                    .map_err(|e| LtseqError::io("Failed to read Parquet", e))
-            })
-        })?;
+        let df = read_source(
+            py,
+            &self.session,
+            &path,
+            ParquetReadOptions::default(),
+            |e| LtseqError::io("Failed to read Parquet", e),
+        )?;
 
         self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
         self.dataframe = Some(Arc::new(df));
@@ -366,9 +382,11 @@ impl LTSeqTable {
         has_header: bool,
     ) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        detached(py, || {
-            crate::cursor::create_cursor_from_csv(session, &path, has_header)
-        })
+        let options = CsvReadOptions::new().has_header(has_header);
+        let df = read_source(py, &session, &path, options, |e| {
+            LtseqError::runtime("Failed to read CSV", e)
+        })?;
+        detached(py, || crate::cursor::create_cursor(df, path))
     }
 
     /// Scan Parquet file and return a streaming cursor
@@ -381,7 +399,10 @@ impl LTSeqTable {
     #[staticmethod]
     fn scan_parquet(py: Python<'_>, path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        detached(py, || crate::cursor::create_cursor_from_parquet(session, &path))
+        let df = read_source(py, &session, &path, ParquetReadOptions::default(), |e| {
+            LtseqError::runtime("Failed to read Parquet", e)
+        })?;
+        detached(py, || crate::cursor::create_cursor(df, path))
     }
 
     /// Load and return a CSV file as a fully initialized LTSeqTable.

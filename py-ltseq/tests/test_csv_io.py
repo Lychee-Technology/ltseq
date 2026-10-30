@@ -168,18 +168,15 @@ class TestWriteCSV:
 class TestIOErrorHandling:
     """Test I/O error handling (T32)."""
 
-    def test_read_csv_nonexistent_returns_empty(self):
-        """Reading a non-existent CSV returns empty table (lazy error)."""
-        t = LTSeq.read_csv("/nonexistent/path/to/file.csv")
-        # The current behavior: no exception, empty schema, empty data
-        assert t._schema == {}
-        assert t.to_dicts() == []
+    def test_read_csv_nonexistent_raises(self):
+        """Reading a non-existent CSV raises FileNotFoundError naming it (#261)."""
+        with pytest.raises(FileNotFoundError, match="/nonexistent/path/to/file.csv"):
+            LTSeq.read_csv("/nonexistent/path/to/file.csv")
 
-    def test_read_parquet_nonexistent_returns_empty(self):
-        """Reading a non-existent parquet file returns empty table (lazy error)."""
-        t = LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
-        # The current behavior: no exception, empty data
-        assert t.to_dicts() == []
+    def test_read_parquet_nonexistent_raises(self):
+        """Reading a non-existent parquet file raises FileNotFoundError naming it (#261)."""
+        with pytest.raises(FileNotFoundError, match="/nonexistent/path/to/file.parquet"):
+            LTSeq.read_parquet("/nonexistent/path/to/file.parquet")
 
 
 if __name__ == "__main__":

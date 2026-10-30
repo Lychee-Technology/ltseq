@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from ltseq import LTSeq, ltseq_core
+from ltseq import LTSeq
 
 FIRST = [1, 2, 3]
 SECOND = [4, 5]
@@ -62,16 +62,6 @@ def rewrite_keeping_size_and_time(path: Path, xs: list[int]) -> None:
 
 
 def read(fmt: str, source: str) -> LTSeq:
-    if "*" in source or source.startswith("file:"):
-        # read_csv and read_parquet return an empty table for a glob or a URL
-        # without calling the kernel (#261), so call the kernel's reader
-        # directly.
-        inner = (
-            ltseq_core.LTSeqTable.from_csv(source, True)
-            if fmt == "csv"
-            else ltseq_core.LTSeqTable.from_parquet(source)
-        )
-        return LTSeq._from_inner(inner)
     return LTSeq.read_csv(source) if fmt == "csv" else LTSeq.read_parquet(source)
 
 

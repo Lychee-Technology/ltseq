@@ -47,6 +47,11 @@ chrono = { version = "0.4.45", default-features = false }
 # Already in the tree through DataFusion; the version follows it.
 tempfile = "3.27.0"
 
+# Whether a reader's path is a URL, decided as `ListingTableUrl::parse`
+# decides it (`source::is_local`, #261). Already in the tree through
+# DataFusion; the version follows it.
+url = "2.5.8"
+
 # The local file store of every session (`source::LocalFiles`, #262), and
 # the engine's query planner: object_store's and DataFusion's traits
 # are async. Already in the tree through DataFusion; the version follows it.

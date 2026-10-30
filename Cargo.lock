@@ -1992,6 +1992,7 @@ dependencies = [
  "rustix",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

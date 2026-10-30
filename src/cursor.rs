@@ -127,19 +127,10 @@ impl LTSeqCursor {
     }
 }
 
-/// Create a LTSeqCursor from a CSV file path (used by LTSeqTable::scan_csv)
-pub fn create_cursor_from_csv(
-    session: Arc<SessionContext>,
-    path: &str,
-    has_header: bool,
-) -> Result<LTSeqCursor, LtseqError> {
+/// Create a LTSeqCursor streaming `df`, the files a reader listed at
+/// `path` (used by LTSeqTable::scan_csv and scan_parquet)
+pub fn create_cursor(df: DataFrame, path: String) -> Result<LTSeqCursor, LtseqError> {
     RUNTIME.block_on(async {
-        // Read CSV into DataFrame with has_header option
-        let options = CsvReadOptions::new().has_header(has_header);
-        let df = crate::source::read_files(&session, path, options)
-            .await
-            .map_err(|e| LtseqError::Runtime(format!("Failed to read CSV: {}", e)))?;
-
         // Get schema
         let arrow_schema = crate::LTSeqTable::schema_from_df(df.schema());
 
@@ -149,30 +140,6 @@ pub fn create_cursor_from_csv(
             .await
             .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
 
-        Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
-    })
-}
-
-/// Create a LTSeqCursor from a Parquet file path
-pub fn create_cursor_from_parquet(
-    session: Arc<SessionContext>,
-    path: &str,
-) -> Result<LTSeqCursor, LtseqError> {
-    RUNTIME.block_on(async {
-        // Read Parquet into DataFrame
-        let df = crate::source::read_files(&session, path, ParquetReadOptions::default())
-            .await
-            .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet: {}", e)))?;
-
-        // Get schema
-        let arrow_schema = crate::LTSeqTable::schema_from_df(df.schema());
-
-        // Execute as stream
-        let stream = df
-            .execute_stream()
-            .await
-            .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
-
-        Ok(LTSeqCursor::new(stream, arrow_schema, path.to_string()))
+        Ok(LTSeqCursor::new(stream, arrow_schema, path))
     })
 }
