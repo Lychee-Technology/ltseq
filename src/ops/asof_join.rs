@@ -438,8 +438,9 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
 fn extract_time_values(col: &ArrayRef) -> Result<Vec<Option<i64>>, LtseqError> {
     let values = match col.data_type() {
         DataType::Int64 => col.as_primitive::<Int64Type>().iter().collect(),
-        DataType::Int32 => widen(col.as_primitive::<Int32Type>(), i64::from),
-        DataType::Float64 => widen(col.as_primitive::<Float64Type>(), |v| v as i64),
+        DataType::Int32 => to_i64(col.as_primitive::<Int32Type>(), i64::from),
+        // Truncates the fraction, and reads NaN as 0 (#369).
+        DataType::Float64 => to_i64(col.as_primitive::<Float64Type>(), |v| v as i64),
         DataType::Timestamp(TimeUnit::Second, _) => {
             col.as_primitive::<TimestampSecondType>().iter().collect()
         }
@@ -455,7 +456,7 @@ fn extract_time_values(col: &ArrayRef) -> Result<Vec<Option<i64>>, LtseqError> {
             .as_primitive::<TimestampNanosecondType>()
             .iter()
             .collect(),
-        DataType::Date32 => widen(col.as_primitive::<Date32Type>(), i64::from),
+        DataType::Date32 => to_i64(col.as_primitive::<Date32Type>(), i64::from),
         DataType::Date64 => col.as_primitive::<Date64Type>().iter().collect(),
         other => {
             return Err(LtseqError::Validation(format!(
@@ -469,7 +470,7 @@ fn extract_time_values(col: &ArrayRef) -> Result<Vec<Option<i64>>, LtseqError> {
 }
 
 /// The values of `arr` converted to i64, `None` where a value is NULL.
-fn widen<T: ArrowPrimitiveType>(
+fn to_i64<T: ArrowPrimitiveType>(
     arr: &PrimitiveArray<T>,
     convert: impl Fn(T::Native) -> i64,
 ) -> Vec<Option<i64>> {
