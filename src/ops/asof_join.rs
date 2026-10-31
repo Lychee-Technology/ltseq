@@ -27,32 +27,38 @@ use datafusion::arrow::datatypes::{
     Schema as ArrowSchema, SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
-use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
+use datafusion::arrow::row::{RowConverter, SortField};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// Encode the `by` grouping columns of every row into hashable owned keys via
-/// Arrow's RowConverter. One converter is shared between left and right so the
-/// encodings are comparable. Returns `None` when there are no `by` columns
-/// (the ungrouped fast path). `by_indices` are column positions in `batches`.
-fn extract_group_keys(
+/// Call `f` with the index of each row of `batch`, in order, and its `by`
+/// columns encoded by Arrow's RowConverter. One converter is shared between
+/// left and right, so two keys are equal exactly when their bytes are.
+/// `by_indices` are column positions in `batch`. The rows are encoded
+/// `chunk_rows` at a time, so the encoder holds at most that many keys
+/// however many rows `batch` has.
+fn for_each_group_key(
     converter: &RowConverter,
-    batches: &[RecordBatch],
+    batch: &RecordBatch,
     by_indices: &[usize],
-) -> Result<Vec<OwnedRow>, LtseqError> {
-    let mut keys: Vec<OwnedRow> = Vec::new();
-    for batch in batches {
-        let cols: Vec<ArrayRef> =
-            by_indices.iter().map(|&i| Arc::clone(batch.column(i))).collect();
-        let rows = converter
+    chunk_rows: usize,
+    mut f: impl FnMut(usize, &[u8]),
+) -> Result<(), LtseqError> {
+    for start in (0..batch.num_rows()).step_by(chunk_rows) {
+        let len = chunk_rows.min(batch.num_rows() - start);
+        let cols: Vec<ArrayRef> = by_indices
+            .iter()
+            .map(|&i| batch.column(i).slice(start, len))
+            .collect();
+        let keys = converter
             .convert_columns(&cols)
             .map_err(|e| LtseqError::Runtime(format!("Failed to encode by= keys: {}", e)))?;
-        for i in 0..batch.num_rows() {
-            keys.push(rows.row(i).owned());
+        for (i, key) in keys.iter().enumerate() {
+            f(start + i, key.data());
         }
     }
-    Ok(keys)
+    Ok(())
 }
 
 /// Resolve `by` column names to indices in `schema`, validating existence.
@@ -250,28 +256,41 @@ pub fn asof_join_impl(
         let converter = RowConverter::new(sort_fields)
             .map_err(|e| LtseqError::Runtime(format!("Failed to build by= encoder: {}", e)))?;
 
-        let left_keys =
-            extract_group_keys(&converter, std::slice::from_ref(&left_batch), &left_by_idx)?;
-        let right_keys = extract_group_keys(
+        // Keys are encoded a batch of the session's size at a time, and only
+        // a group's first key is kept, so neither side holds a key per row.
+        let chunk_rows = table.session.copied_config().batch_size();
+
+        // Bucket right rows by group.
+        let mut groups: HashMap<Box<[u8]>, Bucket> = HashMap::new();
+        for_each_group_key(
             &converter,
-            std::slice::from_ref(&right_batch),
+            &right_batch,
             &right_by_idx,
+            chunk_rows,
+            |row, key| match groups.get_mut(key) {
+                Some(bucket) => add(bucket, row),
+                None => {
+                    let mut bucket = Bucket::default();
+                    add(&mut bucket, row);
+                    groups.insert(key.into(), bucket);
+                }
+            },
         )?;
 
-        // Bucket right rows by group. Consume right_keys (unused afterward) so
-        // each OwnedRow moves into the map instead of being cloned per row.
-        let mut groups: HashMap<OwnedRow, Bucket> = HashMap::new();
-        for (row, key) in right_keys.into_iter().enumerate() {
-            add(groups.entry(key).or_default(), row);
-        }
-
-        for (left_time, key) in left_times.iter().zip(&left_keys) {
-            matched_right_indices.push(
-                groups
-                    .get(key)
-                    .and_then(|(times, rows)| search(left_time, times).map(|i| rows[i])),
-            );
-        }
+        for_each_group_key(
+            &converter,
+            &left_batch,
+            &left_by_idx,
+            chunk_rows,
+            |row, key| {
+                let left_time = left_times.is_valid(row).then(|| left_times.value(row));
+                matched_right_indices.push(
+                    groups
+                        .get(key)
+                        .and_then(|(times, rows)| search(left_time, times).map(|i| rows[i])),
+                );
+            },
+        )?;
     }
 
     // 8. Build result schema: left columns + suffix-renamed right columns.
@@ -461,7 +480,7 @@ fn non_null_run(times: &Int64Array) -> Option<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::TimestampMicrosecondArray;
+    use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
 
     #[test]
     fn a_64_bit_time_column_is_read_in_place() {
@@ -491,5 +510,30 @@ mod tests {
         assert_eq!(run(&[None, None]), Some(2..2));
         assert_eq!(run(&[]), Some(0..0));
         assert_eq!(run(&[Some(1), None, Some(2)]), None);
+    }
+
+    #[test]
+    fn group_keys_are_visited_in_order_and_compare_equal_across_chunks() {
+        let keys: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "a", "c", "b"]));
+        let batch = RecordBatch::try_from_iter([("k", keys)]).expect("a batch");
+        let converter =
+            RowConverter::new(vec![SortField::new(DataType::Utf8)]).expect("an encoder");
+        for chunk_rows in 1..=6 {
+            let mut rows = Vec::new();
+            let mut groups: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+            for_each_group_key(&converter, &batch, &[0], chunk_rows, |row, key| {
+                rows.push(row);
+                groups.entry(key.to_vec()).or_default().push(row);
+            })
+            .expect("encoded keys");
+            let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+            groups.sort();
+            assert_eq!(rows, [0, 1, 2, 3, 4], "chunk_rows={chunk_rows}");
+            assert_eq!(
+                groups,
+                [vec![0, 2], vec![1, 4], vec![3]],
+                "chunk_rows={chunk_rows}"
+            );
+        }
     }
 }
