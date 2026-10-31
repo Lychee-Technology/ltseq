@@ -292,12 +292,12 @@ fn chunked_group_count(
 /// Boundary info extracted from a single row group for cross-RG matching.
 /// Contains only the tail of the last partition and head of the first partition.
 struct RgBoundaryInfo {
-    /// Key of the first partition in this RG
-    first_key: i64,
+    /// Key of the first partition in this RG (`None` for NULL)
+    first_key: Option<i64>,
     /// First few rows of the first partition (up to num_steps-1 rows)
     first_head: RecordBatch,
-    /// Key of the last partition in this RG
-    last_key: i64,
+    /// Key of the last partition in this RG (`None` for NULL)
+    last_key: Option<i64>,
     /// Last few rows of the last partition (up to num_steps-1 rows)
     last_tail: RecordBatch,
 }
@@ -488,12 +488,16 @@ fn read_match_and_extract_boundary(
             part_col.data_type()
         )
     })?;
+    // A NULL key is one partition, apart from every value, as in the general
+    // path's `compute_partition_boundaries`. Parquet reads a NULL slot back
+    // as 0, so the slot's value must not be read as a key.
+    let key = |i: usize| part_values.is_valid(i).then(|| part_values.value(i));
 
     let n = combined.num_rows();
     let mut partition_boundaries = vec![false; n];
     partition_boundaries[0] = true;
     for (i, boundary) in partition_boundaries.iter_mut().enumerate().skip(1) {
-        if part_values.value(i) != part_values.value(i - 1) {
+        if key(i) != key(i - 1) {
             *boundary = true;
         }
     }
@@ -509,7 +513,7 @@ fn read_match_and_extract_boundary(
     )?;
 
     // Extract boundary info for cross-RG matching
-    let first_key = part_values.value(0);
+    let first_key = key(0);
     let first_partition_end = partition_boundaries
         .iter()
         .enumerate()
@@ -525,7 +529,7 @@ fn read_match_and_extract_boundary(
         .rev()
         .find_map(|(idx, is_boundary)| is_boundary.then_some(idx))
         .unwrap_or(0);
-    let last_key = part_values.value(last_partition_start);
+    let last_key = key(last_partition_start);
     let last_tail_start = last_partition_start.max(n.saturating_sub(num_steps.saturating_sub(1)));
     let last_tail = combined.slice(last_tail_start, n - last_tail_start);
 
@@ -543,7 +547,9 @@ fn read_match_and_extract_boundary(
     })
 }
 
-/// Coerce a partition column to Int64Array.
+/// Coerce a partition column to Int64Array, keeping its NULLs. The keys are
+/// only compared for equality, and `as i64` gives each `UInt64` value a key
+/// of its own, so values above `i64::MAX` stay apart.
 fn coerce_partition_to_i64(col: &ArrayRef) -> Option<Int64Array> {
     use datafusion::arrow::datatypes::DataType;
 
@@ -551,18 +557,15 @@ fn coerce_partition_to_i64(col: &ArrayRef) -> Option<Int64Array> {
         DataType::Int64 => col.as_any().downcast_ref::<Int64Array>().cloned(),
         DataType::UInt64 => {
             let arr = col.as_any().downcast_ref::<UInt64Array>()?;
-            let values: Vec<i64> = arr.values().iter().map(|v| *v as i64).collect();
-            Some(Int64Array::from(values))
+            Some(arr.unary(|v| v as i64))
         }
         DataType::Int32 => {
             let arr = col.as_any().downcast_ref::<Int32Array>()?;
-            let values: Vec<i64> = arr.values().iter().map(|v| *v as i64).collect();
-            Some(Int64Array::from(values))
+            Some(arr.unary(i64::from))
         }
         DataType::UInt32 => {
             let arr = col.as_any().downcast_ref::<UInt32Array>()?;
-            let values: Vec<i64> = arr.values().iter().map(|v| *v as i64).collect();
-            Some(Int64Array::from(values))
+            Some(arr.unary(i64::from))
         }
         _ => None,
     }
@@ -592,7 +595,7 @@ fn count_cross_rg_boundary_patterns_from_info(
 
     let keep = num_steps - 1;
     let mut boundary_count: usize = 0;
-    let mut pending: Option<(i64, RecordBatch)> = None;
+    let mut pending: Option<(Option<i64>, RecordBatch)> = None;
 
     for result in rg_results {
         let Some(b) = &result.boundary else {
@@ -876,6 +879,7 @@ mod tests {
     use crate::engine::{create_session_context, session_context_with, RUNTIME};
     use crate::metadata::SortSpec;
     use crate::ops::grouping::group_ordered_count_impl;
+    use crate::ops::pattern_match::search_pattern_count_impl;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::file_format::options::ParquetReadOptions;
     use datafusion::prelude::SessionContext;
@@ -1129,5 +1133,80 @@ mod tests {
         let count = group_ordered_count_impl(&table, &expr).expect("general path count");
         let _ = std::fs::remove_file(&path);
         assert_eq!(count, general_path_count(&expr));
+    }
+
+    /// Sorted by `i`, with a partition key `k` of type `key_type` that moves
+    /// between values and NULL in both directions, next to 0 among others.
+    /// Every row has `e = 1`, so a pattern of `e == 1` steps matches at
+    /// every start whose rows share one partition.
+    fn keyed_events(key_type: &DataType) -> RecordBatch {
+        let keys: Vec<Option<i64>> = [1, 1, 1, -1, -1, -1, 0, 0, 0, -1, 0, 0, 5, 5, -1, -1]
+            .into_iter()
+            .map(|k| (k >= 0).then_some(k))
+            .collect();
+        let keys =
+            datafusion::arrow::compute::cast(&Int64Array::from(keys), key_type).expect("cast keys");
+        let n = keys.len() as i64;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("i", DataType::Int64, false),
+            Field::new("k", key_type.clone(), true),
+            Field::new("e", DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..n)),
+                keys,
+                Arc::new(Int64Array::from_iter_values((0..n).map(|_| 1))),
+            ],
+        )
+        .expect("valid keyed events batch")
+    }
+
+    /// The parallel pattern count splits partitions where the general path
+    /// does: a NULL key is one partition, apart from 0 and every other value,
+    /// inside a row group and across a seam (#153). Parquet reads a NULL slot
+    /// back as 0.
+    #[test]
+    fn pattern_count_keeps_null_partition_keys_apart() {
+        let step = binop(
+            "Eq",
+            col("e"),
+            PyExpr::Literal(crate::types::LiteralValue::Int64(1)),
+        );
+        for key_type in [
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt32,
+            DataType::UInt64,
+        ] {
+            let batch = keyed_events(&key_type);
+            let memory = LTSeqTable::from_batches(
+                create_session_context(),
+                vec![batch.clone()],
+                batch.schema(),
+                vec![SortSpec::new("i".to_string(), false)],
+            )
+            .expect("in-memory table");
+            // Hand counts: the partitions hold 3, 3, 3, 1, 2, 2 and 2 rows.
+            for (num_steps, hand_count) in [(2, 9), (3, 3)] {
+                let steps = vec![step.clone(); num_steps];
+                let expected = search_pattern_count_impl(&memory, &steps, Some("k".to_string()))
+                    .expect("general path count");
+                assert_eq!(expected, hand_count, "{key_type}, steps={num_steps}");
+
+                for rows_per_group in [1, 2, 3, 4, 16] {
+                    let path = write_parquet(&batch, rows_per_group, &format!("keys_{key_type}"));
+                    let table = sorted_parquet_table(&path);
+                    let count = parallel_pattern_match_count(&table, &steps, "k", &path);
+                    let _ = std::fs::remove_file(&path);
+                    assert_eq!(
+                        count.expect("parallel count"),
+                        expected,
+                        "{key_type}, steps={num_steps}, rows_per_group={rows_per_group}"
+                    );
+                }
+            }
+        }
     }
 }

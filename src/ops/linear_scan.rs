@@ -673,13 +673,21 @@ fn coerce_to_i64(arr: &ArrayRef) -> Option<Int64Array> {
             let src = arr.as_any().downcast_ref::<UInt32Array>()?;
             Some(Int64Array::from_iter(src.iter().map(|v| v.map(|x| x as i64))))
         }
-        DataType::Timestamp(_, _) => {
-            // Reinterpret timestamp as i64
-            let data = arr.to_data();
-            Int64Array::try_new(
-                data.buffers()[0].clone().into(),
-                data.nulls().cloned(),
-            ).ok()
+        DataType::Timestamp(unit, _) => {
+            use datafusion::arrow::array::AsArray;
+            use datafusion::arrow::datatypes::{
+                TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+                TimestampNanosecondType, TimestampSecondType,
+            };
+            // Every unit stores i64. The typed array's values and NULLs are
+            // its own slice's, whatever the offset into the shared buffer.
+            let values = match unit {
+                TimeUnit::Second => arr.as_primitive::<TimestampSecondType>().values(),
+                TimeUnit::Millisecond => arr.as_primitive::<TimestampMillisecondType>().values(),
+                TimeUnit::Microsecond => arr.as_primitive::<TimestampMicrosecondType>().values(),
+                TimeUnit::Nanosecond => arr.as_primitive::<TimestampNanosecondType>().values(),
+            };
+            Some(Int64Array::new(values.clone(), arr.nulls().cloned()))
         }
         _ => None,
     }
