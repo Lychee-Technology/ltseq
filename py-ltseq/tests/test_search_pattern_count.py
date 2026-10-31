@@ -375,3 +375,68 @@ def test_search_pattern_count_match_spanning_empty_row_group(tmp_path):
 
     # The match at rows 1..3 crosses the empty middle row group.
     assert count == 1
+
+
+@pytest.mark.parametrize("key_type", ["int32", "int64", "uint32", "uint64"])
+@pytest.mark.parametrize("row_group_size", [1, 2, 3, 6])
+def test_search_pattern_count_keeps_null_partition_keys_apart(
+    tmp_path, key_type, row_group_size
+):
+    """A NULL key is one partition of its own on sorted Parquet too (#153).
+    Parquet reads a NULL slot back as 0, which the sorted-Parquet path took
+    for key 0."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    # Sorted by userid with its NULLs last. The steps match at rows 0-1 (key
+    # 0) and 4-5 (NULL); rows 2-3 cross from key 0 to NULL.
+    table = pa.table(
+        {
+            "userid": pa.array([0, 0, 0, None, None, None], pa.type_for_alias(key_type)),
+            "eventtime": [1, 2, 3, 4, 5, 6],
+            "ev": ["s1/a", "s2/a", "s1/a", "s2/a", "s1/a", "s2/a"],
+        }
+    )
+    path = tmp_path / "null_keys.parquet"
+    pq.write_table(table, path, row_group_size=row_group_size)
+    steps = (
+        lambda r: r.ev.s.starts_with("s1/"),
+        lambda r: r.ev.s.starts_with("s2/"),
+    )
+
+    parquet = LTSeq.read_parquet(str(path)).assume_sorted("userid", "eventtime")
+    memory = LTSeq.from_arrow(table).assume_sorted("userid", "eventtime")
+
+    assert parquet.search_pattern_count(*steps, partition_by="userid") == 2
+    assert memory.search_pattern_count(*steps, partition_by="userid") == 2
+
+
+@pytest.mark.parametrize("row_group_size", [2, 4])
+def test_search_pattern_count_keeps_uint64_keys_above_int64_apart(
+    tmp_path, row_group_size
+):
+    """The sorted-Parquet path keys a `uint64` partition as an `int64`, which
+    maps each value to its own key, so `2**64 - 1` stays apart from
+    `2**63 - 1` (#153)."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    # The steps match at rows 0-1 and 4-5; rows 2-3 cross between the keys.
+    table = pa.table(
+        {
+            "userid": pa.array([2**63 - 1] * 3 + [2**64 - 1] * 3, pa.uint64()),
+            "eventtime": [1, 2, 3, 4, 5, 6],
+            "ev": ["s1/a", "s2/a", "s1/a", "s2/a", "s1/a", "s2/a"],
+        }
+    )
+    path = tmp_path / "uint64_keys.parquet"
+    pq.write_table(table, path, row_group_size=row_group_size)
+
+    t = LTSeq.read_parquet(str(path)).assume_sorted("userid", "eventtime")
+    count = t.search_pattern_count(
+        lambda r: r.ev.s.starts_with("s1/"),
+        lambda r: r.ev.s.starts_with("s2/"),
+        partition_by="userid",
+    )
+
+    assert count == 2
