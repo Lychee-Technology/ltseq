@@ -436,8 +436,13 @@ fn consolidate(
 }
 
 /// A time column's values as i64, NULL where the time is NULL. A 64-bit
-/// column is read in place; a 32-bit or float one is converted.
+/// column is read in place; a 32-bit or float one is converted. A column
+/// without rows has no values to read, so its type is not checked: a filter
+/// that keeps no row of an all-NULL column, typed `null`, still joins.
 fn time_values(col: &ArrayRef) -> Result<Int64Array, LtseqError> {
+    if col.is_empty() {
+        return Ok(Int64Array::from(Vec::<i64>::new()));
+    }
     let values = match col.data_type() {
         DataType::Int64 => col.as_primitive::<Int64Type>().clone(),
         DataType::Int32 => col.as_primitive::<Int32Type>().unary(i64::from),
