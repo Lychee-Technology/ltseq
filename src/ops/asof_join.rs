@@ -12,39 +12,53 @@
 //! * `backward`: Find largest right.time where right.time <= left.time
 //! * `forward`: Find smallest right.time where right.time >= left.time  
 //! * `nearest`: Find closest right.time (backward bias on ties)
+//!
+//! A NULL time on either side never matches.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::ops::common::right_rename_map;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
-use datafusion::arrow::array::{Array, ArrayRef, RecordBatch};
-use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use datafusion::arrow::row::{OwnedRow, RowConverter, SortField};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray, Int64Array, RecordBatch};
+use datafusion::arrow::compute::concat_batches;
+use datafusion::arrow::datatypes::{
+    DataType, Date32Type, Date64Type, Field, Float64Type, Int32Type, Int64Type,
+    Schema as ArrowSchema, SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
+};
+use datafusion::arrow::row::{RowConverter, SortField};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
-/// Encode the `by` grouping columns of every row into hashable owned keys via
-/// Arrow's RowConverter. One converter is shared between left and right so the
-/// encodings are comparable. Returns `None` when there are no `by` columns
-/// (the ungrouped fast path). `by_indices` are column positions in `batches`.
-fn extract_group_keys(
+/// Call `f` with the index of each row of `batch`, in order, and its `by`
+/// columns encoded by Arrow's RowConverter. One converter is shared between
+/// left and right, so two keys are equal exactly when their bytes are.
+/// `by_indices` are column positions in `batch`. The rows are encoded
+/// `chunk_rows` at a time, so the encoder holds at most that many keys
+/// however many rows `batch` has.
+fn for_each_group_key(
     converter: &RowConverter,
-    batches: &[RecordBatch],
+    batch: &RecordBatch,
     by_indices: &[usize],
-) -> Result<Vec<OwnedRow>, LtseqError> {
-    let mut keys: Vec<OwnedRow> = Vec::new();
-    for batch in batches {
-        let cols: Vec<ArrayRef> =
-            by_indices.iter().map(|&i| Arc::clone(batch.column(i))).collect();
-        let rows = converter
+    chunk_rows: usize,
+    mut f: impl FnMut(usize, &[u8]),
+) -> Result<(), LtseqError> {
+    for start in (0..batch.num_rows()).step_by(chunk_rows) {
+        let len = chunk_rows.min(batch.num_rows() - start);
+        let cols: Vec<ArrayRef> = by_indices
+            .iter()
+            .map(|&i| batch.column(i).slice(start, len))
+            .collect();
+        let keys = converter
             .convert_columns(&cols)
             .map_err(|e| LtseqError::Runtime(format!("Failed to encode by= keys: {}", e)))?;
-        for i in 0..batch.num_rows() {
-            keys.push(rows.row(i).owned());
+        for (i, key) in keys.iter().enumerate() {
+            f(start + i, key.data());
         }
     }
-    Ok(keys)
+    Ok(())
 }
 
 /// Resolve `by` column names to indices in `schema`, validating existence.
@@ -169,29 +183,20 @@ pub fn asof_join_impl(
             ))
         })?;
 
-    // 6. Flatten batches and extract time values
-    let mut left_times: Vec<i64> = Vec::new();
-
-    for batch in left_batches.iter() {
-        let time_col = batch.column(left_time_idx);
-        let times = extract_time_values(time_col)?;
-        left_times.extend(times);
-    }
-
-    let mut right_times: Vec<i64> = Vec::new();
-
-    for batch in right_batches.iter() {
-        let time_col = batch.column(right_time_idx);
-        let times = extract_time_values(time_col)?;
-        right_times.extend(times);
-    }
+    // 6. Consolidate each side into one batch, and read its time column as
+    // i64. A 64-bit time column is read in place, not copied.
+    let left_batch = consolidate(&left_schema, left_batches, "left")?;
+    let right_batch = consolidate(&right_schema, right_batches, "right")?;
+    let left_times = time_values(left_batch.column(left_time_idx))?;
+    let right_times = time_values(right_batch.column(right_time_idx))?;
 
     // 7. For each left row, find the matching right row via binary search.
     //
-    // Without `by=`, the search runs over the whole (time-sorted) right table.
-    // With `by=`, each left row only matches right rows sharing its group key:
-    // we bucket right row indices by group (times stay ascending because the
-    // table is time-sorted) and search within the left row's own bucket.
+    // A NULL time never matches (#263): a left row with one has no match, and
+    // the search runs over right times that leave out the NULLs, so they stay
+    // ascending wherever the sort put the NULLs. With `by=`, each left row
+    // only matches right rows sharing its group key: we bucket right rows by
+    // group and search within the left row's own bucket.
     let mut matched_right_indices: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
 
     let find = |target: i64, times: &[i64]| match direction {
@@ -200,10 +205,39 @@ pub fn asof_join_impl(
         "nearest" => find_asof_nearest(target, times),
         _ => unreachable!(),
     };
+    let search = |left_time: Option<i64>, times: &[i64]| left_time.and_then(|t| find(t, times));
+    // A bucket: the non-NULL times of some right rows, and their row indices.
+    type Bucket = (Vec<i64>, Vec<usize>);
+    let add = |(times, rows): &mut Bucket, row: usize| {
+        if right_times.is_valid(row) {
+            times.push(right_times.value(row));
+            rows.push(row);
+        }
+    };
 
     if left_by_cols.is_empty() && right_by_cols.is_empty() {
-        for &left_time in &left_times {
-            matched_right_indices.push(find(left_time, &right_times));
+        // A sort by time puts the column's NULLs first or last, so the right
+        // rows whose time is not NULL are consecutive, and their times are
+        // searched in place. Only a right table declared sorted without being
+        // so, as `is_sorted=True` or `assume_sorted` allow, can hold a NULL
+        // between them; a bucket that leaves the NULLs out handles it.
+        if let Some(run) = non_null_run(&right_times) {
+            let times = &right_times.values()[run.clone()];
+            matched_right_indices.extend(
+                left_times
+                    .iter()
+                    .map(|t| search(t, times).map(|i| run.start + i)),
+            );
+        } else {
+            let mut all = Bucket::default();
+            for row in 0..right_times.len() {
+                add(&mut all, row);
+            }
+            matched_right_indices.extend(
+                left_times
+                    .iter()
+                    .map(|t| search(t, &all.0).map(|i| all.1[i])),
+            );
         }
     } else {
         if left_by_cols.len() != right_by_cols.len() {
@@ -222,27 +256,41 @@ pub fn asof_join_impl(
         let converter = RowConverter::new(sort_fields)
             .map_err(|e| LtseqError::Runtime(format!("Failed to build by= encoder: {}", e)))?;
 
-        let left_keys = extract_group_keys(&converter, &left_batches, &left_by_idx)?;
-        let right_keys = extract_group_keys(&converter, &right_batches, &right_by_idx)?;
+        // Keys are encoded a batch of the session's size at a time, and only
+        // a group's first key is kept, so neither side holds a key per row.
+        let chunk_rows = table.session.copied_config().batch_size();
 
-        // Bucket right rows by group: key -> (ascending times, original indices).
-        // Consume right_keys (unused afterward) so each OwnedRow moves into the
-        // map instead of being cloned per row.
-        let mut groups: HashMap<OwnedRow, (Vec<i64>, Vec<usize>)> = HashMap::new();
-        for (idx, key) in right_keys.into_iter().enumerate() {
-            let entry = groups.entry(key).or_default();
-            entry.0.push(right_times[idx]);
-            entry.1.push(idx);
-        }
-
-        for (i, &left_time) in left_times.iter().enumerate() {
-            match groups.get(&left_keys[i]) {
-                Some((times, orig)) => {
-                    matched_right_indices.push(find(left_time, times).map(|g| orig[g]));
+        // Bucket right rows by group.
+        let mut groups: HashMap<Box<[u8]>, Bucket> = HashMap::new();
+        for_each_group_key(
+            &converter,
+            &right_batch,
+            &right_by_idx,
+            chunk_rows,
+            |row, key| match groups.get_mut(key) {
+                Some(bucket) => add(bucket, row),
+                None => {
+                    let mut bucket = Bucket::default();
+                    add(&mut bucket, row);
+                    groups.insert(key.into(), bucket);
                 }
-                None => matched_right_indices.push(None),
-            }
-        }
+            },
+        )?;
+
+        for_each_group_key(
+            &converter,
+            &left_batch,
+            &left_by_idx,
+            chunk_rows,
+            |row, key| {
+                let left_time = left_times.is_valid(row).then(|| left_times.value(row));
+                matched_right_indices.push(
+                    groups
+                        .get(key)
+                        .and_then(|(times, rows)| search(left_time, times).map(|i| rows[i])),
+                );
+            },
+        )?;
     }
 
     // 8. Build result schema: left columns + suffix-renamed right columns.
@@ -267,54 +315,16 @@ pub fn asof_join_impl(
     let result_schema = Arc::new(ArrowSchema::new(result_fields));
 
     // 9. Build result arrays
-    //
-    // Optimization: consolidate all batches into single RecordBatches once,
-    // then extract columns directly. This avoids per-column concat (which
-    // would redundantly concatenate the same batches N+M times).
     let num_result_rows = left_times.len();
     let mut result_columns: Vec<Arc<dyn Array>> = Vec::new();
 
-    // Consolidate left batches into a single RecordBatch
-    let consolidated_left = if left_batches.len() <= 1 {
-        left_batches.into_iter().next()
-    } else {
-        Some(
-            datafusion::arrow::compute::concat_batches(&left_schema, &left_batches).map_err(
-                |e| {
-                    LtseqError::Runtime(format!(
-                        "Failed to concatenate left batches: {}",
-                        e
-                    ))
-                },
-            )?,
-        )
-    };
-
-    // Consolidate right batches into a single RecordBatch
-    let consolidated_right = if right_batches.len() <= 1 {
-        right_batches.into_iter().next()
-    } else {
-        Some(
-            datafusion::arrow::compute::concat_batches(&right_schema, &right_batches).map_err(
-                |e| {
-                    LtseqError::Runtime(format!(
-                        "Failed to concatenate right batches: {}",
-                        e
-                    ))
-                },
-            )?,
-        )
-    };
-
     // Copy left columns directly (all rows kept in order after concat)
-    if let Some(ref left_batch) = consolidated_left {
-        for col_idx in 0..left_schema.fields().len() {
-            result_columns.push(Arc::clone(left_batch.column(col_idx)));
-        }
+    for col_idx in 0..left_schema.fields().len() {
+        result_columns.push(Arc::clone(left_batch.column(col_idx)));
     }
 
     // Build right columns with matches or NULLs via take()
-    if let Some(ref right_batch) = consolidated_right {
+    if right_batch.num_rows() > 0 {
         let indices: Vec<Option<u32>> = matched_right_indices
             .iter()
             .map(|opt| opt.map(|idx| idx as u32))
@@ -402,8 +412,9 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
         (Some(b), None) => Some(b),
         (None, Some(f)) => Some(f),
         (Some(b), Some(f)) => {
-            let diff_back = target - right_times[b];
-            let diff_fwd = right_times[f] - target;
+            // As u64, a distance between any two i64 times fits.
+            let diff_back = target.abs_diff(right_times[b]);
+            let diff_fwd = right_times[f].abs_diff(target);
             if diff_back <= diff_fwd {
                 Some(b)
             } else {
@@ -413,147 +424,121 @@ fn find_asof_nearest(target: i64, right_times: &[i64]) -> Option<usize> {
     }
 }
 
-/// Extract time values from an Arrow array column as i64
-fn extract_time_values(col: &Arc<dyn Array>) -> Result<Vec<i64>, LtseqError> {
-    let len = col.len();
-    let mut values = Vec::with_capacity(len);
+/// `batches` as one batch: empty when there are none, and not copied when
+/// there is one.
+fn consolidate(
+    schema: &SchemaRef,
+    batches: Vec<RecordBatch>,
+    side: &str,
+) -> Result<RecordBatch, LtseqError> {
+    concat_batches(schema, &batches)
+        .map_err(|e| LtseqError::Runtime(format!("Failed to concatenate {} batches: {}", side, e)))
+}
 
-    match col.data_type() {
-        DataType::Int64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Int64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Int64Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i)
-                });
-            }
+/// A time column's values as i64, NULL where the time is NULL. A 64-bit
+/// column is read in place; a 32-bit or float one is converted. A column
+/// without rows has no values to read, so its type is not checked: a filter
+/// that keeps no row of an all-NULL column, typed `null`, still joins.
+fn time_values(col: &ArrayRef) -> Result<Int64Array, LtseqError> {
+    if col.is_empty() {
+        return Ok(Int64Array::from(Vec::<i64>::new()));
+    }
+    let values = match col.data_type() {
+        DataType::Int64 => col.as_primitive::<Int64Type>().clone(),
+        DataType::Int32 => col.as_primitive::<Int32Type>().unary(i64::from),
+        // Truncates the fraction, and reads NaN as 0 (#369).
+        DataType::Float64 => col.as_primitive::<Float64Type>().unary(|v| v as i64),
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            col.as_primitive::<TimestampSecondType>().reinterpret_cast()
         }
-        DataType::Int32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Int32Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Int32Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Float64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Float64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation(
-                        "Failed to cast to Float64Array".into(),
-                    )
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Timestamp(_, _) => {
-            // Try various timestamp types
-            if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampMicrosecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampNanosecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col
-                .as_any()
-                .downcast_ref::<array::TimestampMillisecondArray>()
-            {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else if let Some(arr) = col.as_any().downcast_ref::<array::TimestampSecondArray>() {
-                for i in 0..len {
-                    values.push(if arr.is_null(i) {
-                        i64::MIN
-                    } else {
-                        arr.value(i)
-                    });
-                }
-            } else {
-                return Err(LtseqError::Validation(
-                    "Unsupported timestamp type for asof join time column".into(),
-                ));
-            }
-        }
-        DataType::Date32 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Date32Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Date32Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i) as i64
-                });
-            }
-        }
-        DataType::Date64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<array::Date64Array>()
-                .ok_or_else(|| {
-                    LtseqError::Validation("Failed to cast to Date64Array".into())
-                })?;
-            for i in 0..len {
-                values.push(if arr.is_null(i) {
-                    i64::MIN
-                } else {
-                    arr.value(i)
-                });
-            }
-        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => col
+            .as_primitive::<TimestampMillisecondType>()
+            .reinterpret_cast(),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => col
+            .as_primitive::<TimestampMicrosecondType>()
+            .reinterpret_cast(),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => col
+            .as_primitive::<TimestampNanosecondType>()
+            .reinterpret_cast(),
+        DataType::Date32 => col.as_primitive::<Date32Type>().unary(i64::from),
+        DataType::Date64 => col.as_primitive::<Date64Type>().reinterpret_cast(),
         other => {
             return Err(LtseqError::Validation(format!(
                 "Unsupported data type '{}' for asof join time column",
                 other
             )));
         }
-    }
+    };
 
     Ok(values)
 }
 
+/// The rows of `times` that are not NULL, when they are consecutive: there
+/// is no NULL between them.
+fn non_null_run(times: &Int64Array) -> Option<Range<usize>> {
+    let len = times.len();
+    let start = (0..len).take_while(|&i| times.is_null(i)).count();
+    let end = len - (start..len).rev().take_while(|&i| times.is_null(i)).count();
+    (len - (end - start) == times.null_count()).then_some(start..end)
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+
+    #[test]
+    fn a_64_bit_time_column_is_read_in_place() {
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None, Some(3)]));
+        let stamps: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![
+            Some(1),
+            None,
+            Some(3),
+        ]));
+        for col in [ints, stamps] {
+            let times = time_values(&col).expect("a time column");
+            assert_eq!(
+                times.values().inner().as_ptr(),
+                col.to_data().buffers()[0].as_ptr()
+            );
+            assert_eq!(times, Int64Array::from(vec![Some(1), None, Some(3)]));
+        }
+    }
+
+    #[test]
+    fn the_non_null_run_is_found_unless_a_null_lies_inside_it() {
+        let run = |times: &[Option<i64>]| non_null_run(&Int64Array::from(times.to_vec()));
+        assert_eq!(run(&[Some(1), Some(2)]), Some(0..2));
+        assert_eq!(run(&[None, None, Some(1), Some(2)]), Some(2..4));
+        assert_eq!(run(&[Some(1), Some(2), None]), Some(0..2));
+        assert_eq!(run(&[None, Some(1), None]), Some(1..2));
+        assert_eq!(run(&[None, None]), Some(2..2));
+        assert_eq!(run(&[]), Some(0..0));
+        assert_eq!(run(&[Some(1), None, Some(2)]), None);
+    }
+
+    #[test]
+    fn group_keys_are_visited_in_order_and_compare_equal_across_chunks() {
+        let keys: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "a", "c", "b"]));
+        let batch = RecordBatch::try_from_iter([("k", keys)]).expect("a batch");
+        let converter =
+            RowConverter::new(vec![SortField::new(DataType::Utf8)]).expect("an encoder");
+        for chunk_rows in 1..=6 {
+            let mut rows = Vec::new();
+            let mut groups: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+            for_each_group_key(&converter, &batch, &[0], chunk_rows, |row, key| {
+                rows.push(row);
+                groups.entry(key.to_vec()).or_default().push(row);
+            })
+            .expect("encoded keys");
+            let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+            groups.sort();
+            assert_eq!(rows, [0, 1, 2, 3, 4], "chunk_rows={chunk_rows}");
+            assert_eq!(
+                groups,
+                [vec![0, 2], vec![1, 4], vec![3]],
+                "chunk_rows={chunk_rows}"
+            );
+        }
+    }
+}

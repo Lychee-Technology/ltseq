@@ -4,6 +4,7 @@ Tests the asof_join() method which performs as-of (nearest time) joins
 commonly used in time-series and financial data processing.
 """
 
+import pyarrow as pa
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -418,3 +419,35 @@ class TestAsofJoinDirectionSemantics:
             # 1006 is only 1 away, should be picked
             assert df.iloc[0]["time_right"] == 1006
             assert df.iloc[0]["bid"] == 96.0
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("right_has_rows", [True, False])
+def test_a_left_table_without_rows_joins_to_a_table_without_rows(by, right_has_rows):
+    """A plan without rows collects to no batches (#207)."""
+    left = LTSeq.from_arrow(pa.table({"t": [1, 2], "g": ["A", "A"], "a": [10, 20]}))
+    right = LTSeq.from_arrow(pa.table({"t": [1], "g": ["A"], "b": [5]}))
+    if not right_has_rows:
+        right = right.filter(lambda r: r.t < 0)
+    joined = left.filter(lambda r: r.t < 0).asof_join(right, on="t", by=by)
+    assert joined.columns == ["t", "g", "a", "t_right", "g_right", "b"]
+    assert joined.to_dicts() == []
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("is_sorted", [True, False])
+def test_a_side_without_rows_joins_with_a_null_typed_time(by, is_sorted):
+    """A time column of only NULLs reads as the `null` type, which is not a
+    time type; a side without rows has no time to read."""
+    rows = LTSeq.from_arrow(pa.table({"t": [1, 2], "g": ["A", "A"], "a": [10, 20]}))
+    no_rows = LTSeq.from_arrow(pa.table({"t": [None], "g": ["A"], "b": [5]})).filter(
+        lambda r: r.b < 0
+    )
+    joined = rows.asof_join(no_rows, on="t", by=by, is_sorted=is_sorted)
+    assert joined.to_dicts() == [
+        {"t": 1, "g": "A", "a": 10, "t_right": None, "g_right": None, "b": None},
+        {"t": 2, "g": "A", "a": 20, "t_right": None, "g_right": None, "b": None},
+    ]
+    joined = no_rows.asof_join(rows, on="t", by=by, is_sorted=is_sorted)
+    assert joined.columns == ["t", "g", "b", "t_right", "g_right", "a"]
+    assert joined.to_dicts() == []
