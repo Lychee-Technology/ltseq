@@ -771,6 +771,8 @@ def _invoke_group_lambda(fn: Callable, proxy: Any) -> Any:
             and ``and`` / ``or`` / ``&`` / ``|`` / conditional expressions
             would otherwise silently drop it from the captured expression.
     """
+    from ..grouping.expr import GROUP_NULL_CHECK_MIGRATION
+
     reached = _code_testing_identity_with_none(fn)
     if reached is not None:
         raise TypeError(
@@ -779,10 +781,8 @@ def _invoke_group_lambda(fn: Callable, proxy: Any) -> Any:
             "rewritten: a group value such as g.first().col is never None, so "
             "Python evaluates the test to a constant bool, and 'and', 'or', '&', "
             "'|' or a conditional expression would silently drop it.\n\n"
-            "Use the is_null() or is_not_null() methods instead:\n"
-            "  - g.first().col.is_null()      instead of  g.first().col is None\n"
-            "  - g.first().col.is_not_null()  instead of  g.first().col is not None\n"
-            "  - r.col.is_not_null()          inside g.all / g.any / g.none\n"
+            + GROUP_NULL_CHECK_MIGRATION
+            + "\n"
             "The check also covers helpers the lambda names and lambdas nested "
             "in it. Test Python values (such as an optional threshold) before "
             "building the lambda, or against a sentinel object rather than None."

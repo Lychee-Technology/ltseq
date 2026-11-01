@@ -196,9 +196,14 @@ class NestedTable:
 
         Raises:
             TypeError: If the lambda, a helper it names or a lambda nested in
-                it compares a value with None using 'is' / 'is not' (#300).
-                Group lambdas are not rewritten; use g.first().col.is_null()
-                / .is_not_null() (or == None / != None) instead.
+                it compares a value with None using 'is' / 'is not', or
+                compares a group value with None using '==' / '!=' (#300).
+                Group values here have no null test (no .is_null() /
+                .is_not_null(), unlike in filter()): emit the group value as
+                a column and test it with a row lambda afterwards, e.g.
+                grouped.derive(lambda g: {"first_b": g.first().b, "n": g.count()})
+                .derive(lambda r: {"n_if_b": if_else(r.first_b.is_not_null(), r.n, None)})
+                (``from ltseq import if_else``).
 
         Example:
             >>> grouped.derive(lambda g: {"span": g.count()})
@@ -232,9 +237,14 @@ class NestedTable:
 
         Raises:
             TypeError: If the lambda, a helper it names or a lambda nested in
-                it compares a value with None using 'is' / 'is not' (#300).
-                Group lambdas are not rewritten; use g.first().col.is_null()
-                / .is_not_null() (or == None / != None) instead.
+                it compares a value with None using 'is' / 'is not', or
+                compares a group value with None using '==' / '!=' (#300).
+                Group values here have no null test (no .is_null() /
+                .is_not_null(), unlike in filter()): emit the group value as
+                a column and test it with a row lambda afterwards, e.g.
+                grouped.agg(lambda g: {"first_b": g.first().b, "n": g.count()})
+                .filter(lambda r: r.first_b.is_not_null()), or a row-level
+                derive with if_else as in derive().
 
         Example:
             >>> spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {

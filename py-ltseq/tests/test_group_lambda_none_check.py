@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, if_else
 
 GUIDANCE = r"compares a value with None using 'is' / 'is not'"
 
@@ -102,8 +102,11 @@ class TestEveryEntryPointRejects:
             _call(entry, groups, "and")
         message = str(info.value)
         assert "Group lambdas" in message
-        assert "g.first().col.is_null()" in message
-        assert "g.first().col.is_not_null()" in message
+        assert "filter, use g.first().col.is_null() / .is_not_null()" in message
+        # derive and agg have no group null test; the message says so and
+        # gives the row-level replacement (TestDeriveAggNullChecks runs it).
+        assert "group values have no null test" in message
+        assert "r.first_b.is_not_null()" in message
 
     @pytest.mark.parametrize("entry", ENTRY_POINTS)
     def test_helper_is_named(self, groups, entry):
@@ -139,26 +142,120 @@ class TestIssueReproduction:
             groups.derive(lambda g: {"f": (g.first().b is not None) and g.count()})
 
 
-class TestNullMethodsKeepWorking:
-    def test_filter(self, groups):
+class TestFilterNullChecks:
+    """filter is the only group entry point whose group values have a null
+    test: .is_null() / .is_not_null(), and == None / != None."""
+
+    def test_null_methods(self, groups):
         kept = groups.filter(lambda g: g.first().b.is_not_null() & (g.count() > 0))
         assert sorted(kept.flatten().to_pandas()["a"]) == [3, 4]
         kept = groups.filter(lambda g: g.first().b.is_null())
         assert sorted(kept.flatten().to_pandas()["a"]) == [1, 2, 5]
+        kept = groups.filter(lambda g: g.last().b.is_null())
+        assert sorted(kept.flatten().to_pandas()["a"]) == [5]
         kept = groups.filter(lambda g: g.all(lambda r: r.b.is_not_null()))
         assert sorted(kept.flatten().to_pandas()["a"]) == [3, 4]
+        kept = groups.filter(lambda g: g.count().is_not_null() & g.max("b").is_not_null())
+        assert sorted(kept.flatten().to_pandas()["a"]) == [1, 2, 3, 4]
 
-    def test_filter_equality_with_none(self, groups):
+    def test_equality_with_none(self, groups):
         kept = groups.filter(lambda g: (g.first().b != None) & (g.count() > 0))  # noqa: E711
         assert sorted(kept.flatten().to_pandas()["a"]) == [3, 4]
+        kept = groups.filter(lambda g: g.first().b == None)  # noqa: E711
+        assert sorted(kept.flatten().to_pandas()["a"]) == [1, 2, 5]
 
-    def test_derive(self, groups):
-        out = groups.derive(lambda g: {"n": g.count()}).filter(lambda r: r.b.is_null())
-        assert sorted(out.to_pandas()["a"]) == [1, 5]
 
-    def test_agg(self, groups):
+MAPPERS = {
+    "derive": lambda groups, fn: groups.derive(fn),
+    "agg": lambda groups, fn: groups.agg(fn),
+}
+
+
+class TestDeriveAggNullChecks:
+    """derive and agg group values have no null test (R1-F1 of PR #375):
+    the guidance sends users to a row-level check on an emitted column, and
+    every spelling that would look like a group null test fails loudly."""
+
+    @pytest.mark.parametrize("method", ["is_null", "is_not_null"])
+    @pytest.mark.parametrize("entry", MAPPERS)
+    def test_null_methods_do_not_exist(self, groups, entry, method):
+        with pytest.raises(AttributeError, match=method):
+            MAPPERS[entry](groups, lambda g: {"x": getattr(g.first().b, method)()})
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            lambda g: {"n": (g.first().b != None) and g.count()},  # noqa: E711
+            lambda g: {"n": g.count() if g.first().b == None else g.count()},  # noqa: E711
+            lambda g: {"n": (None != g.last().b) or g.count()},  # noqa: E711
+            lambda g: {"x": g.first().b == None},  # noqa: E711
+            lambda g: {"x": g.sum("a") != None},  # noqa: E711
+        ],
+    )
+    @pytest.mark.parametrize("entry", MAPPERS)
+    def test_equality_with_none_raises(self, groups, entry, spelling):
+        # It used to be a constant Python bool: `and` returned the counts.
+        with pytest.raises(TypeError, match=r"compared with None using '[=!]='") as info:
+            MAPPERS[entry](groups, spelling)
+        assert "r.first_b.is_not_null()" in str(info.value)
+
+    def test_other_comparisons_keep_their_behavior(self):
+        # Only a comparison with None changed: equality with anything else
+        # is still Python's identity fallback, and group values stay hashable.
+        from ltseq.grouping.proxies.derive_proxy import DeriveGroupProxy
+
+        g = DeriveGroupProxy()
+        count = g.count()
+        assert count == count
+        assert count != g.count()
+        assert (count == 3) is False
+        assert count in {count}
+
+    def test_derive_replacement(self, groups):
+        out = (
+            groups.derive(lambda g: {"first_b": g.first().b, "n": g.count()})
+            .derive(lambda r: {"n_if_b": if_else(r.first_b.is_not_null(), r.n, None)})
+            .to_pandas()
+        )
+        assert out["a"].tolist() == [1, 2, 3, 4, 5]
+        assert out["first_b"].isna().tolist() == [True, True, False, False, True]
+        assert out["n_if_b"].isna().tolist() == [True, True, False, False, True]
+        assert out["n_if_b"].dropna().tolist() == [2, 2]
+
+    def test_derive_replacement_as_a_row_filter(self, groups):
+        out = groups.derive(lambda g: {"first_b": g.first().b}).filter(
+            lambda r: r.first_b.is_null()
+        )
+        assert sorted(out.to_pandas()["a"]) == [1, 2, 5]
+
+    def test_agg_replacement(self, groups):
         out = groups.agg(lambda g: {"first_b": g.first().b, "n": g.count()})
-        assert out.to_pandas()["n"].tolist() == [2, 2, 1]
+        kept = out.filter(lambda r: r.first_b.is_not_null()).to_pandas()
+        assert kept["first_b"].tolist() == ["y"]
+        assert kept["n"].tolist() == [2]
+        masked = out.derive(
+            lambda r: {"n_if_b": if_else(r.first_b.is_not_null(), r.n, None)}
+        ).to_pandas()
+        assert masked["n_if_b"].isna().tolist() == [True, False, True]
+        assert masked["n_if_b"].dropna().tolist() == [2]
+
+    def test_guidance_examples_run(self, groups):
+        # The replacement code the TypeError prints is executed as printed.
+        from ltseq.grouping.expr import GROUP_NULL_CHECK_MIGRATION
+
+        snippets, current = [], []
+        for line in GROUP_NULL_CHECK_MIGRATION.splitlines():
+            if line.startswith("  grouped."):
+                current = [line.strip()]
+                snippets.append(current)
+            elif line.startswith("         .") and current:
+                current.append(line.strip())
+            else:
+                current = []
+        assert [s[0].split("(")[0] for s in snippets] == ["grouped.derive", "grouped.agg"]
+        for snippet in snippets:
+            result = eval("".join(snippet), {"grouped": groups, "if_else": if_else})
+            assert len(result.to_pandas()) > 0
 
 
 class TestEveryCallableFormRejects:
