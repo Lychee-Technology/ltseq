@@ -647,7 +647,7 @@ def _code_testing_identity_with_none(fn: Callable) -> _ReachedCode | None:
     :func:`_called_code`) and that compares a value with ``None`` by
     identity, or ``None`` if there is none.
 
-    Row and condition lambdas are both checked through this function."""
+    Row, condition and group lambdas are all checked through this function."""
     return next(
         (reached for reached in _called_code(fn) if _tests_identity_with_none(reached.code)),
         None,
@@ -745,6 +745,49 @@ def _invoke_condition_lambda(
             "the condition, or against a sentinel object rather than None."
         )
     return fn(SchemaProxy(left_schema), SchemaProxy(right_schema))
+
+
+def _invoke_group_lambda(fn: Callable, proxy: Any) -> Any:
+    """Run a group lambda (the argument of ``NestedTable.filter``,
+    ``derive`` and ``agg``) against ``proxy``, a ``FilterGroupProxy`` or
+    ``DeriveGroupProxy``.
+
+    Every API that accepts ``lambda g: ...`` must call the lambda through
+    this function rather than on its proxy directly. The raw result is
+    returned; callers validate its shape.
+
+    As for :func:`_invoke_condition_lambda`, nothing is rewritten (issue
+    #300): the lambda is refused when it, a function it wraps, or a user
+    function either names (see :func:`_called_code`) compares a value with
+    ``None`` by identity. The check reads bytecode, so it covers the code
+    of the lambdas nested in ``fn`` as well, including the row lambda of
+    ``g.all`` / ``g.any`` / ``g.none``, and it cannot tell a group value from
+    a Python value, so it refuses an ``is None`` test on a closure value too.
+
+    Raises:
+        TypeError: If ``fn`` or any code it reaches compares a value with
+            ``None`` by identity. ``g.first().col`` is an expression, never
+            ``None``, so Python evaluates such a test to a constant bool,
+            and ``and`` / ``or`` / ``&`` / ``|`` / conditional expressions
+            would otherwise silently drop it from the captured expression.
+    """
+    reached = _code_testing_identity_with_none(fn)
+    if reached is not None:
+        raise TypeError(
+            f"{_describe_reached(reached)} compares a value with None using 'is' / 'is not'. "
+            "Group lambdas (group_ordered(...).filter, derive and agg) are not "
+            "rewritten: a group value such as g.first().col is never None, so "
+            "Python evaluates the test to a constant bool, and 'and', 'or', '&', "
+            "'|' or a conditional expression would silently drop it.\n\n"
+            "Use the is_null() or is_not_null() methods instead:\n"
+            "  - g.first().col.is_null()      instead of  g.first().col is None\n"
+            "  - g.first().col.is_not_null()  instead of  g.first().col is not None\n"
+            "  - r.col.is_not_null()          inside g.all / g.any / g.none\n"
+            "The check also covers helpers the lambda names and lambdas nested "
+            "in it. Test Python values (such as an optional threshold) before "
+            "building the lambda, or against a sentinel object rather than None."
+        )
+    return fn(proxy)
 
 
 def _none_check_hint(result: Any) -> str:

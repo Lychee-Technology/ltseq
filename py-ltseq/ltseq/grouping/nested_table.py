@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from ..expr.transforms import _invoke_group_lambda
 from .proxies import FilterGroupProxy, FilterExpr
 
 if TYPE_CHECKING:
@@ -140,13 +141,18 @@ class NestedTable:
         Returns:
             A NestedTable with only rows from groups that pass the predicate
 
+        Raises:
+            TypeError: If the lambda, a helper it names or a lambda nested in
+                it compares a value with None using 'is' / 'is not' (#300).
+                Group lambdas are not rewritten; use g.first().col.is_null()
+                / .is_not_null() (or == None / != None) instead.
+
         Example:
             >>> grouped.filter(lambda g: g.count() > 3)
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
         """
-        proxy = FilterGroupProxy(self._ltseq._schema)
-        result = group_predicate(proxy)
+        result = _invoke_group_lambda(group_predicate, FilterGroupProxy(self._ltseq._schema))
 
         if not isinstance(result, FilterExpr):
             raise ValueError(
@@ -188,6 +194,12 @@ class NestedTable:
         Returns:
             LTSeq with original rows plus new derived columns
 
+        Raises:
+            TypeError: If the lambda, a helper it names or a lambda nested in
+                it compares a value with None using 'is' / 'is not' (#300).
+                Group lambdas are not rewritten; use g.first().col.is_null()
+                / .is_not_null() (or == None / != None) instead.
+
         Example:
             >>> grouped.derive(lambda g: {"span": g.count()})
             >>> grouped.derive(lambda g: {
@@ -218,6 +230,12 @@ class NestedTable:
         Returns:
             LTSeq with one row per group, containing only the mapped columns
 
+        Raises:
+            TypeError: If the lambda, a helper it names or a lambda nested in
+                it compares a value with None using 'is' / 'is not' (#300).
+                Group lambdas are not rewritten; use g.first().col.is_null()
+                / .is_not_null() (or == None / != None) instead.
+
         Example:
             >>> spans = t.group_ordered(lambda r: r.is_up).agg(lambda g: {
             ...     "start": g.first().date,
@@ -229,8 +247,7 @@ class NestedTable:
         from .expr import GroupExpr
         from ..core import LTSeq
 
-        proxy = DeriveGroupProxy()
-        result = group_mapper(proxy)
+        result = _invoke_group_lambda(group_mapper, DeriveGroupProxy())
 
         if not isinstance(result, dict) or not result:
             raise ValueError("agg lambda must return a non-empty dict of group expressions")
@@ -311,8 +328,7 @@ class NestedTable:
         from .proxies.derive_proxy import DeriveGroupProxy
         from .expr import GroupExpr
 
-        proxy = DeriveGroupProxy()
-        result = group_mapper(proxy)
+        result = _invoke_group_lambda(group_mapper, DeriveGroupProxy())
 
         if not isinstance(result, dict):
             raise ValueError("Derive lambda must return a dict")
