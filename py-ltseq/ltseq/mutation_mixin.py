@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ._typing import LTSeqLike
 from .exceptions import ColumnNotFoundError
-from .expr.core_types import _encode_literal
+from .expr.core_types import LiteralExpr, _encode_literal
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -98,14 +98,20 @@ class MutationMixin(LTSeqLike):
 
         Args:
             predicate_or_pos:
-                - callable: delete all rows where predicate returns True
+                - callable: delete the rows where the predicate is TRUE. A row
+                  where it is FALSE or NULL is kept, so ``t.delete(p)`` and
+                  ``t.filter(p)`` together hold every row of ``t``, and
+                  ``delete(p)`` is not ``filter(~p)``, which drops the NULL
+                  rows too.
                 - int: delete the row at that 0-based position (silently ignored if out of range)
 
         Returns:
             New LTSeq with row(s) removed; the original is unchanged.
 
         Example:
-            >>> t2 = t.delete(lambda r: r.status == "deleted")
+            >>> t = LTSeq.from_dict({"id": [1, 2, 3], "status": ["active", None, "expired"]})
+            >>> t.delete(lambda r: r.status == "expired").to_dicts()   # keeps the NULL status
+            [{'id': 1, 'status': 'active'}, {'id': 2, 'status': None}]
             >>> t2 = t.delete(0)   # remove first row
         """
         from .core import LTSeq
@@ -125,7 +131,18 @@ class MutationMixin(LTSeqLike):
                     "delete() predicate must return a boolean expression, "
                     "got a dict"
                 )
-            negated = {"type": "UnaryOp", "op": "Not", "operand": expr_dict}
+            # Keep the rows where the predicate is FALSE or NULL (#265):
+            # NOT p alone is NULL where p is, and a filter drops those rows.
+            # NOT coalesce(p, false) evaluates the predicate once, unlike
+            # NOT p OR p IS NULL.
+            definite = {
+                "type": "Call",
+                "func": "fill_null",
+                "args": [LiteralExpr(False).serialize()],
+                "kwargs": {},
+                "on": expr_dict,
+            }
+            negated = {"type": "UnaryOp", "op": "Not", "operand": definite}
             return LTSeq._from_inner(self._inner.filter(negated))
 
         # integer positional delete — delegate to Rust

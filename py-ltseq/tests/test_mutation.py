@@ -96,6 +96,98 @@ class TestDelete:
         assert len(sample.to_pandas()) == 3
 
 
+def _nullable():
+    """Rows where every predicate below is TRUE on some, FALSE on some and
+    NULL on others, including a row that is NULL in every column."""
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "id": pa.array([1, 2, 3, 4, 5, 6], pa.int64()),
+                "x": pa.array([1, None, 3, 4, None, 0], pa.int64()),
+                "f": pa.array([0.5, float("nan"), None, 2.5, None, -1.0], pa.float64()),
+                "s": pa.array(["active", None, "expired", "expired", None, "x"]),
+                "b": pa.array([True, None, False, True, None, False]),
+            }
+        )
+    )
+
+
+# Predicates that are NULL on some rows: comparisons, Boolean columns,
+# Kleene AND/OR, NOT, string methods and membership. A window predicate
+# would belong here, but filter() does not take one yet.
+NULL_PRODUCING = {
+    "gt": lambda r: r.x > 1,
+    "eq_str": lambda r: r.s == "expired",
+    "ne_str": lambda r: r.s != "expired",
+    "float_cmp": lambda r: r.f > 0.0,
+    "bool_column": lambda r: r.b,
+    "not": lambda r: ~(r.x > 1),
+    "and": lambda r: (r.x > 1) & (r.s == "expired"),
+    "or": lambda r: (r.x > 3) | r.b,
+    "is_in": lambda r: r.x.is_in([0, 3]),
+    "str_method": lambda r: r.s.s.starts_with("ex"),
+    "between": lambda r: r.x.between(1, 3),
+}
+
+
+def _multiset(rows):
+    from collections import Counter
+
+    def key(row):
+        # NaN != NaN, so compare floats by their repr.
+        return tuple(sorted((k, repr(v)) for k, v in row.items()))
+
+    return Counter(key(row) for row in rows)
+
+
+class TestDeleteNullPredicate:
+    """``delete(p)`` removes only the rows where ``p`` is TRUE (#265)."""
+
+    def test_archived_reference_example_keeps_the_null_row(self):
+        t = LTSeq.from_dict({"id": [1, 2, 3], "status": ["active", None, "expired"]})
+        assert t.delete(lambda r: r.status == "expired").to_dicts() == [
+            {"id": 1, "status": "active"},
+            {"id": 2, "status": None},
+        ]
+
+    def test_null_predicate_keeps_the_row(self):
+        t = LTSeq.from_dict({"x": [1, None, 3]})
+        assert t.delete(lambda r: r.x > 1).to_dicts() == [{"x": 1}, {"x": None}]
+
+    def test_delete_is_not_filter_of_the_negation(self):
+        t = LTSeq.from_dict({"x": [1, None, 3]})
+        assert t.filter(lambda r: ~(r.x > 1)).count() == 1
+        assert t.delete(lambda r: r.x > 1).count() == 2
+
+    def test_is_none_predicate_deletes_the_null_rows(self):
+        t = LTSeq.from_dict({"x": [1, None, 3]})
+        # LTSeq rewrites `r.x is None` to `r.x.is_null()`; pyright sees a bool.
+        result = t.delete(lambda r: r.x is None)  # pyright: ignore[reportArgumentType]
+        assert result.to_dicts() == [{"x": 1}, {"x": 3}]
+
+    def test_or_is_null_deletes_the_null_rows_too(self):
+        t = LTSeq.from_dict({"x": [1, None, 3]})
+        result = t.delete(lambda r: (r.x > 1) | (r.x > 1).is_null())
+        assert result.to_dicts() == [{"x": 1}]
+
+    @pytest.mark.parametrize("name", NULL_PRODUCING)
+    def test_delete_and_filter_partition_the_rows(self, engine_layout, name):
+        """Property: ``t.delete(p)`` and ``t.filter(p)`` together hold the
+        multiset of rows of ``t``, for predicates that are NULL on some rows."""
+        p = NULL_PRODUCING[name]
+        t = _nullable().sort("id")
+        kept = t.delete(p).to_dicts()
+        removed = t.filter(p).to_dicts()
+        assert _multiset(kept) + _multiset(removed) == _multiset(t.to_dicts())
+        # The predicate is NULL somewhere, so delete keeps more than filter(~p).
+        assert len(kept) > t.filter(lambda r: ~p(r)).count()
+
+    def test_delete_keeps_table_order(self):
+        t = _nullable().sort("id", desc=True)
+        ids = [row["id"] for row in t.delete(lambda r: r.x > 1).to_dicts()]
+        assert ids == [6, 5, 2, 1]
+
+
 # ─── update ──────────────────────────────────────────────────────────────────
     @pytest.mark.parametrize("pos", [0, 4, 5, 9, 14])
     def test_delete_by_index_multi_batch_removes_exactly_one_row(self, pos):
@@ -145,6 +237,27 @@ class TestUpdate:
     def test_update_does_not_mutate_original(self, sample):
         _ = sample.update(lambda r: r.id == 1, score=999)
         assert sample.to_pandas().iloc[0]["score"] == 10
+
+    def test_null_predicate_leaves_the_row_unchanged(self):
+        """Pins the current behavior (#265): a row where the predicate is
+        NULL keeps its values, as a row where it is FALSE does."""
+        t = LTSeq.from_dict({"x": [1, None, 3], "y": [10, 20, 30]})
+        assert t.update(lambda r: r.x > 1, y=0).to_dicts() == [
+            {"x": 1, "y": 10},
+            {"x": None, "y": 20},
+            {"x": 3, "y": 0},
+        ]
+
+    @pytest.mark.parametrize("name", NULL_PRODUCING)
+    def test_update_changes_only_rows_where_the_predicate_is_true(self, name):
+        p = NULL_PRODUCING[name]
+        t = _nullable().sort("id")
+        hit = {row["id"] for row in t.filter(p).to_dicts()}
+        before = t.to_dicts()
+        after = t.update(p, s="UPDATED").to_dicts()
+        for old, new in zip(before, after, strict=True):
+            expected = dict(old, s="UPDATED") if old["id"] in hit else old
+            assert _multiset([new]) == _multiset([expected])
 
 
 # ─── modify ──────────────────────────────────────────────────────────────────
