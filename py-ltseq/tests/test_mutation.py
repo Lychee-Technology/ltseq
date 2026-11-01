@@ -182,6 +182,44 @@ class TestDeleteNullPredicate:
         # The predicate is NULL somewhere, so delete keeps more than filter(~p).
         assert len(kept) > t.filter(lambda r: ~p(r)).count()
 
+    @pytest.mark.parametrize("index_type", [pa.int8(), pa.int32()])
+    @pytest.mark.parametrize(
+        "values",
+        [
+            [True, False, None, True, None, False],
+            [True, False, True, False],
+            [None, None, None],
+            [],
+        ],
+        ids=["nullable", "non_nullable", "all_null", "empty"],
+    )
+    def test_dictionary_encoded_boolean_predicate(
+        self, engine_layout, index_type, values
+    ):
+        """A dictionary-encoded Boolean column as the predicate: delete keeps
+        the FALSE and NULL rows, filter selects the TRUE ones."""
+        t = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "id": pa.array(range(len(values)), pa.int64()),
+                    "p": pa.array(values, pa.dictionary(index_type, pa.bool_())),
+                }
+            )
+        ).sort("id")
+        kept = t.delete(lambda r: r.p).to_dicts()
+        removed = t.filter(lambda r: r.p).to_dicts()
+        assert [row["p"] for row in kept] == [v for v in values if v is not True]
+        assert [row["p"] for row in removed] == [v for v in values if v is True]
+        assert _multiset(kept) + _multiset(removed) == _multiset(t.to_dicts())
+
+    @pytest.mark.parametrize("column", ["x", "s"])
+    def test_non_boolean_predicate_is_refused(self, column):
+        """A predicate that is not Boolean raises, as ``filter(~p)`` does;
+        the rewrite does not turn it into one."""
+        t = _nullable()
+        with pytest.raises(Exception, match="Boolean"):
+            t.delete(lambda r: getattr(r, column)).to_dicts()
+
     def test_delete_keeps_table_order(self):
         t = _nullable().sort("id", desc=True)
         ids = [row["id"] for row in t.delete(lambda r: r.x > 1).to_dicts()]

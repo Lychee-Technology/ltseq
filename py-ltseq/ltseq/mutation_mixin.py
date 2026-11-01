@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ._typing import LTSeqLike
 from .exceptions import ColumnNotFoundError
-from .expr.core_types import LiteralExpr, _encode_literal
+from .expr.core_types import _encode_literal
 
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -133,16 +133,25 @@ class MutationMixin(LTSeqLike):
                 )
             # Keep the rows where the predicate is FALSE or NULL (#265):
             # NOT p alone is NULL where p is, and a filter drops those rows.
-            # NOT coalesce(p, false) evaluates the predicate once, unlike
-            # NOT p OR p IS NULL.
-            definite = {
-                "type": "Call",
-                "func": "fill_null",
-                "args": [LiteralExpr(False).serialize()],
-                "kwargs": {},
-                "on": expr_dict,
+            # NOT p OR p IS NULL keeps them. NOT coalesce(p, false) would
+            # too, but DataFusion cannot fold the coalesce when p is a
+            # dictionary-encoded Boolean ("Unsupported output type for
+            # dictionary packing"), and casting p to Boolean first would
+            # accept non-Boolean predicates that NOT refuses. The cost is
+            # that p is evaluated twice per row: DataFusion simplifies NOT p
+            # into a different expression before it could share the two.
+            negated = {
+                "type": "BinOp",
+                "op": "Or",
+                "left": {"type": "UnaryOp", "op": "Not", "operand": expr_dict},
+                "right": {
+                    "type": "Call",
+                    "func": "is_null",
+                    "args": [],
+                    "kwargs": {},
+                    "on": expr_dict,
+                },
             }
-            negated = {"type": "UnaryOp", "op": "Not", "operand": definite}
             return LTSeq._from_inner(self._inner.filter(negated))
 
         # integer positional delete — delegate to Rust
