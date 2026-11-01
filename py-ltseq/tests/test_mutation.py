@@ -173,7 +173,9 @@ class TestDeleteNullPredicate:
     @pytest.mark.parametrize("name", NULL_PRODUCING)
     def test_delete_and_filter_partition_the_rows(self, engine_layout, name):
         """Property: ``t.delete(p)`` and ``t.filter(p)`` together hold the
-        multiset of rows of ``t``, for predicates that are NULL on some rows."""
+        multiset of rows of ``t``, for deterministic predicates that are NULL
+        on some rows. A volatile predicate draws anew in each query, so the
+        property does not hold for it."""
         p = NULL_PRODUCING[name]
         t = _nullable().sort("id")
         kept = t.delete(p).to_dicts()

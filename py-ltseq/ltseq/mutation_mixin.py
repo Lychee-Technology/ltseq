@@ -99,10 +99,14 @@ class MutationMixin(LTSeqLike):
         Args:
             predicate_or_pos:
                 - callable: delete the rows where the predicate is TRUE. A row
-                  where it is FALSE or NULL is kept, so ``t.delete(p)`` and
-                  ``t.filter(p)`` together hold every row of ``t``, and
-                  ``delete(p)`` is not ``filter(~p)``, which drops the NULL
-                  rows too.
+                  where it is FALSE or NULL is kept, so ``delete(p)`` is not
+                  ``filter(~p)``, which drops the NULL rows too. The predicate
+                  is evaluated once per row. When it gives each row the same
+                  value every time it runs, ``t.delete(p)`` and
+                  ``t.filter(p)`` together hold every row of ``t``, each row
+                  in exactly one of them. A volatile predicate, such as one
+                  calling ``rand()``, draws anew in each query, so a row can
+                  be in both results or in neither.
                 - int: delete the row at that 0-based position (silently ignored if out of range)
 
         Returns:
