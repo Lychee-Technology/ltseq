@@ -13,6 +13,8 @@ the test is in a helper the lambda calls by name.
 
 import ast
 import functools
+import inspect
+import textwrap
 from pathlib import Path
 
 import pandas as pd
@@ -239,23 +241,85 @@ class TestDeriveAggNullChecks:
         assert masked["n_if_b"].isna().tolist() == [True, False, True]
         assert masked["n_if_b"].dropna().tolist() == [2]
 
-    def test_guidance_examples_run(self, groups):
-        # The replacement code the TypeError prints is executed as printed.
-        from ltseq.grouping.expr import GROUP_NULL_CHECK_MIGRATION
+    @staticmethod
+    def _displayed_snippets(text):
+        """The multi-line examples of ``text``, each as the lines displayed.
 
-        snippets, current = [], []
-        for line in GROUP_NULL_CHECK_MIGRATION.splitlines():
-            if line.startswith("  grouped."):
-                current = [line.strip()]
-                snippets.append(current)
-            elif line.startswith("         .") and current:
-                current.append(line.strip())
-            else:
-                current = []
-        assert [s[0].split("(")[0] for s in snippets] == ["grouped.derive", "grouped.agg"]
+        A snippet starts at a line opening with ``(grouped.`` and ends where
+        its parentheses close. Its lines are kept verbatim, newlines and all,
+        and only their common indentation is removed, as when copying the
+        block into a REPL or a script, so a line continuation that Python
+        cannot parse fails to compile here as it would for the user.
+        """
+        snippets, current, depth = [], None, 0
+        for line in text.splitlines():
+            if current is None and line.lstrip().startswith("(grouped."):
+                current, depth = [], 0
+            if current is not None:
+                current.append(line)
+                depth += line.count("(") - line.count(")")
+                if depth == 0:
+                    snippets.append(textwrap.dedent("\n".join(current)))
+                    current = None
+        assert current is None, "unterminated example"
+        return snippets
+
+    @staticmethod
+    def _guidance_texts(groups):
+        from ltseq.grouping.expr import GROUP_NULL_CHECK_MIGRATION
+        from ltseq.grouping.nested_table import NestedTable
+
+        def raised(fn):
+            with pytest.raises(TypeError) as info:
+                fn()
+            return str(info.value)
+
+        return {
+            "constant": GROUP_NULL_CHECK_MIGRATION,
+            "is None error": raised(
+                lambda: groups.derive(lambda g: {"n": (g.first().b is not None) and g.count()})
+            ),
+            "== None error": raised(
+                lambda: groups.agg(lambda g: {"n": (g.first().b != None) and g.count()})  # noqa: E711
+            ),
+            "derive docstring": inspect.getdoc(NestedTable.derive),
+            "agg docstring": inspect.getdoc(NestedTable.agg),
+        }
+
+    @pytest.mark.parametrize(
+        "source",
+        ["constant", "is None error", "== None error", "derive docstring", "agg docstring"],
+    )
+    def test_guidance_examples_run_as_displayed(self, groups, source):
+        # The replacement code in the TypeError and the docstrings is compiled
+        # and run as displayed, without joining its lines (R2-F1 of PR #375).
+        snippets = self._displayed_snippets(self._guidance_texts(groups)[source])
+        expected = {
+            "constant": ["derive", "agg"],
+            "is None error": ["derive", "agg"],
+            "== None error": ["derive", "agg"],
+            "derive docstring": ["derive"],
+            "agg docstring": ["agg"],
+        }[source]
+        assert [s.split("(")[1].split(".")[1] for s in snippets] == expected
         for snippet in snippets:
-            result = eval("".join(snippet), {"grouped": groups, "if_else": if_else})
+            assert "\n" in snippet  # a multi-line example, kept multi-line
+            code = compile(snippet, f"<{source} example>", "eval")
+            result = eval(code, {"grouped": groups, "if_else": if_else})
             assert len(result.to_pandas()) > 0
+
+    def test_unparenthesized_continuation_is_caught(self):
+        # The check above fails on the form it replaced: a chained call
+        # continued on the next line outside parentheses does not compile.
+        old = (
+            "  grouped.agg(lambda g: {})\n"
+            "         .filter(lambda r: r.x)\n"
+        )
+        with pytest.raises(SyntaxError):
+            compile(textwrap.dedent(old), "<old example>", "exec")
+        assert self._displayed_snippets("  (grouped.agg(lambda g: {})\n      .filter(lambda r: r.x))") == [
+            "(grouped.agg(lambda g: {})\n    .filter(lambda r: r.x))"
+        ]
 
 
 class TestEveryCallableFormRejects:

@@ -17,14 +17,15 @@ GROUP_BOOL_CONTEXT_EXAMPLE = "(g.count() > 2) & (g.sum('x') > 0)"
 # How to test a group value for NULL in group_ordered(...).derive / .agg,
 # whose group expressions have no null test (issue #300). Shared by the
 # `is None` refusal (_invoke_group_lambda) and the `== None` refusal below.
+# Each multi-line example is parenthesized so it runs when copied as printed.
 GROUP_NULL_CHECK_MIGRATION = (
     "In group_ordered(...).derive and .agg, group values have no null test: "
     "emit the group value as a column, then test that column in a row lambda "
     "(if_else is ltseq.if_else):\n"
-    "  grouped.derive(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
-    "         .derive(lambda r: {\"n_if_b\": if_else(r.first_b.is_not_null(), r.n, None)})\n"
-    "  grouped.agg(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
-    "         .filter(lambda r: r.first_b.is_not_null())\n"
+    "  (grouped.derive(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
+    "      .derive(lambda r: {\"n_if_b\": if_else(r.first_b.is_not_null(), r.n, None)}))\n"
+    "  (grouped.agg(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
+    "      .filter(lambda r: r.first_b.is_not_null()))\n"
     "In group_ordered(...).filter, use g.first().col.is_null() / .is_not_null() "
     "(also on g.last().col, g.count() and g.<agg>('col')), and "
     "r.col.is_null() / .is_not_null() inside g.all / g.any / g.none."
