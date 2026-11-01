@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-from ltseq import LTSeq, ntile
+from ltseq import LTSeq
 
 
 def _cells(capsys, table, column):
@@ -20,12 +20,13 @@ def _cells(capsys, table, column):
     return [[cell.strip() for cell in line.strip("|").split("|")][index] for line in lines[1:]]
 
 
-def test_decimal_from_integer_arithmetic_on_a_rank(capsys):
-    # `5 - ntile(4)` is a decimal: an integer literal next to ntile's uint64.
+def test_decimal_from_integer_arithmetic_with_a_decimal(capsys):
+    # An Int64 column times a `Decimal` literal is a decimal computed by the
+    # engine, not one read from the input.
     t = LTSeq.from_arrow(pa.table({"v": [3, 1, 2, 4]})).sort("v")
-    out = t.derive(q=lambda r: 5 - ntile(4).over(order_by=r.v))
+    out = t.derive(q=lambda r: r.v * Decimal("1.5"))
     assert pa.types.is_decimal(out.to_arrow().schema.field("q").type)
-    assert _cells(capsys, out, "q") == ["4", "3", "2", "1"]
+    assert _cells(capsys, out, "q") == ["1.5", "3.0", "4.5", "6.0"]
 
 
 def test_decimal_keeps_its_scale(capsys):

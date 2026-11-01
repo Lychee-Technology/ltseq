@@ -20,7 +20,7 @@
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
 use crate::types::{arg, Arg, LiteralValue, PyExpr};
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::expr::WindowFunction as WindowFunctionExpr;
 use datafusion::logical_expr::expr::WindowFunctionParams;
@@ -534,9 +534,14 @@ fn convert_window_ranking(
             builder = builder.partition_by(partition_by_exprs);
         }
 
-        builder
+        // DataFusion's ranking functions return UInt64, so subtracting two
+        // ranks would wrap instead of going negative, and arithmetic with an
+        // integer literal widens to a decimal. A rank never exceeds the row
+        // count, so Int64 holds every one exactly (#323).
+        let ranking = builder
             .build()
-            .map_err(|e| format!("Failed to build window ranking expr: {}", e))
+            .map_err(|e| format!("Failed to build window ranking expr: {}", e))?;
+        Ok(cast(ranking, DataType::Int64))
     } else {
         Err("Expected Window expression".to_string())
     }
