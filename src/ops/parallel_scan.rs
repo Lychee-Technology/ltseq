@@ -300,6 +300,10 @@ struct RgBoundaryInfo {
     last_key: Option<i64>,
     /// Last few rows of the last partition (up to num_steps-1 rows)
     last_tail: RecordBatch,
+    /// The whole RG is one partition. Equal first and last keys do not say
+    /// so: partitions are runs in table order, which need not be sorted by
+    /// the key, so `[K, M, K]` is three partitions.
+    one_partition: bool,
 }
 
 /// Result from fused read+match of a single row group.
@@ -538,6 +542,7 @@ fn read_match_and_extract_boundary(
         first_head,
         last_key,
         last_tail,
+        one_partition: first_partition_end == n,
     };
 
     // `combined` is dropped here — RG data freed immediately
@@ -577,6 +582,8 @@ fn coerce_partition_to_i64(col: &ArrayRef) -> Option<Int64Array> {
 /// `num_steps - 1` rows of the stream's trailing partition. The tail can
 /// accumulate across several short row groups, so matches spanning three or
 /// more row groups (and empty row groups in between) are counted correctly.
+/// It grows only through a row group that is one partition: after any other,
+/// the tail is that group's last partition alone.
 ///
 /// At each non-empty RG whose first partition continues the pending one, the
 /// tail is concatenated with the RG's head and only matches that actually
@@ -621,9 +628,7 @@ fn count_cross_rg_boundary_patterns_from_info(
         }
 
         pending = Some(match pending.take() {
-            Some((pending_key, pending_batch))
-                if pending_key == b.first_key && b.first_key == b.last_key =>
-            {
+            Some((pending_key, pending_batch)) if pending_key == b.first_key && b.one_partition => {
                 // The whole row group belongs to the pending partition:
                 // extend the tail and keep only the last `keep` rows.
                 let merged = concat_boundary_pair(&pending_batch, &b.last_tail)?;
@@ -1206,6 +1211,89 @@ mod tests {
                         "{key_type}, steps={num_steps}, rows_per_group={rows_per_group}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Writes `batch` as one row group per entry of `group_rows`.
+    fn write_parquet_groups(batch: &RecordBatch, group_rows: &[usize], tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ltseq_issue153_{}_{}.parquet",
+            tag,
+            std::process::id()
+        ));
+        let file = File::create(&path).expect("create parquet file");
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), None).expect("parquet writer");
+        let mut offset = 0;
+        for &rows in group_rows {
+            writer
+                .write(&batch.slice(offset, rows))
+                .expect("write row group");
+            writer.flush().expect("close row group");
+            offset += rows;
+        }
+        writer.close().expect("close parquet file");
+        path.to_str().expect("utf-8 temp path").to_string()
+    }
+
+    /// Partitions are runs of equal keys in table order, as the general
+    /// path's `compute_partition_boundaries` splits them, and the table need
+    /// not be sorted by its key, so a row group can start and end with one
+    /// key and hold another in between. The tail carried into the next seam
+    /// is then that group's last run alone, not the preceding tail followed
+    /// by it (#153 review): with row groups `[K]`, `[K, M, K]`, `[K]`, the
+    /// partitions hold 2, 1 and 2 rows, and a three-step pattern has no
+    /// match.
+    #[test]
+    fn pattern_count_does_not_carry_a_tail_across_an_inner_partition() {
+        let step = binop(
+            "Eq",
+            col("e"),
+            PyExpr::Literal(crate::types::LiteralValue::Int64(1)),
+        );
+        let steps = vec![step; 3];
+        // `K, M`: NULL around 0, 1 around 0, and 0 around NULL.
+        for (outer, inner) in [(None, Some(0)), (Some(1), Some(0)), (Some(0), None)] {
+            for key_type in [
+                DataType::Int32,
+                DataType::Int64,
+                DataType::UInt32,
+                DataType::UInt64,
+            ] {
+                let keys = Int64Array::from(vec![outer, outer, inner, outer, outer]);
+                let keys = datafusion::arrow::compute::cast(&keys, &key_type).expect("cast keys");
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("i", DataType::Int64, false),
+                    Field::new("k", key_type.clone(), true),
+                    Field::new("e", DataType::Int64, false),
+                ]));
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(Int64Array::from_iter_values(0..5)),
+                        keys,
+                        Arc::new(Int64Array::from_iter_values([1; 5])),
+                    ],
+                )
+                .expect("valid batch");
+                let case = format!("{key_type}, keys {outer:?} around {inner:?}");
+
+                let memory = LTSeqTable::from_batches(
+                    create_session_context(),
+                    vec![batch.clone()],
+                    batch.schema(),
+                    vec![SortSpec::new("i".to_string(), false)],
+                )
+                .expect("in-memory table");
+                let expected = search_pattern_count_impl(&memory, &steps, Some("k".to_string()))
+                    .expect("general path count");
+                assert_eq!(expected, 0, "{case}");
+
+                let path = write_parquet_groups(&batch, &[1, 3, 1], "inner_partition");
+                let table = sorted_parquet_table(&path);
+                let count = parallel_pattern_match_count(&table, &steps, "k", &path);
+                let _ = std::fs::remove_file(&path);
+                assert_eq!(count.expect("parallel count"), expected, "{case}");
             }
         }
     }

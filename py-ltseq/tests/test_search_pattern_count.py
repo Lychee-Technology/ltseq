@@ -440,3 +440,41 @@ def test_search_pattern_count_keeps_uint64_keys_above_int64_apart(
     )
 
     assert count == 2
+
+
+@pytest.mark.parametrize("key_type", ["int32", "int64", "uint32", "uint64"])
+@pytest.mark.parametrize(
+    ("outer", "inner"), [(None, 0), (1, 0), (0, None)], ids=["null-0", "1-0", "0-null"]
+)
+def test_search_pattern_count_tail_does_not_cross_an_inner_partition(
+    tmp_path, key_type, outer, inner
+):
+    """Partitions are runs of equal keys in table order, which need not be
+    sorted by the key. The middle row group starts and ends with key `outer`
+    and holds `inner` between, so it is three partitions, and the rows before
+    and after it are not one partition (#153 review)."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+
+    table = pa.table(
+        {
+            "i": [0, 1, 2, 3, 4],
+            "k": pa.array([outer, outer, inner, outer, outer], pa.type_for_alias(key_type)),
+            "e": [1, 1, 1, 1, 1],
+        }
+    )
+    path = tmp_path / "inner_partition.parquet"
+    # Row groups [outer], [outer, inner, outer], [outer].
+    with pq.ParquetWriter(path, table.schema) as writer:
+        for offset, rows in [(0, 1), (1, 3), (4, 1)]:
+            writer.write_table(table.slice(offset, rows))
+    meta = pq.ParquetFile(path).metadata
+    assert [meta.row_group(g).num_rows for g in range(meta.num_row_groups)] == [1, 3, 1]
+    steps = [lambda r: r.e == 1] * 3
+
+    parquet = LTSeq.read_parquet(str(path)).assume_sorted("i")
+    memory = LTSeq.from_arrow(table).assume_sorted("i")
+
+    # The partitions hold 2, 1 and 2 rows, too few for three steps.
+    assert parquet.search_pattern_count(*steps, partition_by="k") == 0
+    assert memory.search_pattern_count(*steps, partition_by="k") == 0
