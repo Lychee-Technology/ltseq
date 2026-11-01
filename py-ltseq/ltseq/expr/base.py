@@ -464,7 +464,7 @@ def row_number() -> "CallExpr":
     Must be used with .over() to specify ordering.
 
     Returns:
-        Expression representing the row number
+        Expression representing the row number, an int64
 
     Example:
         >>> t.derive(lambda r: {"rn": row_number().over(order_by=r.date)})
@@ -485,7 +485,7 @@ def rank() -> "CallExpr":
     Must be used with .over() to specify ordering.
 
     Returns:
-        Expression representing the rank
+        Expression representing the rank, an int64
 
     Example:
         >>> t.derive(lambda r: {"rank": rank().over(order_by=r.score)})
@@ -506,7 +506,7 @@ def dense_rank() -> "CallExpr":
     Must be used with .over() to specify ordering.
 
     Returns:
-        Expression representing the dense rank
+        Expression representing the dense rank, an int64
 
     Example:
         >>> t.derive(lambda r: {"drank": dense_rank().over(order_by=r.score)})
@@ -529,7 +529,7 @@ def ntile(n: int) -> "CallExpr":
         n: Number of buckets to divide into
 
     Returns:
-        Expression representing the bucket number (1 to n)
+        Expression representing the bucket number (1 to n), an int64
 
     Example:
         >>> t.derive(lambda r: {"quartile": ntile(4).over(order_by=r.score)})

@@ -4,7 +4,7 @@
 
 > **难度** ★★★ · **领域** 金融 · **前置** 案例 13
 >
-> **涉及 API**：`rank().over(partition_by=, order_by=, descending=)` / `cast("int64")` / `filter` / `select` / `rename` / `join(on=, how="left")` / `when` / `is_null`
+> **涉及 API**：`rank().over(partition_by=, order_by=, descending=)` / `filter` / `select` / `rename` / `join(on=, how="left")` / `when` / `is_null`
 
 **学习目标**
 
@@ -78,7 +78,7 @@ from ltseq import rank
 ranked = sales.derive(
     rk=lambda r: rank().over(
         partition_by=r.day, order_by=r.gmv, descending=True
-    ).cast("int64"),   # rank() 返回无符号整数，见解析
+    ),
 )
 
 ranked.sort("day", "rk").show(12);
@@ -110,10 +110,8 @@ ranked.sort("day", "rk").show(12);
 - 排名函数不需要先 `sort()`——`.over(order_by=...)` 自带排序，见案例 13。
 - `rank()` 并列同名次；GMV 撞车时升级为 `row_number()`（并列强行分先后）或
   `dense_rank()`（并列不跳号），按业务口径选。
-- `rank()` 目前返回无符号整数（`uint64`），尽管 `ranked.schema` 显示的是
-  `int64`。无符号减法不会变成负数，而是回绕：不做转换的话，第二步的
-  `prev_rank - rk` 会把 A 的 1 − 2 算成 18446744073709551615，所以排名时直接
-  把 `rk` 转成 `int64`。
+- `rank()` 返回 `int64`，所以商品名次下滑时，第二步的 `prev_rank - rk` 是负数：
+  A 的 1 − 2 得 −1。
 - 这一步的输出还是"长表"（day 在行上）；排名迁移要的是"两个榜单按商品对
   齐"——下一步把 d1 的名次**搬到** d2 的行上。
 

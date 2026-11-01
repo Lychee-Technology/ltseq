@@ -35,8 +35,8 @@ def test_cast_over_arithmetic_on_a_ranking_window(engine_layout):
 
 
 def test_cast_over_a_partitioned_rank_subtracts_below_zero(engine_layout):
-    # A difference of two ranks cast to int64 goes negative instead of
-    # wrapping as an unsigned subtraction does (tutorial case 17).
+    # A cast to int64 over a rank, as code written before ranks were int64
+    # (#323) does, keeps a difference of two ranks negative.
     out = (
         _table()
         .sort("v")

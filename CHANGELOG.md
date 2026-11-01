@@ -33,6 +33,7 @@ Literal values in lambdas are typed (#145). They used to be sent to the engine a
   - A value of a type no literal has (`bytes`, `timedelta`, a list, an expression or lambda given to `update`) raises `TypeError` naming the column, and an `int` outside Int64, `pandas.NaT` and `pandas.NA` raise `ValueError`, before anything executes.
   - A key of `insert` that is not a column raises `ColumnNotFoundError`; the value used to be dropped. `update` raises `ColumnNotFoundError` too, a subclass of the `ValueError` it raised before. The keys are checked before any value, so an unknown key raises `ColumnNotFoundError` even when its value is invalid too.
 - `group_ordered(...).first().count()` uses its counting kernel only for predicates the kernel computes as DataFusion does. Predicates with UInt64 order comparisons, Int32/UInt32 or timestamp arithmetic, or a `shift()` with `default=` or `partition_by=` are counted on the general path, which is slower (`docs/BENCHMARK.md`).
+- `row_number()`, `rank()`, `dense_rank()` and `ntile()` return `int64` (#323). They returned DataFusion's `uint64`, although `.schema` reported `int64`, and arithmetic followed the real type: the difference of two ranks wrapped to 18446744073709551615 instead of going negative, `rank() - 2` and `5 - ntile(4)` were `decimal128(21, 0)`, and `write_parquet` stored ranks as `uint64`. A `cast("int64")` written to work around this still works and can be dropped.
 
 ### Fixed
 

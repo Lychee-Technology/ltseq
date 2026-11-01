@@ -4,7 +4,7 @@
 
 > **Level** ★★★ · **Domain** Finance · **Prereqs** Case 13
 >
-> **APIs used**: `rank().over(partition_by=, order_by=, descending=)` / `cast("int64")` / `filter` / `select` / `rename` / `join(on=, how="left")` / `when` / `is_null`
+> **APIs used**: `rank().over(partition_by=, order_by=, descending=)` / `filter` / `select` / `rename` / `join(on=, how="left")` / `when` / `is_null`
 
 **Learning goals**
 
@@ -81,7 +81,7 @@ from ltseq import rank
 ranked = sales.derive(
     rk=lambda r: rank().over(
         partition_by=r.day, order_by=r.gmv, descending=True
-    ).cast("int64"),   # rank() returns an unsigned integer; see the notes
+    ),
 )
 
 ranked.sort("day", "rk").show(12);
@@ -114,10 +114,8 @@ ranked.sort("day", "rk").show(12);
   order (case 13).
 - `rank()` shares ranks on ties; switch to `row_number()` (force an order) or
   `dense_rank()` (ties without gaps) depending on the business contract.
-- `rank()` currently returns an unsigned integer (`uint64`), although
-  `ranked.schema` reports `int64`. Unsigned subtraction wraps around instead of
-  going negative: without the cast, step 2's `prev_rank - rk` turns A's 1 − 2
-  into 18446744073709551615, so `rk` is cast to `int64` where it is ranked.
+- `rank()` returns `int64`, so step 2's `prev_rank - rk` goes negative when a
+  product falls: A's 1 − 2 is −1.
 - The output is still a long table (day on rows); rank migration wants both
   boards **aligned per product** — the next step moves d1's ranks onto d2's
   rows.
