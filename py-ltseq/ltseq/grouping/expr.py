@@ -14,6 +14,33 @@ from ..expr.base import bool_context_error
 # Usage example shown in the boolean-context TypeError for the group dialect.
 GROUP_BOOL_CONTEXT_EXAMPLE = "(g.count() > 2) & (g.sum('x') > 0)"
 
+# How to test a group value for NULL in group_ordered(...).derive / .agg,
+# whose group expressions have no null test (issue #300). Shared by the
+# `is None` refusal (_invoke_group_lambda) and the `== None` refusal below.
+# Each multi-line example is parenthesized so it runs when copied as printed.
+GROUP_NULL_CHECK_MIGRATION = (
+    "In group_ordered(...).derive and .agg, group values have no null test: "
+    "emit the group value as a column, then test that column in a row lambda "
+    "(if_else is ltseq.if_else):\n"
+    "  (grouped.derive(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
+    "      .derive(lambda r: {\"n_if_b\": if_else(r.first_b.is_not_null(), r.n, None)}))\n"
+    "  (grouped.agg(lambda g: {\"first_b\": g.first().b, \"n\": g.count()})\n"
+    "      .filter(lambda r: r.first_b.is_not_null()))\n"
+    "In group_ordered(...).filter, use g.first().col.is_null() / .is_not_null() "
+    "(also on g.last().col, g.count() and g.<agg>('col')), and "
+    "r.col.is_null() / .is_not_null() inside g.all / g.any / g.none."
+)
+
+
+def group_null_comparison_error(op: str) -> TypeError:
+    """The TypeError for ``<group value> == None`` / ``!= None`` outside the
+    filter dialect, which is the only one that captures a null test."""
+    return TypeError(
+        f"A group value compared with None using '{op}' is a constant Python "
+        "bool here, not a null test, and 'and', 'or' or a conditional "
+        "expression would silently drop it.\n\n" + GROUP_NULL_CHECK_MIGRATION
+    )
+
 
 class GroupExpr(ABC):
     """Base class for group-level expressions."""
@@ -28,6 +55,24 @@ class GroupExpr(ABC):
         `and`/`or`/`not`/`in`/ternary/chained comparisons call bool() and
         would silently drop conditions otherwise."""
         raise bool_context_error(GROUP_BOOL_CONTEXT_EXAMPLE)
+
+    # Comparisons with None (issue #300). Only the filter dialect
+    # (_ComparableGroupExpr, which overrides these) captures a null test.
+    # Elsewhere Python fell back to identity and returned a constant bool, so
+    # `(g.first().b != None) and g.count()` in derive/agg silently returned
+    # the count. Other comparisons keep Python's default behavior.
+    def __eq__(self, other: object) -> bool:
+        if other is None:
+            raise group_null_comparison_error("==")
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        if other is None:
+            raise group_null_comparison_error("!=")
+        return NotImplemented
+
+    # Defining __eq__ would otherwise make instances unhashable.
+    __hash__ = object.__hash__
 
     # Arithmetic operations - return BinOpGroupExpr
     def __add__(self, other: "GroupExpr") -> "BinOpGroupExpr":

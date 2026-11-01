@@ -249,8 +249,8 @@ class TestEqNoneInGroupPredicates:
 
     def test_is_none_points_to_the_null_checks(self, groups):
         # Group lambdas are not rewritten (#144 covers row lambdas), so
-        # `is None` is a plain Python bool; the error names what works.
-        with pytest.raises(ValueError, match=r"is_null\(\)"):
+        # `is None` is refused at the call (#300); the error names what works.
+        with pytest.raises(TypeError, match=r"is_null\(\)"):
             groups.filter(lambda g: g.first().v is None)
 
     def test_aggregate(self, groups):
