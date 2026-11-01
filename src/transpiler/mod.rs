@@ -467,6 +467,27 @@ fn parse_call_math(
     }
 }
 
+/// The Arrow type a `cast(target)` call names. Shared by the row
+/// transpiler and the window planner, which lowers a cast whose input is a
+/// window expression (#312).
+pub(crate) fn cast_target_type(args: &[PyExpr]) -> Result<DataType, String> {
+    let target_type = match arg(args, 0) {
+        Arg::Absent => return Err("cast requires a target type argument".to_string()),
+        Arg::Literal(value) => value.require_str("cast() target type")?.to_string(),
+        Arg::Expr(_) => return Err("cast target type must be a string literal".to_string()),
+    };
+    Ok(match target_type.to_lowercase().as_str() {
+        "int32" | "i32" => DataType::Int32,
+        "int64" | "i64" => DataType::Int64,
+        "float32" | "f32" => DataType::Float32,
+        "float64" | "f64" => DataType::Float64,
+        "utf8" | "string" | "str" => DataType::Utf8,
+        "bool" | "boolean" => DataType::Boolean,
+        "date32" | "date" => DataType::Date32,
+        _ => return Err(format!("Unsupported cast target type: {}", target_type)),
+    })
+}
+
 /// Handle type operations (cast, is_in)
 fn parse_call_type_ops(
     func: &str,
@@ -477,22 +498,7 @@ fn parse_call_type_ops(
     match func {
         "cast" => {
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
-            let target_type = match arg(&args, 0) {
-                Arg::Absent => return Err("cast requires a target type argument".to_string()),
-                Arg::Literal(value) => value.require_str("cast() target type")?.to_string(),
-                Arg::Expr(_) => return Err("cast target type must be a string literal".to_string()),
-            };
-            let arrow_type = match target_type.to_lowercase().as_str() {
-                "int32" | "i32" => DataType::Int32,
-                "int64" | "i64" => DataType::Int64,
-                "float32" | "f32" => DataType::Float32,
-                "float64" | "f64" => DataType::Float64,
-                "utf8" | "string" | "str" => DataType::Utf8,
-                "bool" | "boolean" => DataType::Boolean,
-                "date32" | "date" => DataType::Date32,
-                _ => return Err(format!("Unsupported cast target type: {}", target_type)),
-            };
-            Ok(opaque_cast::cast(on_expr, arrow_type, rx))
+            Ok(opaque_cast::cast(on_expr, cast_target_type(&args)?, rx))
         }
         "is_in" => {
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;

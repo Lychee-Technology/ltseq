@@ -198,8 +198,13 @@ class IOMixin:
         Args:
             rows: List of dicts, one per row. All dicts must have the same keys.
             schema: Optional column schema as {column_name: arrow_type_string}.
-                    If None, types are inferred from the first row's values.
-                    Explicit schema is required for empty rows lists.
+                    The column names come from its keys, or from the first
+                    row's keys when it is None; a row without one of them
+                    holds NULL there, and a key outside them is dropped.
+                    Column types are inferred from all rows' values, not the
+                    first row's: ``[{"a": 1}, {"a": 2.5}]`` gives ``a: double``.
+                    The schema's types are used only when ``rows`` is empty,
+                    which requires an explicit schema.
 
         Returns:
             New LTSeq instance

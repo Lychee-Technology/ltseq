@@ -217,7 +217,7 @@ summary.show();
 
 1. 把冷却规则改成"滑动窗口内最多 2 条"（窗口 60 分钟内已发 2 条则抑制）：
    状态升级为"最近发出的 ts 列表"，fold 里用 Python 列表维护。`show()`
-   会把列表列打印成 `[unsupported type]`，用 `to_dicts()` 读回结果。
+   把列表列打印成 `[1, 2]` 的样子，`to_dicts()` 则读回 Python 列表。
 2. 给 alerts 加 severity 列，规则改为"critical 无冷却、warning 有冷却"——
    状态更新条件怎么写？
 3. 在 `naive` 上用

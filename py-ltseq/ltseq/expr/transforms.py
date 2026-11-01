@@ -820,12 +820,14 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
     return expr_dict
 
 
-def _require_partition_by_column(name: str, schema: dict[str, str]) -> None:
-    """Raise ``ColumnNotFoundError`` unless ``name``, given as
-    ``partition_by=``, is a column of ``schema``."""
+def _require_partition_by_column(
+    name: str, schema: dict[str, str], kwarg: str = "partition_by"
+) -> None:
+    """Raise ``ColumnNotFoundError`` unless ``name``, given as ``kwarg=``
+    (``partition_by=`` by default), is a column of ``schema``."""
     if name not in schema:
         raise ColumnNotFoundError(
-            f"partition_by column '{name}' not found in schema. "
+            f"{kwarg} column '{name}' not found in schema. "
             f"Available columns: {list(schema)}"
         )
 
@@ -835,7 +837,8 @@ def _check_partition_by_names(node: Any, schema: dict[str, str]) -> None:
 
     The row proxy checks the names a lambda reads as ``r.name``; a name given
     as a string reaches Rust as a literal, which the window planner reads as
-    a column name, so it is checked here.
+    a column name, so it is checked here. So is a name given to ``.over()``
+    as a string, which reaches Rust as a column reference no proxy checked.
     """
     if isinstance(node, list):
         for item in node:
@@ -845,5 +848,10 @@ def _check_partition_by_names(node: Any, schema: dict[str, str]) -> None:
             part = (node.get("kwargs") or {}).get("partition_by") or {}
             if part.get("type") == "Literal" and isinstance(part.get("value"), str):
                 _require_partition_by_column(part["value"], schema)
+        elif node.get("type") == "Window":
+            for kwarg in ("partition_by", "order_by"):
+                key = node.get(kwarg) or {}
+                if key.get("type") == "Column":
+                    _require_partition_by_column(key["name"], schema, kwarg)
         for value in node.values():
             _check_partition_by_names(value, schema)

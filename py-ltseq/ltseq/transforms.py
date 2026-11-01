@@ -32,9 +32,11 @@ def _window_sort_required_error() -> Exception:
     from .exceptions import SortRequiredError
 
     return SortRequiredError(
-        "Window functions (shift/rolling/diff/rank/cumulative) require a "
-        "defined row order. Call .sort(...) or .assume_sorted(...) before "
-        "using them in derive()." + _COMPUTED_SORT_HINT
+        "Window functions that follow table order (shift, diff, rolling, "
+        "cum_*, and a ranking function or .over() window without "
+        "order_by=) require a defined row order. Call .sort(...) or "
+        ".assume_sorted(...) before using them in derive(), or give the "
+        "window its own order with .over(order_by=...)." + _COMPUTED_SORT_HINT
     )
 
 
@@ -489,10 +491,11 @@ class TransformMixin(LookupMixin, LTSeqLike):
     def _has_implicit_order_window(self, derived_cols: dict[str, Any]) -> bool:
         """Check for window functions that depend on the table's row order.
 
-        These are shift/diff/rolling/cumulative expressions: unlike an explicit
-        ``.over(order_by=...)`` window (``type == "Window"``, which carries its
-        own ordering), they are only well-defined once the table has a defined
-        order, so they require a prior ``.sort()`` / ``.assume_sorted()``.
+        These are shift/diff/rolling/cumulative expressions, and ranking
+        functions whose ``.over()`` has no ``order_by``: unlike a window with
+        its own ``.over(order_by=...)``, they are only well-defined once the
+        table has a defined order, so they require a prior ``.sort()`` /
+        ``.assume_sorted()``.
         """
 
         def check_expr(expr: dict[str, Any]) -> bool:
@@ -507,7 +510,15 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 # so it stays row-order bound and requires a prior .sort().
                 if expr.get("order_by") is not None:
                     return False
-                return check_expr(expr.get("expr") or {})
+                # A ranking function without order_by ranks in table order
+                # too; without one DataFusion fails with an internal error
+                # ("ORDER BY column cannot be empty", #312).
+                inner = expr.get("expr") or {}
+                if inner.get("type") == "Call" and inner.get("func") in (
+                    "row_number", "rank", "dense_rank", "ntile"
+                ):
+                    return True
+                return check_expr(inner)
             if expr_type == "Call":
                 func = expr.get("func", "")
                 if func in ("shift", "diff", "rolling", "cum_sum", "cum_max", "cum_min"):

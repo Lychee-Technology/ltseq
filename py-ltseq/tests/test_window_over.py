@@ -19,7 +19,7 @@ import tempfile
 
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, ntile, rank, row_number
 
 
 @pytest.fixture
@@ -297,3 +297,78 @@ class TestOverSortGuard:
             lambda r: {"prev": r.value.shift(1).over(partition_by=r.grp, order_by=r.value)}
         )
         assert len(result.to_pandas()) == 4
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda r: row_number().over(),
+            lambda r: rank().over(partition_by=r.grp),
+            lambda r: ntile(2).over(partition_by="grp"),
+        ],
+        ids=["row_number", "rank-partitioned", "ntile-partitioned-by-name"],
+    )
+    def test_ranking_without_order_by_requires_sort(self, unsorted, build):
+        # Without order_by a ranking function ranks in table order; on a
+        # table with none, DataFusion failed with an internal error (#312).
+        from ltseq.exceptions import SortRequiredError
+
+        with pytest.raises(SortRequiredError, match="ranking function"):
+            unsorted.derive(x=build)
+
+    def test_ranking_without_order_by_follows_table_order(self, unsorted):
+        out = unsorted.sort("value").derive(
+            rn=lambda r: row_number().over(),
+            rk=lambda r: rank().over(partition_by=r.grp),
+        )
+        assert out.to_dicts() == [
+            {"grp": "A", "value": 10, "rn": 1, "rk": 1},
+            {"grp": "A", "value": 20, "rn": 2, "rk": 2},
+            {"grp": "B", "value": 100, "rn": 3, "rk": 1},
+            {"grp": "B", "value": 200, "rn": 4, "rk": 2},
+        ]
+
+
+class TestOverColumnNames:
+    """``.over()`` takes a column name for ``partition_by=`` and ``order_by=``,
+    as the window methods' own ``partition_by=`` does (#312)."""
+
+    @pytest.fixture
+    def table(self):
+        import pyarrow as pa
+
+        return LTSeq.from_arrow(
+            pa.table({"u": ["a", "a", "b", "b"], "U": [1, 1, 1, 1], "v": [4, 2, 3, 1]})
+        ).sort("v")
+
+    def test_partition_by_name_matches_expression(self, table, engine_layout):
+        by_name = table.derive(x=lambda r: rank().over(partition_by="u", order_by=r.v))
+        by_expr = table.derive(x=lambda r: rank().over(partition_by=r.u, order_by=r.v))
+        assert by_name.to_dicts() == by_expr.to_dicts()
+        assert [row["x"] for row in by_name.to_dicts()] == [1, 1, 2, 2]
+
+    def test_order_by_name_matches_expression(self, table, engine_layout):
+        by_name = table.derive(x=lambda r: row_number().over(order_by="v", descending=True))
+        by_expr = table.derive(x=lambda r: row_number().over(order_by=r.v, descending=True))
+        assert by_name.to_dicts() == by_expr.to_dicts()
+        assert [row["x"] for row in by_name.to_dicts()] == [4, 3, 2, 1]
+
+    def test_sequence_window_takes_a_partition_name(self, table, engine_layout):
+        by_name = table.derive(x=lambda r: r.v.shift(1).over(partition_by="u"))
+        assert [row["x"] for row in by_name.to_dicts()] == [None, None, 1, 2]
+
+    def test_name_is_exact(self, table):
+        # "U" is a column of its own, so it is one partition, not "u"'s two.
+        out = table.derive(x=lambda r: rank().over(partition_by="U", order_by=r.v))
+        assert [row["x"] for row in out.to_dicts()] == [1, 2, 3, 4]
+
+    @pytest.mark.parametrize("kwarg", ["partition_by", "order_by"])
+    def test_unknown_name_raises_column_not_found(self, table, kwarg):
+        from ltseq.exceptions import ColumnNotFoundError
+
+        with pytest.raises(ColumnNotFoundError, match=f"{kwarg} column 'w' not found"):
+            table.derive(x=lambda r: rank().over(**{"order_by": r.v, kwarg: "w"}))
+
+    @pytest.mark.parametrize("value", [["u"], 1])
+    def test_other_values_raise_type_error(self, table, value):
+        with pytest.raises(TypeError, match=r"\.over\(partition_by=\) takes one column name"):
+            table.derive(x=lambda r: rank().over(partition_by=value, order_by=r.v))

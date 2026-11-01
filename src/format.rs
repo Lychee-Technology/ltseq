@@ -4,6 +4,15 @@ use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::temporal_conversions;
+use datafusion::arrow::util::display::{ArrayFormatter, DurationFormat, FormatOptions};
+
+/// How Arrow's own formatter prints the types this module has no arm for
+/// (decimals, durations, times, lists, structs, binary, ...). A NULL nested
+/// in a list or struct prints as `None`, as a NULL cell does, and a duration
+/// prints as `1 days 2 hours 3 mins 4.500000 secs` rather than ISO 8601.
+const FALLBACK_FORMAT: FormatOptions<'static> = FormatOptions::new()
+    .with_null("None")
+    .with_duration_format(DurationFormat::Pretty);
 
 /// A typed column reference that avoids repeated `downcast_ref` per cell.
 ///
@@ -30,7 +39,10 @@ enum TypedColumn<'a> {
     Float32(&'a Float32Array),
     Float64(&'a Float64Array),
     Boolean(&'a BooleanArray),
-    /// Fallback for unsupported types — stores the raw dyn Array
+    /// Every other type Arrow can display: decimals, durations, lists, ...
+    /// Without it they printed as `[unsupported type]` (#312).
+    Other(ArrayFormatter<'a>),
+    /// A type Arrow's formatter refuses
     Unsupported,
 }
 
@@ -125,7 +137,10 @@ impl<'a> TypedColumn<'a> {
                     .downcast_ref()
                     .expect("type matched Boolean"),
             ),
-            _ => TypedColumn::Unsupported,
+            _ => match ArrayFormatter::try_new(column, &FALLBACK_FORMAT) {
+                Ok(formatter) => TypedColumn::Other(formatter),
+                Err(_) => TypedColumn::Unsupported,
+            },
         }
     }
 
@@ -191,6 +206,7 @@ impl<'a> TypedColumn<'a> {
             TypedColumn::Float32(arr) => format!("{}", arr.value(row_idx)),
             TypedColumn::Float64(arr) => format!("{}", arr.value(row_idx)),
             TypedColumn::Boolean(arr) => arr.value(row_idx).to_string(),
+            TypedColumn::Other(formatter) => formatter.value(row_idx).to_string(),
             TypedColumn::Unsupported => "[unsupported type]".to_string(),
         }
     }
@@ -350,7 +366,61 @@ pub fn format_table(
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_value;
+    use super::{format_table, truncate_value};
+    use datafusion::arrow::array::{
+        ArrayRef, Decimal128Array, DurationMicrosecondArray, ListArray,
+    };
+    use datafusion::arrow::datatypes::{Field, Int64Type, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    /// The cells of `column` as `show()` prints them, one per row.
+    fn cells(column: ArrayRef) -> Vec<String> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "c",
+            column.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+        format_table(&[batch], &schema, usize::MAX)
+            .lines()
+            .skip(3)
+            .filter(|line| line.starts_with('|'))
+            .map(|line| line.trim_matches('|').trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn decimals_print_their_value() {
+        let decimals = Decimal128Array::from(vec![Some(150), None, Some(-5)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_eq!(cells(Arc::new(decimals)), ["1.50", "None", "-0.05"]);
+        // `5 - ntile(4)` is decimal128(21, 0) (#312)
+        let integral = Decimal128Array::from(vec![4])
+            .with_precision_and_scale(21, 0)
+            .unwrap();
+        assert_eq!(cells(Arc::new(integral)), ["4"]);
+    }
+
+    #[test]
+    fn durations_print_their_parts() {
+        let durations = DurationMicrosecondArray::from(vec![Some(1_800_000_000), None]);
+        assert_eq!(
+            cells(Arc::new(durations)),
+            ["0 days 0 hours 30 mins 0.000000 secs", "None"]
+        );
+    }
+
+    #[test]
+    fn lists_print_their_items_with_none_for_null() {
+        let lists = ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+            Some(vec![Some(1), None]),
+            None,
+            Some(vec![]),
+        ]);
+        assert_eq!(cells(Arc::new(lists)), ["[1, None]", "None", "[]"]);
+    }
 
     #[test]
     fn short_values_pass_through() {

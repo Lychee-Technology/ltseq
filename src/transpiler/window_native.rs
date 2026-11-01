@@ -640,6 +640,51 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
     }
 }
 
+/// `x.cast(t)` whose input may be a window expression (#312): the window
+/// planner lowers the input, and the cast is the row transpiler's.
+///
+/// Kept out of `convert_expr_with_window_children`, which recurses once per
+/// operator of an expression: its frame is what a deep expression stacks.
+#[inline(never)]
+fn convert_cast_over_window(
+    on: Option<Box<PyExpr>>,
+    args: &[PyExpr],
+    rx: &Resolver<'_>,
+    order_by: &[Sort],
+) -> Result<Expr, String> {
+    use crate::transpiler::contains_window_function;
+
+    let on = super::require_on(on, "cast")?;
+    let on_expr = if contains_window_function(&on) {
+        pyexpr_to_window_inner(*on, rx, order_by)?
+    } else {
+        super::lower_expr(*on, rx)?
+    };
+    let target = super::cast_target_type(args)?;
+    Ok(super::opaque_cast::cast(on_expr, target, rx))
+}
+
+/// The error for a function the window planner has no arm for, called on a
+/// window expression's result. The row transpiler cannot lower a window, so
+/// it would fail on the window inside with a message that blames window
+/// nesting; this names the call instead (#312).
+#[inline(never)]
+fn window_input_unsupported(func: &str) -> String {
+    // `str_len` is written `.s.len()`, `dt_year` `.dt.year()` and
+    // `math_sqrt` `sqrt()`.
+    let name = func
+        .strip_prefix("str_")
+        .map(|f| format!(".s.{f}"))
+        .or_else(|| func.strip_prefix("dt_").map(|f| format!(".dt.{f}")))
+        .or_else(|| func.strip_prefix("math_").map(str::to_string))
+        .unwrap_or_else(|| func.to_string());
+    format!(
+        "{name}() cannot take a window expression's result in the same derive \
+         yet; derive the window into a column first, then apply {name}() to \
+         that column in a second derive"
+    )
+}
+
 /// Handle expressions that contain window functions in their children (e.g., BinOp, if_else wrapping shift)
 fn convert_expr_with_window_children(
     py_expr: PyExpr,
@@ -777,6 +822,12 @@ fn convert_expr_with_window_children(
                             super::round_decimals(arg(rest, 0), |d| lower(d.clone()))?,
                         ]),
                     })
+                }
+                "cast" => convert_cast_over_window(on, &args, rx, order_by),
+                _ if on.as_deref().is_some_and(contains_window_function)
+                    || args.iter().any(contains_window_function) =>
+                {
+                    Err(window_input_unsupported(&func))
                 }
                 _ => {
                     // For other function calls, try to handle as non-window
