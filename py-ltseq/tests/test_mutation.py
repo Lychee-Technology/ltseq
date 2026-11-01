@@ -95,6 +95,28 @@ class TestDelete:
         _ = sample.delete(0)
         assert len(sample.to_pandas()) == 3
 
+    @pytest.mark.parametrize("pos", [0, 4, 5, 9, 14])
+    def test_delete_by_index_multi_batch_removes_exactly_one_row(self, pos):
+        """Regression (#176): only the batch holding `pos` is spliced.
+
+        The per-batch offset math used `saturating_sub`, which yielded 0 for
+        every batch after the target and deleted their first rows too. Small
+        single-batch tables never showed it.
+        """
+        import pyarrow as pa
+        from ltseq import LTSeq
+
+        batches = [
+            pa.record_batch({"id": list(range(start, start + 5))})
+            for start in (0, 5, 10)
+        ]
+        t = LTSeq.from_arrow(pa.Table.from_batches(batches))
+        assert t.count() == 15
+
+        result = t.delete(pos)
+        ids = [row["id"] for row in result.to_dicts()]
+        assert ids == [i for i in range(15) if i != pos]
+
 
 def _nullable():
     """Rows where every predicate below is TRUE on some, FALSE on some and
@@ -252,28 +274,6 @@ class TestDeleteNullPredicate:
 
 
 # ─── update ──────────────────────────────────────────────────────────────────
-    @pytest.mark.parametrize("pos", [0, 4, 5, 9, 14])
-    def test_delete_by_index_multi_batch_removes_exactly_one_row(self, pos):
-        """Regression (#176): only the batch holding `pos` is spliced.
-
-        The per-batch offset math used `saturating_sub`, which yielded 0 for
-        every batch after the target and deleted their first rows too. Small
-        single-batch tables never showed it.
-        """
-        import pyarrow as pa
-        from ltseq import LTSeq
-
-        batches = [
-            pa.record_batch({"id": list(range(start, start + 5))})
-            for start in (0, 5, 10)
-        ]
-        t = LTSeq.from_arrow(pa.Table.from_batches(batches))
-        assert t.count() == 15
-
-        result = t.delete(pos)
-        ids = [row["id"] for row in result.to_dicts()]
-        assert ids == [i for i in range(15) if i != pos]
-
 
 class TestUpdate:
     def test_update_matching_rows(self, sample):
