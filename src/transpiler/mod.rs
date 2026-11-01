@@ -220,7 +220,7 @@ fn parse_call_conditional(
     }
 }
 
-/// Handle null-related operations (fill_null, is_null, is_not_null, coalesce)
+/// Handle null-related operations (fill_null, is_null, is_not_null, is_not_true, coalesce)
 fn parse_call_null_ops(
     func: &str,
     on: Option<PyExpr>,
@@ -243,6 +243,14 @@ fn parse_call_null_ops(
         "is_not_null" => {
             let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
             Ok(on_expr.is_not_null())
+        }
+        // `p IS NOT TRUE`: TRUE where p is FALSE or NULL. delete() filters on
+        // it (#265), so p is evaluated once per row, which matters when p is
+        // volatile (rand()). DataFusion coerces a dictionary-encoded Boolean
+        // and refuses a non-Boolean operand.
+        "is_not_true" => {
+            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            Ok(on_expr.is_not_true())
         }
         "coalesce" => {
             if args.is_empty() {
@@ -932,7 +940,7 @@ fn parse_call_expr(
         // Conditional
         "if_else" => parse_call_conditional(func, &args, rx),
         // Null handling
-        "fill_null" | "is_null" | "is_not_null" | "coalesce" => {
+        "fill_null" | "is_null" | "is_not_null" | "is_not_true" | "coalesce" => {
             parse_call_null_ops(func, on, args, rx)
         }
         // Math (built-in method-style: abs, ceil, floor, round)
@@ -1658,12 +1666,31 @@ mod tests {
     }
 
     #[test]
+    fn is_not_true_names_its_operand_once() {
+        // delete() filters on it (#265): one occurrence of the predicate,
+        // so a volatile predicate is drawn once per row.
+        let schema = test_schema();
+        let p = PyExpr::BinOp {
+            op: "Gt".to_string(),
+            left: Box::new(col_expr("a")),
+            right: Box::new(int_lit(1)),
+        };
+        assert_eq!(
+            pyexpr_to_datafusion(call_expr("is_not_true", p, vec![]), &schema),
+            Ok(Expr::Column(Column::new_unqualified("a"))
+                .gt(lit(1_i64))
+                .is_not_true())
+        );
+    }
+
+    #[test]
     fn receiver_functions_reject_standalone_calls() {
         // These used to fail with "Column '' not found in schema".
         let schema = test_schema();
         for func in [
             "fill_null",
             "is_null",
+            "is_not_true",
             "cast",
             "is_in",
             "str_lower",

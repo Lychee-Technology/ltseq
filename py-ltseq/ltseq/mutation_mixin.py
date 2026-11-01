@@ -133,24 +133,18 @@ class MutationMixin(LTSeqLike):
                 )
             # Keep the rows where the predicate is FALSE or NULL (#265):
             # NOT p alone is NULL where p is, and a filter drops those rows.
-            # NOT p OR p IS NULL keeps them. NOT coalesce(p, false) would
-            # too, but DataFusion cannot fold the coalesce when p is a
-            # dictionary-encoded Boolean ("Unsupported output type for
-            # dictionary packing"), and casting p to Boolean first would
-            # accept non-Boolean predicates that NOT refuses. The cost is
-            # that p is evaluated twice per row: DataFusion simplifies NOT p
-            # into a different expression before it could share the two.
+            # p IS NOT TRUE keeps them and evaluates p once per row, so a
+            # volatile predicate (rand()) deletes exactly the rows where its
+            # one draw is TRUE; NOT p OR p IS NULL drew twice. It also
+            # accepts a dictionary-encoded Boolean, where DataFusion cannot
+            # fold NOT coalesce(p, false), and refuses a non-Boolean p, as
+            # NOT p does.
             negated = {
-                "type": "BinOp",
-                "op": "Or",
-                "left": {"type": "UnaryOp", "op": "Not", "operand": expr_dict},
-                "right": {
-                    "type": "Call",
-                    "func": "is_null",
-                    "args": [],
-                    "kwargs": {},
-                    "on": expr_dict,
-                },
+                "type": "Call",
+                "func": "is_not_true",
+                "args": [],
+                "kwargs": {},
+                "on": expr_dict,
             }
             return LTSeq._from_inner(self._inner.filter(negated))
 

@@ -220,6 +220,29 @@ class TestDeleteNullPredicate:
         with pytest.raises(Exception, match="Boolean"):
             t.delete(lambda r: getattr(r, column)).to_dicts()
 
+    def test_volatile_nullable_predicate_is_evaluated_once_per_row(self):
+        """``delete(p)`` draws a volatile ``p`` once per row (R2-F1).
+
+        ``p`` is all NULL, so ``(p & (rand() < 0.5)) | (rand() < 0.5)`` is
+        TRUE about half the time and NULL or FALSE otherwise: delete keeps
+        about half the rows. A rewrite naming the predicate twice, as
+        ``NOT p OR p IS NULL`` did, draws twice and kept about 43.75%.
+        With 200,000 rows one standard deviation of the kept share is
+        about 0.11 points, so the bounds are some 25 deviations from
+        either outcome."""
+        from ltseq.expr import rand
+
+        n = 200_000
+        t = LTSeq.from_arrow(pa.table({"p": pa.array([None] * n, pa.bool_())}))
+
+        def p(r):
+            return (r.p & (rand() < 0.5)) | (rand() < 0.5)
+
+        kept = t.delete(p).count()
+        assert 0.47 * n < kept < 0.53 * n
+        # filter selects about half the rows as well: delete is its complement.
+        assert 0.47 * n < t.filter(p).count() < 0.53 * n
+
     def test_delete_keeps_table_order(self):
         t = _nullable().sort("id", desc=True)
         ids = [row["id"] for row in t.delete(lambda r: r.x > 1).to_dicts()]
