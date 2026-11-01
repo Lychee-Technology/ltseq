@@ -78,8 +78,8 @@ from ltseq import rank
 ranked = sales.derive(
     rk=lambda r: rank().over(
         partition_by=r.day, order_by=r.gmv, descending=True
-    ),
-).derive(rk=lambda r: r.rk.cast("int64"))   # rank() 返回无符号整数，见解析
+    ).cast("int64"),   # rank() 返回无符号整数，见解析
+)
 
 ranked.sort("day", "rk").show(12);
 ```
@@ -112,9 +112,8 @@ ranked.sort("day", "rk").show(12);
   `dense_rank()`（并列不跳号），按业务口径选。
 - `rank()` 目前返回无符号整数（`uint64`），尽管 `ranked.schema` 显示的是
   `int64`。无符号减法不会变成负数，而是回绕：不做转换的话，第二步的
-  `prev_rank - rk` 会把 A 的 1 − 2 算成 18446744073709551615。所以第二个
-  `derive` 先把 `rk` 转成 `int64`；之所以分两步，是因为 `cast` 暂时不能直接
-  套在窗口表达式外面。
+  `prev_rank - rk` 会把 A 的 1 − 2 算成 18446744073709551615，所以排名时直接
+  把 `rk` 转成 `int64`。
 - 这一步的输出还是"长表"（day 在行上）；排名迁移要的是"两个榜单按商品对
   齐"——下一步把 d1 的名次**搬到** d2 的行上。
 

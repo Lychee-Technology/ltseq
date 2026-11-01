@@ -43,6 +43,24 @@ def _is_sequence_window(call: "CallExpr") -> bool:
     return False
 
 
+def _over_key(key: Any, name: str) -> "Expr | None":
+    """The key an ``.over()`` argument names: a column name, as the window
+    methods' own ``partition_by=`` takes it, or an expression.
+
+    A string is the column of that exact name (case-sensitive, as every
+    column reference is); a name that is not a column raises
+    ``ColumnNotFoundError`` when the derive is planned.
+    """
+    if key is None or isinstance(key, Expr):
+        return key
+    if isinstance(key, str):
+        return ColumnExpr(key)
+    raise TypeError(
+        f".over({name}=) takes one column name or expression, such as "
+        f"{name}=\"u\" or {name}=r.u; got {type(key).__name__}"
+    )
+
+
 class ColumnExpr(Expr):
     """
     Represents a column reference, e.g., r.age in a lambda.
@@ -191,8 +209,8 @@ class CallExpr(Expr):
 
     def over(
         self,
-        partition_by: "Expr | None" = None,
-        order_by: "Expr | None" = None,
+        partition_by: "str | Expr | None" = None,
+        order_by: "str | Expr | None" = None,
         descending: "bool | None" = None,
         desc: "bool | None" = None,
     ) -> "WindowExpr":
@@ -210,9 +228,11 @@ class CallExpr(Expr):
         order.
 
         Args:
-            partition_by: Column(s) to partition by (optional)
-            order_by: Column(s) to order by. Required for ranking functions;
-                optional for sequence windows (they fall back to the table sort).
+            partition_by: The column to partition by (optional): a column
+                name (``"u"``) or an expression (``r.u``).
+            order_by: The column to order by, as a name or an expression.
+                Without it the window follows the table's declared order,
+                and a table with none raises ``SortRequiredError``.
             descending: If True, order in descending order (default False)
             desc: Alias for descending. When both are given, ``descending``
                 takes precedence — matching sort()'s resolution so the same
@@ -224,6 +244,7 @@ class CallExpr(Expr):
         Example:
             >>> row_number().over(order_by=r.date)
             >>> rank().over(partition_by=r.group, order_by=r.score)
+            >>> rank().over(partition_by="group", order_by="score")
             >>> r.close.shift(1).over(partition_by=r.symbol)
             >>> r.price.cum_max().over(partition_by=r.symbol, order_by=r.date)
 
@@ -231,7 +252,11 @@ class CallExpr(Expr):
             ValueError: if called on a non-window expression, or if
                 ``partition_by`` is supplied here while the sequence window also
                 carries a ``partition_by=`` kwarg (pick one).
+            TypeError: if ``partition_by`` or ``order_by`` is neither a string
+                nor an expression (one key only: lists are not taken).
         """
+        partition_by = _over_key(partition_by, "partition_by")
+        order_by = _over_key(order_by, "order_by")
         if self.func not in _RANKING_FUNCS and not _is_sequence_window(self):
             raise ValueError(
                 f".over() is only for window expressions (ranking functions or sequence windows shift/rolling/diff/cum_*); "

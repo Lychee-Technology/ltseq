@@ -164,8 +164,11 @@ class AggregationMixin(LTSeqLike):
         """
         Group by key assuming data is globally sorted.
 
-        Efficient one-pass grouping without hashing. Requires data to be sorted
-        by the grouping key.
+        Groups consecutive rows with equal keys, as ``group_ordered`` does
+        (the same plan), after checking that the key leads the declared sort
+        order, so that each key value forms one group. Raises
+        ``SortRequiredError`` when the table has no declared order or the key
+        does not lead it.
 
         Args:
             key: Lambda that extracts the grouping key.

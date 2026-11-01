@@ -140,14 +140,14 @@ the direction to "higher is better" with `5 - bucket`.
 from ltseq import ntile
 
 # ntile cuts by row position, so each key breaks ties by spend (see the notes)
+# `5 - ntile(...)` comes back as a decimal; cast makes each score an integer
 rfm = rfm.derive(lambda r: {
-    "r_score": 5 - ntile(4).over(order_by=r.recency * 1e6 - r.monetary),                # closer is better
-    "f_score": 5 - ntile(4).over(order_by=r.freq * 1e6 + r.monetary, descending=True),  # more is better
-    "m_score": 5 - ntile(4).over(order_by=r.monetary, descending=True),                 # higher is better
-}).derive(lambda r: {     # `5 - ntile(...)` comes back as a decimal; make it an integer
-    "r_score": r.r_score.cast("int64"),
-    "f_score": r.f_score.cast("int64"),
-    "m_score": r.m_score.cast("int64"),
+    # closer is better
+    "r_score": (5 - ntile(4).over(order_by=r.recency * 1e6 - r.monetary)).cast("int64"),
+    # more is better
+    "f_score": (5 - ntile(4).over(order_by=r.freq * 1e6 + r.monetary, descending=True)).cast("int64"),
+    # higher is better
+    "m_score": (5 - ntile(4).over(order_by=r.monetary, descending=True)).cast("int64"),
 })
 rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show();
 ```
@@ -180,8 +180,8 @@ rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score
   spend as a tie-breaker: `r.recency * 1e6 - r.monetary` orders by recency,
   then bigger spender first (spend stays far below 1e6 here).
 - `5 - ntile(...)` comes back as a `decimal` (an integer literal minus
-  `ntile`'s unsigned integer), and `show()` cannot print decimals yet, so the
-  second `derive` casts the scores to `int64`.
+  `ntile`'s unsigned integer), so each score casts it to `int64` in the same
+  expression: `cast` takes a window expression's result like any other.
 - 7 rows over 4 buckets: sizes 2/2/2/1 — `ntile` keeps buckets "roughly
   equal", earlier buckets absorbing the remainder.
 - The ranking family: `row_number` (unique) / `rank` (ties skip) /

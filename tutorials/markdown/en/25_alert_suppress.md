@@ -234,8 +234,8 @@ summary.show();
 
 1. Change the rule to "at most 2 per sliding window" (suppress if 2 already
    fired within 60 minutes): the state becomes a list of recent fired ts —
-   maintain a Python list in fold. `show()` prints a list column as
-   `[unsupported type]`, so read the result back with `to_dicts()`.
+   maintain a Python list in fold. `show()` prints the list column as
+   `[1, 2]`; `to_dicts()` reads it back as Python lists.
 2. Add a severity column with the rule "critical never suppressed, warning
    cooled down" — how does the state update condition change?
 3. On `naive`, find the alerts at most 30 minutes after the previous record

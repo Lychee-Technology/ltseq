@@ -133,14 +133,14 @@ rfm.select("user", "last_date", "recency", "freq", "monetary").show();
 from ltseq import ntile
 
 # ntile 按行位置切桶，所以每个排序键都用消费额打破并列（见解析）
+# `5 - ntile(...)` 的结果是 decimal，用 cast 把每个分数转成整数
 rfm = rfm.derive(lambda r: {
-    "r_score": 5 - ntile(4).over(order_by=r.recency * 1e6 - r.monetary),                # 越近越好
-    "f_score": 5 - ntile(4).over(order_by=r.freq * 1e6 + r.monetary, descending=True),  # 越多越好
-    "m_score": 5 - ntile(4).over(order_by=r.monetary, descending=True),                 # 越高越好
-}).derive(lambda r: {     # `5 - ntile(...)` 的结果是 decimal，转回整数
-    "r_score": r.r_score.cast("int64"),
-    "f_score": r.f_score.cast("int64"),
-    "m_score": r.m_score.cast("int64"),
+    # 越近越好
+    "r_score": (5 - ntile(4).over(order_by=r.recency * 1e6 - r.monetary)).cast("int64"),
+    # 越多越好
+    "f_score": (5 - ntile(4).over(order_by=r.freq * 1e6 + r.monetary, descending=True)).cast("int64"),
+    # 越高越好
+    "m_score": (5 - ntile(4).over(order_by=r.monetary, descending=True)).cast("int64"),
 })
 rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show();
 ```
@@ -171,8 +171,8 @@ rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score
   每次运行都可能不同。`.over()` 只接受一个 `order_by` 表达式，所以排序键里折进
   消费额作决胜键：`r.recency * 1e6 - r.monetary` 先按 recency，再让消费高的
   排前（本例消费额远小于 1e6）。
-- `5 - ntile(...)` 的结果是 `decimal`（整数字面量减 `ntile` 的无符号整数），而
-  `show()` 目前打印不了 decimal，所以第二个 `derive` 把分数转成 `int64`。
+- `5 - ntile(...)` 的结果是 `decimal`（整数字面量减 `ntile` 的无符号整数），所以
+  每个分数在同一个表达式里直接转成 `int64`：`cast` 可以直接套在窗口表达式外面。
 - 7 行分 4 桶：桶大小 2/2/2/1——`ntile` 保证"大致相等"，除不尽时前面的桶多一行。
 - 排名函数族：`row_number`（唯一序号）/ `rank`（有并列跳号）/ `dense_rank`
   （并列不跳号）/ `ntile`（分桶），全部 `.over(partition_by=, order_by=)`。

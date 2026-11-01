@@ -81,8 +81,8 @@ from ltseq import rank
 ranked = sales.derive(
     rk=lambda r: rank().over(
         partition_by=r.day, order_by=r.gmv, descending=True
-    ),
-).derive(rk=lambda r: r.rk.cast("int64"))   # rank() returns an unsigned integer; see the notes
+    ).cast("int64"),   # rank() returns an unsigned integer; see the notes
+)
 
 ranked.sort("day", "rk").show(12);
 ```
@@ -117,8 +117,7 @@ ranked.sort("day", "rk").show(12);
 - `rank()` currently returns an unsigned integer (`uint64`), although
   `ranked.schema` reports `int64`. Unsigned subtraction wraps around instead of
   going negative: without the cast, step 2's `prev_rank - rk` turns A's 1 − 2
-  into 18446744073709551615. The second `derive` casts `rk` to `int64`; it is a
-  separate step because `cast` cannot wrap a window expression yet.
+  into 18446744073709551615, so `rk` is cast to `int64` where it is ranked.
 - The output is still a long table (day on rows); rank migration wants both
   boards **aligned per product** — the next step moves d1's ranks onto d2's
   rows.
