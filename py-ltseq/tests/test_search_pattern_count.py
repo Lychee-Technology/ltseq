@@ -382,9 +382,9 @@ def test_search_pattern_count_match_spanning_empty_row_group(tmp_path):
 def test_search_pattern_count_keeps_null_partition_keys_apart(
     tmp_path, key_type, row_group_size
 ):
-    """A NULL key is one partition of its own on sorted Parquet too (#153).
-    Parquet reads a NULL slot back as 0, which the sorted-Parquet path took
-    for key 0."""
+    """A run of NULL keys is a partition apart from key 0 on sorted Parquet
+    too (#153). Parquet reads a NULL slot back as 0, which the sorted-Parquet
+    path took for key 0."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -478,3 +478,36 @@ def test_search_pattern_count_tail_does_not_cross_an_inner_partition(
     # The partitions hold 2, 1 and 2 rows, too few for three steps.
     assert parquet.search_pattern_count(*steps, partition_by="k") == 0
     assert memory.search_pattern_count(*steps, partition_by="k") == 0
+
+
+def test_search_pattern_partitions_are_runs_of_equal_keys():
+    """The partitions the `partition_by` docstrings describe: runs of
+    adjacent rows with equal keys in table order, a NULL key equal to NULL,
+    so keys [NULL, 0, NULL] are three partitions until the table is sorted by
+    the key (#153 review)."""
+    pa = pytest.importorskip("pyarrow")
+
+    table = pa.table(
+        {
+            "i": [0, 1, 2, 3, 4],
+            "k": pa.array([None, None, 0, None, None], pa.int64()),
+            "e": [1, 1, 1, 1, 1],
+        }
+    )
+    two = [lambda r: r.e == 1] * 2
+    three = [lambda r: r.e == 1] * 3
+
+    def starts(t, steps):
+        return t.search_pattern(*steps, partition_by="k").to_arrow().column("i").to_pylist()
+
+    by_row = LTSeq.from_arrow(table).sort("i")
+    # Partitions [0, 1], [2], [3, 4]: no match crosses the 0 or joins the
+    # two NULL runs.
+    assert starts(by_row, two) == [0, 3]
+    assert starts(by_row, three) == []
+    assert by_row.search_pattern_count(*three, partition_by="k") == 0
+
+    by_key = LTSeq.from_arrow(table).sort("k", "i")
+    # Sorted by the key, NULLs last: partitions [2] and [0, 1, 3, 4].
+    assert starts(by_key, three) == [0, 1]
+    assert by_key.search_pattern_count(*three, partition_by="k") == 2

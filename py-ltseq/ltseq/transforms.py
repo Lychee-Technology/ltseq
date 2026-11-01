@@ -893,10 +893,15 @@ class TransformMixin(LookupMixin, LTSeqLike):
         Args:
             *step_predicates: Lambda predicates for each step in the pattern.
                              E.g., lambda r: r.url.s.starts_with("http://example.com")
-            partition_by: Optional column name for partitioning. Pattern
-                         matching does not cross partition boundaries.
-                         NULL keys are one partition, apart from every
-                         value.
+            partition_by: Optional column name for partitioning. A
+                         partition is a run of adjacent rows, in table
+                         order, with equal keys; a NULL key equals NULL
+                         and no value. Pattern matching does not cross
+                         partition boundaries. A key that recurs after
+                         another key starts a new partition, so keys
+                         [NULL, 0, NULL] are three partitions; sort by
+                         the key first, as in t.sort("userid", "ts"),
+                         to make each key one partition.
 
         Returns:
             New LTSeq with matching rows
@@ -939,8 +944,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
         Args:
             *step_predicates: Lambda predicates for each step in the pattern.
             partition_by: Optional column name for partitioning, as in
-                search_pattern(): a match does not cross partitions, and
-                NULL keys are one partition, apart from every value.
+                search_pattern(): a partition is a run of adjacent rows
+                with equal keys, a NULL key equals NULL and no value, and
+                a match does not cross partitions.
 
         Returns:
             Number of matching pattern instances

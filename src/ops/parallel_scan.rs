@@ -492,9 +492,10 @@ fn read_match_and_extract_boundary(
             part_col.data_type()
         )
     })?;
-    // A NULL key is one partition, apart from every value, as in the general
-    // path's `compute_partition_boundaries`. Parquet reads a NULL slot back
-    // as 0, so the slot's value must not be read as a key.
+    // A partition starts wherever the key changes, and a NULL key equals NULL
+    // and no value, as in the general path's `compute_partition_boundaries`.
+    // Parquet reads a NULL slot back as 0, so the slot's value must not be
+    // read as a key.
     let key = |i: usize| part_values.is_valid(i).then(|| part_values.value(i));
 
     let n = combined.num_rows();
@@ -1169,9 +1170,8 @@ mod tests {
     }
 
     /// The parallel pattern count splits partitions where the general path
-    /// does: a NULL key is one partition, apart from 0 and every other value,
-    /// inside a row group and across a seam (#153). Parquet reads a NULL slot
-    /// back as 0.
+    /// does: a NULL key equals NULL and no value, 0 included, inside a row
+    /// group and across a seam (#153). Parquet reads a NULL slot back as 0.
     #[test]
     fn pattern_count_keeps_null_partition_keys_apart() {
         let step = binop(
