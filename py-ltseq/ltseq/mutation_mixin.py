@@ -98,14 +98,24 @@ class MutationMixin(LTSeqLike):
 
         Args:
             predicate_or_pos:
-                - callable: delete all rows where predicate returns True
+                - callable: delete the rows where the predicate is TRUE. A row
+                  where it is FALSE or NULL is kept, so ``delete(p)`` is not
+                  ``filter(~p)``, which drops the NULL rows too. The predicate
+                  is evaluated once per row. When it gives each row the same
+                  value every time it runs, ``t.delete(p)`` and
+                  ``t.filter(p)`` together hold every row of ``t``, each row
+                  in exactly one of them. A volatile predicate, such as one
+                  calling ``rand()``, draws anew in each query, so a row can
+                  be in both results or in neither.
                 - int: delete the row at that 0-based position (silently ignored if out of range)
 
         Returns:
             New LTSeq with row(s) removed; the original is unchanged.
 
         Example:
-            >>> t2 = t.delete(lambda r: r.status == "deleted")
+            >>> t = LTSeq.from_dict({"id": [1, 2, 3], "status": ["active", None, "expired"]})
+            >>> t.delete(lambda r: r.status == "expired").to_dicts()   # keeps the NULL status
+            [{'id': 1, 'status': 'active'}, {'id': 2, 'status': None}]
             >>> t2 = t.delete(0)   # remove first row
         """
         from .core import LTSeq
@@ -125,7 +135,21 @@ class MutationMixin(LTSeqLike):
                     "delete() predicate must return a boolean expression, "
                     "got a dict"
                 )
-            negated = {"type": "UnaryOp", "op": "Not", "operand": expr_dict}
+            # Keep the rows where the predicate is FALSE or NULL (#265):
+            # NOT p alone is NULL where p is, and a filter drops those rows.
+            # p IS NOT TRUE keeps them and evaluates p once per row, so a
+            # volatile predicate (rand()) deletes exactly the rows where its
+            # one draw is TRUE; NOT p OR p IS NULL drew twice. It also
+            # accepts a dictionary-encoded Boolean, where DataFusion cannot
+            # fold NOT coalesce(p, false), and refuses a non-Boolean p, as
+            # NOT p does.
+            negated = {
+                "type": "Call",
+                "func": "is_not_true",
+                "args": [],
+                "kwargs": {},
+                "on": expr_dict,
+            }
             return LTSeq._from_inner(self._inner.filter(negated))
 
         # integer positional delete — delegate to Rust
