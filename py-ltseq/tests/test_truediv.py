@@ -450,6 +450,84 @@ class TestSearchPatternOperands:
         t = LTSeq.read_parquet(path).assume_sorted("i")
         assert t.search_pattern_count(lambda r: (r.x / None).is_null(), lambda r: r.x >= 0) == 2
 
+    # R3-F1: a float literal next to an integer column is placed among the
+    # column's values, as `filter` places it, never cast with them to
+    # Float64. 2.0**53 + 1 is no Float64, so a cast would round row 1 to
+    # 2**53: `>` would miss it and `==` would match it.
+    EXACT = {
+        "gt": (lambda r: r.x > 2.0**53, [1, 2]),
+        "ge": (lambda r: r.x >= 2.0**53, [0, 1, 2]),
+        "lt": (lambda r: r.x < 2.0**53, []),
+        "le": (lambda r: r.x <= 2.0**53, [0]),
+        "eq": (lambda r: r.x == 2.0**53, [0]),
+        "ne": (lambda r: r.x != 2.0**53, [1, 2]),
+        "gt_reversed": (lambda r: 2.0**53 < r.x, [1, 2]),
+        "ge_reversed": (lambda r: 2.0**53 <= r.x, [0, 1, 2]),
+        "lt_reversed": (lambda r: 2.0**53 > r.x, []),
+        "le_reversed": (lambda r: 2.0**53 >= r.x, [0]),
+        "eq_reversed": (lambda r: 2.0**53 == r.x, [0]),
+        "ne_reversed": (lambda r: 2.0**53 != r.x, [1, 2]),
+        "lt_above": (lambda r: r.x < 2.0**53 + 2, [0, 1]),
+        "eq_above": (lambda r: r.x == 2.0**53 + 2, [2]),
+        "eq_above_reversed": (lambda r: 2.0**53 + 2 == r.x, [2]),
+        "arithmetic_operand": (lambda r: r.x + 0 > 2.0**53, [1, 2]),
+        "arithmetic_operand_reversed": (lambda r: 2.0**53 == r.x - 0, [0]),
+    }
+
+    @staticmethod
+    def _boundary(type=pa.int64()):
+        n = 2**53
+        return _table([n, n + 1, n + 2], [1, 1, 1], type)
+
+    @pytest.mark.parametrize("type", [pa.int64(), pa.uint64()], ids=str)
+    @pytest.mark.parametrize("name", list(EXACT))
+    def test_float_literal_is_exact_next_to_integers(self, type, name):
+        pred, expected = self.EXACT[name]
+        t = LTSeq.from_arrow(self._boundary(type)).sort("i")
+        assert _col(t.filter(pred), "i") == expected
+        assert _pattern_rows(t, pred) == expected
+        assert _pattern_rows(t, pred, lambda r: r.x > 0) == [i for i in expected if i < 2]
+
+    @pytest.mark.parametrize("name", list(EXACT))
+    def test_float_literal_is_exact_next_to_encoded_integers(self, name):
+        pred, expected = self.EXACT[name]
+        t = LTSeq.from_arrow(self._encoded([2**53, 2**53 + 1, 2**53 + 2], [1, 1, 1], ["x"]))
+        t = t.sort("i")
+        assert _col(t.filter(pred), "i") == expected
+        assert _pattern_rows(t, pred) == expected
+
+    def test_float_literal_is_exact_in_a_reported_pattern(self):
+        t = LTSeq.from_arrow(self._boundary()).sort("i")
+        assert _pattern_rows(t, lambda r: r.x > 2.0**53) == [1, 2]
+        assert _pattern_rows(t, lambda r: r.x == 2.0**53) == [0]
+        assert _pattern_rows(t, lambda r: r.x == 2.0**53, lambda r: r.x > 2.0**53) == [0]
+        assert _pattern_rows(t, lambda r: 2.0**53 < r.x, lambda r: 2.0**53 + 2 == r.x) == [1]
+
+    def test_float_literal_is_exact_sorted_parquet(self, tmp_path):
+        path = str(tmp_path / "x.parquet")
+        pq.write_table(self._boundary(), path, row_group_size=1)
+        t = LTSeq.read_parquet(path).assume_sorted("i")
+        assert t.search_pattern_count(lambda r: r.x > 2.0**53) == 2
+        assert t.search_pattern_count(lambda r: r.x == 2.0**53) == 1
+        assert t.search_pattern_count(lambda r: 2.0**53 >= r.x, lambda r: r.x > 2.0**53) == 1
+        assert t.search_pattern_count(lambda r: r.x > 2.0**53, lambda r: 2.0**53 != r.x) == 1
+
+    def test_nan_next_to_integers_raises_as_in_filter(self):
+        t = LTSeq.from_arrow(self._boundary()).sort("i")
+        nan = float("nan")
+        with pytest.raises(Exception, match="NaN"):
+            t.filter(lambda r: r.x > nan).to_arrow()
+        with pytest.raises(Exception, match="column 'x'.*NaN"):
+            t.search_pattern(lambda r: r.x > nan).to_arrow()
+        with pytest.raises(Exception, match="column 'x'.*NaN"):
+            t.search_pattern_count(lambda r: nan == r.x)
+
+    def test_float_literal_next_to_floats_is_unchanged(self):
+        t = LTSeq.from_arrow(_table([7, 8, 9], [1, 1, 1])).sort("i")
+        pred = lambda r: r.x / 2 > 3.5  # noqa: E731
+        assert _col(t.filter(pred), "i") == [1, 2]
+        assert _pattern_rows(t, pred) == [1, 2]
+
 
 class TestPctChange:
     def test_integer_matches_pandas(self):

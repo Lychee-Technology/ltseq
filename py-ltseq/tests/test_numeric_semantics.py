@@ -110,6 +110,17 @@ class TestIntegerOverflowRaises:
         with pytest.raises(RuntimeError, match="[Oo]verflow"):
             big.search_pattern(lambda r: r.x * 4 == 0)
 
+    def test_search_pattern_constant_operand(self, big):
+        # A comparison with a constant operand is lowered through the
+        # transpiler (R3-F1 on #218), whose folding wraps as `filter`'s does;
+        # the constant's arithmetic still raises here.
+        from ltseq.expr.types import LiteralExpr
+
+        with pytest.raises(RuntimeError, match="[Oo]verflow"):
+            big.search_pattern(lambda r: r.x == LiteralExpr(BIG) * 4)
+        with pytest.raises(RuntimeError, match="[Oo]verflow"):
+            big.search_pattern_count(lambda r: LiteralExpr(BIG) + BIG + BIG > r.x)
+
 
 class TestDecimal:
     @pytest.fixture

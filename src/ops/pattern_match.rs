@@ -42,8 +42,10 @@ use crate::LTSeqTable;
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
 ///
-/// Comparison and arithmetic operands take DataFusion's coercion, and float
-/// comparisons treat `-0.0` as `0.0`, as in `filter`.
+/// Comparison and arithmetic operands take DataFusion's coercion, float
+/// comparisons treat `-0.0` as `0.0`, and a comparison places a literal
+/// operand as the transpiler places it ([`eval_lowered_binop`]), as in
+/// `filter`.
 ///
 /// NULL follows SQL three-valued logic, as in `filter`, and stays NULL in the
 /// returned mask; callers read a NULL slot as no match.
@@ -96,6 +98,10 @@ fn eval_expr(
             }
         }
 
+        PyExpr::BinOp { op, left, right } if meets_literal(op, left, right)? => {
+            eval_lowered_binop(op, left, right, batch, name_to_idx)
+        }
+
         PyExpr::BinOp { op, left, right } => {
             let left_arr = eval_expr(left, batch, name_to_idx)?;
             let right_arr = eval_expr(right, batch, name_to_idx)?;
@@ -134,6 +140,119 @@ fn eval_expr(
     }
 }
 
+/// Whether `left op right` is a comparison with a constant operand
+/// ([`constant`]), which places the literal among the other operand's
+/// values. Arithmetic keeps this evaluator's checked kernels (#221).
+fn meets_literal(op: &str, left: &PyExpr, right: &PyExpr) -> Result<bool, String> {
+    use crate::transpiler::BinaryOp;
+    use datafusion::logical_expr::Operator;
+
+    let comparison = matches!(
+        crate::transpiler::parse_binary_op(op)?,
+        BinaryOp::Native(
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+        )
+    );
+    Ok(comparison && (constant(left) || constant(right)))
+}
+
+/// Whether `expr` is a constant the transpiler folds into a literal: a
+/// literal, or literals combined by operators. A function call is not one
+/// here, so this evaluator still reports the functions it does not support.
+fn constant(expr: &PyExpr) -> bool {
+    match expr {
+        PyExpr::Literal(_) => true,
+        PyExpr::BinOp { left, right, .. } => constant(left) && constant(right),
+        PyExpr::UnaryOp { operand, .. } => constant(operand),
+        PyExpr::Alias { expr, .. } => constant(expr),
+        _ => false,
+    }
+}
+
+/// The comparison `left op right` with a constant operand, lowered by the
+/// transpiler and evaluated by DataFusion, so that the literal reads as it
+/// does in `filter`. It places the literal among the values of the other
+/// operand when that operand is of an exact domain (an integer, a decimal,
+/// a date or timestamp), rather than casting both to a common type: next to
+/// an Int64, `x > 2.0**53` keeps `2**53 + 1`, which a Float64 cast would
+/// round to `2**53`, and NaN is refused as `filter` refuses it.
+///
+/// The other operand, unless it is constant too, is evaluated here and
+/// handed to the transpiler as a column of its type, named as the column it
+/// is so that errors name it; a constant operand is handed over as written,
+/// so that it folds as it does in `filter`. The constant is evaluated here
+/// first, on one row, so that its integer arithmetic raises on overflow as
+/// this evaluator's checked kernels do (#221); DataFusion's simplifier,
+/// which folds it for the transpiler, wraps.
+fn eval_lowered_binop(
+    op: &str,
+    left: &PyExpr,
+    right: &PyExpr,
+    batch: &RecordBatch,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+) -> Result<ArrayRef, String> {
+    use datafusion::arrow::array::RecordBatchOptions;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::common::DFSchema;
+    use datafusion::execution::context::ExecutionProps;
+    use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+    use datafusion::physical_expr::create_physical_expr;
+
+    let rows = batch.num_rows();
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    let one_row = RecordBatch::try_new_with_options(
+        Arc::new(Schema::empty()),
+        vec![],
+        &RecordBatchOptions::new().with_row_count(Some(1)),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut operand = |expr: &PyExpr| -> Result<Box<PyExpr>, String> {
+        if constant(expr) {
+            eval_expr(expr, &one_row, name_to_idx)?;
+            return Ok(Box::new(expr.clone()));
+        }
+        let values = eval_expr(expr, batch, name_to_idx)?;
+        let name = match expr {
+            PyExpr::Column(name) => name.clone(),
+            _ => "__ltseq_operand".to_string(),
+        };
+        fields.push(Field::new(&name, values.data_type().clone(), true));
+        columns.push(values);
+        Ok(Box::new(PyExpr::Column(name)))
+    };
+    let lowered = PyExpr::BinOp {
+        op: op.to_string(),
+        left: operand(left)?,
+        right: operand(right)?,
+    };
+    let schema = Arc::new(Schema::new(fields));
+    let expr = crate::transpiler::pyexpr_to_datafusion(lowered, &schema)?;
+    let df_schema = DFSchema::try_from(Arc::clone(&schema)).map_err(|e| e.to_string())?;
+    let physical = create_physical_expr(
+        &expr,
+        &df_schema,
+        &ExecutionProps::new(),
+        &PhysicalPlanningContext::default(),
+    )
+    .map_err(|e| format!("{op} failed: {e}"))?;
+    let input = RecordBatch::try_new_with_options(
+        schema,
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(rows)),
+    )
+    .map_err(|e| e.to_string())?;
+    physical
+        .evaluate(&input)
+        .and_then(|result| result.into_array(rows))
+        .map_err(|e| format!("{op} failed: {e}"))
+}
+
 /// Evaluate a binary operation on two arrays.
 ///
 /// Operator names are parsed by the transpiler's `parse_binary_op` — the
@@ -164,10 +283,12 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
     };
 
     // Comparisons and arithmetic take DataFusion's operand coercion, as the
-    // DataFusion path does: `r.x / 2 > 3` compares a Float64 quotient with an
-    // Int64 literal, and Arrow's kernels refuse operands of two types. A NULL
-    // literal is coerced to its other operand's type; next to `&` or `|` it
-    // is Boolean.
+    // DataFusion path does: `r.x / 2 > r.i` compares a Float64 quotient with
+    // an Int64 column, and `(r.x / 2) + 1` adds an Int64 literal to it;
+    // Arrow's kernels refuse operands of two types. (A comparison with a
+    // literal operand is lowered by the transpiler instead,
+    // `eval_lowered_binop`.) A NULL-typed operand is coerced to its other
+    // operand's type; next to `&` or `|` it is Boolean.
     let coerced = match operator {
         Operator::And | Operator::Or => Some((null_as_boolean(left)?, null_as_boolean(right)?)),
         _ => coerce_operands(&operator, left, right)?,
@@ -1120,6 +1241,34 @@ mod tests {
         let zeros: ArrayRef = Arc::new(Int64Array::from(vec![1, 0, 1]));
         let err = eval_binop("Div", &ints, &zeros).unwrap_err();
         assert!(err.contains("Divide by zero"), "{err}");
+    }
+
+    /// A float literal next to an integer column is placed among the
+    /// column's values, as the transpiler places it in `filter` (R3-F1):
+    /// 2.0**53 + 1 is no Float64, and a cast to Float64 would round
+    /// 2**53 + 1 down to 2**53.
+    #[test]
+    fn float_literal_is_exact_next_to_integers() {
+        let n = 1_i64 << 53;
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let x: ArrayRef = Arc::new(Int64Array::from(vec![Some(n), Some(n + 1), None]));
+        let batch = RecordBatch::try_new(schema, vec![x]).unwrap();
+        let idx = HashMap::from([("x".to_string(), 0)]);
+        let column = || Box::new(PyExpr::Column("x".to_string()));
+        let boundary = || Box::new(PyExpr::Literal(LiteralValue::Float64(n as f64)));
+        let mask = |op: &str, reversed: bool| {
+            let (left, right) = if reversed {
+                (boundary(), column())
+            } else {
+                (column(), boundary())
+            };
+            let expr = PyExpr::BinOp { op: op.to_string(), left, right };
+            eval_predicate(&expr, &batch, &idx).unwrap().iter().collect::<Vec<_>>()
+        };
+        assert_eq!(mask("Gt", false), [Some(false), Some(true), None]);
+        assert_eq!(mask("Eq", false), [Some(true), Some(false), None]);
+        assert_eq!(mask("Lt", true), [Some(false), Some(true), None]);
+        assert_eq!(mask("Eq", true), [Some(true), Some(false), None]);
     }
 
     /// A dictionary-encoded integer operand, on either side, is integer true
