@@ -293,6 +293,76 @@ class TestExecutionPaths:
             t.search_pattern(lambda r: r.x / r.y > 0, lambda r: r.x > 0).to_arrow()
 
 
+def _pattern_rows(t, *steps):
+    """Step-1 rows of `search_pattern`, checked against `search_pattern_count`."""
+    rows = _col(t.search_pattern(*steps), "i")
+    assert t.search_pattern_count(*steps) == len(rows)
+    return rows
+
+
+class TestSearchPatternOperands:
+    """The pattern evaluator reads a Float64 quotient as `filter` does (#218).
+
+    Integer `/` now gives Float64, so its result meets integer literals and
+    columns, and its signed zeros meet comparisons: the evaluator takes
+    DataFusion's operand coercion and its float comparisons.
+    """
+
+    # `filter` is the reference: its predicate runs in a DataFusion plan.
+    PREDICATES = {
+        "int_threshold": lambda r: r.x / 2 > 3,
+        "int_threshold_reversed": lambda r: 4 > r.x / 2,
+        "int_column": lambda r: r.x / 2 >= r.i,
+        "plus_int": lambda r: (r.x / 2) + 1 == 5,
+        "minus_int": lambda r: (r.x / 2) - 1 < 3,
+        "times_int": lambda r: (r.x / 2) * 2 == 8,
+        "div_int": lambda r: (r.x / 2) / 2 == 2.0,
+        "floor_div_int": lambda r: (r.x / 2) // 2 == 2,
+        "mod_int": lambda r: (r.x / 2) % 2 == 0.5,
+    }
+
+    @pytest.mark.parametrize("type", [pa.int32(), pa.int64(), pa.uint64()], ids=str)
+    @pytest.mark.parametrize("name", list(PREDICATES))
+    def test_mixed_operands_match_filter(self, type, name):
+        pred = self.PREDICATES[name]
+        t = LTSeq.from_arrow(_table([7, 8, 9], [1, 1, 1], type)).sort("i")
+        expected = _col(t.filter(pred), "i")
+        assert expected, "the predicate selects some row"
+        assert _pattern_rows(t, pred) == expected
+        assert _pattern_rows(t, pred, lambda r: r.x > 0) == [i for i in expected if i < 2]
+
+    def test_mixed_operands_sorted_parquet(self, tmp_path):
+        path = str(tmp_path / "x.parquet")
+        pq.write_table(_table([7, 8, 9], [1, 1, 1]), path, row_group_size=1)
+        t = LTSeq.read_parquet(path).assume_sorted("i")
+        assert t.search_pattern_count(lambda r: r.x / 2 > 3, lambda r: (r.x / 2) + 1 >= 5) == 2
+
+    # 0 / -2 is -0.0, which DataFusion compares as 0.0; 1 / 2 is 0.5.
+    SIGNED_ZERO = {
+        "eq": (lambda r: r.x / r.y == 0.0, [0]),
+        "ne": (lambda r: r.x / r.y != 0.0, [1]),
+        "lt": (lambda r: r.x / r.y < 0.0, []),
+        "le": (lambda r: r.x / r.y <= 0.0, [0]),
+        "gt": (lambda r: r.x / r.y > 0.0, [1]),
+        "ge": (lambda r: r.x / r.y >= 0.0, [0, 1]),
+        "eq_int": (lambda r: r.x / r.y == 0, [0]),
+        "eq_column": (lambda r: r.x / r.y == r.x / 2, [0, 1]),
+    }
+
+    @pytest.mark.parametrize("name", list(SIGNED_ZERO))
+    def test_signed_zero_compares_as_zero(self, name):
+        pred, expected = self.SIGNED_ZERO[name]
+        t = LTSeq.from_arrow(_table([0, 1], [-2, 2])).sort("i")
+        assert _col(t.filter(pred), "i") == expected
+        assert _pattern_rows(t, pred) == expected
+
+    def test_signed_zero_in_a_pattern(self):
+        t = LTSeq.from_arrow(_table([0, 1], [-2, 2])).sort("i")
+        assert _pattern_rows(t, lambda r: r.x / r.y == 0.0, lambda r: r.x > 0) == [0]
+        assert _pattern_rows(t, lambda r: r.x / r.y < 0.0, lambda r: r.x > 0) == []
+        assert _pattern_rows(t, lambda r: r.x / r.y != 0.0, lambda r: r.x > 0) == []
+
+
 class TestPctChange:
     def test_integer_matches_pandas(self):
         values = [1, 2, None, 4, 5, 6]

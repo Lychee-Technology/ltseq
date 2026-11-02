@@ -42,6 +42,9 @@ use crate::LTSeqTable;
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
 ///
+/// Comparison and arithmetic operands take DataFusion's coercion, and float
+/// comparisons treat `-0.0` as `0.0`, as in `filter`.
+///
 /// NULL follows SQL three-valued logic, as in `filter`, and stays NULL in the
 /// returned mask; callers read a NULL slot as no match.
 pub(crate) fn eval_predicate(
@@ -137,7 +140,6 @@ fn eval_expr(
 fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use crate::transpiler::BinaryOp;
     use datafusion::arrow::compute::kernels::boolean;
-    use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::numeric;
     use datafusion::logical_expr::Operator;
 
@@ -157,25 +159,25 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
         }
     };
 
+    // Comparisons and arithmetic take DataFusion's operand coercion, as the
+    // DataFusion path does: `r.x / 2 > 3` compares a Float64 quotient with an
+    // Int64 literal, and Arrow's kernels refuse operands of two types.
+    let coerced = match operator {
+        Operator::And | Operator::Or => None,
+        _ => coerce_operands(&operator, left, right)?,
+    };
+    let (left, right) = match &coerced {
+        Some((l, r)) => (l, r),
+        None => (left, right),
+    };
+
     match operator {
-        Operator::Eq => Ok(Arc::new(
-            cmp::eq(left, right).map_err(|e| format!("Eq failed: {}", e))?,
-        )),
-        Operator::NotEq => Ok(Arc::new(
-            cmp::neq(left, right).map_err(|e| format!("Ne failed: {}", e))?,
-        )),
-        Operator::Lt => Ok(Arc::new(
-            cmp::lt(left, right).map_err(|e| format!("Lt failed: {}", e))?,
-        )),
-        Operator::LtEq => Ok(Arc::new(
-            cmp::lt_eq(left, right).map_err(|e| format!("Le failed: {}", e))?,
-        )),
-        Operator::Gt => Ok(Arc::new(
-            cmp::gt(left, right).map_err(|e| format!("Gt failed: {}", e))?,
-        )),
-        Operator::GtEq => Ok(Arc::new(
-            cmp::gt_eq(left, right).map_err(|e| format!("Ge failed: {}", e))?,
-        )),
+        Operator::Eq
+        | Operator::NotEq
+        | Operator::Lt
+        | Operator::LtEq
+        | Operator::Gt
+        | Operator::GtEq => compare(operator, left, right),
         Operator::Plus => numeric::add(left, right).map_err(|e| format!("Add failed: {}", e)),
         Operator::Minus => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
         Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
@@ -218,6 +220,57 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
             other
         )),
     }
+}
+
+/// `left` and `right` cast to the types DataFusion coerces the operands of
+/// `left op right` to (`BinaryTypeCoercer`, as the transpiler resolves
+/// them), or `None` when they already have those types. Operands DataFusion
+/// cannot coerce are left as they are, so the kernel reports them as before.
+fn coerce_operands(
+    op: &datafusion::logical_expr::Operator,
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<Option<(ArrayRef, ArrayRef)>, String> {
+    use datafusion::arrow::compute::{cast_with_options, CastOptions};
+
+    let Ok((left_type, right_type)) =
+        crate::transpiler::binary_input_types(left.data_type(), op, right.data_type())
+    else {
+        return Ok(None);
+    };
+    if left.data_type() == &left_type && right.data_type() == &right_type {
+        return Ok(None);
+    }
+    // The coerced types hold every operand value; `safe: false` makes a value
+    // that did not fit an error rather than a silent NULL.
+    let options = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    let cast = |arr: &ArrayRef, to: &DataType| {
+        cast_with_options(arr, to, &options)
+            .map_err(|e| format!("Cannot cast {} to {to}: {e}", arr.data_type()))
+    };
+    Ok(Some((cast(left, &left_type)?, cast(right, &right_type)?)))
+}
+
+/// Compare two arrays with `apply_cmp`, the function DataFusion's
+/// `BinaryExpr` compares with. It turns `-0.0` into `0.0` before Arrow's
+/// `cmp` kernels, which order floats by IEEE 754 totalOrder and would put
+/// `-0.0` below `0.0`: `0 / -2 == 0.0` holds in `filter` and must here.
+fn compare(
+    op: datafusion::logical_expr::Operator,
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<ArrayRef, String> {
+    use datafusion::logical_expr::ColumnarValue;
+    use datafusion::physical_expr_common::datum::apply_cmp;
+
+    let left_value = ColumnarValue::Array(Arc::clone(left));
+    let right_value = ColumnarValue::Array(Arc::clone(right));
+    apply_cmp(op, &left_value, &right_value)
+        .and_then(|result| result.into_array(left.len()))
+        .map_err(|e| format!("{op} failed: {e}"))
 }
 
 /// Evaluate a function call expression.
