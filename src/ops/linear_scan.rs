@@ -20,7 +20,8 @@
 //! | `Call { func: "is_null" / "is_not_null", on: expr }` | Check if evaluated value is (not) null |
 //! | `BinOp { op: Ne/Eq/Gt/Lt/Ge/Le }` | Compare two values |
 //! | `BinOp { op: Or/And }` | Logical combination |
-//! | `BinOp { op: Add/Sub/Mul/Div }` | Arithmetic |
+//! | `BinOp { op: Add/Sub/Mul }` | Integer arithmetic |
+//! | `BinOp { op: Div }` | Integer true division, giving Float64 (`transpiler::true_div`) |
 //! | `Literal` (Boolean, Int64, Float64, String) | Constant value |
 //! | `UnaryOp { op: "Not" }` | Logical negation |
 //!
@@ -85,10 +86,12 @@ pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
 ///   `!=`; or, in a fused predicate, an integer is compared `>` with an
 ///   integral float literal below 2^53, which the fused evaluator reads as
 ///   that integer (#145 PR-4) and the multi-pass one cannot compare;
-/// - arithmetic is computed by DataFusion in `Int64` (`+ - * /`) or `Float64`
-///   (`-`). `Int32`/`UInt32` arithmetic DataFusion computes in 32 bits,
-///   wrapping (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic
-///   gives a duration, and `UInt64` past `i64::MAX` is negative to the kernel.
+/// - arithmetic is computed by DataFusion in `Int64` (`+ - *`) or `Float64`
+///   (`-`), or is `/` on two of the integers `i64` holds exactly, which both
+///   paths compute as true division in `Float64` (`transpiler::true_div`).
+///   `Int32`/`UInt32` arithmetic DataFusion computes in 32 bits, wrapping
+///   (`3 - 5` is 4294967294 in `UInt32`), timestamp arithmetic gives a
+///   duration, and `UInt64` past `i64::MAX` is negative to the kernel.
 ///
 /// A NULL literal is declined. Its comparison or arithmetic is NULL on every
 /// row, so the kernel gains nothing from it, and the kernel's NULL is an
@@ -144,6 +147,10 @@ fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataT
                             && get_literal_i64(right).is_some());
                     agrees.then_some(T::Boolean)
                 }
+                // Integer `/` is true division in Float64 on both paths
+                // (`transpiler::true_div`, #218). Not for UInt64: the
+                // kernel's `shift` reads it as i64.
+                "Div" if exact_integer(&l) && exact_integer(&r) => Some(T::Float64),
                 "Add" | "Sub" | "Mul" | "Div" => {
                     let operator = match crate::transpiler::parse_binary_op(op).ok()? {
                         crate::transpiler::BinaryOp::Native(operator) => operator,
@@ -827,9 +834,11 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             }
             Err(format!("Mul: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
+        // Integer true division, as the DataFusion path computes it (#218).
         "Div" => {
-            if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(numeric::div(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+            if left.data_type().is_integer() && right.data_type().is_integer() {
+                return crate::transpiler::true_div::true_div_arrays(left, right)
+                    .map_err(|e| e.to_string());
             }
             Err(format!("Div: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
@@ -1089,6 +1098,19 @@ mod tests {
             let result = vectorized_binop(op, left, right);
             assert!(result.is_ok(), "{op}: {:?}", result.err());
         }
+    }
+
+    /// Integer `/` is true division in Float64, as on the DataFusion path
+    /// (#218), and a zero divisor raises rather than giving `inf`.
+    #[test]
+    fn integer_div_is_true_division() {
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![7, -7, 7, -7]));
+        let divisors: ArrayRef = Arc::new(Int32Array::from(vec![2, 2, -2, -2]));
+        let result = vectorized_binop("Div", &ints, &divisors).unwrap();
+        let result = result.as_any().downcast_ref::<Float64Array>().expect("Float64");
+        assert_eq!(result.values().to_vec(), vec![3.5, -3.5, -3.5, 3.5]);
+        let zeros: ArrayRef = Arc::new(Int64Array::from(vec![1, 0, 1, 1]));
+        assert!(vectorized_binop("Div", &ints, &zeros).is_err());
     }
 
     /// Every admitted operator evaluates in three-valued logic, as DataFusion
@@ -1584,10 +1606,8 @@ mod tests {
             let gap = binop("Gt", binop("Sub", col("x"), shift1("x")), two(scale));
             assert!(!can_linear_scan(&gap, &schema), "scale {scale}");
         }
-        assert!(can_linear_scan(
-            &binop("Gt", binop("Div", col("x"), lit(LiteralValue::Int64(2))), shift1("x")),
-            &schema
-        ));
+        let half = |e: PyExpr| binop("Div", e, lit(LiteralValue::Int64(2)));
+        assert!(can_linear_scan(&binop("Gt", half(col("x")), half(shift1("x"))), &schema));
     }
 
     /// The kernel takes a predicate only where it computes what DataFusion
@@ -1638,6 +1658,16 @@ mod tests {
             (binop("Gt", binop("Sub", col("i32"), int(1)), shift1("i32")), true),
             (binop("Gt", binop("Sub", col("f64"), shift1("f64")), float(0.5)), true),
             (binop("Gt", binop("Add", col("f64"), shift1("f64")), float(0.5)), false),
+            // Integer `/` is Float64 true division on both paths (#218), so
+            // it compares with a Float64 and nothing else.
+            (binop("Gt", binop("Div", col("i64"), shift1("i64")), float(1.5)), true),
+            (binop("Gt", binop("Div", col("i32"), shift1("i32")), float(1.5)), true),
+            (binop("Gt", binop("Div", col("u64"), shift1("u64")), float(1.5)), false),
+            (binop("Gt", binop("Div", col("u32"), int(2)), binop("Div", shift1("u32"), int(2))), true),
+            (binop("Gt", binop("Div", col("i64"), int(2)), shift1("i64")), false),
+            (binop("Gt", binop("Div", col("i64"), shift1("i64")), int(1)), false),
+            (binop("Gt", binop("Div", col("f64"), shift1("f64")), float(1.5)), false),
+            (binop("Gt", binop("Div", col("ts"), shift1("ts")), float(1.5)), false),
             // Float thresholds against integers: integral and below 2^53 only.
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(2.0)), true),
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(1.5)), false),

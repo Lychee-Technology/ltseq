@@ -142,6 +142,14 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
     use datafusion::logical_expr::Operator;
 
     let operator = match crate::transpiler::parse_binary_op(op)? {
+        // Integer `/` is true division, as the DataFusion path computes it
+        // (#218); arrow's `div` would truncate.
+        BinaryOp::Native(Operator::Divide)
+            if left.data_type().is_integer() && right.data_type().is_integer() =>
+        {
+            return crate::transpiler::true_div::true_div_arrays(left, right)
+                .map_err(|e| format!("Div failed: {}", e));
+        }
         BinaryOp::Native(operator) => operator,
         BinaryOp::FloorDiv => {
             return crate::transpiler::floor_div::floor_div_arrays(left, right)
@@ -1003,6 +1011,22 @@ mod tests {
             kwargs: HashMap::new(),
             on: Some(Box::new(PyExpr::Column(column.to_string()))),
         }
+    }
+
+    /// Integer `/` is true division in Float64, as on the DataFusion path
+    /// (#218), and a zero divisor raises.
+    #[test]
+    fn integer_div_is_true_division() {
+        use datafusion::arrow::array::{Float64Array, Int64Array, UInt64Array};
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(7), Some(-7), None]));
+        let divisors: ArrayRef = Arc::new(UInt64Array::from(vec![Some(2), Some(2), Some(0)]));
+        let result = eval_binop("Div", &ints, &divisors).unwrap();
+        let result = result.as_any().downcast_ref::<Float64Array>().expect("Float64");
+        assert_eq!(result.iter().collect::<Vec<_>>(), [Some(3.5), Some(-3.5), None]);
+
+        let zeros: ArrayRef = Arc::new(Int64Array::from(vec![1, 0, 1]));
+        let err = eval_binop("Div", &ints, &zeros).unwrap_err();
+        assert!(err.contains("Divide by zero"), "{err}");
     }
 
     /// The same values in each Arrow string layout, plus an Int64 column.

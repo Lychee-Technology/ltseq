@@ -30,6 +30,7 @@ pub(crate) mod narrow_decimals;
 mod opaque_cast;
 pub(crate) mod probe;
 mod resolve;
+pub(crate) mod true_div;
 pub(crate) mod window_native;
 
 pub(crate) use float_lists::FloatListZeros;
@@ -143,11 +144,26 @@ pub(crate) fn binary_expr(
         (None, _) => (left, right),
     };
     Ok(match op {
+        // Python's `/` on two integers is true division, where DataFusion's
+        // truncates and keeps the integer type (#218).
+        BinaryOp::Native(Operator::Divide) if integer_operands(&left, &right, rx) => {
+            true_div::true_div(left, right)
+        }
         BinaryOp::Native(operator) => {
             Expr::BinaryExpr(BinaryExpr::new(Box::new(left), operator, Box::new(right)))
         }
         BinaryOp::FloorDiv => floor_div::floor_div(left, right),
     })
+}
+
+/// Whether `left / right` divides two integers ([`true_div::integer_pair`]).
+/// An operand DataFusion cannot type is left to DataFusion's `/`, which
+/// reports it where it always has.
+fn integer_operands(left: &Expr, right: &Expr, rx: &Resolver<'_>) -> bool {
+    match (rx.data_type(left), rx.data_type(right)) {
+        (Ok(l), Ok(r)) => true_div::integer_pair(&l, &r),
+        _ => false,
+    }
 }
 
 /// Parse a binary operation into a DataFusion expression
@@ -1493,6 +1509,32 @@ mod tests {
             lit(2_i64),
         );
         assert_eq!(expr, expected);
+    }
+
+    /// `/` on two integers is the true-division UDF; with a float operand
+    /// it stays DataFusion's `/` (#218).
+    #[test]
+    fn binop_div_of_integers_builds_true_div() {
+        let schema = test_schema();
+        let div = |right: PyExpr| {
+            pyexpr_to_datafusion(
+                PyExpr::BinOp {
+                    op: "Div".to_string(),
+                    left: Box::new(col_expr("a")),
+                    right: Box::new(right),
+                },
+                &schema,
+            )
+            .unwrap()
+        };
+        let a = || Expr::Column(Column::new_unqualified("a"));
+        assert_eq!(
+            div(col_expr("b")),
+            true_div::true_div(a(), Expr::Column(Column::new_unqualified("b")))
+        );
+        assert_eq!(div(int_lit(2)), true_div::true_div(a(), lit(2_i64)));
+        let float = div(PyExpr::Literal(crate::types::LiteralValue::Float64(2.0)));
+        assert!(matches!(float, Expr::BinaryExpr(BinaryExpr { op: Operator::Divide, .. })), "{float}");
     }
 
     /// Lowering coerces each node once, however deep the expression: the

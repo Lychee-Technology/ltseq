@@ -493,12 +493,12 @@ class TestReverseOperatorsEndToEnd:
         assert vals[2] == 0
 
     def test_rtruediv(self, numbers_table):
-        """100 / r.y should produce correct results (int division on int cols)."""
+        """100 / r.y should produce correct results (true division on int cols, #218)."""
         result = numbers_table.derive(ratio=lambda r: 100 / r.y)
         df = result.to_pandas()
         vals = df["ratio"].tolist()
-        assert vals[0] == 20   # 100 / 5  (integer division on int64)
-        assert vals[1] == 12   # 100 / 8  (integer division on int64)
+        assert vals[0] == 20.0  # 100 / 5
+        assert vals[1] == 12.5  # 100 / 8, a float64 as in Python
 
     def test_rmod(self, numbers_table):
         """17 % r.y should produce correct results."""

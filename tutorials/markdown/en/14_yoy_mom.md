@@ -4,14 +4,14 @@
 
 > **Level** ★★☆ · **Domain** Finance · **Prereqs** Case 01
 >
-> **APIs used**: `sort` / `shift(n)` / `shift(n, partition_by=)` / `cast("float64")` / `when` / `slice`
+> **APIs used**: `sort` / `shift(n)` / `shift(n, partition_by=)` / `when` / `slice`
 
 **Learning goals**
 
 - Implement MoM (vs last month) and YoY (vs same month last year) with `shift(1)`
   and `shift(12)` — the most classic business use of window functions
-- Learn LTSeq's **integer-division pitfall**: on `main`, `/` follows SQL
-  semantics and truncates on integers — cast to `float64` before computing rates
+- See why rates need no cast: `/` on two integers is true division with a
+  `float64` result, as in Python (issue #218)
 - See the semantic value of NULL: the NULLs produced by `shift(12)` on the first
   12 rows say exactly "no prior-year base"
 
@@ -102,15 +102,15 @@ shifted.slice(11, 3).show();
 
 ## Step 2 · Rates and trend labels
 
-Growth rate = (current - base) / base. There is a must-know LTSeq trap here —
-read the code first, the explanation after.
+Growth rate = (current - base) / base. Read the code first, the explanation
+after.
 
 ```python
 from ltseq import when
 
 rates = shifted.derive(
-    mom=lambda r: (r.gmv.cast("float64") - r.prev_month) / r.prev_month,
-    yoy=lambda r: (r.gmv.cast("float64") - r.prev_year) / r.prev_year,
+    mom=lambda r: (r.gmv - r.prev_month) / r.prev_month,
+    yoy=lambda r: (r.gmv - r.prev_year) / r.prev_year,
 ).derive(
     mom_trend=lambda r: when(r.mom.is_null(), "no base")
     .when(r.mom > 0.05, "jump")
@@ -136,10 +136,11 @@ rates.slice(11, 3).show();
 
 **Notes**
 
-- **Integer-division trap**: `gmv` is Int64, and on `main` LTSeq's `/` follows
-  SQL semantics — integer / integer **truncates** (issue #218). Without the cast,
-  `(830 - 900) / 900` would yield `0`, not `-0.0778`! Cast the numerator with
-  `cast("float64")` so float - integer → float and the rate survives.
+- **Integer division is true division**: `gmv` and `prev_month` are Int64, and
+  LTSeq's `/` divides two integers as Python does, into a `float64`:
+  `(830 - 900) / 900` is `-0.0778`. SQL engines truncate it to `0`, and so did
+  LTSeq before issue #218; the `cast("float64")` older code carries for this is
+  no longer needed. A zero integer divisor raises, as in Python.
 - **NULL propagation**: when `prev_year` is NULL, `(x - NULL) / NULL` is NULL —
   SQL three-valued logic carries "no base" into the final metric with zero
   special-casing.
@@ -167,7 +168,7 @@ multi = (
     .sort("shop", "month")
     .derive(prev_gmv=lambda r: r.gmv.shift(1, partition_by="shop"))
     .derive(
-        mom_by_shop=lambda r: (r.gmv.cast("float64") - r.prev_gmv) / r.prev_gmv,
+        mom_by_shop=lambda r: (r.gmv - r.prev_gmv) / r.prev_gmv,
     )
 )
 
@@ -202,9 +203,9 @@ multi.filter(lambda r: r.shop == "S2").show();
 - **One shift, one sentence**: `shift(1)` is MoM, `shift(12)` is YoY, and
   `shift(12, partition_by=)` is grouped YoY — three parameter tweaks of one
   function, where SQL writes `LAG(gmv, 12) OVER (PARTITION BY shop ORDER BY month)`.
-- **Cast before rates**: on `main`, integer `/` integer truncates as in SQL
-  (issue #218); write `cast("float64")` first for every rate, share, or mean
-  difference.
+- **Rates need no cast**: integer `/` integer is true division with a
+  `float64` result (issue #218), so a rate, share or mean difference is
+  written as the formula reads.
 - **NULL is part of the semantics**: out-of-bound shift NULLs, all-NULL group
   aggregates, and `otherwise` fallbacks — understand them or the output will
   quietly mislead you.
@@ -218,9 +219,8 @@ multi.filter(lambda r: r.shop == "S2").show();
    `shift(12, partition_by="shop")` — S2 has only two months, so its yoy is
    always NULL; why is that the right answer?
 3. Rewrite MoM with `pct_change()` and compare with the hand-written form.
-   `pct_change()` divides like `/`, so cast first
-   (`r.gmv.cast("float64").pct_change()`); it also has no `partition_by`
-   parameter — how do you work around that for multi-shop data?
+   `pct_change()` returns `float64` on integer columns too; it has no
+   `partition_by` parameter — how do you work around that for multi-shop data?
 4. Change the trend labels to four bands: jump (>10%) / mild grow (0-10%) /
    mild drift (-10%-0) / slide (<-10%), and verify how branch order in the
    `when` chain matters.

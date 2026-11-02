@@ -95,8 +95,8 @@ class TestIntegerOverflowRaises:
 
     def test_division_of_min_by_minus_one(self):
         t = _int64_table(x=[I64_MIN])
-        with pytest.raises(ValueError, match="[Oo]verflow"):
-            t.derive(y=lambda r: r.x / -1).to_arrow()
+        # `/` is true division in float64 (#218), so its quotient fits.
+        assert _col(t.derive(y=lambda r: r.x / -1), "y") == [I64_MIN / -1]
         with pytest.raises(ValueError, match="[Oo]verflow"):
             t.derive(y=lambda r: r.x // -1).to_arrow()
 

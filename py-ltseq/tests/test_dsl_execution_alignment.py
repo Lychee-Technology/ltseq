@@ -55,15 +55,10 @@ DATA = {
 ROWS = [dict(zip(DATA, values)) for values in zip(*DATA.values())]
 
 
-def _trunc_div(a: int, b: int) -> int:
-    """`/` on integers: SQL truncating division, not Python's (#218)."""
-    q = abs(a) // abs(b)
-    return q if (a < 0) == (b < 0) else -q
-
-
 def _trunc_mod(a: int, b: int) -> int:
     """`%`: SQL remainder with the dividend's sign, not Python's (#218)."""
-    return a - b * _trunc_div(a, b)
+    q = abs(a) // abs(b)
+    return a - b * (q if (a < 0) == (b < 0) else -q)
 
 
 @dataclass(frozen=True)
@@ -85,8 +80,9 @@ CASES: dict[str, Case] = {
     "__rsub__": Case(lambda r: 10 - r.x, lambda row: 10 - row["x"]),
     "__mul__": Case(lambda r: r.x * r.y, lambda row: row["x"] * row["y"]),
     "__rmul__": Case(lambda r: 3 * r.x, lambda row: 3 * row["x"]),
-    "__truediv__": Case(lambda r: r.x / r.y, lambda row: _trunc_div(row["x"], row["y"])),
-    "__rtruediv__": Case(lambda r: 100 / r.y, lambda row: _trunc_div(100, row["y"])),
+    # Integer `/` is Python's true division, a float64 (#218).
+    "__truediv__": Case(lambda r: r.x / r.y, lambda row: row["x"] / row["y"]),
+    "__rtruediv__": Case(lambda r: 100 / r.y, lambda row: 100 / row["y"]),
     "__floordiv__": Case(lambda r: r.x // r.y, lambda row: row["x"] // row["y"]),
     "__rfloordiv__": Case(lambda r: -7 // r.y, lambda row: -7 // row["y"]),
     "__mod__": Case(lambda r: r.x % r.y, lambda row: _trunc_mod(row["x"], row["y"])),

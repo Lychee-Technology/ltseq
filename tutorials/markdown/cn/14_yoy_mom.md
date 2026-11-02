@@ -4,13 +4,13 @@
 
 > **难度** ★★☆ · **领域** 金融 · **前置** 案例 01
 >
-> **涉及 API**：`sort` / `shift(n)` / `shift(n, partition_by=)` / `cast("float64")` / `when` / `slice`
+> **涉及 API**：`sort` / `shift(n)` / `shift(n, partition_by=)` / `when` / `slice`
 
 **学习目标**
 
 - 用 `shift(1)` 与 `shift(12)` 实现环比与同比——这是窗口函数最经典的业务用法
-- 认识 LTSeq 的**整数除法陷阱**：在 `main` 上，`/` 遵循 SQL 语义，整数相除会
-  截断，比率必须先 `cast("float64")`
+- 理解比率为什么不必转型：两个整数相除是真除法，结果为 `float64`，与 Python
+  一致（issue #218）
 - 理解 NULL 的语义价值：`shift(12)` 前 12 行的 NULL 恰好表达"没有上年同期"
 
 ## 问题描述
@@ -96,15 +96,14 @@ shifted.slice(11, 3).show();
 
 ## 第二步 · 比率与趋势标签
 
-增长率 = (本期 - 基期) / 基期。这里有一个 LTSeq 的必知陷阱，先看代码再说
-为什么。
+增长率 = (本期 - 基期) / 基期。先看代码，再看解析。
 
 ```python
 from ltseq import when
 
 rates = shifted.derive(
-    mom=lambda r: (r.gmv.cast("float64") - r.prev_month) / r.prev_month,
-    yoy=lambda r: (r.gmv.cast("float64") - r.prev_year) / r.prev_year,
+    mom=lambda r: (r.gmv - r.prev_month) / r.prev_month,
+    yoy=lambda r: (r.gmv - r.prev_year) / r.prev_year,
 ).derive(
     mom_trend=lambda r: when(r.mom.is_null(), "无基期")
     .when(r.mom > 0.05, "跳升")
@@ -130,10 +129,10 @@ rates.slice(11, 3).show();
 
 **解析**
 
-- **整数除法陷阱**：`gmv` 是 Int64 列，在 `main` 上 LTSeq 的 `/` 遵循 SQL 语义
-  ——整数相除**截断取整**（issue #218），`(830 - 900) / 900` 不做 cast 会得到
-  `0` 而不是 `-0.0778`！
-  所以分子先 `cast("float64")`，浮点 - 整数 → 浮点，比率才正确。
+- **整数除法是真除法**：`gmv` 与 `prev_month` 都是 Int64 列，LTSeq 的 `/` 像
+  Python 一样把两个整数相除为 `float64`：`(830 - 900) / 900` 得 `-0.0778`。
+  SQL 引擎会截断为 `0`，issue #218 之前的 LTSeq 也是如此；旧代码为此写的
+  `cast("float64")` 已不再需要。整数除数为零时报错，与 Python 相同。
 - **NULL 的传播**：`prev_year` 为 NULL 时，`(x - NULL) / NULL` 结果为 NULL——
   SQL 三值逻辑自动帮你把"无基期"传导到最终指标，不用写特判。
 - **when 链的第一分支优先**：NULL 条件不命中任何比较分支，会一路落到
@@ -159,7 +158,7 @@ multi = (
     .sort("shop", "month")
     .derive(prev_gmv=lambda r: r.gmv.shift(1, partition_by="shop"))
     .derive(
-        mom_by_shop=lambda r: (r.gmv.cast("float64") - r.prev_gmv) / r.prev_gmv,
+        mom_by_shop=lambda r: (r.gmv - r.prev_gmv) / r.prev_gmv,
     )
 )
 
@@ -193,8 +192,8 @@ multi.filter(lambda r: r.shop == "S2").show();
 - **一个 shift 值一句话**：`shift(1)` 环比、`shift(12)` 同比、
   `shift(12, partition_by=)` 分组同比——同一个函数改改参数，对应 SQL 的
   `LAG(gmv, 12) OVER (PARTITION BY shop ORDER BY month)`。
-- **比率先转型**：在 `main` 上，整数 `/` 整数会像 SQL 一样截断（issue #218），
-  写增长率、占比、均值差一律先 `cast("float64")`。
+- **比率不必转型**：整数 `/` 整数是真除法，结果为 `float64`（issue #218），
+  增长率、占比、均值差按公式直接写即可。
 - **NULL 是语义的一部分**：越界 shift 的 NULL、聚合全空组的 NULL、when 链
   落空的 otherwise——理解它们，输出才不会"骗你"。
 
@@ -206,8 +205,7 @@ multi.filter(lambda r: r.shop == "S2").show();
 2. 多店铺数据上补齐同比：`shift(12, partition_by="shop")`，观察 S2 只有 2 个月
    时 yoy 全为 NULL。
 3. 用 `pct_change()` 重写环比，与手写 `(x - prev) / prev` 对比。`pct_change()`
-   的除法和 `/` 一样，所以要先转型（`r.gmv.cast("float64").pct_change()`）；它也
-   没有 `partition_by` 参数，多店铺场景该怎么绕？
+   在整数列上同样返回 `float64`；它没有 `partition_by` 参数，多店铺场景该怎么绕？
 4. 把趋势标签改成四档：跳升(>10%) / 温和增长(0~10%) / 温和回落(-10%~0) /
    下滑(<-10%)，验证 when 链分支顺序的重要性。
 
