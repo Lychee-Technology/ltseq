@@ -21,7 +21,8 @@ The three paths share the DataFusion transpiler. The hand-written
 evaluators are guarded elsewhere: the `group_ordered(...).first().count()`
 kernel by `test_group_count_fast_path.py`, which compares it with the
 DataFusion path, and `search_pattern`, whose evaluator supports a narrow
-subset, by #188.
+subset of functions, by `test_search_pattern_coercion.py`, which holds its
+operand types to `filter`'s (#188).
 
 Window functions (`shift`, `rolling`, ...) are reached through
 `ColumnExpr.__getattr__`, which accepts any name, so they cannot be
