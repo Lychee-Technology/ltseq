@@ -52,7 +52,7 @@ pub(crate) fn eval_predicate(
     batch: &RecordBatch,
     name_to_idx: &std::collections::HashMap<String, usize>,
 ) -> Result<BooleanArray, String> {
-    let arr = eval_expr(expr, batch, name_to_idx)?;
+    let arr = null_as_boolean(&eval_expr(expr, batch, name_to_idx)?)?;
     // Convert result to BooleanArray
     arr.as_any()
         .downcast_ref::<BooleanArray>()
@@ -82,12 +82,13 @@ fn eval_expr(
         PyExpr::Literal(value) => {
             let n = batch.num_rows();
             match value {
-                // A bare NULL has no type of its own; a Boolean null array
-                // lets it combine with the predicate's boolean operators.
-                LiteralValue::Null => Ok(datafusion::arrow::array::new_null_array(
-                    &DataType::Boolean,
-                    n,
-                )),
+                // A bare NULL is NULL-typed, as DataFusion types `lit(NULL)`:
+                // each operator reads it as its other operand's type, so
+                // `r.x / None` is integer true division and `flag & None`
+                // is Boolean (`eval_binop`).
+                LiteralValue::Null => {
+                    Ok(datafusion::arrow::array::new_null_array(&DataType::Null, n))
+                }
                 _ => value
                     .to_scalar_value()
                     .to_array_of_size(n)
@@ -105,6 +106,7 @@ fn eval_expr(
             let arr = eval_expr(operand, batch, name_to_idx)?;
             match op.as_str() {
                 "Not" => {
+                    let arr = null_as_boolean(&arr)?;
                     let bool_arr = arr
                         .as_any()
                         .downcast_ref::<BooleanArray>()
@@ -145,9 +147,11 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
 
     let operator = match crate::transpiler::parse_binary_op(op)? {
         // Integer `/` is true division, as the DataFusion path computes it
-        // (#218); arrow's `div` would truncate.
+        // (#218); arrow's `div` would truncate. `integer_pair` is the test
+        // the transpiler applies: it reads encoded operands by their value
+        // type and takes a NULL literal next to an integer.
         BinaryOp::Native(Operator::Divide)
-            if left.data_type().is_integer() && right.data_type().is_integer() =>
+            if crate::transpiler::true_div::integer_pair(left.data_type(), right.data_type()) =>
         {
             return crate::transpiler::true_div::true_div_arrays(left, right)
                 .map_err(|e| format!("Div failed: {}", e));
@@ -161,15 +165,36 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
 
     // Comparisons and arithmetic take DataFusion's operand coercion, as the
     // DataFusion path does: `r.x / 2 > 3` compares a Float64 quotient with an
-    // Int64 literal, and Arrow's kernels refuse operands of two types.
+    // Int64 literal, and Arrow's kernels refuse operands of two types. A NULL
+    // literal is coerced to its other operand's type; next to `&` or `|` it
+    // is Boolean.
     let coerced = match operator {
-        Operator::And | Operator::Or => None,
+        Operator::And | Operator::Or => Some((null_as_boolean(left)?, null_as_boolean(right)?)),
         _ => coerce_operands(&operator, left, right)?,
     };
     let (left, right) = match &coerced {
         Some((l, r)) => (l, r),
         None => (left, right),
     };
+
+    // An operand still NULL-typed (both were NULL literals, or coercion
+    // found no common type) makes the result NULL on every row, as in
+    // DataFusion; Arrow's kernels take no NULL-typed operand.
+    if left.data_type() == &DataType::Null || right.data_type() == &DataType::Null {
+        let result_type = match operator {
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq => DataType::Boolean,
+            _ => DataType::Null,
+        };
+        return Ok(datafusion::arrow::array::new_null_array(
+            &result_type,
+            left.len(),
+        ));
+    }
 
     match operator {
         Operator::Eq
@@ -219,6 +244,20 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
             "Unsupported binary operator in search_pattern predicate: {:?}",
             other
         )),
+    }
+}
+
+/// `arr` as Boolean when it is NULL-typed (a NULL literal, or an expression
+/// over NULL literals only), so that boolean operators and the final mask
+/// read it as Boolean NULL, as DataFusion coerces it; otherwise `arr`.
+fn null_as_boolean(arr: &ArrayRef) -> Result<ArrayRef, String> {
+    if arr.data_type() == &DataType::Null {
+        Ok(datafusion::arrow::array::new_null_array(
+            &DataType::Boolean,
+            arr.len(),
+        ))
+    } else {
+        Ok(Arc::clone(arr))
     }
 }
 
@@ -300,18 +339,19 @@ fn eval_call(
             let substr = extract_literal_string(&args[0])?;
             eval_string_predicate(&source, "contains", |s| s.contains(substr.as_str()))
         }
+        // Arrow's `is_null` kernels read logical nulls, as DataFusion's
+        // IS NULL does: a NULL-typed array (a NULL literal) has no null
+        // buffer, yet every slot is NULL.
         "is_null" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
-            let result: BooleanArray = (0..source.len())
-                .map(|i| Some(source.is_null(i)))
-                .collect();
+            let result = datafusion::arrow::compute::is_null(&source)
+                .map_err(|e| format!("is_null failed: {e}"))?;
             Ok(Arc::new(result))
         }
         "is_not_null" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
-            let result: BooleanArray = (0..source.len())
-                .map(|i| Some(!source.is_null(i)))
-                .collect();
+            let result = datafusion::arrow::compute::is_not_null(&source)
+                .map_err(|e| format!("is_not_null failed: {e}"))?;
             Ok(Arc::new(result))
         }
         // The .s accessor wraps string methods — the transpiler unwraps it
@@ -1082,6 +1122,89 @@ mod tests {
         assert!(err.contains("Divide by zero"), "{err}");
     }
 
+    /// A dictionary-encoded integer operand, on either side, is integer true
+    /// division too: the transpiler reads it by its value type (R2-F1).
+    #[test]
+    fn encoded_integer_div_is_true_division() {
+        use datafusion::arrow::array::{DictionaryArray, Float64Array, Int8Array};
+        use datafusion::arrow::datatypes::Int8Type;
+        let encoded: ArrayRef = Arc::new(DictionaryArray::<Int8Type>::new(
+            Int8Array::from(vec![Some(0), Some(1), Some(2), None]),
+            Arc::new(Int64Array::from(vec![7, 8, 9])),
+        ));
+        let twos: ArrayRef = Arc::new(Int64Array::from(vec![2, 2, 2, 2]));
+        let quotient = eval_binop("Div", &encoded, &twos).unwrap();
+        let quotient = quotient
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(
+            quotient.iter().collect::<Vec<_>>(),
+            [Some(3.5), Some(4.0), Some(4.5), None]
+        );
+        let sevens: ArrayRef = Arc::new(Int64Array::from(vec![7, 7, 7, 7]));
+        let reversed = eval_binop("Div", &sevens, &encoded).unwrap();
+        let reversed = reversed
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(reversed.value(1), 0.875);
+        assert!(reversed.is_null(3));
+    }
+
+    /// `x / None` and `None / x` are NULL, as DataFusion types `lit(NULL)`
+    /// as its other operand (R2-F2); the NULL literal does not make integer
+    /// division an error or a Boolean operation.
+    #[test]
+    fn null_literal_div_is_null() {
+        use datafusion::arrow::array::Float64Array;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
+            vec![Arc::new(Int64Array::from(vec![Some(7), Some(0), None]))],
+        )
+        .expect("valid batch");
+        let idx = HashMap::from([("x".to_string(), 0)]);
+        let x = || PyExpr::Column("x".to_string());
+        let null = || PyExpr::Literal(LiteralValue::Null);
+        let binop = |op: &str, left: PyExpr, right: PyExpr| PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let call = |func: &str, on: PyExpr| PyExpr::Call {
+            func: func.to_string(),
+            args: vec![],
+            on: Some(Box::new(on)),
+            kwargs: Default::default(),
+        };
+        for quotient in [binop("Div", x(), null()), binop("Div", null(), x())] {
+            let values = eval_expr(&quotient, &batch, &idx).expect("NULL quotient");
+            let values = values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("Float64");
+            assert_eq!(values.null_count(), 3, "{quotient:?}");
+            let is_null = eval_predicate(&call("is_null", quotient.clone()), &batch, &idx).unwrap();
+            assert_eq!(is_null.iter().collect::<Vec<_>>(), [Some(true); 3]);
+            let gt = eval_predicate(
+                &binop("Gt", quotient, PyExpr::Literal(LiteralValue::Int64(1))),
+                &batch,
+                &idx,
+            )
+            .unwrap();
+            assert_eq!(gt.null_count(), 3);
+        }
+        let both = binop("Div", null(), null());
+        let is_null = eval_predicate(&call("is_null", both), &batch, &idx).unwrap();
+        assert_eq!(is_null.iter().collect::<Vec<_>>(), [Some(true); 3]);
+        let compared = eval_predicate(&binop("Eq", x(), null()), &batch, &idx).unwrap();
+        assert_eq!(compared.null_count(), 3);
+        let is_not_null = eval_predicate(&call("is_not_null", null()), &batch, &idx).unwrap();
+        assert_eq!(is_not_null.iter().collect::<Vec<_>>(), [Some(false); 3]);
+        let bare = eval_predicate(&null(), &batch, &idx).unwrap();
+        assert_eq!(bare.null_count(), 3);
+    }
+
     /// The same values in each Arrow string layout, plus an Int64 column.
     fn string_batch() -> (RecordBatch, HashMap<String, usize>) {
         let values = vec![Some("apple"), None, Some("pineapple"), Some("app")];
@@ -1114,9 +1237,21 @@ mod tests {
     fn string_predicates_agree_across_string_layouts() {
         let (batch, idx) = string_batch();
         let cases = [
-            ("starts_with", "app", [Some(true), None, Some(false), Some(true)]),
-            ("ends_with", "le", [Some(true), None, Some(true), Some(false)]),
-            ("contains", "pple", [Some(true), None, Some(true), Some(false)]),
+            (
+                "starts_with",
+                "app",
+                [Some(true), None, Some(false), Some(true)],
+            ),
+            (
+                "ends_with",
+                "le",
+                [Some(true), None, Some(true), Some(false)],
+            ),
+            (
+                "contains",
+                "pple",
+                [Some(true), None, Some(true), Some(false)],
+            ),
         ];
         for (func, arg, expected) in cases {
             for column in ["utf8", "large", "view"] {
@@ -1198,6 +1333,9 @@ mod tests {
             and(a(), null()),
             or(null(), b()),
             not(and(a(), null())),
+            or(null(), null()),
+            not(null()),
+            and(not(null()), b()),
         ];
         for expr in cases {
             let result = eval_predicate(&expr, &batch, &idx).expect("boolean predicate");

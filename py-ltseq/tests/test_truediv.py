@@ -362,6 +362,94 @@ class TestSearchPatternOperands:
         assert _pattern_rows(t, lambda r: r.x / r.y < 0.0, lambda r: r.x > 0) == []
         assert _pattern_rows(t, lambda r: r.x / r.y != 0.0, lambda r: r.x > 0) == []
 
+    @staticmethod
+    def _encoded(xs, ys, encode):
+        """`_table(xs, ys)` with the columns in `encode` dictionary-encoded."""
+        table = _table(xs, ys)
+        for name in encode:
+            index = table.schema.get_field_index(name)
+            table = table.set_column(index, name, table.column(name).dictionary_encode())
+        return table
+
+    # x = [7, 8, 9, None], y = [2, 4, -3, 2]. Each predicate selects some
+    # rows and not others; truncating division selects different ones.
+    ENCODED = {
+        "column_by_literal": lambda r: r.x / 2 > 3,
+        "literal_by_column": lambda r: 18 / r.x > 2.2,
+        "column_by_column": lambda r: r.x / r.y == 3.5,
+        "negative_quotient": lambda r: r.x / r.y < -2.9,
+        "quotient_is_null": lambda r: (r.x / r.y).is_null(),
+    }
+
+    @pytest.mark.parametrize("encode", [["x"], ["y"], ["x", "y"]], ids="+".join)
+    @pytest.mark.parametrize("name", list(ENCODED))
+    def test_encoded_integers_match_filter(self, encode, name):
+        # R2-F1: a dictionary-encoded integer operand is true division too.
+        pred = self.ENCODED[name]
+        t = LTSeq.from_arrow(self._encoded([7, 8, 9, None], [2, 4, -3, 2], encode)).sort("i")
+        expected = _col(t.filter(pred), "i")
+        assert expected, "the predicate selects some row"
+        assert _pattern_rows(t, pred) == expected
+        assert _pattern_rows(t, pred, lambda r: r.i >= 0) == [i for i in expected if i < 3]
+
+    def test_encoded_integers_reported_case(self):
+        t = LTSeq.from_arrow(self._encoded([7, 8, 9], [1, 1, 1], ["x"])).sort("i")
+        assert _col(t.filter(lambda r: r.x / 2 > 3), "i") == [0, 1, 2]
+        assert _pattern_rows(t, lambda r: r.x / 2 > 3) == [0, 1, 2]
+
+    @pytest.mark.parametrize("encode", [["x"], ["y"]], ids="+".join)
+    def test_encoded_zero_divisor_raises(self, encode):
+        t = LTSeq.from_arrow(self._encoded([1, 2], [1, 0], encode)).sort("i")
+        with pytest.raises(RuntimeError, match="Divide by zero"):
+            t.search_pattern(lambda r: r.x / r.y > 0, lambda r: r.x > 0).to_arrow()
+        with pytest.raises(RuntimeError, match="Divide by zero"):
+            t.search_pattern_count(lambda r: r.x / r.y > 0, lambda r: r.x > 0)
+
+    def test_encoded_null_divisor_is_null(self):
+        # A NULL divisor whose dictionary key slot holds a zero is NULL.
+        t = LTSeq.from_arrow(self._encoded([1, 2], [None, 2], ["y"])).sort("i")
+        assert _pattern_rows(t, lambda r: (r.x / r.y).is_null()) == [0]
+        assert _pattern_rows(t, lambda r: r.x / r.y == 1.0) == [1]
+
+    # R2-F2: a `None` operand of integer `/` makes the quotient NULL, as in
+    # `filter`, rather than an Int64 / Boolean error.
+    NULL_OPERAND = {
+        "x_by_none_is_null": lambda r: (r.x / None).is_null(),
+        "none_by_x_is_null": lambda r: (None / r.x).is_null(),
+        "x_by_none_is_not_null": lambda r: (r.x / None).is_not_null(),
+        "none_by_x_compared": lambda r: None / r.x > 0,
+        "x_by_none_or_true": lambda r: (r.x / None > 0) | (r.i >= 0),
+        "x_by_none_and_false": lambda r: ~((r.x / None > 0) & (r.i < 0)),
+        "x_by_none_plus": lambda r: ((r.x / None) + 1).is_null(),
+    }
+
+    @pytest.mark.parametrize("type", [pa.int32(), pa.int64(), pa.uint64()], ids=str)
+    @pytest.mark.parametrize("name", list(NULL_OPERAND))
+    def test_null_operand_matches_filter(self, type, name):
+        pred = self.NULL_OPERAND[name]
+        t = LTSeq.from_arrow(_table([7, 0, 9], [1, 1, 1], type)).sort("i")
+        expected = _col(t.filter(pred), "i")
+        assert expected in ([], [0, 1, 2])
+        assert _pattern_rows(t, pred) == expected
+        assert _pattern_rows(t, pred, lambda r: r.x >= 0) == [i for i in expected if i < 2]
+
+    def test_null_operand_selects_every_row(self):
+        t = LTSeq.from_arrow(_table([7, 0, 9], [1, 1, 1])).sort("i")
+        for pred in (lambda r: (r.x / None).is_null(), lambda r: (None / r.x).is_null()):
+            assert _col(t.filter(pred), "i") == [0, 1, 2]
+            assert _pattern_rows(t, pred) == [0, 1, 2]
+
+    def test_null_operand_encoded_column(self):
+        t = LTSeq.from_arrow(self._encoded([7, 0, 9], [1, 1, 1], ["x"])).sort("i")
+        assert _pattern_rows(t, lambda r: (r.x / None).is_null()) == [0, 1, 2]
+        assert _pattern_rows(t, lambda r: (None / r.x).is_null()) == [0, 1, 2]
+
+    def test_null_operand_sorted_parquet(self, tmp_path):
+        path = str(tmp_path / "x.parquet")
+        pq.write_table(_table([7, 0, 9], [1, 1, 1]), path, row_group_size=1)
+        t = LTSeq.read_parquet(path).assume_sorted("i")
+        assert t.search_pattern_count(lambda r: (r.x / None).is_null(), lambda r: r.x >= 0) == 2
+
 
 class TestPctChange:
     def test_integer_matches_pandas(self):
