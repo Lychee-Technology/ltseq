@@ -4,14 +4,14 @@
 
 > **难度** ★★☆ · **领域** 电商 · **前置** 案例 01
 >
-> **涉及 API**：`join(on=, how="left")` / `group_by().agg()` / `group_sorted` + `NestedTable.derive`（组级广播）/ `cast("float64")` / `sort`
+> **涉及 API**：`join(on=, how="left")` / `group_by().agg()` / `group_sorted` + `NestedTable.derive`（组级广播）/ `sort`
 
 **学习目标**
 
 - 掌握"汇总值分摊回明细行"的两条路线：**join 回填**与**分组广播**（SQL 窗口语义）
 - 理解 `NestedTable.derive` 与 `NestedTable.agg` 的区别：**广播保留每行**，折叠
   一组一行
-- 再次演练整数除法陷阱——比率计算先 `cast("float64")`
+- 直接用两个整数列相除：`/` 是真除法，结果为 `float64`（issue #218）
 
 ## 问题描述
 
@@ -106,8 +106,8 @@ fees_joined.sort("month").show();
 
 ## 第二步 · 补上年合计并计算分摊
 
-年合计来自 `months` 自身的分组聚合；`share` 的除法先转型——案例 14 的整数除法
-陷阱再次出现。
+年合计来自 `months` 自身的分组聚合；`share` 直接用两个整数列相除，结果为
+`float64`，与案例 14 相同。
 
 ```python
 totals = months.group_by("year").agg(total=lambda g: g.sales.sum())
@@ -115,7 +115,7 @@ totals = months.group_by("year").agg(total=lambda g: g.sales.sum())
 enriched = (
     fees_joined.join(totals, on="year", how="left")
     .derive(
-        share=lambda r: r.fee.cast("float64") / r.total * r.sales,
+        share=lambda r: r.fee / r.total * r.sales,
     )
     .sort("month")
 )
@@ -141,8 +141,9 @@ enriched.show();
 
 **解析**
 
-- `12 / 120 * 30`：若不 cast，整数 `/` 整数截断得 `0`，全表 share 全为 0——
-  案例 14 的陷阱在业务数据上杀伤力更大，请形成肌肉记忆。
+- `12 / 120 * 30`：整数 `/` 整数是真除法，得 `0.1`，所以 share 为 `3`。
+  采用 SQL 截断除法的引擎（issue #218 之前的 LTSeq 也是）在这里得到 `0`，
+  全表 share 都会变成 0。
 - 验算：每组的 share 之和应恰好等于该组 fee（3+4+5=12 ✔；4+6+6+8=24 ✔）。
   分摊类计算务必做"守恒校验"，这是它与普通派生列的区别。
 - 两次 join 后表里带了 `total` 这种冗余列，下游若不需要可以 `drop`。
@@ -161,7 +162,7 @@ nested = (
 )
 
 shared = nested.derive(lambda g: {"year_total": g.sum("sales")}).derive(
-    share2=lambda r: r.fee.cast("float64") / r.year_total * r.sales,
+    share2=lambda r: r.fee / r.year_total * r.sales,
 )
 
 shared.sort("month").show();

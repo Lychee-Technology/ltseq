@@ -4,7 +4,7 @@
 
 > **Level** ★★☆ · **Domain** E-commerce · **Prereqs** Case 01
 >
-> **APIs used**: `join(on=, how="left")` / `group_by().agg()` / `group_sorted` + `NestedTable.derive` (group broadcast) / `cast("float64")` / `sort`
+> **APIs used**: `join(on=, how="left")` / `group_by().agg()` / `group_sorted` + `NestedTable.derive` (group broadcast) / `sort`
 
 **Learning goals**
 
@@ -12,8 +12,8 @@
   **join back-fill** and **group broadcast** (SQL window semantics)
 - Understand `NestedTable.derive` vs `NestedTable.agg`: broadcast **keeps every
   row**, agg collapses to one row per group
-- Rehearse the integer-division trap once more — cast to `float64` before any
-  ratio
+- Divide two integer columns directly: `/` is true division with a `float64`
+  result (issue #218)
 
 ## The problem
 
@@ -112,8 +112,8 @@ fees_joined.sort("month").show();
 
 ## Step 2 · Add the yearly total and compute the share
 
-The yearly total comes from grouping `months` itself; the share division
-casts first — case 14's integer-division trap again.
+The yearly total comes from grouping `months` itself; the share divides two
+integer columns into a `float64`, as in case 14.
 
 ```python
 totals = months.group_by("year").agg(total=lambda g: g.sales.sum())
@@ -121,7 +121,7 @@ totals = months.group_by("year").agg(total=lambda g: g.sales.sum())
 enriched = (
     fees_joined.join(totals, on="year", how="left")
     .derive(
-        share=lambda r: r.fee.cast("float64") / r.total * r.sales,
+        share=lambda r: r.fee / r.total * r.sales,
     )
     .sort("month")
 )
@@ -147,9 +147,9 @@ enriched.show();
 
 **Notes**
 
-- `12 / 120 * 30`: without the cast, integer `/` integer truncates to `0` and
-  every share in the table becomes 0 — case 14's trap does far more damage on
-  business data; build the reflex.
+- `12 / 120 * 30`: integer `/` integer is true division, `0.1`, so the share
+  is `3`. An engine with SQL's truncating `/`, as LTSeq was before issue #218,
+  gives `0` here, and every share in the table becomes 0.
 - Sanity check: within each group the shares must sum to the group's fee
   (3+4+5=12 ✔; 4+6+6+8=24 ✔). Allocation results always deserve a
   conservation check — that is what separates them from ordinary derived
@@ -172,7 +172,7 @@ nested = (
 )
 
 shared = nested.derive(lambda g: {"year_total": g.sum("sales")}).derive(
-    share2=lambda r: r.fee.cast("float64") / r.year_total * r.sales,
+    share2=lambda r: r.fee / r.year_total * r.sales,
 )
 
 shared.sort("month").show();

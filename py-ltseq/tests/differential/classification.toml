@@ -75,11 +75,11 @@ ref = "#193"
 note = "2.0 + 3.0 folded to an Int64"
 expect = '{"result": {"v": {"type": "double", "values": [5.0, 5.0]}}}'
 
-["folding_and_scan::fold_div"]
+["folding_and_scan::column_div"]
 status = "INTENDED_CHANGE"
-ref = "#193"
-note = "a folded Int64 / Int64 is what DataFusion computes for the same arithmetic on a column (column_div)"
-expect = '{"result": {"v": {"type": "int64", "values": [3, 3]}}}'
+ref = "#218"
+note = "Int64 / Int64 is Python's true division, a float64; it truncated. The folded constant (fold_div) gives the same 3.5, which main recorded before #193 made it truncate too"
+expect = '{"result": {"v": {"type": "double", "values": [3.5, 3.5]}}}'
 
 ["folding_and_scan::fold_overflow"]
 status = "INTENDED_CHANGE"

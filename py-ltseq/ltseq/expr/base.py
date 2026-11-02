@@ -600,7 +600,17 @@ class Expr(ABC):
         return BinOpExpr("Mul", cast(Any, self), self._coerce(other))
 
     def __truediv__(self, other: "Expr | Any") -> "BinOpExpr":
-        """Division operator: expr / other"""
+        """Division operator: expr / other.
+
+        Two integer operands divide as Python's ``/`` does: true division with
+        a float64 result (``7 / 2`` is ``3.5``, ``-7 / 2`` is ``-3.5``), the
+        exact quotient rounded once, also for values beyond ``2**53``. A zero
+        integer divisor raises ``ValueError`` when the result is collected
+        (``RuntimeError`` from ``search_pattern``); it does not give ``inf``.
+        A float operand keeps IEEE division (``1 / 0.0`` is ``inf``), and a
+        decimal operand keeps decimal division. NULL in either operand gives
+        NULL.
+        """
         from .types import BinOpExpr
 
         return BinOpExpr("Div", cast(Any, self), self._coerce(other))
@@ -926,7 +936,13 @@ class Expr(ABC):
         """
         Compute the percentage change from the previous row.
 
-        Equivalent to: (value - value.shift(1)) / value.shift(1)
+        Equivalent to ``(x - x.shift(1)) / x.shift(1)`` computed in float64:
+        both values are cast to float64 first. The result is float64 for
+        every numeric column, integer and decimal columns included, so it
+        matches pandas' ``pct_change(fill_method=None)``: a decrease on an
+        unsigned column is negative, and a previous value of 0 gives ``inf``
+        (NaN when the value is 0 too) instead of raising as integer ``/``
+        does. A NULL value or previous value gives NULL.
 
         Requires the table to be sorted. Common in financial analysis.
 
@@ -939,7 +955,10 @@ class Expr(ABC):
         from .types import CallExpr
 
         shifted = CallExpr("shift", (self._coerce(1),), {}, on=cast(Any, self))
-        return (self - shifted) / shifted
+        # In float64 throughout (#218): integer `/` raises on a zero divisor
+        # where pct_change gives inf, and an unsigned difference would wrap.
+        previous = shifted.cast("float64")
+        return (self.cast("float64") - previous) / previous
 
     @staticmethod
     def _coerce(value: Any) -> Any:

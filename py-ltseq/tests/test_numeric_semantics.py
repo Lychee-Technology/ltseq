@@ -95,8 +95,8 @@ class TestIntegerOverflowRaises:
 
     def test_division_of_min_by_minus_one(self):
         t = _int64_table(x=[I64_MIN])
-        with pytest.raises(ValueError, match="[Oo]verflow"):
-            t.derive(y=lambda r: r.x / -1).to_arrow()
+        # `/` is true division in float64 (#218), so its quotient fits.
+        assert _col(t.derive(y=lambda r: r.x / -1), "y") == [I64_MIN / -1]
         with pytest.raises(ValueError, match="[Oo]verflow"):
             t.derive(y=lambda r: r.x // -1).to_arrow()
 
@@ -109,6 +109,17 @@ class TestIntegerOverflowRaises:
         # search_pattern evaluates predicates with checked kernels (#221).
         with pytest.raises(RuntimeError, match="[Oo]verflow"):
             big.search_pattern(lambda r: r.x * 4 == 0)
+
+    def test_search_pattern_constant_operand(self, big):
+        # A comparison with a constant operand is lowered through the
+        # transpiler (R3-F1 on #218), whose folding wraps as `filter`'s does;
+        # the constant's arithmetic still raises here.
+        from ltseq.expr.types import LiteralExpr
+
+        with pytest.raises(RuntimeError, match="[Oo]verflow"):
+            big.search_pattern(lambda r: r.x == LiteralExpr(BIG) * 4)
+        with pytest.raises(RuntimeError, match="[Oo]verflow"):
+            big.search_pattern_count(lambda r: LiteralExpr(BIG) + BIG + BIG > r.x)
 
 
 class TestDecimal:

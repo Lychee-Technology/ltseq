@@ -42,6 +42,11 @@ use crate::LTSeqTable;
 /// - Call: starts_with, ends_with, contains (string methods via .s accessor)
 /// - Call: is_null, is_not_null
 ///
+/// Comparison and arithmetic operands take DataFusion's coercion, float
+/// comparisons treat `-0.0` as `0.0`, and a comparison places a literal
+/// operand as the transpiler places it ([`eval_lowered_binop`]), as in
+/// `filter`.
+///
 /// NULL follows SQL three-valued logic, as in `filter`, and stays NULL in the
 /// returned mask; callers read a NULL slot as no match.
 pub(crate) fn eval_predicate(
@@ -49,7 +54,7 @@ pub(crate) fn eval_predicate(
     batch: &RecordBatch,
     name_to_idx: &std::collections::HashMap<String, usize>,
 ) -> Result<BooleanArray, String> {
-    let arr = eval_expr(expr, batch, name_to_idx)?;
+    let arr = null_as_boolean(&eval_expr(expr, batch, name_to_idx)?)?;
     // Convert result to BooleanArray
     arr.as_any()
         .downcast_ref::<BooleanArray>()
@@ -79,17 +84,22 @@ fn eval_expr(
         PyExpr::Literal(value) => {
             let n = batch.num_rows();
             match value {
-                // A bare NULL has no type of its own; a Boolean null array
-                // lets it combine with the predicate's boolean operators.
-                LiteralValue::Null => Ok(datafusion::arrow::array::new_null_array(
-                    &DataType::Boolean,
-                    n,
-                )),
+                // A bare NULL is NULL-typed, as DataFusion types `lit(NULL)`:
+                // each operator reads it as its other operand's type, so
+                // `r.x / None` is integer true division and `flag & None`
+                // is Boolean (`eval_binop`).
+                LiteralValue::Null => {
+                    Ok(datafusion::arrow::array::new_null_array(&DataType::Null, n))
+                }
                 _ => value
                     .to_scalar_value()
                     .to_array_of_size(n)
                     .map_err(|e| format!("Cannot build literal array: {e}")),
             }
+        }
+
+        PyExpr::BinOp { op, left, right } if meets_literal(op, left, right)? => {
+            eval_lowered_binop(op, left, right, batch, name_to_idx)
         }
 
         PyExpr::BinOp { op, left, right } => {
@@ -102,6 +112,7 @@ fn eval_expr(
             let arr = eval_expr(operand, batch, name_to_idx)?;
             match op.as_str() {
                 "Not" => {
+                    let arr = null_as_boolean(&arr)?;
                     let bool_arr = arr
                         .as_any()
                         .downcast_ref::<BooleanArray>()
@@ -129,6 +140,119 @@ fn eval_expr(
     }
 }
 
+/// Whether `left op right` is a comparison with a constant operand
+/// ([`constant`]), which places the literal among the other operand's
+/// values. Arithmetic keeps this evaluator's checked kernels (#221).
+fn meets_literal(op: &str, left: &PyExpr, right: &PyExpr) -> Result<bool, String> {
+    use crate::transpiler::BinaryOp;
+    use datafusion::logical_expr::Operator;
+
+    let comparison = matches!(
+        crate::transpiler::parse_binary_op(op)?,
+        BinaryOp::Native(
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+        )
+    );
+    Ok(comparison && (constant(left) || constant(right)))
+}
+
+/// Whether `expr` is a constant the transpiler folds into a literal: a
+/// literal, or literals combined by operators. A function call is not one
+/// here, so this evaluator still reports the functions it does not support.
+fn constant(expr: &PyExpr) -> bool {
+    match expr {
+        PyExpr::Literal(_) => true,
+        PyExpr::BinOp { left, right, .. } => constant(left) && constant(right),
+        PyExpr::UnaryOp { operand, .. } => constant(operand),
+        PyExpr::Alias { expr, .. } => constant(expr),
+        _ => false,
+    }
+}
+
+/// The comparison `left op right` with a constant operand, lowered by the
+/// transpiler and evaluated by DataFusion, so that the literal reads as it
+/// does in `filter`. It places the literal among the values of the other
+/// operand when that operand is of an exact domain (an integer, a decimal,
+/// a date or timestamp), rather than casting both to a common type: next to
+/// an Int64, `x > 2.0**53` keeps `2**53 + 1`, which a Float64 cast would
+/// round to `2**53`, and NaN is refused as `filter` refuses it.
+///
+/// The other operand, unless it is constant too, is evaluated here and
+/// handed to the transpiler as a column of its type, named as the column it
+/// is so that errors name it; a constant operand is handed over as written,
+/// so that it folds as it does in `filter`. The constant is evaluated here
+/// first, on one row, so that its integer arithmetic raises on overflow as
+/// this evaluator's checked kernels do (#221); DataFusion's simplifier,
+/// which folds it for the transpiler, wraps.
+fn eval_lowered_binop(
+    op: &str,
+    left: &PyExpr,
+    right: &PyExpr,
+    batch: &RecordBatch,
+    name_to_idx: &std::collections::HashMap<String, usize>,
+) -> Result<ArrayRef, String> {
+    use datafusion::arrow::array::RecordBatchOptions;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::common::DFSchema;
+    use datafusion::execution::context::ExecutionProps;
+    use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+    use datafusion::physical_expr::create_physical_expr;
+
+    let rows = batch.num_rows();
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+    let one_row = RecordBatch::try_new_with_options(
+        Arc::new(Schema::empty()),
+        vec![],
+        &RecordBatchOptions::new().with_row_count(Some(1)),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut operand = |expr: &PyExpr| -> Result<Box<PyExpr>, String> {
+        if constant(expr) {
+            eval_expr(expr, &one_row, name_to_idx)?;
+            return Ok(Box::new(expr.clone()));
+        }
+        let values = eval_expr(expr, batch, name_to_idx)?;
+        let name = match expr {
+            PyExpr::Column(name) => name.clone(),
+            _ => "__ltseq_operand".to_string(),
+        };
+        fields.push(Field::new(&name, values.data_type().clone(), true));
+        columns.push(values);
+        Ok(Box::new(PyExpr::Column(name)))
+    };
+    let lowered = PyExpr::BinOp {
+        op: op.to_string(),
+        left: operand(left)?,
+        right: operand(right)?,
+    };
+    let schema = Arc::new(Schema::new(fields));
+    let expr = crate::transpiler::pyexpr_to_datafusion(lowered, &schema)?;
+    let df_schema = DFSchema::try_from(Arc::clone(&schema)).map_err(|e| e.to_string())?;
+    let physical = create_physical_expr(
+        &expr,
+        &df_schema,
+        &ExecutionProps::new(),
+        &PhysicalPlanningContext::default(),
+    )
+    .map_err(|e| format!("{op} failed: {e}"))?;
+    let input = RecordBatch::try_new_with_options(
+        schema,
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(rows)),
+    )
+    .map_err(|e| e.to_string())?;
+    physical
+        .evaluate(&input)
+        .and_then(|result| result.into_array(rows))
+        .map_err(|e| format!("{op} failed: {e}"))
+}
+
 /// Evaluate a binary operation on two arrays.
 ///
 /// Operator names are parsed by the transpiler's `parse_binary_op` — the
@@ -137,11 +261,20 @@ fn eval_expr(
 fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, String> {
     use crate::transpiler::BinaryOp;
     use datafusion::arrow::compute::kernels::boolean;
-    use datafusion::arrow::compute::kernels::cmp;
     use datafusion::arrow::compute::kernels::numeric;
     use datafusion::logical_expr::Operator;
 
     let operator = match crate::transpiler::parse_binary_op(op)? {
+        // Integer `/` is true division, as the DataFusion path computes it
+        // (#218); arrow's `div` would truncate. `integer_pair` is the test
+        // the transpiler applies: it reads encoded operands by their value
+        // type and takes a NULL literal next to an integer.
+        BinaryOp::Native(Operator::Divide)
+            if crate::transpiler::true_div::integer_pair(left.data_type(), right.data_type()) =>
+        {
+            return crate::transpiler::true_div::true_div_arrays(left, right)
+                .map_err(|e| format!("Div failed: {}", e));
+        }
         BinaryOp::Native(operator) => operator,
         BinaryOp::FloorDiv => {
             return crate::transpiler::floor_div::floor_div_arrays(left, right)
@@ -149,25 +282,48 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
         }
     };
 
+    // Comparisons and arithmetic take DataFusion's operand coercion, as the
+    // DataFusion path does: `r.x / 2 > r.i` compares a Float64 quotient with
+    // an Int64 column, and `(r.x / 2) + 1` adds an Int64 literal to it;
+    // Arrow's kernels refuse operands of two types. (A comparison with a
+    // literal operand is lowered by the transpiler instead,
+    // `eval_lowered_binop`.) A NULL-typed operand is coerced to its other
+    // operand's type; next to `&` or `|` it is Boolean.
+    let coerced = match operator {
+        Operator::And | Operator::Or => Some((null_as_boolean(left)?, null_as_boolean(right)?)),
+        _ => coerce_operands(&operator, left, right)?,
+    };
+    let (left, right) = match &coerced {
+        Some((l, r)) => (l, r),
+        None => (left, right),
+    };
+
+    // An operand still NULL-typed (both were NULL literals, or coercion
+    // found no common type) makes the result NULL on every row, as in
+    // DataFusion; Arrow's kernels take no NULL-typed operand.
+    if left.data_type() == &DataType::Null || right.data_type() == &DataType::Null {
+        let result_type = match operator {
+            Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq => DataType::Boolean,
+            _ => DataType::Null,
+        };
+        return Ok(datafusion::arrow::array::new_null_array(
+            &result_type,
+            left.len(),
+        ));
+    }
+
     match operator {
-        Operator::Eq => Ok(Arc::new(
-            cmp::eq(left, right).map_err(|e| format!("Eq failed: {}", e))?,
-        )),
-        Operator::NotEq => Ok(Arc::new(
-            cmp::neq(left, right).map_err(|e| format!("Ne failed: {}", e))?,
-        )),
-        Operator::Lt => Ok(Arc::new(
-            cmp::lt(left, right).map_err(|e| format!("Lt failed: {}", e))?,
-        )),
-        Operator::LtEq => Ok(Arc::new(
-            cmp::lt_eq(left, right).map_err(|e| format!("Le failed: {}", e))?,
-        )),
-        Operator::Gt => Ok(Arc::new(
-            cmp::gt(left, right).map_err(|e| format!("Gt failed: {}", e))?,
-        )),
-        Operator::GtEq => Ok(Arc::new(
-            cmp::gt_eq(left, right).map_err(|e| format!("Ge failed: {}", e))?,
-        )),
+        Operator::Eq
+        | Operator::NotEq
+        | Operator::Lt
+        | Operator::LtEq
+        | Operator::Gt
+        | Operator::GtEq => compare(operator, left, right),
         Operator::Plus => numeric::add(left, right).map_err(|e| format!("Add failed: {}", e)),
         Operator::Minus => numeric::sub(left, right).map_err(|e| format!("Sub failed: {}", e)),
         Operator::Multiply => numeric::mul(left, right).map_err(|e| format!("Mul failed: {}", e)),
@@ -212,6 +368,71 @@ fn eval_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef, S
     }
 }
 
+/// `arr` as Boolean when it is NULL-typed (a NULL literal, or an expression
+/// over NULL literals only), so that boolean operators and the final mask
+/// read it as Boolean NULL, as DataFusion coerces it; otherwise `arr`.
+fn null_as_boolean(arr: &ArrayRef) -> Result<ArrayRef, String> {
+    if arr.data_type() == &DataType::Null {
+        Ok(datafusion::arrow::array::new_null_array(
+            &DataType::Boolean,
+            arr.len(),
+        ))
+    } else {
+        Ok(Arc::clone(arr))
+    }
+}
+
+/// `left` and `right` cast to the types DataFusion coerces the operands of
+/// `left op right` to (`BinaryTypeCoercer`, as the transpiler resolves
+/// them), or `None` when they already have those types. Operands DataFusion
+/// cannot coerce are left as they are, so the kernel reports them as before.
+fn coerce_operands(
+    op: &datafusion::logical_expr::Operator,
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<Option<(ArrayRef, ArrayRef)>, String> {
+    use datafusion::arrow::compute::{cast_with_options, CastOptions};
+
+    let Ok((left_type, right_type)) =
+        crate::transpiler::binary_input_types(left.data_type(), op, right.data_type())
+    else {
+        return Ok(None);
+    };
+    if left.data_type() == &left_type && right.data_type() == &right_type {
+        return Ok(None);
+    }
+    // The coerced types hold every operand value; `safe: false` makes a value
+    // that did not fit an error rather than a silent NULL.
+    let options = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    let cast = |arr: &ArrayRef, to: &DataType| {
+        cast_with_options(arr, to, &options)
+            .map_err(|e| format!("Cannot cast {} to {to}: {e}", arr.data_type()))
+    };
+    Ok(Some((cast(left, &left_type)?, cast(right, &right_type)?)))
+}
+
+/// Compare two arrays with `apply_cmp`, the function DataFusion's
+/// `BinaryExpr` compares with. It turns `-0.0` into `0.0` before Arrow's
+/// `cmp` kernels, which order floats by IEEE 754 totalOrder and would put
+/// `-0.0` below `0.0`: `0 / -2 == 0.0` holds in `filter` and must here.
+fn compare(
+    op: datafusion::logical_expr::Operator,
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<ArrayRef, String> {
+    use datafusion::logical_expr::ColumnarValue;
+    use datafusion::physical_expr_common::datum::apply_cmp;
+
+    let left_value = ColumnarValue::Array(Arc::clone(left));
+    let right_value = ColumnarValue::Array(Arc::clone(right));
+    apply_cmp(op, &left_value, &right_value)
+        .and_then(|result| result.into_array(left.len()))
+        .map_err(|e| format!("{op} failed: {e}"))
+}
+
 /// Evaluate a function call expression.
 fn eval_call(
     func: &str,
@@ -239,18 +460,19 @@ fn eval_call(
             let substr = extract_literal_string(&args[0])?;
             eval_string_predicate(&source, "contains", |s| s.contains(substr.as_str()))
         }
+        // Arrow's `is_null` kernels read logical nulls, as DataFusion's
+        // IS NULL does: a NULL-typed array (a NULL literal) has no null
+        // buffer, yet every slot is NULL.
         "is_null" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
-            let result: BooleanArray = (0..source.len())
-                .map(|i| Some(source.is_null(i)))
-                .collect();
+            let result = datafusion::arrow::compute::is_null(&source)
+                .map_err(|e| format!("is_null failed: {e}"))?;
             Ok(Arc::new(result))
         }
         "is_not_null" => {
             let source = eval_expr(receiver()?, batch, name_to_idx)?;
-            let result: BooleanArray = (0..source.len())
-                .map(|i| Some(!source.is_null(i)))
-                .collect();
+            let result = datafusion::arrow::compute::is_not_null(&source)
+                .map_err(|e| format!("is_not_null failed: {e}"))?;
             Ok(Arc::new(result))
         }
         // The .s accessor wraps string methods — the transpiler unwraps it
@@ -1005,6 +1227,133 @@ mod tests {
         }
     }
 
+    /// Integer `/` is true division in Float64, as on the DataFusion path
+    /// (#218), and a zero divisor raises.
+    #[test]
+    fn integer_div_is_true_division() {
+        use datafusion::arrow::array::{Float64Array, Int64Array, UInt64Array};
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(7), Some(-7), None]));
+        let divisors: ArrayRef = Arc::new(UInt64Array::from(vec![Some(2), Some(2), Some(0)]));
+        let result = eval_binop("Div", &ints, &divisors).unwrap();
+        let result = result.as_any().downcast_ref::<Float64Array>().expect("Float64");
+        assert_eq!(result.iter().collect::<Vec<_>>(), [Some(3.5), Some(-3.5), None]);
+
+        let zeros: ArrayRef = Arc::new(Int64Array::from(vec![1, 0, 1]));
+        let err = eval_binop("Div", &ints, &zeros).unwrap_err();
+        assert!(err.contains("Divide by zero"), "{err}");
+    }
+
+    /// A float literal next to an integer column is placed among the
+    /// column's values, as the transpiler places it in `filter` (R3-F1):
+    /// 2.0**53 + 1 is no Float64, and a cast to Float64 would round
+    /// 2**53 + 1 down to 2**53.
+    #[test]
+    fn float_literal_is_exact_next_to_integers() {
+        let n = 1_i64 << 53;
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let x: ArrayRef = Arc::new(Int64Array::from(vec![Some(n), Some(n + 1), None]));
+        let batch = RecordBatch::try_new(schema, vec![x]).unwrap();
+        let idx = HashMap::from([("x".to_string(), 0)]);
+        let column = || Box::new(PyExpr::Column("x".to_string()));
+        let boundary = || Box::new(PyExpr::Literal(LiteralValue::Float64(n as f64)));
+        let mask = |op: &str, reversed: bool| {
+            let (left, right) = if reversed {
+                (boundary(), column())
+            } else {
+                (column(), boundary())
+            };
+            let expr = PyExpr::BinOp { op: op.to_string(), left, right };
+            eval_predicate(&expr, &batch, &idx).unwrap().iter().collect::<Vec<_>>()
+        };
+        assert_eq!(mask("Gt", false), [Some(false), Some(true), None]);
+        assert_eq!(mask("Eq", false), [Some(true), Some(false), None]);
+        assert_eq!(mask("Lt", true), [Some(false), Some(true), None]);
+        assert_eq!(mask("Eq", true), [Some(true), Some(false), None]);
+    }
+
+    /// A dictionary-encoded integer operand, on either side, is integer true
+    /// division too: the transpiler reads it by its value type (R2-F1).
+    #[test]
+    fn encoded_integer_div_is_true_division() {
+        use datafusion::arrow::array::{DictionaryArray, Float64Array, Int8Array};
+        use datafusion::arrow::datatypes::Int8Type;
+        let encoded: ArrayRef = Arc::new(DictionaryArray::<Int8Type>::new(
+            Int8Array::from(vec![Some(0), Some(1), Some(2), None]),
+            Arc::new(Int64Array::from(vec![7, 8, 9])),
+        ));
+        let twos: ArrayRef = Arc::new(Int64Array::from(vec![2, 2, 2, 2]));
+        let quotient = eval_binop("Div", &encoded, &twos).unwrap();
+        let quotient = quotient
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(
+            quotient.iter().collect::<Vec<_>>(),
+            [Some(3.5), Some(4.0), Some(4.5), None]
+        );
+        let sevens: ArrayRef = Arc::new(Int64Array::from(vec![7, 7, 7, 7]));
+        let reversed = eval_binop("Div", &sevens, &encoded).unwrap();
+        let reversed = reversed
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("Float64");
+        assert_eq!(reversed.value(1), 0.875);
+        assert!(reversed.is_null(3));
+    }
+
+    /// `x / None` and `None / x` are NULL, as DataFusion types `lit(NULL)`
+    /// as its other operand (R2-F2); the NULL literal does not make integer
+    /// division an error or a Boolean operation.
+    #[test]
+    fn null_literal_div_is_null() {
+        use datafusion::arrow::array::Float64Array;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
+            vec![Arc::new(Int64Array::from(vec![Some(7), Some(0), None]))],
+        )
+        .expect("valid batch");
+        let idx = HashMap::from([("x".to_string(), 0)]);
+        let x = || PyExpr::Column("x".to_string());
+        let null = || PyExpr::Literal(LiteralValue::Null);
+        let binop = |op: &str, left: PyExpr, right: PyExpr| PyExpr::BinOp {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let call = |func: &str, on: PyExpr| PyExpr::Call {
+            func: func.to_string(),
+            args: vec![],
+            on: Some(Box::new(on)),
+            kwargs: Default::default(),
+        };
+        for quotient in [binop("Div", x(), null()), binop("Div", null(), x())] {
+            let values = eval_expr(&quotient, &batch, &idx).expect("NULL quotient");
+            let values = values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("Float64");
+            assert_eq!(values.null_count(), 3, "{quotient:?}");
+            let is_null = eval_predicate(&call("is_null", quotient.clone()), &batch, &idx).unwrap();
+            assert_eq!(is_null.iter().collect::<Vec<_>>(), [Some(true); 3]);
+            let gt = eval_predicate(
+                &binop("Gt", quotient, PyExpr::Literal(LiteralValue::Int64(1))),
+                &batch,
+                &idx,
+            )
+            .unwrap();
+            assert_eq!(gt.null_count(), 3);
+        }
+        let both = binop("Div", null(), null());
+        let is_null = eval_predicate(&call("is_null", both), &batch, &idx).unwrap();
+        assert_eq!(is_null.iter().collect::<Vec<_>>(), [Some(true); 3]);
+        let compared = eval_predicate(&binop("Eq", x(), null()), &batch, &idx).unwrap();
+        assert_eq!(compared.null_count(), 3);
+        let is_not_null = eval_predicate(&call("is_not_null", null()), &batch, &idx).unwrap();
+        assert_eq!(is_not_null.iter().collect::<Vec<_>>(), [Some(false); 3]);
+        let bare = eval_predicate(&null(), &batch, &idx).unwrap();
+        assert_eq!(bare.null_count(), 3);
+    }
+
     /// The same values in each Arrow string layout, plus an Int64 column.
     fn string_batch() -> (RecordBatch, HashMap<String, usize>) {
         let values = vec![Some("apple"), None, Some("pineapple"), Some("app")];
@@ -1037,9 +1386,21 @@ mod tests {
     fn string_predicates_agree_across_string_layouts() {
         let (batch, idx) = string_batch();
         let cases = [
-            ("starts_with", "app", [Some(true), None, Some(false), Some(true)]),
-            ("ends_with", "le", [Some(true), None, Some(true), Some(false)]),
-            ("contains", "pple", [Some(true), None, Some(true), Some(false)]),
+            (
+                "starts_with",
+                "app",
+                [Some(true), None, Some(false), Some(true)],
+            ),
+            (
+                "ends_with",
+                "le",
+                [Some(true), None, Some(true), Some(false)],
+            ),
+            (
+                "contains",
+                "pple",
+                [Some(true), None, Some(true), Some(false)],
+            ),
         ];
         for (func, arg, expected) in cases {
             for column in ["utf8", "large", "view"] {
@@ -1121,6 +1482,9 @@ mod tests {
             and(a(), null()),
             or(null(), b()),
             not(and(a(), null())),
+            or(null(), null()),
+            not(null()),
+            and(not(null()), b()),
         ];
         for expr in cases {
             let result = eval_predicate(&expr, &batch, &idx).expect("boolean predicate");
