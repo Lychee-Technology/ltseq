@@ -78,9 +78,15 @@ fn for_each_group_key(
 
 /// `col` with every float that `join` equates with another replaced by one
 /// value of the two: `-0.0` by `0.0`, and every NaN, whatever its sign and
-/// payload, by one NaN. Any other column is returned as it is.
+/// payload, by one NaN. A dictionary has its values replaced so, under the
+/// same keys: the encoder keys a dictionary row by its value. Any other
+/// column is returned as it is.
 fn join_equal_floats(col: ArrayRef) -> ArrayRef {
     match col.data_type() {
+        DataType::Dictionary(_, values) if values.is_floating() => {
+            let dict = col.as_any_dictionary();
+            dict.with_values(join_equal_floats(dict.values().clone()))
+        }
         DataType::Float16 => {
             canonical_floats::<Float16Type>(&col, <Float16Type as ArrowPrimitiveType>::Native::NAN)
         }
@@ -532,7 +538,8 @@ fn non_null_run(times: &Int64Array) -> Option<Range<usize>> {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{
-        Float32Array, Float64Array, StringArray, TimestampMicrosecondArray,
+        DictionaryArray, Float32Array, Float64Array, Int32Array, StringArray,
+        TimestampMicrosecondArray,
     };
 
     #[test]
@@ -657,6 +664,46 @@ mod tests {
             assert_eq!(
                 group_rows(vec![col]),
                 (vec![vec![0, 1], vec![2, 3, 4], vec![5]], vec![6])
+            );
+        }
+    }
+
+    #[test]
+    fn dictionary_encoded_float_keys_follow_join_equality() {
+        // Rows 0..5 point at -0.0, 0.0, three NaNs of different bits and 1.5;
+        // row 6 has a NULL key and row 7 points at a NULL value.
+        let values = vec![
+            Some(-0.0),
+            Some(0.0),
+            Some(f64::NAN),
+            Some(-f64::NAN),
+            Some(f64::from_bits(0x7ff8_0000_0000_0001)),
+            Some(1.5),
+            None,
+        ];
+        let keys = Int32Array::from(vec![
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            None,
+            Some(6),
+        ]);
+        let f64s: ArrayRef = Arc::new(Float64Array::from(values.clone()));
+        let f32s: ArrayRef = Arc::new(Float32Array::from(
+            values
+                .iter()
+                .map(|k| k.map(|v| v as f32))
+                .collect::<Vec<_>>(),
+        ));
+        for values in [f64s, f32s] {
+            let dict: ArrayRef =
+                Arc::new(DictionaryArray::try_new(keys.clone(), values).expect("a dictionary"));
+            assert_eq!(
+                group_rows(vec![dict]),
+                (vec![vec![0, 1], vec![2, 3, 4], vec![5]], vec![6, 7])
             );
         }
     }

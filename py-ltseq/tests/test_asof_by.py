@@ -262,3 +262,46 @@ class TestAsofByKeyEquality:
         )
         r = left.asof_join(right, on="t", by="g").to_dicts()
         assert {x["id"]: x["v"] for x in r} == {0: None, 1: "2.5"}
+
+    @pytest.mark.parametrize(
+        "float_type, uint_type, nans",
+        [
+            (np.float32, np.uint32, [0x7FC00000, 0xFFC00001]),
+            (np.float64, np.uint64, [0x7FF8000000000000, 0xFFF8000000000001]),
+        ],
+        ids=["float32", "float64"],
+    )
+    def test_dictionary_encoded_float_keys_follow_the_same_equality(
+        self, engine_layout, float_type, uint_type, nans
+    ):
+        """A dictionary-encoded float key is keyed by its value, so ``-0.0``
+        meets ``0.0`` and NaNs of different bits meet there too (#370 R1-F1),
+        and the output keeps each side's own values."""
+        left_nan, right_nan = np.array(nans, uint_type).view(float_type)
+        left_g = pa.array(np.array([0.0, left_nan, 1.5], float_type)).dictionary_encode()
+        right_g = pa.array(np.array([-0.0, right_nan, 2.5], float_type)).dictionary_encode()
+        left = LTSeq.from_arrow(pa.table({"id": [0, 1, 2], "t": [10, 10, 10], "g": left_g}))
+        right = LTSeq.from_arrow(pa.table({"t": [5, 6, 7], "g": right_g, "v": ["zero", "nan", "2.5"]}))
+        r = left.asof_join(right, on="t", by="g").to_arrow().sort_by("id")
+        assert r.column("v").to_pylist() == ["zero", "nan", None]
+        g = r.column("g").combine_chunks()
+        if pa.types.is_dictionary(g.type):
+            g = g.dictionary_decode()
+        g = g.to_numpy(zero_copy_only=False).astype(float_type)
+        assert np.signbit(g[0]) == np.False_ and g[0] == 0.0
+        assert g[1].view(uint_type) == nans[0]
+        assert g[2] == float_type(1.5)
+
+    def test_dictionary_encoded_float_keys_keep_nulls_out(self, engine_layout):
+        """A NULL in a dictionary key, or a NULL value its key points at,
+        still matches nothing."""
+        left_g = pa.DictionaryArray.from_arrays(
+            pa.array([0, None, 1], pa.int32()), pa.array([-0.0, None], pa.float64())
+        )
+        right_g = pa.DictionaryArray.from_arrays(
+            pa.array([0, 1, None], pa.int32()), pa.array([0.0, None], pa.float64())
+        )
+        left = LTSeq.from_arrow(pa.table({"id": [0, 1, 2], "t": [10, 10, 10], "g": left_g}))
+        right = LTSeq.from_arrow(pa.table({"t": [5, 6, 7], "g": right_g, "v": ["zero", "nv", "nk"]}))
+        r = left.asof_join(right, on="t", by="g").to_arrow().sort_by("id")
+        assert r.column("v").to_pylist() == ["zero", None, None]
