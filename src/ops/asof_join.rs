@@ -20,12 +20,15 @@ use crate::error::LtseqError;
 use crate::ops::common::right_rename_map;
 use crate::LTSeqTable;
 use datafusion::arrow::array;
-use datafusion::arrow::array::{Array, ArrayRef, AsArray, Int64Array, RecordBatch};
+use datafusion::arrow::array::{
+    Array, ArrayRef, ArrowPrimitiveType, AsArray, Int64Array, RecordBatch,
+};
+use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::{
-    DataType, Date32Type, Date64Type, Field, Float64Type, Int32Type, Int64Type,
-    Schema as ArrowSchema, SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
+    DataType, Date32Type, Date64Type, Field, Float16Type, Float32Type, Float64Type, Int32Type,
+    Int64Type, Schema as ArrowSchema, SchemaRef, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use datafusion::arrow::row::{RowConverter, SortField};
 use std::collections::HashMap;
@@ -33,32 +36,72 @@ use std::ops::Range;
 use std::sync::Arc;
 
 /// Call `f` with the index of each row of `batch`, in order, and its `by`
-/// columns encoded by Arrow's RowConverter. One converter is shared between
-/// left and right, so two keys are equal exactly when their bytes are.
-/// `by_indices` are column positions in `batch`. The rows are encoded
-/// `chunk_rows` at a time, so the encoder holds at most that many keys
-/// however many rows `batch` has.
+/// columns encoded by Arrow's RowConverter, or `None` when one of them is
+/// NULL. One converter is shared between left and right, so two keys are
+/// equal exactly when their bytes are. `by_indices` are column positions in
+/// `batch`. The rows are encoded `chunk_rows` at a time, so the encoder
+/// holds at most that many keys however many rows `batch` has.
+///
+/// `by` keys follow `join`'s equality (contract §12.1, #370), which the
+/// encoding alone does not: it gives NULL a key of its own, and a float the
+/// key of its bits. So a row with a NULL key gets none, as NULL matches
+/// nothing, NULL included; and floats are encoded through
+/// `join_equal_floats`, so that `-0.0` meets `0.0` and NaN meets NaN.
 fn for_each_group_key(
     converter: &RowConverter,
     batch: &RecordBatch,
     by_indices: &[usize],
     chunk_rows: usize,
-    mut f: impl FnMut(usize, &[u8]),
+    mut f: impl FnMut(usize, Option<&[u8]>),
 ) -> Result<(), LtseqError> {
     for start in (0..batch.num_rows()).step_by(chunk_rows) {
         let len = chunk_rows.min(batch.num_rows() - start);
         let cols: Vec<ArrayRef> = by_indices
             .iter()
-            .map(|&i| batch.column(i).slice(start, len))
+            .map(|&i| join_equal_floats(batch.column(i).slice(start, len)))
             .collect();
+        // `logical_nulls`, not `nulls`: a `null`-typed column has no
+        // validity buffer, and a dictionary's NULLs can sit in its values.
+        let nulls = cols.iter().fold(None, |acc: Option<NullBuffer>, col| {
+            NullBuffer::union(acc.as_ref(), col.logical_nulls().as_ref())
+        });
         let keys = converter
             .convert_columns(&cols)
             .map_err(|e| LtseqError::Runtime(format!("Failed to encode by= keys: {}", e)))?;
         for (i, key) in keys.iter().enumerate() {
-            f(start + i, key.data());
+            let valid = nulls.as_ref().is_none_or(|n| n.is_valid(i));
+            f(start + i, valid.then(|| key.data()));
         }
     }
     Ok(())
+}
+
+/// `col` with every float that `join` equates with another replaced by one
+/// value of the two: `-0.0` by `0.0`, and every NaN, whatever its sign and
+/// payload, by one NaN. Any other column is returned as it is.
+fn join_equal_floats(col: ArrayRef) -> ArrayRef {
+    match col.data_type() {
+        DataType::Float16 => {
+            canonical_floats::<Float16Type>(&col, <Float16Type as ArrowPrimitiveType>::Native::NAN)
+        }
+        DataType::Float32 => canonical_floats::<Float32Type>(&col, f32::NAN),
+        DataType::Float64 => canonical_floats::<Float64Type>(&col, f64::NAN),
+        _ => col,
+    }
+}
+
+fn canonical_floats<T: ArrowPrimitiveType>(col: &ArrayRef, nan: T::Native) -> ArrayRef {
+    // The default of a float is `0.0`, and `-0.0 == 0.0`.
+    let zero = T::Native::default();
+    Arc::new(col.as_primitive::<T>().unary::<_, T>(|v| {
+        if v.partial_cmp(&v).is_none() {
+            nan
+        } else if v == zero {
+            zero
+        } else {
+            v
+        }
+    }))
 }
 
 /// Resolve `by` column names to indices in `schema`, validating existence.
@@ -260,19 +303,23 @@ pub fn asof_join_impl(
         // a group's first key is kept, so neither side holds a key per row.
         let chunk_rows = table.session.copied_config().batch_size();
 
-        // Bucket right rows by group.
+        // Bucket right rows by group. A right row with a NULL key is in no
+        // bucket, and a left row with one finds none (#370).
         let mut groups: HashMap<Box<[u8]>, Bucket> = HashMap::new();
         for_each_group_key(
             &converter,
             &right_batch,
             &right_by_idx,
             chunk_rows,
-            |row, key| match groups.get_mut(key) {
-                Some(bucket) => add(bucket, row),
-                None => {
-                    let mut bucket = Bucket::default();
-                    add(&mut bucket, row);
-                    groups.insert(key.into(), bucket);
+            |row, key| {
+                let Some(key) = key else { return };
+                match groups.get_mut(key) {
+                    Some(bucket) => add(bucket, row),
+                    None => {
+                        let mut bucket = Bucket::default();
+                        add(&mut bucket, row);
+                        groups.insert(key.into(), bucket);
+                    }
                 }
             },
         )?;
@@ -285,8 +332,7 @@ pub fn asof_join_impl(
             |row, key| {
                 let left_time = left_times.is_valid(row).then(|| left_times.value(row));
                 matched_right_indices.push(
-                    groups
-                        .get(key)
+                    key.and_then(|key| groups.get(key))
                         .and_then(|(times, rows)| search(left_time, times).map(|i| rows[i])),
                 );
             },
@@ -485,7 +531,9 @@ fn non_null_run(times: &Int64Array) -> Option<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+    use datafusion::arrow::array::{
+        Float32Array, Float64Array, StringArray, TimestampMicrosecondArray,
+    };
 
     #[test]
     fn a_64_bit_time_column_is_read_in_place() {
@@ -528,7 +576,10 @@ mod tests {
             let mut groups: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
             for_each_group_key(&converter, &batch, &[0], chunk_rows, |row, key| {
                 rows.push(row);
-                groups.entry(key.to_vec()).or_default().push(row);
+                groups
+                    .entry(key.expect("a key that is not NULL").to_vec())
+                    .or_default()
+                    .push(row);
             })
             .expect("encoded keys");
             let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
@@ -538,6 +589,74 @@ mod tests {
                 groups,
                 [vec![0, 2], vec![1, 4], vec![3]],
                 "chunk_rows={chunk_rows}"
+            );
+        }
+    }
+
+    /// The rows of `cols` grouped as `for_each_group_key` keys them, and the
+    /// rows it gives no key.
+    fn group_rows(cols: Vec<ArrayRef>) -> (Vec<Vec<usize>>, Vec<usize>) {
+        let fields = cols
+            .iter()
+            .map(|c| SortField::new(c.data_type().clone()))
+            .collect();
+        let converter = RowConverter::new(fields).expect("an encoder");
+        let names = (0..cols.len()).map(|i| format!("k{i}"));
+        let batch = RecordBatch::try_from_iter(names.zip(cols)).expect("a batch");
+        let indices: Vec<usize> = (0..batch.num_columns()).collect();
+        let mut groups: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+        let mut keyless = Vec::new();
+        for_each_group_key(&converter, &batch, &indices, 2, |row, key| match key {
+            Some(key) => groups.entry(key.to_vec()).or_default().push(row),
+            None => keyless.push(row),
+        })
+        .expect("encoded keys");
+        let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+        groups.sort();
+        (groups, keyless)
+    }
+
+    #[test]
+    fn a_row_with_a_null_in_any_by_column_has_no_key() {
+        let s: ArrayRef = Arc::new(StringArray::from(vec![
+            None,
+            Some("a"),
+            None,
+            Some("a"),
+            Some("a"),
+        ]));
+        let k: ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(1),
+            None,
+            None,
+            Some(1),
+            Some(1),
+        ]));
+        assert_eq!(group_rows(vec![s, k]), (vec![vec![3, 4]], vec![0, 1, 2]));
+        let all_null: ArrayRef = Arc::new(datafusion::arrow::array::NullArray::new(3));
+        assert_eq!(group_rows(vec![all_null]), (vec![], vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn float_keys_follow_join_equality() {
+        let nans = [f64::NAN, -f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)];
+        let keys = vec![
+            Some(0.0),
+            Some(-0.0),
+            Some(nans[0]),
+            Some(nans[1]),
+            Some(nans[2]),
+            Some(1.5),
+            None,
+        ];
+        let f64s: ArrayRef = Arc::new(Float64Array::from(keys.clone()));
+        let f32s: ArrayRef = Arc::new(Float32Array::from(
+            keys.iter().map(|k| k.map(|v| v as f32)).collect::<Vec<_>>(),
+        ));
+        for col in [f64s, f32s] {
+            assert_eq!(
+                group_rows(vec![col]),
+                (vec![vec![0, 1], vec![2, 3, 4], vec![5]], vec![6])
             );
         }
     }

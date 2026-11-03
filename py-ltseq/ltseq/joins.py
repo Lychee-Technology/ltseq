@@ -345,7 +345,10 @@ class JoinMixin(LTSeqLike):
             is_sorted: If True, skip sort verification (faster)
             left_on / right_on: Time column names when they differ
             by: Column name(s) to group by — each left row matches only right
-                rows sharing the same by-value (per-symbol asof, etc.)
+                rows sharing the same by-value (per-symbol asof, etc.). These
+                keys follow join-key equality (v0.5 contract §12.1): a NULL in
+                any of them matches nothing, not even NULL, NaN matches NaN and
+                -0.0 matches 0.0
             strategy: "backward" (<=), "forward" (>=), or "nearest".
                 Default "backward". With a lambda on=, the operator decides and
                 strategy must agree if also given
