@@ -40,6 +40,7 @@ Literal values in lambdas are typed (#145). They used to be sent to the engine a
 
 ### Fixed
 
+- `top_k(k)` gives the `k` largest non-null values, in `agg` and `group_by(...).agg` (#199). It sorted NULLs first, so each NULL took one of the `k` slots and was then dropped from the string: over `[3, None, 1, 2]`, `top_k(2)` gave `"3"` and now gives `"3;2"`; over `[3, None, None, 1, 2]` it gave `""`. A group whose values are all NULL still gives `""`.
 - `Decimal` literals compare exactly with decimal and integer columns, also when the comparison would need more than 38 digits: `r.price > Decimal("1.236")` on `decimal(5, 2)` now selects 1.24, and `r.w == 10**18` on `decimal(38, 20)` is false instead of failing at collect (#227). They work in arithmetic with a float column.
 - Literals compared with `decimal32`, `decimal64` and `decimal256` columns follow the same rules. A `Decimal` with more digits than a `decimal32` or `decimal64` column holds failed at collect, `decimal256(76, 0) >= Decimal("1.2345")` was true for 1, and an int compared with a negative-scale `decimal64` column panicked.
 - `fill_null(1)`, `coalesce` and `if_else` with an integer literal keep a `decimal32` or `decimal64` column's type unless int64 holds every value of it. DataFusion's common type of those decimals and Int64 is int64, which rounded `1.23` to `1`, and failed at collect on `decimal64(18, -1)` values past the int64 range and on `decimal32(9, -1)` values, which Arrow scales up in 32 bits.

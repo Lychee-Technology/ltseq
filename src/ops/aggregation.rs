@@ -236,8 +236,11 @@ fn pyexpr_to_agg_plan(
                 Expr::Column(Column::new_unqualified(col_name)),
                 DataType::Float64,
             );
-            // ORDER BY col DESC (SQL default for DESC: nulls first)
-            let sort = SortExpr::new(col_f64.clone(), false, true);
+            // ORDER BY col DESC NULLS LAST, so a NULL never takes one of the
+            // k slots (#199); array_to_string drops the NULLs a slice past
+            // the non-null values still reaches. An all-NULL group keeps
+            // giving "".
+            let sort = SortExpr::new(col_f64.clone(), false, false);
             let agg = agg_fn::array_agg(col_f64)
                 .order_by(vec![sort])
                 .build()

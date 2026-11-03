@@ -217,24 +217,44 @@ class TestTopKWithOtherAggregates:
 
 
 class TestTopKNulls:
-    """Locks the legacy null semantics through the native migration (#91):
-    ORDER BY col DESC places nulls first (DataFusion SQL default), so nulls
-    consume top-k slots and are then dropped by array_to_string."""
+    """NULLs never take a top_k slot (#199): top_k(k) gives the k largest
+    non-null values, through t.agg and t.group_by(...).agg."""
 
-    def test_top_k_nulls_consume_slots(self):
-        csv = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False)
-        csv.write("g,v\n")
-        for row in ["a,10", "a,", "a,30", "a,20"]:
-            csv.write(row + "\n")
-        csv.close()
-        try:
-            t = LTSeq.read_csv(csv.name)
-            top_fn = lambda g: g.v.top_k(2)  # noqa: E731
-            df = t.agg(by=lambda r: r.g, top=top_fn).to_pandas()
-            # [null, 30, 20, 10] sliced to [null, 30]; null dropped in join.
-            assert df["top"][0] == "30"
-        finally:
-            os.unlink(csv.name)
+    CASES = [
+        ([3, None, 1, 2], 2, "3;2"),
+        ([3, None, None, 1, 2], 2, "3;2"),
+        ([None, 5, 4], 1, "5"),
+        # k past the non-null values gives every non-null value.
+        ([None, 5, None, 4], 5, "5;4"),
+    ]
+
+    @staticmethod
+    def _table(values, groups=None):
+        columns = {"v": pa.array(values, pa.int64())}
+        if groups is not None:
+            columns["g"] = pa.array(groups, pa.string())
+        return LTSeq.from_arrow(pa.table(columns))
+
+    @pytest.mark.parametrize("values,k,expected", CASES)
+    def test_agg_skips_nulls(self, values, k, expected, engine_layout):
+        t = self._table(values)
+        out = t.agg(o=lambda g: g.v.top_k(k)).to_arrow()
+        assert out.column("o").to_pylist() == [expected]
+
+    @pytest.mark.parametrize("values,k,expected", CASES)
+    def test_group_by_agg_skips_nulls(self, values, k, expected, engine_layout):
+        t = self._table(values, ["a"] * len(values))
+        out = t.group_by("g").agg(o=lambda g: g.v.top_k(k)).to_arrow()
+        assert out.column("o").to_pylist() == [expected]
+
+    def test_group_by_agg_each_group_skips_its_nulls(self, engine_layout):
+        t = self._table(
+            [3, None, 1, 2, None, 5, 4, None, None],
+            ["a", "a", "a", "a", "b", "b", "b", "c", "c"],
+        )
+        out = t.group_by("g").agg(o=lambda g: g.v.top_k(2)).sort("g").to_arrow()
+        # An all-NULL group still gives "", as before the fix.
+        assert out.to_pydict() == {"g": ["a", "b", "c"], "o": ["3;2", "5;4", ""]}
 
 
 class TestTopKArgument:
