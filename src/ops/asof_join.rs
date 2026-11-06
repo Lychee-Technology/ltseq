@@ -14,7 +14,8 @@
 //! * `nearest`: Find closest right.time (backward bias on ties)
 //!
 //! A NULL or NaN time on either side never matches. Float times are searched
-//! as floats, so their fractions and infinities count.
+//! as floats, so their fractions and infinities count. An integer time next to
+//! a float one is compared by exact value, so neither is rounded.
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -33,6 +34,9 @@ use datafusion::arrow::datatypes::{
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use datafusion::arrow::row::{RowConverter, SortField};
+use num_bigint::BigInt;
+use num_traits::Float;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -273,16 +277,12 @@ pub fn asof_join_impl(
             chunk_rows: table.session.copied_config().batch_size(),
         })
     };
-    let matched_right_indices = match (left_times, right_times) {
-        (Times::Int(left), Times::Int(right)) => {
-            matched_rows(&left, &right, direction, by.as_ref())?
-        }
-        (left, right) => matched_rows(
-            &left.into_floats(),
-            &right.into_floats(),
-            direction,
-            by.as_ref(),
-        )?,
+    let by = by.as_ref();
+    let matched_right_indices = match (&left_times, &right_times) {
+        (Times::Int(left), Times::Int(right)) => matched_rows(left, right, direction, by)?,
+        (Times::Int(left), Times::Float(right)) => matched_rows(left, right, direction, by)?,
+        (Times::Float(left), Times::Int(right)) => matched_rows(left, right, direction, by)?,
+        (Times::Float(left), Times::Float(right)) => matched_rows(left, right, direction, by)?,
     };
 
     // 8. Build result schema: left columns + suffix-renamed right columns.
@@ -385,27 +385,28 @@ type Bucket<N> = (Vec<N>, Vec<usize>);
 /// ascending wherever the sort put them. With `by=`, each left row only
 /// matches right rows sharing its group key: we bucket right rows by group
 /// and search within the left row's own bucket.
-fn matched_rows<T>(
-    left_times: &PrimitiveArray<T>,
-    right_times: &PrimitiveArray<T>,
+fn matched_rows<L, R>(
+    left_times: &PrimitiveArray<L>,
+    right_times: &PrimitiveArray<R>,
     direction: &str,
     by: Option<&ByKeys>,
 ) -> Result<Vec<Option<usize>>, LtseqError>
 where
-    T: ArrowPrimitiveType,
-    T::Native: AsofTime,
+    L: ArrowPrimitiveType,
+    R: ArrowPrimitiveType,
+    L::Native: AsofTime<R::Native>,
 {
     let mut matched: Vec<Option<usize>> = Vec::with_capacity(left_times.len());
 
-    let find = |target: T::Native, times: &[T::Native]| match direction {
+    let find = |target: L::Native, times: &[R::Native]| match direction {
         "backward" => find_asof_backward(target, times),
         "forward" => find_asof_forward(target, times),
         "nearest" => find_asof_nearest(target, times),
         _ => unreachable!(),
     };
     let search =
-        |left_time: Option<T::Native>, times: &[T::Native]| left_time.and_then(|t| find(t, times));
-    let add = |(times, rows): &mut Bucket<T::Native>, row: usize| {
+        |left_time: Option<L::Native>, times: &[R::Native]| left_time.and_then(|t| find(t, times));
+    let add = |(times, rows): &mut Bucket<R::Native>, row: usize| {
         if right_times.is_valid(row) {
             times.push(right_times.value(row));
             rows.push(row);
@@ -442,7 +443,7 @@ where
 
     // Bucket right rows by group. A right row with a NULL key is in no
     // bucket, and a left row with one finds none (#370).
-    let mut groups: HashMap<Box<[u8]>, Bucket<T::Native>> = HashMap::new();
+    let mut groups: HashMap<Box<[u8]>, Bucket<R::Native>> = HashMap::new();
     for_each_group_key(
         &by.converter,
         by.right,
@@ -477,40 +478,112 @@ where
     Ok(matched)
 }
 
-/// A value the search can compare. It never meets a NaN: `time_values` reads
-/// one as NULL, so `PartialOrd` orders every value it is given.
-trait AsofTime: Copy + PartialOrd {
-    /// Whether `back`, at or before `target`, is at most as far from it as
+/// A left time, searched among right times of type `R` by exact value: an
+/// integer and a float are compared as they are, and neither is converted to
+/// the other's type, where an integer above `2**53` would round and land on
+/// the wrong side of the left time. No value here is a NaN: `time_values`
+/// reads one as NULL.
+trait AsofTime<R>: Copy {
+    /// How this time orders against the right time `right`.
+    fn cmp_right(self, right: R) -> Ordering;
+
+    /// Whether `back`, at or before this time, is at most as far from it as
     /// `fwd`, at or after it. The two distances are compared exactly.
-    fn back_is_nearest(target: Self, back: Self, fwd: Self) -> bool;
+    fn back_is_nearest(self, back: R, fwd: R) -> bool;
 }
 
-impl AsofTime for i64 {
-    fn back_is_nearest(target: i64, back: i64, fwd: i64) -> bool {
+impl AsofTime<i64> for i64 {
+    fn cmp_right(self, right: i64) -> Ordering {
+        self.cmp(&right)
+    }
+
+    fn back_is_nearest(self, back: i64, fwd: i64) -> bool {
         // As u64, a distance between any two i64 times fits.
-        target.abs_diff(back) <= fwd.abs_diff(target)
+        self.abs_diff(back) <= fwd.abs_diff(self)
     }
 }
 
-impl AsofTime for f64 {
-    fn back_is_nearest(target: f64, back: f64, fwd: f64) -> bool {
+impl AsofTime<f64> for f64 {
+    fn cmp_right(self, right: f64) -> Ordering {
+        self.partial_cmp(&right).unwrap_or(Ordering::Equal)
+    }
+
+    fn back_is_nearest(self, back: f64, fwd: f64) -> bool {
         // An exact match is at distance 0, also at an infinity, where the
         // subtraction below has no answer.
-        if back == target {
+        if back == self {
             return true;
         }
-        let (to_back, back_error) = difference(target, back);
-        let (to_fwd, fwd_error) = difference(fwd, target);
+        if fwd == self {
+            return false;
+        }
+        // This time lies strictly between the other two, so it is finite, and
+        // an infinity is farther from it than any finite time: a distance
+        // that overflows below is not an infinite one.
+        if back.is_infinite() || fwd.is_infinite() {
+            return fwd.is_infinite();
+        }
+        let (to_back, back_error) = difference(self, back);
+        let (to_fwd, fwd_error) = difference(fwd, self);
         // Rounding keeps order, so rounded distances that differ are in the
-        // order of the exact ones; rounded ones that agree are told apart by
-        // their errors. Finite times are at most twice the largest float
-        // apart, so at most one distance overflows. Both are infinite only
-        // between -inf and +inf, a tie.
+        // order of the exact ones, and one that overflowed is the greater;
+        // rounded ones that agree are told apart by their errors. Finite times
+        // are at most twice the largest float apart, so at most one distance
+        // overflows and the errors compared are those of finite distances.
         if to_back != to_fwd {
             return to_back < to_fwd;
         }
-        to_back.is_infinite() || back_error <= fwd_error
+        back_error <= fwd_error
     }
+}
+
+impl AsofTime<f64> for i64 {
+    fn cmp_right(self, right: f64) -> Ordering {
+        cmp_int_float(i128::from(self), right)
+    }
+
+    fn back_is_nearest(self, back: f64, fwd: f64) -> bool {
+        // A time a float holds exactly compares as floats, without big numbers.
+        let target = self as f64;
+        if self.cmp_right(target).is_eq() {
+            return target.back_is_nearest(back, fwd);
+        }
+        if back.is_infinite() || fwd.is_infinite() {
+            return fwd.is_infinite();
+        }
+        // `self - back <= fwd - self`, with no distance to round.
+        BigInt::from(self) << (SCALE_BITS + 1) <= scaled_float(back) + scaled_float(fwd)
+    }
+}
+
+impl AsofTime<i64> for f64 {
+    fn cmp_right(self, right: i64) -> Ordering {
+        cmp_int_float(i128::from(right), self).reverse()
+    }
+
+    fn back_is_nearest(self, back: i64, fwd: i64) -> bool {
+        // `self - back <= fwd - self`, with no distance to round: this time
+        // lies between two i64, so doubling it neither rounds nor overflows.
+        cmp_int_float(i128::from(back) + i128::from(fwd), 2.0 * self).is_ge()
+    }
+}
+
+/// How `int`, at most a sum of two i64, orders against `float`, by exact value.
+fn cmp_int_float(int: i128, float: f64) -> Ordering {
+    // A whole float converts exactly. One past i128's range saturates, which
+    // is still past `int`, so the fraction is only reached for a finite float.
+    let whole = float.trunc();
+    int.cmp(&(whole as i128))
+        .then_with(|| 0.0.cmp_right(float - whole))
+}
+
+/// `2**SCALE_BITS` times any finite float is an integer.
+const SCALE_BITS: i16 = 1075;
+
+/// A finite float times `2**SCALE_BITS`.
+fn scaled_float(value: f64) -> BigInt {
+    let (mantissa, exponent, sign) = Float::integer_decode(value);
+    (BigInt::from(sign) * BigInt::from(mantissa)) << (exponent + SCALE_BITS) as usize
 }
 
 /// `a - b` rounded, and what the rounding lost: when the result is finite,
@@ -525,12 +598,12 @@ fn difference(a: f64, b: f64) -> (f64, f64) {
 }
 
 /// Find the largest index where right_times[idx] <= target (backward match)
-fn find_asof_backward<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize> {
+fn find_asof_backward<L: AsofTime<R>, R: Copy>(target: L, right_times: &[R]) -> Option<usize> {
     if right_times.is_empty() {
         return None;
     }
 
-    let idx = right_times.partition_point(|&t| t <= target);
+    let idx = right_times.partition_point(|&t| target.cmp_right(t).is_ge());
 
     if idx == 0 {
         None
@@ -540,12 +613,12 @@ fn find_asof_backward<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize
 }
 
 /// Find the smallest index where right_times[idx] >= target (forward match)
-fn find_asof_forward<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize> {
+fn find_asof_forward<L: AsofTime<R>, R: Copy>(target: L, right_times: &[R]) -> Option<usize> {
     if right_times.is_empty() {
         return None;
     }
 
-    let idx = right_times.partition_point(|&t| t < target);
+    let idx = right_times.partition_point(|&t| target.cmp_right(t).is_gt());
 
     if idx >= right_times.len() {
         None
@@ -555,7 +628,7 @@ fn find_asof_forward<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize>
 }
 
 /// Find the nearest index (backward bias on ties)
-fn find_asof_nearest<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize> {
+fn find_asof_nearest<L: AsofTime<R>, R: Copy>(target: L, right_times: &[R]) -> Option<usize> {
     let backward = find_asof_backward(target, right_times);
     let forward = find_asof_forward(target, right_times);
 
@@ -564,7 +637,7 @@ fn find_asof_nearest<N: AsofTime>(target: N, right_times: &[N]) -> Option<usize>
         (Some(b), None) => Some(b),
         (None, Some(f)) => Some(f),
         (Some(b), Some(f)) => {
-            if N::back_is_nearest(target, right_times[b], right_times[f]) {
+            if target.back_is_nearest(right_times[b], right_times[f]) {
                 Some(b)
             } else {
                 Some(f)
@@ -588,18 +661,6 @@ fn consolidate(
 enum Times {
     Int(Int64Array),
     Float(Float64Array),
-}
-
-impl Times {
-    /// The times as floats, for a search against a float column: a pair of
-    /// time columns is compared in one type, and this is the one `join` reads
-    /// an integer and a float key in. An integer above `2**53` rounds.
-    fn into_floats(self) -> Float64Array {
-        match self {
-            Times::Int(times) => times.unary(|v| v as f64),
-            Times::Float(times) => times,
-        }
-    }
 }
 
 /// A time column's values. A 64-bit column is read in place, floats included;
@@ -747,6 +808,115 @@ mod tests {
         // A distance that overflows is still the greater one.
         assert_eq!(find_asof_nearest(big / 2.0, &[-big, big]), Some(1));
         assert_eq!(find_asof_nearest(-big / 2.0, &[-big, big]), Some(0));
+        // A distance that overflows is finite, so an infinity is farther.
+        assert_eq!(find_asof_nearest(-big / 2.0, &[-inf, big]), Some(1));
+        assert_eq!(find_asof_nearest(big / 2.0, &[-big, inf]), Some(0));
+    }
+
+    #[test]
+    fn an_integer_and_a_float_compare_by_exact_value() {
+        let edge = 2i64.pow(53);
+        let (edge_f, two_63) = (edge as f64, 2f64.powi(63));
+        for (int, float, expected) in [
+            (edge + 1, edge_f, Ordering::Greater),
+            (edge - 1, edge_f, Ordering::Less),
+            (edge, edge_f, Ordering::Equal),
+            (edge + 1, edge_f + 2.0, Ordering::Less),
+            (5, 5.25, Ordering::Less),
+            (-5, -5.25, Ordering::Greater),
+            (0, -0.0, Ordering::Equal),
+            (0, f64::from_bits(1), Ordering::Less),
+            (i64::MAX, two_63, Ordering::Less),
+            (i64::MIN, -two_63, Ordering::Equal),
+            (i64::MIN, -two_63 * (1.0 + f64::EPSILON), Ordering::Greater),
+            (i64::MAX, f64::MAX, Ordering::Less),
+            (i64::MIN, f64::MIN, Ordering::Greater),
+            (i64::MAX, f64::INFINITY, Ordering::Less),
+            (i64::MIN, f64::NEG_INFINITY, Ordering::Greater),
+        ] {
+            assert_eq!(int.cmp_right(float), expected, "{int} and {float}");
+            assert_eq!(
+                float.cmp_right(int),
+                expected.reverse(),
+                "{float} and {int}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mixed_pair_keeps_each_time_on_its_side() {
+        let edge = 2i64.pow(53);
+        let edge_f = edge as f64;
+        // As floats, edge + 1 rounds to edge, and edge + 3 to edge + 4.
+        assert_eq!(find_asof_backward(edge_f, &[edge + 1]), None);
+        assert_eq!(find_asof_forward(edge_f, &[edge + 1]), Some(0));
+        assert_eq!(find_asof_forward(edge_f + 4.0, &[edge + 3]), None);
+        assert_eq!(find_asof_backward(edge_f + 4.0, &[edge + 3]), Some(0));
+        assert_eq!(find_asof_backward(edge + 1, &[edge_f + 2.0]), None);
+        assert_eq!(find_asof_forward(edge + 1, &[edge_f]), None);
+        assert_eq!(find_asof_forward(edge + 3, &[edge_f + 4.0]), Some(0));
+    }
+
+    #[test]
+    fn nearest_compares_exact_distances_across_a_mixed_pair() {
+        let edge = 2i64.pow(53);
+        let edge_f = edge as f64;
+        let (inf, big) = (f64::INFINITY, f64::MAX);
+        // edge + 3 is a tie between edge and edge + 6; as a float, edge + 4 is
+        // closer to edge + 6.
+        assert_eq!(
+            find_asof_nearest(edge + 3, &[edge_f, edge_f + 6.0]),
+            Some(0)
+        );
+        // edge + 1 is closer to edge + 2 than to edge - 2; as a float, edge is
+        // a tie between them.
+        assert_eq!(
+            find_asof_nearest(edge + 1, &[edge_f - 2.0, edge_f + 2.0]),
+            Some(1)
+        );
+        assert_eq!(find_asof_nearest(5, &[4.5, 5.5]), Some(0), "a tie");
+        assert_eq!(find_asof_nearest(i64::MAX, &[-big, big]), Some(1));
+        assert_eq!(find_asof_nearest(i64::MIN + 1, &[-big, big]), Some(0));
+        assert_eq!(find_asof_nearest(edge + 1, &[-inf, big]), Some(1));
+        assert_eq!(find_asof_nearest(edge + 1, &[-big, inf]), Some(0));
+        assert_eq!(find_asof_nearest(edge + 1, &[-inf, inf]), Some(0), "a tie");
+        assert_eq!(find_asof_nearest(1, &[-inf, big]), Some(1));
+        // A float between integers, and one that is the later of them.
+        assert_eq!(find_asof_nearest(5.25, &[4i64, 6]), Some(1));
+        assert_eq!(find_asof_nearest(5.0, &[4i64, 6]), Some(0), "a tie");
+        assert_eq!(find_asof_nearest(edge_f, &[edge, edge + 1]), Some(0));
+        assert_eq!(
+            find_asof_nearest(edge_f + 2.0, &[edge + 1, edge + 2]),
+            Some(1)
+        );
+        // edge + 8 is closer to edge + 11 than to edge + 3; as floats, those
+        // are edge + 12 and edge + 4, a tie.
+        assert_eq!(
+            find_asof_nearest(edge_f + 8.0, &[edge + 3, edge + 11]),
+            Some(1)
+        );
+        // The sum of the two neighbours does not fit an i64, nor the distance.
+        assert_eq!(
+            find_asof_nearest(2f64.powi(62), &[i64::MIN, i64::MAX]),
+            Some(1)
+        );
+        assert_eq!(find_asof_nearest(0.0, &[i64::MIN, i64::MAX]), Some(1));
+        assert_eq!(
+            find_asof_nearest(-0.5, &[i64::MIN, i64::MAX]),
+            Some(0),
+            "a tie"
+        );
+    }
+
+    #[test]
+    fn scaled_floats_keep_every_bit() {
+        let scale = BigInt::from(1) << SCALE_BITS as usize;
+        assert_eq!(scaled_float(0.0), BigInt::from(0));
+        assert_eq!(scaled_float(1.5), &scale * 3 / 2);
+        assert_eq!(scaled_float(-1.5), -&scale * 3 / 2);
+        // The smallest float is 2**-1074.
+        assert_eq!(scaled_float(f64::from_bits(1)), BigInt::from(2));
+        assert_eq!(scaled_float(f64::MIN_POSITIVE), BigInt::from(1) << 53);
     }
 
     #[test]

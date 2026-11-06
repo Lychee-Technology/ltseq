@@ -336,7 +336,8 @@ class JoinMixin(LTSeqLike):
         A NULL or NaN time never matches: a right row whose time is one is
         never a match, and a left row whose time is one gets NULL right
         columns. Float times are compared as floats, fraction and infinities
-        included; an integer time column next to a float one is read as float64.
+        included; an integer time next to a float one is compared by exact
+        value, so neither is rounded.
 
         Args:
             other: Another LTSeq table

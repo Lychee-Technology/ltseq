@@ -4,7 +4,8 @@ A right row whose time is NULL or NaN is never a match, and a left row whose
 time is NULL or NaN has none, in every direction, with and without ``by=``,
 wherever the input's sort puts them. Nor does it match a NULL ``by`` key
 (#370): the brute-force reference below holds NULL keys too. Float times are
-searched as floats, so the reference also holds fractions and infinities.
+searched as floats, so the reference also holds fractions and infinities, and
+an integer time next to a float one is compared by exact value.
 """
 
 import math
@@ -131,6 +132,16 @@ def absent(t):
     return t is None or t != t
 
 
+def distance(a, b):
+    """How far apart two times are, computed without rounding or overflow.
+    Python compares an integer and a float by exact value."""
+    if a == b:
+        return Fraction(0)
+    if math.isinf(a) or math.isinf(b):
+        return INF
+    return abs(Fraction(a) - Fraction(b))
+
+
 def reference(left, right, direction, by):
     """The ``rid`` each left row matches, by left ``id``, found by checking
     every right row (contract §12.3, test row J6). Right times are unique
@@ -154,7 +165,9 @@ def reference(left, right, direction, by):
             match = back
         elif direction == "forward":
             match = fwd
-        elif back is None or (fwd is not None and fwd["t"] - t < t - back["t"]):
+        elif back is None or (
+            fwd is not None and distance(fwd["t"], t) < distance(t, back["t"])
+        ):
             match = fwd
         else:
             match = back
@@ -166,12 +179,13 @@ def reference(left, right, direction, by):
 FLOAT_TIMES = [-INF, INF, *(v / 4 for v in range(-10, 10))]
 
 
-def random_rows(rng, n, key, unique_times, time_type=pa.int64()):
+def random_rows(rng, n, key, unique_times, time_type=pa.int64(), pool=None):
     """``n`` rows with a time that is NULL about a quarter of the time, and a
     group that is NULL about a fifth of the time. Float times are fractions or
-    infinities, and NaN of either sign about a fifth of the time."""
+    infinities, and NaN of either sign about a fifth of the time. Times are
+    drawn from ``pool``, or by default from values that suit their type."""
     floats = pa.types.is_floating(time_type)
-    pool = FLOAT_TIMES if floats else range(60)
+    pool = pool or (FLOAT_TIMES if floats else range(60))
     times = rng.sample(pool, n) if unique_times else rng.choices(pool, k=n)
     if floats:
         times = [rng.choice([NAN, -NAN]) if rng.random() < 0.2 else t for t in times]
@@ -328,8 +342,8 @@ def test_negative_zero_is_zero(direction, left_time, right_time):
     [("backward", 0, 0), ("forward", 1, 1), ("nearest", 0, 1)],
 )
 def test_an_integer_time_meets_a_float_time_with_its_fraction(direction, int_left, float_left):
-    """A pair of an integer and a float column is searched as floats, so the
-    float side keeps its fraction whichever side it is on."""
+    """The float side of a pair of an integer and a float column keeps its
+    fraction whichever side it is on."""
     ints = pa.array([4, 6], pa.int64())
     floats = pa.array([4.5, 5.5], pa.float64())
     left = LTSeq.from_arrow(pa.table({"id": [0], "t": pa.array([5], pa.int64())}))
@@ -362,21 +376,10 @@ def random_float(rng):
     return rng.choice([-1, 1]) * magnitude
 
 
-def test_nearest_compares_exact_distances():
-    """``nearest`` agrees with exact rational arithmetic on triples that are
-    close to a tie, at every magnitude. One group per triple, so that one join
-    checks them all."""
-    rng = random.Random("nearest-exact")
-    triples = []
-    while len(triples) < 20_000:
-        t, step = random_float(rng), abs(random_float(rng))
-        back, fwd = t - step, t + step
-        for _ in range(rng.randint(0, 3)):
-            fwd = math.nextafter(fwd, rng.choice([-INF, INF]))
-        back, fwd = (back, fwd) if rng.random() < 0.5 else (2 * t - fwd, 2 * t - back)
-        if all(map(math.isfinite, (back, fwd))) and back < t < fwd:
-            triples.append((t, back, fwd))
-
+def assert_nearest_is_exact(triples):
+    """``nearest`` agrees with exact distances on ``(left time, right time
+    before it, right time after it)`` triples. One group per triple, so that
+    one join checks them all."""
     groups = range(len(triples))
     left = LTSeq.from_arrow(pa.table({"id": groups, "g": groups, "t": [x[0] for x in triples]}))
     right = LTSeq.from_arrow(
@@ -390,7 +393,222 @@ def test_nearest_compares_exact_distances():
     )
     joined = left.asof_join(right, on="t", by="g", strategy="nearest", is_sorted=True)
     expected = {
-        g: 2 * g if Fraction(t) - Fraction(back) <= Fraction(fwd) - Fraction(t) else 2 * g + 1
+        g: 2 * g if distance(t, back) <= distance(fwd, t) else 2 * g + 1
         for g, (t, back, fwd) in enumerate(triples)
     }
     assert matched_rids(joined) == expected
+
+
+def test_nearest_compares_exact_distances():
+    """On triples that are close to a tie, at every magnitude."""
+    rng = random.Random("nearest-exact")
+    triples = []
+    while len(triples) < 20_000:
+        t, step = random_float(rng), abs(random_float(rng))
+        back, fwd = t - step, t + step
+        for _ in range(rng.randint(0, 3)):
+            fwd = math.nextafter(fwd, rng.choice([-INF, INF]))
+        back, fwd = (back, fwd) if rng.random() < 0.5 else (2 * t - fwd, 2 * t - back)
+        if all(map(math.isfinite, (back, fwd))) and back < t < fwd:
+            triples.append((t, back, fwd))
+
+    assert_nearest_is_exact(triples)
+
+
+MAX = sys.float_info.max
+EDGE = 2**53
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("is_sorted", [True, False])
+@pytest.mark.parametrize(
+    "left_time, right_times, expected",
+    [
+        (-MAX / 2, [-INF, MAX], 1),
+        (MAX / 2, [-MAX, INF], 0),
+        (0.0, [-INF, INF], 0),
+        (-MAX / 2, [-MAX, MAX], 0),
+        (MAX / 2, [-MAX, MAX], 1),
+    ],
+)
+def test_nearest_tells_an_infinite_time_from_a_distance_that_overflows(
+    by, is_sorted, left_time, right_times, expected
+):
+    """``MAX + MAX / 2`` overflows a float, but it is finite, so it is closer
+    than an infinity. An infinity is only a tie with the other infinity."""
+    left = LTSeq.from_arrow(pa.table({"id": [0], "t": [left_time], "g": ["A"]}))
+    right = LTSeq.from_arrow(pa.table({"rid": [0, 1], "t": right_times, "g": ["A", "A"]}))
+    joined = left.asof_join(right, on="t", by=by, strategy="nearest", is_sorted=is_sorted)
+    assert matched_rids(joined) == {0: expected}
+
+
+def test_nearest_agrees_with_exact_distances_among_huge_and_infinite_times():
+    """On every triple of these times."""
+    times = [-INF, -MAX, -MAX / 2, -1.0, 0.0, 1.0, MAX / 2, MAX, INF]
+    triples = [
+        (t, back, fwd)
+        for t in times
+        for back in times
+        for fwd in times
+        if back < t < fwd
+    ]
+    assert_nearest_is_exact(triples)
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("is_sorted", [True, False])
+@pytest.mark.parametrize(
+    "left_time, right_time, backward, forward",
+    [
+        # As floats, EDGE + 1 rounds to EDGE, and EDGE + 3 to EDGE + 4, so each
+        # of these would match on a side it is not on.
+        (float(EDGE), EDGE + 1, False, True),
+        (float(EDGE + 4), EDGE + 3, True, False),
+        (EDGE + 1, float(EDGE), True, False),
+        (EDGE + 3, float(EDGE + 4), False, True),
+        # The same below zero.
+        (float(-EDGE), -EDGE - 1, True, False),
+        (-EDGE - 1, float(-EDGE), False, True),
+        # At the ends of int64, where a float rounds up past every integer.
+        (2**63 - 1, 2.0**63, False, True),
+        (2.0**63, 2**63 - 1, True, False),
+        (-(2**63), -(2.0**63), True, True),
+        # A value both hold is one time.
+        (EDGE, float(EDGE), True, True),
+        (float(EDGE), EDGE, True, True),
+        # Beyond int64, and at the infinities.
+        (2**63 - 1, MAX, False, True),
+        (-(2**63), -MAX, True, False),
+        (MAX, 2**63 - 1, True, False),
+        (2**63 - 1, INF, False, True),
+        (-INF, -(2**63), False, True),
+    ],
+)
+def test_a_mixed_pair_keeps_each_time_on_its_side(
+    by, is_sorted, left_time, right_time, backward, forward
+):
+    """Compared by exact value, so ``backward`` never matches a later right row
+    and ``forward`` never an earlier one, whichever side holds the integer."""
+    left = LTSeq.from_arrow(pa.table({"id": [0], "t": [left_time], "g": ["A"]}))
+    right = LTSeq.from_arrow(pa.table({"rid": [0], "t": [right_time], "g": ["A"]}))
+    # The only right row is the nearest one, on whichever side it is.
+    for direction, matches in [("backward", backward), ("forward", forward), ("nearest", True)]:
+        joined = left.asof_join(right, on="t", by=by, strategy=direction, is_sorted=is_sorted)
+        assert matched_rids(joined) == {0: 0 if matches else None}, direction
+
+
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize(
+    "left_time, right_times, expected",
+    [
+        # EDGE + 3 is a tie; as a float, EDGE + 4 is closer to the later time.
+        (EDGE + 3, [float(EDGE), float(EDGE + 6)], 0),
+        # EDGE + 1 is closer to the later time; as a float, EDGE is a tie.
+        (EDGE + 1, [float(EDGE - 2), float(EDGE + 2)], 1),
+        # EDGE + 8 is 5 from EDGE + 3 and 3 from EDGE + 11; as floats, those
+        # are EDGE + 4 and EDGE + 12, a tie.
+        (float(EDGE + 8), [EDGE + 3, EDGE + 11], 1),
+        (float(EDGE + 8), [EDGE + 5, EDGE + 11], 0),
+        # A distance that does not fit an integer or a float.
+        (2**63 - 1, [-MAX, MAX], 1),
+        (-(2**63) + 1, [-MAX, MAX], 0),
+        (EDGE + 1, [-INF, MAX], 1),
+        (EDGE + 1, [-MAX, INF], 0),
+        (EDGE + 1, [-INF, INF], 0),
+        (-0.5, [-(2**63), 2**63 - 1], 0),
+        (0.0, [-(2**63), 2**63 - 1], 1),
+    ],
+)
+def test_nearest_across_a_mixed_pair_compares_exact_distances(
+    by, left_time, right_times, expected
+):
+    left = LTSeq.from_arrow(pa.table({"id": [0], "t": [left_time], "g": ["A"]}))
+    right = LTSeq.from_arrow(pa.table({"rid": [0, 1], "t": right_times, "g": ["A", "A"]}))
+    joined = left.asof_join(right, on="t", by=by, strategy="nearest", is_sorted=True)
+    assert matched_rids(joined) == {0: expected}
+
+
+# Around 2**53, where an integer stops fitting a float, and at the ends of int64.
+INT_TIMES = [
+    -(2**63),
+    -EDGE - 3,
+    -EDGE - 1,
+    0,
+    5,
+    *range(EDGE - 3, EDGE + 8),
+    2**62 + 1,
+    2**63 - 1,
+]
+MIXED_FLOAT_TIMES = [
+    -INF,
+    INF,
+    -MAX,
+    MAX,
+    -(2.0**63),
+    2.0**63,
+    float(-EDGE - 2),
+    -0.5,
+    0.0,
+    4.75,
+    5.25,
+    *(float(EDGE + v) for v in range(-4, 10, 2)),
+    float(EDGE) - 0.5,
+    2.0**62,
+]
+
+
+@pytest.mark.parametrize("order", ["shuffled", "nulls first", "nulls last", "nulls between"])
+@pytest.mark.parametrize("by", [None, "g"])
+@pytest.mark.parametrize("direction", DIRECTIONS)
+@pytest.mark.parametrize("int_left", [True, False], ids=["int-left", "int-right"])
+def test_a_mixed_pair_equals_a_brute_force_reference(engine_layout, int_left, direction, by, order):
+    rng = random.Random(f"mixed-{int_left}-{direction}-{by}-{order}")
+    ints, floats = (pa.int64(), INT_TIMES), (pa.float64(), MIXED_FLOAT_TIMES)
+    (left_type, left_pool), (right_type, right_pool) = (
+        (ints, floats) if int_left else (floats, ints)
+    )
+    for _ in range(4):
+        left = random_rows(rng, rng.randint(1, 12), "id", False, left_type, left_pool)
+        right = random_rows(rng, rng.randint(1, 12), "rid", True, right_type, right_pool)
+        joined = as_table(in_order(left, order, rng), "id", left_type).asof_join(
+            as_table(in_order(right, order, rng), "rid", right_type),
+            on="t",
+            by=by,
+            strategy=direction,
+            is_sorted=order != "shuffled",
+        )
+        assert matched_rids(joined) == reference(left, right, direction, by)
+
+
+def near_tie_triples(rng, n):
+    """``n`` triples of an integer time and two floats around it, about as far
+    from it as each other, at magnitudes where the integer may not fit a float."""
+    triples = []
+    while len(triples) < n:
+        t = rng.choice([-1, 1]) * rng.randrange(2 ** rng.randint(1, 63))
+        step = abs(random_float(rng))
+        back, fwd = float(t) - step, float(t) + step
+        for _ in range(rng.randint(0, 3)):
+            fwd = math.nextafter(fwd, rng.choice([-INF, INF]))
+        if math.isfinite(back) and math.isfinite(fwd) and back < t < fwd:
+            triples.append((t, back, fwd))
+    return triples
+
+
+def test_nearest_compares_exact_distances_from_an_integer_time():
+    triples = near_tie_triples(random.Random("nearest-int-left"), 20_000)
+    assert_nearest_is_exact(triples)
+
+
+def test_nearest_compares_exact_distances_from_a_float_time():
+    """Two integers around a float, about as far from it as each other."""
+    rng = random.Random("nearest-float-left")
+    triples = []
+    while len(triples) < 20_000:
+        center = rng.choice([-1, 1]) * rng.randrange(2 ** rng.randint(1, 62))
+        t = float(center) + rng.choice([0.0, 0.25, 0.5, -0.5])
+        step = rng.randrange(1, 2 ** rng.randint(1, 62))
+        back, fwd = center - step, center + step + rng.randint(-1, 1)
+        if back < t < fwd:
+            triples.append((t, back, fwd))
+    assert_nearest_is_exact(triples)
