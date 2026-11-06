@@ -2,7 +2,8 @@
 
 A right row whose time is NULL is never a match, and a left row whose time
 is NULL has none, in every direction, with and without ``by=``, wherever
-the input's sort puts the NULLs.
+the input's sort puts the NULLs. Nor does it match a NULL ``by`` key
+(#370): the brute-force reference below holds NULL keys too.
 """
 
 import random
@@ -122,11 +123,15 @@ def test_null_times_never_match_for_each_time_type(time_type, unit, direction, e
 def reference(left, right, direction, by):
     """The ``rid`` each left row matches, by left ``id``, found by checking
     every right row (contract §12.3, test row J6). Right times are unique
-    within a group, so the match does not depend on how ties break."""
+    within a group, so the match does not depend on how ties break. A NULL
+    ``by`` key matches nothing, not even another NULL (§12.1)."""
     expected = {}
     for row in left:
         candidates = [
-            r for r in right if r["t"] is not None and (by is None or r["g"] == row["g"])
+            r
+            for r in right
+            if r["t"] is not None
+            and (by is None or (row["g"] is not None and r["g"] == row["g"]))
         ]
         t = row["t"]
         if t is None:
@@ -147,10 +152,15 @@ def reference(left, right, direction, by):
 
 
 def random_rows(rng, n, key, unique_times):
-    """``n`` rows with a time that is NULL about a quarter of the time."""
+    """``n`` rows with a time that is NULL about a quarter of the time, and a
+    group that is NULL about a fifth of the time."""
     times = rng.sample(range(60), n) if unique_times else [rng.randrange(60) for _ in range(n)]
     return [
-        {key: i, "t": None if rng.random() < 0.25 else times[i], "g": rng.choice("AB")}
+        {
+            key: i,
+            "t": None if rng.random() < 0.25 else times[i],
+            "g": rng.choice(["A", "B", "A", "B", None]),
+        }
         for i in range(n)
     ]
 

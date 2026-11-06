@@ -2,6 +2,8 @@
 
 import math
 
+import numpy as np
+import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
@@ -152,3 +154,154 @@ class TestAsofErrors:
         right = make_table([{"rt": 5, "g": "A", "v": 1}], {"rt": "int64", "g": "string", "v": "int64"})
         r = left.asof_join(right, left_on="lt", right_on="rt", by="g").to_dicts()
         assert r[0]["v"] == 1
+
+
+class TestAsofByKeyEquality:
+    """``by`` keys follow ``join``'s equality (#370, contract §12.1 and
+    §12.3): a NULL key matches nothing, not even NULL, NaN matches NaN and
+    ``-0.0`` matches ``0.0``."""
+
+    @pytest.mark.parametrize("strategy", ["backward", "forward", "nearest"])
+    def test_the_issue_reproduction(self, strategy):
+        left = LTSeq.from_arrow(pa.table({"t": [10, 10], "s": pa.array([None, "A"], pa.string())}))
+        right = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "t": [10, 15],
+                    "s": pa.array([None, "A"], pa.string()),
+                    "v": ["null-key", "A"],
+                }
+            )
+        )
+        r = left.asof_join(right, on="t", by="s", strategy=strategy).to_dicts()
+        expected_a = {"backward": None, "forward": "A", "nearest": "A"}[strategy]
+        assert [(x["s"], x["v"]) for x in r] == [(None, None), ("A", expected_a)]
+
+    @pytest.mark.parametrize("null_in", ["s", "k", "both"])
+    def test_a_null_in_any_of_several_by_columns_never_matches(self, null_in):
+        """The right table holds a row with the same NULL, and one whose
+        other key is equal, so neither half of the key alone decides."""
+        s = None if null_in in ("s", "both") else "A"
+        k = None if null_in in ("k", "both") else 1
+        left = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "id": [0, 1],
+                    "t": [10, 10],
+                    "s": pa.array([s, "A"], pa.string()),
+                    "k": pa.array([k, 1], pa.int64()),
+                }
+            )
+        )
+        right = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "t": [1, 2, 3, 4],
+                    "s": pa.array([s, None, "A", "A"], pa.string()),
+                    "k": pa.array([k, 1, None, 1], pa.int64()),
+                    "v": ["same-nulls", "null-s", "null-k", "A1"],
+                }
+            )
+        )
+        r = left.asof_join(right, on="t", by=["s", "k"]).to_dicts()
+        assert {x["id"]: x["v"] for x in r} == {0: None, 1: "A1"}
+
+    def test_an_all_null_by_column_never_matches(self):
+        left = LTSeq.from_arrow(pa.table({"t": [10, 10], "g": pa.nulls(2, pa.string())}))
+        right = LTSeq.from_arrow(
+            pa.table({"t": [5, 6], "g": pa.nulls(2, pa.string()), "v": [1, 2]})
+        )
+        r = left.asof_join(right, on="t", by="g").to_dicts()
+        assert [x["v"] for x in r] == [None, None]
+
+    @pytest.mark.parametrize("float_type", [np.float32, np.float64])
+    def test_negative_zero_matches_zero(self, float_type):
+        left = LTSeq.from_arrow(
+            pa.table({"id": [0, 1], "t": [10, 10], "g": np.array([0.0, -0.0], float_type)})
+        )
+        right = LTSeq.from_arrow(
+            pa.table({"t": [5, 6], "g": np.array([-0.0, 1.0], float_type), "v": ["zero", "one"]})
+        )
+        r = left.asof_join(right, on="t", by="g").to_dicts()
+        assert {x["id"]: x["v"] for x in r} == {0: "zero", 1: "zero"}
+
+    @pytest.mark.parametrize(
+        "float_type, uint_type, nans",
+        [
+            (np.float32, np.uint32, [0x7FC00000, 0xFFC00000, 0x7FC00001]),
+            (
+                np.float64,
+                np.uint64,
+                [0x7FF8000000000000, 0xFFF8000000000000, 0x7FF8000000000001],
+            ),
+        ],
+        ids=["float32", "float64"],
+    )
+    def test_nan_matches_nan_whatever_its_bits(self, float_type, uint_type, nans):
+        """A quiet NaN, a negative one and one with a payload are all NaN."""
+        bits = np.array(nans, uint_type).view(float_type)
+        left = LTSeq.from_arrow(
+            pa.table({"id": [0, 1, 2], "t": [10, 10, 10], "g": pa.array(bits)})
+        )
+        right = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "t": [5, 6],
+                    "g": pa.array(np.array([bits[1], 1.0], float_type)),
+                    "v": ["nan", "one"],
+                }
+            )
+        )
+        r = left.asof_join(right, on="t", by="g").to_dicts()
+        assert {x["id"]: x["v"] for x in r} == {0: "nan", 1: "nan", 2: "nan"}
+
+    def test_a_float_key_still_tells_values_apart(self):
+        left = LTSeq.from_arrow(pa.table({"id": [0, 1], "t": [10, 10], "g": [1.5, 2.5]}))
+        right = LTSeq.from_arrow(
+            pa.table({"t": [5, 6], "g": [2.5, float("nan")], "v": ["2.5", "nan"]})
+        )
+        r = left.asof_join(right, on="t", by="g").to_dicts()
+        assert {x["id"]: x["v"] for x in r} == {0: None, 1: "2.5"}
+
+    @pytest.mark.parametrize(
+        "float_type, uint_type, nans",
+        [
+            (np.float32, np.uint32, [0x7FC00000, 0xFFC00001]),
+            (np.float64, np.uint64, [0x7FF8000000000000, 0xFFF8000000000001]),
+        ],
+        ids=["float32", "float64"],
+    )
+    def test_dictionary_encoded_float_keys_follow_the_same_equality(
+        self, engine_layout, float_type, uint_type, nans
+    ):
+        """A dictionary-encoded float key is keyed by its value, so ``-0.0``
+        meets ``0.0`` and NaNs of different bits meet there too (#370 R1-F1),
+        and the output keeps each side's own values."""
+        left_nan, right_nan = np.array(nans, uint_type).view(float_type)
+        left_g = pa.array(np.array([0.0, left_nan, 1.5], float_type)).dictionary_encode()
+        right_g = pa.array(np.array([-0.0, right_nan, 2.5], float_type)).dictionary_encode()
+        left = LTSeq.from_arrow(pa.table({"id": [0, 1, 2], "t": [10, 10, 10], "g": left_g}))
+        right = LTSeq.from_arrow(pa.table({"t": [5, 6, 7], "g": right_g, "v": ["zero", "nan", "2.5"]}))
+        r = left.asof_join(right, on="t", by="g").to_arrow().sort_by("id")
+        assert r.column("v").to_pylist() == ["zero", "nan", None]
+        g = r.column("g").combine_chunks()
+        if pa.types.is_dictionary(g.type):
+            g = g.dictionary_decode()
+        g = g.to_numpy(zero_copy_only=False).astype(float_type)
+        assert np.signbit(g[0]) == np.False_ and g[0] == 0.0
+        assert g[1].view(uint_type) == nans[0]
+        assert g[2] == float_type(1.5)
+
+    def test_dictionary_encoded_float_keys_keep_nulls_out(self, engine_layout):
+        """A NULL in a dictionary key, or a NULL value its key points at,
+        still matches nothing."""
+        left_g = pa.DictionaryArray.from_arrays(
+            pa.array([0, None, 1], pa.int32()), pa.array([-0.0, None], pa.float64())
+        )
+        right_g = pa.DictionaryArray.from_arrays(
+            pa.array([0, 1, None], pa.int32()), pa.array([0.0, None], pa.float64())
+        )
+        left = LTSeq.from_arrow(pa.table({"id": [0, 1, 2], "t": [10, 10, 10], "g": left_g}))
+        right = LTSeq.from_arrow(pa.table({"t": [5, 6, 7], "g": right_g, "v": ["zero", "nv", "nk"]}))
+        r = left.asof_join(right, on="t", by="g").to_arrow().sort_by("id")
+        assert r.column("v").to_pylist() == ["zero", None, None]
