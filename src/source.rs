@@ -29,6 +29,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::common::{exec_datafusion_err, DataFusionError, Result};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::file_format::options::ReadOptions;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::datasource::source_as_provider;
 use datafusion::execution::cache::cache_manager::FileMetadataCache;
@@ -46,6 +47,7 @@ use futures_util::TryStreamExt;
 use url::{ParseError, Url};
 
 use crate::python_glob;
+use crate::stored_zones;
 
 /// Why a reader built no table.
 #[derive(Debug)]
@@ -72,7 +74,8 @@ impl From<DataFusionError> for ReadError {
 /// `path` is a file, a directory whose files with the format's extension
 /// are read, or a glob ([`locate`]). The table lists each file by its own
 /// URL, so an execution looks up each file and no directory. The schema is
-/// inferred from these files as DataFusion infers it from its listing;
+/// inferred from these files as DataFusion infers it from its listing, with
+/// the zones it leaves out of a Parquet file's schema ([`stored_zones`]);
 /// `options` carry none, as LTSeq's readers give none.
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
@@ -107,7 +110,10 @@ pub(crate) async fn read_files<'a>(
     }
     // An empty file cannot add to the schema, and may fail when read for it.
     let sized: Vec<ObjectMeta> = files.iter().filter(|f| f.size > 0).cloned().collect();
-    let schema = options.format.infer_schema(&state, &store, &sized).await?;
+    let schema = match options.format.downcast_ref::<ParquetFormat>() {
+        Some(parquet) => stored_zones::infer_schema(parquet, &state, &store, &sized).await?,
+        None => options.format.infer_schema(&state, &store, &sized).await?,
+    };
 
     let paths = files
         .iter()
