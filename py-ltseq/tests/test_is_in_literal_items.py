@@ -10,6 +10,13 @@ list that holds NULL, is NULL.
 
 from __future__ import annotations
 
+import datetime
+import enum
+import zoneinfo
+from decimal import Decimal
+
+import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -311,3 +318,159 @@ def test_a_nested_membership_item_keeps_its_list():
     assert rewrite_in(bools_message) == "(r.x == r.y.is_in([True])) | r.x.is_in([False])"
     # x == y on [T, T, F, F] and [T, F, T, F], or x is False.
     assert run_rewrite(bools(), bools_message) == [True, False, True, True]
+
+
+def test_the_derived_column_takes_a_name_the_table_does_not_have():
+    """An unread column `v` is not overwritten by the offered derivation
+    (R3-F1 of #294's review)."""
+    from ltseq import rand
+
+    t = floats().derive(v=lambda r: r.y + 5)
+    message = refusal(t, lambda r: rand().round(0).is_in([r.y, 1.0]))
+    name, derivation, rewrite = derived_in(message)
+    assert (name, derivation) == ("v1", "rand().round(0)")
+    assert rewrite == "(r.v1 == r.y) | r.v1.is_in([1.0])"
+    scope = {"rand": rand}
+    derived = t.derive(**{name: eval(f"lambda r: {derivation}", scope)})
+    assert column(derived, "v") == [5.0] * 200
+    got = column(derived.derive(m=eval(f"lambda r: {rewrite}", scope)))
+    assert got == [True] * len(got)
+
+
+def test_outside_a_capture_the_message_asks_for_a_fresh_name():
+    """Built outside a row lambda, the expression has no table, so the
+    message cannot know `v` is free and says to pick a name that is."""
+    from ltseq import rand
+    from ltseq.expr import ColumnExpr
+
+    with pytest.raises(TypeError) as raised:
+        rand().round(0).is_in([ColumnExpr("y"), 1.0])
+    message = str(raised.value)
+    assert (
+        "t.derive(v=lambda r: rand().round(0)) (if the table already has a column v, "
+        "use a name it does not have), then compare that column with ==: "
+        "(r.v == r.y) | r.v.is_in([1.0])."
+    ) in message
+
+
+class Small(enum.IntEnum):
+    THREE = 3
+
+
+class Text(str):
+    pass
+
+
+UTC = datetime.timezone.utc
+
+
+def pair(kind: pa.DataType, x: list, y: list) -> LTSeq:
+    return LTSeq.from_arrow(
+        pa.table({"k": list(range(len(x))), "x": pa.array(x, kind), "y": pa.array(y, kind)})
+    ).sort("k")
+
+
+# Literal items of each supported kind beside an expression item: the table,
+# the literals, and how the rewrite spells them (R3-F2 of #294's review). A
+# numpy number reads as the Python number it is encoded as.
+SPELLED = {
+    "numpy float32 nan": (
+        lambda: pair(pa.float64(), [0.0, float("nan"), 1.0, None], [1.0, None, 2.0, 3.0]),
+        [np.float32(float("nan"))],
+        "float('nan')",
+    ),
+    "numpy infinities": (
+        lambda: pair(pa.float64(), [float("inf"), float("-inf"), 1.0, None], [1.0, None, 2.0, 3.0]),
+        [np.float64(float("inf")), np.float16(float("-inf"))],
+        "float('inf'), float('-inf')",
+    ),
+    "numpy float32": (
+        lambda: pair(pa.float32(), [1.1, 2.0, 1.0, None], [2.0, None, 1.0, 3.0]),
+        [np.float32(1.1)],
+        "1.100000023841858",
+    ),
+    "numpy integers": (lambda: table(), [np.int16(3), np.uint8(2)], "3, 2"),
+    "int enum": (lambda: table(), [Small.THREE], "3"),
+    "numpy bool": (
+        lambda: pair(pa.bool_(), [True, True, False, None], [True, False, False, True]),
+        [np.True_],
+        "True",
+    ),
+    "numpy and subclassed str": (
+        lambda: pair(pa.string(), ["a", "b", "c", None], ["c", None, "c", "a"]),
+        [np.str_("a"), Text("b")],
+        "'a', 'b'",
+    ),
+    "decimal": (
+        lambda: pair(
+            pa.decimal128(5, 2),
+            [Decimal("1.50"), Decimal("2.00"), Decimal("3.25"), None],
+            [Decimal("2.00"), None, Decimal("1.00"), Decimal("1.50")],
+        ),
+        [Decimal("1.50")],
+        "Decimal('1.50')",
+    ),
+    "date": (
+        lambda: pair(
+            pa.date32(),
+            [datetime.date(2020, 1, 1), datetime.date(2020, 1, 2), datetime.date(2020, 1, 3), None],
+            [datetime.date(2020, 1, 2), None, datetime.date(2020, 1, 3), datetime.date(2020, 1, 1)],
+        ),
+        [datetime.date(2020, 1, 1)],
+        "datetime.date(2020, 1, 1)",
+    ),
+    "datetime": (
+        lambda: pair(
+            pa.timestamp("us"),
+            [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 1, 2), None],
+            [datetime.datetime(2020, 1, 2), None, datetime.datetime(2020, 1, 1)],
+        ),
+        [datetime.datetime(2020, 1, 1)],
+        "datetime.datetime(2020, 1, 1, 0, 0)",
+    ),
+    "datetime in UTC": (
+        lambda: pair(
+            pa.timestamp("us", tz="UTC"),
+            [datetime.datetime(2020, 1, 1, tzinfo=UTC), datetime.datetime(2020, 1, 2, tzinfo=UTC), None],
+            [datetime.datetime(2020, 1, 2, tzinfo=UTC), None, datetime.datetime(2020, 1, 1, tzinfo=UTC)],
+        ),
+        [datetime.datetime(2020, 1, 1, tzinfo=UTC)],
+        "datetime.datetime(2020, 1, 1, 0, 0, tzinfo=datetime.timezone.utc)",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", SPELLED)
+def test_each_supported_literal_is_spelled_as_python_that_runs(case):
+    make, literals, spelled = SPELLED[case]
+    t = make()
+    message = refusal(t, lambda r: r.x.is_in([r.y, *literals]))
+    rewrite = rewrite_in(message)
+    assert rewrite == f"(r.x == r.y) | r.x.is_in([{spelled}])"
+    # Each spelling, evaluated, encodes as the literal it spells.
+    scope = {"Decimal": Decimal, "datetime": datetime}
+    for read, value in zip(eval(f"[{spelled}]", scope), literals, strict=True):
+        assert repr(LiteralExpr(read).serialize()) == repr(LiteralExpr(value).serialize())
+    # The rewrite, run, gives what the refused list means.
+    got = column(t.derive(m=eval(f"lambda r: {rewrite}", scope)))
+    assert got == column(t.derive(m=lambda r: (r.x == r.y) | r.x.is_in(literals)))
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        np.datetime64("2020-01-01T00:00:00"),
+        pd.Timestamp("2020-01-01 00:00:00.000000001"),
+        datetime.datetime(2020, 1, 1, tzinfo=zoneinfo.ZoneInfo("Europe/Paris")),
+    ],
+    ids=["numpy datetime64", "pandas Timestamp", "zoneinfo datetime"],
+)
+def test_a_literal_without_a_faithful_spelling_gets_the_generic_rewrite(literal):
+    t = pair(pa.timestamp("ns", tz="UTC"), [None], [None])
+    message = refusal(t, lambda r: r.x.is_in([r.y, literal]))
+    assert "compare it with == and join the tests with |, as in (r.x == r.y) | r.x.is_in([3])." in message
+
+
+def test_an_item_with_an_unspellable_literal_gets_the_generic_rewrite():
+    message = refusal(table(), lambda r: r.x.is_in([r.y + LiteralExpr(np.datetime64("2020-01-01")), 3]))
+    assert "as in (r.x == r.y) | r.x.is_in([3])." in message

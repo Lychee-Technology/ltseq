@@ -4,7 +4,11 @@ import keyword
 import math
 import numbers
 from abc import ABC, abstractmethod
-from typing import Any, NoReturn, TYPE_CHECKING, cast
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any, Iterable, Iterator, NoReturn, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .types import CallExpr
@@ -588,12 +592,46 @@ _OPERATOR_SYMBOLS = {
 _REFLECTED_OPERATORS = {"Add", "Sub", "Mul", "Div", "FloorDiv", "Mod"}
 
 
-def _literal_text(value: Any) -> str:
-    """A literal value as Python source: ``repr``, except for the non-finite
-    floats, whose ``repr`` (``nan``, ``inf``) is not an expression."""
-    if isinstance(value, float) and not math.isfinite(value):
-        return f"float({str(value)!r})"
-    return repr(value)
+def _literal_text(value: Any) -> str | None:
+    """A literal value as Python source that encodes as ``value`` does, or
+    None when it has none (R3-F2 of #294's review).
+
+    The spelling follows the literal's encoding (``_encode_literal``), not
+    ``repr``: a numpy number is the Python number it encodes as
+    (``numpy.float32(nan)`` reads ``float('nan')``, as ``np.float32(nan)``
+    is not an expression), a non-finite float is ``float('nan')``, and an
+    ``int`` or ``str`` subclass is its plain value. ``Decimal``, ``date``
+    and ``datetime`` keep their ``repr``, which the ``decimal`` and
+    ``datetime`` imports evaluate; a ``datetime`` is spelled only with no
+    time zone or a fixed ``datetime.timezone``. Anything else (another time
+    zone, a pandas or numpy timestamp, an unsupported type) has no spelling.
+    """
+    if value is None:
+        return "None"
+    kind = type(value)
+    if kind.__module__ == "numpy":
+        # As _encode_literal: numpy.bool_ is not a bool, and
+        # numpy.timedelta64 registers as numbers.Integral.
+        if kind.__name__ in ("bool_", "bool"):
+            return repr(bool(value))
+        if kind.__name__ in ("datetime64", "timedelta64"):
+            return None
+    if isinstance(value, bool):
+        return repr(bool(value))
+    if isinstance(value, numbers.Integral):
+        return repr(int(value))
+    if isinstance(value, numbers.Real) and not isinstance(value, numbers.Rational):
+        number = float(value)
+        return repr(number) if math.isfinite(number) else f"float({str(number)!r})"
+    if isinstance(value, str):
+        return repr(str(value))
+    if kind is Decimal:
+        return f"Decimal({str(value)!r})"
+    if kind is date:
+        return repr(value)
+    if isinstance(value, datetime) and kind is datetime and type(value.tzinfo) in (type(None), timezone):
+        return repr(value)
+    return None
 
 
 def _is_null_literal(value: Any) -> bool:
@@ -618,6 +656,8 @@ def _spell(value: Any, *, as_expr: bool = True) -> str | None:
     if isinstance(value, LiteralExpr) or not isinstance(value, Expr):
         literal = value.value if isinstance(value, LiteralExpr) else value
         text = _literal_text(literal)
+        if text is None:
+            return None
         return f"LiteralExpr({text})" if as_expr else text
     if isinstance(value, ColumnExpr):
         name = value.name
@@ -718,6 +758,28 @@ def _expr_text(value: Any) -> str:
 # faithful spelling.
 _GENERIC_IS_IN_REWRITE = "(r.x == r.y) | r.x.is_in([3])"
 
+# The column names of the table whose row lambda is being captured, or None
+# outside a capture. An is_in error reads them to name a new column that
+# derive() would add, not replace (R3-F1 of #294's review).
+_captured_columns: ContextVar[frozenset[str] | None] = ContextVar(
+    "ltseq_captured_columns", default=None
+)
+
+
+@contextmanager
+def _capturing(columns: Iterable[str]) -> Iterator[None]:
+    """Mark the columns of the table a row lambda is captured against."""
+    token = _captured_columns.set(frozenset(columns))
+    try:
+        yield
+    finally:
+        _captured_columns.reset(token)
+
+
+def _fresh_name(taken: set[str]) -> str:
+    """``v``, or the first of ``v1``, ``v2``, ... not in ``taken``."""
+    return next(n for n in ("v", *(f"v{i}" for i in range(1, len(taken) + 2))) if n not in taken)
+
 
 def _expression_item_error(receiver: "Expr", items: list[Any], position: int) -> TypeError:
     """The error for an ``is_in`` item that is an expression (#294), with the
@@ -728,18 +790,25 @@ def _expression_item_error(receiver: "Expr", items: list[Any], position: int) ->
     they are; when one of them has no faithful spelling, the message gives
     the pattern on columns ``r.x`` and ``r.y`` instead. A receiver that
     holds ``rand()`` and would be written more than once is derived once
-    first, as each copy would draw its own value (R2-F1 of #294's review).
+    first, as each copy would draw its own value (R2-F1 of #294's review),
+    into a column the table does not have; when the table is unknown (the
+    expression was not built in a row lambda), the message says to pick
+    such a name (R3-F1).
     """
     from .types import ColumnExpr, LiteralExpr
 
     item = _expr_text(items[position])
     subject = _spell(receiver)
     derived = None
+    fresh = None
     literal = [not isinstance(v, Expr) or isinstance(v, LiteralExpr) for v in items]
     if subject is not None and _is_volatile(receiver) and (literal.count(False) + any(literal)) > 1:
-        taken = _column_names(receiver).union(*(_column_names(v) for v in items))
-        name = next(n for n in ("v", *(f"v{i}" for i in range(1, len(taken) + 2))) if n not in taken)
+        columns = _captured_columns.get()
+        taken = _column_names(receiver).union(*(_column_names(v) for v in items), columns or ())
+        name = _fresh_name(taken)
         derived = f"t.derive({name}=lambda r: {subject})"
+        if columns is None:
+            fresh = f" (if the table already has a column {name}, use a name it does not have)"
         subject = _spell(ColumnExpr(name))
     tests: list[str | None] = []
     for v, lit in zip(items, literal):
@@ -747,16 +816,17 @@ def _expression_item_error(receiver: "Expr", items: list[Any], position: int) ->
             other = _spell(v)
             tests.append(None if subject is None or other is None else f"({subject} == {other})")
     if any(literal):
-        listed = ", ".join(
-            _literal_text(v.value if isinstance(v, LiteralExpr) else v) for v, lit in zip(items, literal) if lit
-        )
-        tests.append(None if subject is None else f"{subject}.is_in([{listed}])")
+        texts = [_literal_text(v.value if isinstance(v, LiteralExpr) else v) for v, lit in zip(items, literal) if lit]
+        if subject is None or any(t is None for t in texts):
+            tests.append(None)
+        else:
+            tests.append(f"{subject}.is_in([{', '.join(cast(list[str], texts))}])")
     if any(t is None for t in tests):
         how = f"compare it with == and join the tests with |, as in {_GENERIC_IS_IN_REWRITE}"
     elif derived is not None:
         how = (
             "derive the value once into a new column, as it holds rand() and each copy "
-            f"of it would draw its own value: {derived}, then compare that column with ==: "
+            f"of it would draw its own value: {derived}{fresh or ''}, then compare that column with ==: "
             f"{' | '.join(cast(list[str], tests))}"
         )
     else:

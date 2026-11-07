@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, NoReturn, SupportsFloat, SupportsIndex, overload
@@ -106,6 +107,10 @@ def ntile(n: int) -> CallExpr: ...
 
 # Shared by Expr.__bool__ and the group dialect (GroupExpr / FilterExpr).
 def bool_context_error(example: str) -> TypeError: ...
+
+# Marks the columns of the table a row lambda is captured against, for the
+# is_in refusal's new-column name (#294).
+def _capturing(columns: Iterable[str]) -> AbstractContextManager[None]: ...
 
 # Math
 def sqrt(x: Expr) -> CallExpr: ...
