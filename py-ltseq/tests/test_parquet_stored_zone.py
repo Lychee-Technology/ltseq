@@ -99,7 +99,9 @@ def test_nested_column_keeps_its_zone_and_instants(tmp_path, stored, expected, v
 
     assert column_type(got) == expected
     assert column_type(got) == pq.read_schema(path).field("a").type
-    assert got.column("a").to_pylist() == pq.read_table(path).column("a").to_pylist()
+    # The written array, not `pq.read_table`: pyarrow 25 cannot read back a
+    # fixed-size list with a null (fixed in 26), and seconds to ms is exact.
+    assert got.column("a").to_pylist() == pa.array(values, stored).to_pylist()
 
 
 @pytest.mark.parametrize(
