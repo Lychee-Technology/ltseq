@@ -14,14 +14,16 @@ A zero that becomes a literal only in the optimizer is merged the same
 way: a value of `now()`, which DataFusion reads when the query runs, a
 constant ltseq did not take for one, or a derived column, whose value
 DataFusion writes in its place when it moves a filter below the
-projection. `r.x.is_in([now().dt.diff(now(), unit="second"), 1.0, 2.0,
-3.0])` missed the -0.0 rows. Negating `!=` gives `==`, so `~((r.x != -0.0)
+projection. `(r.x == now().dt.diff(now(), unit="second")) | (r.x == 1.0)
+| ...` missed the -0.0 rows. Negating `!=` gives `==`, so `~((r.x != -0.0)
 & (r.x != 1.0) & ...)` did too.
 
 The lists cross the three-item threshold and hold zeros of both signs, an
-integer zero, NULL, NaN, a column and zeros DataFusion folds late; the
-receivers are a column, a CASE and a computed value, of each float type,
-and values of `rand()`, which must be named once.
+integer zero, NULL and NaN; the receivers are a column, a CASE and a
+computed value, of each float type, and values of `rand()`, which must be
+named once. `is_in` takes literal items only (#294), so a column and zeros
+DataFusion folds late are items of the equivalent `==` joined by `|` and
+`!=` joined by `&`, which the simplifier merges into the same lists.
 The reference is SQL's IN over Python's `==` in three-valued logic, with
 NaN equal to NaN: every NaN here has the same bits, and NaNs of different
 bits are #290's.
@@ -58,7 +60,7 @@ def clock_zero():
 
 # Items that are expressions, with their value on row `k`. Besides `y`,
 # zeros DataFusion folds after lowering: from the clock, and a constant
-# holding an IN.
+# holding an IN. `is_in` refuses them (#294); they are compared with `==`.
 ITEMS = {
     Y_ITEM: (lambda r: r.y, lambda k: Y[k]),
     "now 0": (lambda r: clock_zero(), lambda k: 0.0),
@@ -118,6 +120,11 @@ def table(x_type: pa.DataType) -> LTSeq:
     ).sort("k")
 
 
+def literal(items: list) -> bool:
+    """Whether `is_in` takes `items`: no item is an expression (#294)."""
+    return not any(isinstance(item, str) for item in items)
+
+
 def written(r, items: list) -> list:
     return [ITEMS[item][0](r) if isinstance(item, str) else item for item in items]
 
@@ -172,10 +179,11 @@ def outcomes(x_type: str, receiver: str, lists: list[list]) -> tuple[dict, dict]
     for items in lists:
         reference = expected(receiver, items)
         name = f"{items}"
-        columns[f"in {name}"] = lambda r, items=items: recv(r).is_in(written(r, items))
-        wanted[f"in {name}"] = reference
-        columns[f"not in {name}"] = lambda r, items=items: ~recv(r).is_in(written(r, items))
-        wanted[f"not in {name}"] = [negation(v) for v in reference]
+        if literal(items):
+            columns[f"in {name}"] = lambda r, items=items: recv(r).is_in(items)
+            wanted[f"in {name}"] = reference
+            columns[f"not in {name}"] = lambda r, items=items: ~recv(r).is_in(items)
+            wanted[f"not in {name}"] = [negation(v) for v in reference]
         # `== None` is IS NULL (#154), not an equality with NULL.
         if None in items:
             continue
@@ -197,8 +205,7 @@ ENCODED = ["dictionary", "run_end_encoded"]
 
 def compared_by_column_equality(x_type: str, items: list) -> bool:
     """DataFusion's `=` between an encoded float column and a float column
-    compares zeros by sign (#292), and an item that is a column is compared
-    with `=`."""
+    compares zeros by sign (#292)."""
     return x_type in ENCODED and Y_ITEM in items
 
 
@@ -210,17 +217,9 @@ def test_membership_and_equalities_follow_the_reference(x_type, receiver):
     assert {name: got[name] for name in wanted if got[name] != wanted[name]} == {}
 
 
-@pytest.mark.parametrize("x_type", ENCODED)
-def test_an_encoded_column_meets_a_column_item_as_equality_does(x_type):
-    """Where `==` itself is wrong (#292), `is_in` still agrees with it."""
-    lists = [items for items in LISTS if compared_by_column_equality(x_type, items) and None not in items]
-    got, _ = outcomes(x_type, "column", lists)
-    assert {f"{items}" for items in lists if got[f"in {items}"] != got[f"or {items}"]} == set()
-
-
 @pytest.mark.xfail(strict=True, reason="#292: `=` on an encoded float column compares zeros by sign")
 @pytest.mark.parametrize("x_type", ENCODED)
-def test_an_encoded_column_meets_a_column_item_as_the_reference_does(x_type):
+def test_an_encoded_column_meets_a_column_as_the_reference_does(x_type):
     lists = [items for items in LISTS if compared_by_column_equality(x_type, items)]
     got, wanted = outcomes(x_type, "column", lists)
     assert {name: got[name] for name in wanted if got[name] != wanted[name]} == {}
@@ -251,7 +250,8 @@ def test_filter_keeps_both_zeros(data_layout, receiver, items):
     def kept(predicate):
         return t.filter(predicate).to_arrow().column("k").to_pylist()
 
-    assert kept(lambda r: recv(r).is_in(written(r, items))) == keep
+    if literal(items):
+        assert kept(lambda r: recv(r).is_in(items)) == keep
     if None not in items:
         assert kept(lambda r: any_equal(recv(r), written(r, items))) == keep
         assert kept(lambda r: ~all_unequal(recv(r), written(r, items))) == keep
@@ -268,8 +268,11 @@ COMBINED_LISTS = {
 }
 
 
-@pytest.mark.parametrize("lists", COMBINED_LISTS)
-@pytest.mark.parametrize("form", ["is_in", "|"])
+@pytest.mark.parametrize(
+    "form, lists",
+    # Only `==` takes the zeros that fold late (#294).
+    [("is_in", "literal"), ("|", "literal"), ("|", "folded late")],
+)
 @pytest.mark.parametrize("combine", ["and", "or"])
 @pytest.mark.parametrize("negate", [(False, False), (False, True), (True, True)], ids=str)
 def test_lists_the_optimizer_combines(combine, negate, form, lists):
@@ -279,7 +282,7 @@ def test_lists_the_optimizer_combines(combine, negate, form, lists):
     lists on one column comparing their items bitwise; none of it may decide
     a zero by its sign."""
     test = {
-        "is_in": lambda r, items: r.x.is_in(written(r, items)),
+        "is_in": lambda r, items: r.x.is_in(items),
         "|": lambda r, items: any_equal(r.x, written(r, items)),
     }[form]
     join = {"and": operator.and_, "or": operator.or_}[combine]
@@ -407,7 +410,6 @@ STAGED = {
 }
 STAGED_ITEMS = [1.0, 2.5, 7.0]
 STAGED_FORMS = {
-    "x.is_in([z, ...])": lambda r: r.x.is_in([r.z, *STAGED_ITEMS]),
     "x == z | ...": lambda r: any_equal(r.x, [r.z, *STAGED_ITEMS]),
     "z == x | ...": lambda r: functools.reduce(operator.or_, [r.z == r.x, *(r.x == v for v in STAGED_ITEMS)]),
     "~(x != z & ...)": lambda r: ~all_unequal(r.x, [r.z, *STAGED_ITEMS]),
@@ -461,7 +463,7 @@ def test_two_columns_holding_zeros_of_either_sign():
     the simplifier before they are split, and `-0.0` and `0.0` are different
     items there."""
     t = table(pa.float64()).derive(a=lambda r: LiteralExpr(-0.0), b=lambda r: LiteralExpr(0.0))
-    kept = t.filter(lambda r: r.x.is_in([r.a, 1.0, 2.5, 7.0]) & r.x.is_in([r.b, 3.0, 4.0, 5.0]))
+    kept = t.filter(lambda r: any_equal(r.x, [r.a, 1.0, 2.5, 7.0]) & any_equal(r.x, [r.b, 3.0, 4.0, 5.0]))
     assert kept.to_arrow().column("k").to_pylist() == [k for k, v in enumerate(X) if v == 0.0]
 
 
@@ -475,7 +477,6 @@ SPELLINGS = {
     "v == x": lambda x, v: v == x,
     "x != v": lambda x, v: x != v,
     "v != x": lambda x, v: v != x,
-    "x.is_in([v, ...])": lambda x, v: x.is_in([v, 1.0, 2.5, 7.0]),
 }
 
 
@@ -505,14 +506,6 @@ VOLATILE = {
     "0.0 or 1.0": (lambda: rand().round(0), [0.0, 1.0]),
     "-0.0, 0.0 or 1.0": (lambda: if_else(rand() < 0.5, (rand() - 0.5) * 0.0, 1.0), [-0.0, 0.0, 1.0]),
 }
-# Items, with their value: float columns holding one value each, and zeros
-# DataFusion folds after lowering.
-VOLATILE_ITEMS = {
-    "r.nz": (lambda r: r.nz, -0.0),
-    "r.z": (lambda r: r.z, 0.0),
-    "r.one": (lambda r: r.one, 1.0),
-    **{late: (ITEMS[late][0], ITEMS[late][1](0)) for late in FOLDED_LATE},
-}
 VOLATILE_COMPARISONS = {
     "== 0.0": (lambda r, x: x == 0.0, lambda v: equal(v, 0.0)),
     "== -0.0": (lambda r, x: x == -0.0, lambda v: equal(v, 0.0)),
@@ -529,10 +522,6 @@ VOLATILE_LISTS = [
     [-0.0, 1.0, 2.5, 7.0],
     [0.0, 5.0, 6.0, 7.0],
     [None, 0.0, 1.0, 2.5],
-    ["r.nz", "r.one"],
-    ["r.z", "r.one", 2.5, 7.0],
-    ["r.nz", 1.0, 2.5, 7.0],
-    *([late, 1.0, 2.5, 7.0] for late in FOLDED_LATE),
 ]
 
 
@@ -542,13 +531,12 @@ def volatile_tests() -> dict:
     for items in VOLATILE_LISTS:
 
         def in_list(r, x, items=items):
-            return x.is_in([VOLATILE_ITEMS[i][0](r) if isinstance(i, str) else i for i in items])
+            return x.is_in(items)
 
-        value_items = [VOLATILE_ITEMS[i][1] if isinstance(i, str) else i for i in items]
-        tests[f"in {items}"] = (in_list, lambda v, items=value_items: member(v, items))
+        tests[f"in {items}"] = (in_list, lambda v, items=items: member(v, items))
         tests[f"not in {items}"] = (
             lambda r, x, in_list=in_list: ~in_list(r, x),
-            lambda v, items=value_items: negation(member(v, items)),
+            lambda v, items=items: negation(member(v, items)),
         )
     return tests
 
@@ -557,21 +545,14 @@ VOLATILE_TESTS = volatile_tests()
 VOLATILE_ROWS = 400
 
 
-def decided_by_sign(receiver: str, name: str) -> bool:
-    """A list on a volatile value keeps an item that varies by row as
-    written, so it compares that item with a zero by sign (#298)."""
-    _, domain = VOLATILE[receiver]
-    return 0.0 in domain and ("'r.nz'" in name or "'r.z'" in name)
-
-
-def constant_tests(receiver: str, *, by_sign: bool = False) -> dict:
+def constant_tests(receiver: str) -> dict:
     """The tests whose answer is the same for every value `receiver` can
-    take, with that answer; those `decided_by_sign` only when `by_sign`."""
+    take, with that answer."""
     _, domain = VOLATILE[receiver]
     out = {}
     for name, (test, truth) in VOLATILE_TESTS.items():
         answers = {truth(v) for v in domain}
-        if len(answers) == 1 and decided_by_sign(receiver, name) == by_sign:
+        if len(answers) == 1:
             out[name] = (test, answers.pop())
     return out
 
@@ -615,12 +596,6 @@ def test_a_volatile_value_is_tested_once(engine_layout, receiver):
     assert wrong_answers(receiver, constant_tests(receiver), ("inline", "staged")) == {}
 
 
-@pytest.mark.xfail(strict=True, reason="#298: a list on a volatile value compares a column item's zeros by sign")
-@pytest.mark.parametrize("receiver", [name for name, (_, domain) in VOLATILE.items() if 0.0 in domain])
-def test_a_volatile_value_meets_a_column_item_as_equality_does(receiver):
-    assert wrong_answers(receiver, constant_tests(receiver, by_sign=True), ("inline",)) == {}
-
-
 @pytest.mark.parametrize("receiver", VOLATILE)
 def test_a_volatile_value_filters_all_rows_or_none(receiver):
     """The same tests as filters: each keeps every row or none."""
@@ -633,16 +608,15 @@ def test_a_volatile_value_filters_all_rows_or_none(receiver):
 
 def test_constant_receiver():
     """A membership test of no column is folded by DataFusion before it
-    runs, also when the clock gives its value or an item."""
+    runs, also when the clock gives its value."""
     t = table(pa.float64())
     got = t.derive(
         a=lambda r: LiteralExpr(0.0).is_in([-0.0, 1.0]),
         b=lambda r: LiteralExpr(-0.0).is_in([0.0, 1.0, 2.0, 3.0]),
         c=lambda r: LiteralExpr(0.0) == -0.0,
         d=lambda r: (clock_zero() * -1.0).is_in([0.0, 1.0, 2.0, 3.0]),
-        e=lambda r: LiteralExpr(-0.0).is_in([clock_zero() * 1.0, 1.0, 2.0, 3.0]),
-        f=lambda r: (clock_zero() * -1.0) != 0.0,
+        e=lambda r: (clock_zero() * -1.0) != 0.0,
     ).to_arrow()
-    assert got.column("f").to_pylist() == [False] * len(X)
-    for name in "abcde":
+    assert got.column("e").to_pylist() == [False] * len(X)
+    for name in "abcd":
         assert got.column(name).to_pylist() == [True] * len(X), name

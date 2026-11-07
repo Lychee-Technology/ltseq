@@ -13,9 +13,10 @@
 //! optimizer pass, so the plan the optimizer returns holds no such list.
 //! A list on a volatile value is completed with the other zero instead, as
 //! lowering builds it (`literals::listed_once`): splitting would name the
-//! value twice, and DataFusion evaluates each copy. Lowering keeps a value
-//! of `now()` and a column as written in such a list, so a zero either of
-//! them turns into is completed here.
+//! value twice, and DataFusion evaluates each copy. `is_in` items are
+//! literals (#294) and DataFusion merges no `=` on a volatile value into a
+//! list, so no such list should reach this rule with one zero; completing
+//! it keeps the rule correct if one does.
 //!
 //! It cannot undo what the simplifier did to such a list before: two lists
 //! on one value are intersected and subtracted comparing their items as

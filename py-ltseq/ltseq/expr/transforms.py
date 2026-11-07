@@ -15,7 +15,7 @@ import types
 from typing import Any, Callable, Iterator, NamedTuple, cast
 
 from ..exceptions import ColumnNotFoundError
-from .base import Expr
+from .base import Expr, _capturing
 from .proxy import SchemaProxy
 
 
@@ -697,7 +697,9 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
             "and would silently change the captured expression.\n\n"
             f"{_NULL_METHOD_GUIDANCE}"
         )
-    return fn(SchemaProxy(schema))
+    # An is_in error reads the table's columns to name a new one (#294).
+    with _capturing(schema):
+        return fn(SchemaProxy(schema))
 
 
 def _invoke_condition_lambda(
