@@ -907,7 +907,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
             partition_by: Optional column name for partitioning. A
                          partition is a run of adjacent rows, in table
                          order, with equal keys; a NULL key equals NULL
-                         and no value. Pattern matching does not cross
+                         and no value, -0.0 equals 0.0, and every NaN
+                         equals every NaN. Pattern matching does not cross
                          partition boundaries. A key that recurs after
                          another key starts a new partition, so keys
                          [NULL, 0, NULL] are three partitions; sort by

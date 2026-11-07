@@ -511,3 +511,85 @@ def test_search_pattern_partitions_are_runs_of_equal_keys():
     # Sorted by the key, NULLs last: partitions [2] and [0, 1, 3, 4].
     assert starts(by_key, three) == [0, 1]
     assert by_key.search_pattern_count(*three, partition_by="k") == 2
+
+
+def _signed_zero_table(pa):
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "k": pa.array(range(6), pa.int64()),
+                "x": pa.array([1.0, -0.0, 2.0, 0.0, 3.0, -0.0], pa.float64()),
+                "p": pa.array([0.0, 0.0, -0.0, -0.0, 0.0, 0.0], pa.float64()),
+            }
+        )
+    ).sort("k")
+
+
+@pytest.mark.parametrize(
+    "pred",
+    [
+        lambda r: r.x == 0.0,
+        lambda r: r.x == -0.0,
+        lambda r: r.x != 0.0,
+        lambda r: r.x > -0.0,
+        lambda r: r.x >= 0.0,
+        lambda r: r.x < 0.0,
+        lambda r: r.x <= -0.0,
+        lambda r: r.x == r.p,
+        lambda r: r.x > r.p,
+    ],
+)
+def test_search_pattern_steps_compare_signed_zeros_as_filter_does(pred):
+    """A step keeps the rows `filter` keeps: `-0.0` equals `0.0` (#289)."""
+    pa = pytest.importorskip("pyarrow")
+    t = _signed_zero_table(pa)
+
+    def keys(tbl):
+        return tbl.to_arrow().column("k").to_pylist()
+
+    assert keys(t.search_pattern(pred)) == keys(t.filter(pred))
+    assert t.search_pattern_count(pred) == len(keys(t.filter(pred)))
+
+
+def test_search_pattern_two_steps_match_at_either_zero():
+    """The issue's two-step reproducer: rows 1 (`-0.0`) and 3 (`0.0`) each
+    start a match, and partitions by `p` are one run of zeros (#289)."""
+    pa = pytest.importorskip("pyarrow")
+    t = _signed_zero_table(pa)
+    two = (lambda r: r.x == 0.0, lambda r: r.x > 1.0)
+
+    assert t.search_pattern_count(*two) == 2
+    assert t.search_pattern_count(*two, partition_by="p") == 2
+    starts = t.search_pattern(*two, partition_by="p").to_arrow().column("k")
+    assert starts.to_pylist() == [1, 3]
+
+
+@pytest.mark.parametrize("float_type", ["float64", "float32"])
+@pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+def test_search_pattern_float_partitions_follow_contract_equality(
+    float_type, encoded
+):
+    """Float partition keys are equal as §18 has them: `-0.0` equals `0.0`,
+    and NaNs of any sign or payload are one value; NULL equals only NULL
+    (#289)."""
+    pa = pytest.importorskip("pyarrow")
+    np = pytest.importorskip("numpy")
+
+    nan = float("nan")
+    neg_nan = float(-np.float64(nan))
+    other_nan = float(np.array([0x7FF8000000000001], np.uint64).view(np.float64)[0])
+    # Runs: [0.0, -0.0], [nan, -nan, other nan], [NULL, NULL], [1.5].
+    keys = [0.0, -0.0, nan, neg_nan, other_nan, None, None, 1.5]
+    p = pa.array(keys, pa.float64()).cast(float_type)
+    if encoded:
+        p = p.dictionary_encode()
+    t = LTSeq.from_arrow(
+        pa.table({"i": list(range(len(keys))), "p": p, "e": [1] * len(keys)})
+    ).sort("i")
+    two = [lambda r: r.e == 1] * 2
+    three = [lambda r: r.e == 1] * 3
+
+    starts = t.search_pattern(*two, partition_by="p").to_arrow().column("i")
+    assert starts.to_pylist() == [0, 2, 3, 5]
+    assert t.search_pattern_count(*two, partition_by="p") == 4
+    assert t.search_pattern_count(*three, partition_by="p") == 1

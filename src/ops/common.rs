@@ -10,6 +10,7 @@
 
 use crate::error::LtseqError;
 use crate::metadata::SortSpec;
+use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
@@ -300,6 +301,46 @@ pub fn select_in_order(
     stage.sort(order)?.select(picked)
 }
 
+/// `col` with each set of floats that the contract's key equality (§18)
+/// treats as one value replaced by a single member: `-0.0` by `0.0`, and
+/// every NaN, whatever its sign and payload, by one NaN. A dictionary keeps
+/// its keys and has its values replaced the same way, because a row of a
+/// dictionary is keyed by its value. Any other column is returned unchanged.
+///
+/// Arrow's `eq` and its row encoder compare floats bit for bit. Run a
+/// column through this first and they give §18's equality, which `asof_join`
+/// `by=` keys and `search_pattern` partitions use.
+pub(crate) fn equal_floats_as_one(col: ArrayRef) -> ArrayRef {
+    use datafusion::arrow::array::{ArrowPrimitiveType, AsArray};
+    use datafusion::arrow::datatypes::{DataType, Float16Type, Float32Type, Float64Type};
+
+    fn canonical<T: ArrowPrimitiveType>(col: &ArrayRef, nan: T::Native) -> ArrayRef {
+        // The default of a float is `0.0`, and `-0.0 == 0.0`.
+        let zero = T::Native::default();
+        Arc::new(col.as_primitive::<T>().unary::<_, T>(|v| {
+            if v.partial_cmp(&v).is_none() {
+                nan
+            } else if v == zero {
+                zero
+            } else {
+                v
+            }
+        }))
+    }
+
+    match col.data_type() {
+        DataType::Dictionary(_, values) if values.is_floating() => {
+            let dict = col.as_any_dictionary();
+            dict.with_values(equal_floats_as_one(dict.values().clone()))
+        }
+        DataType::Float16 => {
+            canonical::<Float16Type>(&col, <Float16Type as ArrowPrimitiveType>::Native::NAN)
+        }
+        DataType::Float32 => canonical::<Float32Type>(&col, f32::NAN),
+        DataType::Float64 => canonical::<Float64Type>(&col, f64::NAN),
+        _ => col,
+    }
+}
 
 // ============================================================================
 // Test Utilities

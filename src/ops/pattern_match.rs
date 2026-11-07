@@ -639,10 +639,15 @@ fn eval_string_predicate(
 ///
 /// Returns a BooleanArray where true = start of a new partition.
 /// Row 0 is always true. Consecutive rows with the same partition value
-/// are in the same partition.
+/// are in the same partition, a NULL key being equal to NULL only.
+///
+/// Float keys are equal as the contract's §18 says partitions compare them:
+/// `-0.0` equals `0.0`, and every NaN equals every other NaN (#289). Arrow's
+/// `eq` compares floats bit for bit, so they are made one value first.
 fn compute_partition_boundaries(
     partition_col: &ArrayRef,
 ) -> Result<BooleanArray, String> {
+    let partition_col = &crate::ops::common::equal_floats_as_one(Arc::clone(partition_col));
     let n = partition_col.len();
     if n == 0 {
         return Ok(BooleanArray::from(Vec::<bool>::new()));
@@ -1501,5 +1506,51 @@ mod tests {
                 .expect_err("non-string column");
             assert_eq!(err, format!("{func} requires string column, got Int64"));
         }
+    }
+
+    /// Float partition keys follow §18: `-0.0` equals `0.0` and every NaN
+    /// equals every NaN, a NULL equals only NULL (#289). Plain and
+    /// dictionary-encoded columns split at the same rows.
+    #[test]
+    fn float_partition_keys_follow_contract_equality() {
+        use datafusion::arrow::array::{DictionaryArray, Float32Array, Float64Array, Int32Array};
+
+        let other_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let keys = [
+            Some(0.0),
+            Some(-0.0),
+            Some(0.0),
+            Some(f64::NAN),
+            Some(-f64::NAN),
+            Some(other_nan),
+            None,
+            None,
+            Some(-0.0),
+            Some(1.5),
+        ];
+        let expected = vec![true, false, false, true, false, false, true, false, true, true];
+        let boundaries = |col: ArrayRef| {
+            let b = compute_partition_boundaries(&col).expect("boundaries");
+            (0..b.len()).map(|i| b.value(i)).collect::<Vec<_>>()
+        };
+
+        let f64s: ArrayRef = Arc::new(Float64Array::from(keys.to_vec()));
+        assert_eq!(boundaries(Arc::clone(&f64s)), expected, "float64");
+
+        let f32s: ArrayRef = Arc::new(Float32Array::from(
+            keys.iter().map(|k| k.map(|v| v as f32)).collect::<Vec<_>>(),
+        ));
+        assert_eq!(boundaries(f32s), expected, "float32");
+
+        // NULL rows are NULL keys, the usual encoding of a NULL value.
+        let dict_keys = Int32Array::from(
+            keys.iter()
+                .zip(0..)
+                .map(|(k, i)| k.map(|_| i))
+                .collect::<Vec<Option<i32>>>(),
+        );
+        let dict: ArrayRef =
+            Arc::new(DictionaryArray::try_new(dict_keys, f64s).expect("dictionary"));
+        assert_eq!(boundaries(dict), expected, "dictionary of float64");
     }
 }
