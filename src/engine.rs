@@ -202,6 +202,8 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     ]
     .into_iter()
     .chain(state.physical_optimizers().iter().cloned())
+    // The #386 spike, off unless a measurement turns it on (`topk_research`).
+    .chain(research_rules())
     .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
     .collect();
     let state = SessionStateBuilder::new_from_existing(state)
@@ -218,6 +220,14 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
         Arc::new(LocalFiles::new(footers)),
     );
     Arc::new(session)
+}
+
+/// Physical rules only a measurement build carries.
+fn research_rules() -> Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>> {
+    #[cfg(feature = "topk_research")]
+    return vec![Arc::new(crate::topk_research::prune::SlotPruneTopKCount)];
+    #[cfg(not(feature = "topk_research"))]
+    Vec::new()
 }
 
 /// DataFusion's planner, plus the planners of the plan nodes LTSeq adds.

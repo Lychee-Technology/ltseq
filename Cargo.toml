@@ -72,6 +72,9 @@ libc = "0.2.189"
 # Prototypes that price the v0.5 contract's costly commitments (#251).
 # Only measurement builds enable it; see benchmarks/m0/README.md.
 m0 = ["tokio/sync", "tokio/time"]
+# Per-operator plan metrics for the Top-K aggregate pruning research (#386).
+# Only measurement builds enable it; see benchmarks/topk_agg/README.md.
+topk_research = []
 
 # No profile may set `panic = "abort"`: `transpiler::resolve` catches a panic
 # in DataFusion's type coercion (#242) and reads it as "no common type".

@@ -41,6 +41,11 @@ jobs:
           cargo clippy --all-targets --features m0 -- -D warnings
           cargo test --features m0 --lib m0::
 
+      # The #386 research build (benchmarks/topk_agg): a metrics hook and the
+      # slot-bound pruning spike, compiled only with this feature.
+      - name: Run clippy on the topk_research build
+        run: cargo clippy --all-targets --features topk_research -- -D warnings
+
       - name: Set up Python 3.13
         uses: actions/setup-python@v7
         with:

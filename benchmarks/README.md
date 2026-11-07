@@ -18,6 +18,7 @@ This directory holds LTSeq's performance benchmarks: core-operation micro-benchm
 | `CLICKBENCH_MAPPING.md` | 三轮设计与标准 ClickBench（43 条查询）的对应关系、实测结论与 R2/R3 快路径的适用条件 | — |
 | `autoresearch/` | 基准门控的自动化性能研究 + 受控 pilot | 是 / Yes |
 | `m0/` | v0.5 契约六项高成本承诺的可行性测量（#251）：`m0` cargo feature 下的原型、逐格子进程的测量框架、结果与报告 `m0/REPORT.md` / Feasibility measurements of six costly v0.5 contract commitments (#251): prototypes behind the `m0` cargo feature, a one-subprocess-per-cell harness, results and `m0/REPORT.md` | 部分 / Partly (ClickBench for m3–m6) |
+| `topk_agg/` | 精确 Top-K 聚合剪枝（Pivot 式槽位上界）的研究（#386）：`topk_research` cargo feature 下的指标钩子与原型、基线矩阵、剪枝模拟、原型对比与报告 `topk_agg/REPORT.md` / Research on exact Top-K aggregate pruning (Pivot-style slot bounds): a metrics hook and spike behind the `topk_research` cargo feature, the baseline matrix, a pruning simulation, the spike comparison and `topk_agg/REPORT.md` | 部分 / Partly (ClickBench for Q16/Q34/Q13-like cells) |
 
 ## 快速开始 / Quick start
 
