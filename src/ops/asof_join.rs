@@ -19,7 +19,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::common::right_rename_map;
+use crate::ops::common::{equal_floats_as_one, right_rename_map};
 use crate::LTSeqTable;
 use datafusion::arrow::array;
 use datafusion::arrow::array::{
@@ -29,9 +29,9 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::{BooleanBuffer, NullBuffer};
 use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::{
-    DataType, Date32Type, Date64Type, Field, Float16Type, Float32Type, Float64Type, Int32Type,
-    Int64Type, Schema as ArrowSchema, SchemaRef, TimeUnit, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+    DataType, Date32Type, Date64Type, Field, Int32Type, Int64Type, Schema as ArrowSchema,
+    SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
 };
 use datafusion::arrow::row::{RowConverter, SortField};
 use num_bigint::BigInt;
@@ -52,7 +52,7 @@ use std::sync::Arc;
 /// encoding alone does not: it gives NULL a key of its own, and a float the
 /// key of its bits. So a row with a NULL key gets none, as NULL matches
 /// nothing, NULL included; and floats are encoded through
-/// `join_equal_floats`, so that `-0.0` meets `0.0` and NaN meets NaN.
+/// `equal_floats_as_one`, so that `-0.0` meets `0.0` and NaN meets NaN.
 fn for_each_group_key(
     converter: &RowConverter,
     batch: &RecordBatch,
@@ -64,7 +64,7 @@ fn for_each_group_key(
         let len = chunk_rows.min(batch.num_rows() - start);
         let cols: Vec<ArrayRef> = by_indices
             .iter()
-            .map(|&i| join_equal_floats(batch.column(i).slice(start, len)))
+            .map(|&i| equal_floats_as_one(batch.column(i).slice(start, len)))
             .collect();
         // `logical_nulls`, not `nulls`: a `null`-typed column has no
         // validity buffer, and a dictionary's NULLs can sit in its values.
@@ -80,40 +80,6 @@ fn for_each_group_key(
         }
     }
     Ok(())
-}
-
-/// `col` with every float that `join` equates with another replaced by one
-/// value of the two: `-0.0` by `0.0`, and every NaN, whatever its sign and
-/// payload, by one NaN. A dictionary has its values replaced so, under the
-/// same keys: the encoder keys a dictionary row by its value. Any other
-/// column is returned as it is.
-fn join_equal_floats(col: ArrayRef) -> ArrayRef {
-    match col.data_type() {
-        DataType::Dictionary(_, values) if values.is_floating() => {
-            let dict = col.as_any_dictionary();
-            dict.with_values(join_equal_floats(dict.values().clone()))
-        }
-        DataType::Float16 => {
-            canonical_floats::<Float16Type>(&col, <Float16Type as ArrowPrimitiveType>::Native::NAN)
-        }
-        DataType::Float32 => canonical_floats::<Float32Type>(&col, f32::NAN),
-        DataType::Float64 => canonical_floats::<Float64Type>(&col, f64::NAN),
-        _ => col,
-    }
-}
-
-fn canonical_floats<T: ArrowPrimitiveType>(col: &ArrayRef, nan: T::Native) -> ArrayRef {
-    // The default of a float is `0.0`, and `-0.0 == 0.0`.
-    let zero = T::Native::default();
-    Arc::new(col.as_primitive::<T>().unary::<_, T>(|v| {
-        if v.partial_cmp(&v).is_none() {
-            nan
-        } else if v == zero {
-            zero
-        } else {
-            v
-        }
-    }))
 }
 
 /// Resolve `by` column names to indices in `schema`, validating existence.
