@@ -26,6 +26,7 @@ use datafusion::arrow::array::{
     UInt64Array,
 };
 use datafusion::arrow::compute::concat_batches;
+use datafusion::arrow::datatypes::DataType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ProjectionMask;
 use rayon::prelude::*;
@@ -320,7 +321,7 @@ struct RgMatchResult {
 /// pattern-matches it, extracts minimal boundary data, then drops the RG data.
 /// This eliminates the 1.4s deallocation overhead from storing all RG data.
 pub fn parallel_pattern_match_count(
-    _table: &LTSeqTable,
+    table: &LTSeqTable,
     step_predicates: &[PyExpr],
     partition_col: &str,
     parquet_path: &str,
@@ -349,6 +350,27 @@ pub fn parallel_pattern_match_count(
     // Build projection
     let mut all_needed = needed_cols;
     all_needed.insert(partition_col.to_string());
+
+    // A naive or date literal reads as a wall clock in the zone of the column
+    // it meets, and this read gives a column the file's type, which may have
+    // another zone than the table's (`stored_zones`). The general path reads
+    // the table's type.
+    let table_schema = table.require_schema()?;
+    if (parquet_schema.fields().iter())
+        .filter(|field| all_needed.contains(field.name()))
+        .any(|field| {
+            table_schema.field_with_name(field.name()).is_ok_and(|column| {
+                matches!(
+                    (field.data_type(), column.data_type()),
+                    (DataType::Timestamp(_, file), DataType::Timestamp(_, table)) if file != table
+                )
+            })
+        })
+    {
+        return Err(LtseqError::Runtime(
+            "PARALLEL_FALLBACK: a column's zone is not the table's".into(),
+        ));
+    }
 
     let proj_indices: Vec<usize> = parquet_schema
         .fields()

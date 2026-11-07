@@ -104,6 +104,11 @@ class IOMixin:
         execution reads those files as they are then, their footers
         included, and raises if one of them no longer exists.
 
+        An aware timestamp keeps the zone name the file stores for it, also
+        when its unit there is not the Parquet column's: pyarrow writes a
+        ``timestamp[s, tz=Z]`` in milliseconds, and it reads as
+        ``timestamp[ms, tz=Z]``, as pyarrow reads it.
+
         Args:
             path: Path to a Parquet file, a directory or a glob
 
