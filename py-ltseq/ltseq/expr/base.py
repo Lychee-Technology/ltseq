@@ -1,6 +1,7 @@
 """Base expression class for LTSeq."""
 
 import keyword
+import math
 import numbers
 from abc import ABC, abstractmethod
 from typing import Any, NoReturn, TYPE_CHECKING, cast
@@ -581,61 +582,132 @@ _OPERATOR_SYMBOLS = {
 }
 
 
-def _expr_text(value: Any) -> str:
-    """A short Python-like spelling of an expression, for error messages.
+# Operators whose reflected method keeps the operand order, so a plain
+# literal may stand on their left (``1 + r.x`` is ``Add(1, r.x)``). Comparisons
+# reflect into the mirrored operator, and ``&``/``|`` have no reflected method.
+_REFLECTED_OPERATORS = {"Add", "Sub", "Mul", "Div", "FloorDiv", "Mod"}
 
-    Columns read as ``r.name``, or ``getattr(r, name)`` when the name is not
-    an identifier; nodes it cannot spell read as their class.
+
+def _literal_text(value: Any) -> str:
+    """A literal value as Python source: ``repr``, except for the non-finite
+    floats, whose ``repr`` (``nan``, ``inf``) is not an expression."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return f"float({str(value)!r})"
+    return repr(value)
+
+
+def _is_null_literal(value: Any) -> bool:
+    from .types import LiteralExpr
+
+    return isinstance(value, LiteralExpr) and value.value is None
+
+
+def _spell(value: Any, *, as_expr: bool = True) -> str | None:
+    """Python source that builds ``value`` again, for error messages, or
+    None when some node of it has no faithful spelling.
+
+    With ``as_expr``, the spelling is an expression object even for a
+    literal (``LiteralExpr(1)``, as ``1`` would be a Python int); without
+    it, a literal reads as its value. Every expression it spells is a
+    primary (a column, a call, or parenthesized), so it can take a method
+    call or stand beside any operator without changing meaning: ``~r.x``
+    reads ``(~r.x)``, as ``~r.x.is_in(...)`` would negate the membership.
     """
     from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, UnaryOpExpr
 
-    if not isinstance(value, Expr):
-        return repr(value)
+    if isinstance(value, LiteralExpr) or not isinstance(value, Expr):
+        literal = value.value if isinstance(value, LiteralExpr) else value
+        text = _literal_text(literal)
+        return f"LiteralExpr({text})" if as_expr else text
     if isinstance(value, ColumnExpr):
         name = value.name
         if name.isidentifier() and not keyword.iskeyword(name):
             return f"r.{name}"
         return f"getattr(r, {name!r})"
-    if isinstance(value, LiteralExpr):
-        return repr(value.value)
     if isinstance(value, BinOpExpr):
-        symbol = _OPERATOR_SYMBOLS.get(value.op, value.op)
-        return f"({_expr_text(value.left)} {symbol} {_expr_text(value.right)})"
-    if isinstance(value, UnaryOpExpr) and value.op == "Not":
-        return f"~{_expr_text(value.operand)}"
+        symbol = _OPERATOR_SYMBOLS.get(value.op)
+        if symbol is None:
+            return None
+        plain_left = value.op in _REFLECTED_OPERATORS and not isinstance(value.right, LiteralExpr)
+        left = _spell(value.left, as_expr=not plain_left)
+        # `r.x == None` would build `r.x.is_null()`, not this comparison.
+        right = _spell(value.right, as_expr=_is_null_literal(value.right))
+        if left is None or right is None:
+            return None
+        return f"({left} {symbol} {right})"
+    if isinstance(value, UnaryOpExpr):
+        if value.op != "Not":
+            return None
+        operand = _spell(value.operand)
+        return None if operand is None else f"(~{operand})"
     if isinstance(value, CallExpr):
-        args = [_expr_text(a) for a in value.args]
-        args += [f"{k}={_expr_text(v)}" for k, v in value.kwargs.items()]
+        args = [_spell(a, as_expr=False) for a in value.args]
+        kwargs = [(k, _spell(v, as_expr=False)) for k, v in value.kwargs.items()]
+        if any(a is None for a in args) or any(v is None for _, v in kwargs):
+            return None
+        listed = ", ".join([*cast(list[str], args), *(f"{k}={v}" for k, v in kwargs)])
         func = value.func
         # Accessor methods and standalone functions carry a prefix
         # (`str_lower` is `.s.lower()`, `math_sqrt` is `sqrt()`).
         if value.on is None:
             func = func.removeprefix("math_").removeprefix("dt_").removeprefix("str_")
-            return f"{func}({', '.join(args)})"
+            import ltseq
+
+            if func != "abs" and not callable(getattr(ltseq, func, None)):
+                return None
+            return f"{func}({listed})"
+        on = _spell(value.on)
+        if on is None or not func.isidentifier():
+            return None
         for prefix, accessor in (("str_", "s."), ("dt_", "dt.")):
             if func.startswith(prefix):
                 func = accessor + func.removeprefix(prefix)
-        return f"{_expr_text(value.on)}.{func}({', '.join(args)})"
-    return type(value).__name__
+        return f"{on}.{func}({listed})"
+    return None
+
+
+def _expr_text(value: Any) -> str:
+    """A short Python-like spelling of an expression, for error messages:
+    its source (see ``_spell``), or its class when it has none."""
+    return _spell(value) or type(value).__name__
+
+
+# The rewrite an is_in error offers when the receiver or an item has no
+# faithful spelling.
+_GENERIC_IS_IN_REWRITE = "(r.x == r.y) | r.x.is_in([3])"
 
 
 def _expression_item_error(receiver: "Expr", items: list[Any], position: int) -> TypeError:
     """The error for an ``is_in`` item that is an expression (#294), with the
     spelling that tests a value of the same row: an equality for each
-    expression item, and ``is_in`` of the literal ones."""
+    expression item, and ``is_in`` of the literal ones.
+
+    The rewrite is Python source that keeps the receiver and every item as
+    they are; when one of them has no faithful spelling, the message gives
+    the pattern on columns ``r.x`` and ``r.y`` instead.
+    """
     from .types import LiteralExpr
 
     item = _expr_text(items[position])
-    subject = _expr_text(receiver)
+    subject = _spell(receiver)
     literal = [not isinstance(v, Expr) or isinstance(v, LiteralExpr) for v in items]
-    tests = [f"({subject} == {_expr_text(v)})" for v, lit in zip(items, literal) if not lit]
+    tests: list[str | None] = []
+    for v, lit in zip(items, literal):
+        if not lit:
+            other = _spell(v)
+            tests.append(None if subject is None or other is None else f"({subject} == {other})")
     if any(literal):
-        listed = ", ".join(_expr_text(v) for v, lit in zip(items, literal) if lit)
-        tests.append(f"{subject}.is_in([{listed}])")
-    rewrite = " | ".join(tests)
+        listed = ", ".join(
+            _literal_text(v.value if isinstance(v, LiteralExpr) else v) for v, lit in zip(items, literal) if lit
+        )
+        tests.append(None if subject is None else f"{subject}.is_in([{listed}])")
+    if any(t is None for t in tests):
+        how = f"compare it with == and join the tests with |, as in {_GENERIC_IS_IN_REWRITE}"
+    else:
+        how = f"compare it with ==: {' | '.join(cast(list[str], tests))}"
     return TypeError(
         f"is_in() takes literal values only, but item {position} is the expression {item}. "
-        f"To test a value of the same row, compare it with ==: {rewrite}. "
+        f"To test a value of the same row, {how}. "
         "For membership in another table, use a join or semi_join()."
     )
 
