@@ -659,11 +659,53 @@ def _spell(value: Any, *, as_expr: bool = True) -> str | None:
         on = _spell(value.on)
         if on is None or not func.isidentifier():
             return None
+        if func == "is_in":
+            # is_in takes its values as one list (R2-F2 of #294's review).
+            if kwargs:
+                return None
+            return f"{on}.is_in([{listed}])"
         for prefix, accessor in (("str_", "s."), ("dt_", "dt.")):
             if func.startswith(prefix):
                 func = accessor + func.removeprefix(prefix)
         return f"{on}.{func}({listed})"
     return None
+
+
+def _is_volatile(value: Any) -> bool:
+    """Whether an expression holds ``rand()``, which draws a new value at each
+    place it is written, so two copies of it are two values."""
+    from .types import BinOpExpr, CallExpr, UnaryOpExpr
+
+    if isinstance(value, BinOpExpr):
+        return _is_volatile(value.left) or _is_volatile(value.right)
+    if isinstance(value, UnaryOpExpr):
+        return _is_volatile(value.operand)
+    if isinstance(value, CallExpr):
+        return (
+            value.func == "math_rand"
+            or _is_volatile(value.on)
+            or any(_is_volatile(a) for a in value.args)
+            or any(_is_volatile(v) for v in value.kwargs.values())
+        )
+    return False
+
+
+def _column_names(value: Any) -> set[str]:
+    """The names of the columns an expression reads."""
+    from .types import BinOpExpr, CallExpr, ColumnExpr, UnaryOpExpr
+
+    if isinstance(value, ColumnExpr):
+        return {value.name}
+    if isinstance(value, BinOpExpr):
+        return _column_names(value.left) | _column_names(value.right)
+    if isinstance(value, UnaryOpExpr):
+        return _column_names(value.operand)
+    if isinstance(value, CallExpr):
+        names = _column_names(value.on)
+        for v in (*value.args, *value.kwargs.values()):
+            names |= _column_names(v)
+        return names
+    return set()
 
 
 def _expr_text(value: Any) -> str:
@@ -684,13 +726,21 @@ def _expression_item_error(receiver: "Expr", items: list[Any], position: int) ->
 
     The rewrite is Python source that keeps the receiver and every item as
     they are; when one of them has no faithful spelling, the message gives
-    the pattern on columns ``r.x`` and ``r.y`` instead.
+    the pattern on columns ``r.x`` and ``r.y`` instead. A receiver that
+    holds ``rand()`` and would be written more than once is derived once
+    first, as each copy would draw its own value (R2-F1 of #294's review).
     """
-    from .types import LiteralExpr
+    from .types import ColumnExpr, LiteralExpr
 
     item = _expr_text(items[position])
     subject = _spell(receiver)
+    derived = None
     literal = [not isinstance(v, Expr) or isinstance(v, LiteralExpr) for v in items]
+    if subject is not None and _is_volatile(receiver) and (literal.count(False) + any(literal)) > 1:
+        taken = _column_names(receiver).union(*(_column_names(v) for v in items))
+        name = next(n for n in ("v", *(f"v{i}" for i in range(1, len(taken) + 2))) if n not in taken)
+        derived = f"t.derive({name}=lambda r: {subject})"
+        subject = _spell(ColumnExpr(name))
     tests: list[str | None] = []
     for v, lit in zip(items, literal):
         if not lit:
@@ -703,6 +753,12 @@ def _expression_item_error(receiver: "Expr", items: list[Any], position: int) ->
         tests.append(None if subject is None else f"{subject}.is_in([{listed}])")
     if any(t is None for t in tests):
         how = f"compare it with == and join the tests with |, as in {_GENERIC_IS_IN_REWRITE}"
+    elif derived is not None:
+        how = (
+            "derive the value once into a new column, as it holds rand() and each copy "
+            f"of it would draw its own value: {derived}, then compare that column with ==: "
+            f"{' | '.join(cast(list[str], tests))}"
+        )
     else:
         how = f"compare it with ==: {' | '.join(cast(list[str], tests))}"
     return TypeError(

@@ -238,3 +238,76 @@ def test_values_may_be_any_iterable():
     t = table()
     assert column(t.derive(m=lambda r: r.x.is_in(v for v in (1, 3)))) == [True, False, True, None]
     assert column(t.derive(m=lambda r: r.x.is_in((2,)))) == [False, True, False, None]
+
+
+def floats(n: int = 200) -> LTSeq:
+    return LTSeq.from_arrow(pa.table({"k": list(range(n)), "y": [0.0] * n})).sort("k")
+
+
+def derived_in(message: str) -> tuple[str, str, str]:
+    """The column, the derivation and the rewrite a refusal offers for a
+    receiver that holds rand()."""
+    marker = "each copy of it would draw its own value: t.derive("
+    assert marker in message, message
+    rest = message.split(marker, 1)[1]
+    name, rest = rest.split("=lambda r: ", 1)
+    derivation, rest = rest.split("), then compare that column with ==: ", 1)
+    return name, derivation, rest.split(". For membership", 1)[0]
+
+
+def test_a_volatile_receiver_is_derived_once():
+    """Two copies of `rand()` are two draws (R2-F1 of #294's review): with
+    `y` 0, `rand().round(0)` is 0 or 1, so it is always in `[y, 1.0]`, but
+    `(rand().round(0) == r.y) | rand().round(0).is_in([1.0])` is not."""
+    from ltseq import rand
+
+    t = floats()
+    message = refusal(t, lambda r: rand().round(0).is_in([r.y, 1.0]))
+    assert "(rand().round(0) == r.y)" not in message
+    name, derivation, rewrite = derived_in(message)
+    assert (name, derivation) == ("v", "rand().round(0)")
+    assert rewrite == "(r.v == r.y) | r.v.is_in([1.0])"
+    scope = {"rand": rand}
+    derived = t.derive(**{name: eval(f"lambda r: {derivation}", scope)})
+    got = column(derived.derive(m=eval(f"lambda r: {rewrite}", scope)))
+    assert got == [True] * len(got)
+
+
+def test_the_derived_column_takes_a_name_no_item_reads():
+    from ltseq import rand
+
+    t = floats().derive(v=lambda r: r.y, v1=lambda r: r.y)
+    message = refusal(t, lambda r: (rand() + r.v).is_in([r.v1, 2.0]))
+    name, derivation, rewrite = derived_in(message)
+    assert (name, derivation) == ("v2", "(rand() + r.v)")
+    assert rewrite == "(r.v2 == r.v1) | r.v2.is_in([2.0])"
+
+
+def test_a_volatile_receiver_written_once_is_kept():
+    from ltseq import rand
+
+    message = refusal(floats(), lambda r: rand().is_in([r.y]))
+    assert rewrite_in(message) == "(rand() == r.y)"
+
+
+def test_a_nested_membership_receiver_keeps_its_list():
+    """`is_in` takes one list, so a nested membership is spelled with it
+    (R2-F2 of #294's review)."""
+    t = bools()
+    message = refusal(t, lambda r: r.x.is_in([True]).is_in([r.y, True]))
+    rewrite = "(r.x.is_in([True]) == r.y) | r.x.is_in([True]).is_in([True])"
+    assert rewrite_in(message) == rewrite
+    # x.is_in([True]) is x: [True, True, False, False]; y is [True, False, True, False],
+    # so the value is y or True on all rows but the third.
+    assert run_rewrite(t, message) == [True, True, False, True]
+
+
+def test_a_nested_membership_item_keeps_its_list():
+    t = table()
+    message = refusal(t, lambda r: r.x.is_in([r.y.is_in([1, 5]), 3]))
+    assert "item 0 is the expression r.y.is_in([1, 5])" in message
+    assert rewrite_in(message) == "(r.x == r.y.is_in([1, 5])) | r.x.is_in([3])"
+    bools_message = refusal(bools(), lambda r: r.x.is_in([r.y.is_in([True]), False]))
+    assert rewrite_in(bools_message) == "(r.x == r.y.is_in([True])) | r.x.is_in([False])"
+    # x == y on [T, T, F, F] and [T, F, T, F], or x is False.
+    assert run_rewrite(bools(), bools_message) == [True, False, True, True]
