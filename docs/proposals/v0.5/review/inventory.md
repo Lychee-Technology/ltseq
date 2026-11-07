@@ -251,7 +251,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | `x.fill_null(v)` | (py-ltseq/ltseq/expr/base.py:746) | KEEP | `Expr.fill_null()` ([§8.5]) | Unchanged. |
 | `x.is_null()` | (py-ltseq/ltseq/expr/base.py:763) | KEEP | `Expr.is_null()` ([§8.5]) | Unchanged. |
 | `x.is_not_null()` | (py-ltseq/ltseq/expr/base.py:777) | KEEP | `Expr.is_not_null()` ([§8.5]) | Unchanged. |
-| `x.is_in(values)` | (py-ltseq/ltseq/expr/base.py:791) | KEEP | `Expr.is_in()` ([§8.5]) | Same test, now never NULL. |
+| `x.is_in(values)` | Takes an item that is an expression, such as a column, which no documentation describes (py-ltseq/ltseq/expr/base.py:791). | REDESIGN | `Expr.is_in()` ([§8.5]) | Same test on a list of literals, now never NULL. An expression item raises `LTSeqTypeError` at capture (#294). For a value of the same row write `(r.x == r.y) \| r.x.is_in([...])`; for membership in another table, `semi_join` ([§12.2]). |
 | `x.between(low, high)` | (py-ltseq/ltseq/expr/base.py:812) | KEEP | `Expr.between()` ([§8.5]) | Unchanged. |
 | `x.cast(dtype: str)` | Takes type-name strings (py-ltseq/ltseq/expr/base.py:831; docs/api.md:1440-1446). | REDESIGN | `Expr.cast()` ([§8.5], [§17.6]) | Takes pyarrow aliases or `pa.DataType` and follows the [§17.6] rule table. A failed value raises `CastError`. |
 | `x.abs()` | (py-ltseq/ltseq/expr/base.py:852) | KEEP | `Expr.abs()` ([§8.5]) | Unchanged. |
@@ -527,6 +527,7 @@ Building the inventory against the draft contract turned up places where the con
 - `LTSeq._repr_html_` (py-ltseq/ltseq/core.py:178-198), a notebook hook that executes the plan. [§3.2] now says no display hook is defined, and S3 tests it.
 - The group helpers `g.sum("col")` and its siblings, `g.first()`/`g.last()` and `g.none(pred)` (py-ltseq/ltseq/grouping/proxies/derive_proxy.py:34-74; py-ltseq/ltseq/grouping/proxies/filter_proxy.py:219). [§8.1] now says these names read as columns and gives their forms.
 - `when(c).then(v)` (py-ltseq/ltseq/expr/base.py:76-86). [§8.3] now says it is removed.
+- Expression items in `is_in` (`r.x.is_in([r.y, 3])`; py-ltseq/ltseq/expr/base.py:791). [§8.5] took `Iterable[Literal]` and said `values` MUST be literals, but this inventory marked `x.is_in(values)` KEEP. [§8.5] now names the error and the replacements, D7 tests the refusal, and the row is REDESIGN (#294).
 
 **Names outside [§22] with no contract text.** [§22] is closed, so these are not public and need no further text. They are listed so the removal tests of [§24.1] can enumerate them.
 
@@ -569,9 +570,9 @@ Building the inventory against the draft contract turned up places where the con
 
 | Action | Rows |
 |---|---|
-| KEEP | 107 |
+| KEEP | 106 |
 | RENAME | 14 |
-| REDESIGN | 66 |
+| REDESIGN | 67 |
 | MERGE | 35 |
 | REMOVE | 107 |
 | ADD | 69 |

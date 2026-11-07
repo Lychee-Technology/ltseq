@@ -316,7 +316,8 @@ fn compared(
 }
 
 /// `expr IN (list)`: the disjunction of `expr == item`, which is how SQL
-/// defines IN. Each equality is built like `==` builds it: a literal item
+/// defines IN. Every item is a literal; `is_in` refuses an expression item
+/// (#294). Each equality is built like `==` builds it: a non-NULL item
 /// is read next to `expr` and placed among its values ([`compared`]), so an
 /// item placed exactly takes `expr`'s type and an item no value of that
 /// type equals is dropped. A list left empty is false (NULL for a NULL
@@ -335,6 +336,7 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
     // Each kept item, with its equality's two sides as DataFusion coerces them.
     let mut kept = Vec::with_capacity(list.len());
     for item in list {
+        // `rx.literal` gives no value for NULL, which is kept as written.
         let item = if rx.literal(&item).is_none() {
             item
         } else {
@@ -382,12 +384,9 @@ pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<
             None => groups.push((key, value, vec![(item, right)])),
         }
     }
-    let tests = groups
+    Ok(groups
         .into_iter()
         .map(|(key, value, items)| membership(key.as_ref(), value, items, rx))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(tests
-        .into_iter()
         .reduce(Expr::or)
         .expect("at least one item is kept"))
 }
@@ -404,11 +403,11 @@ type ListItem = (Expr, Expr);
 /// Arrow's total-order `eq`. Its `=` compares -0.0 equal to 0.0, as IEEE
 /// 754 does, so the list alone would decide a zero by its sign (#245).
 /// A float list therefore holds no zero: a zero item is the range of both
-/// zeros beside the list ([`within`]), as a zero is for `==`, and an item
-/// that is not a constant is compared beside the list as `==` compares it
-/// ([`float_equality`]). NaN is left as both compare it: equal to a NaN of
-/// the same bits. An item DataFusion replaces with a zero only while it
-/// optimizes (a column holding a constant) reaches a list after lowering;
+/// zeros beside the list ([`within`]), as a zero is for `==`. Every item is
+/// a literal, since `is_in` refuses an expression item (#294). NaN is left
+/// as both compare it: equal to a NaN of the same bits. A zero DataFusion
+/// writes only while it optimizes (a column holding a constant, compared
+/// with `==` and merged into a list) reaches a list after lowering;
 /// [`super::float_lists`] splits that list. A volatile `value` is tested
 /// by one list instead ([`listed_once`]).
 fn membership(
@@ -416,22 +415,18 @@ fn membership(
     value: Expr,
     items: Vec<ListItem>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Expr {
     let Some(float_type) = comparison_type.filter(|t| t.is_floating()) else {
         let list = items.into_iter().map(|(item, _)| item).collect();
-        return Ok(value.in_list(list, false));
+        return value.in_list(list, false);
     };
     if value.is_volatile() {
-        return Ok(listed_once(value, items, float_type, rx));
+        return listed_once(value, items, float_type, rx);
     }
     let mut list = Vec::with_capacity(items.len());
     let mut zero = false;
-    let mut equalities = Vec::new();
     for (item, coerced) in items {
-        if !Resolver::constant(&coerced) {
-            let equality = query_constant_equality(Operator::Eq, &value, &item, rx)?;
-            equalities.push(equality.unwrap_or_else(|| value.clone().eq(item)));
-        } else if rx.literal(&coerced).is_some_and(|v| is_float_zero(&v)) {
+        if rx.literal(&coerced).is_some_and(|v| is_float_zero(&v)) {
             zero = true;
         } else {
             list.push(item);
@@ -439,12 +434,10 @@ fn membership(
     }
     let zeros = zero.then(|| within(value.clone(), zero_bounds(float_type), false));
     let list = (!list.is_empty()).then(|| value.clone().in_list(list, false));
-    Ok(list
-        .into_iter()
+    list.into_iter()
         .chain(zeros)
-        .chain(equalities)
         .reduce(Expr::or)
-        .expect("at least one item"))
+        .expect("at least one item")
 }
 
 /// `value IN (items)` for a volatile float `value` (one holding `rand()`),
@@ -452,12 +445,9 @@ fn membership(
 /// expression, so the tests [`membership`] puts beside the list would each
 /// test another draw.
 ///
-/// The one list matches either zero by holding both. A zero item is -0.0
-/// and 0.0, and a zero DataFusion folds later (a value of `now()`, a
-/// column holding a constant) is completed by [`super::float_lists`]. An
-/// item that varies by row is kept as written, so the list decides that
-/// item's zeros by sign (#298): a CASE computing its other zero would be a
-/// list item DataFusion 55 can take for a constant (#297).
+/// The one list matches either zero by holding both: a zero item is -0.0
+/// and 0.0. Every item is a literal (#294), so lowering leaves no zero for
+/// [`super::float_lists`] to complete.
 ///
 /// A list holding a zero meets DataFusion's intersection and difference
 /// of lists (#296), which the range keeps a zero out of elsewhere. Those

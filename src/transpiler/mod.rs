@@ -529,6 +529,13 @@ fn parse_call_type_ops(
             if args.is_empty() {
                 return Err("is_in requires at least one value".to_string());
             }
+            // Python refuses an expression item when the lambda is captured
+            // (#294), so every item reaching here is a literal.
+            if let Some(position) = args.iter().position(|a| !matches!(a, PyExpr::Literal(_))) {
+                return Err(format!(
+                    "is_in takes literal values only, but item {position} is an expression"
+                ));
+            }
             let list_exprs: Vec<Expr> = args
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, rx))
@@ -1722,6 +1729,33 @@ mod tests {
             Ok(Expr::Column(Column::new_unqualified("a"))
                 .gt(lit(1_i64))
                 .is_not_true())
+        );
+    }
+
+    #[test]
+    fn is_in_refuses_an_expression_item() {
+        // Python refuses these at capture (#294); the transpiler does too.
+        let schema = test_schema();
+        let plus_one = PyExpr::BinOp {
+            op: "Add".to_string(),
+            left: Box::new(col_expr("b")),
+            right: Box::new(int_lit(1)),
+        };
+        for (items, position) in [
+            (vec![col_expr("b")], 0),
+            (vec![int_lit(3), col_expr("b")], 1),
+            (vec![plus_one], 0),
+        ] {
+            let err = pyexpr_to_datafusion(call_expr("is_in", col_expr("a"), items), &schema)
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!("is_in takes literal values only, but item {position} is an expression")
+            );
+        }
+        assert!(
+            pyexpr_to_datafusion(call_expr("is_in", col_expr("a"), vec![int_lit(3)]), &schema)
+                .is_ok()
         );
     }
 

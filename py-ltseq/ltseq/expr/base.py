@@ -1,8 +1,14 @@
 """Base expression class for LTSeq."""
 
+import keyword
+import math
 import numbers
 from abc import ABC, abstractmethod
-from typing import Any, NoReturn, TYPE_CHECKING, cast
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any, Iterable, Iterator, NoReturn, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .types import CallExpr
@@ -562,6 +568,290 @@ def _pow_not_supported() -> NotImplementedError:
     )
 
 
+_OPERATOR_SYMBOLS = {
+    "Add": "+",
+    "Sub": "-",
+    "Mul": "*",
+    "Div": "/",
+    "FloorDiv": "//",
+    "Mod": "%",
+    "Eq": "==",
+    "Ne": "!=",
+    "Lt": "<",
+    "Le": "<=",
+    "Gt": ">",
+    "Ge": ">=",
+    "And": "&",
+    "Or": "|",
+}
+
+
+# Operators whose reflected method keeps the operand order, so a plain
+# literal may stand on their left (``1 + r.x`` is ``Add(1, r.x)``). Comparisons
+# reflect into the mirrored operator, and ``&``/``|`` have no reflected method.
+_REFLECTED_OPERATORS = {"Add", "Sub", "Mul", "Div", "FloorDiv", "Mod"}
+
+
+def _literal_text(value: Any) -> str | None:
+    """A literal value as Python source that encodes as ``value`` does, or
+    None when it has none (R3-F2 of #294's review).
+
+    The spelling follows the literal's encoding (``_encode_literal``), not
+    ``repr``: a numpy number is the Python number it encodes as
+    (``numpy.float32(nan)`` reads ``float('nan')``, as ``np.float32(nan)``
+    is not an expression), a non-finite float is ``float('nan')``, and an
+    ``int`` or ``str`` subclass is its plain value. ``Decimal``, ``date``
+    and ``datetime`` keep their ``repr``, which the ``decimal`` and
+    ``datetime`` imports evaluate; a ``datetime`` is spelled only with no
+    time zone or a fixed ``datetime.timezone``. Anything else (another time
+    zone, a pandas or numpy timestamp, an unsupported type) has no spelling.
+    """
+    if value is None:
+        return "None"
+    kind = type(value)
+    if kind.__module__ == "numpy":
+        # As _encode_literal: numpy.bool_ is not a bool, and
+        # numpy.timedelta64 registers as numbers.Integral.
+        if kind.__name__ in ("bool_", "bool"):
+            return repr(bool(value))
+        if kind.__name__ in ("datetime64", "timedelta64"):
+            return None
+    if isinstance(value, bool):
+        return repr(bool(value))
+    if isinstance(value, numbers.Integral):
+        return repr(int(value))
+    if isinstance(value, numbers.Real) and not isinstance(value, numbers.Rational):
+        number = float(value)
+        return repr(number) if math.isfinite(number) else f"float({str(number)!r})"
+    if isinstance(value, str):
+        return repr(str(value))
+    if kind is Decimal:
+        return f"Decimal({str(value)!r})"
+    if kind is date:
+        return repr(value)
+    if isinstance(value, datetime) and kind is datetime and type(value.tzinfo) in (type(None), timezone):
+        return repr(value)
+    return None
+
+
+def _is_null_literal(value: Any) -> bool:
+    from .types import LiteralExpr
+
+    return isinstance(value, LiteralExpr) and value.value is None
+
+
+# Accessor methods whose public name is not their function's name without
+# its prefix.
+_ACCESSOR_METHODS = {"str_ltrim": "lstrip", "str_rtrim": "rstrip"}
+
+
+def _spell(value: Any, *, as_expr: bool = True) -> str | None:
+    """Python source that builds ``value`` again, for error messages, or
+    None when some node of it has no faithful spelling.
+
+    With ``as_expr``, the spelling is an expression object even for a
+    literal (``LiteralExpr(1)``, as ``1`` would be a Python int); without
+    it, a literal reads as its value. Every expression it spells is a
+    primary (a column, a call, or parenthesized), so it can take a method
+    call or stand beside any operator without changing meaning: ``~r.x``
+    reads ``(~r.x)``, as ``~r.x.is_in(...)`` would negate the membership.
+    """
+    from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, UnaryOpExpr
+
+    if isinstance(value, LiteralExpr) or not isinstance(value, Expr):
+        literal = value.value if isinstance(value, LiteralExpr) else value
+        text = _literal_text(literal)
+        if text is None:
+            return None
+        return f"LiteralExpr({text})" if as_expr else text
+    if isinstance(value, ColumnExpr):
+        name = value.name
+        if name.isidentifier() and not keyword.iskeyword(name):
+            return f"r.{name}"
+        return f"getattr(r, {name!r})"
+    if isinstance(value, BinOpExpr):
+        symbol = _OPERATOR_SYMBOLS.get(value.op)
+        if symbol is None:
+            return None
+        plain_left = value.op in _REFLECTED_OPERATORS and not isinstance(value.right, LiteralExpr)
+        left = _spell(value.left, as_expr=not plain_left)
+        # `r.x == None` would build `r.x.is_null()`, not this comparison.
+        right = _spell(value.right, as_expr=_is_null_literal(value.right))
+        if left is None or right is None:
+            return None
+        return f"({left} {symbol} {right})"
+    if isinstance(value, UnaryOpExpr):
+        if value.op != "Not":
+            return None
+        operand = _spell(value.operand)
+        return None if operand is None else f"(~{operand})"
+    if isinstance(value, CallExpr):
+        args = [_spell(a, as_expr=False) for a in value.args]
+        kwargs = [(k, _spell(v, as_expr=False)) for k, v in value.kwargs.items()]
+        if any(a is None for a in args) or any(v is None for _, v in kwargs):
+            return None
+        listed = ", ".join([*cast(list[str], args), *(f"{k}={v}" for k, v in kwargs)])
+        func = value.func
+        # Accessor methods and standalone functions carry a prefix
+        # (`str_lower` is `.s.lower()`, `math_sqrt` is `sqrt()`).
+        if value.on is None:
+            func = func.removeprefix("math_").removeprefix("dt_").removeprefix("str_")
+            import ltseq
+
+            if func != "abs" and not callable(getattr(ltseq, func, None)):
+                return None
+            return f"{func}({listed})"
+        on = _spell(value.on)
+        if on is None or not func.isidentifier():
+            return None
+        if func == "is_in":
+            # is_in takes its values as one list (R2-F2 of #294's review).
+            if kwargs:
+                return None
+            return f"{on}.is_in([{listed}])"
+        # An accessor method spells its own public name, which is not always
+        # its function's name (`.s.lstrip()` builds `str_ltrim`); a function
+        # no accessor method has a name for has no spelling (R5-F1 of #294's
+        # review).
+        from .accessors import StringAccessor, TemporalAccessor
+
+        for prefix, accessor, cls in (("str_", "s", StringAccessor), ("dt_", "dt", TemporalAccessor)):
+            if func.startswith(prefix):
+                method = _ACCESSOR_METHODS.get(func, func.removeprefix(prefix))
+                if not callable(getattr(cls, method, None)):
+                    return None
+                return f"{on}.{accessor}.{method}({listed})"
+        return f"{on}.{func}({listed})"
+    return None
+
+
+def _is_volatile(value: Any) -> bool:
+    """Whether an expression holds ``rand()``, which draws a new value at each
+    place it is written, so two copies of it are two values."""
+    from .types import BinOpExpr, CallExpr, UnaryOpExpr
+
+    if isinstance(value, BinOpExpr):
+        return _is_volatile(value.left) or _is_volatile(value.right)
+    if isinstance(value, UnaryOpExpr):
+        return _is_volatile(value.operand)
+    if isinstance(value, CallExpr):
+        return (
+            value.func == "math_rand"
+            or _is_volatile(value.on)
+            or any(_is_volatile(a) for a in value.args)
+            or any(_is_volatile(v) for v in value.kwargs.values())
+        )
+    return False
+
+
+def _column_names(value: Any) -> set[str]:
+    """The names of the columns an expression reads."""
+    from .types import BinOpExpr, CallExpr, ColumnExpr, UnaryOpExpr
+
+    if isinstance(value, ColumnExpr):
+        return {value.name}
+    if isinstance(value, BinOpExpr):
+        return _column_names(value.left) | _column_names(value.right)
+    if isinstance(value, UnaryOpExpr):
+        return _column_names(value.operand)
+    if isinstance(value, CallExpr):
+        names = _column_names(value.on)
+        for v in (*value.args, *value.kwargs.values()):
+            names |= _column_names(v)
+        return names
+    return set()
+
+
+def _expr_text(value: Any) -> str:
+    """A short Python-like spelling of an expression, for error messages:
+    its source (see ``_spell``), or its class when it has none."""
+    return _spell(value) or type(value).__name__
+
+
+# The rewrite an is_in error offers when the receiver or an item has no
+# faithful spelling.
+_GENERIC_IS_IN_REWRITE = "(r.x == r.y) | r.x.is_in([3])"
+
+# The column names of the table whose row lambda is being captured, or None
+# outside a capture. An is_in error reads them to name a new column that
+# derive() would add, not replace (R3-F1 of #294's review).
+_captured_columns: ContextVar[frozenset[str] | None] = ContextVar(
+    "ltseq_captured_columns", default=None
+)
+
+
+@contextmanager
+def _capturing(columns: Iterable[str]) -> Iterator[None]:
+    """Mark the columns of the table a row lambda is captured against."""
+    token = _captured_columns.set(frozenset(columns))
+    try:
+        yield
+    finally:
+        _captured_columns.reset(token)
+
+
+def _fresh_name(taken: set[str]) -> str:
+    """``v``, or the first of ``v1``, ``v2``, ... not in ``taken``."""
+    return next(n for n in ("v", *(f"v{i}" for i in range(1, len(taken) + 2))) if n not in taken)
+
+
+def _expression_item_error(receiver: "Expr", items: list[Any], position: int) -> TypeError:
+    """The error for an ``is_in`` item that is an expression (#294), with the
+    spelling that tests a value of the same row: an equality for each
+    expression item, and ``is_in`` of the literal ones.
+
+    The rewrite is Python source that keeps the receiver and every item as
+    they are; when one of them has no faithful spelling, the message gives
+    the pattern on columns ``r.x`` and ``r.y`` instead. A receiver that
+    holds ``rand()`` and would be written more than once is derived once
+    first, as each copy would draw its own value (R2-F1 of #294's review),
+    into a column the table does not have; when the table is unknown (the
+    expression was not built in a row lambda), the message says to pick
+    such a name (R3-F1).
+    """
+    from .types import ColumnExpr, LiteralExpr
+
+    item = _expr_text(items[position])
+    subject = _spell(receiver)
+    derived = None
+    fresh = None
+    literal = [not isinstance(v, Expr) or isinstance(v, LiteralExpr) for v in items]
+    if subject is not None and _is_volatile(receiver) and (literal.count(False) + any(literal)) > 1:
+        columns = _captured_columns.get()
+        taken = _column_names(receiver).union(*(_column_names(v) for v in items), columns or ())
+        name = _fresh_name(taken)
+        derived = f"t.derive({name}=lambda r: {subject})"
+        if columns is None:
+            fresh = f" (if the table already has a column {name}, use a name it does not have)"
+        subject = _spell(ColumnExpr(name))
+    tests: list[str | None] = []
+    for v, lit in zip(items, literal):
+        if not lit:
+            other = _spell(v)
+            tests.append(None if subject is None or other is None else f"({subject} == {other})")
+    if any(literal):
+        texts = [_literal_text(v.value if isinstance(v, LiteralExpr) else v) for v, lit in zip(items, literal) if lit]
+        if subject is None or any(t is None for t in texts):
+            tests.append(None)
+        else:
+            tests.append(f"{subject}.is_in([{', '.join(cast(list[str], texts))}])")
+    if any(t is None for t in tests):
+        how = f"compare it with == and join the tests with |, as in {_GENERIC_IS_IN_REWRITE}"
+    elif derived is not None:
+        how = (
+            "derive the value once into a new column, as it holds rand() and each copy "
+            f"of it would draw its own value: {derived}{fresh or ''}, then compare that column with ==: "
+            f"{' | '.join(cast(list[str], tests))}"
+        )
+    else:
+        how = f"compare it with ==: {' | '.join(cast(list[str], tests))}"
+    return TypeError(
+        f"is_in() takes literal values only, but item {position} is the expression {item}. "
+        f"To test a value of the same row, {how}. "
+        "For membership in another table, use a join or semi_join()."
+    )
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.
@@ -808,18 +1098,29 @@ class Expr(ABC):
         whatever the list's length.
 
         Args:
-            values: A list of values to check membership against
+            values: The literal values to check membership against: Python
+                constants of the types a literal takes, ``None`` included.
 
         Returns:
             Boolean expression that is True when value is in the list
+
+        Raises:
+            TypeError: A value is an expression, such as a column (#294).
+                Compare a value of the same row with ``==``:
+                ``(r.x == r.y) | r.x.is_in([3])``. For membership in
+                another table, use a join or ``semi_join``.
 
         Example:
             >>> t.filter(lambda r: r.status.is_in(["active", "pending", "review"]))
             >>> t.filter(lambda r: r.age.is_in([18, 21, 65]))
         """
-        from .types import CallExpr
+        from .types import CallExpr, LiteralExpr
 
-        coerced_values = [self._coerce(v) for v in values]
+        items = list(values)
+        for position, item in enumerate(items):
+            if isinstance(item, Expr) and not isinstance(item, LiteralExpr):
+                raise _expression_item_error(self, items, position)
+        coerced_values = [self._coerce(v) for v in items]
         return CallExpr("is_in", tuple(coerced_values), {}, on=cast(Any, self))
 
     def between(self, low: Any, high: Any) -> "BinOpExpr":
