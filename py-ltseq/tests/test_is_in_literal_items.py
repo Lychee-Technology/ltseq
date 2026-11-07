@@ -474,3 +474,115 @@ def test_a_literal_without_a_faithful_spelling_gets_the_generic_rewrite(literal)
 def test_an_item_with_an_unspellable_literal_gets_the_generic_rewrite():
     message = refusal(table(), lambda r: r.x.is_in([r.y + LiteralExpr(np.datetime64("2020-01-01")), 3]))
     assert "as in (r.x == r.y) | r.x.is_in([3])." in message
+
+
+def strings() -> LTSeq:
+    x = ["a", "b ", " c", "d"]
+    y = ["  a", "b  ", " c ", None]
+    return LTSeq.from_arrow(pa.table({"k": [0, 1, 2, 3], "x": x, "y": y})).sort("k")
+
+
+@pytest.mark.parametrize(
+    "method, spelled, expected",
+    [
+        ("lstrip", "r.y.s.lstrip()", [True, False, False, True]),
+        ("rstrip", "r.y.s.rstrip()", [False, False, True, True]),
+    ],
+)
+def test_an_accessor_item_is_spelled_with_its_public_method(method, spelled, expected):
+    """`.s.lstrip()` builds `str_ltrim`: the rewrite names the method a user
+    calls, and runs (R5-F1 of #294's review)."""
+    t = strings()
+    message = refusal(t, lambda r: r.x.is_in([getattr(r.y.s, method)(), "d"]))
+    rewrite = rewrite_in(message)
+    assert rewrite == f"(r.x == {spelled}) | r.x.is_in(['d'])"
+    got = column(t.derive(m=eval(f"lambda r: {rewrite}", {})))
+    assert got == expected
+    assert got == column(t.derive(m=lambda r: (r.x == getattr(r.y.s, method)()) | r.x.is_in(["d"])))
+
+
+# A call of each accessor method, as an is_in item.
+ACCESSOR_CALLS = {
+    **{
+        f"s.{name}": (lambda r, name=name, args=args: getattr(r.y.s, name)(*args))
+        for name, args in [
+            ("contains", ("a",)),
+            ("starts_with", ("a",)),
+            ("ends_with", ("a",)),
+            ("lower", ()),
+            ("upper", ()),
+            ("strip", ()),
+            ("len", ()),
+            ("slice", (1, 2)),
+            ("regex_match", ("a+",)),
+            ("replace", ("a", "b")),
+            ("concat", ("a", "b")),
+            ("pad_left", (5, "*")),
+            ("pad_right", (5,)),
+            ("split", (",", 1)),
+            ("split_part", (",", 1)),
+            ("like", ("a%",)),
+            ("isalpha", ()),
+            ("isdigit", ()),
+            ("islower", ()),
+            ("isupper", ()),
+            ("pos", ("a",)),
+            ("find", ("a",)),
+            ("left", (2,)),
+            ("right", (2,)),
+            ("lstrip", ()),
+            ("rstrip", ()),
+            ("asc", ()),
+            ("ord", ()),
+        ]
+    },
+    **{
+        f"dt.{name}": (lambda r, name=name, args=args: getattr(r.y.dt, name)(*args))
+        for name, args in [
+            ("year", ()),
+            ("month", ()),
+            ("day", ()),
+            ("hour", ()),
+            ("minute", ()),
+            ("second", ()),
+            ("millisecond", ()),
+            ("weekday", ()),
+            ("age", ()),
+            ("add", (1, 2)),
+            ("diff", (datetime.date(2020, 1, 1), "month")),
+        ]
+    },
+}
+
+
+def test_every_accessor_method_is_listed():
+    from ltseq.expr.accessors import StringAccessor, TemporalAccessor
+
+    public = {
+        f"{prefix}.{name}"
+        for prefix, cls in (("s", StringAccessor), ("dt", TemporalAccessor))
+        for name in vars(cls)
+        if not name.startswith("_") and callable(getattr(cls, name))
+    }
+    assert public == set(ACCESSOR_CALLS)
+
+
+@pytest.mark.parametrize("case", ACCESSOR_CALLS)
+def test_an_accessor_item_is_spelled_as_source_that_builds_it(case):
+    """The rewrite for each accessor call, evaluated, builds the same
+    expression the refused item was (R5-F1 of #294's review)."""
+    item = ACCESSOR_CALLS[case]
+    message = refusal(table(), lambda r: r.x.is_in([item(r)]))
+    rewrite = rewrite_in(message)
+    scope = {"datetime": datetime}
+    built = eval(f"lambda r: {rewrite}", scope)(SchemaProxyLike())
+    expected = (lambda r: r.x == item(r))(SchemaProxyLike())
+    assert built.serialize() == expected.serialize()
+
+
+def test_an_accessor_function_without_a_method_gets_the_generic_rewrite():
+    from ltseq.expr import CallExpr
+
+    message = refusal(table(), lambda r: r.x.is_in([CallExpr("str_ltrim_all", (), {}, on=r.y), 3]))
+    assert "item 0 is the expression CallExpr" in message
+    assert "as in (r.x == r.y) | r.x.is_in([3])." in message

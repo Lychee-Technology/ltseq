@@ -640,6 +640,11 @@ def _is_null_literal(value: Any) -> bool:
     return isinstance(value, LiteralExpr) and value.value is None
 
 
+# Accessor methods whose public name is not their function's name without
+# its prefix.
+_ACCESSOR_METHODS = {"str_ltrim": "lstrip", "str_rtrim": "rstrip"}
+
+
 def _spell(value: Any, *, as_expr: bool = True) -> str | None:
     """Python source that builds ``value`` again, for error messages, or
     None when some node of it has no faithful spelling.
@@ -704,9 +709,18 @@ def _spell(value: Any, *, as_expr: bool = True) -> str | None:
             if kwargs:
                 return None
             return f"{on}.is_in([{listed}])"
-        for prefix, accessor in (("str_", "s."), ("dt_", "dt.")):
+        # An accessor method spells its own public name, which is not always
+        # its function's name (`.s.lstrip()` builds `str_ltrim`); a function
+        # no accessor method has a name for has no spelling (R5-F1 of #294's
+        # review).
+        from .accessors import StringAccessor, TemporalAccessor
+
+        for prefix, accessor, cls in (("str_", "s", StringAccessor), ("dt_", "dt", TemporalAccessor)):
             if func.startswith(prefix):
-                func = accessor + func.removeprefix(prefix)
+                method = _ACCESSOR_METHODS.get(func, func.removeprefix(prefix))
+                if not callable(getattr(cls, method, None)):
+                    return None
+                return f"{on}.{accessor}.{method}({listed})"
         return f"{on}.{func}({listed})"
     return None
 
