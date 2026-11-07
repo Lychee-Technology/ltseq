@@ -1,8 +1,17 @@
-from typing import TYPE_CHECKING, Any, NoReturn, overload
+from collections.abc import Iterable
+from datetime import date
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, NoReturn, SupportsFloat, SupportsIndex, overload
 
 if TYPE_CHECKING:
     from .core_types import BinOpExpr, LiteralExpr, UnaryOpExpr
     from .types import CallExpr, LookupExpr
+
+# An `is_in` value: a literal, never an expression (#294). `SupportsIndex`
+# and `SupportsFloat` admit NumPy integers and floats; `date` admits
+# `datetime` and `pandas.Timestamp`. An `Expr` other than a `LiteralExpr`
+# matches none of these.
+_IsInValue = bool | int | float | str | Decimal | date | SupportsIndex | SupportsFloat | LiteralExpr | None
 
 
 class Expr:
@@ -56,7 +65,7 @@ class Expr:
     def fill_null(self, default: Any) -> CallExpr: ...
     def is_null(self) -> CallExpr: ...
     def is_not_null(self) -> CallExpr: ...
-    def is_in(self, values: list[Any]) -> CallExpr: ...
+    def is_in(self, values: Iterable[_IsInValue]) -> CallExpr: ...
     def between(self, low: Any, high: Any) -> BinOpExpr: ...
     def cast(self, dtype: str) -> CallExpr: ...
     def abs(self) -> CallExpr: ...

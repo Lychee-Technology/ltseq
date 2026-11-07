@@ -1,5 +1,6 @@
 """Base expression class for LTSeq."""
 
+import keyword
 import numbers
 from abc import ABC, abstractmethod
 from typing import Any, NoReturn, TYPE_CHECKING, cast
@@ -562,6 +563,83 @@ def _pow_not_supported() -> NotImplementedError:
     )
 
 
+_OPERATOR_SYMBOLS = {
+    "Add": "+",
+    "Sub": "-",
+    "Mul": "*",
+    "Div": "/",
+    "FloorDiv": "//",
+    "Mod": "%",
+    "Eq": "==",
+    "Ne": "!=",
+    "Lt": "<",
+    "Le": "<=",
+    "Gt": ">",
+    "Ge": ">=",
+    "And": "&",
+    "Or": "|",
+}
+
+
+def _expr_text(value: Any) -> str:
+    """A short Python-like spelling of an expression, for error messages.
+
+    Columns read as ``r.name``, or ``getattr(r, name)`` when the name is not
+    an identifier; nodes it cannot spell read as their class.
+    """
+    from .types import BinOpExpr, CallExpr, ColumnExpr, LiteralExpr, UnaryOpExpr
+
+    if not isinstance(value, Expr):
+        return repr(value)
+    if isinstance(value, ColumnExpr):
+        name = value.name
+        if name.isidentifier() and not keyword.iskeyword(name):
+            return f"r.{name}"
+        return f"getattr(r, {name!r})"
+    if isinstance(value, LiteralExpr):
+        return repr(value.value)
+    if isinstance(value, BinOpExpr):
+        symbol = _OPERATOR_SYMBOLS.get(value.op, value.op)
+        return f"({_expr_text(value.left)} {symbol} {_expr_text(value.right)})"
+    if isinstance(value, UnaryOpExpr) and value.op == "Not":
+        return f"~{_expr_text(value.operand)}"
+    if isinstance(value, CallExpr):
+        args = [_expr_text(a) for a in value.args]
+        args += [f"{k}={_expr_text(v)}" for k, v in value.kwargs.items()]
+        func = value.func
+        # Accessor methods and standalone functions carry a prefix
+        # (`str_lower` is `.s.lower()`, `math_sqrt` is `sqrt()`).
+        if value.on is None:
+            func = func.removeprefix("math_").removeprefix("dt_").removeprefix("str_")
+            return f"{func}({', '.join(args)})"
+        for prefix, accessor in (("str_", "s."), ("dt_", "dt.")):
+            if func.startswith(prefix):
+                func = accessor + func.removeprefix(prefix)
+        return f"{_expr_text(value.on)}.{func}({', '.join(args)})"
+    return type(value).__name__
+
+
+def _expression_item_error(receiver: "Expr", items: list[Any], position: int) -> TypeError:
+    """The error for an ``is_in`` item that is an expression (#294), with the
+    spelling that tests a value of the same row: an equality for each
+    expression item, and ``is_in`` of the literal ones."""
+    from .types import LiteralExpr
+
+    item = _expr_text(items[position])
+    subject = _expr_text(receiver)
+    literal = [not isinstance(v, Expr) or isinstance(v, LiteralExpr) for v in items]
+    tests = [f"({subject} == {_expr_text(v)})" for v, lit in zip(items, literal) if not lit]
+    if any(literal):
+        listed = ", ".join(_expr_text(v) for v, lit in zip(items, literal) if lit)
+        tests.append(f"{subject}.is_in([{listed}])")
+    rewrite = " | ".join(tests)
+    return TypeError(
+        f"is_in() takes literal values only, but item {position} is the expression {item}. "
+        f"To test a value of the same row, compare it with ==: {rewrite}. "
+        "For membership in another table, use a join or semi_join()."
+    )
+
+
 class Expr(ABC):
     """
     Abstract base class for all expression types.
@@ -808,18 +886,29 @@ class Expr(ABC):
         whatever the list's length.
 
         Args:
-            values: A list of values to check membership against
+            values: The literal values to check membership against: Python
+                constants of the types a literal takes, ``None`` included.
 
         Returns:
             Boolean expression that is True when value is in the list
+
+        Raises:
+            TypeError: A value is an expression, such as a column (#294).
+                Compare a value of the same row with ``==``:
+                ``(r.x == r.y) | r.x.is_in([3])``. For membership in
+                another table, use a join or ``semi_join``.
 
         Example:
             >>> t.filter(lambda r: r.status.is_in(["active", "pending", "review"]))
             >>> t.filter(lambda r: r.age.is_in([18, 21, 65]))
         """
-        from .types import CallExpr
+        from .types import CallExpr, LiteralExpr
 
-        coerced_values = [self._coerce(v) for v in values]
+        items = list(values)
+        for position, item in enumerate(items):
+            if isinstance(item, Expr) and not isinstance(item, LiteralExpr):
+                raise _expression_item_error(self, items, position)
+        coerced_values = [self._coerce(v) for v in items]
         return CallExpr("is_in", tuple(coerced_values), {}, on=cast(Any, self))
 
     def between(self, low: Any, high: Any) -> "BinOpExpr":
