@@ -8,7 +8,7 @@ needs a receiver reports that instead of looking up a column named ``''``.
 """
 
 import math
-from datetime import date
+from datetime import datetime, timezone
 
 import pyarrow as pa
 import pytest
@@ -66,7 +66,14 @@ def test_string_standalone_forms(t):
 
 
 def test_temporal_standalone_takes_no_receiver(t):
-    assert _col(t, lambda r: today()) == [date.today()] * 4
+    # today() is DataFusion's current_date() in a session with no time zone,
+    # so it is the UTC date, not the local one (#249). Bracket the query with
+    # UTC reads so the check also holds when the UTC date rolls over mid-query.
+    before = datetime.now(timezone.utc).date()
+    got = _col(t, lambda r: today())
+    after = datetime.now(timezone.utc).date()
+    assert len(got) == 4 and len(set(got)) == 1
+    assert got[0] in {before, after}
 
 
 def test_aggregate_standalone_forms(t):
