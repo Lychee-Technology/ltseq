@@ -10,7 +10,7 @@ are in [REPORT.md](REPORT.md); the raw results are under
 
 | | What | Script | Results |
 |---|---|---|---|
-| Steps 1 and 2 | What each consumer raises for each error source, and what `close()` and dropping a reader release | `probe.py` | `results/probe.md`, `.json` |
+| Steps 1 and 2 | What each consumer raises for each error source, and what `close()` and dropping a reader release, for pyarrow's readers and the native subclass | `probe.py` | `results/probe.md`, `.json` |
 | Step 3 | What reading `to_batches()` through the Rust iterator costs against today's C stream, idle and with a busy Python thread | `bench.py` | `results/bench.md`, `.json` |
 
 ## The spike
@@ -31,17 +31,25 @@ build carries it, and M1 replaces it.
   error at the bottom of DataFusion's chain.
 - `py-ltseq/ltseq/_stream_spike.py`: stand-ins for the contract's exception
   classes (§20.1), which do not exist yet, and the helpers above. A
-  `fault=(after, class, message)` raises a class after `after` batches;
-  `ArithmeticOverflowError` and `OrderViolationError` have no execution error
-  today, so only a fault can raise them.
+  `fault=(after, class, message)` raises a class after `after` batches.
+  `OrderViolationError` has no execution error today, so only a fault can
+  raise it; `ArithmeticOverflowError` has one, `INT64_MIN // -1`, which the
+  probe and the tests read alongside the injected fault.
+- `_closing_reader.pyx`: OD-X6's option (e), a Cython subclass of
+  `pyarrow.RecordBatchReader` that shares the C++ reader `from_batches`
+  builds and closes the Rust iterator on `close()`. `closing_reader.py`
+  compiles it against the installed pyarrow (Cython and a C++20 compiler)
+  under `target/stream_errors/closing_reader/`, and its `to_batches(t)`
+  returns it. The probe leaves its columns out when it cannot be built.
 - `py-ltseq/tests/test_stream_spike.py` holds the spike to the report's
-  outcomes; it skips on a default build.
+  outcomes; it skips on a default build, and its native-subclass tests skip
+  without Cython.
 
 ## Running
 
 ```bash
 maturin develop --release --features stream_spike
-uv pip install duckdb polars          # for their columns; neither is a project dependency
+uv pip install duckdb polars cython   # for their columns; none is a project dependency
 python benchmarks/stream_errors/probe.py
 python benchmarks/stream_errors/bench.py           # about 15 minutes; --quick for a trial
 pytest py-ltseq/tests/test_stream_spike.py

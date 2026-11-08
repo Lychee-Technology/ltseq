@@ -17,10 +17,11 @@
 //!
 //! v0.5's exception classes do not exist yet. The Python side passes
 //! stand-ins with the contract's bases (`ltseq._stream_spike`), keyed by
-//! class name, and [`classify`] names the class of an execution error. Two
-//! of the four classes the issue names, `ArithmeticOverflowError` and
-//! `OrderViolationError`, have no execution error today, so a [`Fault`]
-//! injects them (and any other class) after a given number of batches.
+//! class name, and [`classify`] names the class of an execution error. One
+//! of the four classes the issue names, `OrderViolationError`, has no
+//! execution error today (`ArithmeticOverflowError` has `INT64_MIN // -1`),
+//! so a [`Fault`] injects it (and any other class) after a given number of
+//! batches.
 //!
 //! [`LIVE`] counts the executions a reader or stream holds, so a test can
 //! tell whether closing or dropping one stopped its execution.

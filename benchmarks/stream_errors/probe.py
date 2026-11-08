@@ -3,11 +3,13 @@
 Runs every error source against every way of reading a stream and records
 the exception's class, whether it is an ``OSError`` or a ``ValueError``,
 the batches read before it, and its message. Also records whether
-``close()`` or dropping the reader stops the execution (OD-X6).
+``close()`` or dropping the reader stops the execution (OD-X6), for
+pyarrow's readers and for the native subclass of option (e)
+(``closing_reader.py``).
 
 Needs a spike build (``maturin develop --release --features stream_spike``)
-and, for their columns, DuckDB and Polars. Writes ``results/probe.json`` and
-``results/probe.md``.
+and, for their columns, DuckDB, Polars, and Cython with a C++20 compiler.
+Writes ``results/probe.json`` and ``results/probe.md``.
 
     python benchmarks/stream_errors/probe.py
 """
@@ -38,6 +40,7 @@ RESULTS = HERE / "results"
 ROWS = 40
 BATCH = 4  # ten batches
 AFTER = 3  # injected faults fire after three batches
+INT64_MIN = -(2**63)
 
 try:
     import duckdb
@@ -47,6 +50,17 @@ try:
     import polars as pl
 except ImportError:  # pragma: no cover - optional
     pl = None
+
+# OD-X6's option (e): a Cython subclass of pyarrow's reader whose close()
+# reaches the iterator. It needs Cython and a C++ compiler; without them its
+# columns are left out.
+try:
+    import closing_reader
+
+    closing_reader.load()
+except Exception as e:  # noqa: BLE001 - optional, like DuckDB and Polars
+    print(f"leaving out the native subclass: {type(e).__name__}: {e}", file=sys.stderr)
+    closing_reader = None
 
 
 # --- error sources ---------------------------------------------------------
@@ -65,6 +79,19 @@ def _base() -> LTSeq:
                 # z is 0 and s is not a number from row 30 on: batch 8 of 10.
                 "z": [1] * 30 + [0] * (n - 30),
                 "s": ["1"] * 30 + ["a"] * (n - 30),
+            }
+        )
+    )
+
+
+def _overflow() -> LTSeq:
+    """Integer ``//`` that overflows: ``INT64_MIN // -1`` from row 30 on."""
+    n = ROWS
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "x": list(range(30)) + [INT64_MIN] * (n - 30),
+                "y": [1] * 30 + [-1] * (n - 30),
             }
         )
     )
@@ -91,6 +118,7 @@ SOURCES: dict[str, Callable[[], tuple[LTSeq, Any]]] = {
     "LTSeqIOError (injected)": _injected("LTSeqIOError"),
     "ExecutionError (injected)": _injected("ExecutionError"),
     "integer // 0 (real)": lambda: (_base().derive(y=lambda r: r.x // r.z), None),
+    "INT64_MIN // -1 (real)": lambda: (_overflow().derive(z=lambda r: r.x // r.y), None),
     "cast of 'a' to int64 (real)": lambda: (_base().derive(y=lambda r: r.s.cast("int64")), None),
     "file deleted after read_parquet (real, raises at the call)": lambda: (_missing_file(), None),
 }
@@ -149,6 +177,33 @@ def _from_stream_reader_batches(t: LTSeq, fault: Any, seen: list[int]) -> int:
     return _drain(pa.RecordBatchReader.from_stream(spike.to_batches(t, fault)), seen)
 
 
+def _closing_read_next_batch(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    return _drain(closing_reader.to_batches(t, fault), seen)
+
+
+def _closing_iterate(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    for _ in closing_reader.to_batches(t, fault):
+        seen[0] += 1
+    return seen[0]
+
+
+def _closing_read_all(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    return closing_reader.to_batches(t, fault).read_all().num_rows // BATCH
+
+
+def _closing_pa_table(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    return pa.table(closing_reader.to_batches(t, fault)).num_rows // BATCH
+
+
+def _closing_duckdb(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    reader = closing_reader.to_batches(t, fault)  # noqa: F841 - named for DuckDB's scan
+    return duckdb.sql("select count(*) from reader").fetchall()[0][0] // BATCH
+
+
+def _closing_polars(t: LTSeq, fault: Any, seen: list[int]) -> int:
+    return pl.from_arrow(closing_reader.to_batches(t, fault)).height // BATCH
+
+
 def _duckdb_reader(t: LTSeq, fault: Any, seen: list[int]) -> int:
     reader = spike.to_batches(t, fault)  # noqa: F841 - named for DuckDB's scan
     return duckdb.sql("select count(*) from reader").fetchall()[0][0] // BATCH
@@ -193,6 +248,15 @@ if pl is not None:
     PATHS["pl.from_arrow(reader)"] = ("to_batches(), Python read", _polars_reader)
     PATHS["pl.DataFrame(s)"] = ("spike C stream", _polars_stream)
     PATHS["pl.from_dataframe(s)"] = ("spike C stream", _polars_from_dataframe)
+if closing_reader is not None:
+    PATHS["closing: read_next_batch"] = ("native subclass, Python read", _closing_read_next_batch)
+    PATHS["closing: iteration"] = ("native subclass, Python read", _closing_iterate)
+    PATHS["closing: read_all"] = ("native subclass, Python read", _closing_read_all)
+    PATHS["pa.table(closing)"] = ("native subclass imported as a C stream", _closing_pa_table)
+    if duckdb is not None:
+        PATHS["duckdb(closing)"] = ("native subclass imported as a C stream", _closing_duckdb)
+    if pl is not None:
+        PATHS["pl.from_arrow(closing)"] = ("native subclass, Python read", _closing_polars)
 
 
 def _scrub(message: str) -> str:
@@ -206,7 +270,8 @@ def probe_cell(source: str, path: str) -> dict[str, Any]:
     # Batches read before the raise, for the paths that read one at a time.
     seen = [0]
     counts = read in (_read_next_batch, _iterate, _from_stream_stream,
-                      _from_stream_today, _from_stream_reader_batches)
+                      _from_stream_today, _from_stream_reader_batches,
+                      _closing_read_next_batch, _closing_iterate)
     try:
         n = read(t, fault, seen)
     except _NotApplicable:
@@ -238,6 +303,8 @@ def probe_close() -> list[dict[str, Any]]:
             spike.to_batches(t)
         ),
     }
+    if closing_reader is not None:
+        readers["closing: the native subclass over the Rust iterator"] = closing_reader.to_batches
     rows = []
     for name, make in readers.items():
         t = _base()
@@ -249,6 +316,8 @@ def probe_close() -> list[dict[str, Any]]:
         try:
             r.read_next_batch()
             after = "returns the next batch"
+        except StopIteration:
+            after = "StopIteration (end of stream)"
         except Exception as e:  # noqa: BLE001
             after = f"{type(e).__name__}: {e}"
         del r
@@ -262,19 +331,25 @@ def probe_close() -> list[dict[str, Any]]:
                 "live_after_drop": spike.live(),
             }
         )
-    t = _base()
-    with spike.to_batches(t) as r:
-        r.read_next_batch()
-    in_with = spike.live()
-    del r
-    gc.collect()
-    rows.append(
-        {
-            "reader": "to_batches() in a with block",
-            "live_after_with": in_with,
-            "live_after_drop": spike.live(),
-        }
-    )
+    in_with: dict[str, Callable[[LTSeq], pa.RecordBatchReader]] = {
+        "to_batches() in a with block": lambda t: spike.to_batches(t),
+    }
+    if closing_reader is not None:
+        in_with["closing: the native subclass in a with block"] = closing_reader.to_batches
+    for name, make in in_with.items():
+        t = _base()
+        with make(t) as r:
+            r.read_next_batch()
+        after_with = spike.live()
+        del r
+        gc.collect()
+        rows.append(
+            {
+                "reader": name,
+                "live_after_with": after_with,
+                "live_after_drop": spike.live(),
+            }
+        )
     return rows
 
 
@@ -288,6 +363,10 @@ def versions() -> dict[str, str]:
         out["duckdb"] = duckdb.__version__
     if pl is not None:
         out["polars"] = pl.__version__
+    if closing_reader is not None:
+        import Cython
+
+        out["cython"] = Cython.__version__
     return out
 
 
@@ -304,7 +383,8 @@ def render(result: dict[str, Any]) -> str:
         "Each cell: the exception raised (`LTSeq` = the stand-in class itself), "
         "`OSError`/`ValueError` when it is one, the batches read first where the "
         "path counts them, and the message. `n/a`: the path does not take an "
-        "injected fault."
+        "injected fault. `closing:` paths read the native subclass of "
+        "`pyarrow.RecordBatchReader` (`_closing_reader.pyx`, OD-X6's option (e))."
     )
     for path, (kind, _) in PATHS.items():
         lines += ["", f"## `{path}` ({kind})", "", "| Source | Raised | Message |", "|---|---|---|"]

@@ -10,7 +10,11 @@ than leaving the report stale:
   with the class name, which pyarrow raises as `OSError` or `ArrowInvalid`
   (§16.4);
 - `close()` on that reader does not stop its execution; dropping it does
-  (OD-X6).
+  (OD-X6);
+- a Cython subclass of `pyarrow.RecordBatchReader` that shares that reader's
+  C++ reader and closes the iterator on `close()` keeps the class on every
+  Python read and stops the execution on `close()` (OD-X6's option (e));
+  these tests compile it, and skip without Cython.
 
 A default build has no spike, and every test but the first is skipped.
 """
@@ -18,7 +22,9 @@ A default build has no spike, and every test but the first is skipped.
 from __future__ import annotations
 
 import gc
+import importlib.util
 import os
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -34,6 +40,7 @@ spike_build = pytest.mark.skipif(
 ROWS = 40
 BATCH = 4
 AFTER = 3
+INT64_MIN = -(2**63)
 
 # The four classes #256 names, with the contract's bases, and the two
 # classes of the other errno.
@@ -66,6 +73,18 @@ def _table() -> LTSeq:
                 "x": list(range(ROWS)),
                 "z": [1] * 30 + [0] * (ROWS - 30),
                 "s": ["1"] * 30 + ["a"] * (ROWS - 30),
+            }
+        )
+    )
+
+
+def _overflow_table() -> LTSeq:
+    # INT64_MIN // -1 does not fit in int64: a real execution overflow.
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "x": list(range(30)) + [INT64_MIN] * (ROWS - 30),
+                "y": [1] * 30 + [-1] * (ROWS - 30),
             }
         )
     )
@@ -159,17 +178,50 @@ def test_read_next_batch_returns_the_batches_before_the_error():
 @pytest.mark.usefixtures("layout")
 @pytest.mark.parametrize("read", READS, ids=lambda f: f.__name__.lstrip("_"))
 @pytest.mark.parametrize(
-    "derive, cls",
+    "make, derive, cls",
     [
-        (lambda r: r.x // r.z, "DivisionByZeroError"),
-        (lambda r: r.s.cast("int64"), "CastError"),
+        (_table, lambda r: r.x // r.z, "DivisionByZeroError"),
+        (_table, lambda r: r.s.cast("int64"), "CastError"),
+        (_overflow_table, lambda r: r.x // r.y, "ArithmeticOverflowError"),
     ],
-    ids=["divide_by_zero", "cast"],
+    ids=["divide_by_zero", "cast", "overflow"],
 )
-def test_engine_errors_raise_their_class(read, derive, cls):
-    reader = spike.to_batches(_table().derive(y=derive))
-    with pytest.raises(spike.CLASSES[cls]):
+def test_engine_errors_raise_their_class(read, make, derive, cls):
+    reader = spike.to_batches(make().derive(z=derive))
+    with pytest.raises(spike.CLASSES[cls]) as caught:
         read(reader)
+    assert type(caught.value) is spike.CLASSES[cls]
+
+
+OVERFLOW_MESSAGE = f"Overflow happened on: {INT64_MIN} / -1"
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+@pytest.mark.parametrize("read", READS, ids=lambda f: f.__name__.lstrip("_"))
+def test_a_real_overflow_raises_arithmetic_overflow_error(read):
+    reader = spike.to_batches(_overflow_table().derive(z=lambda r: r.x // r.y))
+    with pytest.raises(spike.ArithmeticOverflowError) as caught:
+        read(reader)
+    assert isinstance(caught.value, OverflowError)
+    assert str(caught.value) == OVERFLOW_MESSAGE
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+@pytest.mark.parametrize(
+    "consume",
+    [
+        lambda s: pa.table(s),
+        lambda s: pa.RecordBatchReader.from_stream(s).read_all(),
+    ],
+    ids=["pa.table", "from_stream"],
+)
+def test_a_real_overflow_ends_the_c_stream_with_einval_and_its_class(consume):
+    with pytest.raises(pa.ArrowInvalid) as caught:
+        consume(spike.Stream(_overflow_table().derive(z=lambda r: r.x // r.y)))
+    assert type(caught.value) is pa.ArrowInvalid
+    assert str(caught.value) == f"ArithmeticOverflowError: {OVERFLOW_MESSAGE}"
 
 
 @spike_build
@@ -261,3 +313,82 @@ def test_duckdb_and_polars_carry_the_message():
     # Polars reads a pyarrow reader in Python, so the class survives.
     with pytest.raises(spike.OrderViolationError):
         pl.from_arrow(spike.to_batches(_table(), (AFTER, "OrderViolationError", "boom")))
+
+
+# --- OD-X6's option (e): a native subclass whose close() reaches the iterator
+
+
+@pytest.fixture(scope="module")
+def closing_reader():
+    pytest.importorskip("Cython")
+    if not spike.available():
+        pytest.skip("needs a spike build (--features stream_spike)")
+    path = Path(__file__).resolve().parents[2] / "benchmarks" / "stream_errors" / "closing_reader.py"
+    spec = importlib.util.spec_from_file_location("closing_reader", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.load()  # compiles it against this pyarrow on first use
+    return module
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+@pytest.mark.parametrize("read", READS, ids=lambda f: f.__name__.lstrip("_"))
+@pytest.mark.parametrize("name, base, _", CLASSES, ids=[c[0] for c in CLASSES])
+def test_the_native_subclass_keeps_the_class(closing_reader, read, name, base, _):
+    reader = closing_reader.to_batches(_table(), (AFTER, name, "boom"))
+    assert isinstance(reader, pa.RecordBatchReader)
+    with pytest.raises(spike.CLASSES[name], match="^boom$") as caught:
+        read(reader)
+    assert type(caught.value) is spike.CLASSES[name]
+    assert isinstance(caught.value, base)
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+@pytest.mark.parametrize("read", READS, ids=lambda f: f.__name__.lstrip("_"))
+def test_the_native_subclass_keeps_the_class_of_a_real_error(closing_reader, read):
+    reader = closing_reader.to_batches(_overflow_table().derive(z=lambda r: r.x // r.y))
+    with pytest.raises(spike.ArithmeticOverflowError, match=f"^{OVERFLOW_MESSAGE}$"):
+        read(reader)
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+def test_closing_the_native_subclass_stops_the_execution(closing_reader):
+    reader = closing_reader.to_batches(_table())
+    reader.read_next_batch()
+    assert spike.live() == 1
+    reader.close()
+    assert spike.live() == 0
+    # The iterator is closed, so the reader is at its end.
+    with pytest.raises(StopIteration):
+        reader.read_next_batch()
+    with closing_reader.to_batches(_table()) as reader:
+        reader.read_next_batch()
+        assert spike.live() == 1
+    assert spike.live() == 0
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+def test_dropping_the_native_subclass_stops_the_execution(closing_reader):
+    reader = closing_reader.to_batches(_table())
+    reader.read_next_batch()
+    assert spike.live() == 1
+    del reader
+    gc.collect()
+    assert spike.live() == 0
+
+
+@spike_build
+@pytest.mark.usefixtures("layout")
+def test_consumers_read_the_native_subclass(closing_reader):
+    expected = list(range(ROWS))
+    assert pa.table(closing_reader.to_batches(_table())).column("x").to_pylist() == expected
+    duckdb = pytest.importorskip("duckdb")
+    pl = pytest.importorskip("polars")
+    reader = closing_reader.to_batches(_table())  # noqa: F841 - named for DuckDB's scan
+    assert duckdb.sql("select x from reader order by x").fetchall() == [(x,) for x in expected]
+    assert pl.from_arrow(closing_reader.to_batches(_table()))["x"].to_list() == expected

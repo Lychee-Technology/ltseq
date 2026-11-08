@@ -148,9 +148,9 @@ impl SpikeBatches {
         self.schema.as_ref().to_pyarrow(py)
     }
 
-    /// Stop the execution. pyarrow's reader never calls this (its `close()`
-    /// does not reach the iterator); it exists to show what a wrapper that
-    /// did call it would get.
+    /// Stop the execution. pyarrow's `from_batches` reader never calls this
+    /// (its `close()` does not reach the iterator); the native subclass in
+    /// `benchmarks/stream_errors/_closing_reader.pyx` does.
     fn close(&self, py: Python<'_>) {
         let execution = py.detach(|| match self.execution.lock() {
             Ok(mut guard) => guard.take(),
