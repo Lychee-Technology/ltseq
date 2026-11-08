@@ -18,6 +18,7 @@ This directory holds LTSeq's performance benchmarks: core-operation micro-benchm
 | `CLICKBENCH_MAPPING.md` | 三轮设计与标准 ClickBench（43 条查询）的对应关系、实测结论与 R2/R3 快路径的适用条件 | — |
 | `autoresearch/` | 基准门控的自动化性能研究 + 受控 pilot | 是 / Yes |
 | `m0/` | v0.5 契约六项高成本承诺的可行性测量（#251）：`m0` cargo feature 下的原型、逐格子进程的测量框架、结果与报告 `m0/REPORT.md` / Feasibility measurements of six costly v0.5 contract commitments (#251): prototypes behind the `m0` cargo feature, a one-subprocess-per-cell harness, results and `m0/REPORT.md` | 部分 / Partly (ClickBench for m3–m6) |
+| `stream_errors/` | v0.5 流错误路径的 spike（#256）：`to_batches()` 与 C stream 上的异常类、errno 与消息，`close()` 是否停止执行，以及 Rust 迭代器的开销；`stream_spike` cargo feature，报告 `stream_errors/REPORT.md` / Spike of the v0.5 stream error paths (#256): the exception class, errno and message on `to_batches()` and the C stream, whether `close()` stops the execution, and what the Rust iterator costs; `stream_spike` cargo feature, report in `stream_errors/REPORT.md` | 否 / No |
 
 ## 快速开始 / Quick start
 
