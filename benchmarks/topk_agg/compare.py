@@ -82,12 +82,26 @@ def cells(clickbench: Path, repeat: int) -> list[dict]:
     return out
 
 
+def _untrusted_compute(op: dict) -> bool:
+    """Whether a spike operator's ``elapsed_compute`` predates the timing fix.
+
+    Until the operator recorded ``input_time``, a partition that bailed out
+    early charged its streaming merge with elapsed time from the probe on,
+    including the intervals it was suspended waiting for input, so its
+    compute time is not the operator's work and the share is unavailable.
+    """
+    m = op["metrics"]
+    return op["name"] == "SlotPrunedCountExec" and m.get("bailed_early", 0) > 0 and "input_time" not in m
+
+
 def _median_share(analyses: list[dict], names: tuple[str, ...]) -> float | None:
     shares = []
     for analysis in analyses:
         cpu = 0.0
         for op in analysis["operators"]:
             if op["name"] in names and "mode=Partial" not in op["line"]:
+                if _untrusted_compute(op):
+                    return None
                 cpu += op["metrics"].get("elapsed_compute", 0) / 1e9
         shares.append(cpu / analysis["process_cpu_seconds"])
     return statistics.median(shares) if shares else None
@@ -158,7 +172,9 @@ def markdown(rows: list[dict], host: dict) -> str:
         "control (the same operator and first merge, then every row merged). Times are seconds over the "
         "interleaved timed runs; `Δ` is the change of the median against mode 0, `Δ ctl` against the "
         "mode's control (negative is faster). `peak` is the resident growth of a cold single run in its own "
-        "process. `final` is the final stage's share of process CPU, `merged` the share of the final stage's "
+        "process. `final` is the final stage's share of process CPU (blank for a spike mode whose partitions "
+        "bailed out early before the operator's compute timing left out input waits), `merged` the share of "
+        "the final stage's "
         "input rows the spike merged, `bailed` the share of final partitions that bailed out to one "
         "merge of every row.",
         "",

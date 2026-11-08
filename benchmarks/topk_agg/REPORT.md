@@ -59,9 +59,21 @@ Two measurement caveats apply throughout:
   over the same run. `elapsed_compute` is time spent inside the operator's
   poll. At 8 partitions on 8 CPUs that is close to CPU time. At 32 partitions
   it includes time spent waiting for a CPU, so 32-partition shares can
-  exceed 100%; read them as relative only. The same goes for a spike
-  partition that bails out early: its merge time is wall time minus the time
-  spent waiting for input, which still counts time spent waiting for a CPU.
+  exceed 100%; read them as relative only.
+- The spike's stage shares are unavailable wherever a partition bailed out
+  early. The operator that produced `results/compare.json` charged such a
+  partition with the elapsed time from its probe to the end of its
+  streaming merge, minus only the time spent inside its input's polls. The
+  intervals it spent suspended waiting for the next batch stayed in, so its
+  `elapsed_compute` was mostly waiting; `uniform_1000000` at 8 partitions
+  showed a 101.1% final-stage share. `compare.py` now leaves those shares
+  blank, and the operator now counts only the time inside its own polls
+  less its input's, a test with an input that suspends between batches
+  holds it to that, and the probe's slotting is included. The cells were
+  not rerun with it. Partitions that kept buffering were timed after their
+  input was drained, so their shares stand, but they leave out the probe's
+  slotting of its first 131,072 rows. End-to-end latencies are measured
+  separately and are unaffected.
 - Phase 1 peaks are resident growth over a warm run, which understates them.
   The comparison's peaks are cold single runs in a fresh process and are the
   ones to compare.
@@ -376,8 +388,9 @@ What the numbers say:
 
 - **Pruning is credited with the spike-vs-control gap**, as the interim
   assessment asked: −29%, −21% and −16% on the three ClickBench queries at
-  8 partitions. The final stage's CPU fell from 3.77 s to 1.12 s (UserID),
-  9.76 s to 1.34 s (URL) and 1.63 s to 0.24 s (SearchPhrase).
+  8 partitions. The final stage's CPU fell from 9.76 s to 1.34 s (URL) and
+  from 1.63 s to 0.24 s (SearchPhrase). On UserID two of eight partitions
+  bailed out early, so its final-stage CPU is unavailable (see Setup).
 - **More final partitions are not the explanation.** Today's plan does get
   faster with more partitions: UserID 1.320 → 1.196 → 1.065 s at 8, 16 and
   32, URL 5.845 → 5.710 → 5.592 s. The spike's gain against the same
@@ -413,7 +426,9 @@ What the numbers say:
 - **The ceiling is the final stage's share.** On URL the process spent
   41.9 s of CPU: 16.8 s in the partial aggregate, 9.8 s in the final one.
   The spike's final stage took 1.34 s, of which 1.27 s was hashing the URL
-  strings into slots, and the process 33.0 s. Removing the second hash
+  strings into slots, and the process 33.0 s. (The 1.27 s includes the
+  probe's slotting of each partition's first 131,072 of about 2.7M rows,
+  which the 1.34 s leaves out; see Setup.) Removing the second hash
   (the interim assessment's option E) could save at most that 1.3 s of
   CPU, about 3% of the process's CPU; the gains above already pay for the
   second hash.
@@ -496,5 +511,7 @@ against these same cells. This report opens none.
   plan (LTSeq plans every terminal afresh). Its probe and slot sizing are
   heuristics whose constants (131,072 rows, 90%, half, 128 rows per slot)
   were picked before the run, not tuned; only `r32` was tried besides.
-- Stage shares beyond 8 partitions on 8 CPUs, and of partitions that bailed
-  out early, are not CPU time (see Setup).
+- Stage shares beyond 8 partitions on 8 CPUs are not CPU time, and the
+  spike's shares where a partition bailed out early are unavailable: they
+  were measured before the operator stopped counting input waits, and were
+  not rerun (see Setup).

@@ -68,9 +68,10 @@
 //! terminal afresh; re-executing a plan over changed files would not be).
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, UInt32Array};
 use datafusion::arrow::compute::{concat_batches, take_record_batch};
@@ -452,7 +453,7 @@ impl ExecutionPlan for SlotPrunedCountExec {
             prune: self.prune,
             shared: Arc::clone(&self.threshold),
         };
-        let batches = stream::once(async move { pruner.run(input, context, metrics).await })
+        let batches = stream::once(pruner.run_timed(input, context, metrics))
             .map_ok(|batches| stream::iter(batches.into_iter().map(Ok)))
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -467,10 +468,15 @@ impl ExecutionPlan for SlotPrunedCountExec {
 }
 
 struct PartitionMetrics {
-    /// Everything after the input is drained: slotting, gathers and the
-    /// merges (comparable to the replaced aggregate's `elapsed_compute`,
-    /// which also leaves out waiting for input).
+    /// The operator's own work: the time spent inside its polls (buffering,
+    /// the probe, slotting, gathers and the merges) less the time spent
+    /// inside its input's polls. Time the operator is suspended waiting for
+    /// input lies between polls and is not counted, as in the replaced
+    /// aggregate's `elapsed_compute`; like it, this is wall time on a worker
+    /// thread, so it also counts time that thread waited for a CPU.
     elapsed_compute: Time,
+    /// Time spent inside the input's polls, left out of `elapsed_compute`.
+    input_time: Time,
     /// Hashing rows into slots and computing the bounds.
     slot_time: Time,
     /// Copying the rows of the first merge and of the kept slots.
@@ -497,6 +503,7 @@ impl PartitionMetrics {
         let counter = |name: &'static str| MetricBuilder::new(set).counter(name, partition);
         PartitionMetrics {
             elapsed_compute: MetricBuilder::new(set).elapsed_compute(partition),
+            input_time: MetricBuilder::new(set).subset_time("input_time", partition),
             slot_time: MetricBuilder::new(set).subset_time("slot_time", partition),
             gather_time: MetricBuilder::new(set).subset_time("gather_time", partition),
             output_rows: MetricBuilder::new(set).output_rows(partition),
@@ -545,6 +552,43 @@ struct Pruner {
 }
 
 impl Pruner {
+    /// [`Pruner::run`], with its own work measured into `elapsed_compute`.
+    ///
+    /// Every merge runs a one-partition plan inside this future, so all of
+    /// the operator's work happens inside its polls. Each poll is timed, and
+    /// the time spent inside the input's polls during it is subtracted. A
+    /// poll that returns `Pending` ends the timing, so the intervals spent
+    /// suspended on the input (or on anything else) are never counted, on
+    /// the early-bail path's streaming merge as on the buffering one.
+    fn run_timed(
+        self,
+        input: SendableRecordBatchStream,
+        context: Arc<TaskContext>,
+        metrics: PartitionMetrics,
+    ) -> impl Future<Output = Result<Vec<RecordBatch>>> {
+        let (compute, input_time) = (metrics.elapsed_compute.clone(), metrics.input_time.clone());
+        let input = {
+            let input_time = input_time.clone();
+            let schema = input.schema();
+            let mut input = input;
+            let timed = stream::poll_fn(move |cx| {
+                let _timer = input_time.timer();
+                input.poll_next_unpin(cx)
+            });
+            Box::pin(RecordBatchStreamAdapter::new(schema, timed)) as SendableRecordBatchStream
+        };
+        let mut run = Box::pin(self.run(input, context, metrics));
+        std::future::poll_fn(move |cx| {
+            let started = Instant::now();
+            let waited = input_time.value();
+            let polled = run.as_mut().poll(cx);
+            let inside = started.elapsed();
+            let waited = Duration::from_nanos((input_time.value() - waited) as u64);
+            compute.add_duration(inside.saturating_sub(waited));
+            polled
+        })
+    }
+
     async fn run(
         self,
         mut input: SendableRecordBatchStream,
@@ -570,8 +614,6 @@ impl Pruner {
                 }
             }
         }
-        let compute = metrics.elapsed_compute.clone();
-        let _started = compute.timer();
         let rows_in = buffered;
         let batch_size = context.session_config().batch_size();
         metrics.rows_in.add(rows_in);
@@ -689,26 +731,17 @@ impl Pruner {
         context: &Arc<TaskContext>,
         metrics: &PartitionMetrics,
     ) -> Result<Vec<RecordBatch>> {
-        let started = Instant::now();
         let buffered: usize = batches.iter().map(RecordBatch::num_rows).sum();
         metrics.rows_in.add(buffered);
         metrics.rows_merged.add(buffered);
         metrics.bailed.add(1);
         metrics.bailed_early.add(1);
         metrics.waves.add(1);
-        // The time spent waiting for input is not the merge's.
-        let waited = Arc::new(AtomicU64::new(0));
         let rest = {
-            let (rows_in, rows_merged, waited) = (
-                metrics.rows_in.clone(),
-                metrics.rows_merged.clone(),
-                Arc::clone(&waited),
-            );
+            let (rows_in, rows_merged) = (metrics.rows_in.clone(), metrics.rows_merged.clone());
             let mut input = input;
             stream::poll_fn(move |cx| {
-                let polled = Instant::now();
                 let next = input.poll_next_unpin(cx);
-                waited.fetch_add(polled.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 if let std::task::Poll::Ready(Some(Ok(batch))) = &next {
                     rows_in.add(batch.num_rows());
                     rows_merged.add(batch.num_rows());
@@ -726,12 +759,6 @@ impl Pruner {
                 context,
             )
             .await?;
-        let busy = started
-            .elapsed()
-            .saturating_sub(std::time::Duration::from_nanos(
-                waited.load(Ordering::Relaxed),
-            ));
-        metrics.elapsed_compute.add_duration(busy);
         metrics
             .output_rows
             .add(out.iter().map(RecordBatch::num_rows).sum());
@@ -948,5 +975,160 @@ impl ExecutionPlan for Buffered {
             (0, Some(input)) => Ok(input),
             _ => internal_err!("Buffered runs once, as partition 0"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::task::{Poll, Waker};
+    use std::time::Duration;
+
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::functions_aggregate::count::count_udaf;
+    use datafusion::physical_expr::aggregate::AggregateExprBuilder;
+    use datafusion::physical_plan::expressions::{col, lit};
+
+    /// The shape of `group by k, count(1) as cnt` over a hash repartition,
+    /// planned the way DataFusion plans it.
+    fn count_shape() -> Shape {
+        let raw = Arc::new(Schema::new(vec![Field::new("k", DataType::Int64, false)]));
+        let source = MemorySourceConfig::try_new_exec(&[vec![]], Arc::clone(&raw), None).unwrap();
+        let group_by = PhysicalGroupBy::new_single(vec![(col("k", &raw).unwrap(), "k".into())]);
+        let count = Arc::new(
+            AggregateExprBuilder::new(count_udaf(), vec![lit(1i64)])
+                .schema(Arc::clone(&raw))
+                .alias("cnt")
+                .build()
+                .unwrap(),
+        );
+        let partial = Arc::new(
+            AggregateExec::try_new(
+                AggregateMode::Partial,
+                Arc::new(group_by.clone()),
+                vec![Arc::clone(&count)],
+                vec![None],
+                source,
+                Arc::clone(&raw),
+            )
+            .unwrap(),
+        );
+        let hash = vec![col("k", &partial.schema()).unwrap()];
+        let repartition =
+            Arc::new(RepartitionExec::try_new(partial, Partitioning::Hash(hash, 1)).unwrap());
+        let last = AggregateExec::try_new(
+            AggregateMode::FinalPartitioned,
+            Arc::new(group_by.as_final()),
+            vec![count],
+            vec![None],
+            repartition,
+            raw,
+        )
+        .unwrap();
+        Shape::of(&last, "cnt").expect("eligible")
+    }
+
+    /// Partial rows that arrive `delay` apart: each batch is preceded by a
+    /// `Pending`, woken by a thread once the delay has passed.
+    fn delayed(
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+        delay: Duration,
+    ) -> SendableRecordBatchStream {
+        let mut batches = VecDeque::from(batches);
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut sleeping = false;
+        let pending = stream::poll_fn(move |cx| {
+            if batches.is_empty() {
+                return Poll::Ready(None);
+            }
+            *waker.lock().unwrap() = Some(cx.waker().clone());
+            if !sleeping {
+                sleeping = true;
+                let (waker, ready) = (Arc::clone(&waker), Arc::clone(&ready));
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    ready.store(true, Ordering::SeqCst);
+                    if let Some(w) = waker.lock().unwrap().take() {
+                        w.wake();
+                    }
+                });
+                return Poll::Pending;
+            }
+            if !ready.swap(false, Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            sleeping = false;
+            Poll::Ready(batches.pop_front().map(Ok))
+        });
+        Box::pin(RecordBatchStreamAdapter::new(schema, pending))
+    }
+
+    #[test]
+    fn early_bail_compute_leaves_out_suspended_input_waits() {
+        let shape = count_shape();
+        let schema = Arc::clone(&shape.partial_schema);
+        // Four batches of distinct keys, each counted once: the probe after
+        // the second (131,072 rows) finds every slot reaching T0 and streams
+        // the other two into one merge, waiting for each.
+        let rows = PROBE_ROWS / 2;
+        let batches: Vec<RecordBatch> = (0..4)
+            .map(|b| {
+                let keys =
+                    Int64Array::from_iter_values((0..rows as i64).map(|i| b * rows as i64 + i));
+                let ones = Int64Array::from_iter_values(std::iter::repeat_n(1, rows));
+                RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(keys), Arc::new(ones)])
+                    .unwrap()
+            })
+            .collect();
+        let delay = Duration::from_millis(300);
+        let input = delayed(schema, batches, delay);
+
+        let set = ExecutionPlanMetricsSet::new();
+        let metrics = PartitionMetrics::new(&set, 0);
+        let (compute, slot_time, input_time) = (
+            metrics.elapsed_compute.clone(),
+            metrics.slot_time.clone(),
+            metrics.input_time.clone(),
+        );
+        let (bailed_early, rows_in) = (metrics.bailed_early.clone(), metrics.rows_in.clone());
+        let pruner = Pruner {
+            shape,
+            k: 1,
+            sizing: Sizing::PerRows(128),
+            prune: true,
+            shared: Arc::new(AtomicI64::new(i64::MIN)),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let out = runtime
+            .block_on(pruner.run_timed(input, Arc::new(TaskContext::default()), metrics))
+            .unwrap();
+        let wall = started.elapsed();
+
+        assert_eq!(
+            out.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            4 * rows
+        );
+        assert_eq!(bailed_early.value(), 1);
+        assert_eq!(rows_in.value(), 4 * rows);
+        let compute = Duration::from_nanos(compute.value() as u64);
+        // The four waits, two of them during the streaming merge, are about
+        // 1.2 s of the wall time and none of the compute time. Measuring
+        // from the probe on, as before, counted the two merge-time waits.
+        assert!(
+            compute + delay * 4 * 4 / 5 <= wall,
+            "compute {compute:?} counts input waits (wall {wall:?})"
+        );
+        assert!(compute > Duration::ZERO);
+        // The probe's slotting is the operator's work too.
+        assert!(slot_time.value() <= compute.as_nanos() as usize);
+        assert!(input_time.value() < wall.as_nanos() as usize);
     }
 }
