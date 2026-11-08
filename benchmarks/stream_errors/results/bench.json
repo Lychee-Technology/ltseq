@@ -1,0 +1,1497 @@
+{
+ "build": {
+  "python": "3.13.5",
+  "pyarrow": "26.0.1",
+  "platform": "Linux-7.0.14-26-pve-x86_64-with-glibc2.41",
+  "cpus": "8",
+  "switch_interval_s": "0.005",
+  "duckdb": "2.0.0",
+  "commit": "b357449-dirty"
+ },
+ "repeat": 5,
+ "busy_repeat": 3,
+ "partitions": [
+  1,
+  4,
+  8
+ ],
+ "batch_sizes": [
+  8192,
+  1024
+ ],
+ "busy_batch_sizes": [
+  8192
+ ],
+ "cells": [
+  {
+   "terminal": "py_today",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3104533980367705,
+    0.312796049984172,
+    0.30672026006504893,
+    0.3073317790403962,
+    0.30689396895468235
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3097960400627926,
+    0.31324151100125164,
+    0.30860396404750645,
+    0.3069018229143694,
+    0.3059499670052901
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.31920542393345386,
+    0.3260805109748617,
+    0.32000883505679667,
+    0.31666836701333523,
+    0.3146604879293591
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3191653429530561,
+    0.3146368049783632,
+    0.3252017779741436,
+    0.3228992329677567,
+    0.3204126179916784
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3195223150542006,
+    0.3130418210057542,
+    0.3205021029571071,
+    0.3135248450562358,
+    0.33031580096576363
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.32446641905698925,
+    0.3189414170337841,
+    0.32670566299930215,
+    0.31983246898744255,
+    0.31977062800433487
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.36260441702324897,
+    0.35407382994890213,
+    0.3539121779613197,
+    0.3504384410334751,
+    0.34578885103110224
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3894131910055876,
+    0.39611914509441704,
+    0.38620089599862695,
+    0.37746948993299156,
+    0.36415182100608945
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.39601870998740196,
+    0.37973742408212274,
+    0.39198315201792866,
+    0.3697661249898374,
+    0.37203261291142553
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3833123170770705,
+    0.401639023097232,
+    0.3783921910217032,
+    0.3778217249782756,
+    0.36524235701654106
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.10851817892398685,
+    0.11668470199219882,
+    0.10408969398122281,
+    0.10596978710964322,
+    0.11854961793869734
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.10976230702362955,
+    0.10963158996310085,
+    0.10116365004796535,
+    0.1151627009967342,
+    0.11735710897482932
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1106784549774602,
+    0.12076977209653705,
+    0.10939106298610568,
+    0.10217199800536036,
+    0.11558298906311393
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1184788899263367,
+    0.11865324201062322,
+    0.10665377601981163,
+    0.12697327497880906,
+    0.11722529400140047
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.10868001903872937,
+    0.09594183193985373,
+    0.10877219995018095,
+    0.09962406102567911,
+    0.11653217801358551
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.11004205094650388,
+    0.11134044593200088,
+    0.11475920700468123,
+    0.1135337200248614,
+    0.11908994102850556
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.11881028895732015,
+    0.12813405797351152,
+    0.11274964408949018,
+    0.11383331299293786,
+    0.12013956590089947
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.12427926005329937,
+    0.12027806509286165,
+    0.12995925906579942,
+    0.11851987196132541,
+    0.11233042005915195
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1339094960130751,
+    0.12801957898773253,
+    0.10748336999677122,
+    0.11885488696862012,
+    0.1269619659287855
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.12960379791911691,
+    0.12222524196840823,
+    0.11756839603185654,
+    0.10926002799533308,
+    0.11986389709636569
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.08657266199588776,
+    0.09246169298421592,
+    0.08409547002520412,
+    0.08560650795698166,
+    0.08602203498594463
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.08533657703083009,
+    0.08332588896155357,
+    0.08421578002162278,
+    0.0838070010067895,
+    0.08460503804963082
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.0912804959807545,
+    0.08511726500000805,
+    0.08537340897601098,
+    0.08635814697481692,
+    0.0878634121036157
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.08608041401021183,
+    0.08513204695191234,
+    0.08443228399846703,
+    0.08693502191454172,
+    0.08755136805120856
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.0852020449237898,
+    0.09088890394195914,
+    0.08249013393651694,
+    0.08443663897924125,
+    0.08243838394992054
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.09028764895629138,
+    0.08653298497665673,
+    0.08626959100365639,
+    0.08632538199890405,
+    0.08534043398685753
+   ],
+   "batches": 1536,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.09257529303431511,
+    0.09067883307579905,
+    0.089522436959669,
+    0.0936145749874413,
+    0.09248932602349669
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.09364263294264674,
+    0.08884811797179282,
+    0.08509767602663487,
+    0.08648270496632904,
+    0.0846624820260331
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.09238766599446535,
+    0.08655660599470139,
+    0.08807791804429144,
+    0.0874790110392496,
+    0.09326506301295012
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.09229605400469154,
+    0.09112599899526685,
+    0.08797366998624057,
+    0.0864938929444179,
+    0.08692144509404898
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.4286563830683008,
+    0.41854101105127484,
+    0.43411622499115765,
+    0.42987455101683736,
+    0.4236172439996153
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.42026053997687995,
+    0.41944515192881227,
+    0.4205033410107717,
+    0.4273052280768752,
+    0.4220242060255259
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.4741064771078527,
+    0.46786569291725755,
+    0.47576178202871233,
+    0.47872972302138805,
+    0.46574362996034324
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.46965948899742216,
+    0.4675949519732967,
+    0.4735131689812988,
+    0.4609268190106377,
+    0.45790067699272186
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.4670713540399447,
+    0.4646676800912246,
+    0.4774795030243695,
+    0.4787076129578054,
+    0.46518693096004426
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.512279107933864,
+    0.5093950869049877,
+    0.5167388709960505,
+    0.5089928470551968,
+    0.5165087409550324
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.5094859410310164,
+    0.4823519529309124,
+    0.4798137010075152,
+    0.47607910505030304,
+    0.48256011703051627
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.6954181399196386,
+    0.6823037998983636,
+    0.6903054009890184,
+    0.7012083020526916,
+    0.692527876002714
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.6998895989963785,
+    0.6825547899352387,
+    0.6911936819087714,
+    0.6782139709684998,
+    0.6909186070552096
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.7029720549471676,
+    0.6823759489925578,
+    0.6741955570178106,
+    0.6901830320712179,
+    0.6771181059302762
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.14528905402403325,
+    0.1484537849901244,
+    0.164865791099146,
+    0.1403607550309971,
+    0.14902733999770135
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.16103775892406702,
+    0.1672838309314102,
+    0.15396774502005428,
+    0.16250145994126797,
+    0.15171378396917135
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.17322292306926101,
+    0.1997889579506591,
+    0.1875950979301706,
+    0.1678152900421992,
+    0.16779175004921854
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.17241983395069838,
+    0.17775920301210135,
+    0.1916142109548673,
+    0.16964987001847476,
+    0.19084333500359207
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.2000908530317247,
+    0.18578975601121783,
+    0.196119355969131,
+    0.16595893597695976,
+    0.16038673499133438
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.2764069850090891,
+    0.2507465399103239,
+    0.2511278389720246,
+    0.1869014339754358,
+    0.19605877296999097
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1710385240148753,
+    0.16697330307215452,
+    0.16490291396621615,
+    0.1608407360035926,
+    0.1663925109896809
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3006909629330039,
+    0.30870873702224344,
+    0.275935746030882,
+    0.3042141090845689,
+    0.2793346350081265
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.30214772501494735,
+    0.29719228600151837,
+    0.2902214170899242,
+    0.2988619119860232,
+    0.2981499530142173
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.2881071480223909,
+    0.31069324107374996,
+    0.2743069080170244,
+    0.29353265301324427,
+    0.2882608660729602
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.12225277302786708,
+    0.11735583795234561,
+    0.12044226203579456,
+    0.11676535592414439,
+    0.11998438509181142
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.11960878490936011,
+    0.11512373201549053,
+    0.12016213103197515,
+    0.11821012396831065,
+    0.11698951304424554
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1811461189063266,
+    0.1644052379997447,
+    0.16602579201571643,
+    0.17222633806522936,
+    0.1761159870075062
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.14371903298888355,
+    0.1819355220068246,
+    0.18008972890675068,
+    0.1732964989496395,
+    0.17512189398985356
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.17414200096391141,
+    0.17655203503090888,
+    0.16201404796447605,
+    0.17625452706124634,
+    0.18738878599833697
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1989376979181543,
+    0.23523905698675662,
+    0.2673053729813546,
+    0.25576968397945166,
+    0.23620233603287488
+   ],
+   "batches": 12288,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.1327111100545153,
+    0.1304976879619062,
+    0.12472335703205317,
+    0.12749100697692484,
+    0.12707519601099193
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.319762391038239,
+    0.29646594100631773,
+    0.30142920406069607,
+    0.2942443829961121,
+    0.2883104350185022
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.3036420240532607,
+    0.2997076379833743,
+    0.30384596507065,
+    0.2881903910310939,
+    0.30701029498595744
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 1024,
+   "busy": false,
+   "one_file": false,
+   "repeat": 5,
+   "times": [
+    0.2883007109630853,
+    0.3073589189443737,
+    0.2841729549691081,
+    0.2912774479482323,
+    0.29124576901085675
+   ],
+   "batches": 0,
+   "spins": 0
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    1.0404698880156502,
+    1.0389591730199754,
+    1.0397161409491673
+   ],
+   "batches": 192,
+   "spins": 321035027
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    1.0397909840103239,
+    1.042681492981501,
+    1.0373254319420084
+   ],
+   "batches": 192,
+   "spins": 324893251
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.2578380700433627,
+    3.264209056040272,
+    3.3507132530212402
+   ],
+   "batches": 192,
+   "spins": 432047979
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.5042372660245746,
+    0.42095024103764445,
+    0.481248173979111
+   ],
+   "batches": 192,
+   "spins": 271423177
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.6828020059037954,
+    1.134796699974686,
+    0.9708750220015645
+   ],
+   "batches": 192,
+   "spins": 309913263
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    4.193794828956015,
+    4.171764174010605,
+    4.192086176015437
+   ],
+   "batches": 192,
+   "spins": 487426274
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.1526060519972816,
+    0.14176573604345322,
+    0.14525972201954573
+   ],
+   "batches": 0,
+   "spins": 291570223
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    4.1042432700050995,
+    4.129638785962015,
+    4.170251886011101
+   ],
+   "batches": 0,
+   "spins": 526971385
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    1.261024259030819,
+    1.2476338290143758,
+    1.3063578320434317
+   ],
+   "batches": 0,
+   "spins": 379246177
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 1,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    2.0640446780016646,
+    2.281910255085677,
+    2.214080426027067
+   ],
+   "batches": 0,
+   "spins": 407091116
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.9754890409531072,
+    0.9911732109030709,
+    0.9953969470225275
+   ],
+   "batches": 192,
+   "spins": 327001731
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.9860513699240983,
+    1.001071796985343,
+    0.9920072470558807
+   ],
+   "batches": 192,
+   "spins": 319018406
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.389783632941544,
+    3.3544120780425146,
+    3.424989516963251
+   ],
+   "batches": 192,
+   "spins": 481089114
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    2.39369582105428,
+    2.4805406040977687,
+    2.444912120932713
+   ],
+   "batches": 192,
+   "spins": 379498160
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    2.4391974119935185,
+    2.3939739069901407,
+    2.613217092002742
+   ],
+   "batches": 192,
+   "spins": 381248042
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    4.077575511066243,
+    4.078309735050425,
+    4.1286739989882335
+   ],
+   "batches": 192,
+   "spins": 442930306
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.11168027704115957,
+    0.10692963202018291,
+    0.10108086001127958
+   ],
+   "batches": 0,
+   "spins": 283295658
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    4.166385745047592,
+    4.23785003402736,
+    4.235981394071132
+   ],
+   "batches": 0,
+   "spins": 546683427
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.2278892650501803,
+    3.3207766209961846,
+    3.262365204980597
+   ],
+   "batches": 0,
+   "spins": 514677582
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 4,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.0465939280111343,
+    3.376802228973247,
+    3.334523605997674
+   ],
+   "batches": 0,
+   "spins": 484968183
+  },
+  {
+   "terminal": "py_today",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.858692622045055,
+    0.793954401044175,
+    0.9975595199503005
+   ],
+   "batches": 192,
+   "spins": 314019319
+  },
+  {
+   "terminal": "py_spike_stream",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.8644502820679918,
+    1.0015409049810842,
+    0.9866722240112722
+   ],
+   "batches": 192,
+   "spins": 328391292
+  },
+  {
+   "terminal": "py_to_batches",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.131374001968652,
+    3.2378539950586855,
+    3.349007192067802
+   ],
+   "batches": 192,
+   "spins": 445631723
+  },
+  {
+   "terminal": "py_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    2.583767437026836,
+    2.5477153829997405,
+    2.35737490397878
+   ],
+   "batches": 192,
+   "spins": 393643443
+  },
+  {
+   "terminal": "py_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    2.332589732017368,
+    2.3685132910031825,
+    2.4254958770470694
+   ],
+   "batches": 192,
+   "spins": 395732144
+  },
+  {
+   "terminal": "py_to_batches_reimported",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.774633883032948,
+    4.032758306944743,
+    4.079356618924066
+   ],
+   "batches": 192,
+   "spins": 497824897
+  },
+  {
+   "terminal": "duckdb_today",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    0.09207482193596661,
+    0.09838452294934541,
+    0.0921939859399572
+   ],
+   "batches": 0,
+   "spins": 279390309
+  },
+  {
+   "terminal": "duckdb_to_batches",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    4.127986253006384,
+    4.179290147963911,
+    4.14811951701995
+   ],
+   "batches": 0,
+   "spins": 572312826
+  },
+  {
+   "terminal": "duckdb_to_batches_attached",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.4553146969992667,
+    3.321415127022192,
+    3.170751146040857
+   ],
+   "batches": 0,
+   "spins": 501998933
+  },
+  {
+   "terminal": "duckdb_to_batches_poll",
+   "partitions": 8,
+   "batch_size": 8192,
+   "busy": true,
+   "one_file": true,
+   "repeat": 3,
+   "times": [
+    3.2003655340522528,
+    3.2464356990531087,
+    3.236318519921042
+   ],
+   "batches": 0,
+   "spins": 506893055
+  }
+ ]
+}

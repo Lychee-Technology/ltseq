@@ -26,6 +26,8 @@ pub(crate) mod format; // Formatting and display functions
 pub(crate) mod gil; // GIL release boundary for heavy execution (issue #142)
 #[cfg(feature = "m0")]
 pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
+#[cfg(feature = "stream_spike")]
+pub(crate) mod stream_spike; // #256's stream error spike (feature `stream_spike`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
@@ -1390,6 +1392,14 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(m0::_set_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_build, m)?)?;
+    }
+    #[cfg(feature = "stream_spike")]
+    {
+        m.add_class::<stream_spike::reader::SpikeBatches>()?;
+        m.add_function(wrap_pyfunction!(stream_spike::_spike_batches, m)?)?;
+        m.add_function(wrap_pyfunction!(stream_spike::_spike_stream, m)?)?;
+        m.add_function(wrap_pyfunction!(stream_spike::_spike_live, m)?)?;
+        m.add_function(wrap_pyfunction!(stream_spike::_spike_classes, m)?)?;
     }
     Ok(())
 }

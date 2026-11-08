@@ -56,6 +56,15 @@ jobs:
           cargo clippy --all-targets --features m0 -- -D warnings
           cargo test --features m0 --lib m0::
 
+      # #256's stream error spike (benchmarks/stream_errors) compiles only
+      # with the stream_spike feature. Its Python tests need a spike build
+      # and skip on the default one.
+      - name: Run clippy and Rust tests on the stream error spike
+        if: matrix.python-version == '3.13'
+        run: |
+          cargo clippy --all-targets --features stream_spike -- -D warnings
+          cargo test --features stream_spike --lib stream_spike::
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
