@@ -3,24 +3,35 @@
 **Question.** Is Pivot-style exact slot-bound pruning ("Know Your LIMIT") worth
 building for LTSeq's `group by key, count, sort desc, first K` queries?
 
-**Recommendation: No-Go for a production implementation now.** The pruning
-effect is real and large where it applies: on ClickBench at K=10 the spike
-merged 0.1–1.3% of the final aggregate's input and was 25.7% faster on Q16
-(UserID), 17.8% on Q34 (URL) and 11.7% on a Q13-like filtered SearchPhrase
-count. That clears the issue's ≥15% bar. It fails the other half of the bar:
-on comparable queries it cannot prune, it costs more than 5%. On the same
-ClickBench file at K=1000 it was +6.5% (UserID) and +8.3% (SearchPhrase); on
-uniform or flat string keys +12–13% with 3.8× the peak memory; at 32
-partitions on 8 cores +38%. The control below shows this cost comes from the
-operator's mechanics, not from pruning. The fallback that would cap it is not
-demonstrated. Other parts are unbuilt: memory-pool integration and spilling,
-a way to choose the slot count. The operator is also coupled to DataFusion 55's
-plan shapes. The sections below give the evidence. The last one says what
-would change the recommendation. The decision is the owner's.
+**Recommendation: Go, for an off-by-default, production-shaped
+implementation of the shape the spike covers, and nothing wider.** The
+second spike clears the issue's bar on this machine. On ClickBench at K=10 it
+was 23.7% faster on Q16 (UserID) and 18.2% on Q34 (URL) at 8 partitions,
+and 18–32% faster at 16 and 32 partitions against today's plan at the same
+partition count. Outside the 40 ms cells at 1K keys, no comparison cell
+regressed by more than 3.9%, and those cells reached +4.6% on a 6.3%
+spread. That includes every cell where nothing can be pruned: uniform,
+flat and hot-key data, K=1000, and 32 partitions on 8 cores. Peak memory
+falls where it prunes and grows by at most 8% (13 MiB) elsewhere. What it still
+lacks is production plumbing, not evidence: memory-pool accounting and
+spilling for its buffer, a slot count and probe that do not depend on row
+arrival order, and tests that pin it to DataFusion's plan shapes. The
+decision is the owner's.
 
-Everything in this report was measured once, on one machine, between
-21:07 and 23:10 UTC on 2026-11-07. Numbers come from `results/`; nothing is
-taken from historical runs.
+The first spike (commit `96a3b17`, kept in `results/v1/`) recommended No-Go.
+It was 6–13% slower, with up to 3.8× the memory, on queries it could not
+prune, and 38% slower at 32 partitions. The owner's interim assessment on
+the issue traced that to the operator's mechanics, not to the algorithm,
+and proposed a threshold before any merge, an early bail-out, and slot
+counts sized from the data. The second spike implements those three. A
+first rerun showed that bailing out only after buffering still cost 4–10%
+(`results/late_bail/`), so it also gained a probe that gives up on pruning
+after the first 131,072 rows. The sections below give the evidence.
+
+Phase 0 and Phase 1 were measured once, between 21:07 and 23:10 UTC on
+2026-11-07. The comparison of the second spike ran between 00:06 and 00:41
+UTC on 2026-11-08, on the same machine. Numbers come from `results/`;
+nothing is taken from historical runs.
 
 ## Setup
 
@@ -28,18 +39,18 @@ taken from historical runs.
 |---|---|
 | Machine | Intel i7-8700K, 8 CPUs visible to the guest, 23 GiB, Linux 7.0.14 (Proxmox guest) |
 | Build | `maturin develop --release --features topk_research` (fat LTO), rustc 1.97.1, Python 3.14.10, pyarrow 25.0.1, DataFusion 55.0.0 |
-| Commit | `main` at `6715031` plus this branch's uncommitted research code (the hook and spike in `src/topk_research/`); with the spike off, a measurement build plans and runs exactly today's engine |
+| Commit | Phase 0–1: `main` at `6715031` plus the research hook. Comparison: `main` at `c1a236a` plus this branch's second spike. `c1a236a` only changes `is_in`. With the spike off, a measurement build plans and runs exactly today's engine |
 | Engine | LTSeq's session: `target_partitions` = CPU count (8) unless pinned, batch size 16384, `repartition_aggregations` on, Parquet filter pushdown on, DataFusion's partial-aggregation skip at its defaults (probe 100,000 rows, ratio 0.8) |
 | Synthetic data | 12 Parquet files of 20M rows (`fixtures.py`, seed 386): uniform, Zipf (s=1.1), hot-key (50% one key) and flat (counts within ±1) over 1K, 100K and 1M keys; each keyed by int64 and by a ~40-byte URL-like string |
 | ClickBench | `hits.parquet`, 99,997,497 rows, 226 row groups (14 GiB), from `prepare_data.py` |
-| Commands | `run.py` (Phase 1, 156 synthetic cells, then `--groups clickbench`), `report.py`, `compare.py` (Phase 3, 36 cells), exactly as in [README.md](README.md) |
+| Commands | `run.py` (Phase 1, 156 synthetic cells, then `--groups clickbench`), `report.py`, `compare.py` (Phase 3, 44 cells), exactly as in [README.md](README.md) |
 | Method | One process per cell; warm-up run, 5 timed runs (the comparison interleaves its modes in 5 rounds, alternating their order); the harness waits for a quiet machine and reruns a contended cell (`benchmarks/m0/harness.py`) |
 
 Every result of every cell was checked against DuckDB. The check is
 tie-aware: the returned counts must equal DuckDB's top-K counts, and every
 returned key must have the count DuckDB gives it. All 162 Phase 1 cells
-passed. In the comparison, all 114 results passed: 36 of today's plan and 78
-of the spike and its control.
+passed. All 138 results of the comparison passed: 44 of today's plan and
+94 of the spike and its control.
 
 Two measurement caveats apply throughout:
 
@@ -48,15 +59,17 @@ Two measurement caveats apply throughout:
   over the same run. `elapsed_compute` is time spent inside the operator's
   poll. At 8 partitions on 8 CPUs that is close to CPU time. At 32 partitions
   it includes time spent waiting for a CPU, so 32-partition shares can
-  exceed 100%; read them as relative only.
+  exceed 100%; read them as relative only. The same goes for a spike
+  partition that bails out early: its merge time is wall time minus the time
+  spent waiting for input, which still counts time spent waiting for a CPU.
 - Phase 1 peaks are resident growth over a warm run, which understates them.
   The comparison's peaks are cold single runs in a fresh process and are the
   ones to compare.
 
-Three cells stayed contended after their retries: in Phase 1,
-`uniform_1000000 skey count_col` (0.80 other cores) and `flat_1000000 skey`
-at K=100 (0.51); in the comparison, `zipf_1000000 skey` at K=1000 (3.0
-other cores; its cv reached 30%). None is used for a conclusion.
+In Phase 1, `uniform_1000000 skey count_col` (0.80 other cores) and
+`flat_1000000 skey` at K=100 (0.51) stayed contended after their retries.
+Neither is used for a conclusion. No comparison cell was contended (at most
+0.05 other cores).
 
 ## Phase 0: what the engine does today
 
@@ -149,12 +162,12 @@ UserID 0.2%).
 **Gate.** The issue's early stop applies "if final merge is not a
 meaningful bottleneck on representative workloads". On ClickBench Q34 and
 the filtered SearchPhrase count, the ceilings (22.8%, 18.1%) exceeded 15%.
-So the gate did not stop the work, and I built the spike. On every
+So the gate did not stop the work, and the spike was built. On every
 synthetic workload the ceiling was 12% or less.
 
 The simulation used partition-local thresholds. The spike shares its
 threshold across partitions, and that matters: Q16's simulated 30.9%
-became 98.7% of partial rows skipped in the spike. With a global threshold
+became 98.7% of partial rows skipped in the first spike. With a global threshold
 the simulation's oracle column already showed 90.8% of Q16's groups
 prunable. The ceiling is therefore an upper bound only for the local
 variant. The other direction shows too: on Zipf 1M int the ceiling was 12%
@@ -172,39 +185,59 @@ partition is not a bound on its global count, because its other partial
 rows sit elsewhere. The rule refuses a final aggregate whose input is not a
 hash repartition.
 
-**Invariant.** For COUNT, the partial states are non-negative Int64 values
+**Bounds.** For COUNT, the partial states are non-negative Int64 values
 whose sum is the final count. `COUNT(col)` partials exclude NULL values and
 still sum to the final value. Equal keys hash alike: DataFusion's own hash
 tables depend on that, and the slot is computed by the same `create_hashes`
-over the same column values the final aggregate groups. So for every group
-g, `count(g) = Σ partials(g) ≤ Σ partials in slot(g) = bound(slot(g))`.
-Collisions only make a bound looser. The bounds are complete only after
-the partition's last input batch, so nothing is decided before then. Late
-input is impossible by construction, at the cost of a pipeline barrier
-(see the costs below). DataFusion 55 does not re-partition adaptively; a
-future engine that moved keys between partitions mid-stream would break
-the ownership the bound relies on.
+over the same column values the final aggregate groups. Per slot s the
+spike records `bound(s)`, the sum of its partial counts, and `maxp(s)`, its
+largest single partial count. For every group g in slot s,
+`count(g) = Σ partials(g) ≤ bound(s)`, and `maxp(s)` is at most the largest
+final count in s, because a partial count never exceeds its group's
+total. Collisions only loosen a bound. The bounds are complete only after the
+partition's last input row, so no pruning decision is made before then.
+Late input is impossible by construction. DataFusion 55 does not
+re-partition adaptively; a future engine that moved keys between partitions
+mid-stream would break the ownership the bounds rely on.
 
-**Threshold.** Slots are merged in descending bound order, in waves of
-doubling size. A slot is skipped only when K groups are final and its bound
-is strictly below the threshold. The threshold is the largest K-th count
-any partition has finalized. A partition's K-th count is at most the global
-K-th count, so a skipped group is below the global K-th count and in no
-top-K. Every group at or above the global K-th count is merged and emitted,
-and the Top-K sort and merge above pick an exact top-K from them. Equality
-never prunes: a group tied with the threshold stays a candidate, so a
-secondary sort key would still see every tied group.
+**Thresholds.** Each is at most the partition's K-th count, which is at
+most the global K-th count:
+
+- `T0`, before any merge: the K-th largest `maxp` over occupied slots
+  (undefined with fewer than K). Slots hold disjoint groups, so K slots with
+  `maxp ≥ T0` name K distinct groups whose counts reach `T0`.
+- `T1`, after the first merge of the K slots with the largest `maxp`: the
+  K-th count among their groups. Each of those slots holds a group of count
+  at least `T0`, so `T0 ≤ T1`.
+- the shared threshold: the largest `T0` or `T1` any partition has
+  published (an atomic).
+
+A slot outside the first merge is skipped only when its bound is strictly
+below the largest of these. Its groups are then below the global K-th count
+and in no top-K. Every group at or above the global K-th count is merged
+and emitted, and the Top-K sort and merge above pick an exact top-K from
+them. Equality never prunes: a group tied with the threshold stays a
+candidate, so a secondary sort key would still see every tied group.
+
+**Bail-outs** are always exact, since they merge every row. A partition
+bails out after buffering when the first merge and the kept slots together
+hold more than half its rows. Its probe bails out earlier, after 131,072
+rows: it computes `T0` and the bounds of those rows alone. If more than 90%
+of them lie in slots that reach that `T0`, the partition streams its
+buffered batches and the rest of its input into one final aggregate. The
+probe is a guess about speed. Its threshold and bounds are not the final
+ones.
 
 Edge cases:
 
-- Fewer than K groups, or K=0: nothing is pruned (the rule also requires
-  K ≥ 1).
+- Fewer than K occupied slots, or K=0: no `T0`; the rule also requires
+  K ≥ 1. A partition without `T0` prunes only by the shared threshold.
 - A NULL group key hashes to a fixed value and is one group, like any other
   key.
 - Float keys: slotting uses the values the aggregate groups, so `-0.0` and
   NaN fall in the same slot exactly when the aggregate puts them in the same
   group.
-- Overflow: the bound is an i64 sum of at most the input row count.
+- Overflow: a bound is an i64 sum of at most the input row count.
 
 **Errors and eligibility.** The rule plans the pruner only for this shape:
 a `FinalPartitioned` aggregate over a hash repartition, one grouping set,
@@ -221,21 +254,28 @@ an overflow error.
 
 **Test evidence.**
 
-- `selfcheck.py` checks the algorithm on 20,000 random inputs heavy in ties
-  and hot keys, 4,399 of which prune something. Every count above the K-th is
-  kept; at least K groups at or above it are kept, globally and per
-  partition; a skipped group is strictly below the K-th count; local
-  thresholds prune a subset of what the global one prunes.
-- `py-ltseq/tests/test_topk_research.py` (123 tests on a measurement build)
-  holds the spike to the unpruned engine across the nine pinned engine
-  layouts and every input layout of `layouts.LAYOUTS`. It covers ties, flat
-  counts, K at and above the group count, empty input, NULL and string keys,
-  float keys with `-0.0`, NaN and NULL, and `COUNT(col)` over NULLs. It also
-  checks that the rule leaves ascending sorts, unlimited sorts, other
-  aggregates, two aggregates and sorts on derived columns alone.
-- The repository's 831 aggregation, grouping, sort, slice and `top_k` tests
-  pass with the spike forced on for every eligible plan. I did not count
-  how many of their plans were eligible.
+- `selfcheck.py` checks the first spike's wave rule on 20,000 random
+  inputs heavy in ties and hot keys, 4,399 of which prune something. It
+  checks the second spike's thresholds on 20,000 more, 5,382 of which prune
+  something. Those inputs split each group's count over up to eight partial
+  rows, as several input partitions' partial aggregates would. Every input
+  satisfies `T0 ≤ T1 ≤` the partition's K-th count `≤` the global one, and the
+  rule keeps every group at or above the global K-th count.
+- `py-ltseq/tests/test_topk_research.py` (206 tests on a measurement build)
+  holds the spike to the unpruned engine. It runs across the nine pinned
+  engine layouts and every input layout of `layouts.LAYOUTS`, with fixed
+  and data-sized slot counts (down to one row per slot). It covers ties,
+  flat counts, K at and above the group count, empty input, NULL and string
+  keys, float keys with `-0.0`, NaN and NULL, and `COUNT(col)` over NULLs.
+  It checks that the control merges every row, that an unprunable input
+  bails out, that the probe bails out before buffering everything, and that
+  the slot count follows the input. It also checks that the rule leaves
+  ascending sorts, unlimited sorts, other aggregates, two aggregates and
+  sorts on derived columns alone.
+- The 1,017 tests of the repository's aggregation, grouping, sort, slice
+  and `top_k` files pass with the spike forced on for every eligible plan,
+  once at one partial row per slot and once at 128. I did not count how many
+  of their plans were eligible.
 
 ## Phase 3: architecture and spike
 
@@ -257,124 +297,195 @@ Three ways to build it, compared on whether they actually skip merge work:
    coupling: the rule matches DataFusion's plan shapes and `AggregateExec`'s
    accessors, which change between releases.
 3. **A narrowly specialized LTSeq operator.** The spike's
-   `SlotPrunedCountExec` is this, planned through (2). It reuses
-   DataFusion's `AggregateExec` in `Final` mode for each wave, so the group
-   table is the baseline's. It does skip merge work: a pruned row is never
-   copied, probed or inserted. It still hashes and buffers every row.
+   `SlotPrunedCountExec` is this, planned through (2). Its merges are
+   DataFusion's `AggregateExec` in `Final` mode, so the group table is the
+   baseline's. It does skip merge work: a pruned row is never copied,
+   probed or inserted. It still hashes every row a second time, and it
+   buffers every row unless its probe bails out.
 
-The spike (`src/topk_research/prune.rs`) is off unless
-`_topk_set_prune(slots)` turns it on in a measurement build. It buffers a
-partition's input and computes the slot bounds. It ranks slots by bound,
-gathers each wave's rows and merges them, publishing the partition's K-th
-count to the shared threshold. Its metrics report rows in, rows merged,
-slots merged, waves, and the time spent slotting. A **control** mode
-(`prune=False`) runs the same operator without ever pruning. The gap from
-today's plan to the control is the cost of the mechanics; the gap from the
-control to the spike is what pruning buys.
+The spike (`src/topk_research/prune.rs`) is off unless `_topk_set_prune`
+turns it on in a measurement build. Per final partition it buffers its
+input, with the probe described above, then sizes its slots (`rN`: one slot
+per N buffered partial rows) and computes `bound`, `maxp` and `T0`. It runs
+the first merge (the K slots with the largest `maxp`), takes `T1` and the
+shared threshold, and either bails out or gathers the kept rows once and
+merges them. That is at most three merges, against up to fourteen waves in
+the first spike. Its metrics report rows in, rows merged, slots, merges,
+bail-outs, and the time spent slotting and gathering. A **control** mode
+(`prune=False`) probes alike and runs the same first merge, then merges
+every row. The gap from today's plan to the control is the cost of the
+mechanics; the gap from the control to the spike is what pruning buys.
 
 ### Baseline vs spike
 
-8 partitions. Medians of 5 interleaved runs. Δ is the change against
-today's plan (negative is faster). Peak is a cold single run. "Merged" is
-the share of the final aggregate's input the spike merged. The full table,
-including 1K and 100K keys, 1024 slots and 32 partitions, is in
-[results/compare.md](results/compare.md).
+Medians of 5 interleaved runs. Δ is the change against today's plan at the
+same partition count (negative is faster); "vs control" is the spike against
+its control, which is the share to credit to pruning. Peak is a cold single
+run. "Merged" is the share of the final aggregate's input the spike merged
+(first of three analyzed runs). The full table, including 1K and 100K keys,
+is in [results/compare.md](results/compare.md).
 
-| Workload | K | Today s | Spike (8192 slots) | Control | Peak today → spike, MiB | Merged |
-|---|---:|---:|---:|---:|---:|---:|
-| ClickBench Q16, UserID | 10 | 1.343 | **−25.7%** | +6.1% | 1386 → 1027 | 1.3% |
-| ClickBench Q34, URL | 10 | 5.894 | **−17.8%** | +6.3% | 8274 → 7510 | 0.1% |
-| ClickBench SearchPhrase ≠ '' | 10 | 1.416 | −11.7% | +6.7% | 1528 → 1301 | 0.1% |
-| ClickBench Q16, UserID | 1000 | 1.366 | +6.5% | +5.9% | 1391 → 1248 | 100% |
-| ClickBench Q34, URL | 1000 | 5.896 | −1.1% | +5.7% | 8694 → 7804 | 73.5% |
-| ClickBench SearchPhrase ≠ '' | 1000 | 1.401 | +8.3% | +10.7% | 1565 → 1617 | 99.9% |
-| zipf 1M keys, int | 10 | 0.222 | −2.2% | +0.1% | 152 → 139 | 0.1% |
-| zipf 1M keys, string | 10 | 0.633 | −4.5% | +3.0% | 487 → 444 | 0.2% |
-| hot 1M keys, string | 10 | 0.889 | +7.2% | +5.0% | 889 → 841 | 100% |
-| uniform 1M keys, int | 10 | 0.374 | −24.5% | −30.0% | 170 → 594 | 100% |
-| uniform 1M keys, string | 10 | 1.168 | +13.0% | +11.0% | 545 → 2078 | 100% |
-| flat 1M keys, string | 10 | 1.194 | +12.7% | +10.4% | 546 → 2036 | 100% |
-| uniform 1M keys, int, 32 partitions | 10 | 0.193 | +37.9% | +28.1% | 308 → 544 | 95.5% |
+ClickBench, `r128` unless noted:
 
-Run-to-run spread on these cells was 0.4–5.6% (cv); the 40 ms cells at 1K
-keys, which this table leaves out, reached 14%.
+| Query | K | P | Today s | Spike Δ | Control Δ | Spike vs control | Peak today → spike, MiB | Merged |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Q16, UserID | 10 | 8 | 1.320 | **−23.7%** | +7.1% | −28.8% | 1335 → 1002 | 25.1% |
+| Q34, URL | 10 | 8 | 5.845 | **−18.2%** | +3.2% | −20.7% | 8596 → 7701 | 0.06% |
+| SearchPhrase ≠ '' | 10 | 8 | 1.401 | −11.3% | +5.6% | −16.0% | 1599 → 1290 | 0.4% |
+| Q16, UserID | 10 | 16 | 1.196 | −28.9% | −3.1% | −26.6% | 1517 → 1196 | 37.8% |
+| Q34, URL | 10 | 16 | 5.710 | −17.8% | +2.3% | −19.7% | 8670 → 7816 | 0.1% |
+| SearchPhrase ≠ '' | 10 | 16 | 1.355 | −13.9% | +2.4% | −15.9% | 1793 → 1366 | 0.7% |
+| Q16, UserID | 10 | 32 | 1.065 | −31.6% | −1.0% | −31.0% | 1684 → 1028 | 1.8% |
+| Q34, URL | 10 | 32 | 5.592 | −17.9% | +1.0% | −18.7% | 9043 → 7329 | 0.2% |
+| SearchPhrase ≠ '' | 10 | 32 | 1.332 | −12.6% | +2.1% | −14.4% | 1693 → 1398 | 1.4% |
+| Q16, UserID | 1000 | 8 | 1.355 | −2.6% | −2.1% | −0.5% | 1361 → 1348 | 100% |
+| Q34, URL | 1000 | 8 | 5.831 | +0.3% | −0.1% | +0.4% | 8462 → 8436 | 100% |
+| Q34, URL, `r32` | 1000 | 8 | 5.831 | −14.4% | | | 8462 → 7549 | 2.4% |
+| SearchPhrase ≠ '' | 1000 | 8 | 1.414 | +0.0% | +0.8% | −0.7% | 1573 → 1601 | 100% |
+
+Synthetic, 1M keys, `r128`:
+
+| Workload | K | P | Today s | Spike Δ | Control Δ | Peak today → spike, MiB | Merged |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| zipf, int | 10 | 8 | 0.188 | −9.9% | −0.4% | 149 → 140 | 0.6% |
+| zipf, string | 10 | 8 | 0.637 | −6.0% | +0.3% | 478 → 447 | 0.5% |
+| zipf, int | 10 | 32 | 0.159 | −4.7% | +1.9% | 170 → 166 | 1.8% |
+| zipf, int | 1000 | 8 | 0.186 | +3.8% | +3.3% | 146 → 158 | 100% |
+| uniform, int | 10 | 8 | 0.365 | −0.1% | −0.2% | 173 → 180 | 100% |
+| uniform, string | 10 | 8 | 1.178 | −1.7% | −0.8% | 545 → 569 | 100% |
+| uniform, int | 10 | 32 | 0.194 | +3.9% | +2.7% | 295 → 306 | 100% |
+| uniform, string | 10 | 32 | 1.000 | +1.5% | +2.7% | 1182 → 1196 | 100% |
+| flat, string | 10 | 8 | 1.162 | +1.0% | +0.2% | 578 → 547 | 100% |
+| hot, string | 10 | 8 | 0.876 | −0.0% | +1.3% | 900 → 879 | 100% |
+
+Run-to-run spread on these cells was 0.3–3.7% (cv), except UserID at 16
+partitions (8.4%, see below). The 40–120 ms cells at 1K keys, which these
+tables leave out, reached 9%. Their medians moved between −12.6% and +4.6%,
+in both directions and for the control alike. That is noise, not an effect.
 
 What the numbers say:
 
-- **Pruning pays only where the final merge is big and nearly all of it
-  can be skipped.** On ClickBench at K=10 the spike merged 0.1–1.3% of
-  the final input. The final stage's CPU share fell from 42% to 7% (Q16)
-  and from 23% to 4% (Q34). Peak memory fell with the group table. The
-  wall-clock gain (12–26%) is a large part of the final stage's former
-  share, because that stage was on the critical path.
+- **Pruning is credited with the spike-vs-control gap**, as the interim
+  assessment asked: −29%, −21% and −16% on the three ClickBench queries at
+  8 partitions. The final stage's CPU fell from 3.77 s to 1.12 s (UserID),
+  9.76 s to 1.34 s (URL) and 1.63 s to 0.24 s (SearchPhrase).
+- **More final partitions are not the explanation.** Today's plan does get
+  faster with more partitions: UserID 1.320 → 1.196 → 1.065 s at 8, 16 and
+  32, URL 5.845 → 5.710 → 5.592 s. The spike's gain against the same
+  partition count holds or grows (UserID −24%, −29%, −32%; URL −18% at
+  all three), and the spike at 8 partitions beats today's plan at 32.
+- **Where nothing can be pruned, the spike is within noise of today.** On
+  the no-gain cells it ranged from −1.7% to +3.9%, against +4–13% for the
+  first spike. Its peak memory grows by at most 8% (13 MiB), against
+  3.5–3.8× for the first spike.
+  The probe did it: in the rerun without it (`results/late_bail/`),
+  bailing out only after buffering cost +6.8% to +9.6% on uniform and flat
+  1M keys and +4–5% on hot keys, with 3× the peak memory on string keys.
+  That is the price of the barrier: the final merge cannot overlap the
+  partial aggregation it waits on.
+- **The probe misjudges some partitions**, only on UserID at K=10. In the
+  analyzed runs it bailed out in 2 of 8 partitions at 8 partitions, 2–10 of 16
+  at 16, and 0–7 of 32 at 32. Those partitions merged every row; the
+  partitions that kept buffering merged about 0.1%. The probe sees only the
+  first rows to arrive, so its verdict can change from run to run, and it
+  explains the 8.4% spread at 16 partitions. The query was still 24–32%
+  faster. With `r32` no probe bailed out and the spike merged 0.01%, but it
+  was slower (−20.5%): finer slots cost more to compute.
+- **The slot count still matters.** At K=1000 the K-th count is low, and a
+  slot's bound falls below it only when the slot is small. URL at K=1000 bailed
+  out at `r128` (+0.3%) and gained 14.4% at `r32`. On URL at K=10, `r32`
+  doubled the slotting time (2.33 s against 1.27 s) and gained less than
+  `r128` (−16.3% against −18.2%). No single setting measured here is best
+  everywhere.
+- **The controls price the case where the probe keeps buffering and pruning
+  then fails:** +3.2% to +7.1% at 8 partitions on ClickBench, under +2.5%
+  at 16 and 32. No real query in the matrix landed there, but an
+  adversarial one could.
+- **The ceiling is the final stage's share.** On URL the process spent
+  41.9 s of CPU: 16.8 s in the partial aggregate, 9.8 s in the final one.
+  The spike's final stage took 1.34 s, of which 1.27 s was hashing the URL
+  strings into slots, and the process 33.0 s. Removing the second hash
+  (the interim assessment's option E) could save at most that 1.3 s of
+  CPU, about 3% of the process's CPU; the gains above already pay for the
+  second hash.
 - **Pruning ratio is not speedup.** On Zipf 1M keys the spike skipped
-  99.8% of the final input and gained 2–5%. The final merge was 9–12% of
-  CPU and ran concurrently with the partial aggregation that dominates.
-- **The mechanics cost about 6% where nothing is pruned.** That is the
-  control on every ClickBench query. The sources are hashing every key a
-  second time, copying each wave's rows, up to 14 small aggregations per
-  partition, and the barrier: the merge cannot start until the
-  partition's last input row. When pruning fails (Q16 and SearchPhrase at
-  K=1000) the spike pays this and gains nothing. With string keys and no
-  skew it pays 11–13% plus 3.8× the peak memory, because it holds every
-  partial row.
-- **The slot count decides whether anything is pruned.** At 1024 slots,
-  Q16 at K=10 merged 100% of its input and was 7.2% slower. At 8192 slots
-  it merged 1.3% and was 25.7% faster. A bound falls below the K-th count
-  only when a slot holds fewer rows than that count. The right slot count
-  depends on the input size and the threshold, and the spike fixes it in
-  advance.
-- **One gain is not pruning.** On uniform and flat 1M int keys both the
-  spike and the control were 23–30% faster, with 3.5× the memory. Nothing
-  was pruned. Merging the final input in many small hash tables instead of
-  one helps there, which looks like a cache effect. It reverses for string
-  keys and at 32 partitions. It is not evidence for pruning, and it is
-  outside this issue.
+  99.5% of the final input and gained 6–10%, because the final merge was
+  only 10–12% of CPU.
+
+### The first spike against the second
+
+Spike Δ against today's plan at 8 partitions, K=10 unless noted (first
+spike: 8192 slots, from `results/v1/`; second: `r128`).
+
+| Workload | First spike | Second spike | Peak, first → second, MiB |
+|---|---:|---:|---:|
+| ClickBench Q16, UserID | −25.7% | −23.7% | 1027 → 1002 |
+| ClickBench Q34, URL | −17.8% | −18.2% | 7510 → 7701 |
+| ClickBench SearchPhrase ≠ '' | −11.7% | −11.3% | 1301 → 1290 |
+| ClickBench Q16, UserID, K=1000 | +6.5% | −2.6% | 1248 → 1348 |
+| ClickBench SearchPhrase ≠ '', K=1000 | +8.3% | +0.0% | 1617 → 1601 |
+| uniform 1M keys, string | +13.0% | −1.7% | 2078 → 569 |
+| flat 1M keys, string | +12.7% | +1.0% | 2036 → 547 |
+| hot 1M keys, string | +7.2% | −0.0% | 841 → 879 |
+| uniform 1M keys, int, 32 partitions | +37.9% | +3.9% | 544 → 306 |
+| uniform 1M keys, int | −24.5% | −0.1% | 594 → 180 |
+
+The last row is the effect the interim assessment flagged. The first
+spike's control was 30% faster there with nothing pruned, because it merged
+in several small hash tables instead of one. The second spike merges in one
+table, as today's plan does, and that effect is gone. It is not evidence
+for pruning, and it is outside this issue.
 
 ## Recommendation
 
-**No-Go for building slot-bound pruning into LTSeq now.**
+**Go for an off-by-default implementation of exactly this shape**: a single
+`COUNT`, descending, `LIMIT K`, over a hash repartition.
 
 - **Against the bar.** At least one representative high-cardinality
-  workload gains ≥15%: Q16 −25.7% and Q34 −17.8% at K=10, both well outside
-  the 0.4–1.9% cv of those cells. The no-material-regression condition
-  fails. The same file at K=1000 is +6.5% (Q16) and +8.3% (SearchPhrase);
-  unskewed string keys are +12–13% with 3.8× memory; oversubscribed
-  partitions are +38%. Each is several times the cell's run-to-run spread.
-- **Complexity.** What the spike leaves out is what production needs. It
-  has no memory-pool accounting and no spilling for a buffer that holds a
-  partition's entire input (on Q34, all 21.7M partial rows of URLs at once). It has no slot
-  count chosen from the data. It has no fallback that bounds the cost when
-  nothing prunes. And it depends on DataFusion 55's plan shapes and
-  aggregate accessors. The cheapest fallback, merging everything in one
-  wave once the bounds show nothing will prune, still pays the barrier, the
-  second hash and the buffer. It is not shown that any fallback gets under
-  5%.
-- **Scope.** The gain applies to one shape: a single COUNT, descending,
-  small K, over a hash repartition, on skewed high-cardinality keys. It
-  matches ClickBench Q16/Q34 and LTSeq's R1 benchmark. It is a narrow slice
-  of LTSeq's workload, and it is not where LTSeq's ordered-sequence
-  operations spend their time.
+  workload gains ≥15%: Q16 −23.7% and Q34 −18.2% at 8 partitions, and
+  −17.8% to −31.6% at 16 and 32. Each is far outside its cell's spread. No
+  comparable negative control regressed by more than 5%: the worst was
+  +3.9% with a 3.0% spread, or +4.6% with a 6.3% spread on a 37 ms
+  cell. Peak memory falls where the spike prunes and grows by at most 8%
+  elsewhere.
+- **What it is worth.** The gain applies to one shape on skewed
+  high-cardinality keys at small K. It matches ClickBench Q16/Q34 and
+  LTSeq's R1 benchmark. It is a narrow slice of LTSeq's workload, and it is
+  not where LTSeq's ordered-sequence operations spend their time.
+- **What production needs**, none of it measured here:
+  - Register the buffer with the memory pool and make it spill. On Q34 it
+    holds a partition's 2.7M partial rows of URLs; a bounded pool would fail
+    or need to spill them.
+  - Make the slot count and the probe robust. A rule that picks the slot
+    count from the probe's own `T0`, rather than a fixed rows-per-slot, is
+    the obvious next experiment: it would address both the UserID probe
+    misfires and URL at K=1000.
+  - Add plan-shape tests against DataFusion upgrades. The rule matches
+    `AggregateExec`'s accessors and the repartition shape of DataFusion 55.
+  - Skip hashing once (option E). Replacing the hash `RepartitionExec` to
+    carry the slot costs more to own than its ~3% of CPU on Q34 returns.
+    Upstream, a final aggregate that receives the repartition's hashes would
+    remove it and help every DataFusion user; that is worth proposing, not
+    forking for.
+- **What would reverse this.** If the memory-pool and spill integration
+  costs more than the margin, or another machine does not reproduce the gains
+  (one machine, 8 CPUs, so far), No-Go stands.
 
-**What would change this.** A fallback that keeps the K=1000 and unskewed
-cells within 5% of today, with the buffer accounted and spillable. The most
-promising route is upstream, option 1: a final aggregate that receives the
-repartition's hashes and can defer inserting rows. That removes the second
-hash and the copies, which are most of the control's 6%. Upstream
-DataFusion is also where a COUNT Top-K would benefit every user. If the
-owner weighs the ClickBench gains differently and decides Go, the first
-follow-up should be the fallback and slot-count study against these same
-cells, not an implementation. No follow-up issue is opened, as the issue
-asks, since this report concludes No-Go.
+If the owner decides Go, the follow-up is one implementation issue covering
+the production items above, behind an off-by-default setting, re-measured
+against these same cells. This report opens none.
 
 ## Limitations
 
 - One machine. A 6-core/12-thread CPU exposing 8 CPUs to a VM, measured
-  over two hours with the harness's contention checks. Other core counts
-  and memory bandwidths will move the ratios.
-- ClickBench ran only on `hits.parquet` in its published order, at 8
-  partitions. The sorted copy and other partition counts were not run.
+  with the harness's contention checks. Other core counts and memory
+  bandwidths will move the ratios.
+- ClickBench ran only on `hits.parquet` in its published order. The sorted
+  copy was not run.
 - The spike is a measurement tool. It is not memory-safe under a bounded
-  pool, it re-plans every wave, and its shared threshold is correct for a
-  single execution of a plan (LTSeq plans every terminal afresh).
-- Stage shares beyond 8 partitions on 8 CPUs are not CPU time (see Setup).
+  pool, and its shared threshold is correct for a single execution of a
+  plan (LTSeq plans every terminal afresh). Its probe and slot sizing are
+  heuristics whose constants (131,072 rows, 90%, half, 128 rows per slot)
+  were picked before the run, not tuned; only `r32` was tried besides.
+- Stage shares beyond 8 partitions on 8 CPUs, and of partitions that bailed
+  out early, are not CPU time (see Setup).

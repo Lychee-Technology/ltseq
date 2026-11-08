@@ -51,7 +51,11 @@ fn walk(plan: &dyn ExecutionPlan, depth: usize, out: &mut Vec<OperatorMetrics>) 
     out.push((
         depth,
         plan.name().to_string(),
-        displayable(plan).one_line().to_string().trim_end().to_string(),
+        displayable(plan)
+            .one_line()
+            .to_string()
+            .trim_end()
+            .to_string(),
         metrics,
     ));
     for child in plan.children() {
@@ -93,11 +97,17 @@ pub(crate) fn _topk_analyze(py: Python<'_>, table: PyRef<'_, LTSeqTable>) -> PyR
 }
 
 /// Turn the slot-bound pruning spike on with `slots` slots per final
-/// partition, or off with 0; `prune=False` keeps its waves but merges every
-/// slot (the control). Returns the previous `(slots, prune)`. Applies to
-/// every plan optimized afterwards (see `prune`).
+/// partition, or with one slot per `rows_per_slot` buffered partial rows
+/// when that is non-zero; both 0 turn it off. `prune=False` is the control:
+/// the same operator and first merge, then every row merged. Returns the
+/// previous `(slots, prune, rows_per_slot)`. Applies to every plan
+/// optimized afterwards (see `prune`).
 #[pyfunction]
-#[pyo3(signature = (slots, prune = true))]
-pub(crate) fn _topk_set_prune(slots: usize, prune: bool) -> (usize, bool) {
-    prune::set(slots, prune)
+#[pyo3(signature = (slots, prune = true, rows_per_slot = 0))]
+pub(crate) fn _topk_set_prune(
+    slots: usize,
+    prune: bool,
+    rows_per_slot: usize,
+) -> (usize, bool, usize) {
+    prune::set(slots, prune, rows_per_slot)
 }

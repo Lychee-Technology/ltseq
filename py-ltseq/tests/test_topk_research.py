@@ -6,8 +6,9 @@ a measurement build:
 - `_topk_analyze` executes the plan a terminal runs and returns its
   per-operator metrics, which `benchmarks/topk_agg/` attributes to stages;
 - `_topk_set_prune(slots)` turns on the exact slot-bound pruner of a
-  grouped COUNT Top-K (`prune=False`: the same operator merging every
-  slot, the benchmarks' control). These differential tests hold it to the unpruned
+  grouped COUNT Top-K, with a fixed slot count or one sized from the data
+  (`rows_per_slot`); `prune=False` is the benchmarks' control, the same
+  operator merging every row. These differential tests hold it to the unpruned
   answer, tie-aware, across engine and input layouts, ties, NULL and float
   keys (-0.0, NaN), COUNT(col) over NULLs, empty inputs and K above the
   group count, and check that it is planned only for the eligible shape.
@@ -32,8 +33,8 @@ measurement_build = pytest.mark.skipif(
 
 
 @contextlib.contextmanager
-def pruning(slots: int):
-    previous = ltseq_core._topk_set_prune(slots)
+def pruning(slots: int, rows_per_slot: int = 0):
+    previous = ltseq_core._topk_set_prune(slots, True, rows_per_slot)
     try:
         yield
     finally:
@@ -112,13 +113,13 @@ def test_hook_reports_the_stages_of_a_grouped_top_k(engine_config):
 
 
 @measurement_build
-@pytest.mark.parametrize("slots", [1, 4, 64])
+@pytest.mark.parametrize("slots, rows_per_slot", [(1, 0), (4, 0), (64, 0), (0, 1), (0, 16)])
 @pytest.mark.parametrize("k", [1, 3, 10, 500])
-def test_pruned_top_k_matches_unpruned(engine_layout, slots, k):
-    rng = random.Random(386 + slots * 1000 + k)
+def test_pruned_top_k_matches_unpruned(engine_layout, slots, rows_per_slot, k):
+    rng = random.Random(386 + slots * 1000 + rows_per_slot * 7 + k)
     keys = skewed_keys(rng, 300, 3000)
     t = LTSeq.from_arrow(pa.table({"k": keys}))
-    with pruning(slots):
+    with pruning(slots, rows_per_slot):
         assert_exact_top_k(top(t, k).to_arrow(), counts_of(keys), k)
 
 
@@ -141,11 +142,12 @@ def test_control_merges_every_row(engine_config):
 
 
 @measurement_build
-def test_pruned_top_k_in_every_input_layout(data_layout):
+@pytest.mark.parametrize("slots, rows_per_slot", [(16, 0), (0, 4)])
+def test_pruned_top_k_in_every_input_layout(data_layout, slots, rows_per_slot):
     rng = random.Random(7)
     keys = skewed_keys(rng, 200, 2000)
     t = data_layout(pa.table({"k": pa.array(keys, pa.int64())}))
-    with pruning(16):
+    with pruning(slots, rows_per_slot):
         for k in (1, 5, 50):
             assert_exact_top_k(top(t, k).to_arrow(), counts_of(keys), k)
 
@@ -242,3 +244,61 @@ def test_skewed_input_skips_partial_rows(engine_config):
     rows_in = sum(m["rows_in"] for m in pruner)
     rows_merged = sum(m["rows_merged"] for m in pruner)
     assert rows_merged < rows_in / 2
+    assert sum(m["bailed"] for m in pruner) == 0
+
+
+def _pruner_metrics(table: LTSeq) -> list[dict]:
+    operators = ltseq_core._topk_analyze(table._inner)[4]
+    return [dict(m) for _, name, _, m in operators if name == "SlotPrunedCountExec"]
+
+
+@measurement_build
+@pytest.mark.parametrize("k", [1, 10])
+def test_unprunable_input_bails_out_to_one_merge(engine_config, k):
+    # Every key twice, a few three times: no slot bound falls below the
+    # K-th count, so every partition merges its buffered rows as they are.
+    engine_config(target_partitions=4, batch_size=64)
+    keys = [i for i in range(3000) for _ in range(2)] + list(range(40))
+    random.Random(1).shuffle(keys)
+    t = LTSeq.from_arrow(pa.table({"k": keys}))
+    with pruning(0, 8):
+        table = top(t, k)
+        pruner = _pruner_metrics(table)
+        assert_exact_top_k(table.to_arrow(), counts_of(keys), k)
+    # Metrics are summed over the partitions; each holds about 1,300 rows.
+    assert [m["bailed"] for m in pruner] == [4]
+    assert sum(m["rows_merged"] for m in pruner) == sum(m["rows_in"] for m in pruner)
+
+
+@measurement_build
+def test_slot_count_follows_the_input(engine_config):
+    engine_config(target_partitions=2)
+    rng = random.Random(9)
+    keys = [h for h in range(4) for _ in range(300)] + [rng.randrange(4, 50_000) for _ in range(8000)]
+    t = LTSeq.from_arrow(pa.table({"k": keys}))
+    with pruning(0, 10):
+        table = top(t, 2)
+        pruner = _pruner_metrics(table)
+        assert_exact_top_k(table.to_arrow(), counts_of(keys), 2)
+    # Summed over the two partitions: one slot per ten rows, rounded up in each.
+    for m in pruner:
+        assert m["rows_in"] / 10 <= m["slots"] <= m["rows_in"] / 10 + 2
+    # The heavy keys reach a K-th count no light slot's bound comes near.
+    assert sum(m["rows_merged"] for m in pruner) < sum(m["rows_in"] for m in pruner) / 4
+
+
+@measurement_build
+def test_probe_bails_out_before_buffering_everything(engine_config):
+    # 400,000 keys twice each: past the probe's 131,072 rows, every slot
+    # reaches T0, so each partition streams the rest into one merge.
+    engine_config(target_partitions=2)
+    keys = list(range(400_000)) * 2 + [7, 7, 7]
+    t = LTSeq.from_arrow(pa.table({"k": keys}))
+    with pruning(0, 128):
+        table = top(t, 3)
+        pruner = _pruner_metrics(table)
+        result = table.to_arrow()
+    assert result.column("cnt").to_pylist() == [5, 2, 2]
+    assert result.column("k").to_pylist()[0] == 7
+    assert [(m["bailed"], m["bailed_early"]) for m in pruner] == [(2, 2)]
+    assert sum(m["rows_merged"] for m in pruner) == sum(m["rows_in"] for m in pruner)

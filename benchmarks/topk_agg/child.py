@@ -8,10 +8,11 @@ process's CPU time over each (the denominator of every stage share), checks
 the result against DuckDB, and prints one JSON line.
 
 With ``modes`` in the spec (``compare.py``), the cell instead times the
-query under each pruning setting (``_topk_set_prune``: 0 is today's plan,
-N is the spike with N slots per partition), interleaved in one process:
-a negative N is the spike's control, its waves without pruning; one
-warm-up per mode, then ``repeat`` rounds that run every mode once, in
+query under each pruning setting (``_topk_set_prune``, see ``prune_args``:
+``"0"`` is today's plan, ``"N"`` the spike with N slots per partition,
+``"rN"`` the spike with one slot per N buffered partial rows), interleaved
+in one process: a leading ``-`` is the spike's control, the same operator
+merging every row; one warm-up per mode, then ``repeat`` rounds that run every mode once, in
 reverse order on odd rounds, so drift and cache state fall on all modes
 alike. With ``warmup`` false and ``repeat`` 1 it measures the peak of a
 single cold run of one mode, the only peak a later run cannot hide.
@@ -71,6 +72,16 @@ def _analyze(table) -> dict:
     }
 
 
+def prune_args(mode) -> tuple[int, bool, int]:
+    """``_topk_set_prune``'s arguments for a mode such as ``"0"``, ``"8192"``, ``"r128"`` or ``"-r128"``."""
+    text = str(mode)
+    control = text.startswith("-")
+    text = text.removeprefix("-")
+    if text.startswith("r"):
+        return 0, not control, int(text[1:])
+    return int(text), not control, 0
+
+
 def compare(spec: dict) -> None:
     source, key, shape, k = spec["source"], spec["key"], spec["shape"], spec["k"]
     modes = spec["modes"]
@@ -80,7 +91,7 @@ def compare(spec: dict) -> None:
         out["engine"] = layout
 
         def run(mode):
-            ltseq_core._topk_set_prune(abs(mode), mode > 0)
+            ltseq_core._topk_set_prune(*prune_args(mode))
             table = queries.top_k(LTSeq.read_parquet(source), shape, key, k, spec.get("filter"))
             return table, table.to_arrow()
 
@@ -100,7 +111,7 @@ def compare(spec: dict) -> None:
                 out["modes"][str(mode)]["runs"].append(entry)
         for mode in modes:
             for i in range(spec.get("analyze_repeat", 3 if spec.get("analyze", True) else 0)):
-                ltseq_core._topk_set_prune(abs(mode), mode > 0)
+                ltseq_core._topk_set_prune(*prune_args(mode))
                 analysis = _analyze(queries.top_k(LTSeq.read_parquet(source), shape, key, k, spec.get("filter")))
                 if i:
                     analysis["plan"] = None

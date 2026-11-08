@@ -17,22 +17,49 @@
 //! repartition below gives each key's partial rows to exactly one
 //! partition, so the partition's exact top-K is all the Top-K sort above
 //! needs. The pruner buffers the partition's partial rows, hashes each
-//! row's key into one of `slots` slots, and sums the partial counts per
-//! slot. COUNT's partial counts are non-negative and add up to the final
-//! count, and equal keys hash alike (DataFusion's own hash tables rely on
-//! it), so `count(g) <= bound(slot(g))` for every group. Slots are ranked
-//! by bound, descending, and merged in waves of doubling size (ranks
-//! `[2^w - 1, 2^(w+1) - 1)`) by DataFusion's own `AggregateExec` in mode
-//! `Final`, so the group table is the baseline's. Before each wave a slot
-//! whose bound is strictly below the threshold is skipped: none of its
-//! groups can reach it, and the threshold only rises. The groups of every
-//! merged slot are emitted, ties with the threshold included.
+//! row's key into one of S slots, and records per slot the sum of its
+//! partial counts (`bound`) and its largest single partial count (`maxp`).
+//! S is fixed, or sized from the buffered row count (`rows_per_slot`).
+//! COUNT's partial counts are non-negative and add up to the final count,
+//! and equal keys hash alike (DataFusion's own hash tables rely on it), so
+//! for every group g, `maxp(s) <= max count in s` and
+//! `count(g) <= bound(slot(g))`.
 //!
-//! The threshold is the largest K-th count any partition has finalized so
-//! far, shared through an atomic. A partition's K-th count is at most the
-//! global K-th count, so a group below it is in no top-K; every group at
-//! or above the global K-th count is merged and emitted by its partition,
-//! and the Top-K sort and merge above pick an exact top-K from them.
+//! Thresholds, each at most the global K-th count:
+//!
+//! - `T0`, before any merge: the K-th largest `maxp` over occupied slots.
+//!   Slots hold disjoint groups, so K slots with `maxp >= T0` name K
+//!   distinct groups of this partition whose counts reach `T0`.
+//! - `T1`, after the first merge: the K-th count of the groups of the K
+//!   slots with the largest `maxp` (at least K groups, all final).
+//! - the shared one: the largest value any partition has published.
+//!
+//! A partition's K-th count is at most the global K-th count, so a slot
+//! whose bound is strictly below a threshold holds no group of any top-K;
+//! equality never prunes. Every group of a merged slot is emitted, and the
+//! Top-K sort and merge above pick an exact top-K from them.
+//!
+//! The steps, at most three merges by DataFusion's own `AggregateExec` in
+//! mode `Final` (so the group table is the baseline's):
+//!
+//! 1. merge the K slots with the largest `maxp` (when there are K
+//!    occupied slots), giving `T1`;
+//! 2. take the other slots whose bound reaches the threshold; if they and
+//!    the first merge's slots hold more than half of the partition's rows,
+//!    bail out: discard the first merge and merge every buffered batch as
+//!    it is, with no gather;
+//! 3. otherwise gather the kept rows once, and merge them.
+//!
+//! Before all of that, once a partition has buffered [`PROBE_ROWS`] rows,
+//! a probe computes `T0` and the bounds of those rows alone; if more than
+//! [`EARLY_BAIL_SHARE`] of them lie in slots that reach it, the partition
+//! stops buffering and streams the buffered batches and the rest of its
+//! input into one final aggregate. Bailing out is always exact, so the
+//! probe is a guess about speed only.
+//!
+//! The control (`prune = false`) probes alike, and after buffering does
+//! step 1 and then always bails out, so it pays everything the pruner pays
+//! when it cannot prune.
 //!
 //! What the spike leaves out: the buffered input is not registered with
 //! the memory pool and never spills; the hash is computed again rather
@@ -40,26 +67,25 @@
 //! plan, so it is right for one execution of the plan (LTSeq plans every
 //! terminal afresh; re-executing a plan over changed files would not be).
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, UInt32Array};
-use datafusion::arrow::compute::take_record_batch;
+use datafusion::arrow::compute::{concat_batches, take_record_batch};
 use datafusion::arrow::datatypes::{DataType, Int64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::hash_utils::{create_hashes, RandomState};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{internal_err, Result};
-use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::aggregate::AggregateFunctionExpr;
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
@@ -74,25 +100,84 @@ use datafusion::physical_plan::{
 };
 use futures_util::{stream, StreamExt, TryStreamExt};
 
-/// Slots per final partition; zero means the spike is off.
+/// Fixed slots per final partition; with [`ROWS_PER_SLOT`] zero too, the
+/// spike is off.
 static SLOTS: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether the spike prunes. Off, it buffers, slots and merges in waves
-/// exactly as when on but merges every slot: the control that tells the
-/// gain of pruning from the gain of merging in slot waves.
+/// When non-zero, each partition sizes its slot count from its input:
+/// one slot per this many buffered partial rows ([`SLOTS`] is ignored).
+static ROWS_PER_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the spike prunes. Off, it buffers, slots and runs the first
+/// merge exactly as when on, then merges everything: the control that
+/// tells the gain of pruning from the cost of the mechanics.
 static PRUNE: AtomicBool = AtomicBool::new(true);
 
 /// Seed of the slot hash; any seed but the repartition's (0) will do.
 const SLOT_SEED: u64 = 386;
 
-/// Set the slots per partition (0 turns the spike off) and whether it
-/// prunes; returns the previous values. Read when a plan is optimized, so
-/// they apply to the next terminal of any table.
-pub(crate) fn set(slots: usize, prune: bool) -> (usize, bool) {
+/// Bail out (merge every buffered batch as it is) when the rows to merge
+/// exceed this share of the partition's input.
+const BAIL_SHARE: f64 = 0.5;
+
+/// Rows a partition buffers before its probe decides whether to keep
+/// buffering.
+const PROBE_ROWS: usize = 1 << 17;
+
+/// The probe bails out when more than this share of its rows lies in slots
+/// it could not prune.
+const EARLY_BAIL_SHARE: f64 = 0.9;
+
+/// Largest slot count a partition sizes for itself.
+const MAX_SLOTS: usize = 1 << 22;
+
+/// How a partition chooses its slot count.
+#[derive(Debug, Clone, Copy)]
+enum Sizing {
+    Fixed(usize),
+    PerRows(usize),
+}
+
+impl Sizing {
+    fn slots(self, rows_in: usize) -> usize {
+        match self {
+            Sizing::Fixed(slots) => slots,
+            Sizing::PerRows(per) => rows_in.div_ceil(per).clamp(1, MAX_SLOTS),
+        }
+    }
+}
+
+impl fmt::Display for Sizing {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Sizing::Fixed(slots) => write!(f, "slots={slots}"),
+            Sizing::PerRows(per) => write!(f, "rows_per_slot={per}"),
+        }
+    }
+}
+
+/// Set the fixed slots per partition, whether the spike prunes, and the
+/// rows per slot that size the slot count from the data instead (0: use
+/// `slots`); `slots` and `rows_per_slot` both 0 turn the spike off.
+/// Returns the previous values. Read when a plan is optimized, so they
+/// apply to the next terminal of any table.
+pub(crate) fn set(slots: usize, prune: bool, rows_per_slot: usize) -> (usize, bool, usize) {
     (
         SLOTS.swap(slots, Ordering::Relaxed),
         PRUNE.swap(prune, Ordering::Relaxed),
+        ROWS_PER_SLOT.swap(rows_per_slot, Ordering::Relaxed),
     )
+}
+
+fn sizing() -> Option<Sizing> {
+    match (
+        ROWS_PER_SLOT.load(Ordering::Relaxed),
+        SLOTS.load(Ordering::Relaxed),
+    ) {
+        (0, 0) => None,
+        (0, slots) => Some(Sizing::Fixed(slots)),
+        (per, _) => Some(Sizing::PerRows(per)),
+    }
 }
 
 /// The physical rule that plans [`SlotPrunedCountExec`]; registered last
@@ -106,12 +191,11 @@ impl PhysicalOptimizerRule for SlotPruneTopKCount {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let slots = SLOTS.load(Ordering::Relaxed);
-        if slots == 0 {
+        let Some(sizing) = sizing() else {
             return Ok(plan);
-        }
+        };
         plan.transform_down(|node| {
-            Ok(match rewrite_sort(&node, slots) {
+            Ok(match rewrite_sort(&node, sizing) {
                 Some(new) => Transformed::new(new, true, TreeNodeRecursion::Jump),
                 None => Transformed::no(node),
             })
@@ -128,7 +212,7 @@ impl PhysicalOptimizerRule for SlotPruneTopKCount {
     }
 }
 
-fn rewrite_sort(node: &Arc<dyn ExecutionPlan>, slots: usize) -> Option<Arc<dyn ExecutionPlan>> {
+fn rewrite_sort(node: &Arc<dyn ExecutionPlan>, sizing: Sizing) -> Option<Arc<dyn ExecutionPlan>> {
     let sort = node.downcast_ref::<SortExec>()?;
     let k = sort.fetch().filter(|&k| k > 0)?;
     let mut orders = sort.expr().iter();
@@ -137,7 +221,7 @@ fn rewrite_sort(node: &Arc<dyn ExecutionPlan>, slots: usize) -> Option<Arc<dyn E
         return None;
     }
     let mut name = order.expr.downcast_ref::<Column>()?.name().to_string();
-    let child = rewrite_below(sort.input(), &mut name, k, slots)?;
+    let child = rewrite_below(sort.input(), &mut name, k, sizing)?;
     with_child(node, child)
 }
 
@@ -160,12 +244,12 @@ fn rewrite_below(
     plan: &Arc<dyn ExecutionPlan>,
     name: &mut String,
     k: usize,
-    slots: usize,
+    sizing: Sizing,
 ) -> Option<Arc<dyn ExecutionPlan>> {
     if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
         let expr = projection.expr().iter().find(|e| e.alias == *name)?;
         *name = expr.expr.downcast_ref::<Column>()?.name().to_string();
-        let child = rewrite_below(projection.input(), name, k, slots)?;
+        let child = rewrite_below(projection.input(), name, k, sizing)?;
         return with_child(plan, child);
     }
     let aggregate = plan.downcast_ref::<AggregateExec>()?;
@@ -174,7 +258,7 @@ fn rewrite_below(
         aggregate: Arc::clone(plan),
         shape,
         k,
-        slots,
+        sizing,
         prune: PRUNE.load(Ordering::Relaxed),
         threshold: Arc::new(AtomicI64::new(i64::MIN)),
         metrics: ExecutionPlanMetricsSet::new(),
@@ -259,9 +343,9 @@ pub(crate) struct SlotPrunedCountExec {
     aggregate: Arc<dyn ExecutionPlan>,
     shape: Shape,
     k: usize,
-    slots: usize,
+    sizing: Sizing,
     prune: bool,
-    /// The largest K-th count a partition has finalized; `i64::MIN` until
+    /// The largest threshold a partition has published; `i64::MIN` until
     /// one has.
     threshold: Arc<AtomicI64>,
     metrics: ExecutionPlanMetricsSet,
@@ -271,8 +355,8 @@ impl DisplayAs for SlotPrunedCountExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "SlotPrunedCountExec: k={}, slots={}, prune={}, replaces ",
-            self.k, self.slots, self.prune
+            "SlotPrunedCountExec: k={}, {}, prune={}, replaces ",
+            self.k, self.sizing, self.prune
         )?;
         self.aggregate.fmt_as(t, f)
     }
@@ -316,7 +400,7 @@ impl ExecutionPlan for SlotPrunedCountExec {
             aggregate,
             shape: self.shape.clone(),
             k: self.k,
-            slots: self.slots,
+            sizing: self.sizing,
             prune: self.prune,
             threshold: Arc::new(AtomicI64::new(i64::MIN)),
             metrics: ExecutionPlanMetricsSet::new(),
@@ -347,14 +431,17 @@ impl ExecutionPlan for SlotPrunedCountExec {
         let pruner = Pruner {
             shape: self.shape.clone(),
             k: self.k,
-            slots: self.slots,
+            sizing: self.sizing,
             prune: self.prune,
             shared: Arc::clone(&self.threshold),
         };
         let batches = stream::once(async move { pruner.run(input, context, metrics).await })
             .map_ok(|batches| stream::iter(batches.into_iter().map(Ok)))
             .try_flatten();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(self.schema(), batches)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema(),
+            batches,
+        )))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -367,33 +454,75 @@ struct PartitionMetrics {
     /// merges (comparable to the replaced aggregate's `elapsed_compute`,
     /// which also leaves out waiting for input).
     elapsed_compute: Time,
-    /// Hashing rows into slots, summing bounds, and bucketing rows.
+    /// Hashing rows into slots and computing the bounds.
     slot_time: Time,
+    /// Copying the rows of the first merge and of the kept slots.
+    gather_time: Time,
     output_rows: Count,
     rows_in: Count,
+    /// Rows of the merges whose groups are emitted: every input row when
+    /// the partition bails out, otherwise the first merge's and the kept
+    /// slots' rows.
     rows_merged: Count,
+    /// Rows of the first merge (merged again when the partition bails out).
+    rows_first: Count,
+    slots: Count,
     slots_merged: Count,
+    /// Merges run, the discarded first one included.
     waves: Count,
+    /// Partitions that bailed out, and those whose probe did.
+    bailed: Count,
+    bailed_early: Count,
 }
 
 impl PartitionMetrics {
     fn new(set: &ExecutionPlanMetricsSet, partition: usize) -> Self {
+        let counter = |name: &'static str| MetricBuilder::new(set).counter(name, partition);
         PartitionMetrics {
             elapsed_compute: MetricBuilder::new(set).elapsed_compute(partition),
             slot_time: MetricBuilder::new(set).subset_time("slot_time", partition),
+            gather_time: MetricBuilder::new(set).subset_time("gather_time", partition),
             output_rows: MetricBuilder::new(set).output_rows(partition),
-            rows_in: MetricBuilder::new(set).counter("rows_in", partition),
-            rows_merged: MetricBuilder::new(set).counter("rows_merged", partition),
-            slots_merged: MetricBuilder::new(set).counter("slots_merged", partition),
-            waves: MetricBuilder::new(set).counter("waves", partition),
+            rows_in: counter("rows_in"),
+            rows_merged: counter("rows_merged"),
+            rows_first: counter("rows_first"),
+            slots: counter("slots"),
+            slots_merged: counter("slots_merged"),
+            waves: counter("waves"),
+            bailed: counter("bailed"),
+            bailed_early: counter("bailed_early"),
         }
     }
+}
+
+/// A partition's slots: each buffered row's slot, and per slot its bound,
+/// its largest partial count and its row count.
+struct Slots {
+    of_row: Vec<Vec<u32>>,
+    bound: Vec<i64>,
+    maxp: Vec<i64>,
+    rows: Vec<usize>,
+}
+
+impl Slots {
+    fn occupied(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.rows.len()).filter(|&s| self.rows[s] > 0)
+    }
+}
+
+/// The K-th largest of `values`, if there are K.
+fn kth_largest(mut values: Vec<i64>, k: usize) -> Option<i64> {
+    if k == 0 || values.len() < k {
+        return None;
+    }
+    let (_, kth, _) = values.select_nth_unstable_by(k - 1, |a, b| b.cmp(a));
+    Some(*kth)
 }
 
 struct Pruner {
     shape: Shape,
     k: usize,
-    slots: usize,
+    sizing: Sizing,
     prune: bool,
     shared: Arc<AtomicI64>,
 }
@@ -405,105 +534,202 @@ impl Pruner {
         context: Arc<TaskContext>,
         metrics: PartitionMetrics,
     ) -> Result<Vec<RecordBatch>> {
-        // The bounds are complete only once every partial row is in.
+        // The bounds are complete only once every partial row is in; a probe
+        // of the first rows can give up on pruning before then.
         let mut batches = Vec::new();
+        let mut buffered = 0;
+        let mut probed = false;
         while let Some(batch) = input.next().await {
             let batch = batch?;
-            if batch.num_rows() > 0 {
-                batches.push(batch);
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            buffered += batch.num_rows();
+            batches.push(batch);
+            if !probed && buffered >= PROBE_ROWS {
+                probed = true;
+                if self.hopeless(&batches, buffered, &metrics)? {
+                    return self.stream_all(batches, input, &context, &metrics).await;
+                }
             }
         }
         let compute = metrics.elapsed_compute.clone();
-        let started = compute.timer();
+        let _started = compute.timer();
+        let rows_in = buffered;
+        let batch_size = context.session_config().batch_size();
+        metrics.rows_in.add(rows_in);
+        if rows_in == 0 {
+            return Ok(Vec::new());
+        }
 
         let slot_timer = metrics.slot_time.timer();
-        let (bound, row_slots) = self.bounds(&batches)?;
-        metrics
-            .rows_in
-            .add(row_slots.iter().map(Vec::len).sum::<usize>());
-        // Occupied slots by bound, descending; a slot's wave is
-        // floor(log2(rank + 1)).
-        let mut occupied = vec![false; self.slots];
-        row_slots.iter().flatten().for_each(|&s| occupied[s as usize] = true);
-        let mut order: Vec<usize> = (0..self.slots).filter(|&s| occupied[s]).collect();
-        order.sort_unstable_by_key(|&s| Reverse(bound[s]));
-        let mut wave_of = vec![0usize; self.slots];
-        for (rank, &slot) in order.iter().enumerate() {
-            wave_of[slot] = (usize::BITS - 1 - (rank + 1).leading_zeros()) as usize;
-        }
-        let waves = order.last().map_or(0, |&s| wave_of[s] + 1);
-        // rows[wave][batch]: the rows of a wave's slots in each batch.
-        let mut rows = vec![vec![Vec::<u32>::new(); batches.len()]; waves];
-        for (b, slots) in row_slots.iter().enumerate() {
-            for (row, &slot) in slots.iter().enumerate() {
-                rows[wave_of[slot as usize]][b].push(row as u32);
-            }
-        }
+        let slots = self.slots(&batches, self.sizing.slots(rows_in))?;
+        metrics.slots.add(slots.rows.len());
+        let maxps: Vec<i64> = slots.occupied().map(|s| slots.maxp[s]).collect();
+        let t0 = kth_largest(maxps, self.k);
         drop(slot_timer);
 
-        let mut heap = BinaryHeap::<Reverse<i64>>::new();
-        let mut out = Vec::new();
-        for (wave, wave_rows) in rows.into_iter().enumerate() {
-            let local = (heap.len() == self.k).then(|| heap.peek().map(|r| r.0)).flatten();
-            if let Some(local) = local {
-                self.shared.fetch_max(local, Ordering::Relaxed);
+        // First merge: the K slots with the largest single partial count.
+        let mut first = vec![false; slots.rows.len()];
+        let mut first_out = Vec::new();
+        let mut first_rows = 0;
+        let mut local = None;
+        if let Some(t0) = t0 {
+            if self.prune {
+                self.shared.fetch_max(t0, Ordering::Relaxed);
             }
-            let threshold = Some(self.shared.load(Ordering::Relaxed))
-                .filter(|&t| self.prune && t != i64::MIN);
-            let first_rank = (1usize << wave) - 1;
-            if threshold.is_some_and(|t| bound[order[first_rank]] < t) {
-                break;
+            let mut ranked: Vec<usize> = slots.occupied().collect();
+            ranked.select_nth_unstable_by_key(self.k - 1, |&s| std::cmp::Reverse(slots.maxp[s]));
+            for &s in &ranked[..self.k] {
+                first[s] = true;
+                first_rows += slots.rows[s];
             }
-            let last_rank = ((1usize << (wave + 1)) - 1).min(order.len());
-            let keep = |slot: u32| threshold.is_none_or(|t| bound[slot as usize] >= t);
-            metrics.slots_merged.add(
-                order[first_rank..last_rank]
-                    .iter()
-                    .filter(|&&s| keep(s as u32))
-                    .count(),
-            );
-            let mut gathered = Vec::new();
-            for (b, indices) in wave_rows.into_iter().enumerate() {
-                let indices: Vec<u32> = match threshold {
-                    None => indices,
-                    Some(_) => indices
-                        .into_iter()
-                        .filter(|&row| keep(row_slots[b][row as usize]))
-                        .collect(),
-                };
-                if !indices.is_empty() {
-                    metrics.rows_merged.add(indices.len());
-                    gathered.push(take_record_batch(&batches[b], &UInt32Array::from(indices))?);
-                }
-            }
-            if gathered.is_empty() {
-                continue;
-            }
+            let gathered = self.gather(&batches, &slots, &metrics, batch_size, |s| first[s])?;
             metrics.waves.add(1);
-            let merged = self.merge(gathered, &context).await?;
-            for batch in &merged {
-                let counts = batch.column(self.shape.count_column).as_primitive::<Int64Type>();
-                for count in counts.iter().flatten() {
-                    if heap.len() < self.k {
-                        heap.push(Reverse(count));
-                    } else if heap.peek().is_some_and(|min| count > min.0) {
-                        heap.pop();
-                        heap.push(Reverse(count));
-                    }
-                }
-                metrics.output_rows.add(batch.num_rows());
+            metrics.rows_first.add(first_rows);
+            first_out = self.merge(gathered, &context).await?;
+            local = kth_largest(self.counts(&first_out), self.k);
+            if let (true, Some(t1)) = (self.prune, local) {
+                self.shared.fetch_max(t1, Ordering::Relaxed);
             }
-            out.extend(merged);
         }
-        drop(started);
+
+        // The slots left to merge, and whether to bail out.
+        let threshold = self.prune.then(|| {
+            [local, t0, Some(self.shared.load(Ordering::Relaxed))]
+                .into_iter()
+                .flatten()
+                .filter(|&t| t != i64::MIN)
+                .max()
+        });
+        let threshold = threshold.flatten();
+        let keep = |s: usize| !first[s] && threshold.is_none_or(|t| slots.bound[s] >= t);
+        let kept_rows: usize = slots
+            .occupied()
+            .filter(|&s| keep(s))
+            .map(|s| slots.rows[s])
+            .sum();
+        if !self.prune || (first_rows + kept_rows) as f64 > BAIL_SHARE * rows_in as f64 {
+            metrics.bailed.add(1);
+            metrics.waves.add(1);
+            metrics.rows_merged.add(rows_in);
+            metrics.slots_merged.add(slots.occupied().count());
+            drop(first_out);
+            drop(slots);
+            let out = self.merge(batches, &context).await?;
+            metrics
+                .output_rows
+                .add(out.iter().map(RecordBatch::num_rows).sum());
+            return Ok(out);
+        }
+        metrics.rows_merged.add(first_rows + kept_rows);
+        metrics
+            .slots_merged
+            .add(slots.occupied().filter(|&s| first[s] || keep(s)).count());
+        let mut out = first_out;
+        if kept_rows > 0 {
+            let gathered = self.gather(&batches, &slots, &metrics, batch_size, keep)?;
+            drop(batches);
+            metrics.waves.add(1);
+            out.extend(self.merge(gathered, &context).await?);
+        }
+        metrics
+            .output_rows
+            .add(out.iter().map(RecordBatch::num_rows).sum());
         Ok(out)
     }
 
-    /// Each slot's bound (the sum of its partial counts) and each row's slot.
-    fn bounds(&self, batches: &[RecordBatch]) -> Result<(Vec<i64>, Vec<Vec<u32>>)> {
+    /// Whether the probe says pruning will not pay: more than
+    /// [`EARLY_BAIL_SHARE`] of the first rows lie in slots whose bound
+    /// reaches their own `T0`. A guess about speed, not a correctness rule:
+    /// the bounds of the whole input only grow, and so may the threshold.
+    fn hopeless(
+        &self,
+        batches: &[RecordBatch],
+        rows: usize,
+        metrics: &PartitionMetrics,
+    ) -> Result<bool> {
+        let _timer = metrics.slot_time.timer();
+        let slots = self.slots(batches, self.sizing.slots(rows))?;
+        let maxps: Vec<i64> = slots.occupied().map(|s| slots.maxp[s]).collect();
+        let Some(t0) = kth_largest(maxps, self.k) else {
+            return Ok(false);
+        };
+        let kept: usize = slots
+            .occupied()
+            .filter(|&s| slots.bound[s] >= t0)
+            .map(|s| slots.rows[s])
+            .sum();
+        Ok(kept as f64 > EARLY_BAIL_SHARE * rows as f64)
+    }
+
+    /// Bail out early: merge the buffered batches and the rest of the input
+    /// in one final aggregate, streaming.
+    async fn stream_all(
+        &self,
+        batches: Vec<RecordBatch>,
+        input: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
+        metrics: &PartitionMetrics,
+    ) -> Result<Vec<RecordBatch>> {
+        let started = Instant::now();
+        let buffered: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        metrics.rows_in.add(buffered);
+        metrics.rows_merged.add(buffered);
+        metrics.bailed.add(1);
+        metrics.bailed_early.add(1);
+        metrics.waves.add(1);
+        // The time spent waiting for input is not the merge's.
+        let waited = Arc::new(AtomicU64::new(0));
+        let rest = {
+            let (rows_in, rows_merged, waited) = (
+                metrics.rows_in.clone(),
+                metrics.rows_merged.clone(),
+                Arc::clone(&waited),
+            );
+            let mut input = input;
+            stream::poll_fn(move |cx| {
+                let polled = Instant::now();
+                let next = input.poll_next_unpin(cx);
+                waited.fetch_add(polled.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                if let std::task::Poll::Ready(Some(Ok(batch))) = &next {
+                    rows_in.add(batch.num_rows());
+                    rows_merged.add(batch.num_rows());
+                }
+                next
+            })
+        };
+        let all = stream::iter(batches.into_iter().map(Ok)).chain(rest);
+        let out = self
+            .merge_stream(
+                Box::pin(RecordBatchStreamAdapter::new(
+                    Arc::clone(&self.shape.partial_schema),
+                    all,
+                )),
+                context,
+            )
+            .await?;
+        let busy = started
+            .elapsed()
+            .saturating_sub(std::time::Duration::from_nanos(
+                waited.load(Ordering::Relaxed),
+            ));
+        metrics.elapsed_compute.add_duration(busy);
+        metrics
+            .output_rows
+            .add(out.iter().map(RecordBatch::num_rows).sum());
+        Ok(out)
+    }
+
+    /// Hash every row into one of `count` slots.
+    fn slots(&self, batches: &[RecordBatch], count: usize) -> Result<Slots> {
         let random = RandomState::with_seed(SLOT_SEED);
-        let mut bound = vec![0i64; self.slots];
-        let mut row_slots = Vec::with_capacity(batches.len());
+        let mut slots = Slots {
+            of_row: Vec::with_capacity(batches.len()),
+            bound: vec![0; count],
+            maxp: vec![0; count],
+            rows: vec![0; count],
+        };
         let mut hashes = Vec::new();
         for batch in batches {
             let keys: Vec<ArrayRef> = self
@@ -515,32 +741,98 @@ impl Pruner {
             hashes.clear();
             hashes.resize(batch.num_rows(), 0u64);
             create_hashes(&keys, &random, &mut hashes)?;
-            let counts = batch.column(self.shape.state_column).as_primitive::<Int64Type>();
-            let slots: Vec<u32> = hashes
+            let counts = batch
+                .column(self.shape.state_column)
+                .as_primitive::<Int64Type>();
+            let of_row: Vec<u32> = hashes
                 .iter()
-                .map(|h| ((h >> 32) % self.slots as u64) as u32)
+                .map(|h| ((h >> 32) % count as u64) as u32)
                 .collect();
-            for (row, &slot) in slots.iter().enumerate() {
+            for (row, &slot) in of_row.iter().enumerate() {
+                let slot = slot as usize;
+                slots.rows[slot] += 1;
                 if counts.is_valid(row) {
-                    bound[slot as usize] += counts.value(row);
+                    let c = counts.value(row);
+                    slots.bound[slot] += c;
+                    slots.maxp[slot] = slots.maxp[slot].max(c);
                 }
             }
-            row_slots.push(slots);
+            slots.of_row.push(of_row);
         }
-        Ok((bound, row_slots))
+        Ok(slots)
     }
 
-    /// Merge one wave's partial rows with DataFusion's final aggregate.
+    /// The rows of the slots `pick` selects, in batches of the session's
+    /// batch size.
+    fn gather(
+        &self,
+        batches: &[RecordBatch],
+        slots: &Slots,
+        metrics: &PartitionMetrics,
+        batch_size: usize,
+        pick: impl Fn(usize) -> bool,
+    ) -> Result<Vec<RecordBatch>> {
+        let _timer = metrics.gather_time.timer();
+        let mut pieces = Vec::new();
+        for (batch, of_row) in batches.iter().zip(&slots.of_row) {
+            let indices: Vec<u32> = (0..of_row.len() as u32)
+                .filter(|&row| pick(of_row[row as usize] as usize))
+                .collect();
+            if indices.len() == of_row.len() {
+                pieces.push(batch.clone());
+            } else if !indices.is_empty() {
+                pieces.push(take_record_batch(batch, &UInt32Array::from(indices))?);
+            }
+        }
+        if pieces.len() <= 1 {
+            return Ok(pieces);
+        }
+        let all = concat_batches(&self.shape.partial_schema, &pieces)?;
+        drop(pieces);
+        let size = batch_size.max(1);
+        Ok((0..all.num_rows())
+            .step_by(size)
+            .map(|offset| all.slice(offset, size.min(all.num_rows() - offset)))
+            .collect())
+    }
+
+    /// The counts of merged groups.
+    fn counts(&self, merged: &[RecordBatch]) -> Vec<i64> {
+        merged
+            .iter()
+            .flat_map(|b| {
+                let counts = b
+                    .column(self.shape.count_column)
+                    .as_primitive::<Int64Type>();
+                counts.iter().flatten().collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Merge partial rows with DataFusion's final aggregate, handing it the
+    /// batches so it can drop each once it is read.
     async fn merge(
         &self,
         batches: Vec<RecordBatch>,
         context: &Arc<TaskContext>,
     ) -> Result<Vec<RecordBatch>> {
-        let source = MemorySourceConfig::try_new_exec(
-            &[batches],
+        if batches.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stream = RecordBatchStreamAdapter::new(
             Arc::clone(&self.shape.partial_schema),
-            None,
-        )?;
+            stream::iter(batches.into_iter().map(Ok)),
+        );
+        self.merge_stream(Box::pin(stream), context).await
+    }
+
+    /// Merge a stream of partial rows with DataFusion's final aggregate.
+    async fn merge_stream(
+        &self,
+        input: SendableRecordBatchStream,
+        context: &Arc<TaskContext>,
+    ) -> Result<Vec<RecordBatch>> {
+        let source = Arc::new(Buffered::new(input));
         let aggregate = AggregateExec::try_new(
             AggregateMode::Final,
             Arc::clone(&self.shape.group_by),
@@ -550,5 +842,94 @@ impl Pruner {
             Arc::clone(&self.shape.aggregate_input_schema),
         )?;
         collect(Arc::new(aggregate), Arc::clone(context)).await
+    }
+}
+
+/// A one-partition source that hands out a stream once (buffered batches,
+/// which the consumer drops as it reads them, or the rest of an input).
+struct Buffered {
+    input: Mutex<Option<SendableRecordBatchStream>>,
+    properties: Arc<PlanProperties>,
+}
+
+impl fmt::Debug for Buffered {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("Buffered")
+    }
+}
+
+impl Buffered {
+    fn new(input: SendableRecordBatchStream) -> Self {
+        let schema = input.schema();
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(schema),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Buffered {
+            input: Mutex::new(Some(input)),
+            properties: Arc::new(properties),
+        }
+    }
+}
+
+impl DisplayAs for Buffered {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Buffered")
+    }
+}
+
+impl ExecutionPlan for Buffered {
+    fn name(&self) -> &str {
+        "Buffered"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        Vec::new()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn replace_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return internal_err!("Buffered has no children");
+        }
+        Ok(self)
+    }
+
+    #[allow(deprecated)]
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        match (partition, self.input.lock().ok().and_then(|mut b| b.take())) {
+            (0, Some(input)) => Ok(input),
+            _ => internal_err!("Buffered runs once, as partition 0"),
+        }
     }
 }

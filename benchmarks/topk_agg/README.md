@@ -15,7 +15,12 @@ are under [results/](results/).
 | `ceiling.py` | Simulates the pruner on a query's exact per-group counts (from DuckDB): how much final-merge input it could skip |
 | `report.py` | Phase 1 tables: timings, stage CPU shares, the pruning simulation and the ceiling → `results/cells.md`, `results/summary.json`, `results/plans/` |
 | `compare.py` | Phase 3: baseline vs the spike vs its control, interleaved in one process per cell → `results/compare.json`, `results/compare.md` |
-| `selfcheck.py` | Randomized checks that the simulated pruner never skips a possible winner |
+| `selfcheck.py` | Randomized checks that the simulated pruner, and the spike's pre-merge thresholds, never skip a possible winner |
+
+`results/v1/` holds the comparison of the first spike (fixed slots, merges
+in doubling waves; commit `96a3b17`), and `results/late_bail/` a partial
+rerun of the second spike before it had its probe (28 synthetic cells);
+REPORT.md compares both with the current one.
 
 ## The research build
 
@@ -26,10 +31,12 @@ unchanged (`src/topk_research/`):
 - `ltseq_core._topk_analyze(table._inner)` executes the plan a terminal
   runs and returns its per-operator DataFusion metrics. Stage costs come
   from these counters, not from differences of wall-clock times.
-- `ltseq_core._topk_set_prune(slots, prune=True)` plans the spike,
-  `SlotPrunedCountExec`, in place of the final aggregate of an eligible
-  query from the next terminal on; `slots=0` turns it off, and
-  `prune=False` is the control: the same operator merging every slot.
+- `ltseq_core._topk_set_prune(slots, prune=True, rows_per_slot=0)` plans
+  the spike, `SlotPrunedCountExec`, in place of the final aggregate of an
+  eligible query from the next terminal on: `slots` fixed slots per final
+  partition, or one slot per `rows_per_slot` buffered partial rows when that
+  is non-zero; both 0 turn it off. `prune=False` is the control: the same
+  operator and first merge, then every row merged as it is.
 
 `py-ltseq/tests/test_topk_research.py` holds the spike to the unpruned
 answer on a measurement build and checks that a default build has neither
@@ -44,7 +51,7 @@ uv run --group bench python benchmarks/prepare_data.py        # ClickBench hits.
 python benchmarks/topk_agg/selfcheck.py
 python benchmarks/topk_agg/run.py                             # ~45 min; --groups, --clickbench PATH
 python benchmarks/topk_agg/report.py                          # ~3 min (DuckDB group counts)
-python benchmarks/topk_agg/compare.py                         # ~40 min; --only, --clickbench PATH
+python benchmarks/topk_agg/compare.py                         # ~75 min; --only, --clickbench PATH
 ```
 
 `run.py` and `compare.py` reuse `benchmarks/m0/harness.py`: before each

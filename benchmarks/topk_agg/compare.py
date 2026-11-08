@@ -5,16 +5,19 @@ and the fixtures; it writes ``results/compare.json`` and, with
 ``--report``, ``results/compare.md``.
 
 Per cell, one process times every mode interleaved (``child.py``'s
-``compare``): mode 0 is today's plan, N is the spike with N slots per
-final partition. Each mode's peak is a cold single run in a process of its
-own. A negative mode -N is the control: the spike's operator with N slots
-that buffers, slots and merges in waves but prunes nothing, so the gap
-between -N and N is what pruning buys and the gap between 0 and -N is what
-the restructuring alone does. The table reports, per mode, the median and spread of the timed runs,
-the change of the median against mode 0, the peak, the final stage's
+``compare``): mode ``0`` is today's plan, ``rN`` the spike with one slot
+per N buffered partial rows of a final partition, ``N`` the spike with N
+slots per partition. Each mode's peak is a cold single run in a process of
+its own. A mode with a leading ``-`` is the control: the spike's operator
+that buffers, slots and runs its first merge, then merges every row as it
+is, so the gap between ``-rN`` and ``rN`` is what pruning buys and the gap
+between ``0`` and ``-rN`` is what the mechanics cost. The table reports,
+per mode, the median and spread of the timed runs, the change of the
+median against mode 0 and against the control, the peak, the final stage's
 share of process CPU (the final ``AggregateExec`` or the
-``SlotPrunedCountExec`` that replaces it), and the share of the final
-stage's input rows the spike merged.
+``SlotPrunedCountExec`` that replaces it), the share of the final stage's
+input rows the spike merged, and the share of final partitions that bailed
+out to a single merge.
 """
 
 from __future__ import annotations
@@ -34,13 +37,15 @@ import fixtures  # noqa: E402
 from harness import host_info  # noqa: E402
 from run import CLICKBENCH, CONTENDED, run_cell  # noqa: E402
 
-SPIKE = 8192
+SPIKE = "r128"
+CONTROL = "-r128"
+MODES = ("0", SPIKE, CONTROL)
 
 
 def cells(clickbench: Path, repeat: int) -> list[dict]:
     out = []
 
-    def cell(source, key, k=10, partitions=8, predicate=None, modes=(0, SPIKE, -SPIKE)):
+    def cell(source, key, k=10, partitions=8, predicate=None, modes=MODES):
         out.append(
             {
                 "group": "compare",
@@ -63,12 +68,17 @@ def cells(clickbench: Path, repeat: int) -> list[dict]:
         source = fixtures.DATA / f"{name}.parquet"
         for key in ("key", "skey"):
             cell(source, key, k=1000)
-        cell(source, "key", partitions=32)
+            cell(source, key, partitions=32)
     if clickbench.exists():
         cpus = os.cpu_count() or 1
+        queries = (("UserID", None), ("URL", None), ("SearchPhrase", "nonempty_key"))
         for k in (10, 1000):
-            for key, predicate in (("UserID", None), ("URL", None), ("SearchPhrase", "nonempty_key")):
-                cell(clickbench, key, k=k, partitions=cpus, predicate=predicate, modes=(0, 1024, SPIKE, -SPIKE))
+            for key, predicate in queries:
+                cell(clickbench, key, k=k, partitions=cpus, predicate=predicate, modes=(*MODES, "r32"))
+        # More final partitions alone also shrink each final hash table.
+        for partitions in (2 * cpus, 4 * cpus):
+            for key, predicate in queries:
+                cell(clickbench, key, partitions=partitions, predicate=predicate)
     return out
 
 
@@ -92,16 +102,25 @@ def _merged(analyses: list[dict]) -> float | None:
     return None
 
 
+def _bailed(analyses: list[dict], partitions: int) -> float | None:
+    # The hook sums a metric over partitions, so this is the share of all final partitions.
+    for analysis in analyses:
+        ops = [op["metrics"] for op in analysis["operators"] if op["name"] == "SlotPrunedCountExec"]
+        if ops:
+            return sum(m.get("bailed", 0) for m in ops) / partitions
+    return None
+
+
 def summarize(result: dict, peaks: dict) -> list[dict]:
     spec = result["spec"]
     rows = []
-    base = None
+    medians = {mode: statistics.median(r["seconds"] for r in data["runs"]) for mode, data in result.get("modes", {}).items()}
+    base = medians.get("0")
     for mode, data in result.get("modes", {}).items():
         seconds = [r["seconds"] for r in data["runs"]]
-        median = statistics.median(seconds)
+        median = medians[mode]
         ordered = sorted(seconds)
-        if mode == "0":
-            base = median
+        control = medians.get("-" + mode) if not mode.startswith("-") and mode != "0" else None
         rows.append(
             {
                 "fixture": Path(spec["source"]).stem,
@@ -109,15 +128,17 @@ def summarize(result: dict, peaks: dict) -> list[dict]:
                 "filter": spec.get("filter"),
                 "k": spec["k"],
                 "p": spec["partitions"],
-                "mode": int(mode),
+                "mode": mode,
                 "median": median,
                 "p25": ordered[len(ordered) // 4],
                 "p75": ordered[(3 * len(ordered)) // 4],
                 "cv": statistics.pstdev(seconds) / median,
                 "delta": None if base is None else median / base - 1,
+                "vs_control": None if control is None else median / control - 1,
                 "peak_mib": peaks.get(mode),
                 "final_share": _median_share(data["analyze"], ("AggregateExec", "SlotPrunedCountExec")),
                 "merged": _merged(data["analyze"]),
+                "bailed": _bailed(data["analyze"], spec["partitions"]),
                 "ok": data.get("check", {}).get("ok"),
                 "other_cores": result.get("other_cores"),
             }
@@ -133,19 +154,21 @@ def markdown(rows: list[dict], host: dict) -> str:
         f"{host.get('cpu_count')} CPUs, {(host.get('memory_bytes') or 0) >> 30} GiB, {host.get('rustc')}, "
         f"command `{host.get('command')}`, started {host.get('started')}.",
         "",
-        "`slots` 0 is today's plan, N the spike with N slots per partition, -N its control (the same "
-        "operator merging every slot). Times are seconds over the interleaved timed runs; `Δ` is the change of "
-        "the median against `slots` 0 (negative is faster). `peak` is the resident growth of a cold single "
-        "run in its own process. `final` is the final stage's share of process CPU, `merged` the share of the "
-        "final stage's input rows the spike merged.",
+        "`mode` 0 is today's plan, rN the spike with one slot per N partial rows of a final partition, -rN its "
+        "control (the same operator and first merge, then every row merged). Times are seconds over the "
+        "interleaved timed runs; `Δ` is the change of the median against mode 0, `Δ ctl` against the "
+        "mode's control (negative is faster). `peak` is the resident growth of a cold single run in its own "
+        "process. `final` is the final stage's share of process CPU, `merged` the share of the final stage's "
+        "input rows the spike merged, `bailed` the share of final partitions that bailed out to one "
+        "merge of every row.",
         "",
-        "| fixture | key | filter | K | P | slots | ok | median s | IQR s | cv | Δ | peak MiB | final | merged | other cores |",
-        "|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| fixture | key | filter | K | P | mode | ok | median s | IQR s | cv | Δ | Δ ctl | peak MiB | final | merged | bailed | other cores |",
+        "|---|---|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in rows:
         lines.append(
             "| {fixture} | {key} | {filter} | {k} | {p} | {mode} | {ok} | {median:.3f} | {p25:.3f}–{p75:.3f} "
-            "| {cv:.1%} | {delta} | {peak} | {final} | {merged} | {other} |".format(
+            "| {cv:.1%} | {delta} | {vs_control} | {peak} | {final} | {merged} | {bailed} | {other} |".format(
                 fixture=r["fixture"],
                 key=r["key"],
                 filter=r["filter"] or "",
@@ -157,10 +180,12 @@ def markdown(rows: list[dict], host: dict) -> str:
                 p75=r["p75"],
                 cv=r["cv"],
                 ok="yes" if r["ok"] else "**NO**",
-                delta="" if r["mode"] == 0 or r["delta"] is None else f"{r['delta']:+.1%}",
+                delta="" if r["mode"] == "0" or r["delta"] is None else f"{r['delta']:+.1%}",
+                vs_control="" if r["vs_control"] is None else f"{r['vs_control']:+.1%}",
                 peak="" if r["peak_mib"] is None else f"{r['peak_mib']:.0f}",
                 final="" if r["final_share"] is None else f"{r['final_share']:.1%}",
                 merged="" if r["merged"] is None else f"{r['merged']:.1%}",
+                bailed="" if r["bailed"] is None else f"{r['bailed']:.0%}",
                 other="" if r["other_cores"] is None else f"{r['other_cores']:.2f}",
             )
         )
@@ -182,7 +207,7 @@ def report(path: Path, out: Path) -> None:
             if mode == "0" or not mode_data["analyze"]:
                 continue
             name = "{}-{}-{}{}-k{}-p{}.txt".format(
-                f"spike{mode}" if int(mode) > 0 else f"control{-int(mode)}",
+                f"control{mode[1:]}" if mode.startswith("-") else f"spike{mode}",
                 Path(spec["source"]).stem,
                 spec["key"],
                 f"-{spec['filter']}" if spec.get("filter") else "",
@@ -227,8 +252,8 @@ def main() -> None:
         data["cells"].append({"timing": timing, "peaks": peaks})
         parts = []
         for r in summarize(timing, peaks) if "modes" in timing else []:
-            delta = "" if r["mode"] == 0 or r["delta"] is None else f" {r['delta']:+.1%}"
-            parts.append(f"slots={r['mode']} {r['median']:.3f}s{delta} ok={r['ok']}")
+            delta = "" if r["mode"] == "0" or r["delta"] is None else f" {r['delta']:+.1%}"
+            parts.append(f"mode={r['mode']} {r['median']:.3f}s{delta} ok={r['ok']}")
         line = "; ".join(parts)
         print(f"[{i}/{len(todo)}] {Path(spec['source']).stem} {spec['key']} k={spec['k']} p={spec['partitions']}: "
               f"{line or timing.get('error', '')[:300]}", flush=True)
