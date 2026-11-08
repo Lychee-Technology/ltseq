@@ -209,11 +209,13 @@ def test_planned_only_for_the_eligible_shape(engine_config):
     count = lambda g: CallExpr("count")  # noqa: E731
     with pruning(8):
         assert _planned(top(t, 3))
-        assert _planned(
+        # Ascending, no limit, another aggregate, two aggregates, a sort on
+        # a computed column, or a computed column between the aggregate and
+        # the sort (it would not be evaluated on pruned groups, and `cnt * 2`
+        # is checked arithmetic): the existing plan.
+        assert not _planned(
             t.agg(by=lambda r: r.k, cnt=count).derive(lambda r: {"x": r.cnt * 2}).sort("cnt", desc=True).slice(0, 3)
         )
-        # Ascending, no limit, another aggregate, two aggregates, or a
-        # sort on a computed column: the existing plan.
         assert not _planned(t.agg(by=lambda r: r.k, cnt=count).sort("cnt").slice(0, 3))
         assert not _planned(t.agg(by=lambda r: r.k, cnt=count).sort("cnt", desc=True))
         assert not _planned(t.agg(by=lambda r: r.k, s=lambda g: g.v.sum()).sort("s", desc=True).slice(0, 3))
@@ -302,3 +304,31 @@ def test_probe_bails_out_before_buffering_everything(engine_config):
     assert result.column("k").to_pylist()[0] == 7
     assert [(m["bailed"], m["bailed_early"]) for m in pruner] == [(2, 2)]
     assert sum(m["rows_merged"] for m in pruner) == sum(m["rows_in"] for m in pruner)
+
+
+@measurement_build
+@pytest.mark.parametrize("slots, rows_per_slot", [(1024, 0), (0, 128)])
+def test_error_of_a_derive_on_a_prunable_group_is_kept(engine_config, slots, rows_per_slot):
+    # Sixteen heavy keys and 20,000 singletons, so the pruner would skip the
+    # singleton slots; the derive divides by zero on singleton 20,000 only.
+    # Unpruned, the derive runs on every group and raises; the pruner must
+    # not hide that by never emitting the group, so it is not planned.
+    engine_config(target_partitions=4, batch_size=64)
+    keys = [h for h in range(16) for _ in range(500)] + list(range(16, 20_016))
+    random.Random(3).shuffle(keys)
+    t = LTSeq.from_arrow(pa.table({"k": keys}))
+
+    def query():
+        grouped = t.agg(by=lambda r: r.k, cnt=lambda g: CallExpr("count"))
+        return grouped.derive(lambda r: {"x": 1 // (r.k - 20_000)}).sort("cnt", desc=True).slice(0, 1)
+
+    with pytest.raises(Exception, match="(?i)divide by zero"):
+        query().to_arrow()
+    with pruning(slots, rows_per_slot):
+        assert not _planned(query())
+        with pytest.raises(Exception, match="(?i)divide by zero"):
+            query().to_arrow()
+        # The same input without the derive does prune.
+        operators = ltseq_core._topk_analyze(top(t, 1)._inner)[4]
+    pruner = [dict(m) for _, name, _, m in operators if name == "SlotPrunedCountExec"]
+    assert sum(m["rows_merged"] for m in pruner) < sum(m["rows_in"] for m in pruner)

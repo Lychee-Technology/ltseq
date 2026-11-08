@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! SortExec: TopK(fetch=K), expr=[c DESC]
-//!   [ProjectionExec passing c through]*
+//!   [ProjectionExec of columns and literals only]*
 //!     AggregateExec: mode=FinalPartitioned, gby=[keys], aggr=[count(..) as c]
 //!       RepartitionExec: partitioning=Hash(..)
 //! ```
@@ -86,7 +86,7 @@ use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::expressions::{Column, Literal};
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
@@ -238,8 +238,22 @@ fn with_child(
         .ok()
 }
 
+/// Whether evaluating `expr` can never fail: a column reference or a
+/// literal. Anything else (arithmetic, casts, calls) is fallible in general,
+/// for example `1 // (k - 20000)` or a checked `cnt * 2`.
+fn infallible(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    expr.downcast_ref::<Column>().is_some() || expr.downcast_ref::<Literal>().is_some()
+}
+
 /// Rewrite the final aggregate under pass-through projections, following
 /// the ordering column's name down; `None` if the shape is not eligible.
+///
+/// A projection between the Top-K sort and the aggregate evaluates every
+/// one of its expressions on every group the aggregate emits, so an error
+/// it raises on a group the pruner would discard is observable today.
+/// Pruning below it is exact only when none of its expressions can fail,
+/// so every expression must be a column or a literal, not just the one
+/// that carries the count.
 fn rewrite_below(
     plan: &Arc<dyn ExecutionPlan>,
     name: &mut String,
@@ -247,6 +261,9 @@ fn rewrite_below(
     sizing: Sizing,
 ) -> Option<Arc<dyn ExecutionPlan>> {
     if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        if !projection.expr().iter().all(|e| infallible(&e.expr)) {
+            return None;
+        }
         let expr = projection.expr().iter().find(|e| e.alias == *name)?;
         *name = expr.expr.downcast_ref::<Column>()?.name().to_string();
         let child = rewrite_below(projection.input(), name, k, sizing)?;

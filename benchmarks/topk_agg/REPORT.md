@@ -243,11 +243,19 @@ Edge cases:
 a `FinalPartitioned` aggregate over a hash repartition, one grouping set,
 exactly one aggregate that is a non-distinct, unfiltered `count` with an
 Int64 state, a single descending sort key that is that count (possibly
-renamed by pass-through projections), and a fetch of at least 1. Anything
-fallible, such as filters, derived keys or the arguments of the count, is
-evaluated below the partial aggregate, and errors surface before the final
-stage, so skipping finalization cannot suppress one. COUNT's finalization
-cannot fail. That is why SUM, AVG, MIN and MAX are excluded. A SUM over
+renamed by projections between it and the sort), and a fetch of at least 1.
+Anything fallible below the aggregate, such as filters, derived keys or the
+arguments of the count, is evaluated before the partial aggregate, so its
+errors surface before the final stage. COUNT's finalization cannot fail. A
+projection between the aggregate and the sort is different: it evaluates
+every expression on every group the aggregate emits, so a derive such as
+`1 // (k - 20000)` raises on a group the pruner would discard. The first
+version of the rule checked only the expression carrying the count, and on
+sixteen heavy keys plus 20,000 singletons it returned a top-1 where today's
+plan raises division by zero. The rule now plans the pruner only when every
+expression of every such projection is a column or a literal, which cannot
+fail; any computed column, including a checked `cnt * 2`, keeps today's
+plan. No measured cell had a computed projection. That is why SUM, AVG, MIN and MAX are excluded. A SUM over
 values of either sign has no such bound. Even a non-negative SUM finalizes
 with checked arithmetic under the v0.5 contract, so skipping it could hide
 an overflow error.
@@ -261,7 +269,7 @@ an overflow error.
   rows, as several input partitions' partial aggregates would. Every input
   satisfies `T0 ≤ T1 ≤` the partition's K-th count `≤` the global one, and the
   rule keeps every group at or above the global K-th count.
-- `py-ltseq/tests/test_topk_research.py` (206 tests on a measurement build)
+- `py-ltseq/tests/test_topk_research.py` (208 tests on a measurement build)
   holds the spike to the unpruned engine. It runs across the nine pinned
   engine layouts and every input layout of `layouts.LAYOUTS`, with fixed
   and data-sized slot counts (down to one row per slot). It covers ties,
@@ -271,7 +279,8 @@ an overflow error.
   bails out, that the probe bails out before buffering everything, and that
   the slot count follows the input. It also checks that the rule leaves
   ascending sorts, unlimited sorts, other aggregates, two aggregates and
-  sorts on derived columns alone.
+  sorts on derived columns alone, and that a failing derive between the
+  aggregate and the sort still raises with the spike on.
 - The 1,017 tests of the repository's aggregation, grouping, sort, slice
   and `top_k` files pass with the spike forced on for every eligible plan,
   once at one partial row per slot and once at 128. I did not count how many
