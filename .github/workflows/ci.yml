@@ -8,7 +8,17 @@ on:
 
 jobs:
   build-and-test:
+    # requires-python admits every version from 3.13 up, so the Python suite
+    # runs on each supported minor version (#254). The Rust steps do not
+    # depend on the Python version, so they run in the first entry only.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
     runs-on: ubuntu-latest
+    env:
+      # uv uses this interpreter for the venv, not another one on the runner.
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -17,6 +27,8 @@ jobs:
         with:
           components: clippy
 
+      # pyo3 is built for the interpreter it finds, so each Python version
+      # keeps a target directory of its own.
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -24,27 +36,30 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-py${{ matrix.python-version }}-cargo-
 
       - name: Run clippy
+        if: matrix.python-version == '3.13'
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run Rust tests
+        if: matrix.python-version == '3.13'
         run: cargo test
 
       # The #251 measurement prototypes (benchmarks/m0) compile only with the
       # m0 feature, which no other step enables. The feature adds no
       # dependency features, so this rebuilds only this crate.
       - name: Run clippy and Rust tests on the m0 prototypes
+        if: matrix.python-version == '3.13'
         run: |
           cargo clippy --all-targets --features m0 -- -D warnings
           cargo test --features m0 --lib m0::
 
-      - name: Set up Python 3.13
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
