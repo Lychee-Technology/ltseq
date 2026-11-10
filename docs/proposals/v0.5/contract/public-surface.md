@@ -68,7 +68,7 @@ An *integer argument* is a count, a position, an offset, a width or a number of 
 
 ### 2.4 Supported versions
 
-v0.5 supports CPython 3.13 and later, and pyarrow 25.0.1 and later, its one required dependency; `pyproject.toml` declares both floors (`requires-python`, `dependencies`). Two libraries are optional and used only where named: pandas from 3.0.5, for `from_pandas` and `to_pandas` ([§4.5], [§16.2]), and NumPy from 2.4.4, for NumPy scalars as literals and integer arguments ([§17.2], [§2.3]). A floor is the oldest version the test suite of [§24] runs against in CI, which runs every supported CPython minor version; behavior with an older version, or with another Python implementation, is not specified. Raising a floor is a change to this contract.
+v0.5 supports CPython 3.13 and later, and pyarrow 25.0.1 and later, its one required dependency; `pyproject.toml` declares both floors (`requires-python`, `dependencies`). Two libraries are optional and used only where named: pandas from 3.0.5, for `from_pandas` and `to_pandas` ([§4.5], [§16.2]), and NumPy from 2.4.4, for NumPy scalars as literals and integer arguments ([§17.2], [§2.3]). Their floors are declared as the extras `pandas` and `numpy` (`[project.optional-dependencies]`), so that the package metadata states every floor; the release adds them, as `pyproject.toml` has no extras today. A floor is the oldest version the test suite of [§24] runs against in CI, which runs every supported CPython minor version (row S6 of [§24.3]); behavior with an older version, or with another Python implementation, is not specified. Raising a floor is a change to this contract.
 
 When this section was written, CI ran CPython 3.13 and 3.14 with pyarrow 25.0.1, pandas 3.0.5 and NumPy 2.4.4, the versions `uv.lock` pins, so every floor was tested. Where a rule cites what pyarrow 25.0.1 or another library does ([§6.1], [§16.4], [§16.5]), the citation is evidence for the rule, and the rule fixes what LTSeq does with any supported version.
 
@@ -179,5 +179,6 @@ Previous: [Overview, principles and rule ownership (§1)](overview.md) · [Index
 [§19.3]: numeric-null-temporal.md#193-dt-fields
 [§22]: api-reference.md#22-complete-canonical-api-reference
 [§24]: acceptance.md#24-acceptance-criteria-and-contract-test-matrix
+[§24.3]: acceptance.md#243-guarantee-matrix
 
 <!-- /v0.5-modular:links -->

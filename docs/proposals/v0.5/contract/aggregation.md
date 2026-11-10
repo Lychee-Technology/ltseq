@@ -78,6 +78,24 @@ Removed, with their replacements: `avg` (`mean`), `variance` (`var`), `stddev` (
 - **`top_k(k)`** returned the `k` largest values of each group as one `;`-joined string. The rows themselves are a rank and a filter: `t.derive(rk=lambda r: row_number().over(partition_by="g", order_by="x", descending=True)).filter(lambda r: r.rk <= k)` keeps the `k` rows with the largest `x` in each `g`, ties broken by table order ([§10.2]) and NULLs last. The old string is that result sorted and joined: `.sort("g", "rk").group_by("g").agg(top=lambda g: g.x.cast("string").string_agg(";"))`.
 - **`skew`** was the population skewness *m*₃ / *m*₂^1.5, from the central moments. It is `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="g")).group_by("g").agg(skew=lambda g: (g.d ** 3).mean() / (g.d ** 2).mean() ** 1.5)`, or with `.over()` and `LTSeq.agg` for the whole table. Each step rounds, so unlike `var` the result is not the exact value rounded once; a group whose values are all equal gives NaN (0.0 / 0.0), where v0.4 gave NULL.
 
+For a group whose `x` values are `values`, in table order, the `top_k` idiom keeps the rows this reference names, with `rk` their position in its result plus 1:
+
+```python
+import math
+
+def top_k_rows(values, k):
+    """0-based positions, in the group's table order, of the rows ranked 1 to k."""
+    def is_nan(v):
+        return isinstance(v, float) and math.isnan(v)
+    nans = [i for i, v in enumerate(values) if is_nan(v)]
+    nulls = [i for i, v in enumerate(values) if v is None]
+    rest = sorted((i for i, v in enumerate(values) if v is not None and not is_nan(v)),
+                  key=lambda i: values[i], reverse=True)
+    return (nans + rest + nulls)[:k]
+```
+
+It is [§9.4]'s order, descending with NULLs last: every NaN is greater than every number, so NaNs rank first; `sorted` stays stable with `reverse=True`, so values equal under [§9.4], `-0.0` and `0.0` included, keep table order; NULLs rank after every value. Python's own comparisons of the other types agree with [§9.4]. `heapq.nlargest` is not a reference for the idiom: it compares NaN as Python does, so `nlargest(1, [1.0, nan, 2.0])` is `[2.0]` where the idiom keeps the NaN, and it raises `TypeError` on a `None` next to a number, where the idiom ranks the NULL last.
+
 ### 14.3 `LTSeq.agg`
 
 ```python

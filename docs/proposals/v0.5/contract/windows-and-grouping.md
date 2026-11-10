@@ -186,11 +186,11 @@ class NestedTable:
 
 - **`filter(predicate)`** keeps the groups where the aggregate predicate is TRUE. Groups keep their identity: two surviving groups with equal keys that were separated by a removed group stay two groups.
 - **`agg(**named)`** returns one row per group: the key columns in `keys` order, then the named aggregates in keyword order. Rows are in group order. Order defined; `sort_keys` is `None`. A name that collides with a key raises `LTSeqValueError`; no names raise `LTSeqValueError`.
-- **`derive(**named)`** returns every row of the surviving groups and adds or replaces columns as `LTSeq.derive` does ([§7.3]): a replaced column keeps its position, and `sort_keys` follows [§7.3]'s rule for carrying keys, so replacing a column named in `sort_keys` with anything but a bare reference to it truncates `sort_keys` before that key. In the expressions, bare column references are the current row's values, aggregates are computed over the row's group, and window methods run within the group in table order.
+- **`derive(**named)`** returns every row of the surviving groups and adds or replaces columns as `LTSeq.derive` does ([§7.3]): a replaced column keeps its position, and `sort_keys` follows [§7.3]'s rule for carrying keys, so replacing a column named in `sort_keys` truncates `sort_keys` before that key unless a result column still holds the replaced column: a bare reference to it under its own name, or under another name, as in the swap `derive(a=lambda g: g.b, b=lambda g: g.a)`, which turns `sort_keys` `(a, b)` into `(b, a)`. In the expressions, bare column references are the current row's values, aggregates are computed over the row's group, and window methods run within the group in table order.
 - **`first()`**, **`last()`** return the first or last row of each group, with the input schema, in group order.
 - **`flatten(group_id=None)`** returns every row of the surviving groups in input order. With `group_id`, it appends an `int64` column numbering the surviving groups 0, 1, 2, … in order; a name that is already a column raises `LTSeqValueError`.
 - **`count()`** executes and returns the number of surviving groups.
-- `derive`, `first`, `last` and `flatten` keep the input's order. `first`, `last` and `flatten` replace no column (`flatten` may append one) and keep `sort_keys`; `derive` keeps the keys its replacements leave ([§9.2]).
+- `derive`, `first`, `last` and `flatten` keep the input's order. `first`, `last` and `flatten` replace no column (`flatten` may append one) and keep `sort_keys`; `derive` carries and truncates keys by [§7.3]'s rule ([§9.2]).
 
 ### 11.3 Example
 

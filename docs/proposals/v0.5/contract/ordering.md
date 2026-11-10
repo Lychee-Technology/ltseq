@@ -32,7 +32,7 @@ An *undefined* order means rows may arrive in any sequence, which MAY differ bet
 | `read_csv`, `read_parquet`, `from_arrow`, `from_pandas`, `from_dict`, `from_rows` | Defined ([§4]) | `None` |
 | `LTSeq.range` | Defined | `(SortKey(name, step < 0, True),)` ([§4.7]) |
 | `filter`, `delete`, `distinct`, `head`, `tail`, `slice`, `step`, `search_first`, `search_pattern`, `fold`, `collect`, `partition` values | Input's | Input's |
-| `select`, `derive`, `NestedTable.derive`, `update`, `rename`, `drop`, window expressions | Input's (windows never reorder rows, #202) | Input's, renamed or truncated as [§7] states |
+| `select`, `derive`, `NestedTable.derive`, `update`, `rename`, `drop`, window expressions | Input's (windows never reorder rows, #202) | Input's, carried, renamed or truncated as [§7] states |
 | `insert` | Input's (MUST be defined) | `None` |
 | `sort` | Defined | The sort keys |
 | `assume_sorted` | Input's (MUST be defined) | The declared keys |
@@ -49,7 +49,7 @@ An *undefined* order means rows may arrive in any sequence, which MAY differ bet
 
 "Input's" means: defined if and only if the input's order is defined, and in that case the same relative order of the surviving rows.
 
-Truncation: when an operation removes or replaces a column named in `sort_keys`, the result keeps the keys before it and drops it and every later key. If no key is left, `sort_keys` is `None` and the order stays defined.
+Truncation: when an operation removes or replaces a column named in `sort_keys`, the result keeps the keys before it and drops it and every later key. If no key is left, `sort_keys` is `None` and the order stays defined. `select`, `derive` and `NestedTable.derive` apply this through [§7.3]'s rule for carrying keys, under which a replaced key column is not truncated while a result column still holds it: `derive(x=lambda r: r.x)` keeps `x`'s key, and the swap `derive(a=lambda r: r.b, b=lambda r: r.a)` turns `sort_keys` `(a, b)` into `(b, a)`. Their truncation comes before the first key that no result column holds.
 
 ### 9.3 Order requirements
 
@@ -165,6 +165,7 @@ Previous: [Expression DSL (§8)](expressions.md) · [Index](../README.md) · Nex
 [§6]: schema-and-table-operations.md#6-schema-and-types
 [§6.2]: schema-and-table-operations.md#62-supported-types
 [§7]: schema-and-table-operations.md#7-basic-table-operations
+[§7.3]: schema-and-table-operations.md#73-derive
 [§9.1]: #91-order-state
 [§9.3]: #93-order-requirements
 [§9.4]: #94-sort
