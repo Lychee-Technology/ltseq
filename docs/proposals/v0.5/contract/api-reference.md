@@ -388,7 +388,7 @@ class DtNamespace:                                                             #
     def convert_time_zone(self, tz: str, /) -> Expr: ...
 
 # The aliases of §2.3 (PathLike, DTypeLike, LiteralValue, IntoExpr, ExprFn, AggFn, RowExpr, AggExpr)
-# are defined in this module exactly as §2.3 writes them.
+# are defined in this module exactly as §2.3 writes them, both branches of LiteralValue included.
 ```
 
 `StrNamespace`, `DtNamespace`, `When` and `Rolling` are importable from `ltseq.typing` for annotations; they are not constructible by users (`TypeError`).

@@ -45,22 +45,32 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 import datetime, decimal, os
 import pyarrow as pa
-if TYPE_CHECKING:
-    import numpy                              # not a dependency; names the scalars §17.2 accepts
-
 PathLike  = str | os.PathLike[str]
 DTypeLike = str | pa.DataType                 # str: a pyarrow alias, see §6.3
-type LiteralValue = (None | bool | int | float | str | bytes | decimal.Decimal
-                | datetime.date | datetime.datetime | datetime.time | datetime.timedelta
-                | numpy.bool_ | numpy.integer | numpy.floating | numpy.datetime64 | numpy.timedelta64)
-                # lazy, so importing ltseq.typing never imports NumPy; pandas Timestamp
-                # and Timedelta are datetime and timedelta subclasses (§17.2)
+_Scalar   = (None | bool | int | float | str | bytes | decimal.Decimal
+             | datetime.date | datetime.datetime | datetime.time | datetime.timedelta)
+             # pandas Timestamp and Timedelta are datetime and timedelta subclasses (§17.2)
+if TYPE_CHECKING:
+    import numpy                              # not a dependency; names the scalars §17.2 accepts
+    type LiteralValue = (_Scalar | numpy.bool_ | numpy.integer | numpy.floating
+                         | numpy.datetime64 | numpy.timedelta64)
+else:
+    def _literal_value():                     # runs when LiteralValue.__value__ is first read
+        try:
+            import numpy
+        except ImportError:
+            return _Scalar
+        return (_Scalar | numpy.bool_ | numpy.integer | numpy.floating
+                | numpy.datetime64 | numpy.timedelta64)
+    type LiteralValue = _literal_value()      # lazy: importing ltseq.typing never imports NumPy
 IntoExpr  = Expr | LiteralValue
 ExprFn    = Callable[[Row], IntoExpr]         # a lambda in row context, §8.1
 AggFn     = Callable[[Group], IntoExpr]       # a lambda in aggregate context, §8.1
 RowExpr   = IntoExpr | ExprFn                 # a value: select, derive, update
 AggExpr   = IntoExpr | AggFn                  # a value: agg, NestedTable.derive
 ```
+
+`LiteralValue` has two definitions, and they are one alias. A type checker reads the `TYPE_CHECKING` branch, where `numpy` is the imported module, and treats the `else` branch as unreachable. At run time only the `else` branch is executed. Its `type` statement evaluates its value only when `LiteralValue.__value__` is first read, and the value is then cached. At that point `_literal_value` imports NumPy, so the value never names a module the runtime has not bound. When NumPy is installed the value is the union a type checker sees; when it is not, the value is `_Scalar`. So reading the value never raises `NameError` ([§2.2]). The first branch alone would raise it whether NumPy is installed or not, because `if TYPE_CHECKING:` never binds `numpy` at run time. `_Scalar` and `_literal_value` are private names of `ltseq.typing`, and [§2.2]'s list of its names leaves them out. With pyright 1.1.414 in standard mode, `lit(np.int64(3))` and `lit(None)` type-check against this definition and `lit(object())` is an error. CPython 3.13, 3.14 and 3.15 evaluate `LiteralValue.__value__` without NumPy, giving `_Scalar` and leaving `numpy` out of `sys.modules`, and with a stand-in module that has NumPy's five scalar names, giving the 16-member union.
 
 A *value* argument is `RowExpr` or `AggExpr`: an `Expr`, a literal, or a lambda returning either (`derive(flag=False)`, `derive(x=None)` and `derive(c=lambda r: r.a + 1)` all type-check). A *condition* argument (`filter`, `delete`, `update`'s `where`, `search_first`, `search_pattern`, `starts_when`, `NestedTable.filter`) is `Expr | ExprFn` or `Expr | AggFn`, because no literal is a condition: a Python `bool` raises ([§3.4]), and any other literal is not of type `bool` ([§7.1]). `delete` and `update` also take a position, an integer argument (below, [§7.10]). A condition inside an expression (the condition of `when` and `if_else`, an aggregate's `where=`, either operand of `&` and `|`) stays `IntoExpr`: after the rewrite of [§3.4], `when(r.x is None, 0)` passes what a type checker sees as a `bool`, so the annotation admits it, and [§3.4] refuses a Python `bool` there at plan time. A lambda's return type stays `IntoExpr`, `bool` included, for the same reason (`derive(m=lambda r: r.x is None)`); that a lambda returning a Python `bool` raises is checked when the lambda runs, not by the annotation.
 
