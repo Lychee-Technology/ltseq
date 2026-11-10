@@ -17,7 +17,7 @@
 ### 15.1 `to_batches`
 
 ```python
-def to_batches(self, batch_size: int | None = None) -> pa.RecordBatchReader
+def to_batches(self, batch_size: SupportsIndex | None = None) -> pa.RecordBatchReader
 ```
 
 - **Behavior.** Starts an execution and returns a reader over its result. Batches arrive in the defined order. Each call is a new execution. A reader can be read once.
@@ -79,7 +79,7 @@ def __arrow_c_stream__(self, requested_schema: object | None = None) -> object
 ```
 
 - Exports the result as an Arrow C stream (the PyCapsule interface), with the semantics of `to_batches()` except for errors.
-- **Errors in the stream.** The interface reports a failure as an error code and a message, so no exception class reaches the consumer. An execution error raised while the stream is read, or a `requested_schema` value that fails, ends the stream with the code `EIO` for `LTSeqIOError` and its subclasses and `EINVAL` for every other class, and with a message that starts with the class name: `"ArithmeticOverflowError: ..."`. The consumer raises its own exception: pyarrow raises `OSError` for `EIO` and `pyarrow.ArrowInvalid`, a `ValueError`, for `EINVAL`, with that message.
+- **Errors in the stream.** The interface reports a failure as an error code and a message, so no exception class reaches the consumer. An execution error raised while the stream is read, or a `requested_schema` value that fails, ends the stream with the code `EIO` for `LTSeqIOError` and its subclasses and `EINVAL` for every other class, and with a message that starts with the class name: `"ArithmeticOverflowError: ..."`. The code and that prefix are what this contract fixes. The consumer raises its own exception, whose class belongs to the consumer and is not part of this contract: for example, pyarrow 25.0.1 raises `OSError` for `EIO` and `pyarrow.ArrowInvalid`, a `ValueError`, for `EINVAL`, with that message, and another consumer or pyarrow version may raise another class.
 - `requested_schema`, when given, MUST have the same field names in the same order (`SchemaMismatchError` at the call). Fields whose type differs are converted by exact compatible conversion ([§17.6]): within a kind, nested types included, among integers, decimals and floats, and from `null`, whose values become NULLs of the requested type, keeping every value exactly, so a value that a rule would round or truncate fails. A requested type of another kind, such as `string` for an `int64` column, `date32` for a `string` column, `int8` for a `bool` column or `timestamp` for a `date32` column, raises `LTSeqTypeError` at the call, as does a pair with no rule: `requested_schema` does not parse or format, and a consumer that wants another kind reads a table converted with `cast`. A value that fails ends the stream with a `CastError` message. The stream's schema has `requested_schema`'s names and types, delivered as asked ([§6.2]), with the table's nullability ([§6.1]) and no metadata: the nullability and metadata that `requested_schema` declares are not checked or carried. A consumer may check them itself: `pa.table(t, schema=s)` casts what it reads to `s` and raises `ValueError` for a NULL in a field `s` marks non-nullable, while `RecordBatchReader.from_stream(t, schema=s)` returns the stream's schema.
 - Any consumer of the PyCapsule interface reads an `LTSeq` through it without converting values in Python: `pyarrow.table(t)`, `pyarrow.RecordBatchReader.from_stream(t)`, `polars.from_dataframe(t)`. Consumers that take a `pyarrow.RecordBatchReader`, such as DuckDB's Python client, take `t.to_batches()` ([§23.10]).
 
@@ -99,7 +99,7 @@ Both execute, write one file at `path`, and are atomic: the data goes to a tempo
 |---|---|---|
 | `bool` | `true`, `false` | Any letter case |
 | Integers | Optional `-`, then decimal digits without leading zeros | A leading `+` or leading zeros |
-| Floats | The shortest decimal form that reads back to the same value of the column's type (Python's `repr` for `float64`): `1.0`, `1e+16`, `nan`, `inf`, `-inf` | Float syntax, rounded to the nearest value of the type |
+| Floats | The shortest decimal form that reads back to the same value of the column's type, laid out as Python's `repr` lays out a `float`: `1.0`, `0.1`, `1e+16`, `1e-05`, `nan`, `inf`, `-inf` (below) | Float syntax, rounded to the nearest value of the type |
 | Decimals | Optional `-`, digits, and exactly *s* digits after a `.` when the scale *s* is positive; never an exponent: `0.0000000`, `-1.50` | Fewer fractional digits; more than *s* fail |
 | `string` | The value | |
 | `date32` | `YYYY-MM-DD` | |
@@ -107,6 +107,8 @@ Both execute, write one file at `path`, and are atomic: the data goes to a tempo
 | Naive `timestamp` | `YYYY-MM-DDTHH:MM:SS`, then the unit's fractional digits as for time | A space instead of `T`; fewer fractional digits |
 | Aware `timestamp` | The UTC instant in the naive form, then `Z` | A numeric offset instead of `Z`; a form without either fails |
 | `duration` | Optional `-`, then the integer count of the unit: 1.5 seconds in `duration[ms]` is `1500` | A leading `+` |
+
+*Float forms.* For `float64` the form is Python's `repr(x)`. For `float32` it is `repr(float(numpy.format_float_positional(x, unique=True)))`: the fewest significant digits that read back to the same `float32` value, laid out by the same rule, so `float32` 0.1 is `0.1`, not the `0.10000000149011612` of its `float64` value. Both types use positional notation, with at least one digit after the point, when 10⁻⁴ ≤ |*d*| < 10¹⁶, and otherwise one digit before the point and an exponent of at least two digits with its sign (`1e+16`, `1.6777216e+20`, `1e-05`, `3.4028235e+38`); zeros are `0.0` and `-0.0`. Here *d* is the shortest decimal the form writes, not the binary value *x*, as in Python's `repr`: the `float32` nearest 10⁻⁴ is 0.0000999999974737875…, below 10⁻⁴, and its shortest decimal is 0.0001, so it is written `0.0001`; the next `float32` below it is `9.999999e-05`. For `float64` the two never fall on different sides of a bound, because the `float64` nearest each bound is on the bound's side (10¹⁶ is exact, and the `float64` nearest 10⁻⁴ is above it); for `float32` they can, and *d* decides. NumPy's own `str` and `repr` of a `float32` switch to the exponent form at other magnitudes (`1e+15`, `1.6777216e+07`), so they are not the reference.
 
 *Integer syntax* is an optional `+` or `-` followed by one or more ASCII digits, leading zeros allowed. *Float syntax* is an optional sign, then digits containing at most one `.` (at least one digit in all), then an optional exponent (`e` or `E`, an optional sign, digits); or `nan`, `inf` or `infinity` with an optional sign, in any letter case. Neither allows the surrounding whitespace or the `_` separators that Python's `int()` and `float()` accept, so ` 5` and `1_000` are strings to inference ([§4.2]) and fail as numbers. A date or timestamp outside the years 1 to 9999 has no text form and fails. `binary` and the pass-through types have none either: `cast` between them and `string` raises `LTSeqTypeError` at plan time.
 

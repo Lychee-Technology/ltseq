@@ -42,7 +42,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | `LTSeq.to_pandas()` | Converts with `pa.Table.to_pandas()` defaults (py-ltseq/ltseq/core.py:252), so NaN and NULL collapse in NumPy dtypes. | REDESIGN | `LTSeq.to_pandas()` ([§16.2]) | The default dtype backend is `pyarrow`, so NULL and NaN stay distinct. Dtype-sensitive callers see different column dtypes. |
 | `LTSeq.to_dicts()` | Row export (py-ltseq/ltseq/core.py:372). | KEEP | `LTSeq.to_dicts()` ([§16.3]) | Same output. Nanosecond values that Python types cannot hold now raise `CastError`. |
 | `LTSeq.count()` | Row count (py-ltseq/ltseq/core.py:328). | KEEP | `LTSeq.count()` ([§7.9]) | Unchanged. |
-| `len(t)` / `LTSeq.__len__` | Same as `count()` (py-ltseq/ltseq/core.py:315). | KEEP | `len(t)` ([§3.2]) | Unchanged. |
+| `len(t)` / `LTSeq.__len__` | Same as `count()`, so it executes; `list(t)` and `pandas.DataFrame(t)` call it as a length hint and execute twice (py-ltseq/ltseq/core.py:315). | REDESIGN | `len(t)` ([§3.2]) | Raises `TypeError` naming `count()` (#278). Use `t.count()`; `list(t)` and `pandas.DataFrame(t)` now execute once. |
 | `iter(t)` / `LTSeq.__iter__` | Materializes the whole table through `to_dicts()` (py-ltseq/ltseq/core.py:200-207). | KEEP | `iter(t)` ([§15.2]) | Still yields one dict per row, but now streams through `to_batches()`. |
 | `LTSeq.__arrow_c_stream__` | `requested_schema` is validated but not honored (docs/api.md:353-364). | REDESIGN | `LTSeq.__arrow_c_stream__` ([§16.4]) | The requested schema is honored with exact conversions, or refused. |
 | `to_cursor()` | Referenced (docs/api.md:331, py-ltseq/ltseq/core.py:205) but defined nowhere. | REMOVE | — | A stale reference. Streaming is `t.to_batches()` ([§15.1]). |
@@ -215,7 +215,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | `avg_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:149) | MERGE | `Expr.mean(where=)` ([§14.2]) | Same as `count_if`. |
 | `min_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:168) | MERGE | `Expr.min(where=)` ([§14.2]) | Same as `count_if`. |
 | `max_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:187) | MERGE | `Expr.max(where=)` ([§14.2]) | Same as `count_if`. |
-| `skew(col)` | Population skewness (py-ltseq/ltseq/expr/base.py:406; src/ops/aggregation.rs:292). | REMOVE | — | Removed by [§14.2]. Use `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="k")).group_by("k").agg(skew=lambda g: (g.d ** 3).mean() / (g.d ** 2).mean() ** 1.5)`. |
+| `skew(col)` | Population skewness (py-ltseq/ltseq/expr/base.py:406; src/ops/aggregation.rs:292). | REMOVE | — | Removed by [§14.2]. Use `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="k")).derive(z=lambda r: r.d / r.d.abs().max().over(partition_by="k")).group_by("k").agg(skew=lambda g: (g.z ** 3).mean() / (g.z ** 2).mean() ** 1.5)` ([§14.2] states its accuracy). |
 | `corr(a, b)` | Pearson correlation (py-ltseq/ltseq/expr/base.py:412). | KEEP | `corr()` ([§14.2]) | Unchanged. `where=` is added. |
 | `covar(a, b)` | Covariance (py-ltseq/ltseq/expr/base.py:418). | RENAME | `cov()` ([§14.2]) | Removed by [§14.2] in favor of `cov`. |
 | `concat_agg(col, delimiter=",")` | Unordered string join (py-ltseq/ltseq/expr/base.py:424). | REDESIGN | `Expr.string_agg()` ([§14.2]) | Becomes a method, joined in table order (positional tier). |
@@ -251,7 +251,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | `x.fill_null(v)` | (py-ltseq/ltseq/expr/base.py:746) | KEEP | `Expr.fill_null()` ([§8.5]) | Unchanged. |
 | `x.is_null()` | (py-ltseq/ltseq/expr/base.py:763) | KEEP | `Expr.is_null()` ([§8.5]) | Unchanged. |
 | `x.is_not_null()` | (py-ltseq/ltseq/expr/base.py:777) | KEEP | `Expr.is_not_null()` ([§8.5]) | Unchanged. |
-| `x.is_in(values)` | Takes an item that is an expression, such as a column, which no documentation describes (py-ltseq/ltseq/expr/base.py:791). | REDESIGN | `Expr.is_in()` ([§8.5]) | Same test on a list of literals, now never NULL. An expression item raises `LTSeqTypeError` at capture (#294). For a value of the same row write `(r.x == r.y) \| r.x.is_in([...])`; for membership in another table, `semi_join` ([§12.2]). |
+| `x.is_in(values)` | Takes an item that is an expression, such as a column, which no documentation describes (py-ltseq/ltseq/expr/base.py:791). | REDESIGN | `Expr.is_in()` ([§8.5]) | Same test on a list of literals, now never NULL. An expression item raises `LTSeqTypeError` at capture (#294), and so does a `str` or `bytes` as `values`, which Python would iterate by character (#278). For a value of the same row write `(r.x == r.y) \| r.x.is_in([...])`; for membership in another table, `semi_join` ([§12.2]). |
 | `x.between(low, high)` | (py-ltseq/ltseq/expr/base.py:812) | KEEP | `Expr.between()` ([§8.5]) | Unchanged. |
 | `x.cast(dtype: str)` | Takes type-name strings (py-ltseq/ltseq/expr/base.py:831; docs/api.md:1440-1446). | REDESIGN | `Expr.cast()` ([§8.5], [§17.6]) | Takes pyarrow aliases or `pa.DataType` and follows the [§17.6] rule table. A failed value raises `CastError`. |
 | `x.abs()` | (py-ltseq/ltseq/expr/base.py:852) | KEEP | `Expr.abs()` ([§8.5]) | Unchanged. |
@@ -444,7 +444,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | (none) | Group proxies are split by context (py-ltseq/ltseq/grouping/proxies/). | ADD | `ltseq.typing.Group` ([§8.1]) | One aggregate-context protocol. |
 | (none) | `rolling(n)` returns an untyped `CallExpr` (py-ltseq/ltseq/expr/types.py:163-175). | ADD | `ltseq.typing.Rolling` ([§10.1]) | Typed builder. |
 | (none) | `var` is not a rolling aggregate (py-ltseq/ltseq/expr/types.py:30). | ADD | `Rolling.var()` ([§10.1], [§22.2]) | Completes the set with `std`. |
-| (none) | Stub aliases cover only option literals (py-ltseq/ltseq/__init__.pyi:5-13). | ADD | `PathLike`, `DTypeLike`, `Literal`, `IntoExpr`, `ExprFn`, `AggFn`, `RowExpr`, `AggExpr` ([§2.3]) | Shared annotation vocabulary. |
+| (none) | Stub aliases cover only option literals (py-ltseq/ltseq/__init__.pyi:5-13). | ADD | `PathLike`, `DTypeLike`, `LiteralValue`, `IntoExpr`, `ExprFn`, `AggFn`, `RowExpr`, `AggExpr` ([§2.3]) | Shared annotation vocabulary. The literal alias is `LiteralValue`, so it never shadows `typing.Literal` (#278). |
 | (none) | Baseline defines only four exception classes (py-ltseq/ltseq/exceptions.py:10-27). | ADD | `LTSeqTypeError` ([§20.1]) | Catchable as `TypeError` and as `LTSeqError`. |
 | (none) | Baseline defines only four exception classes (py-ltseq/ltseq/exceptions.py:10-27). | ADD | `LTSeqValueError` ([§20.1]) | Common base of the value-error classes. |
 | (none) | `assume_sorted` is never checked (docs/api.md:531-541). | ADD | `OrderViolationError` ([§20.1]) | Raised by the validation in [§9.5]. |
@@ -570,9 +570,9 @@ Building the inventory against the draft contract turned up places where the con
 
 | Action | Rows |
 |---|---|
-| KEEP | 106 |
+| KEEP | 105 |
 | RENAME | 14 |
-| REDESIGN | 67 |
+| REDESIGN | 68 |
 | MERGE | 35 |
 | REMOVE | 107 |
 | ADD | 69 |

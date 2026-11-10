@@ -19,13 +19,13 @@
 Window methods are `Expr` methods used in `Row` contexts (`select`, `derive`, `filter`, `update`, `search_*`, `starts_when`) and in `NestedTable.derive`.
 
 ```python
-def shift(self, n: int = 1, *, fill_value: Literal = None) -> Expr
-def diff(self, n: int = 1) -> Expr
-def pct_change(self, n: int = 1) -> Expr
+def shift(self, n: SupportsIndex = 1, *, fill_value: LiteralValue = None) -> Expr
+def diff(self, n: SupportsIndex = 1) -> Expr
+def pct_change(self, n: SupportsIndex = 1) -> Expr
 def cum_sum(self) -> Expr
 def cum_min(self) -> Expr
 def cum_max(self) -> Expr
-def rolling(self, window: int, *, min_periods: int | None = None) -> Rolling
+def rolling(self, window: SupportsIndex, *, min_periods: SupportsIndex | None = None) -> Rolling
 ```
 
 **The window order.** A window method reads other rows in *window order*:
@@ -46,7 +46,7 @@ A window method takes any `Row` expression as input, window expressions included
 | `cum_sum()` | Sum of the non-NULL values from the partition start to row *i*; NULL where `x` is NULL | As `sum` ([§14.2]), checked |
 | `cum_min()`, `cum_max()` | Minimum or maximum of the non-NULL values so far, under the order of [§9.4] (so `cum_max` is NaN from the first NaN on); NULL where `x` is NULL | Input type |
 
-- `n` MUST be an `int` literal; anything else raises `LTSeqTypeError`.
+- `n` is an integer argument ([§2.3]): an `Expr`, a `bool`, a float or a string raises `LTSeqTypeError`.
 - `fill_value` MUST be exact in the input type ([§17.5]); it never widens the result type (ADR 0018 D-c).
 - `diff` and `pct_change` take numeric input (`diff` also temporal); `cum_*` take numeric input (`cum_min`/`cum_max` also temporal and string). Other types raise `LTSeqTypeError`.
 
@@ -65,7 +65,7 @@ The table method `cum_sum(*columns)` and the `partition_by=` keyword on the wind
 def row_number() -> Expr
 def rank() -> Expr
 def dense_rank() -> Expr
-def ntile(n: int, /) -> Expr
+def ntile(n: SupportsIndex, /) -> Expr
 ```
 
 - `row_number()` is the 1-based position in window order. `rank()` gives tied rows the same rank and skips (1, 1, 3); `dense_rank()` does not skip (1, 1, 2). `ntile(n)` splits each partition into `n` buckets numbered from 1 whose sizes differ by at most one, larger buckets first.
@@ -186,11 +186,11 @@ class NestedTable:
 
 - **`filter(predicate)`** keeps the groups where the aggregate predicate is TRUE. Groups keep their identity: two surviving groups with equal keys that were separated by a removed group stay two groups.
 - **`agg(**named)`** returns one row per group: the key columns in `keys` order, then the named aggregates in keyword order. Rows are in group order. Order defined; `sort_keys` is `None`. A name that collides with a key raises `LTSeqValueError`; no names raise `LTSeqValueError`.
-- **`derive(**named)`** returns every row of the surviving groups and adds or replaces columns as `LTSeq.derive` does ([§7.3]): a replaced column keeps its position, and replacing a column named in `sort_keys` truncates `sort_keys` before that key. In the expressions, bare column references are the current row's values, aggregates are computed over the row's group, and window methods run within the group in table order.
+- **`derive(**named)`** returns every row of the surviving groups and adds or replaces columns as `LTSeq.derive` does ([§7.3]): a replaced column keeps its position, and `sort_keys` follows [§7.3]'s rule for carrying keys, so replacing a column named in `sort_keys` truncates `sort_keys` before that key unless a result column still holds the replaced column: a bare reference to it under its own name, or under another name, as in the swap `derive(a=lambda g: g.b, b=lambda g: g.a)`, which turns `sort_keys` `(a, b)` into `(b, a)`. In the expressions, bare column references are the current row's values, aggregates are computed over the row's group, and window methods run within the group in table order.
 - **`first()`**, **`last()`** return the first or last row of each group, with the input schema, in group order.
 - **`flatten(group_id=None)`** returns every row of the surviving groups in input order. With `group_id`, it appends an `int64` column numbering the surviving groups 0, 1, 2, … in order; a name that is already a column raises `LTSeqValueError`.
 - **`count()`** executes and returns the number of surviving groups.
-- `derive`, `first`, `last` and `flatten` keep the input's order. `first`, `last` and `flatten` replace no column (`flatten` may append one) and keep `sort_keys`; `derive` keeps the keys its replacements leave ([§9.2]).
+- `derive`, `first`, `last` and `flatten` keep the input's order. `first`, `last` and `flatten` replace no column (`flatten` may append one) and keep `sort_keys`; `derive` carries and truncates keys by [§7.3]'s rule ([§9.2]).
 
 ### 11.3 Example
 
@@ -214,6 +214,7 @@ Previous: [Ordering contract (§9)](ordering.md) · [Index](../README.md) · Nex
 <!-- v0.5-modular:links -->
 
 [§1.6]: overview.md#16-rule-ownership
+[§2.3]: public-surface.md#23-type-aliases-used-in-signatures
 [§4]: loading-and-laziness.md#4-loading
 [§4.6]: loading-and-laziness.md#46-ltseqfrom_dict-and-ltseqfrom_rows
 [§5]: loading-and-laziness.md#5-lazy-evaluation-and-materialization

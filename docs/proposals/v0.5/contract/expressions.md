@@ -23,7 +23,7 @@ A lambda receives one of two proxies. Both are typed in `ltseq.typing`.
 | `Row` | `filter`, `select`, `derive`, `update`, `delete`, `search_first`, `search_pattern`, `group_ordered(starts_when=)` | The column's value in the current row |
 | `Group` | `GroupBy.agg`, `LTSeq.agg`, `NestedTable.agg`, `NestedTable.filter`, `NestedTable.derive` | In `NestedTable.derive`, the value in the current row; everywhere else, MUST appear inside an aggregate ([§14.2]) |
 
-- `p.name` and `p["name"]` are column references. `Row` has no other attributes. `Group` has exactly one more, `count(*, where=None)`, the number of rows in the group ([§14.2]); `g["count"]` still reaches a column named `count`. The v0.4 group helpers are therefore gone: `g.sum("x")`, `g.first()`, `g.all(pred)` and `g.none(pred)` read `g.sum`, `g.first`, `g.all` and `g.none` as columns, so they raise `ColumnNotFoundError` when no such column exists. Their forms are `g.x.sum()`, `g.x.first()`, `(g.x > 0).all()` and `~(g.x > 0).any()` ([§14.2]).
+- `p.name` and `p["name"]` are column references, and an unknown name raises `ColumnNotFoundError` with either spelling ([§3.4]). That class is an `AttributeError`, not a `KeyError`, for `p["name"]` too: the two spellings mean the same reference (principle 2), so they fail with the same class, and `ColumnNotFoundError` is also what `select`, `sort` and every other method raise for an unknown name. A proxy is not a mapping: it has no `keys`, `get` or `in`, so no code reads it with `except KeyError`. Catch `ColumnNotFoundError` (or `ValueError`) for an unknown column. `Row` has no other attributes. `Group` has exactly one more, `count(*, where=None)`, the number of rows in the group ([§14.2]); `g["count"]` still reaches a column named `count`. The v0.4 group helpers are therefore gone: `g.sum("x")`, `g.first()`, `g.all(pred)` and `g.none(pred)` read `g.sum`, `g.first`, `g.all` and `g.none` as columns, so they raise `ColumnNotFoundError` when no such column exists. Their forms are `g.x.sum()`, `g.x.first()`, `(g.x > 0).all()` and `~(g.x > 0).any()` ([§14.2]).
 - An aggregate method ([§14.2]) on an expression in a `Row` context without `.over()` ([§10.4]) raises `LTSeqTypeError`.
 - Window methods ([§10]) are allowed in `Row` contexts and in `NestedTable.derive`, where they run within each group.
 - `fold` ([§10.7]) is not an expression context: its callback receives plain Python values.
@@ -51,7 +51,7 @@ Operands MUST be type-compatible: a number or `bool` next to a string, or a `boo
 ### 8.3 Conditional and NULL functions
 
 ```python
-def lit(value: Literal, /) -> Expr
+def lit(value: LiteralValue, /) -> Expr
 def when(condition: IntoExpr, value: IntoExpr, /) -> When      # an Expr with .when() and .otherwise()
 def if_else(condition: IntoExpr, then: IntoExpr, otherwise: IntoExpr, /) -> Expr
 def coalesce(*values: IntoExpr) -> Expr
@@ -89,12 +89,12 @@ def is_not_null(self) -> Expr
 def is_nan(self) -> Expr
 def fill_null(self, value: IntoExpr, /) -> Expr
 def fill_nan(self, value: IntoExpr, /) -> Expr
-def is_in(self, values: Iterable[Literal], /) -> Expr
+def is_in(self, values: Iterable[LiteralValue], /) -> Expr
 def between(self, low: IntoExpr, high: IntoExpr, /) -> Expr
 def cast(self, dtype: DTypeLike, /) -> Expr
 def try_cast(self, dtype: DTypeLike, /) -> Expr
 def abs(self) -> Expr
-def round(self, decimals: int = 0) -> Expr
+def round(self, decimals: SupportsIndex = 0) -> Expr
 def floor(self) -> Expr
 def ceil(self) -> Expr
 ```
@@ -103,7 +103,7 @@ def ceil(self) -> Expr
 - **`is_nan`** is TRUE for NaN, FALSE otherwise, NULL for NULL. Floating-point input only (`LTSeqTypeError`).
 - **`fill_null(v)`** is `coalesce(self, v)`.
 - **`fill_nan(v)`** replaces NaN with `v` and leaves NULL alone. Floating-point input only; `v` is a shared value ([§17.5]).
-- **`is_in(values)`** is a membership test and never returns NULL: a NULL input is TRUE if `None` is among `values` and FALSE otherwise; NaN is in `values` if NaN is. Values are compared exactly ([§17.4]), so `r.int_col.is_in([1.5])` is FALSE for every row. A value of an incompatible type (a string against a number) raises `LTSeqTypeError`. An empty `values` gives FALSE for every row. `values` MUST be literals: an item that is an expression (a column, arithmetic on one, `now()`) raises `LTSeqTypeError` when the lambda is captured, naming the item. A value of the same row is compared with `==`, as in `(r.x == r.y) | r.x.is_in([3])`; membership in another table is `semi_join` ([§12.2]).
+- **`is_in(values)`** is a membership test and never returns NULL: a NULL input is TRUE if `None` is among `values` and FALSE otherwise; NaN is in `values` if NaN is. Values are compared exactly ([§17.4]), so `r.int_col.is_in([1.5])` is FALSE for every row. A value of an incompatible type (a string against a number) raises `LTSeqTypeError`. An empty `values` gives FALSE for every row. A `str`, `bytes` or `bytearray` as `values` raises `LTSeqTypeError` when `is_in` is called, though Python iterates it: `r.c.is_in("AB")` would test membership in `{"A", "B"}`, which is rarely what was meant; write `["AB"]` for one value or `list("AB")` for its characters. `values` MUST be literals: an item that is an expression (a column, arithmetic on one, `now()`) raises `LTSeqTypeError` when the lambda is captured, naming the item. A value of the same row is compared with `==`, as in `(r.x == r.y) | r.x.is_in([3])`; membership in another table is `semi_join` ([§12.2]).
 - **`between(low, high)`** is `(self >= low) & (self <= high)`, so NULL bounds follow Kleene logic.
 - **`cast`, `try_cast`** convert to `dtype` with the rules of [§17.6]. `cast` raises `CastError` during execution for a value the [§17.6] table says fails; `try_cast` gives NULL instead. Where a rule rounds or truncates (for example float to integer), both return that value. A conversion with no defined rule raises `LTSeqTypeError` at plan time.
 - **`abs`** keeps the type, checked. **`round(decimals)`** rounds half to even, as Python's `round`, at `decimals` digits after the point (before it when negative), and keeps the type; for floats it rounds the exact binary64 value, so `round(2.675, 2) == 2.67`. For integers, a non-negative `decimals` returns the value unchanged; a result that does not fit raises `ArithmeticOverflowError`. **`floor`, `ceil`** keep the type.

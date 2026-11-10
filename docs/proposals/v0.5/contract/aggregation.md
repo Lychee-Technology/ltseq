@@ -71,7 +71,30 @@ def cov(a: IntoExpr, b: IntoExpr, /, *, where: IntoExpr | None = None) -> Expr
 
 A NaN taking part in `sum`, `mean`, `std`, `var`, `quantile`, `corr` or `cov` makes the result NaN. A decimal `sum` or `mean` whose value does not fit its result type raises `ArithmeticOverflowError`.
 
-Removed, with their replacements: `avg` (`mean`), `variance` (`var`), `stddev` (`std`), `percentile(p)` (`quantile(q)`, now exact), `top_k`, `count_if`/`sum_if`/`avg_if`/`min_if`/`max_if` (`where=`), `skew`, `concat_agg` (`string_agg`, now ordered), `covar` (`cov`).
+Removed, with their replacements: `avg` (`mean`), `variance` (`var`), `stddev` (`std`), `percentile(p)` (`quantile(q)`, now exact), `top_k` (below), `count_if`/`sum_if`/`avg_if`/`min_if`/`max_if` (`where=`), `skew` (below), `concat_agg` (`string_agg`, now ordered), `covar` (`cov`).
+
+`top_k(k)` and `skew` have no aggregate in v0.5, because each is a composition of the others:
+
+- **`top_k(k)`** returned the `k` largest values of each group as one `;`-joined string. The rows themselves are a rank and a filter: `t.derive(rk=lambda r: row_number().over(partition_by="g", order_by="x", descending=True)).filter(lambda r: r.rk <= k)` keeps the `k` rows with the largest `x` in each `g`, ties broken by table order ([§10.2]) and NULLs last. Sorted and joined, that result gives a string of the old shape: `.sort("g", "rk").group_by("g").agg(top=lambda g: g.x.cast("string").string_agg(";"))`. It is not the old string byte for byte: v0.5 defines no text form that matches v0.4's, so a migration that compares strings sees three differences. *Text*: v0.4 cast each value to `float64` and wrote it as Rust's `{}` formats an `f64` (DataFusion's `array_to_string`), with no exponent and no fractional part for a whole number; the idiom writes each value's own canonical text form ([§16.5]). An integer is the same (`1`), except above 2⁵³, where v0.4 wrote the rounded `float64` (`9007199254740993` as `9007199254740992`); a float `1.0` was `1` and is `1.0`, `1e16` was `10000000000000000` and is `1e+16`, `0.00001` was `0.00001` and is `1e-05`, `-0.0` was `-0` and is `-0.0`, NaN was `NaN` and is `nan`; a decimal `1.50` was `1.5` and keeps its scale. *Order*: v0.4 ranked the `float64` values in IEEE total order, so a NaN with its sign bit set came after every number and `0.0` before `-0.0`; the idiom ranks by [§9.4], as `top_k_rows` below states. *All-NULL group*: v0.4 gave `""`; the idiom gives NULL, the result of `string_agg` with no non-NULL value. Appending `.fill_null("")` to the `string_agg` restores `""`. A NULL among the kept rows is skipped in both, so `[None, 1.0]` with `k = 2` gives `1` in v0.4 and `1.0` here.
+- **`skew`** was the population skewness *m*₃ / *m*₂^1.5, from the central moments. It is `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="g")).derive(z=lambda r: r.d / r.d.abs().max().over(partition_by="g")).group_by("g").agg(skew=lambda g: (g.z ** 3).mean() / (g.z ** 2).mean() ** 1.5)`, or with `.over()` and `LTSeq.agg` for the whole table; a decimal `x` is cast to `float64` first. Dividing each deviation by the group's largest makes the ratio independent of scale. Every `z` lies in [−1, 1] and one of them is ±1, so neither power can overflow and `(g.z ** 2).mean()` is at least 1/*n*: that denominator never underflows to zero as the moments of `d` itself can, so `[1e-200, -1e-200]` gives `0.0` where the moments of `d` give 0.0 / 0.0. Scaling protects the largest deviation and that denominator, not each term. A deviation far below the largest still underflows: in `[1e200, -1e200, 1e-200, -1e-200]` the small deviations divided by 1e200 round to `0.0` and `-0.0`, so their squares and cubes are zero, and any `z` below about 2.8e-103 in magnitude (2^(−1022/3)) has a cube below 2⁻¹⁰²², subnormal or zero. Each such term is below 2⁻¹⁰²² in magnitude both before and after rounding, so underflow moves `(g.z ** 3).mean()` by less than 2⁻¹⁰²² and the result by less than *n*^1.5 · 2⁻¹⁰²² (below 1e-294 for a billion values). It is lost precision only for a skewness of that order, which can come out as `0.0` or with few correct digits; that example's skewness is exactly 0, and it gives `0.0`. Each step rounds, so unlike `var` the result is not the exact value rounded once. It is close to that value when the deviations `d` are accurate, and it is not in two cases. When a group's spread is tiny next to its mean, `x - mean` cancels: `[1e16, 1e16 + 2, 1e16 + 2, 1e16 + 8]` gives about −0.126, while its skewness is 0.889. When the deviation of a finite value exceeds the `float64` range, `d` is infinite and the result is NaN, as for `[1.7e308, -1.7e308, 1.7e308]`. A group whose values are all equal, a single value included, gives NaN (0.0 / 0.0), where v0.4 gave NULL.
+
+For a group whose `x` values are `values`, in table order, the `top_k` idiom keeps the rows this reference names, with `rk` their position in its result plus 1:
+
+```python
+import math
+
+def top_k_rows(values, k):
+    """0-based positions, in the group's table order, of the rows ranked 1 to k."""
+    def is_nan(v):
+        return isinstance(v, float) and math.isnan(v)
+    nans = [i for i, v in enumerate(values) if is_nan(v)]
+    nulls = [i for i, v in enumerate(values) if v is None]
+    rest = sorted((i for i, v in enumerate(values) if v is not None and not is_nan(v)),
+                  key=lambda i: values[i], reverse=True)
+    return (nans + rest + nulls)[:k]
+```
+
+It is [§9.4]'s order, descending with NULLs last: every NaN is greater than every number, so NaNs rank first; `sorted` stays stable with `reverse=True`, so values equal under [§9.4], `-0.0` and `0.0` included, keep table order; NULLs rank after every value. Python's own comparisons of the other types agree with [§9.4]. `heapq.nlargest` is not a reference for the idiom: it compares NaN as Python does, so `nlargest(1, [1.0, nan, 2.0])` is `[2.0]` where the idiom keeps the NaN, and it raises `TypeError` on a `None` next to a number, where the idiom ranks the NULL last.
 
 ### 14.3 `LTSeq.agg`
 
@@ -105,7 +128,7 @@ def partition(self, *keys: str) -> dict[Any, LTSeq]
 ```python
 def pivot(self, *, index: str | Sequence[str], columns: str, values: str,
           agg: Literal["sum", "mean", "min", "max", "count", "first", "last"] = "sum",
-          column_values: Sequence[Literal] | None = None) -> LTSeq
+          column_values: Sequence[LiteralValue] | None = None) -> LTSeq
 ```
 
 - **Behavior.** One row per distinct `index` combination (grouped as `group_by`). For each value *v* of the `columns` column, one output column whose cell is `values.<agg>(where=columns == v)` over the row's group, with NULL *v* matching NULL. So a combination with no rows is NULL, or `0` for `count`.
@@ -131,9 +154,11 @@ Previous: [Joins and set operations (§12–§13)](joins-and-sets.md) · [Index]
 [§5.3]: loading-and-laziness.md#53-eager-calls
 [§9]: ordering.md#9-ordering-contract
 [§9.4]: ordering.md#94-sort
+[§10.2]: windows-and-grouping.md#102-ranking-functions
 [§11.2]: windows-and-grouping.md#112-nestedtable
 [§14.2]: #142-aggregate-expressions
 [§16]: streaming-and-output.md#16-output-and-interchange
+[§16.5]: streaming-and-output.md#165-writers
 [§16.3]: streaming-and-output.md#163-to_dicts
 [§17.4]: numeric-null-temporal.md#174-types-of-mixed-operands
 [§18]: numeric-null-temporal.md#18-null-nan-and-boolean-logic

@@ -177,7 +177,11 @@ b = LTSeq.from_dict({"x": [1, 3, 3]})
 [d["x"] for d in a.difference(b, distinct=False).to_dicts()] == [1, 2]
 [d["x"] for d in a.intersect(b, distinct=False).to_dicts()] == [1, 3]
 [d["x"] for d in a.concat(b).to_dicts()] == [1, 1, 2, 3, 1, 3, 3]           # was union() or concat()
-[d["x"] for d in a.concat(b).distinct().to_dicts()] == [1, 2, 3]          # SQL UNION
+sorted(d["x"] for d in a.concat(b).distinct(keep="any").to_dicts()) == [1, 2, 3]   # SQL UNION
+[d["x"] for d in a.concat(b).distinct().to_dicts()] == [1, 2, 3]          # first occurrences: needs a defined order
+ga = a.group_by("x").agg(n=lambda g: g.count())   # undefined order
+ga.concat(ga).distinct()                          # SortRequiredError at plan time; suggests keep="any"
+sorted(d["x"] for d in ga.concat(ga).distinct(keep="any").to_dicts()) == [1, 2, 3]
 a.concat(LTSeq.from_dict({"x": [1.5]}))        # SchemaMismatchError at plan time: int64 vs float64 (#222)
 a.concat(LTSeq.from_dict({"x": []}, schema={"x": "int32"}))   # SchemaMismatchError, though empty
 ```

@@ -34,7 +34,7 @@
 
 ### 2.2 Other modules
 
-- `ltseq.typing` is a runtime module that holds typing names only: `Row`, `Group` (protocols for the lambda argument, [§8.1]), the builder and namespace classes `When` ([§8.3]), `Rolling` ([§10.1]), `StrNamespace` ([§8.6]) and `DtNamespace` ([§19.3]), and the aliases `DTypeLike`, `IntoExpr`, `ExprFn`, `AggFn`, `RowExpr`, `AggExpr`, `PathLike`, `Literal`. The classes are for annotations: constructing one directly raises `TypeError`. Importing the module has no side effects.
+- `ltseq.typing` is a runtime module that holds typing names only: `Row`, `Group` (protocols for the lambda argument, [§8.1]), the builder and namespace classes `When` ([§8.3]), `Rolling` ([§10.1]), `StrNamespace` ([§8.6]) and `DtNamespace` ([§19.3]), and the aliases `DTypeLike`, `IntoExpr`, `ExprFn`, `AggFn`, `RowExpr`, `AggExpr`, `PathLike`, `LiteralValue`. The classes are for annotations: constructing one directly raises `TypeError`. Importing the module has no side effects. The alias for a literal value is named `LiteralValue`, not `Literal`, so that importing it never shadows `typing.Literal`. Every alias evaluates at runtime: `LiteralValue.__value__` names the NumPy scalar types when NumPy is installed, importing it then, and omits them when it is not, so evaluating the alias never raises `NameError`.
 - The compiled extension is `ltseq._ltseq_core`. It is private: its names, signatures and behavior are not part of this contract, and it MUST NOT be re-exported.
 - No other module or attribute of the package is public. Expression node classes (`BinOpExpr`, `CallExpr`, `ColumnExpr`, `UnaryOpExpr`, `LiteralExpr`, `LookupExpr`, `WindowExpr`), `SchemaProxy`, `NestedSchemaProxy`, `Cursor`, `LinkedTable`, `PartitionedTable` and `SQLPartitionedTable` are removed from the public surface.
 
@@ -45,24 +45,42 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 import datetime, decimal, os
 import pyarrow as pa
-if TYPE_CHECKING:
-    import numpy                              # not a dependency; names the scalars §17.2 accepts
-
 PathLike  = str | os.PathLike[str]
 DTypeLike = str | pa.DataType                 # str: a pyarrow alias, see §6.3
-type Literal = (None | bool | int | float | str | bytes | decimal.Decimal
-                | datetime.date | datetime.datetime | datetime.time | datetime.timedelta
-                | numpy.bool_ | numpy.integer | numpy.floating | numpy.datetime64 | numpy.timedelta64)
-                # lazy, so importing ltseq.typing never imports NumPy; pandas Timestamp
-                # and Timedelta are datetime and timedelta subclasses (§17.2)
-IntoExpr  = Expr | Literal
+_Scalar   = (None | bool | int | float | str | bytes | decimal.Decimal
+             | datetime.date | datetime.datetime | datetime.time | datetime.timedelta)
+             # pandas Timestamp and Timedelta are datetime and timedelta subclasses (§17.2)
+if TYPE_CHECKING:
+    import numpy                              # not a dependency; names the scalars §17.2 accepts
+    type LiteralValue = (_Scalar | numpy.bool_ | numpy.integer | numpy.floating
+                         | numpy.datetime64 | numpy.timedelta64)
+else:
+    def _literal_value():                     # runs when LiteralValue.__value__ is first read
+        try:
+            import numpy
+        except ImportError:
+            return _Scalar
+        return (_Scalar | numpy.bool_ | numpy.integer | numpy.floating
+                | numpy.datetime64 | numpy.timedelta64)
+    type LiteralValue = _literal_value()      # lazy: importing ltseq.typing never imports NumPy
+IntoExpr  = Expr | LiteralValue
 ExprFn    = Callable[[Row], IntoExpr]         # a lambda in row context, §8.1
 AggFn     = Callable[[Group], IntoExpr]       # a lambda in aggregate context, §8.1
 RowExpr   = IntoExpr | ExprFn                 # a value: select, derive, update
 AggExpr   = IntoExpr | AggFn                  # a value: agg, NestedTable.derive
 ```
 
-A *value* argument is `RowExpr` or `AggExpr`: an `Expr`, a literal, or a lambda returning either (`derive(flag=False)`, `derive(x=None)` and `derive(c=lambda r: r.a + 1)` all type-check). A *condition* argument (`filter`, `delete`, `update`'s `where`, `search_first`, `search_pattern`, `starts_when`, `NestedTable.filter`) is `Expr | ExprFn` or `Expr | AggFn`, because no literal is a condition: a Python `bool` raises ([§3.4]), and any other literal is not of type `bool` ([§7.1]). `delete` and `update` also take a position, `int | numpy.integer` ([§7.10]). A condition inside an expression (the condition of `when` and `if_else`, an aggregate's `where=`, either operand of `&` and `|`) stays `IntoExpr`: after the rewrite of [§3.4], `when(r.x is None, 0)` passes what a type checker sees as a `bool`, so the annotation admits it, and [§3.4] refuses a Python `bool` there at plan time. A lambda's return type stays `IntoExpr`, `bool` included, for the same reason (`derive(m=lambda r: r.x is None)`); that a lambda returning a Python `bool` raises is checked when the lambda runs, not by the annotation.
+`LiteralValue` has two definitions, and they are one alias. A type checker reads the `TYPE_CHECKING` branch, where `numpy` is the imported module, and treats the `else` branch as unreachable. At run time only the `else` branch is executed. Its `type` statement evaluates its value only when `LiteralValue.__value__` is first read, and the value is then cached. At that point `_literal_value` imports NumPy, so the value never names a module the runtime has not bound. When NumPy is installed the value is the union a type checker sees; when it is not, the value is `_Scalar`. So reading the value never raises `NameError` ([§2.2]). The first branch alone would raise it whether NumPy is installed or not, because `if TYPE_CHECKING:` never binds `numpy` at run time. `_Scalar` and `_literal_value` are private names of `ltseq.typing`, and [§2.2]'s list of its names leaves them out. With pyright 1.1.414 in standard mode, `lit(np.int64(3))` and `lit(None)` type-check against this definition and `lit(object())` is an error. CPython 3.13, 3.14 and 3.15 evaluate `LiteralValue.__value__` without NumPy, giving `_Scalar` and leaving `numpy` out of `sys.modules`, and with a stand-in module that has NumPy's five scalar names, giving the 16-member union.
+
+A *value* argument is `RowExpr` or `AggExpr`: an `Expr`, a literal, or a lambda returning either (`derive(flag=False)`, `derive(x=None)` and `derive(c=lambda r: r.a + 1)` all type-check). A *condition* argument (`filter`, `delete`, `update`'s `where`, `search_first`, `search_pattern`, `starts_when`, `NestedTable.filter`) is `Expr | ExprFn` or `Expr | AggFn`, because no literal is a condition: a Python `bool` raises ([§3.4]), and any other literal is not of type `bool` ([§7.1]). `delete` and `update` also take a position, an integer argument (below, [§7.10]). A condition inside an expression (the condition of `when` and `if_else`, an aggregate's `where=`, either operand of `&` and `|`) stays `IntoExpr`: after the rewrite of [§3.4], `when(r.x is None, 0)` passes what a type checker sees as a `bool`, so the annotation admits it, and [§3.4] refuses a Python `bool` there at plan time. A lambda's return type stays `IntoExpr`, `bool` included, for the same reason (`derive(m=lambda r: r.x is None)`); that a lambda returning a Python `bool` raises is checked when the lambda runs, not by the annotation.
+
+An *integer argument* is a count, a position, an offset, a width or a number of digits, annotated `SupportsIndex` in [§22]: the `n`, `offset`, `length`, `pos`, `batch_size`, `window`, `min_periods`, `index`, `width`, `decimals` and `ndigits` parameters, `LTSeq.range`'s `start`, `stop` and `step`, and a position given to `delete` and `update`. It takes any object with `__index__`, a Python `int`, a NumPy integer or a user type, and LTSeq reads its value once, with `operator.index`, when the method is called: `t.head(np.int64(3))` is `t.head(3)`. A `bool` raises `LTSeqTypeError`, although `True.__index__()` is 1, because `t.head(True)` or `r.x.shift(False)` is almost always a flag passed in the wrong place; `numpy.bool_` has no `__index__` and raises as well. So does a value without `__index__`, such as `2.0`, `"2"` or `Decimal(2)`: a float is not truncated and a string is not parsed. The range checks of each method (`n` non-negative, `window` at least 1) apply to the value read. The annotation admits `bool`, because `bool` is a subclass of `int`, so this refusal is checked at run time only ([§22]).
+
+### 2.4 Supported versions
+
+v0.5 supports CPython 3.13 and later, and pyarrow 25.0.1 and later, its one required dependency; `pyproject.toml` declares both floors (`requires-python`, `dependencies`). Two libraries are optional and used only where named: pandas from 3.0.5, for `from_pandas` and `to_pandas` ([§4.5], [§16.2]), and NumPy from 2.4.4, for NumPy scalars as literals and integer arguments ([§17.2], [§2.3]). Their floors are declared as the extras `pandas` and `numpy` (`[project.optional-dependencies]`), so that the package metadata states every floor; the release adds them, as `pyproject.toml` has no extras today. A floor is the oldest version the test suite of [§24] runs against in CI, which runs every supported CPython minor version (row S6 of [§24.3]); behavior with an older version, or with another Python implementation, is not specified. Raising a floor is a change to this contract.
+
+When this section was written, CI ran CPython 3.13 and 3.14 with pyarrow 25.0.1, pandas 3.0.5 and NumPy 2.4.4, the versions `uv.lock` pins, so every floor was tested. Where a rule cites what pyarrow 25.0.1 or another library does ([§6.1], [§16.4], [§16.5]), the citation is evidence for the rule, and the rule fixes what LTSeq does with any supported version.
 
 ---
 
@@ -93,7 +111,7 @@ v0.5 has no other user-visible table type. `LinkedTable` is replaced by `join` w
 |---|---|
 | `repr(t)`, `str(t)` | Column names, types and order state. MUST NOT execute. |
 | Notebook display | No `_repr_html_` or other display hook is defined, so notebooks show `repr` and displaying a table never executes. `t.show()` prints rows. |
-| `len(t)` | Same as `t.count()`: executes. |
+| `len(t)` | Raises `TypeError` ("`len()` would execute the table; use `t.count()`"). |
 | `bool(t)` | Raises `TypeError` ("the truth value of a table is ambiguous; use `t.count() > 0`"). |
 | `iter(t)` | Streams rows as `dict[str, Any]` ([§15.2]). |
 | `t == u`, `hash(t)` | Python identity; content equality is not overloaded. |
@@ -101,6 +119,8 @@ v0.5 has no other user-visible table type. `LinkedTable` is replaced by `join` w
 | `copy.copy(t)`, `copy.deepcopy(t)` | Return an `LTSeq` with the same plan; never execute. |
 | `pickle.dumps(t)` | Executes and stores a materialized snapshot ([§16.6]). |
 | `t.__arrow_c_stream__(requested_schema=None)` | Arrow PyCapsule stream export ([§16.4]). |
+
+`len(t)` refuses because its only answer is a full execution, which `t.count()` asks for by name. `list(t)`, `tuple(t)`, `sorted(t)` and `pandas.DataFrame(t)` call `__len__` as a length hint before iterating, so an executing `len` would run the plan twice, once hidden. Python treats a `TypeError` from the hint as no hint, so each of them executes the plan once, through iteration.
 
 ### 3.3 `NestedTable` and `GroupBy` invariants
 
@@ -139,9 +159,12 @@ Previous: [Overview, principles and rule ownership (§1)](overview.md) · [Index
 
 [§1.6]: overview.md#16-rule-ownership
 [§2.1]: #21-the-ltseq-namespace
+[§2.3]: #23-type-aliases-used-in-signatures
 [§3.4]: #34-lambdas-and-proxies
 [§4]: loading-and-laziness.md#4-loading
+[§4.5]: loading-and-laziness.md#45-ltseqfrom_pandas
 [§5.2]: loading-and-laziness.md#52-ltseqcollect
+[§6.1]: schema-and-table-operations.md#61-schema-and-columns
 [§7]: schema-and-table-operations.md#7-basic-table-operations
 [§7.1]: schema-and-table-operations.md#71-filter
 [§7.3]: schema-and-table-operations.md#73-derive
@@ -158,9 +181,14 @@ Previous: [Overview, principles and rule ownership (§1)](overview.md) · [Index
 [§14.5]: aggregation.md#145-partition
 [§15]: streaming-and-output.md#15-streaming
 [§15.2]: streaming-and-output.md#152-iteration
+[§16.2]: streaming-and-output.md#162-to_pandas
 [§16.4]: streaming-and-output.md#164-arrow-pycapsule-stream
+[§16.5]: streaming-and-output.md#165-writers
 [§16.6]: streaming-and-output.md#166-pickle
 [§17.2]: numeric-null-temporal.md#172-literals
 [§19.3]: numeric-null-temporal.md#193-dt-fields
+[§22]: api-reference.md#22-complete-canonical-api-reference
+[§24]: acceptance.md#24-acceptance-criteria-and-contract-test-matrix
+[§24.3]: acceptance.md#243-guarantee-matrix
 
 <!-- /v0.5-modular:links -->
