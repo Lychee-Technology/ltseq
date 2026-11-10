@@ -2,7 +2,7 @@
 
 # v0.5 review history: Owner decision closure (Q)
 
-[Index](../../README.md) › Review history · Previous: [Assessment closure pass (P)](assessment-closure.md)
+[Index](../../README.md) › Review history · Previous: [Assessment closure pass (P)](assessment-closure.md) · Next: [API surface and interchange follow-ups (R)](follow-up-closure.md)
 
 **Non-normative, historical.** A dated record of the [review](../../README.md#ltseq-v05-api-review), kept as written. Later records name the earlier records they change, and [Deliverable Q] is the current decision register.
 
@@ -61,6 +61,8 @@ None blocks the merge. Each blocks the item named until the owner decides it. Un
 | OD-S1 | — (v0.4) | Fail-loudly v0.4 safeguards for the affected `partition` and lookup keys | #258, #223 | A v0.4 fix, not postponed to v0.5 | No |
 | OD-S2 | — (v0.4) | An urgent v0.4 fix for #259's file corruption and panic | #259 | A v0.4 fix | No |
 
+*Later:* AC3, U2 and OD-E were settled in the contract on 2026-11-10, with the directions above; [Deliverable R] records how.
+
 ### What the modifications required
 
 **D8 departs from the earlier choice.** Until this decision, integer `/` by zero gave `±inf` or NaN: the option #218 recorded, which the gate recommended (J) and K kept, matching NumPy and pandas. The owner replaced it. Integer `/` by zero now raises `DivisionByZeroError`, as Python's `int / int` raises `ZeroDivisionError`, while the result type stays `float64` and a nonzero division is unchanged (`1 / 2` is `0.5`). The operands decide the error, not the result type: exact operands imply no infinity, and an `inf` would pass silently through later sums and comparisons. [§17.1]'s rule that the result type decides now names this as its one exception. A float operand keeps IEEE, so `r.a / r.b.cast("float64")` gives the old result. `pct_change` is defined as `x / x.shift(n) - 1` and would have inherited the new error. It was outside the decision, so [§10.1] now says it keeps IEEE for every input type: a zero base gives `inf`, integer input included.
@@ -104,7 +106,7 @@ The owner's comment also settles what K through P left open for the owner: their
 
 ---
 
-Previous: [Assessment closure pass (P)](assessment-closure.md) · [Index](../../README.md)
+Previous: [Assessment closure pass (P)](assessment-closure.md) · [Index](../../README.md) · Next: [API surface and interchange follow-ups (R)](follow-up-closure.md)
 
 <!-- /v0.5-modular:footer -->
 
@@ -149,5 +151,6 @@ Previous: [Assessment closure pass (P)](assessment-closure.md) · [Index](../../
 [§23.18]: ../../contract/examples-semantics.md#2318-arrow-and-pandas-round-trip
 [§24]: ../../contract/acceptance.md#24-acceptance-criteria-and-contract-test-matrix
 [Deliverable Q]: #q-owner-decision-closure
+[Deliverable R]: follow-up-closure.md#r-api-surface-and-interchange-follow-ups
 
 <!-- /v0.5-modular:links -->

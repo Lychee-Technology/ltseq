@@ -53,7 +53,8 @@ def columns(self) -> list[str]
 Normalization at every boundary where a schema is visible (`schema`, `to_arrow`, `to_batches`, the PyCapsule stream, written files):
 
 - Engine-internal layouts MUST NOT appear: `string_view` is reported as `string`, `binary_view` as `binary`.
-- Dictionary-encoded columns are reported as their value type.
+- Dictionary-encoded and run-end encoded columns are reported as their value type, and every operation sees their decoded values, so `shift`, `diff` and the other window methods treat each row as one value whatever runs the encoding stores (#239). Decoding copies only that column.
+- `list_view` and `large_list_view` are reported as `list` and `large_list`, with the same values. They are a layout of a list, as `string_view` is of a string, and the pass-through rules of the table above apply to the result.
 - Extension types are reported as their storage type.
 - Field and schema metadata are dropped. The Arrow schema that `write_parquet` stores in the file is not metadata in this sense ([§16.5]).
 
@@ -100,7 +101,7 @@ def select(self, /, *columns: str, **named: RowExpr) -> LTSeq
 ```
 
 - **Behavior.** Returns the positional columns in the given order, followed by one column per keyword argument, in keyword order, computed from the input row. `select()` with no arguments returns a table without columns and the input's rows ([§6.1]).
-- **Order and schema.** Keeps order. `sort_keys` keeps the longest prefix whose columns appear in the result unchanged; a keyword argument whose expression is a bare column reference (`y=lambda r: r.x`) carries `x`'s key under the name `y`.
+- **Order and schema.** Keeps order. `sort_keys` follows the rule for carrying keys ([§7.3]), which `derive` shares: a keyword argument that is a bare column reference (`y=lambda r: r.x`) carries `x`'s key under the name `y`.
 - **Errors.** A name produced twice (positionally, by keyword, or both) raises `LTSeqValueError`. A positional argument that is not a `str` raises `LTSeqTypeError` with a hint to pass it as a keyword. An unknown positional name raises `ColumnNotFoundError`.
 - **Example.** `t.select("date", "symbol", notional=lambda r: r.price * r.qty)`
 
@@ -111,12 +112,14 @@ def derive(self, /, **named: RowExpr) -> LTSeq
 ```
 
 - **Behavior.** Adds or replaces columns. Every expression is evaluated against the **input** row: an expression in the same call that references a name being derived sees the input column of that name, or raises `ColumnNotFoundError` if there is none. To build on a derived column, chain a second `derive`.
-- **Order and schema.** A replaced column keeps its position and takes the new expression's type; new columns are appended in keyword order. Keeps order. Replacing a column that appears in `sort_keys` truncates `sort_keys` before that key.
+- **Order and schema.** A replaced column keeps its position and takes the new expression's type; new columns are appended in keyword order. Keeps order. `sort_keys` follows the rule for carrying keys below, so replacing a key column with another expression truncates `sort_keys` before that key.
 - **Values.** A literal value derives a constant column of the literal's type ([§17.2]): `derive(flag=False)` is `bool` (a lambda returning `False` raises, [§3.4]), `derive(x=None)` is the `null` type. A typed NULL column is `lit(None).cast("int64")`.
 - **Errors.** No keyword arguments raise `LTSeqValueError`.
 - **Example.** `t.derive(ret=lambda r: r.close / r.close.shift(1) - 1, close=lambda r: r.close.round(2))`
 
 `with_columns`, and the positional form that takes a lambda returning a `dict`, are removed.
+
+**Carrying keys through `select` and `derive`.** One rule serves both. A result column *holds* an input column `x` when it is `x` itself, kept unchanged (a positional `select` argument, or a column `derive` does not replace), or when its keyword argument is a bare reference to `x` (`y=lambda r: r.x`, `y=r.x`, also `x=lambda r: r.x`). Each key of the input's `sort_keys`, in order, is carried under the name of a result column that holds its column: the column of the same name when that one holds it, otherwise the first such column in result order. `sort_keys` is truncated before the first key that no result column holds. So `select(y=lambda r: r.x)` and `derive(y=lambda r: r.x).drop("x")` both give `x`'s key under `y`; `derive(x=lambda r: r.x)` keeps the key; `derive(x=lambda r: r.x + 0)` truncates it, as does any other expression, because the contract does not decide which expressions preserve values; and `derive(a=lambda r: r.b, b=lambda r: r.a)` on `sort_keys` `(a, b)` gives `(b, a)`, since the new `b` holds the old `a`. Before this rule, `select` carried a key under a new name and `derive` did not; a table's order state should not depend on which of the two built the same columns.
 
 ### 7.4 `rename`
 
@@ -173,7 +176,7 @@ Returns a text rendering of the logical plan, followed by the physical plan when
 
 ```python
 def count(self) -> int
-def show(self, n: int = 10) -> None
+def show(self, n: SupportsIndex = 10) -> None
 ```
 
 - `count()` executes and returns the number of rows. It demands what decides which rows exist and in what order (filter predicates, join, sort and grouping keys, and their inputs) and nothing else ([§20.2]): an error in a column that only supplies output values does not make `count()` fail. It reads the rows its input reads ([§20.2]), so over an input that no `head(n)`, `slice` or `search_first` bounds it checks every `assume_sorted` pair ([§9.5]).
@@ -184,9 +187,9 @@ def show(self, n: int = 10) -> None
 These are ordinary plan-building methods that return a new table. `modify` is removed; `update` covers it.
 
 ```python
-def insert(self, pos: int, rows: Mapping[str, Any] | Sequence[Mapping[str, Any]], /) -> LTSeq
-def delete(self, where: Expr | ExprFn | int | numpy.integer, /) -> LTSeq
-def update(self, where: Expr | ExprFn | int | numpy.integer, /, **values: RowExpr) -> LTSeq
+def insert(self, pos: SupportsIndex, rows: Mapping[str, Any] | Sequence[Mapping[str, Any]], /) -> LTSeq
+def delete(self, where: Expr | ExprFn | SupportsIndex, /) -> LTSeq
+def update(self, where: Expr | ExprFn | SupportsIndex, /, **values: RowExpr) -> LTSeq
 ```
 
 **`insert`** places the given rows before row `pos`, with `list.insert` semantics: a negative `pos` counts from the end, and an out-of-range `pos` is clamped to the start or the end. It never raises `IndexError`.
@@ -195,7 +198,7 @@ def update(self, where: Expr | ExprFn | int | numpy.integer, /, **values: RowExp
 - A key that is not a column raises `ColumnNotFoundError`; a missing key is NULL. Values MUST be exact in the column type ([§17.5]), else `CastError`.
 - Result `sort_keys` is `None`; order stays defined.
 
-**`delete`** removes the rows where `where` is TRUE. A row where it is NULL is kept, so `delete(p)` is not `filter(~p)`. An `int` or a NumPy integer is a position; a `bool` raises `LTSeqTypeError` ([§3.4]). With a position, removes the row at that position, counting from the end when negative; positional tier. A position outside the table raises `LTSeqIndexError` during execution. Keeps order and `sort_keys`.
+**`delete`** removes the rows where `where` is TRUE. A row where it is NULL is kept, so `delete(p)` is not `filter(~p)`. An integer argument ([§2.3]), such as an `int` or a NumPy integer, is a position; a `bool` raises `LTSeqTypeError` ([§2.3], [§3.4]). With a position, removes the row at that position, counting from the end when negative; positional tier. A position outside the table raises `LTSeqIndexError` during execution. Keeps order and `sort_keys`.
 
 **`update`** sets the named columns in the rows where `where` is TRUE (or in the row at a position, given as for `delete`; positional tier) and leaves all other rows unchanged, including rows where `where` is NULL. Each value is an expression evaluated against the input row, or a literal.
 
@@ -227,6 +230,7 @@ Previous: [Loading and lazy evaluation (§4–§5)](loading-and-laziness.md) · 
 [§4.6]: loading-and-laziness.md#46-ltseqfrom_dict-and-ltseqfrom_rows
 [§6.1]: #61-schema-and-columns
 [§7.2]: #72-select
+[§7.3]: #73-derive
 [§7.5]: #75-drop
 [§7.6]: #76-distinct
 [§8.1]: expressions.md#81-contexts-and-proxies

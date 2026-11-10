@@ -86,7 +86,7 @@ def asof_join(self, other: LTSeq, on: str | None = None, *,
               left_by: str | Sequence[str] | None = None,
               right_by: str | Sequence[str] | None = None,
               direction: Literal["backward", "forward", "nearest"] = "backward",
-              tolerance: Literal | None = None,
+              tolerance: LiteralValue | None = None,
               allow_exact_matches: bool = True,
               suffix: str = "_right") -> LTSeq
 ```
@@ -121,7 +121,7 @@ All three methods compare whole rows and require the inputs to have exactly the 
 def concat(self, *others: LTSeq) -> LTSeq
 ```
 
-- **Behavior.** The rows of `self`, then the rows of each of `others` in argument order. Duplicates are kept (bag semantics). `t.concat()` returns an equivalent table.
+- **Behavior.** The rows of `self`, then the rows of each of `others` in argument order. Duplicates are kept (bag semantics). `t.concat()` has `t`'s rows, schema and order state, and, as every `concat`, `sort_keys` `None`: it equals `t` except in `sort_keys`.
 - **Order.** Defined when every input's order is defined: each input's rows in their own order, inputs in sequence. `sort_keys` is `None`.
 - **Errors.** Schema mismatch as above (#222): v0.5 never promotes or casts column types in a concatenation; cast explicitly first.
 
@@ -137,7 +137,7 @@ def difference(self, other: LTSeq, /, *, distinct: bool = True) -> LTSeq
 - Keeps left order and left `sort_keys`.
 - When the left order is undefined, "first occurrence" picks no particular row: which of several equal rows ([§18]) represents a value, and which `min(l, r)` or `max(l - r, 0)` occurrences are kept, is unspecified, as for `distinct(keep="any")` (principle 9). Equal rows differ at most in the sign of a zero or the payload of a NaN.
 
-Removed: `union`, an alias of `concat` that kept duplicates (`concat`; SQL's `UNION` is `concat(...).distinct()`); `subtract` and `except_` (`difference`, which deduplicates or counts occurrences; their own behavior, every left row with no equal right row and NULL never equal, is `anti_join(other, on=t.columns)`); `xunion` (`a.difference(b).concat(b.difference(a))`); `is_subset` (`a.difference(b).count() == 0`); `contain(k, *values)`, which returned whether every value occurs (`t.filter(lambda r: r.k.is_in(values)).select("k").distinct(keep="any").count() == len(set(values))`); `align` (a `left` join of a reference table), and the `on=` argument of `intersect`/`except_` (keyed set operations are `semi_join` and `anti_join`).
+Removed: `union`, an alias of `concat` that kept duplicates (`concat`; SQL's `UNION` is `concat(...).distinct(keep="any")`, which runs whatever the inputs' order, while `distinct()` keeps first occurrences and so needs a defined order ([§7.6])); `subtract` and `except_` (`difference`, which deduplicates or counts occurrences; their own behavior, every left row with no equal right row and NULL never equal, is `anti_join(other, on=t.columns)`); `xunion` (`a.difference(b).concat(b.difference(a))`); `is_subset` (`a.difference(b).count() == 0`); `contain(k, *values)`, which returned whether every value occurs (`t.filter(lambda r: r.k.is_in(values)).select("k").distinct(keep="any").count() == len(set(values))`); `align` (a `left` join of a reference table), and the `on=` argument of `intersect`/`except_` (keyed set operations are `semi_join` and `anti_join`).
 
 <!-- v0.5-modular:footer -->
 
@@ -150,6 +150,7 @@ Previous: [Windows and ordered grouping (§10–§11)](windows-and-grouping.md) 
 <!-- v0.5-modular:links -->
 
 [§1.6]: overview.md#16-rule-ownership
+[§7.6]: schema-and-table-operations.md#76-distinct
 [§9]: ordering.md#9-ordering-contract
 [§9.2]: ordering.md#92-sources-and-propagation
 [§12.1]: #121-join

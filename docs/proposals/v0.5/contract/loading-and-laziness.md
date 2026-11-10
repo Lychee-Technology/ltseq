@@ -129,7 +129,8 @@ def from_rows(cls, rows: Sequence[Mapping[str, Any]], /, *,
 
 ```python
 @classmethod
-def range(cls, start: int, stop: int | None = None, step: int = 1, /, *, name: str = "value") -> LTSeq
+def range(cls, start: SupportsIndex, stop: SupportsIndex | None = None, step: SupportsIndex = 1, /, *,
+          name: str = "value") -> LTSeq
 ```
 
 - **Behavior.** The values of Python `range(start, stop, step)` (with `range(stop)` semantics when `stop` is omitted) in one `int64` column called `name`. Lazy: no values are produced before execution.
@@ -145,7 +146,7 @@ def range(cls, start: int, stop: int | None = None, step: int = 1, /, *, name: s
 
 A **plan-building** call returns an `LTSeq`, `NestedTable` or `GroupBy` and performs every check decidable from the schema and order state ([§20.2]). It reads no data. A **terminal** executes the plan and returns Python or Arrow data. An **eager** table-returning call executes some or all of the plan before it returns ([§5.3]).
 
-Execution reads sources as they are at that moment: each execution reads the files the constructor listed ([§4.1]) afresh, Parquet footers and the row counts they record included, so `count()` never answers from an earlier execution's metadata. A source whose schema no longer matches the planned one raises `SchemaMismatchError` during execution; a listed file that disappeared raises `SourceNotFoundError`. Two terminals on one table are two executions and MAY observe different source contents.
+Execution reads sources as they are at that moment: each execution reads the files the constructor listed ([§4.1]) afresh, Parquet footers and the row counts they record included, so `count()` never answers from an earlier execution's metadata. A source whose schema no longer matches the planned one raises `SchemaMismatchError` during execution; a listed file that disappeared raises `SourceNotFoundError`. Two terminals on one table are two executions and MAY observe different source contents. Within one execution, each scan reads the source as it is when that scan opens it, so two scans of one source, as in a self-join or `t.concat(t.filter(...))`, MAY see different contents if the source changes while the execution runs; LTSeq does not take a snapshot across them. Reading from `collect()` ([§5.2]) gives both one snapshot.
 
 ### 5.2 `LTSeq.collect`
 
@@ -173,7 +174,7 @@ This list is complete. Every other method that returns an `LTSeq`, `NestedTable`
 | `fold` | Runs the Python callback over every row | Arbitrary Python cannot run inside the engine ([§10.7]) |
 | `collect` | Executes the whole plan | It is the snapshot API ([§5.2]) |
 
-Terminals: `count`, `len`, `is_sorted_by`, `to_arrow`, `to_pandas`, `to_dicts`, `to_batches`, `iter`, `__arrow_c_stream__`, `write_csv`, `write_parquet`, `show`, `pickle.dumps`, and `NestedTable.count`.
+Terminals: `count`, `is_sorted_by`, `to_arrow`, `to_pandas`, `to_dicts`, `to_batches`, `iter`, `__arrow_c_stream__`, `write_csv`, `write_parquet`, `show`, `pickle.dumps`, and `NestedTable.count`.
 
 <!-- v0.5-modular:footer -->
 

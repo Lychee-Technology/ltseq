@@ -120,10 +120,10 @@ Neither executes. `t.sort("a", descending=True).sort_keys == (SortKey("a", True,
 ### 9.8 Positional selection
 
 ```python
-def head(self, n: int = 10) -> LTSeq
-def tail(self, n: int = 10) -> LTSeq
-def slice(self, offset: int = 0, length: int | None = None) -> LTSeq
-def step(self, n: int, offset: int = 0) -> LTSeq
+def head(self, n: SupportsIndex = 10) -> LTSeq
+def tail(self, n: SupportsIndex = 10) -> LTSeq
+def slice(self, offset: SupportsIndex = 0, length: SupportsIndex | None = None) -> LTSeq
+def step(self, n: SupportsIndex, offset: SupportsIndex = 0) -> LTSeq
 def reverse(self) -> LTSeq
 ```
 
@@ -142,7 +142,7 @@ def reverse(self) -> LTSeq
 ### 9.9 `with_row_index`
 
 ```python
-def with_row_index(self, name: str = "index", *, offset: int = 0) -> LTSeq
+def with_row_index(self, name: str = "index", *, offset: SupportsIndex = 0) -> LTSeq
 ```
 
 - **Behavior.** Adds an `int64` column holding each row's 0-based position plus `offset`, as the first column.
