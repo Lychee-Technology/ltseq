@@ -92,6 +92,11 @@ fn extract_partition_by(
 /// functions — calling `.window_frame()` or `.partition_by()` on `Expr::AggregateFunction`
 /// returns an empty builder that produces errors on `.build()`. Instead, we manually
 /// extract the aggregate UDF and args, then construct `Expr::WindowFunction` directly.
+///
+/// The window's aggregate claims no order of its output: DataFusion derives
+/// orderings from an aggregate's set monotonicity that do not hold for
+/// LTSeq's rolling and running windows, and drops a sort by the window
+/// column on them (#354, `no_order_claim.rs`).
 pub(crate) fn aggregate_to_window(
     agg_expr: Expr,
     partition_by: Vec<Expr>,
@@ -101,7 +106,9 @@ pub(crate) fn aggregate_to_window(
     match agg_expr {
         Expr::AggregateFunction(agg_func) => {
             Ok(Expr::WindowFunction(Box::new(WindowFunctionExpr {
-                fun: WindowFunctionDefinition::AggregateUDF(agg_func.func),
+                fun: WindowFunctionDefinition::AggregateUDF(
+                    super::no_order_claim::claiming_no_order(agg_func.func),
+                ),
                 params: WindowFunctionParams {
                     args: agg_func.params.args,
                     partition_by,

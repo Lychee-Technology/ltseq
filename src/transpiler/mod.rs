@@ -27,6 +27,7 @@ mod literal_policy;
 mod literals;
 pub(crate) mod min_max;
 pub(crate) mod narrow_decimals;
+mod no_order_claim;
 mod opaque_cast;
 pub(crate) mod probe;
 mod resolve;
