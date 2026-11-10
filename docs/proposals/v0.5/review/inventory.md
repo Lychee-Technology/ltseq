@@ -215,7 +215,7 @@ This inventory covers every public name in `docs/api.md` and in the package expo
 | `avg_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:149) | MERGE | `Expr.mean(where=)` ([§14.2]) | Same as `count_if`. |
 | `min_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:168) | MERGE | `Expr.min(where=)` ([§14.2]) | Same as `count_if`. |
 | `max_if(pred, col)` | (py-ltseq/ltseq/expr/base.py:187) | MERGE | `Expr.max(where=)` ([§14.2]) | Same as `count_if`. |
-| `skew(col)` | Population skewness (py-ltseq/ltseq/expr/base.py:406; src/ops/aggregation.rs:292). | REMOVE | — | Removed by [§14.2]. Use `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="k")).group_by("k").agg(skew=lambda g: (g.d ** 3).mean() / (g.d ** 2).mean() ** 1.5)`. |
+| `skew(col)` | Population skewness (py-ltseq/ltseq/expr/base.py:406; src/ops/aggregation.rs:292). | REMOVE | — | Removed by [§14.2]. Use `t.derive(d=lambda r: r.x - r.x.mean().over(partition_by="k")).derive(z=lambda r: r.d / r.d.abs().max().over(partition_by="k")).group_by("k").agg(skew=lambda g: (g.z ** 3).mean() / (g.z ** 2).mean() ** 1.5)` ([§14.2] states its accuracy). |
 | `corr(a, b)` | Pearson correlation (py-ltseq/ltseq/expr/base.py:412). | KEEP | `corr()` ([§14.2]) | Unchanged. `where=` is added. |
 | `covar(a, b)` | Covariance (py-ltseq/ltseq/expr/base.py:418). | RENAME | `cov()` ([§14.2]) | Removed by [§14.2] in favor of `cov`. |
 | `concat_agg(col, delimiter=",")` | Unordered string join (py-ltseq/ltseq/expr/base.py:424). | REDESIGN | `Expr.string_agg()` ([§14.2]) | Becomes a method, joined in table order (positional tier). |
