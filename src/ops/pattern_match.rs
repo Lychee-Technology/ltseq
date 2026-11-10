@@ -5,12 +5,12 @@
 //! in sequence.
 //!
 //! The algorithm:
-//! 1. Column pruning: project only columns referenced in predicates + partition_by
-//! 2. Collect (with sort-preserving merge for pre-sorted multi-row-group Parquet)
-//! 3. Evaluate each step predicate as a BooleanArray (vectorized)
-//! 4. Single-pass scan: for each step1 match at row i, check step2 at i+1, step3 at i+2, etc.
+//! 1. Execute the table's plan once, in table order, keeping every column
+//!    (`search_pattern_count` prunes to the columns its steps read instead)
+//! 2. Evaluate each step predicate as a BooleanArray (vectorized, per batch)
+//! 3. Single-pass scan: for each step1 match at row i, check step2 at i+1, step3 at i+2, etc.
 //!    Skip if any row crosses a partition boundary.
-//! 5. Use arrow::compute::take() to extract matching rows from the FULL table.
+//! 4. Take the matching rows from the batches of that same execution.
 //!
 //! This avoids computing LEAD/shift for ALL rows — instead, only ~0.1% of rows
 //! (those matching step 1) trigger any further evaluation.
@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{
     Array, ArrayAccessor, ArrayIter, ArrayRef, BooleanArray, Int64Array, LargeStringArray,
-    RecordBatch, StringArray, StringViewArray, UInt64Array,
+    RecordBatch, RecordBatchOptions, StringArray, StringViewArray, UInt64Array,
 };
-use datafusion::arrow::compute::{concat_batches, take};
+use datafusion::arrow::compute::{concat, concat_batches, interleave};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::*;
 
@@ -743,13 +743,23 @@ fn build_partition_ids(boundaries: &BooleanArray) -> Vec<u64> {
     ids
 }
 
-/// Main entry point: streaming pattern matching.
+/// Main entry point: pattern matching over one execution of the table.
 ///
 /// Given a sorted LTSeqTable, N step predicates, and an optional partition_by column,
 /// returns a new LTSeqTable containing only the rows where the sequential pattern matches.
 ///
 /// The returned table contains the rows where step 1 matched (i.e., row index i
 /// where step1(i), step2(i+1), ..., stepN(i+N-1) all matched within the same partition).
+///
+/// The plan runs once, in table order (`ordered_df`), and the matching rows
+/// are taken from the batches of that same execution (#149). They used to
+/// come from a second execution, which scanned the source and ran the
+/// upstream plan again, and named rows by their position in the first one:
+/// rows with equal sort keys may come back in another order on another run,
+/// so a position could name a row the steps never matched. The predicates
+/// are evaluated batch by batch, and only their masks and the partition
+/// column are joined across batches, so the full rows are never copied into
+/// one batch: peak memory is the table plus the matching rows.
 ///
 /// Runs with the GIL released: `lib.rs::search_pattern` deserializes the
 /// predicates under the GIL and wraps this call in `gil::detached`.
@@ -758,7 +768,7 @@ pub fn search_pattern_impl(
     py_exprs: &[PyExpr],
     partition_by: Option<String>,
 ) -> Result<LTSeqTable, LtseqError> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let schema = table.require_schema()?;
     let num_steps = py_exprs.len();
 
     if num_steps == 0 {
@@ -767,7 +777,8 @@ pub fn search_pattern_impl(
         ));
     }
 
-    // 1. Extract referenced columns for projection pruning
+    // 1. A pattern reads at least one column of the table: one its steps or
+    //    partition_by name, or a sort key that orders them.
     let mut referenced_cols = HashSet::new();
     for expr in py_exprs {
         extract_referenced_columns(expr, &mut referenced_cols);
@@ -775,69 +786,28 @@ pub fn search_pattern_impl(
     if let Some(ref part_col) = partition_by {
         referenced_cols.insert(part_col.clone());
     }
-
-    // 3. Project only needed columns, add sort, collect
-    let sort_keys = &table.sort_specs;
-    // Also ensure sort key columns are included
-    for sk in sort_keys.iter() {
+    for sk in table.sort_specs.iter() {
         referenced_cols.insert(sk.column.clone());
     }
-
-    let projected_df = {
-        let select_exprs: Vec<Expr> = referenced_cols
-            .iter()
-            .filter(|col_name| {
-                schema
-                    .fields()
-                    .iter()
-                    .any(|f| f.name() == col_name.as_str())
-            })
-            .map(|col_name| ident(col_name.as_str()))
-            .collect();
-
-        if select_exprs.is_empty() {
-            return Err(LtseqError::Validation(
-                "No valid columns found in step predicates".into(),
-            ));
-        }
-
-        let proj = (**df)
-            .clone()
-            .select(select_exprs)
-            .map_err(|e| {
-                LtseqError::Runtime(format!("Projection failed: {}", e))
-            })?;
-
-        // Add sort to ensure correct order from multi-row-group Parquet
-        if !sort_keys.is_empty() {
-            let sort_exprs = build_sort_exprs(sort_keys);
-            proj.sort(sort_exprs).map_err(|e| {
-                LtseqError::Runtime(format!("Sort failed: {}", e))
-            })?
-        } else {
-            proj
-        }
-    };
-
-    // 4. Collect into a single RecordBatch
-    let batches = RUNTIME
-        .block_on(projected_df.collect())
-        .map_err(LtseqError::collect)?;
-
-    if batches.is_empty() {
-        return LTSeqTable::empty(
-            Arc::clone(&table.session),
-            Arc::clone(schema),
-            table.sort_specs.clone(),
-        );
+    if !schema
+        .fields()
+        .iter()
+        .any(|f| referenced_cols.contains(f.name()))
+    {
+        return Err(LtseqError::Validation(
+            "No valid columns found in step predicates".into(),
+        ));
     }
 
-    let batch_schema = batches[0].schema();
-    let combined = concat_batches(&batch_schema, &batches).map_err(|e| {
-        LtseqError::Runtime(format!("concat_batches failed: {}", e))
-    })?;
+    // 2. Execute the plan once, in table order, keeping every column
+    let batches: Vec<RecordBatch> = RUNTIME
+        .block_on(table.ordered_df()?.collect())
+        .map_err(LtseqError::collect)?
+        .into_iter()
+        .filter(|batch| batch.num_rows() > 0)
+        .collect();
 
-    let n = combined.num_rows();
+    let n: usize = batches.iter().map(RecordBatch::num_rows).sum();
     if n < num_steps {
         return LTSeqTable::empty(
             Arc::clone(&table.session),
@@ -846,84 +816,67 @@ pub fn search_pattern_impl(
         );
     }
 
-    // 5. Build column name → index mapping
-    let mut name_to_idx = std::collections::HashMap::new();
-    for (i, field) in combined.schema().fields().iter().enumerate() {
-        name_to_idx.insert(field.name().clone(), i);
-    }
+    // 3. Build column name → index mapping
+    let batch_schema = batches[0].schema();
+    let name_to_idx: std::collections::HashMap<String, usize> = batch_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, field)| (field.name().clone(), i))
+        .collect();
 
-    // 6. Compute partition boundaries if needed
+    // 4. Compute partition boundaries if needed, over the partition column
+    //    joined across batches
     let partition_ids = if let Some(ref part_col) = partition_by {
-        let idx = name_to_idx.get(part_col).ok_or_else(|| {
+        let idx = *name_to_idx.get(part_col).ok_or_else(|| {
             LtseqError::Validation(format!(
                 "partition_by column '{}' not found",
                 part_col
             ))
         })?;
-        let boundaries = compute_partition_boundaries(combined.column(*idx))
-            .map_err(LtseqError::Runtime)?;
+        let column = concat_column(&batches, idx)?;
+        let boundaries =
+            compute_partition_boundaries(&column).map_err(LtseqError::Runtime)?;
         Some(build_partition_ids(&boundaries))
     } else {
         None
     };
 
-    // 7. Evaluate step 1 predicate vectorized (this is the fast rejection filter)
-    let step1_mask = eval_predicate(&py_exprs[0], &combined, &name_to_idx)
-        .map_err(LtseqError::Runtime)?;
+    // 5. Evaluate every step predicate (vectorized, batch by batch), step 1
+    //    first: it is the fast rejection filter
+    let masks: Vec<BooleanArray> = py_exprs
+        .iter()
+        .map(|expr| step_mask(expr, &batches, &name_to_idx))
+        .collect::<Result<_, _>>()?;
+    let (step1_mask, step_masks) = masks.split_first().expect("at least one step");
 
-    // 8. Single-pass scan
-    let max_start = n.saturating_sub(num_steps - 1);
-    let mut matching_indices: Vec<u64> = Vec::new();
-
-    if num_steps == 1 {
-        // Special case: single predicate = simple filter
-        for i in 0..n {
-            if step1_mask.is_valid(i) && step1_mask.value(i) {
-                matching_indices.push(i as u64);
-            }
+    // 6. Single-pass scan
+    let max_start = n - (num_steps - 1);
+    let mut matching_indices: Vec<usize> = Vec::new();
+    for i in 0..max_start {
+        // Fast rejection: check step 1
+        if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+            continue;
         }
-    } else {
-        // Pre-evaluate remaining step predicates (vectorized)
-        // We evaluate ALL steps upfront since vectorized evaluation is fast
-        // and avoids repeated per-row evaluation.
-        let step_masks: Vec<BooleanArray> = py_exprs[1..]
-            .iter()
-            .map(|expr| {
-                eval_predicate(expr, &combined, &name_to_idx)
-                    .map_err(LtseqError::Runtime)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
-        for i in 0..max_start {
-            // Fast rejection: check step 1
-            if !step1_mask.is_valid(i) || !step1_mask.value(i) {
+        // Check partition boundary: all steps must be in same partition
+        if let Some(ref pids) = partition_ids {
+            if pids[i] != pids[i + num_steps - 1] {
                 continue;
             }
+        }
 
-            // Check partition boundary: all steps must be in same partition
-            if let Some(ref pids) = partition_ids {
-                if pids[i] != pids[i + num_steps - 1] {
-                    continue;
-                }
-            }
-
-            // Check remaining steps
-            let mut all_match = true;
-            for (step_offset, mask) in step_masks.iter().enumerate() {
-                let row = i + step_offset + 1;
-                if !mask.is_valid(row) || !mask.value(row) {
-                    all_match = false;
-                    break;
-                }
-            }
-
-            if all_match {
-                matching_indices.push(i as u64);
-            }
+        // Check remaining steps
+        let all_match = step_masks.iter().enumerate().all(|(step_offset, mask)| {
+            let row = i + step_offset + 1;
+            mask.is_valid(row) && mask.value(row)
+        });
+        if all_match {
+            matching_indices.push(i);
         }
     }
 
-    // 9. If no matches, return empty table with original schema
+    // 7. If no matches, return empty table with original schema
     if matching_indices.is_empty() {
         return LTSeqTable::empty(
             Arc::clone(&table.session),
@@ -932,69 +885,80 @@ pub fn search_pattern_impl(
         );
     }
 
-    // 10. Collect FULL table (all columns) and take matching rows
-    //     For count()-only usage, we can optimize by just returning the count.
-    //     But for generality, we collect the full table.
-    //
-    //     Optimization: if the caller only needs count(), they don't need full rows.
-    //     We return a lightweight table with just the indices to enable count().
-    //     The Python layer calls .count() on the result, which triggers len().
-    //
-    //     Actually, let's return the full rows for correctness.
-    //     The user might want to inspect the matching rows.
-    //
-    //     For the benchmark, the bottleneck is the scan, not the take.
-    //     With only ~1600 matches out of 1M rows, take is trivial.
-
-    // Collect full table with sort
-    let full_df = if !sort_keys.is_empty() {
-        let sort_exprs = build_sort_exprs(sort_keys);
-        (**df).clone().sort(sort_exprs).map_err(|e| {
-            LtseqError::Runtime(format!("Full table sort failed: {}", e))
-        })?
-    } else {
-        (**df).clone()
-    };
-
-    let full_batches = RUNTIME
-        .block_on(full_df.collect())
-        .map_err(LtseqError::collect)?;
-
-    if full_batches.is_empty() {
-        return LTSeqTable::empty(
-            Arc::clone(&table.session),
-            Arc::clone(schema),
-            table.sort_specs.clone(),
-        );
-    }
-
-    let full_schema = full_batches[0].schema();
-    let full_combined = concat_batches(&full_schema, &full_batches).map_err(|e| {
-        LtseqError::Runtime(format!("Full concat_batches failed: {}", e))
-    })?;
-
-    // Take matching rows
-    let indices = UInt64Array::from(matching_indices);
-    let result_columns: Vec<ArrayRef> = full_combined
-        .columns()
-        .iter()
-        .map(|col_arr| {
-            take(col_arr, &indices, None).map_err(|e| {
-                LtseqError::Runtime(format!("take failed: {}", e))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let result_batch = RecordBatch::try_new(full_schema.clone(), result_columns).map_err(|e| {
-        LtseqError::Runtime(format!("RecordBatch creation failed: {}", e))
-    })?;
+    // 8. Take the matching rows, every column, from the batches of this
+    //    execution
+    let result_batch = take_rows(&batches, &matching_indices)?;
 
     LTSeqTable::from_batches(
         Arc::clone(&table.session),
         vec![result_batch],
-        full_schema,
+        batch_schema,
         table.sort_specs.clone(),
     )
+}
+
+/// A column of every batch, joined into one array.
+fn concat_column(batches: &[RecordBatch], idx: usize) -> Result<ArrayRef, LtseqError> {
+    if let [batch] = batches {
+        return Ok(Arc::clone(batch.column(idx)));
+    }
+    let parts: Vec<&dyn Array> = batches.iter().map(|b| b.column(idx).as_ref()).collect();
+    concat(&parts).map_err(|e| LtseqError::Runtime(format!("concat failed: {}", e)))
+}
+
+/// A step predicate's mask over the rows of all `batches`, in order: the
+/// predicate is evaluated on each batch, and only the masks are joined.
+fn step_mask(
+    expr: &PyExpr,
+    batches: &[RecordBatch],
+    name_to_idx: &std::collections::HashMap<String, usize>,
+) -> Result<BooleanArray, LtseqError> {
+    let masks = batches
+        .iter()
+        .map(|batch| eval_predicate(expr, batch, name_to_idx).map_err(LtseqError::Runtime))
+        .collect::<Result<Vec<_>, _>>()?;
+    if masks.len() == 1 {
+        return Ok(masks.into_iter().next().expect("one mask"));
+    }
+    let parts: Vec<&dyn Array> = masks.iter().map(|m| m as &dyn Array).collect();
+    let joined = concat(&parts)
+        .map_err(|e| LtseqError::Runtime(format!("concat failed: {}", e)))?;
+    Ok(joined
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("masks are boolean")
+        .clone())
+}
+
+/// The rows at ascending positions `rows` of the batches read as one
+/// sequence, every column, as one batch. Each row is taken from the batch
+/// that holds it; the batches are not joined first.
+fn take_rows(batches: &[RecordBatch], rows: &[usize]) -> Result<RecordBatch, LtseqError> {
+    let mut positions = Vec::with_capacity(rows.len());
+    let (mut batch_idx, mut batch_start) = (0, 0);
+    for &row in rows {
+        while row >= batch_start + batches[batch_idx].num_rows() {
+            batch_start += batches[batch_idx].num_rows();
+            batch_idx += 1;
+        }
+        positions.push((batch_idx, row - batch_start));
+    }
+
+    let schema = batches[0].schema();
+    let columns = (0..schema.fields().len())
+        .map(|c| {
+            let parts: Vec<&dyn Array> = batches.iter().map(|b| b.column(c).as_ref()).collect();
+            interleave(&parts, &positions)
+                .map_err(|e| LtseqError::Runtime(format!("take failed: {}", e)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    RecordBatch::try_new_with_options(
+        schema,
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(rows.len())),
+    )
+    .map_err(|e| LtseqError::Runtime(format!("RecordBatch creation failed: {}", e)))
 }
 
 /// Optimized version: return just the count of matching patterns.
@@ -1552,5 +1516,175 @@ mod tests {
         let dict: ArrayRef =
             Arc::new(DictionaryArray::try_new(dict_keys, f64s).expect("dictionary"));
         assert_eq!(boundaries(dict), expected, "dictionary of float64");
+    }
+
+    /// A source that counts how often its plan is executed.
+    #[derive(Debug)]
+    struct CountingSource {
+        schema: datafusion::arrow::datatypes::SchemaRef,
+        batches: Vec<RecordBatch>,
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl datafusion::physical_plan::streaming::PartitionStream for CountingSource {
+        fn schema(&self) -> &datafusion::arrow::datatypes::SchemaRef {
+            &self.schema
+        }
+
+        fn execute(
+            &self,
+            _: Arc<datafusion::execution::TaskContext>,
+        ) -> datafusion::execution::SendableRecordBatchStream {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let rows = self.batches.clone().into_iter().map(Ok);
+            Box::pin(
+                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                    Arc::clone(&self.schema),
+                    futures_util::stream::iter(rows),
+                ),
+            )
+        }
+    }
+
+    /// Rows `(k, p, flag, id)`, read through a [`CountingSource`] as one
+    /// batch per inner slice, by a session that emits batches of 3 rows.
+    fn counting_table(
+        batches: &[&[(i64, i64, i64, i64)]],
+        sort_by_k: bool,
+    ) -> (LTSeqTable, Arc<std::sync::atomic::AtomicUsize>) {
+        use datafusion::catalog::streaming::StreamingTable;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, false),
+            Field::new("p", DataType::Int64, false),
+            Field::new("flag", DataType::Int64, false),
+            Field::new("id", DataType::Int64, false),
+        ]));
+        let batches: Vec<RecordBatch> = batches
+            .iter()
+            .map(|rows| {
+                let column = |f: fn(&(i64, i64, i64, i64)) -> i64| -> ArrayRef {
+                    Arc::new(Int64Array::from(rows.iter().map(f).collect::<Vec<_>>()))
+                };
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![
+                        column(|r| r.0),
+                        column(|r| r.1),
+                        column(|r| r.2),
+                        column(|r| r.3),
+                    ],
+                )
+                .expect("batch")
+            })
+            .collect();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = StreamingTable::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(CountingSource {
+                schema: Arc::clone(&schema),
+                batches,
+                executions: Arc::clone(&executions),
+            })],
+        )
+        .expect("source");
+        let session = Arc::new(SessionContext::new_with_config(
+            SessionConfig::new()
+                .with_batch_size(3)
+                .with_target_partitions(2),
+        ));
+        let df = session.read_table(Arc::new(source)).expect("read");
+        let sort_specs = if sort_by_k {
+            vec![crate::SortSpec {
+                column: "k".into(),
+                descending: false,
+                nulls_first: false,
+            }]
+        } else {
+            Vec::new()
+        };
+        let table = LTSeqTable::from_df_with_schema(session, df, schema, sort_specs, None);
+        (table, executions)
+    }
+
+    fn column_values(table: &LTSeqTable, name: &str) -> Vec<i64> {
+        let batches = RUNTIME
+            .block_on(table.ordered_df().expect("plan").collect())
+            .expect("collect");
+        batches
+            .iter()
+            .flat_map(|b| {
+                let idx = b.schema().index_of(name).expect("column");
+                let arr = b
+                    .column(idx)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("int64")
+                    .clone();
+                (0..arr.len()).map(move |i| arr.value(i))
+            })
+            .collect()
+    }
+
+    fn flag_is(value: i64) -> PyExpr {
+        PyExpr::BinOp {
+            op: "Eq".into(),
+            left: Box::new(PyExpr::Column("flag".into())),
+            right: Box::new(PyExpr::Literal(LiteralValue::Int64(value))),
+        }
+    }
+
+    /// `search_pattern` executes the table's plan once, and takes every
+    /// column of its matches, in table order, from the batches of that
+    /// execution, matches across batch and partition boundaries included
+    /// (#149).
+    #[test]
+    fn search_pattern_executes_the_plan_once() {
+        // In k order: k, p, flag, id. Steps flag == 1, flag == 2 match at
+        // k = 0, 3 (across p 1 → 2 unless partitioned), 5 and 8.
+        let rows: Vec<(i64, i64, i64, i64)> = [
+            (1, 1),
+            (1, 2),
+            (1, 0),
+            (1, 1),
+            (2, 2),
+            (2, 1),
+            (2, 2),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(k, &(p, flag))| (k as i64, p, flag, 100 + k as i64))
+        .collect();
+        let row = |k: usize| rows[k];
+        let steps = [flag_is(1), flag_is(2)];
+
+        // Out of order in the source, so the plan sorts.
+        let shuffled: [&[_]; 3] = [
+            &[row(5), row(9), row(0)],
+            &[row(3), row(8), row(1), row(6)],
+            &[row(2), row(7), row(4)],
+        ];
+        for (partition_by, expected) in
+            [(None, vec![100, 103, 105, 108]), (Some("p"), vec![100, 105, 108])]
+        {
+            let (table, executions) = counting_table(&shuffled, true);
+            let result =
+                search_pattern_impl(&table, &steps, partition_by.map(String::from))
+                    .expect("search_pattern");
+            assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(column_values(&result, "id"), expected, "{partition_by:?}");
+            assert_eq!(column_values(&result, "flag"), vec![1; expected.len()]);
+        }
+
+        // In table order in the source, split so that matches cross batches.
+        let in_order: [&[_]; 3] = [&rows[0..4], &rows[4..6], &rows[6..10]];
+        let (table, executions) = counting_table(&in_order, false);
+        let result = search_pattern_impl(&table, &steps, Some("p".into())).expect("search");
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(column_values(&result, "id"), vec![100, 105, 108]);
+        assert_eq!(column_values(&result, "k"), vec![0, 5, 8]);
     }
 }
