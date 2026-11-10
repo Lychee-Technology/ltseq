@@ -7,8 +7,9 @@ The rewrite must:
 - be independent of source layout (several lambdas on one line, f-strings,
   triple-quoted strings, multi-line lambdas, nested lambdas);
 - keep Python semantics for operands that are not expressions;
-- locate lambdas defined at module scope and in modules that use
-  `from __future__` imports, not only lambdas nested in functions;
+- locate lambdas defined at module scope, directly in a class body (on every
+  supported Python version, #254) and in modules that use `from __future__`
+  imports, not only lambdas nested in functions;
 - never let the injected helper shadow a user name;
 - fail closed with a guidance TypeError (never a NameError, never a silent
   wrong or partial result) when a null identity check cannot be rewritten:
@@ -52,6 +53,13 @@ MODULE_DERIVE = lambda r: {"missing": r.b is None}  # noqa: E731
 __ltseq_null_check__ = 5
 assert _NULL_CHECK_HELPER == "__ltseq_null_check__"
 MODULE_PRED_WITH_HELPER_NAME = lambda r: (r.b is None) & (__ltseq_null_check__ > 0)  # noqa: E731
+
+
+# A lambda defined directly in a class body at module scope: no CO_NESTED, and
+# on Python 3.14+ CO_METHOD (#254).
+class ModulePreds:
+    missing = staticmethod(lambda r: r.b is None)
+    present_above = staticmethod(lambda r: (r.b is not None) & (r.a > MODULE_THRESHOLD))
 
 
 # Helpers that lambdas call by name (#185). LTSeq never rewrites them, so on
@@ -287,6 +295,25 @@ class TestCompilationContext:
             missing = staticmethod(lambda r: r.b is None)
 
         assert a_values(t.filter(Preds.missing)) == [1, 3]
+
+    def test_class_body_lambda_at_module_scope(self, t):
+        assert a_values(t.filter(ModulePreds.missing)) == [1, 3]
+        assert a_values(t.filter(ModulePreds.present_above)) == [4]
+
+    def test_class_body_lambda_with_closure(self, t):
+        threshold = 2
+
+        class Preds:
+            missing_above = staticmethod(lambda r: (r.b is None) & (r.a > threshold))
+
+        assert a_values(t.filter(Preds.missing_above)) == [3]
+
+    def test_class_body_lambda_in_derive(self, t):
+        class Exprs:
+            missing = staticmethod(lambda r: {"missing": r.b is None})
+
+        out = rows(t.derive(Exprs.missing))
+        assert [r["missing"] for r in out] == [True, False, True, False]
 
     def test_private_name_in_class_method(self, t):
         class Filters:
@@ -572,6 +599,30 @@ class TestFallbacks:
             os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
             with pytest.raises(TypeError, match=r"could not rewrite"):
                 t.filter(mod.PRED)
+        finally:
+            del sys.modules[mod.__name__]
+
+    def test_stale_source_of_class_body_lambda_fails_closed(self, t, tmp_path):
+        # Ignoring CO_METHOD and CO_NESTED must not let a different lambda on
+        # the same line of a class body pass for the loaded one (#254).
+        mod = _import_module_from_source(
+            tmp_path,
+            "ltseq_none_check_stale_class_mod",
+            """
+            class Preds:
+                PRED = staticmethod(lambda r: (r.b is not None) and (r.a > 1))
+            """,
+        )
+        try:
+            path = tmp_path / "ltseq_none_check_stale_class_mod.py"
+            path.write_text(
+                "\nclass Preds:\n"
+                "    PRED = staticmethod(lambda r: (r.b is None) or (r.a > 1))\n"
+            )
+            stat = path.stat()
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+            with pytest.raises(TypeError, match=r"could not rewrite"):
+                t.filter(mod.Preds.PRED)
         finally:
             del sys.modules[mod.__name__]
 

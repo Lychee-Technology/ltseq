@@ -179,9 +179,9 @@ def _compile_lambda_in_scope(
     a global lookup. The compilation context otherwise matches the original:
     the ``from __future__`` features in effect for ``context`` are applied, and
     the wrapper is placed inside a class of the same name as the lambda's
-    enclosing class so private names mangle identically. Only ``CO_NESTED``
-    can differ from the original (see :func:`_locate_lambda`). The node is not
-    mutated.
+    enclosing class so private names mangle identically. Only the flags in
+    :data:`_SCOPE_FLAGS` can differ from the original (see
+    :func:`_locate_lambda`). The node is not mutated.
     """
     node = site.node
     wrapper = ast.Lambda(
@@ -216,8 +216,16 @@ def _compile_lambda_in_scope(
     return _nested_code(compiled, depth)
 
 
-def _without_nesting_flag(code: types.CodeType) -> types.CodeType:
-    return code.replace(co_flags=code.co_flags & ~inspect.CO_NESTED)
+# ``co_flags`` bits that record where a function was defined rather than what
+# it is. A candidate lambda is compiled inside a wrapper function, so it always
+# has ``CO_NESTED`` and never has ``CO_METHOD`` (Python 3.14+: set on a function
+# defined directly in a class body), whatever the original had. The bytecode
+# and every other field of the code object are still compared.
+_SCOPE_FLAGS = inspect.CO_NESTED | getattr(inspect, "CO_METHOD", 0)
+
+
+def _without_scope_flags(code: types.CodeType) -> types.CodeType:
+    return code.replace(co_flags=code.co_flags & ~_SCOPE_FLAGS)
 
 
 def _locate_lambda(fn: types.FunctionType, index: _ModuleIndex) -> _LambdaSite | None:
@@ -227,14 +235,16 @@ def _locate_lambda(fn: types.FunctionType, index: _ModuleIndex) -> _LambdaSite |
     Byte-for-byte identity is what makes this independent of how many lambdas
     share a line, of string literals on the line, and of line continuations.
     Candidates are always compiled inside a wrapper function, which sets
-    ``CO_NESTED``; a lambda defined at module or class-body scope lacks that
-    flag, so it is ignored on both sides.
+    ``CO_NESTED`` and, on Python 3.14+, clears ``CO_METHOD``. A lambda defined
+    at module or class-body scope lacks ``CO_NESTED``, and one defined directly
+    in a class body has ``CO_METHOD``, so both flags (:data:`_SCOPE_FLAGS`) are
+    ignored on both sides. Every other field still has to match.
     """
     code = fn.__code__
-    target = _without_nesting_flag(code)
+    target = _without_scope_flags(code)
     for site in index.get(code.co_firstlineno, ()):
         compiled = _compile_lambda_in_scope(site, code.co_freevars, code)
-        if _without_nesting_flag(compiled) == target:
+        if _without_scope_flags(compiled) == target:
             return site
     return None
 

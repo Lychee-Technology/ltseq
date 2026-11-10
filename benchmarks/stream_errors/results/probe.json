@@ -1,0 +1,1712 @@
+{
+ "versions": {
+  "python": "3.13.18",
+  "pyarrow": "26.0.1",
+  "platform": "Linux-7.0.14-26-pve-x86_64-with-glibc2.41",
+  "duckdb": "2.0.0",
+  "polars": "2.1.0",
+  "cython": "3.3.1"
+ },
+ "partitions": 4,
+ "cells": {
+  "ArithmeticOverflowError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "ArithmeticOverflowError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "ArithmeticOverflowError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: ArithmeticOverflowError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ArithmeticOverflowError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ArithmeticOverflowError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "CastError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.CastError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "CastError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "CastError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.CastError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: CastError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: CastError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: CastError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.CastError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.CastError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "OrderViolationError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.OrderViolationError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "OrderViolationError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "OrderViolationError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.OrderViolationError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: OrderViolationError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: OrderViolationError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: OrderViolationError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.OrderViolationError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.OrderViolationError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.OrderViolationError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "SourceNotFoundError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.SourceNotFoundError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "SourceNotFoundError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "SourceNotFoundError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.SourceNotFoundError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: SourceNotFoundError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: SourceNotFoundError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: SourceNotFoundError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.SourceNotFoundError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.SourceNotFoundError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "LTSeqIOError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.LTSeqIOError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "LTSeqIOError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "LTSeqIOError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.LTSeqIOError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: LTSeqIOError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: LTSeqIOError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: LTSeqIOError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "builtins.OSError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.LTSeqIOError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: IOError: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.LTSeqIOError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.LTSeqIOError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "ExecutionError (injected)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "Unknown error: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ExecutionError: injected after 3 batches\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "ExecutionError: injected after 3 batches"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 3,
+    "message": "ExecutionError: injected after 3 batches"
+   },
+   "pa.table(t) today": {
+    "applicable": false
+   },
+   "from_stream(t) today": {
+    "applicable": false
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Unknown error: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ExecutionError: injected after 3 batches\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: ExecutionError: injected after 3 batches"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ExecutionError: injected after 3 batches"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ExecutionError: injected after 3 batches"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 3,
+    "message": "injected after 3 batches"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Unknown error: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ExecutionError: injected after 3 batches\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Unknown error: injected after 3 batches. Detail: Python exception: ltseq._stream_spike.ExecutionError: injected after 3 batches\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ExecutionError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "injected after 3 batches"
+   }
+  },
+  "integer // 0 (real)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "division by zero"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "division by zero"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "division by zero"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "Unknown error: division by zero. Detail: Python exception: ltseq._stream_spike.DivisionByZeroError: division by zero\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "DivisionByZeroError: division by zero"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "DivisionByZeroError: division by zero"
+   },
+   "pa.table(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "External error: Arrow error: Divide by zero error"
+   },
+   "from_stream(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "External error: Arrow error: Divide by zero error"
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Unknown error: division by zero. Detail: Python exception: ltseq._stream_spike.DivisionByZeroError: division by zero\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: DivisionByZeroError: division by zero"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "division by zero"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: DivisionByZeroError: division by zero"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: DivisionByZeroError: division by zero"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "division by zero"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "division by zero"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "division by zero"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Unknown error: division by zero. Detail: Python exception: ltseq._stream_spike.DivisionByZeroError: division by zero\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Unknown error: division by zero. Detail: Python exception: ltseq._stream_spike.DivisionByZeroError: division by zero\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.DivisionByZeroError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "division by zero"
+   }
+  },
+  "INT64_MIN // -1 (real)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "Invalid: Overflow happened on: -9223372036854775808 / -1. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "pa.table(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "External error: Arrow error: Arithmetic overflow: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "from_stream(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "External error: Arrow error: Arithmetic overflow: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: Overflow happened on: -9223372036854775808 / -1. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 6,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid: Overflow happened on: -9223372036854775808 / -1. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: Overflow happened on: -9223372036854775808 / -1. Detail: Python exception: ltseq._stream_spike.ArithmeticOverflowError: Overflow happened on: -9223372036854775808 / -1\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.ArithmeticOverflowError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Overflow happened on: -9223372036854775808 / -1"
+   }
+  },
+  "cast of 'a' to int64 (real)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 6,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "Invalid: Cannot cast string 'a' to value of Int64 type. Detail: Python exception: ltseq._stream_spike.CastError: Cannot cast string 'a' to value of Int64 type\n"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "CastError: Cannot cast string 'a' to value of Int64 type"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "CastError: Cannot cast string 'a' to value of Int64 type"
+   },
+   "pa.table(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "External error: Arrow error: Cast error: Cannot cast string 'a' to value of Int64 type"
+   },
+   "from_stream(t) today": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 5,
+    "message": "External error: Arrow error: Cast error: Cannot cast string 'a' to value of Int64 type"
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: Cannot cast string 'a' to value of Int64 type. Detail: Python exception: ltseq._stream_spike.CastError: Cannot cast string 'a' to value of Int64 type\n"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'stream' failed: CastError: Cannot cast string 'a' to value of Int64 type"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: CastError: Cannot cast string 'a' to value of Int64 type"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "polars.exceptions.ComputeError",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "got external error: CastError: Cannot cast string 'a' to value of Int64 type"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 5,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": 6,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "pyarrow.lib.ArrowInvalid",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid: Cannot cast string 'a' to value of Int64 type. Detail: Python exception: ltseq._stream_spike.CastError: Cannot cast string 'a' to value of Int64 type\n"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the stream of the Python object 'reader' failed: Invalid: Cannot cast string 'a' to value of Int64 type. Detail: Python exception: ltseq._stream_spike.CastError: Cannot cast string 'a' to value of Int64 type\n"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.CastError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Cannot cast string 'a' to value of Int64 type"
+   }
+  },
+  "file deleted after read_parquet (real, raises at the call)": {
+   "read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "from_stream(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pa.table(s)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "from_stream(s)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pa.table(t) today": {
+    "applicable": true,
+    "raised": "builtins.ValueError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Failed to execute plan: Object Store error: Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "from_stream(t) today": {
+    "applicable": true,
+    "raised": "builtins.ValueError",
+    "os_error": false,
+    "value_error": true,
+    "ltseq_class": false,
+    "batches_before": 0,
+    "message": "Failed to execute plan: Object Store error: Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "duckdb(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "duckdb(s)": {
+    "applicable": true,
+    "raised": "_duckdb.InvalidInputException",
+    "os_error": false,
+    "value_error": false,
+    "ltseq_class": false,
+    "batches_before": null,
+    "message": "Invalid Input Error: reading the schema of the Python object 'stream' failed: SourceNotFoundError: Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pl.from_arrow(reader)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pl.DataFrame(s)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pl.from_dataframe(s)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "closing: read_next_batch": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "closing: iteration": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": 0,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "closing: read_all": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pa.table(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "duckdb(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   },
+   "pl.from_arrow(closing)": {
+    "applicable": true,
+    "raised": "ltseq._stream_spike.SourceNotFoundError",
+    "os_error": true,
+    "value_error": false,
+    "ltseq_class": true,
+    "batches_before": null,
+    "message": "Generic LocalFileSystem error: Object at location <tmp>/gone.parquet not found: No such file or directory (os error 2)"
+   }
+  }
+ },
+ "close": [
+  {
+   "reader": "to_batches() (from_batches over the Rust iterator)",
+   "live_while_open": 1,
+   "live_after_close": 1,
+   "read_after_close": "returns the next batch",
+   "live_after_drop": 0
+  },
+  {
+   "reader": "from_stream(spike stream)",
+   "live_while_open": 1,
+   "live_after_close": 0,
+   "read_after_close": "ArrowInvalid: Attempt to read from a stream that has already been closed",
+   "live_after_drop": 0
+  },
+  {
+   "reader": "from_stream(to_batches())",
+   "live_while_open": 1,
+   "live_after_close": 0,
+   "read_after_close": "ArrowInvalid: Attempt to read from a stream that has already been closed",
+   "live_after_drop": 0
+  },
+  {
+   "reader": "closing: the native subclass over the Rust iterator",
+   "live_while_open": 1,
+   "live_after_close": 0,
+   "read_after_close": "StopIteration (end of stream)",
+   "live_after_drop": 0
+  },
+  {
+   "reader": "to_batches() in a with block",
+   "live_after_with": 1,
+   "live_after_drop": 0
+  },
+  {
+   "reader": "closing: the native subclass in a with block",
+   "live_after_with": 0,
+   "live_after_drop": 0
+  }
+ ],
+ "live_at_end": 0
+}

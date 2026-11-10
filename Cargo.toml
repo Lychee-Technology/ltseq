@@ -76,6 +76,10 @@ m0 = ["tokio/sync", "tokio/time"]
 # Only measurement builds enable it; see benchmarks/topk_agg/README.md.
 topk_research = []
 
+# #256's spike of the v0.5 stream error paths (to_batches and the C
+# stream). Only spike builds enable it; see benchmarks/stream_errors/README.md.
+stream_spike = []
+
 # No profile may set `panic = "abort"`: `transpiler::resolve` catches a panic
 # in DataFusion's type coercion (#242) and reads it as "no common type".
 [profile.release]
