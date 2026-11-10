@@ -42,7 +42,7 @@ For U2, #274's R3 harness measured both candidates over 640 MiB of decoded Parqu
 | AC10 | A `str`, `bytes` or `bytearray` as `is_in`'s `values` raises `LTSeqTypeError` | [§8.5], [§22] preamble | D7 | M12 |
 | AC11 | One rule for `select` and `derive`: each key is carried under a result column that holds its column, by keeping it or by a bare reference, and `sort_keys` is truncated before the first key nothing holds | [§7.2], [§7.3], [§9.2], [§11.2] | B2, B3, O1, G3 | M2 |
 | AC12 | `t.concat()` equals `t` except that `sort_keys` is `None`; the SQL `UNION` idiom is `concat(...).distinct(keep="any")` | [§13.1], [§13.2], [§23.16] | U2 | M28 |
-| AC13 | Idioms for `top_k` (a `row_number` filter, then `string_agg` for the old string) and `skew` (central moments) | [§14.2] | A2 | M28 |
+| AC13 | Idioms for `top_k` (a `row_number` filter, then `string_agg` for a string of the old shape, whose text, order and all-NULL differences from v0.4 are stated) and `skew` (central moments) | [§14.2] | A2 | M28 |
 | AC16 | Kept: `r["x"]` raises `ColumnNotFoundError`, an `AttributeError` and not a `KeyError`, with the reason | [§8.1] | E1 | M15 |
 | X8 | Each scan reads its source as it is when the scan opens it, so two scans in one execution may differ; `collect()` is the snapshot | [§5.1] | Z1 | M1 |
 | Run-end, list views | Run-end encoding is normalized to its value type, as dictionaries are; `list_view` and `large_list_view` are normalized to `list` and `large_list` | [§6.2] | T2 | M18 |
