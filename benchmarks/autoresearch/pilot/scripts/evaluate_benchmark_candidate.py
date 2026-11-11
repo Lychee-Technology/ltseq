@@ -3,8 +3,8 @@
 
 The policy (docs/BENCHMARK_AUTORESEARCH.md, "Evaluation contract"):
 
-- the baseline and candidate must be comparable: same target, dataset,
-  iterations and warmup;
+- the baseline and candidate must be comparable: each records the target,
+  dataset, iterations and warmup, and the two records match;
 - the baseline must itself be a valid run;
 - the candidate must have no correctness or infrastructure failure, every
   target and protected workload, and a median and p95 for each;
@@ -57,8 +57,9 @@ EXIT_KEEP = 0
 EXIT_DISCARD = 1
 EXIT_INPUT_ERROR = 2
 
-# Run settings that must match for two timings to be compared.
-COMPARED_SETTINGS = ("iterations", "warmup")
+# Run settings that must match for two timings to be compared, with the least
+# usable value of each.
+COMPARED_SETTINGS = {"iterations": 1, "warmup": 0}
 # Machine facts that should match; a difference is reported, not rejected,
 # because a kernel or library update changes them on the same machine.
 COMPARED_SYSTEM_FIELDS = ("platform", "processor", "cpu_count", "python_version")
@@ -88,15 +89,26 @@ def _count(summary: dict, field: str) -> int:
         return 1
 
 
+def _is_count(value: object, minimum: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
 def _compatibility_problems(target: str, baseline: dict, candidate: dict) -> list[str]:
+    # A setting both summaries lack would compare equal, so each summary must
+    # record every setting before the two are compared.
     problems = []
-    for label, summary in (("baseline", baseline), ("candidate", candidate)):
-        if summary.get("target") not in (None, target):
+    labelled = (("baseline", baseline), ("candidate", candidate))
+    for label, summary in labelled:
+        if summary.get("target") is None:
+            problems.append(f"{label} summary does not name its target")
+        elif summary.get("target") != target:
             problems.append(f"{label} summary is for target {summary.get('target')!r}, not {target!r}")
 
     base_file, cand_file = baseline.get("data_file"), candidate.get("data_file")
-    if not base_file or not cand_file:
-        problems.append("dataset unknown: data_file missing from a summary")
+    if not (isinstance(base_file, str) and base_file and isinstance(cand_file, str) and cand_file):
+        problems.append(
+            f"dataset unknown: data_file is baseline {base_file!r}, candidate {cand_file!r}"
+        )
     else:
         base_bytes, cand_bytes = baseline.get("data_file_bytes"), candidate.get("data_file_bytes")
         if base_bytes is not None and cand_bytes is not None:
@@ -110,11 +122,16 @@ def _compatibility_problems(target: str, baseline: dict, candidate: dict) -> lis
                 f"candidate {cand_file} ({cand_bytes} bytes)"
             )
 
-    for field in COMPARED_SETTINGS:
-        if baseline.get(field) != candidate.get(field):
-            problems.append(
-                f"{field} differs: baseline {baseline.get(field)!r}, candidate {candidate.get(field)!r}"
-            )
+    for field, minimum in COMPARED_SETTINGS.items():
+        unusable = [
+            f"{label} {summary.get(field)!r}"
+            for label, summary in labelled
+            if not _is_count(summary.get(field), minimum)
+        ]
+        if unusable:
+            problems.append(f"{field} unknown: expected an integer >= {minimum}, got " + ", ".join(unusable))
+        elif baseline[field] != candidate[field]:
+            problems.append(f"{field} differs: baseline {baseline[field]!r}, candidate {candidate[field]!r}")
     return problems
 
 

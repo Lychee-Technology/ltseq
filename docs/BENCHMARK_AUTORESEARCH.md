@@ -100,7 +100,7 @@ The evaluator checks, in this order, and the first failed check decides:
 
 | Check | `reason_code` on failure |
 |---|---|
-| Same target, dataset (file name and size, or the same path when a size is unknown), `iterations` and `warmup` | `incompatible_inputs` |
+| Both summaries record the target, dataset, `iterations` and `warmup`, and they match: the evaluated target, the same dataset (file name and size, or the same path when a size is unknown), the same counts. A setting missing from both does not count as a match | `incompatible_inputs` |
 | The baseline has no correctness or infrastructure failure, every target and protected workload, and a positive median and p95 for each | `invalid_baseline` |
 | The candidate has no correctness failure (count or a failed workload validation) | `correctness_failure` |
 | ... no infrastructure failure | `infra_failure` |

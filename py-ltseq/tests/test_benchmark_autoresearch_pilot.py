@@ -521,6 +521,46 @@ def test_mismatched_inputs_discard(candidate_overrides, problem):
     assert any(problem in item for item in evaluation["problems"])
 
 
+def _without_fields(summary: dict, *fields: str) -> dict:
+    return {key: value for key, value in summary.items() if key not in fields}
+
+
+@pytest.mark.parametrize(
+    "unset, problem",
+    [
+        (lambda summary: _without_fields(summary, "target"), "baseline summary does not name its target"),
+        (lambda summary: _without_fields(summary, "iterations"), "iterations unknown"),
+        (lambda summary: _without_fields(summary, "warmup"), "warmup unknown"),
+        (lambda summary: {**summary, "iterations": 0}, "iterations unknown"),
+        (lambda summary: {**summary, "iterations": "3"}, "iterations unknown"),
+        (lambda summary: {**summary, "warmup": -1}, "warmup unknown"),
+        (lambda summary: {**summary, "warmup": True}, "warmup unknown"),
+        (lambda summary: {**summary, "data_file": 7}, "dataset unknown"),
+    ],
+    ids=[
+        "no-target",
+        "no-iterations",
+        "no-warmup",
+        "zero-iterations",
+        "string-iterations",
+        "negative-warmup",
+        "bool-warmup",
+        "data-file-not-a-path",
+    ],
+)
+def test_settings_missing_from_both_summaries_discard(unset, problem):
+    """Two summaries that lack the same setting agree only vacuously."""
+    _common, evaluate, _gate = load_pilot_modules()
+
+    evaluation = evaluate.evaluate_candidate(
+        "clickbench_funnel", unset(make_summary()), unset(improved_candidate())
+    )
+
+    assert evaluation["recommendation"] == "discard"
+    assert evaluation["reason_code"] == "incompatible_inputs"
+    assert any(problem in item for item in evaluation["problems"])
+
+
 def test_same_dataset_in_another_checkout_is_comparable():
     _common, evaluate, _gate = load_pilot_modules()
     candidate = improved_candidate(data_file="/elsewhere/benchmarks/data/hits_sorted.parquet")
