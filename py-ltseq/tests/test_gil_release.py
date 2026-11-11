@@ -18,6 +18,14 @@ clones Arc'd batches and finishes in a couple of milliseconds, which is too
 short to observe anything. Loaders (`read_csv`, `read_parquet`) only read
 metadata / the first rows for schema inference and are equally unmeasurable;
 they are wrapped the same way in Rust but have no test here.
+
+Every workload has to clear `MIN_ELAPSED_S` in a release build too
+(`maturin develop --release`), not only in the debug build CI uses, and on a
+machine with more cores than the one it was measured on. A call that reads
+the file's eight row groups in parallel gets faster with each core up
+to eight, so the two calls that release builds finished too quickly (#180)
+now do work that does not split that way: a window over the whole table, and
+a pattern scan over a file with one row group.
 """
 
 import os
@@ -65,6 +73,19 @@ def _arrow_events() -> pa.Table:
 def parquet_path(tmp_path_factory) -> str:
     path = str(tmp_path_factory.mktemp("gil") / "events.parquet")
     pq.write_table(_arrow_events(), path, row_group_size=200_000)
+    return path
+
+
+@pytest.fixture(scope="module")
+def single_rg_parquet_path(parquet_path, tmp_path_factory) -> str:
+    """The same rows as ``parquet_path`` in one row group (#180).
+
+    The parallel pattern scan runs one task per row group, so on this file
+    its work is one task that more cores cannot shorten.
+    """
+    path = str(tmp_path_factory.mktemp("gil") / "events_one_rg.parquet")
+    pq.write_table(pq.read_table(parquet_path), path, row_group_size=N_ROWS)
+    assert pq.read_metadata(path).num_row_groups == 1
     return path
 
 
@@ -132,7 +153,13 @@ def assert_releases_gil(fn):
 
 def test_count_releases_gil(events):
     # Pre-existing control: count() already used py.detach before #142.
-    n = assert_releases_gil(events.filter(lambda r: r.url.s.starts_with("landing/")).count)
+    # A filter over the scan alone finishes in under 10 ms in a release build,
+    # its eight row groups decoded in parallel (#180). The shift is a window
+    # over the whole table in one partition, which counting has to evaluate.
+    rising = events.derive(lambda r: {"prev": r.value.shift(1)}).filter(
+        lambda r: r.value > r.prev
+    )
+    n = assert_releases_gil(rising.count)
     assert 0 < n < N_ROWS
 
 
@@ -198,8 +225,29 @@ def _funnel(t: LTSeq) -> int:
     )
 
 
-def test_search_pattern_count_parquet_parallel_releases_gil(events):
-    assert assert_releases_gil(lambda: _funnel(events)) > 0
+def test_search_pattern_count_parquet_parallel_releases_gil(single_rg_parquet_path):
+    # The parallel Parquet path, which needs a Parquet source, a declared
+    # order and partition_by. `_funnel` over the eight-row-group file takes
+    # about 17 ms in a release build (#180). Here the file has one row group,
+    # and the `value` term in every step makes the scan decode a second column
+    # and evaluate every step's predicate on every row, instead of matching
+    # `url` prefixes alone with the starts_with fast path. The predicates stay
+    # on the parallel path: over the eight-row-group file they take ~27 ms in a
+    # release build, where the DataFusion fallback takes ~100 ms on in-memory
+    # rows already.
+    events = LTSeq.read_parquet(single_rg_parquet_path).assume_sorted(
+        "userid", "eventtime"
+    )
+    count = assert_releases_gil(
+        lambda: events.search_pattern_count(
+            lambda r: r.url.s.starts_with("landing/") & (r.value >= 0.0),
+            lambda r: r.url.s.starts_with("product/") & (r.value >= 0.0),
+            lambda r: r.url.s.starts_with("checkout/") & (r.value >= 0.0),
+            partition_by="userid",
+        )
+    )
+    # `value` is in [0, 1), so the extra terms match every row.
+    assert count == _funnel(events) > 0
 
 
 def test_search_pattern_count_datafusion_fallback_releases_gil(events_mem):
