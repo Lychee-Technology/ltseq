@@ -439,6 +439,8 @@ def _without_workload(summary: dict, workload_id: str) -> dict:
         (lambda: _with_metric(improved_candidate(), "r3_funnel", "p95_s", None), "missing_metrics"),
         (lambda: _with_metric(improved_candidate(), "r2_sessionization", "median_s", None), "missing_metrics"),
         (lambda: _with_metric(improved_candidate(), "r1_top_urls", "median_s", float("nan")), "missing_metrics"),
+        (lambda: _with_metric(improved_candidate(), "r3_funnel", "median_s", "bad"), "missing_metrics"),
+        (lambda: _with_workload(improved_candidate(), "r1_top_urls", ltseq="bad"), "missing_metrics"),
     ],
     ids=[
         "correctness-count",
@@ -450,6 +452,8 @@ def _without_workload(summary: dict, workload_id: str) -> dict:
         "target-p95-missing",
         "protected-median-missing",
         "protected-median-nan",
+        "target-median-string",
+        "ltseq-not-an-object",
     ],
 )
 def test_candidate_integrity_failures_discard(make_candidate, reason_code):
@@ -598,6 +602,28 @@ def test_gate_discard_exits_one_and_still_writes_evaluation(report_dirs, candida
 
     evaluation = json.loads((report_dirs["diff"] / "evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["recommendation"] == "discard"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        _with_metric(improved_candidate(), "r3_funnel", "median_s", "bad"),
+        _with_workload(improved_candidate(), "r1_top_urls", ltseq=[1.0]),
+    ],
+    ids=["string-metric", "ltseq-not-an-object"],
+)
+def test_gate_writes_the_discard_for_a_malformed_metric(report_dirs, candidate):
+    _common, _evaluate, gate = load_pilot_modules()
+    write_summaries(report_dirs, make_summary(), candidate)
+
+    assert gate.main(["clickbench_funnel"]) == 1
+
+    evaluation = json.loads((report_dirs["diff"] / "evaluation.json").read_text(encoding="utf-8"))
+    assert evaluation["reason_code"] == "missing_metrics"
+    diff_payload = json.loads((report_dirs["diff"] / "benchmark-diff.json").read_text(encoding="utf-8"))
+    malformed = next(item for item in diff_payload["workloads"] if item["ltseq_median_delta_pct"] is None)
+    assert malformed["id"] in ("r3_funnel", "r1_top_urls")
+    assert "n/a" in (report_dirs["diff"] / "benchmark-diff.txt").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

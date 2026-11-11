@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeIs
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUTORESEARCH_DIR = Path(__file__).resolve().parents[1]
@@ -334,8 +335,29 @@ def workload_map(summary: dict) -> dict[str, dict]:
     return {workload["id"]: workload for workload in summary.get("workloads", [])}
 
 
-def pct_delta(baseline: float | None, candidate: float | None) -> float | None:
-    if baseline in (None, 0) or candidate is None:
+def is_positive_number(value: object) -> TypeIs[int | float]:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def ltseq_metric(workload: dict | None, metric: str) -> object:
+    """A workload's raw LTSeq timing, or None when the workload has no
+    `ltseq` object. The value is not checked; see is_positive_number."""
+    ltseq = (workload or {}).get("ltseq")
+    return ltseq.get(metric) if isinstance(ltseq, dict) else None
+
+
+def pct_delta(baseline: object, candidate: object) -> float | None:
+    """Percent change, or None unless both timings are positive numbers.
+
+    Summaries come from files the gate does not control, so a malformed timing
+    gives no delta here; the evaluator reports it as `missing_metrics`.
+    """
+    if not is_positive_number(baseline) or not is_positive_number(candidate):
         return None
     return ((candidate - baseline) / baseline) * 100.0
 
@@ -357,13 +379,9 @@ def build_diff(target: str, baseline: dict, candidate: dict) -> dict:
                 "baseline": base,
                 "candidate": cand,
                 "ltseq_median_delta_pct": pct_delta(
-                    ((base or {}).get("ltseq") or {}).get("median_s"),
-                    ((cand or {}).get("ltseq") or {}).get("median_s"),
+                    ltseq_metric(base, "median_s"), ltseq_metric(cand, "median_s")
                 ),
-                "ltseq_p95_delta_pct": pct_delta(
-                    ((base or {}).get("ltseq") or {}).get("p95_s"),
-                    ((cand or {}).get("ltseq") or {}).get("p95_s"),
-                ),
+                "ltseq_p95_delta_pct": pct_delta(ltseq_metric(base, "p95_s"), ltseq_metric(cand, "p95_s")),
             }
         )
     return {

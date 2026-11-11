@@ -35,7 +35,9 @@ if __package__ in (None, ""):
         build_diff,
         check_summary_shape,
         format_delta,
+        is_positive_number,
         load_summary,
+        ltseq_metric,
         resolve_target,
     )
 else:
@@ -45,7 +47,9 @@ else:
         build_diff,
         check_summary_shape,
         format_delta,
+        is_positive_number,
         load_summary,
+        ltseq_metric,
         resolve_target,
     )
 
@@ -70,15 +74,6 @@ REASON_LABELS = {
 
 def exit_status(evaluation: dict) -> int:
     return EXIT_KEEP if evaluation["recommendation"] == "keep" else EXIT_DISCARD
-
-
-def _is_positive_number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value > 0
-    )
 
 
 def _workloads(summary: dict) -> dict[str, dict]:
@@ -160,10 +155,10 @@ def _run_problems(spec, summary: dict) -> dict[str, list[str]]:
             problems["unvalidated_workload"].append(
                 f"{workload_id} benchmark_status={status!r} validation_status={validation!r}"
             )
-        ltseq = workload.get("ltseq") or {}
         for metric in ("median_s", "p95_s"):
-            if not _is_positive_number(ltseq.get(metric)):
-                problems["missing_metrics"].append(f"{workload_id} ltseq.{metric}={ltseq.get(metric)!r}")
+            value = ltseq_metric(workload, metric)
+            if not is_positive_number(value):
+                problems["missing_metrics"].append(f"{workload_id} ltseq.{metric}={value!r}")
     return {code: found for code, found in problems.items() if found}
 
 
