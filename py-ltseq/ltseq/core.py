@@ -342,6 +342,27 @@ class LTSeq(
         """Return optimized logical and physical plans for debugging."""
         return self._inner.explain_plan()
 
+    def _explain_pipeline(self) -> dict[str, Any]:
+        """Private pipeline diagnostics (#238); not a stable API.
+
+        Plans the table as ``explain_plan()`` does, without executing it, and
+        reports the result as data:
+
+        - ``columns``: list of ``{"name", "dtype", "nullable"}``
+        - ``sort_keys``: the declared order, as ``(column, descending)`` pairs
+        - ``logical_plan`` / ``physical_plan``: the texts ``explain_plan()``
+          returns
+        - ``operators``: the physical plan's nodes root first, each
+          ``{"name", "depth", "partitions"}`` (``partitions`` is the node's
+          output partition count; for a file scan, its file groups)
+        - ``operator_counts``: operator name -> occurrences in ``operators``
+
+        Tests use ``operator_counts`` to assert plan shapes without searching
+        plan text. The pipeline compiler (#229) adds its fields here as it
+        lands; see ADR 0019.
+        """
+        return self._inner._explain_pipeline()
+
     def collect(self) -> "LTSeq":
         """
         Materialize the lazy plan and return a new in-memory LTSeq.

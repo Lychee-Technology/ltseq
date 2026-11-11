@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `LTSeq._explain_pipeline()` returns the table's plan as data for tests and diagnostics (#238): its columns, declared order, logical and physical plan texts, and the physical operators with their output partition counts and how often each appears. It is private and unstable: the pipeline compiler (#229, ADR 0019) adds and may rename fields as it lands. It stops at physical planning and executes nothing, so a query that would fail on its data still gets a result.
+
 ### Changed
 
 Literal values in lambdas are typed (#145). They used to be sent to the engine as strings and parsed back, so some queries that ran before now raise, and a few return a different result. Expression types now come from DataFusion's coercion as the expression executes (#225). The archived pre-v0.5 reference's ["Literal values" section](docs/archive/pre-v0.5-api.md#literal-values) describes these rules at baseline commit 3041b44.

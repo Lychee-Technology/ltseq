@@ -56,7 +56,7 @@ This layer provides chaining, lambda-based expressions, and type-directed semant
 The Python package in `py-ltseq/ltseq/` is intentionally thin. Its responsibilities are:
 
 - organize the public API through mixins
-- track Python-side schema and sort metadata
+- read schema and sort metadata from the Rust kernel, which owns them (see Schema Management); Python caches the schema and keeps no sort state of its own
 - capture lambdas into serializable expression trees
 - choose which high-level object type to return
 - bridge to Rust bindings for execution
@@ -87,11 +87,11 @@ The repository treats tests and benchmarks as architectural components rather th
 
 ### `LTSeq`
 
-Defined in `py-ltseq/ltseq/core.py`, `LTSeq` is the main user-visible table object. It wraps a Rust `LTSeqTable` instance in `_inner` and maintains Python-side metadata:
+Defined in `py-ltseq/ltseq/core.py`, `LTSeq` is the main user-visible table object. It wraps a Rust `LTSeqTable` instance in `_inner`, which holds the table's schema and declared order. On the Python side it keeps:
 
-- `_schema`
-- `_sort_keys`
-- `_name`
+- `_schema`, a lazily fetched cache of the Rust schema
+- `_sort_keys`, an uncached read of the Rust declared order, not stored state
+- `_name`, the table name lookups use
 
 It composes behavior through mixins instead of a single large class.
 

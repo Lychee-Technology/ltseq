@@ -584,6 +584,14 @@ impl LTSeqTable {
         Ok((logical_text, physical_text))
     }
 
+    /// Private pipeline diagnostics (#238): the column environment, declared
+    /// order, both plans and the physical operator tree with per-operator
+    /// counts, as one dict. Plans the table as `explain_plan` does and never
+    /// executes it; planning runs detached.
+    fn _explain_pipeline(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        detached(py, || crate::ops::explain::explain_pipeline_impl(self))?.into_py_dict(py)
+    }
+
     /// Materialize the lazy plan into an in-memory table (a snapshot read
     /// back as one in-order partition). Preserves row order, schema, and sort
     /// metadata.
