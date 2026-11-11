@@ -8,8 +8,9 @@ Exit status: 0 keep, 1 discard, 2 when the inputs cannot be evaluated (a
 summary is missing or malformed, or an option is invalid). On status 2 the
 target's diff directory is left empty, so no earlier evaluation can be mistaken
 for this one. The exception is a command line argparse cannot read far enough
-to name a target (an unknown target, or an option with no value): it exits
-before a target is chosen and changes nothing.
+to name a target (an unknown target, an option with no value, or an ambiguous
+option abbreviation): it exits before a target is chosen and changes nothing,
+so check the exit status rather than the files.
 """
 
 from __future__ import annotations

@@ -124,8 +124,9 @@ evaluation can be made (a summary is missing, unreadable or not a benchmark
 summary, the target is unknown, or an option is invalid). On status 2 the gate
 leaves the target's diff directory empty, so an earlier evaluation cannot be
 mistaken for this one. The exception is a command line too broken to name a
-target (an unknown target, or an option with no value): the gate exits before
-choosing a target and changes nothing.
+target (an unknown target, an option with no value, or an ambiguous option
+abbreviation): the gate exits before choosing a target and changes nothing. So
+a consumer decides by the exit status, not by whether `evaluation.json` exists.
 
 A target win needs median **and** p95. Issue #51 set this rule, and the code
 and tests have required it since April 2026. The rule documents said "median

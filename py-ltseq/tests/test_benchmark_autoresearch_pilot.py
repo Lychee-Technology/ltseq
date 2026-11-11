@@ -741,6 +741,34 @@ def test_gate_help_leaves_the_previous_decision(report_dirs):
     assert (report_dirs["diff"] / "evaluation.json").exists()
 
 
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (["clickbench_funnel", "--min-improvement-pct"], "argument --min-improvement-pct: expected one argument"),
+        (["--min-improvement-pct"], "argument --min-improvement-pct: expected one argument"),
+        (["--m", "2", "clickbench_funnel"], "ambiguous option: --m could match"),
+        (["clickbench_funnle"], "invalid choice: 'clickbench_funnle'"),
+    ],
+    ids=["missing-value", "missing-value-default-target", "ambiguous-abbreviation", "unknown-target"],
+)
+def test_gate_usage_errors_before_a_target_leave_the_previous_decision(report_dirs, capsys, args, message):
+    """The documented exception to the status-2 guarantee: argparse exits before
+    it names a target, so the gate exits 2 and changes nothing. A consumer tells
+    this from a decision by the exit status, not by the files."""
+    _common, _evaluate, gate = load_pilot_modules()
+    write_summaries(report_dirs, make_summary(), improved_candidate())
+    assert gate.main(["clickbench_funnel"]) == 0
+    before = {path.name: path.read_bytes() for path in report_dirs["diff"].iterdir()}
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(args)
+
+    assert excinfo.value.code == 2
+    assert message in capsys.readouterr().err
+    assert {path.name: path.read_bytes() for path in report_dirs["diff"].iterdir()} == before
+
+
 # --------------------------------------------------------------------------
 # The scripts run on their own, outside the repository root and without the
 # retired controller.
