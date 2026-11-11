@@ -1004,7 +1004,9 @@ impl LTSeqTable {
     /// Both tables must be sorted by their respective time columns.
     #[expect(
         clippy::too_many_arguments,
-        reason = "arg count is dictated by the exposed Python signature below (see #150)"
+        reason = "the seven parameters are the binding's Python signature, which stays flat; \
+                  with the receiver that is eight, one over clippy's limit, however `py` is \
+                  obtained. The implementation takes them packed as `AsofJoinOptions` (#168)"
     )]
     #[pyo3(signature = (other, left_time_col, right_time_col, direction, suffix, left_by_cols=Vec::new(), right_by_cols=Vec::new()))]
     fn asof_join(
@@ -1018,17 +1020,16 @@ impl LTSeqTable {
         left_by_cols: Vec<String>,
         right_by_cols: Vec<String>,
     ) -> PyResult<LTSeqTable> {
+        let options = crate::ops::asof_join::AsofJoinOptions {
+            left_time_col,
+            right_time_col,
+            direction,
+            suffix,
+            left_by_cols,
+            right_by_cols,
+        };
         detached(py, || {
-            crate::ops::asof_join::asof_join_impl(
-                self,
-                other,
-                left_time_col,
-                right_time_col,
-                direction,
-                suffix,
-                left_by_cols,
-                right_by_cols,
-            )
+            crate::ops::asof_join::asof_join_impl(self, other, options)
         })
     }
 

@@ -105,6 +105,24 @@ fn by_col_indices(
         .collect()
 }
 
+/// How an as-of join matches: the arguments of the PyO3 `asof_join` binding
+/// besides the two tables. The binding keeps Python's flat signature and
+/// packs them here, unvalidated; `asof_join_impl` validates them.
+pub struct AsofJoinOptions<'a> {
+    /// Time/key column of the left table
+    pub left_time_col: &'a str,
+    /// Time/key column of the right table
+    pub right_time_col: &'a str,
+    /// `"backward"`, `"forward"` or `"nearest"`
+    pub direction: &'a str,
+    /// Appended to a right column whose name collides with a left one
+    pub suffix: &'a str,
+    /// Left `by=` columns, matched pairwise with `right_by_cols`
+    pub left_by_cols: Vec<String>,
+    /// Right `by=` columns
+    pub right_by_cols: Vec<String>,
+}
+
 /// As-of Join: Time-series join matching each left row with nearest right row
 ///
 /// For each row in the left table, finds the "nearest" matching row in the right table
@@ -112,21 +130,20 @@ fn by_col_indices(
 ///
 /// Runs with the GIL released (`lib.rs::asof_join` wraps it in `gil::detached`):
 /// both collects and the binary-search matching take only plain Rust values.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors the flat parameter list of the PyO3 `asof_join` binding in lib.rs; \
-              packing into a struct is a behavior-neutral refactor out of scope for #150"
-)]
 pub fn asof_join_impl(
     table: &LTSeqTable,
     other: &LTSeqTable,
-    left_time_col: &str,
-    right_time_col: &str,
-    direction: &str,
-    suffix: &str,
-    left_by_cols: Vec<String>,
-    right_by_cols: Vec<String>,
+    options: AsofJoinOptions<'_>,
 ) -> Result<LTSeqTable, LtseqError> {
+    let AsofJoinOptions {
+        left_time_col,
+        right_time_col,
+        direction,
+        suffix,
+        left_by_cols,
+        right_by_cols,
+    } = options;
+
     // 1. Validate both tables have data
     let (_, stored_schema_left) = table.require_df_and_schema()?;
     let (_, stored_schema_right) = other.require_df_and_schema()?;

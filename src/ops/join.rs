@@ -254,22 +254,26 @@ fn join_on_keys(
     .map_err(|e| LtseqError::Runtime(format!("Native join failed: {}", e)))
 }
 
+/// The right table of a suffixed join, its colliding columns renamed.
+struct RenamedRight {
+    /// The right DataFrame with the renamed columns.
+    df: DataFrame,
+    /// `(old, new)` name of every right column, in the right schema's order;
+    /// `old == new` for a column that did not collide.
+    rename_map: Vec<(String, String)>,
+    /// The right join key columns under their new names.
+    key_cols: Vec<String>,
+}
+
 /// Rename right-table columns that collide with the left table by appending
-/// `suffix` (Polars semantics: only conflicting columns are renamed). Returns
-/// the renamed DataFrame, the `(old, new)` rename map, and the renamed names of
-/// the join key columns.
-#[expect(
-    clippy::type_complexity,
-    reason = "returns (renamed df, old→new rename pairs, right key cols after rename); \
-              a named struct for one internal call site is out of scope for #150"
-)]
+/// `suffix` (Polars semantics: only conflicting columns are renamed).
 fn rename_right_df_for_join(
     df: DataFrame,
     left_schema: &ArrowSchema,
     right_schema: &ArrowSchema,
     suffix: &str,
     right_key_cols: &[String],
-) -> PyResult<(DataFrame, Vec<(String, String)>, Vec<String>)> {
+) -> PyResult<RenamedRight> {
     let rename_map = right_rename_map(left_schema, right_schema, suffix)?;
 
     let select_exprs: Vec<Expr> = rename_map
@@ -298,7 +302,11 @@ fn rename_right_df_for_join(
         .select(select_exprs)
         .map_err(|e| LtseqError::Runtime(format!("Failed to rename right columns: {}", e)))?;
 
-    Ok((renamed_df, rename_map, new_key_cols))
+    Ok(RenamedRight {
+        df: renamed_df,
+        rename_map,
+        key_cols: new_key_cols,
+    })
 }
 
 /// Build result LTSeqTable from a DataFrame.
@@ -360,7 +368,11 @@ pub fn join_impl(
     };
 
     // Rename only the right columns that collide with the left table (suffix).
-    let (renamed_right_df, rename_map, new_right_keys) = rename_right_df_for_join(
+    let RenamedRight {
+        df: renamed_right_df,
+        rename_map,
+        key_cols: new_right_keys,
+    } = rename_right_df_for_join(
         (**df_right).clone(),
         stored_schema_left,
         stored_schema_right,
