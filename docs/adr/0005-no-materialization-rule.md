@@ -17,7 +17,7 @@ Benchmarking and design experience identified materialization as "the main archi
 
 The rule does not (and cannot) cover every table-returning API. The following operations materialize by design or by current implementation:
 
-**Correctness-required exceptions** (documented in `CLAUDE.md`; not shortcuts):
+**Correctness-required exceptions** (documented in `AGENTS.md`; not shortcuts):
 
 1. **Physical-position ops** (`rvs`, `step`, keyed `distinct`) snapshot the table into a single in-order partition (collect → read_batch) before assigning row positions, because an unordered/partitioned window over a lazy multi-partition plan does not preserve input order (`set_ops.rs::snapshot_single_partition`).
 2. **`fold()`** runs a user-supplied Python callback `fn(state, row)` per row; arbitrary Python cannot be a DataFusion plan, so the row-wise path (`to_arrow()` → Python rows → accumulate → `from_arrow()` of the same Arrow table plus the new column) is inherent. Its docstring flags it as a non-lazy slow path (compare Polars `cumulative_eval`).
@@ -42,7 +42,7 @@ These live on the Rust side (Arrow batches, no Python row round-trips), but they
 
 ## Sources
 
-- `CLAUDE.md`: No Materialization Rule (the two correctness exceptions)
+- `AGENTS.md`: Key design patterns, No materialization rule (the two correctness exceptions)
 - `docs/ARCHITECTURE.md`: No-Materialization Rule, Design Goals #4
 - `docs/DESIGN_SUMMARY.md`: §5.4, §7.4
 - `docs/USER_MODEL.md`: Materialization Model

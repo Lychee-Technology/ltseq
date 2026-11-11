@@ -36,4 +36,4 @@ Set-based semantics as in pandas/SQL were rejected as the core model. The `READM
 - `docs/USER_MODEL.md`: "What LTSeq Is Not"
 - `docs/DESIGN_SUMMARY.md`: §Overview
 - `README.md`: Design Philosophy, FAQ
-- `CLAUDE.md`: Architecture Overview
+- `AGENTS.md`: Architecture overview

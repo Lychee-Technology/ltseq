@@ -25,7 +25,7 @@
 
 ## 来源
 
-- `CLAUDE.md`: Key Design Patterns（PyO3 单 `#[pymethods]` 约束、mixin 组合）
+- `AGENTS.md`: Key design patterns（PyO3 单 `#[pymethods]` 约束、mixin 组合）
 - `docs/ARCHITECTURE.cn.md`: PyO3 边界设计、Rust/Python 包结构
 - `docs/DESIGN_SUMMARY.cn.md`: §1.3、§1.4
 - `docs/MODULE_GUIDE.cn.md`: `src/lib.rs`、模块导览

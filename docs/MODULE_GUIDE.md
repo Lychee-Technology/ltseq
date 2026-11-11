@@ -458,7 +458,7 @@ When in doubt, find the most specific relevant test first, then trace into imple
 
 ## Build and Verification Commands
 
-Common commands from `CLAUDE.md`:
+Common commands from `AGENTS.md`:
 
 ```bash
 maturin develop
