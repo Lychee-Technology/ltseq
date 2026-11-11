@@ -706,6 +706,41 @@ def test_gate_threshold_options(report_dirs):
     assert excinfo.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (["--min-improvement-pct", "-2"], "argument --min-improvement-pct: expected a positive percentage"),
+        (["--max-regression-pct", "five"], "argument --max-regression-pct: expected a percentage"),
+        (["--min-improvment-pct", "2"], "unrecognized arguments: --min-improvment-pct 2"),
+    ],
+    ids=["negative-threshold", "non-numeric-threshold", "misspelled-option"],
+)
+def test_gate_usage_errors_clear_the_previous_decision(report_dirs, capsys, args, message):
+    _common, _evaluate, gate = load_pilot_modules()
+    write_summaries(report_dirs, make_summary(), improved_candidate())
+    assert gate.main(["clickbench_funnel"]) == 0
+    assert (report_dirs["diff"] / "evaluation.json").exists()
+
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["clickbench_funnel", *args])
+
+    assert excinfo.value.code == 2
+    assert message in capsys.readouterr().err
+    assert list(report_dirs["diff"].iterdir()) == []
+
+
+def test_gate_help_leaves_the_previous_decision(report_dirs):
+    _common, _evaluate, gate = load_pilot_modules()
+    write_summaries(report_dirs, make_summary(), improved_candidate())
+    assert gate.main(["clickbench_funnel"]) == 0
+
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["--help"])
+
+    assert excinfo.value.code == 0
+    assert (report_dirs["diff"] / "evaluation.json").exists()
+
+
 # --------------------------------------------------------------------------
 # The scripts run on their own, outside the repository root and without the
 # retired controller.
@@ -745,6 +780,18 @@ def test_evaluator_cli_exit_statuses(tmp_path):
     )
     assert missing.returncode == 2
     assert "candidate summary not found" in missing.stderr
+
+    bad_option = run_script(
+        "evaluate_benchmark_candidate.py",
+        str(baseline),
+        str(keep),
+        "clickbench_funnel",
+        "--min-improvement-pct",
+        "0",
+        cwd=tmp_path,
+    )
+    assert bad_option.returncode == 2
+    assert "argument --min-improvement-pct: expected a positive percentage" in bad_option.stderr
 
 
 def test_capture_cli_dry_run_prints_commands(tmp_path):

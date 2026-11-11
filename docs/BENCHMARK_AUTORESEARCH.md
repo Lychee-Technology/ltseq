@@ -122,8 +122,10 @@ read it before trusting the numbers.
 Exit status, for both the gate and the evaluator: 0 keep, 1 discard, 2 when no
 evaluation can be made (a summary is missing, unreadable or not a benchmark
 summary, the target is unknown, or an option is invalid). On status 2 the gate
-leaves the diff directory empty, so an earlier evaluation cannot be mistaken
-for this one.
+leaves the target's diff directory empty, so an earlier evaluation cannot be
+mistaken for this one. The exception is a command line too broken to name a
+target (an unknown target, or an option with no value): the gate exits before
+choosing a target and changes nothing.
 
 A target win needs median **and** p95. Issue #51 set this rule, and the code
 and tests have required it since April 2026. The rule documents said "median

@@ -5,8 +5,11 @@ Reads reports/{baseline,candidates}/<target>/benchmark-summary.json and writes
 benchmark-diff.{json,txt} and evaluation.{json,txt} under reports/diff/<target>/.
 
 Exit status: 0 keep, 1 discard, 2 when the inputs cannot be evaluated (a
-summary is missing or malformed, or an option is invalid). On status 2 the diff
-directory is left empty, so no earlier evaluation can be mistaken for this one.
+summary is missing or malformed, or an option is invalid). On status 2 the
+target's diff directory is left empty, so no earlier evaluation can be mistaken
+for this one. The exception is a command line argparse cannot read far enough
+to name a target (an unknown target, or an option with no value): it exits
+before a target is chosen and changes nothing.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ if __package__ in (None, ""):
         add_threshold_options,
         evaluate_candidate,
         exit_status,
+        threshold_overrides,
     )
 else:
     from ..common import (
@@ -54,6 +58,7 @@ else:
         add_threshold_options,
         evaluate_candidate,
         exit_status,
+        threshold_overrides,
     )
 
 
@@ -76,7 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("target", nargs="?", default="clickbench_funnel", choices=sorted(TARGETS))
     add_threshold_options(parser)
-    args = parser.parse_args(argv)
+    # parse_known_args and text-valued thresholds name the target without
+    # rejecting the rest of the line, so the target's previous decision is
+    # cleared before any usage error below exits with status 2.
+    args, unrecognized = parser.parse_known_args(argv)
 
     spec = resolve_target(args.target)
     ensure_report_dirs()
@@ -86,16 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     diff_dir = resolve_report_dir("diff", spec.key)
     clean_output_dir(diff_dir)
 
+    if unrecognized:
+        parser.error(f"unrecognized arguments: {' '.join(unrecognized)}")
+    overrides = threshold_overrides(parser, args)
+
     try:
         baseline = load_summary(baseline_dir / "benchmark-summary.json", "baseline")
         candidate = load_summary(candidate_dir / "benchmark-summary.json", "candidate")
-        evaluation = evaluate_candidate(
-            spec.key,
-            baseline,
-            candidate,
-            min_improvement_pct=args.min_improvement_pct,
-            max_regression_pct=args.max_regression_pct,
-        )
+        evaluation = evaluate_candidate(spec.key, baseline, candidate, **overrides)
     except BenchmarkInputError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_INPUT_ERROR

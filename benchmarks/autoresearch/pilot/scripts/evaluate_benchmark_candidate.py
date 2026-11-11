@@ -325,27 +325,50 @@ def evaluate_candidate(
     )
 
 
-def positive_pct(text: str) -> float:
-    try:
-        value = float(text)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"expected a percentage, got {text!r}") from exc
-    if not math.isfinite(value) or value <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive percentage, got {text!r}")
-    return value
+THRESHOLD_OPTIONS = {
+    "--min-improvement-pct": "min_improvement_pct",
+    "--max-regression-pct": "max_regression_pct",
+}
 
 
 def add_threshold_options(parser: argparse.ArgumentParser) -> None:
+    """Register the threshold overrides.
+
+    Their values are kept as text and checked by threshold_overrides(), so the
+    gate can clear the target's previous decision before a bad value is
+    rejected.
+    """
     parser.add_argument(
         "--min-improvement-pct",
-        type=positive_pct,
         help="override the target's improvement bar, e.g. 3 for 3%% (calibration runs)",
     )
     parser.add_argument(
         "--max-regression-pct",
-        type=positive_pct,
         help="override the target's protected-regression bar, e.g. 5 for 5%% (calibration runs)",
     )
+
+
+def _positive_pct(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise ValueError(f"expected a percentage, got {text!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"expected a positive percentage, got {text!r}")
+    return value
+
+
+def threshold_overrides(parser: argparse.ArgumentParser, args: argparse.Namespace) -> dict[str, float | None]:
+    """The threshold options as evaluate_candidate() keywords. A bad value is a
+    usage error: parser.error() prints it and exits with status 2."""
+    overrides: dict[str, float | None] = {}
+    for option, dest in THRESHOLD_OPTIONS.items():
+        text = getattr(args, dest)
+        try:
+            overrides[dest] = None if text is None else _positive_pct(text)
+        except ValueError as exc:
+            parser.error(f"argument {option}: {exc}")
+    return overrides
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -358,17 +381,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target", choices=sorted(TARGETS))
     add_threshold_options(parser)
     args = parser.parse_args(argv)
+    overrides = threshold_overrides(parser, args)
 
     try:
         baseline = load_summary(args.baseline_summary, "baseline")
         candidate = load_summary(args.candidate_summary, "candidate")
-        evaluation = evaluate_candidate(
-            args.target,
-            baseline,
-            candidate,
-            min_improvement_pct=args.min_improvement_pct,
-            max_regression_pct=args.max_regression_pct,
-        )
+        evaluation = evaluate_candidate(args.target, baseline, candidate, **overrides)
     except BenchmarkInputError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_INPUT_ERROR
