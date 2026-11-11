@@ -234,12 +234,12 @@ class TestMultiPartitionRegression:
 
         # Premise check: the physical plan must actually read multiple
         # file groups, otherwise this test silently degrades to the
-        # single-partition case it exists to go beyond.
-        import re
-
-        _, physical = t.explain_plan()
-        m = re.search(r"file_groups=\{(\d+) group", physical)
-        assert m is not None and int(m.group(1)) >= 2, physical
+        # single-partition case it exists to go beyond. A file scan outputs
+        # one partition per file group.
+        explained = t._explain_pipeline()
+        scans = [op for op in explained["operators"] if op["name"] == "DataSourceExec"]
+        assert len(scans) == 1, explained["physical_plan"]
+        assert scans[0]["partitions"] >= 2, explained["physical_plan"]
 
         sized = t.group_ordered(lambda r: r.cat).derive(
             lambda gr: {"sz": gr.count()}

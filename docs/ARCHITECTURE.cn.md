@@ -56,7 +56,7 @@ LTSeq 的架构主要围绕五个目标展开：
 `py-ltseq/ltseq/` 下的 Python 包有意保持轻量，主要职责是：
 
 - 通过 mixin 组织公共 API
-- 跟踪 Python 侧 schema 与排序元数据
+- 从持有 schema 与排序元数据的 Rust 内核读取它们（见 ADR 0009）；Python 只缓存 schema，自身不保存排序状态
 - 将 lambda 捕获为可序列化表达式树
 - 决定高层 API 应返回哪种对象类型
 - 作为 Rust 绑定的调用桥梁
@@ -87,11 +87,11 @@ LTSeq 的架构主要围绕五个目标展开：
 
 ### `LTSeq`
 
-`LTSeq` 定义于 `py-ltseq/ltseq/core.py`，是用户可见的主表对象。它通过 `_inner` 持有一个 Rust `LTSeqTable`，同时维护 Python 侧元数据：
+`LTSeq` 定义于 `py-ltseq/ltseq/core.py`，是用户可见的主表对象。它通过 `_inner` 持有一个 Rust `LTSeqTable`，后者持有表的 schema 与声明顺序。Python 侧只保留：
 
-- `_schema`
-- `_sort_keys`
-- `_name`
+- `_schema`：Rust schema 的惰性缓存
+- `_sort_keys`：对 Rust 声明顺序的即时读取，不是保存的状态
+- `_name`：lookup 使用的表名
 
 它通过 mixin 组合行为，而不是把所有逻辑放进单一巨型类中。
 

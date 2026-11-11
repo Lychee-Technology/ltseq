@@ -4,6 +4,7 @@
 //! - **common**: Shared utilities (RAII guards, SQL builders, schema helpers)
 //! - **basic**: search_first operation
 //! - **derive**: Column derivation coordination
+//! - **explain**: Pipeline diagnostics (`_explain_pipeline`)
 //! - **window**: Window functions for derived columns
 //! - **io**: File I/O operations (CSV writing, etc.)
 //! - **sort**: Sort operations
@@ -46,6 +47,7 @@ pub(crate) mod common;
 // Core modules
 pub(crate) mod basic;
 pub(crate) mod derive;
+pub(crate) mod explain;
 pub(crate) mod group_window;
 pub(crate) mod io;
 pub(crate) mod linear_scan;
