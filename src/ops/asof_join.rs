@@ -106,8 +106,9 @@ fn by_col_indices(
 }
 
 /// How an as-of join matches: the arguments of the PyO3 `asof_join` binding
-/// besides the two tables. The binding keeps Python's flat signature and
-/// packs them here, unvalidated; `asof_join_impl` validates them.
+/// besides the two tables. The binding takes its column bindings as pairs,
+/// `on: (left, right)` and `by: [(left, right), ...]`, and unpacks them here
+/// into per-side fields, unvalidated; `asof_join_impl` validates them.
 pub struct AsofJoinOptions<'a> {
     /// Time/key column of the left table
     pub left_time_col: &'a str,
