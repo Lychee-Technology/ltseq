@@ -262,26 +262,28 @@ than DataFusion, and that evaluator has no implicit type coercion (#188).
 
 ## Benchmark-Gated Experiments
 
-For baseline/candidate comparisons, use the benchmark autoresearch pilot:
+To judge one performance change, capture a baseline, apply the change, capture
+a candidate, and compare:
 
 ```bash
-uv run python benchmarks/autoresearch/pilot/scripts/benchmark_baseline.py \
-  clickbench_funnel --sample
+uv run --group bench python benchmarks/autoresearch/pilot/scripts/benchmark_baseline.py \
+  clickbench_funnel
 
-uv run python benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py \
-  clickbench_funnel --sample
+uv run --group bench python benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py \
+  clickbench_funnel
 
 uv run python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py \
   clickbench_funnel
 ```
 
-Use `--sample` only for smoke tests. Use the full sorted dataset for decisions
-about performance changes. The pilot writes baseline, candidate, diff, and
-keep/discard evaluation artifacts under
-`benchmarks/autoresearch/pilot/reports/`.
+The gate exits 0 to keep, 1 to discard and 2 when its inputs cannot be
+evaluated, and writes the diff and the decision under
+`benchmarks/autoresearch/pilot/reports/diff/<target>/`. Use `--sample` only for
+smoke tests; decide on the full sorted dataset.
 
-See [BENCHMARK_AUTORESEARCH.md](BENCHMARK_AUTORESEARCH.md) for the supervised
-autoloop, profiling, artifact retention, and review rules.
+See [BENCHMARK_AUTORESEARCH.md](BENCHMARK_AUTORESEARCH.md) for the evaluation
+contract, the limits of the default thresholds and how to calibrate them, and
+profiling.
 
 ## Reproducible Runs
 

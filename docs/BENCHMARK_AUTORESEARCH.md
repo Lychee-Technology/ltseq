@@ -1,529 +1,208 @@
-# Benchmark Autoresearch
+# Benchmark Comparison and Evaluation
 
-LTSeq includes a benchmark-gated autoresearch pilot under `benchmarks/autoresearch/pilot`.
+`benchmarks/autoresearch/` holds the tools for judging a performance change:
+run a baseline, apply the change, run the candidate, and compare the two with a
+keep/discard decision that a reviewer can check. Anyone can propose the change,
+a person or a general-purpose coding agent; the tools neither write code nor
+manage git.
 
-## Setup
+Until November 2026 this directory also held a supervised controller,
+`pilot/scripts/autoloop.sh`, that ran OpenCode in a dedicated worktree to
+produce one candidate per iteration, archived each run, and kept two ledgers
+(`results.tsv`, `issues.tsv`). It was retired rather than ported: it needed
+Bash 4.3+, which is why its tests failed on macOS (#174), and maintaining an
+agent-orchestration layer is not this project's work. The capture, comparison
+and evaluation scripts it called are what remain. Its documentation is in git
+history before the retirement (`65c5924`).
 
-Install benchmark dependencies:
+## Tools
 
-```bash
-uv sync --group bench
-```
+| Path | Does |
+|---|---|
+| `runner.py` | Runs `bench_vs.py` (ClickBench rounds, LTSeq against DuckDB, each round validated against DuckDB) and optionally `bench_core.py`; with `--profile`, writes flamegraphs and a hotspot report. Run directories go to `results/` (gitignored) or `--output-dir`. |
+| `profiler.py`, `analyzer.py`, `hypothesis.py`, `report.py`, `tracker.py` | Profiling with py-spy or perf + inferno, hotspot extraction from the SVGs, a static list of known optimization patterns matched against hotspots, the Markdown report, and run history. Used by `runner.py`. |
+| `pilot/common.py` | Target definitions (`TARGETS`), the shared capture step, summary and diff builders. |
+| `pilot/scripts/benchmark_baseline.py`, `benchmark_candidate.py` | Build the release extension, run the target's rounds through `runner.py`, and write `benchmark-summary.json` plus a Markdown table. |
+| `pilot/scripts/benchmark_gate.py` | Compares a target's baseline and candidate, writes the diff and the evaluation, and exits with the decision. |
+| `pilot/scripts/evaluate_benchmark_candidate.py` | The same evaluation on any two summary files, printed as JSON; the gate calls it. |
 
-Optional profiling support:
+Targets (`pilot/common.py`):
 
-```bash
-uv sync --group autoresearch
-```
+| Target | Target workload | Protected workloads |
+|---|---|---|
+| `clickbench_funnel` | R3: Funnel | R1: Top URLs, R2: Sessionization |
+| `clickbench_sessionization` | R2: Sessionization | R1: Top URLs, R3: Funnel |
+| `clickbench_top_urls` | R1: Top URLs | R2: Sessionization, R3: Funnel |
 
-Build the Rust extension before collecting benchmark evidence:
-
-```bash
-maturin develop --release
-```
-
-## Data Preparation
-
-Prepare the ClickBench parquet files under `benchmarks/data/`.
-
-Common helpers:
-
-- `python benchmarks/prepare_data.py`
-- `python benchmarks/verify_parquet_order.py benchmarks/data/hits_sorted.parquet userid eventtime watchid`
-
-## Pilot Targets
-
-- `clickbench_funnel`
-- `clickbench_sessionization`
+The scripts are plain Python and run on Linux and macOS with the `bench`
+dependency group. Profiling needs py-spy (the `autoresearch` group) or Linux
+perf with inferno.
 
 ## Workflow
 
-Capture a baseline:
+Run the scripts with `uv run --group bench` (`--group autoresearch` for
+profiling) so `duckdb` and `psutil` are in the environment, as
+`benchmarks/README.md` explains. The ClickBench data goes under
+`benchmarks/data/`, from `uv run --group bench python benchmarks/prepare_data.py`. Decisions need the full sorted dataset;
+`--sample` is a smoke test only, and the sample currently has order breaks
+that make Round 2 wrong (#336).
+
+The capture scripts rebuild the extension with `maturin develop --release`
+into the active environment, so run all three steps from one checkout:
 
 ```bash
-python benchmarks/autoresearch/pilot/scripts/benchmark_baseline.py clickbench_funnel
+# 1. Baseline, on the commit the change is based on
+uv run --group bench python benchmarks/autoresearch/pilot/scripts/benchmark_baseline.py clickbench_funnel
+
+# 2. Apply the candidate change (edit, or check out the branch)
+
+# 3. Candidate
+uv run --group bench python benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py clickbench_funnel
+
+# 4. Compare: exit 0 keep, 1 discard, 2 inputs cannot be evaluated
+uv run python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_funnel
 ```
 
-Capture a candidate after code changes:
+5. Review: put `reports/diff/<target>/evaluation.json` (or `evaluation.txt`
+   and `benchmark-diff.txt`) in the PR description, with the dataset and
+   machine. The reports directory is local output and gitignored.
+
+Options shared by the capture scripts: `--sample`, `--data PATH`,
+`--iterations N`, `--warmup N` (baseline and candidate must use the same),
+`--skip-build` when the installed extension is already the code being
+measured, and `--dry-run` to print the commands without running or deleting
+anything.
+
+To compare summaries captured elsewhere, for example in two checkouts, pass
+the files to the evaluator:
 
 ```bash
-python benchmarks/autoresearch/pilot/scripts/benchmark_candidate.py clickbench_funnel
+uv run python benchmarks/autoresearch/pilot/scripts/evaluate_benchmark_candidate.py \
+  base/benchmark-summary.json cand/benchmark-summary.json clickbench_funnel
 ```
 
-Compare baseline and candidate:
+For profiling rather than a decision:
 
 ```bash
-python benchmarks/autoresearch/pilot/scripts/benchmark_gate.py clickbench_funnel
+uv run --group autoresearch python benchmarks/autoresearch/runner.py --profile --full --round 3
+# Linux perf + inferno, with Rust symbols from: maturin develop --profile flamegraph
+uv run --group autoresearch python benchmarks/autoresearch/runner.py --profile --profiler perf
 ```
 
-Use `--sample` for smoke tests only. Review baseline decisions on the full sorted dataset.
-
-## Machine-readable Benchmark Summary
-
-`benchmarks/bench_vs.py` writes `benchmarks/clickbench_results.json` for downstream gating.
-
-Top-level fields used by the pilot:
-
-- `passed`
-- `correctness_failures`
-- `infra_failures`
-- `completed_rounds`
-- `total_rounds`
-- `rounds`
-
-Each round also carries machine-readable status fields:
-
-- `round_id`
-- `round_name`
-- `benchmark_status`
-- `validation.status`
-- `validation.detail`
-
-Infrastructure failures are persisted in JSON with `benchmark_status=infra_failure` and `validation.status=infra_failure`, so the pilot evaluator does not need to parse stdout to decide whether a candidate should be kept or discarded.
-
-## Supervised Controller
-
-The pilot also includes a supervised controller that uses isolated git worktrees and one OpenCode candidate per iteration.
-
-Start with a dry-run:
-
-```bash
-bash benchmarks/autoresearch/pilot/scripts/autoloop.sh \
-  --target clickbench_funnel \
-  --baseline \
-  --iterations 1 \
-  --sample \
-  --dry-run
-```
-
-In non-dry-run mode, the controller performs preflight checks before running the loop.
-
-Required checks:
-
-- `opencode` in `PATH`
-- `maturin` in `PATH` unless `--skip-build` is used
-- Python benchmark modules `duckdb` and `psutil`
-- benchmark data file exists at `benchmarks/data/hits_sorted.parquet`, `benchmarks/data/hits_sample.parquet`, or the `--data` override
-
-If preflight fails, the controller exits early with setup guidance instead of creating partial benchmark artifacts.
-
----
-
-## End-to-End Acceptance Checklist
-
-What a valid pilot run must produce. Use it for both dry-run verification and
-non-dry-run controller executions.
-
-### Dry-run verification
-
-- [ ] `autoloop.sh --dry-run` prints commands without executing `opencode` or touching the worktree
-- [ ] No benchmark artifacts are created under `reports/`
-- [ ] No worktree directory is created under `.worktrees/`
-- [ ] Preflight checks are skipped (no requirement for `opencode`, `maturin`, or data files)
-
-### Non-dry-run validation
-
-#### Preflight
-
-- [ ] `opencode` is available in `PATH`
-- [ ] `maturin` is available in `PATH` (unless `--skip-build` is used)
-- [ ] Python modules `duckdb` and `psutil` are importable
-- [ ] Benchmark dataset exists at the default path or the `--data` override
-
-#### Baseline
-
-- [ ] `reports/baseline/<target>/benchmark-summary.json` exists
-- [ ] The summary contains a valid `data_file` field matching the requested dataset
-- [ ] `reports/baseline/<target>/benchmark-result.md` exists (human-readable evidence)
-
-#### Candidate and diff (for each iteration)
-
-- [ ] `reports/candidates/<target>/benchmark-summary.json` exists
-- [ ] `reports/candidates/<target>/benchmark-result.md` exists
-- [ ] `reports/diff/<target>/benchmark-diff.json` exists
-- [ ] `reports/diff/<target>/evaluation.json` exists with a `recommendation` field (`keep` or `discard`)
-
-#### Run archive
-
-- [ ] A new directory `reports/runs/<target>/run-NNN/` is created
-- [ ] `run-NNN/decision.txt` exists (structured decision from OpenCode)
-- [ ] `run-NNN/stdout.log` exists (full OpenCode stdout)
-- [ ] `run-NNN/evaluation.txt` exists (controller evaluation output)
-- [ ] `run-NNN/patch.diff` exists (git diff of candidate changes)
-- [ ] For successful benchmarked runs: `run-NNN/candidate/` and `run-NNN/diff/` contain benchmark artifacts
-- [ ] For discarded runs: decision, stdout, evaluation, and patch are still archived
-
-#### Ledgers
-
-- [ ] `results.tsv` has a header row and one data row per completed iteration
-- [ ] Each `results.tsv` row contains: `base_ref`, `target`, `model_status`, `recommendation`, `hypothesis`, `target_win`, `protected_status`, `evidence`, `run_dir`, `patch_path`
-- [ ] The `run_dir` and `patch_path` fields in `results.tsv` point to existing paths
-- [ ] `issues.tsv` exists if any issues were recorded (may not exist if no issues)
-- [ ] Each `issues.tsv` row contains: `id`, `category`, `target`, `file`, `title`, `evidence`, `suggested_fix`, `status`, `run_date`
-
-#### Cleanup
-
-- [ ] Worktree changes are discarded after each iteration (no uncommitted changes remain)
-- [ ] Stale root candidate/diff artifacts are cleared on discard or gate failure paths
-
----
-
-## Reviewer Rubric
-
-How reviewers should judge archived autoresearch pilot runs. Apply the same
-criteria to every run so evaluations stay comparable.
-
-### 1. Scope compliance
-
-- [ ] The patch only modifies allowed source files (e.g., `src/ops/*.rs`, `py-ltseq/ltseq/*.py`)
-- [ ] No changes to test files, benchmark scripts, or autoresearch infrastructure
-- [ ] No changes to files outside the target's allowed scope (see `is_target_allowed_perf_file` in `autoloop.sh`)
-
-### 2. Target improvement
-
-- [ ] `evaluation.json` has `recommendation: keep`
-- [ ] Target workload shows improvement in median or p95 (or both)
-- [ ] The improvement magnitude is meaningful (not within noise)
-
-### 3. Protected-workload safety
-
-- [ ] No protected workload shows regression in median or p95
-- [ ] If a protected workload shows any regression, it is documented and justified
-
-### 4. Patch quality
-
-- [ ] The diff is focused and minimal (no unrelated changes)
-- [ ] The code change is understandable from the diff alone
-- [ ] No obvious correctness issues (e.g., removing necessary logic, changing semantics unintentionally)
-
-### 5. Artifact completeness
-
-- [ ] All required run archive files are present (see acceptance checklist above)
-- [ ] `decision.txt` contains a valid structured decision
-- [ ] `patch.diff` is non-empty and applies cleanly to the base commit
-
-### 6. Failure classification
-
-When a run does **not** produce a `keep` recommendation, distinguish:
-
-| Outcome | Meaning | Action |
-|---------|---------|--------|
-| `discard` (benchmark) | Candidate produced but did not pass gate | Archive for reference; no action needed |
-| `discard` (scope) | Candidate modified disallowed files | Review prompt compliance |
-| `discard` (infra-failure) | Benchmark or gate command failed | Investigate harness issue; may need rerun |
-| No decision | OpenCode produced no usable decision artifact | Tighten prompt or fallback parsing |
-| Harness error | Controller itself errored | Fix controller bug before rerunning |
-
----
-
-## Standard Run Summary Format
-
-Review each archived run through a compact summary that points at the relevant
-evidence, so you do not have to open every artifact by hand.
-
-### Fields
-
-| Field | Source | Description |
-|-------|--------|-------------|
-| `run_id` | Archive directory name | e.g., `run-001` |
-| `base_ref` | `results.tsv` | Short git commit hash of the base |
-| `target` | `results.tsv` | Benchmark target key |
-| `recommendation` | `results.tsv` / `evaluation.json` | `keep` or `discard` |
-| `hypothesis` | `results.tsv` | Scenario or hypothesis from decision |
-| `target_win` | `evaluation.json` | Target workload improvement summary |
-| `protected_status` | `evaluation.json` | Protected workload regression status |
-| `evidence` | `evaluation.json` | Reason for the recommendation |
-| `patch_path` | `results.tsv` | Path to `patch.diff` |
-| `artifacts` | Archive directory | List of archived files |
-
-### Markdown template
-
-```markdown
-## Run: <run_id>
-
-| Field | Value |
-|-------|-------|
-| Base ref | `<base_ref>` |
-| Target | `<target>` |
-| Recommendation | `<keep\|discard>` |
-| Hypothesis | `<hypothesis>` |
-| Target win | `<target_win>` |
-| Protected status | `<protected_status>` |
-| Evidence | `<evidence>` |
-
-### Artifacts
-
-- Decision: `run-NNN/decision.txt`
-- Evaluation: `run-NNN/evaluation.txt`
-- Patch: `run-NNN/patch.diff`
-- Candidate: `run-NNN/candidate/` (if present)
-- Diff: `run-NNN/diff/` (if present)
-
-### Reviewer Notes
-
-<free-form notes from the reviewer>
-```
-
----
-
-## Artifact Retention and Ignore Policy
-
-Which autoresearch-generated artifacts belong in git history, and which stay
-local scratch data.
-
-### Committed artifacts
-
-These artifacts are contractual, reviewable evidence and **should be committed**
-when a run is validated:
-
-- `results.tsv`: run ledger with one row per iteration
-- `issues.tsv`: recorded harness, environment, and performance issues
-- `reports/baseline/<target>/`: latest validated baseline for each target
-- `reports/runs/<target>/run-NNN/`: archived run directories for reviewed runs
-
-### Local-only artifacts
-
-These artifacts are disposable local state and **should not be committed**:
-
-- `.worktrees/`: git worktrees used by the controller; always local
-- `reports/candidates/<target>/`: overwritten each iteration; only the archived copy in `reports/runs/` matters
-- `reports/diff/<target>/`: overwritten each iteration; only the archived copy in `reports/runs/` matters
-- `reports/logs/`: controller loop logs; useful for debugging but not reviewable evidence
-
-### Gitignore rules
-
-The following patterns are in `.gitignore` to prevent accidental commits of
-large or disposable artifacts:
-
-- `.worktrees/`: worktree directories
-- `benchmarks/autoresearch/results/`: flamegraphs and run summaries from the older autoresearch runner
-- `benchmarks/data/*.parquet`: large benchmark datasets
-
-### Placeholder files
-
-`.gitkeep` files in `reports/baseline/`, `reports/candidates/`, and `reports/diff/`
-ensure the directory structure exists in git even when the directories are empty.
-These placeholders should be kept.
-
-### Cleanup expectations
-
-- After a validated run, the `reports/candidates/` and `reports/diff/` directories
-  may be cleared; the evidence lives in `reports/runs/`.
-- Local worktrees under `.worktrees/` can be pruned with `git worktree prune`.
-- Old `reports/runs/` directories may be removed if they are no longer needed for
-  review, but `results.tsv` and `issues.tsv` should be preserved as the authoritative ledger.
-
----
-
-## Benchmark Environment Metadata
-
-Reproducing a run means capturing the environment behind it. Every archived run
-should have the metadata below.
-
-### Required metadata
-
-| Field | Source | Example |
-|-------|--------|---------|
-| `base_ref` | `results.tsv` | `abc1234` |
-| `target` | `results.tsv` | `clickbench_funnel` |
-| `dataset` | `--data` flag or default path | `benchmarks/data/hits_sorted.parquet` |
-| `dataset_label` | Derived from dataset name | `full dataset` |
-| `model` | `--model` flag | `github-copilot/gpt-4.1` |
-| `iterations` | `--iterations` flag | `3` |
-| `warmup` | Target spec default | `1` |
-| `build_mode` | `--skip-build` flag | `release` or `skipped` |
-| `platform` | `uname -s` / `uname -m` | `Linux x86_64` |
-| `cpu_count` | `nproc` | `32` |
-| `rust_version` | `rustc --version` | `rustc 1.85.0` |
-| `run_date` | Controller execution date | `2026-04-22` |
-
-### Where to find it
-
-- `results.tsv` captures `base_ref`, `target`, `recommendation`, and outcome fields
-- The loop log (`benchmark-autoloop-<target>.log`) records dataset label, model, and iteration count
-- The `benchmark-summary.json` files capture the `data_file` path
-- System details (`platform`, `cpu_count`, `rust_version`) can be obtained from the machine that ran the benchmark
-
-### Reproduction checklist
-
-To reproduce a specific archived run:
-
-1. Check out the `base_ref` commit
-2. Install the same Rust and Python dependency versions
-3. Use the same dataset (sample, full, or custom)
-4. Run the baseline and candidate scripts with the same `--data` and `--skip-build` flags
-5. Compare the resulting `benchmark-diff.json` against the archived evidence
-
----
-
-## Target Onboarding Checklist
-
-Verify every item below before adding a new benchmark autoresearch target to the
-supervised controller.
-
-### Required inputs
-
-- [ ] **Target key**: A unique identifier (e.g., `clickbench_funnel`)
-- [ ] **Title**: Human-readable name (e.g., `ClickBench Funnel`)
-- [ ] **Target brief**: A `targets/<key>_perf.md` file describing the optimization goal,
-  target workloads, and protected workloads
-- [ ] **Editable source files**: A list of source files the agent is allowed to modify
-  (e.g., `("src/ops/pattern_match.rs",)`)
-- [ ] **Target workloads**: The round(s) whose improvement is the goal
-  (e.g., `("r3_funnel",)`)
-- [ ] **Protected workloads**: The round(s) that must not regress
-  (e.g., `("r1_top_urls", "r2_sessionization")`)
-
-### Benchmark readiness
-
-- [ ] The target's rounds are supported by `bench_vs.py`
-- [ ] Baseline capture works: `benchmark_baseline.py <key> --sample --dry-run` succeeds
-- [ ] Candidate capture works: `benchmark_candidate.py <key> --sample --dry-run` succeeds
-- [ ] Gate evaluation works: `benchmark_gate.py <key>` produces `benchmark-diff.json` and `evaluation.json`
-- [ ] The target is registered in `TARGETS` dict in `common.py`
-- [ ] The target is registered in `is_target_allowed_perf_file()` in `autoloop.sh`
-
-### Scope validation
-
-- [ ] `is_target_allowed_perf_file()` returns `0` only for the target's editable source files
-- [ ] Test files, benchmark scripts, and autoresearch infrastructure are excluded from allowed edits
-- [ ] The target brief explicitly states what the agent should and should not optimize
-
-### Review readiness
-
-- [ ] Threshold values are defined (default: target improvement `-3.0%`, protected regression `+5.0%`)
-- [ ] The target has at least one validated dry-run through the full autoloop
-- [ ] A human reviewer can interpret the target's `benchmark-diff.json` output
-
-### Wiring into the controller
-
-- [ ] Add the target to `TARGETS` in `benchmarks/autoresearch/pilot/common.py`
-- [ ] Add the target to `is_target_allowed_perf_file()` in `autoloop.sh`
-- [ ] Add the target brief to `targets/<key>_perf.md`
-- [ ] Add `.gitkeep` placeholders under `reports/baseline/<key>/`, `reports/candidates/<key>/`, `reports/diff/<key>/`
-
----
-
-## Graduation Criteria: From Supervised Pilot to Broader Automation
-
-The current pilot is supervised and review-first. Broader automation (auto-commit,
-auto-merge) requires meeting the criteria below first.
-
-### Run reliability
-
-- [ ] The controller runs without harness errors for at least N consecutive iterations
-  across all registered targets
-- [ ] Decision artifact parsing recovers from malformed or missing decision files
-  without losing diagnostic information
-- [ ] Preflight checks catch all common setup failures before creating artifacts
-
-### Artifact quality
-
-- [ ] Every archived run contains all required artifacts (see acceptance checklist)
-- [ ] `results.tsv` and `issues.tsv` pass integrity checks (no broken references,
-  no empty required fields)
-- [ ] Archived patches apply cleanly to the base commit
-
-### Reviewer trust
-
-- [ ] Multiple reviewers have applied the reviewer rubric consistently to the same runs
-- [ ] The false-positive rate (discard recommendations that would have been valid) is acceptably low
-- [ ] The false-negative rate (keep recommendations that introduced regressions) is zero
-
-### Benchmark confidence
-
-- [ ] Threshold values are calibrated against observed run data for each target
-- [ ] Sample-versus-full dataset variance is characterized and documented
-- [ ] Median and p95 gate behavior is reviewed against observed pilot runs
-
-### Automation readiness
-
-- [ ] A clear rollback path exists for auto-committed changes
-- [ ] Protected-workload regressions are caught before any auto-merge
-- [ ] The project has explicit criteria for when to revert to supervised mode
-  (e.g., after a regression slips through)
-
----
-
-## Readiness Criteria: Widening Editable Scope
-
-The current controller restricts candidate edits to a narrow set of target files.
-Widening that scope requires clearing the readiness gates below.
-
-### Evidence gates
-
-- [ ] At least N successful `keep` runs have been archived across all current targets
-- [ ] No protected-workload regression has been introduced by a `keep` candidate
-- [ ] The reviewer rubric has been applied consistently to at least N runs
-
-### Review capacity
-
-- [ ] The project has enough reviewers to handle the increased review load
-- [ ] Review turnaround time is acceptable (e.g., within 1-2 days)
-- [ ] The false-positive and false-negative rates are characterized
-
-### Risk assessment
-
-- [ ] The expanded file list has been reviewed for blast radius
-  (e.g., adding `src/ops/derive.rs` affects more code paths than `src/ops/pattern_match.rs`)
-- [ ] Protected workloads cover the expanded scope
-- [ ] The controller's scope validation (`validate_candidate_scope`) correctly rejects
-  files outside the expanded allowed set
-
-### Gradual expansion
-
-Scope expansion should be incremental:
-
-1. Add one file or file pattern at a time
-2. Run at least N iterations with the expanded scope
-3. Review all resulting runs before further expansion
-4. Document the rationale for each expansion in the target brief
-
----
-
-## Run Archive Completeness Validation
-
-Validation of run archive completeness across the keep and discard paths.
-
-### Validated paths
-
-The following archive paths have been validated against the acceptance checklist:
-
-#### Discard paths
-
-| Path | Artifact | Source |
-|------|----------|--------|
-| `run-NNN/decision.txt` | Structured decision | `archive_run_artifacts()` line 888 |
-| `run-NNN/stdout.log` | Full OpenCode stdout | `archive_run_artifacts()` line 889 |
-| `run-NNN/evaluation.txt` | Controller evaluation | `archive_run_artifacts()` line 890 |
-| `run-NNN/patch.diff` | Git diff of changes | `archive_run_artifacts()` lines 891-898 |
-
-All discard paths (status != keep, scope failure, benchmark failure, gate failure)
-archive these four artifacts before calling `discard_candidate_state()`.
-
-#### Successful benchmarked paths
-
-In addition to the four discard artifacts, successful runs also archive:
-
-| Path | Artifact | Source |
-|------|----------|--------|
-| `run-NNN/candidate/` | Candidate benchmark outputs | `archive_run_artifacts()` lines 900-903 |
-| `run-NNN/diff/` | Diff and evaluation artifacts | `archive_run_artifacts()` lines 904-907 |
-
-These are copied from the worktree report root only when artifacts exist
-(`phase_dir_has_artifacts` check).
-
-### Validation status
-
-**All acceptance criteria are met:**
-
-- [x] Discard runs archive `decision.txt`, `stdout.log`, `evaluation.txt`, and `patch.diff`
-- [x] Successful benchmarked runs also archive candidate and diff artifacts
-- [x] Every archived run directory is self-contained enough for later review
-- [x] Missing archive content would be a bug (the controller always creates these files)
-
-### Related PRs
-
-- PR #63: Stabilized controller contracts, added archive test coverage
-- PR #67: Added archive artifact assertions and ledger preservation
-- PR #85: Relaxed archive artifact assertions to verify directories rather than hard-coded paths
+Until this change, a capture without `--sample` or `--data` ran on the sample,
+not the full dataset: `runner.py` defaults to the sample and the capture step
+passed no data flag. Each summary's `data_file` recorded the file actually
+used, so check it before trusting an older "full dataset" result.
+
+## Evaluation contract
+
+The evaluator checks, in this order, and the first failed check decides:
+
+| Check | `reason_code` on failure |
+|---|---|
+| Same target, dataset (file name and size, or the same path when a size is unknown), `iterations` and `warmup` | `incompatible_inputs` |
+| The baseline has no correctness or infrastructure failure, every target and protected workload, and a positive median and p95 for each | `invalid_baseline` |
+| The candidate has no correctness failure (count or a failed workload validation) | `correctness_failure` |
+| ... no infrastructure failure | `infra_failure` |
+| ... every target and protected workload | `missing_workloads` |
+| ... each of them completed and validated `pass` | `unvalidated_workload` |
+| ... a positive, finite median and p95 for each | `missing_metrics` |
+| No protected workload slower by the regression bar or more in median **or** p95 | `protected_regression` |
+| At least one target workload faster by the improvement bar or more in median **and** p95 | `no_target_improvement` |
+
+Passing every check gives `keep` with `reason_code: target_improvement`;
+anything else is `discard`. `evaluation.json` also lists `problems` (every
+failed check, not only the deciding one), `missing_workloads`, the per-workload
+deltas behind a win or a regression, both git SHAs, the `thresholds` used and
+where they came from, and `warnings`. A difference in platform, processor, CPU
+count or Python version between the two runs is a warning rather than a
+rejection, because an OS or library update changes these on the same machine;
+read it before trusting the numbers.
+
+Exit status, for both the gate and the evaluator: 0 keep, 1 discard, 2 when no
+evaluation can be made (a summary is missing, unreadable or not a benchmark
+summary, the target is unknown, or an option is invalid). On status 2 the gate
+leaves the diff directory empty, so an earlier evaluation cannot be mistaken
+for this one.
+
+A target win needs median **and** p95. Issue #51 set this rule, and the code
+and tests have required it since April 2026. The rule documents said "median
+or p95" until this change. The rule is conservative: a change that only trims
+the tail, or only the typical run, is not a win.
+
+The gate is a tool for one person or agent judging one change. It is not a CI
+check, and nothing runs it on PRs; a regression gate in CI is #158's open
+question.
+
+## Thresholds and their limits
+
+The defaults are a 3% improvement bar and a 5% regression bar, for every
+target. They have not been validated statistically, and they should not be
+read as noise limits.
+
+- An earlier version of this document and `pilot/common.py` cited same-commit
+  variation of about 0.8% for R1, 1.6% for R3 and 9% for R2 on the full
+  dataset. The runs behind those figures are not in the repository, and
+  because of the capture bug above they may have been taken on the sample.
+  Treat them as unverified.
+- If R2 does vary by around 9% between identical runs, both bars are inside
+  its noise. A `clickbench_sessionization` keep can then be noise, and R2 as a
+  protected workload can reject a change of another target that did not touch
+  it.
+- The default is 3 timed iterations. p95 over three samples is 0.9 of the way
+  from the second-slowest to the slowest, so it is close to a single sample.
+  The median is the middle of three.
+- `bench_vs.py` runs LTSeq and DuckDB in one process and records its memory
+  figure as an RSS difference, not a peak (#331). The gate does not use memory.
+
+Calibrating a target, before relying on its decisions:
+
+1. On one commit and an idle machine, capture a baseline and then a candidate
+   with no code change (an A/A comparison). Repeat this several times, with the
+   same `--iterations` you intend to use; more iterations narrow the spread.
+2. Record each workload's median and p95 deltas from `benchmark-diff.json`.
+   The largest absolute delta seen is a floor for that workload's bars, not a
+   bound.
+3. Try candidate bars with `--min-improvement-pct` and `--max-regression-pct`
+   on the gate or the evaluator; `evaluation.json` records them with
+   `source: override`.
+4. Make a bar the default by setting `target_improvement_threshold_pct` and
+   `protected_regression_threshold_pct` on that target in `pilot/common.py`,
+   in a PR that includes the A/A deltas.
+
+Bars apply per target, so a workload that is noisier as a protected workload
+than as a target needs its own target definitions, or a wider bar on the
+targets that protect it.
+
+## Artifacts
+
+Under `benchmarks/autoresearch/pilot/reports/`:
+
+- `baseline/<target>/` and `candidates/<target>/`: `runner.py`'s output
+  (`summary.json`, `bench_vs.json`, `report.md`), `benchmark-result.json` (a
+  copy of the runner summary), `benchmark-summary.json` (normalized: target, git SHA, dataset
+  path and size, warmup, iterations, system, failure counts, per-workload
+  median, p95, samples and validation), and `benchmark-result.md`.
+- `diff/<target>/`: `benchmark-diff.json` and `.txt` (median and p95 deltas
+  for the target and protected workloads) and `evaluation.json` and `.txt`.
+
+Each capture and gate run clears its own directory first, so files never mix
+two runs.
+
+`bench_vs.py` writes `benchmarks/clickbench_results.json`; the fields the
+capture reads are `passed`, `correctness_failures`, `infra_failures`,
+`completed_rounds`, `total_rounds`, `data_file`, `warmup`, `iterations`,
+`system` and `rounds`. Each round carries `round_id`, `round_name`,
+`benchmark_status` and `validation.status` / `validation.detail`. A round that
+raises is recorded as `benchmark_status: infra_failure` rather than aborting
+the run, so the evaluator never parses stdout.
+
+## Known limitations
+
+- The sample is not sorted although the benchmark declares it sorted, and the
+  Parquet order verifier skips row-group seams (#336).
+- There is no published comparative claim; the numbers in
+  `CLICKBENCH_MAPPING.md` predate several changes (#331).
+- Only the three ClickBench rounds are gated. `bench_core.py` runs through
+  `runner.py` but has no evaluation, and many operators have no benchmark
+  (#158).

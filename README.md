@@ -33,14 +33,14 @@ Fast, intuitive ordered computing on sequences of data. Process data as a sequen
 
 ## Benchmarking
 
-Benchmark and benchmark-gated autoresearch tooling live under `benchmarks/`.
+Benchmarks and the tools for judging a performance change live under `benchmarks/`.
 
 - Run the whole suite: `uv run --group bench python benchmarks/run_all.py --sample`
 - ClickBench comparison harness: `uv run --group bench python benchmarks/bench_vs.py --sample`
 - Core operation benchmark: `uv run python benchmarks/bench_core.py` (no `bench` group needed)
 - The ClickBench steps need `duckdb`/`psutil` from the optional `bench` group — pass `--group bench` on each `uv run` so they're synced into the venv (a plain `uv run` would sync them back out).
 - Overview and file guide: `benchmarks/README.md`
-- Benchmark autoresearch pilot: `docs/BENCHMARK_AUTORESEARCH.md`
+- Baseline/candidate comparison and keep/discard evaluation: `docs/BENCHMARK_AUTORESEARCH.md`
 
 ## Quick Start
 

@@ -16,13 +16,14 @@ benchmarks/data/.duckdb_spill/
 benchmarks/results.json
 benchmarks/clickbench_results.json
 
-# autoresearch generated results (flamegraphs, run summaries)
+# autoresearch generated results (flamegraphs, run summaries) and baseline/candidate/diff reports
 benchmarks/autoresearch/results/
+benchmarks/autoresearch/pilot/reports/
 .opencode/
 .claude/
 build/
 
-# autoresearch controller worktrees (local scratch)
+# local git worktrees (scratch)
 .worktrees/
 .vscode/
 libltseq_core.dylib.dSYM/

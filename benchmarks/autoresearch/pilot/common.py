@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import shutil
@@ -19,8 +20,6 @@ RUNNER_PATH = AUTORESEARCH_DIR / "runner.py"
 class TargetSpec:
     key: str
     title: str
-    brief_path: Path
-    source_files: tuple[str, ...]
     rounds: tuple[int, ...]
     target_workloads: tuple[str, ...]
     protected_workloads: tuple[str, ...]
@@ -29,42 +28,22 @@ class TargetSpec:
     warmup: int = 1
     iterations: int = 3
 
+    @property
+    def required_workloads(self) -> tuple[str, ...]:
+        return self.target_workloads + self.protected_workloads
 
-# ── Threshold calibration rationale ──────────────────────────────────
-#
-# target_improvement_threshold_pct = -3.0
-#   A target workload "wins" when either its median or p95 LTSeq latency
-#   improves by at least 3%.  Observed same-SHA variance on the full
-#   ClickBench dataset is 0.8-1.6% for R1/R3 and up to ~9% for R2.
-#   The 3% bar is above typical R1/R3 noise and below R2 noise, so
-#   genuine improvements on the target workload should pass reliably
-#   while spurious noise-driven "improvements" on protected workloads
-#   are unlikely to meet the bar.
-#
-# protected_regression_threshold_pct = 5.0
-#   A protected workload "regresses" when either its median or p95 LTSeq
-#   latency worsens by 5% or more.  The 5% bar is well above observed
-#   noise for R1 (≈0.8%) and R3 (≈1.6%), catching real regressions while
-#   tolerating measurement jitter.  For R2 (≈9% variance), the 5% bar may
-#   admit false negatives; however, R2 is always a protected (never
-#   target) workload in existing target configurations, so a conservative
-#   regression bar avoids rejecting candidates on R2 noise alone.
-#
-# Both targets share one policy because thresholds are evaluated
-# per-workload and the values above accommodate the widest observed
-# variance range.  Per-target overrides are supported via TargetSpec
-# constructor arguments and should be used if future evidence shows
-# different workloads need different sensitivity.  Re-calibrate once
-# clickbench_funnel and clickbench_sessionization baseline data is
-# available.
-# ──────────────────────────────────────────────────────────────────────
+
+# Thresholds. A target workload wins when its LTSeq median AND p95 both improve
+# by at least 3%; a protected workload regresses when its median OR p95 worsens
+# by 5% or more (#51). These values are defaults, not calibrated limits: see
+# "Thresholds and their limits" in docs/BENCHMARK_AUTORESEARCH.md before
+# trusting a decision near them, and calibrate per target there (an A/A run on
+# one commit) rather than editing the defaults here.
 
 TARGETS = {
     "clickbench_funnel": TargetSpec(
         key="clickbench_funnel",
         title="ClickBench Funnel",
-        brief_path=PILOT_DIR / "targets" / "clickbench_funnel_perf.md",
-        source_files=("src/ops/pattern_match.rs",),
         rounds=(1, 2, 3),
         target_workloads=("r3_funnel",),
         protected_workloads=("r1_top_urls", "r2_sessionization"),
@@ -72,8 +51,6 @@ TARGETS = {
     "clickbench_sessionization": TargetSpec(
         key="clickbench_sessionization",
         title="ClickBench Sessionization",
-        brief_path=PILOT_DIR / "targets" / "clickbench_sessionization_perf.md",
-        source_files=("src/ops/window.rs", "src/ops/derive.rs"),
         rounds=(1, 2, 3),
         target_workloads=("r2_sessionization",),
         protected_workloads=("r1_top_urls", "r3_funnel"),
@@ -81,8 +58,6 @@ TARGETS = {
     "clickbench_top_urls": TargetSpec(
         key="clickbench_top_urls",
         title="ClickBench Top URLs",
-        brief_path=PILOT_DIR / "targets" / "clickbench_top_urls_perf.md",
-        source_files=("src/ops/aggregation.rs",),
         rounds=(1, 2, 3),
         target_workloads=("r1_top_urls",),
         protected_workloads=("r2_sessionization", "r3_funnel"),
@@ -102,12 +77,19 @@ ROUND_NUMBER_TO_ID = {
 }
 
 
+class BenchmarkInputError(Exception):
+    """An input the gate cannot evaluate: an unknown target, or a summary file
+    that is missing, unreadable or not a benchmark summary."""
+
+
 def resolve_target(target: str) -> TargetSpec:
     try:
         return TARGETS[target]
     except KeyError as exc:
         available = ", ".join(sorted(TARGETS))
-        raise SystemExit(f"unknown benchmark target: {target} (available: {available})") from exc
+        raise BenchmarkInputError(
+            f"unknown benchmark target: {target} (available: {available})"
+        ) from exc
 
 
 def ensure_report_dirs() -> None:
@@ -171,7 +153,10 @@ def run_runner(
         cmd.extend(["--data", data_path])
     elif data_mode == "sample":
         cmd.append("--sample")
-    elif data_mode != "full":
+    elif data_mode == "full":
+        # runner.py defaults to the sample, so the full dataset must be asked for.
+        cmd.append("--full")
+    else:
         raise SystemExit(f"unsupported data mode: {data_mode}")
 
     if dry_run:
@@ -299,13 +284,14 @@ def build_benchmark_summary(target: str, runner_summary: dict) -> dict:
     return {
         "target": target,
         "title": spec.title,
-        "brief": str(spec.brief_path.relative_to(REPO_ROOT)),
         "git_sha": runner_summary.get("git_sha"),
         "timestamp": runner_summary.get("timestamp"),
         "data_file": bench_vs.get("data_file"),
+        "data_file_bytes": dataset_size(bench_vs.get("data_file")),
         "dataset_label": describe_dataset(bench_vs.get("data_file")),
         "warmup": bench_vs.get("warmup"),
         "iterations": bench_vs.get("iterations"),
+        "system": bench_vs.get("system"),
         "passed": passed,
         "correctness_failures": correctness_failures,
         "infra_failures": infra_failures,
@@ -409,3 +395,100 @@ def format_delta(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:+.2f}%"
+
+
+def dataset_size(data_file: str | None) -> int | None:
+    """Size in bytes of the benchmarked file, so the gate can tell two datasets
+    apart even when the baseline and candidate ran from different checkouts."""
+    if not data_file:
+        return None
+    path = Path(data_file)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def check_summary_shape(summary: object, label: str) -> dict:
+    """Raise BenchmarkInputError unless `summary` looks like benchmark-summary.json."""
+    if not isinstance(summary, dict):
+        raise BenchmarkInputError(f"{label} summary is not a JSON object")
+    workloads = summary.get("workloads")
+    if not isinstance(workloads, list) or not all(
+        isinstance(workload, dict) and isinstance(workload.get("id"), str)
+        for workload in workloads
+    ):
+        raise BenchmarkInputError(f"{label} summary has no valid 'workloads' list")
+    return summary
+
+
+def load_summary(path: Path, label: str) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise BenchmarkInputError(f"{label} summary not found: {path}") from exc
+    except (OSError, ValueError) as exc:
+        raise BenchmarkInputError(f"{label} summary is unreadable: {path}: {exc}") from exc
+    return check_summary_shape(payload, label)
+
+
+PHASE_REPORT_DIRS = {"baseline": "baseline", "candidate": "candidates"}
+
+
+def capture_main(phase: str, argv: list[str] | None = None) -> int:
+    """Run the benchmark for one target and write `<phase>` artifacts.
+
+    Shared by benchmark_baseline.py and benchmark_candidate.py, which differ
+    only in the report directory they write.
+    """
+    parser = argparse.ArgumentParser(description=f"Capture {phase} benchmark artifacts")
+    parser.add_argument("target", nargs="?", default="clickbench_funnel", choices=sorted(TARGETS))
+    parser.add_argument("--sample", action="store_true", help="1M-row sample; smoke tests only")
+    parser.add_argument("--data", type=str, help="custom Parquet file")
+    parser.add_argument("--iterations", type=int)
+    parser.add_argument("--warmup", type=int)
+    parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    spec = resolve_target(args.target)
+    ensure_report_dirs()
+    output_dir = resolve_report_dir(PHASE_REPORT_DIRS[phase], spec.key)
+    if not args.dry_run:
+        clean_output_dir(output_dir)
+
+    run_build(skip_build=args.skip_build, dry_run=args.dry_run)
+    run_runner(
+        output_dir,
+        spec.rounds,
+        data_mode="sample" if args.sample else "full",
+        data_path=args.data,
+        iterations=spec.iterations if args.iterations is None else args.iterations,
+        warmup=spec.warmup if args.warmup is None else args.warmup,
+        dry_run=args.dry_run,
+    )
+
+    if args.dry_run:
+        return 0
+
+    runner_summary = load_json(output_dir / "summary.json")
+    ensure_complete_benchmark_capture(spec, runner_summary)
+    benchmark_summary = build_benchmark_summary(spec.key, runner_summary)
+    write_json(output_dir / "benchmark-result.json", runner_summary)
+    write_json(output_dir / "benchmark-summary.json", benchmark_summary)
+    (output_dir / "benchmark-result.md").write_text(
+        render_benchmark_result(benchmark_summary), encoding="utf-8"
+    )
+
+    print(f"{phase} artifacts: {output_dir}")
+    if not benchmark_summary["passed"]:
+        # The artifacts are still written so the gate can name the failure.
+        print(
+            f"warning: {phase} run did not pass: "
+            f"correctness_failures={benchmark_summary['correctness_failures']}, "
+            f"infra_failures={benchmark_summary['infra_failures']}",
+            file=sys.stderr,
+        )
+    return 0

@@ -1,7 +1,7 @@
 # ADR 0015: 测试与基准是架构层的一部分
 
 - 状态：已采纳（Accepted）
-- 决策日期：早于本记录 · 记录日期：2026-07-26
+- 决策日期：早于本记录 · 记录日期：2026-07-26 · 修订日期：2026-11-11（受监督的 autoresearch 控制器退役；gate 保留其 JSON 契约，并增加退出码与输入校验，#174）
 
 [English](0015-tests-benchmarks-as-architecture.md)
 
@@ -11,7 +11,7 @@
 
 ## 决策
 
-把系统建模为四层：在 API、编排、执行之外，加上**验证与性能层**（`py-ltseq/tests/`、`benchmarks/`、autoresearch 工作流）。
+把系统建模为四层：在 API、编排、执行之外，加上**验证与性能层**（`py-ltseq/tests/`、`benchmarks/`、baseline/candidate 评估工作流）。
 
 ### 测试组织
 
@@ -25,15 +25,17 @@
 - 当前实际是**两套协议**而非一套：**ClickBench 对比**（`bench_vs.py`）报告**中位数**、记录 RSS 内存增量、且**每轮用 DuckDB 校验**正确性；**核心套件**（`bench_core.py`）报告各轮**平均值**，不记录逐样本数据、RSS 或校验结果。commit/工具链版本记录在核心套件的 host info 中，ClickBench 的 system info 反而没有。操作性参数（轮次、阈值、结果 schema）以 `BENCHMARK.md` 为准。
 - 工作负载检验序列论题：Top-URL 聚合、用户会话切分、顺序 URL 漏斗匹配，外加 10K/100K/1M 行的核心套件。
 
-### 基准门控的 autoresearch（受监督）
+### 基准门控的评估
 
-一个 LLM agent 实验闭环（baseline → candidate → gate），配有防止其投机或破坏仓库稳定的护栏：以机器可读 JSON 做门控（`benchmark-diff.json`、`evaluation.json`、`keep`/`discard`；基础设施故障持久化为 `infra_failure`，而非从 stdout 解析）；每轮一个隔离 git worktree、一个候选，结束即丢弃；产出任何工件前先做 preflight 校验；**受限的可编辑范围**（只能改目标允许的源文件；测试、基准脚本与基础设施一律禁改）；阈值（目标改进 -3.0%，受保护工作负载回归容忍 +5.0%）；明确的工件保留策略；以及明确的**监督优先、先审后并**立场：在任何自动 commit/merge 之前须满足成文的毕业标准（包括 `keep` 推荐的误放率必须为零），范围扩大也按增量规则门控。
+一次性能改动通过 ClickBench 各轮上的 baseline → candidate → gate 对比来评判（`benchmarks/autoresearch/pilot/`）。gate 以机器可读 JSON 做决定（`benchmark-diff.json`、`evaluation.json`、带原因码的 `keep`/`discard`；基础设施故障持久化为 `infra_failure`，而非从 stdout 解析），退出码表达同一结论：0 keep、1 discard、2 输入无法评估。它拒绝无法信任的比较：数据集、迭代次数或 warmup 不同，baseline 无效，缺少工作负载或指标。目标工作负载须在中位数和 p95 上都达到该目标的改进门槛（默认 3%）；受保护工作负载的中位数或 p95 任一回归达到其门槛（默认 5%）即被拒绝。这些默认值未经统计验证，`docs/BENCHMARK_AUTORESEARCH.md` 给出了在依赖某个目标的结论之前所需的 A/A 校准方法。
+
+由谁提出改动不属于本系统：可以是人，也可以是通用的编码 agent。项目最初运行过自己的受监督 LLM agent 闭环（在隔离 git worktree 中运行 OpenCode，每轮一个候选，受限的可编辑范围，运行台账，以及任何自动 commit 之前的毕业标准）。该控制器于 2026-11-11 退役：它要求 Bash 4.3+，导致其测试在 macOS 上无法通过（#174，macOS CI #329 的前置条件），而维护一层 agent 编排不是本项目的工作。本决策保留的是它所调用的 gate、采集与性能剖析工具。
 
 ## 影响与取舍
 
 - 性能研究变成“可重复的工程实践”，而非临时调优。
 - 按能力组织的测试能在源码文件重组的重构中存活。
-- autoresearch 的护栏用自动化速度换信任；放宽护栏须满足显式标准。
+- keep/discard 结论的可信度取决于其背后的阈值；在某个目标完成校准之前，评审者应阅读各项增量，而不只看推荐结论。
 
 ## 来源
 
