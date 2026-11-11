@@ -307,6 +307,21 @@ struct RgBoundaryInfo {
     one_partition: bool,
 }
 
+/// What every row group's fused read+match shares: the file, the columns
+/// read from it, and the pattern to match. Built once per file and lent to
+/// each rayon task, which adds only its row group's index.
+struct RowGroupScan<'a> {
+    parquet_path: &'a str,
+    projection_mask: &'a ProjectionMask,
+    /// Position of the partition column in the projected schema
+    partition_col_idx: usize,
+    step_predicates: &'a [PyExpr],
+    fast_path_plan: Option<&'a StartsWithFastPathPlan>,
+    num_steps: usize,
+    /// Column name to position in the projected schema
+    name_to_idx: &'a HashMap<String, usize>,
+}
+
 /// Result from fused read+match of a single row group.
 struct RgMatchResult {
     /// Number of intra-RG pattern matches found
@@ -408,22 +423,19 @@ pub fn parallel_pattern_match_count(
     // Step 3+4: Fused read + match per RG in parallel.
     // Each task reads one RG, pattern-matches it, extracts boundary data, drops RG data.
     // This eliminates the 1.4s dealloc overhead from holding all RG data in memory.
-    let path_str = parquet_path.to_string();
+    let scan = RowGroupScan {
+        parquet_path,
+        projection_mask: &projection_mask,
+        partition_col_idx: part_col_idx,
+        step_predicates,
+        fast_path_plan: fast_path_plan.as_ref(),
+        num_steps,
+        name_to_idx: &name_to_idx,
+    };
 
     let rg_results: Vec<RgMatchResult> = (0..num_row_groups)
         .into_par_iter()
-        .map(|rg_idx| {
-            read_match_and_extract_boundary(
-                &path_str,
-                rg_idx,
-                &projection_mask,
-                part_col_idx,
-                step_predicates,
-                fast_path_plan.as_ref(),
-                num_steps,
-                &name_to_idx,
-            )
-        })
+        .map(|rg_idx| read_match_and_extract_boundary(&scan, rg_idx))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| LtseqError::Runtime(format!("Parallel fused read+match failed: {}", e)))?;
 
@@ -455,20 +467,19 @@ pub fn parallel_pattern_match_count(
 /// RG data. This means each RG's ~20MB of data is freed immediately after
 /// processing, eliminating the 1.4s dealloc overhead from holding all 814 RGs
 /// (~2.7GB) in memory simultaneously.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "packing the args into a struct is a behavior-neutral refactor out of scope for #150"
-)]
 fn read_match_and_extract_boundary(
-    parquet_path: &str,
+    scan: &RowGroupScan<'_>,
     row_group_idx: usize,
-    projection_mask: &ProjectionMask,
-    partition_col_idx: usize,
-    step_predicates: &[PyExpr],
-    fast_path_plan: Option<&StartsWithFastPathPlan>,
-    num_steps: usize,
-    name_to_idx: &HashMap<String, usize>,
 ) -> Result<RgMatchResult, String> {
+    let RowGroupScan {
+        parquet_path,
+        projection_mask,
+        partition_col_idx,
+        step_predicates,
+        fast_path_plan,
+        num_steps,
+        name_to_idx,
+    } = *scan;
     let file = File::open(parquet_path)
         .map_err(|e| format!("Failed to open Parquet for RG {}: {}", row_group_idx, e))?;
 

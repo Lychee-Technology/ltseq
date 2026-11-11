@@ -480,12 +480,10 @@ class JoinMixin(LTSeqLike):
         try:
             joined_inner = left_table._inner.asof_join(
                 right_table._inner,
-                left_time_col,
-                right_time_col,
+                (left_time_col, right_time_col),
                 resolved,
                 suffix,
-                left_by,
-                right_by,
+                list(zip(left_by, right_by)),
             )
         except RuntimeError as e:
             raise RuntimeError(f"Asof join failed: {e}")

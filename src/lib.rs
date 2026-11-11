@@ -982,10 +982,10 @@ impl LTSeqTable {
     /// # Arguments
     ///
     /// * `other` - The right table to join with
-    /// * `left_time_col` - Column name for time/key in left table
-    /// * `right_time_col` - Column name for time/key in right table  
+    /// * `on` - `(left, right)` time/key column names
     /// * `direction` - Match direction: "backward", "forward", or "nearest"
-    /// * `alias` - Prefix for right table columns (e.g., "_other")
+    /// * `suffix` - Appended to a right column whose name collides with a left one
+    /// * `by` - `(left, right)` pairs of columns that must also be equal
     ///
     /// # Direction Semantics
     ///
@@ -1002,33 +1002,27 @@ impl LTSeqTable {
     ///
     /// Uses binary search for O(N log M) complexity where N = left rows, M = right rows.
     /// Both tables must be sorted by their respective time columns.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "arg count is dictated by the exposed Python signature below (see #150)"
-    )]
-    #[pyo3(signature = (other, left_time_col, right_time_col, direction, suffix, left_by_cols=Vec::new(), right_by_cols=Vec::new()))]
+    #[pyo3(signature = (other, on, direction, suffix, by=Vec::new()))]
     fn asof_join(
         &self,
         py: Python<'_>,
         other: &LTSeqTable,
-        left_time_col: &str,
-        right_time_col: &str,
+        on: (String, String),
         direction: &str,
         suffix: &str,
-        left_by_cols: Vec<String>,
-        right_by_cols: Vec<String>,
+        by: Vec<(String, String)>,
     ) -> PyResult<LTSeqTable> {
+        let (left_by_cols, right_by_cols) = by.into_iter().unzip();
+        let options = crate::ops::asof_join::AsofJoinOptions {
+            left_time_col: &on.0,
+            right_time_col: &on.1,
+            direction,
+            suffix,
+            left_by_cols,
+            right_by_cols,
+        };
         detached(py, || {
-            crate::ops::asof_join::asof_join_impl(
-                self,
-                other,
-                left_time_col,
-                right_time_col,
-                direction,
-                suffix,
-                left_by_cols,
-                right_by_cols,
-            )
+            crate::ops::asof_join::asof_join_impl(self, other, options)
         })
     }
 
