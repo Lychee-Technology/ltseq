@@ -1,7 +1,7 @@
 # ADR 0015: Tests and Benchmarks Are an Architectural Layer
 
 - Status: Accepted
-- Decision date: predates this record · Recorded: 2026-07-26
+- Decision date: predates this record · Recorded: 2026-07-26 · Amended: 2026-11-11 (supervised autoresearch controller retired; the gate keeps its JSON contract and gains exit statuses and input checks, #174)
 
 [中文版](0015-tests-benchmarks-as-architecture.cn.md)
 
@@ -11,7 +11,7 @@ The hardest recurring questions in this codebase are empirical: where does DataF
 
 ## Decision
 
-Model the system with a fourth layer alongside API, orchestration, and execution: **validation & performance** (`py-ltseq/tests/`, `benchmarks/`, the autoresearch workflow).
+Model the system with a fourth layer alongside API, orchestration, and execution: **validation & performance** (`py-ltseq/tests/`, `benchmarks/`, the baseline/candidate evaluation workflow).
 
 ### Test organization
 
@@ -25,15 +25,17 @@ Model the system with a fourth layer alongside API, orchestration, and execution
 - There are currently **two protocols**, not one: the **ClickBench comparison** (`bench_vs.py`) reports the **median**, records RSS memory delta, and **validates every round against DuckDB**; the **core suite** (`bench_core.py`) reports the **mean** over iterations and records no per-sample data, RSS, or validation. Commit and toolchain versions are captured in the core suite's host info but not in the ClickBench system info. Operational parameters (iteration counts, thresholds, result schemas) are specified in `BENCHMARK.md`, which is authoritative for them.
 - Workloads exercise the sequence thesis: top-URL aggregation, user sessionization, sequential URL funnel matching, plus the core suite over 10K/100K/1M rows.
 
-### Benchmark-gated autoresearch (supervised)
+### Benchmark-gated evaluation
 
-An LLM-agent experiment loop (baseline → candidate → gate) with guardrails so it cannot game or destabilize the repo: gate on machine-readable JSON (`benchmark-diff.json`, `evaluation.json`, `keep`/`discard`; infra failures persisted as `infra_failure` rather than parsed from stdout); one isolated git worktree and one candidate per iteration, discarded afterward; preflight validation before any artifacts; a **narrow editable scope** (only a target's allowed source files; tests, benchmark scripts, and infra are off-limits); thresholds (target improvement -3.0%, protected-workload regression tolerance +5.0%); a defined artifact-retention policy; and an explicitly **supervised, review-first** stance with written graduation criteria (including a required zero false-negative rate for `keep` recommendations) before any auto-commit/auto-merge, plus incremental scope-widening rules.
+A performance change is judged by a baseline → candidate → gate comparison on the ClickBench rounds (`benchmarks/autoresearch/pilot/`). The gate decides on machine-readable JSON (`benchmark-diff.json`, `evaluation.json`, `keep`/`discard` with a reason code; infrastructure failures are persisted as `infra_failure` rather than parsed from stdout) and its exit status says the same: 0 keep, 1 discard, 2 when the inputs cannot be evaluated. It refuses comparisons it cannot trust: a different dataset, iteration count or warmup, an invalid baseline, a missing workload or metric. A target workload must improve by the target's bar in median and p95 (default 3%); a protected workload must not regress by its bar in median or p95 (default 5%). The defaults are not statistically validated, and `docs/BENCHMARK_AUTORESEARCH.md` gives the A/A calibration a target needs before its decisions are relied on.
+
+Who proposes the change is outside the system: a person or a general-purpose coding agent. The project first ran its own supervised LLM-agent loop (OpenCode in an isolated git worktree, one candidate per iteration, a narrow editable scope, run ledgers, and graduation criteria before any auto-commit). That controller was retired on 2026-11-11: it required Bash 4.3+, which kept its tests from passing on macOS (#174, a prerequisite of macOS CI, #329), and maintaining an agent-orchestration layer is not this project's work. The gate, capture and profiling tools it called are what this decision keeps.
 
 ## Consequences
 
 - Performance investigation becomes "a repeatable engineering practice" rather than ad-hoc tuning.
 - Capability-organized tests survive refactors that reorganize source files.
-- The autoresearch guardrails trade automation speed for trust; widening them is gated on explicit criteria.
+- A keep/discard decision is only as good as the thresholds behind it; until a target is calibrated, a reviewer reads the deltas, not just the recommendation.
 
 ## Sources
 

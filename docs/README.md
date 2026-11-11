@@ -72,7 +72,7 @@ Start here:
 - `docs/api.cn.md`: the Chinese API documentation entry point
 - `docs/LINKING_GUIDE.md`: focused guide for prefix-aliased linking
 - `docs/BENCHMARK.md`: how to run the core and ClickBench benchmarks (see also `benchmarks/README.md`)
-- `docs/BENCHMARK_AUTORESEARCH.md`: benchmark-gated autoresearch pilot workflow
+- `docs/BENCHMARK_AUTORESEARCH.md`: baseline/candidate benchmark comparison, keep/discard evaluation and profiling
 
 ## 核心文档
 
@@ -84,7 +84,7 @@ Start here:
 - `docs/api.cn.md`：中文 API 文档入口，链接 v0.5 API 契约（目标 API，尚未实现，仅有英文版）和归档的 v0.5 之前的 API 参考
 - `docs/LINKING_GUIDE.cn.md`：中文 Linking 指南
 - `docs/BENCHMARK.md`：核心基准与 ClickBench 对比的运行说明（另见 `benchmarks/README.md`）
-- `docs/BENCHMARK_AUTORESEARCH.md`：基准门控的 autoresearch 试点工作流
+- `docs/BENCHMARK_AUTORESEARCH.md`：baseline/candidate 基准对比、keep/discard 评估与性能剖析
 
 ## How These Documents Fit Together
 

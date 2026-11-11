@@ -1,8 +1,8 @@
 # LTSeq Benchmarks
 
-本目录存放 LTSeq 的性能基准：核心算子微基准、与 DuckDB 的 ClickBench 对比，以及一套基准门控的自动化性能研究试点（autoresearch）。
+本目录存放 LTSeq 的性能基准：核心算子微基准、与 DuckDB 的 ClickBench 对比，以及评估一次性能改动的 baseline/candidate 对比与 keep/discard 评估工具（`autoresearch/`）。
 
-This directory holds LTSeq's performance benchmarks: core-operation micro-benchmarks, a ClickBench comparison against DuckDB, and a benchmark-gated automated performance-research pilot (autoresearch).
+This directory holds LTSeq's performance benchmarks: core-operation micro-benchmarks, a ClickBench comparison against DuckDB, and tools that judge one performance change by comparing a baseline with a candidate and giving a keep/discard decision (`autoresearch/`).
 
 ## 文件速览 / Files at a glance
 
@@ -16,7 +16,7 @@ This directory holds LTSeq's performance benchmarks: core-operation micro-benchm
 | `prepare_data.py` | 下载 ClickBench `hits.parquet`（约 14GB）并生成预排序数据集与 1M 采样 | — |
 | `verify_parquet_order.py` | 校验 parquet 文件是否按指定列物理有序 | 传入的 parquet |
 | `CLICKBENCH_MAPPING.md` | 三轮设计与标准 ClickBench（43 条查询）的对应关系、实测结论与 R2/R3 快路径的适用条件 | — |
-| `autoresearch/` | 基准门控的自动化性能研究 + 受控 pilot | 是 / Yes |
+| `autoresearch/` | 性能剖析（火焰图、热点）与 baseline/candidate 对比、keep/discard 评估；退出码 0 keep、1 discard、2 输入无法评估 / Profiling (flamegraphs, hotspots) and baseline/candidate comparison with a keep/discard evaluation; exit 0 keep, 1 discard, 2 inputs cannot be evaluated | 是 / Yes |
 | `m0/` | v0.5 契约六项高成本承诺的可行性测量（#251）：`m0` cargo feature 下的原型、逐格子进程的测量框架、结果与报告 `m0/REPORT.md` / Feasibility measurements of six costly v0.5 contract commitments (#251): prototypes behind the `m0` cargo feature, a one-subprocess-per-cell harness, results and `m0/REPORT.md` | 部分 / Partly (ClickBench for m3–m6) |
 | `stream_errors/` | v0.5 流错误路径的 spike（#256）：`to_batches()` 与 C stream 上的异常类、errno 与消息，`close()` 是否停止执行，以及 Rust 迭代器的开销；`stream_spike` cargo feature，报告 `stream_errors/REPORT.md` / Spike of the v0.5 stream error paths (#256): the exception class, errno and message on `to_batches()` and the C stream, whether `close()` stops the execution, and what the Rust iterator costs; `stream_spike` cargo feature, report in `stream_errors/REPORT.md` | 否 / No |
 
@@ -89,5 +89,5 @@ uv run --group bench python benchmarks/verify_parquet_order.py \
 ## 延伸阅读 / See also
 
 - [`docs/BENCHMARK.md`](../docs/BENCHMARK.md) — 完整运行说明、可复现性约定、各轮次细节、核心基准的分组与计时口径、R2/R3 快路径的适用条件
-- [`docs/BENCHMARK_AUTORESEARCH.md`](../docs/BENCHMARK_AUTORESEARCH.md) — autoresearch 受控自动循环、产物保留与评审规则
+- [`docs/BENCHMARK_AUTORESEARCH.md`](../docs/BENCHMARK_AUTORESEARCH.md) — baseline/candidate 对比流程、评估契约、阈值的局限与校准方法 / Comparison workflow, evaluation contract, the thresholds' limits and how to calibrate them
 - [`CLICKBENCH_MAPPING.md`](CLICKBENCH_MAPPING.md) — 三轮设计原理与和标准 ClickBench 的对应
