@@ -33,4 +33,4 @@ API 应当读起来像 Python（`t.filter(lambda r: r.age > 18)`），又不付�
 - `docs/USER_MODEL.cn.md`: 核心心智模型 #4、表达式模型
 - `docs/MODULE_GUIDE.cn.md`: 表达式子系统导览
 - `docs/api.cn.md`: §0、§11
-- `CLAUDE.md`: Expression Transpilation
+- `AGENTS.md`: Key design patterns, Expression transpilation

@@ -25,7 +25,7 @@ Both sides of the boundary risk monolith files: PyO3 allows only **one `#[pymeth
 
 ## Sources
 
-- `CLAUDE.md`: Key Design Patterns (PyO3 single `#[pymethods]` constraint, mixin composition)
+- `AGENTS.md`: Key design patterns (PyO3 single `#[pymethods]` constraint, mixin composition)
 - `docs/ARCHITECTURE.md`: PyO3 Boundary Design, Rust/Python Package Structure
 - `docs/DESIGN_SUMMARY.md`: §1.3, §1.4
 - `docs/MODULE_GUIDE.md`: `src/lib.rs`, module tours

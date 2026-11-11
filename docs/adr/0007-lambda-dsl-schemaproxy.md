@@ -33,4 +33,4 @@ Capture, serialize, transpile:
 - `docs/USER_MODEL.md`: Core Mental Model #4, Expression Model, Common Mistakes
 - `docs/MODULE_GUIDE.md`: Expression Subsystem Tour, transpiler tour
 - `docs/api.md`: §0, §11
-- `CLAUDE.md`: Expression Transpilation
+- `AGENTS.md`: Key design patterns, Expression transpilation

@@ -36,4 +36,4 @@ pandas/SQL 式的集合语义被否决为核心模型。`README.md` 的 FAQ 明�
 - `docs/USER_MODEL.cn.md`: “LTSeq 不是什么”
 - `docs/DESIGN_SUMMARY.cn.md`: 概览
 - `README.md`: Design Philosophy、FAQ
-- `CLAUDE.md`: Architecture Overview
+- `AGENTS.md`: Architecture overview
