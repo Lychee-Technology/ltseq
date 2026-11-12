@@ -7,7 +7,8 @@ has and an M item the impact map has, that every cell gets an expectation,
 that the cells the contract states outright come out as it states them
 (§17.2-§17.5, §19.2, §20 and the rows N2, N4, N5, H1 and P12 of §24), and
 that putting a rule in force, or the error classes of M15, changes what the
-gate accepts.
+gate accepts, and that the rules a run could put in force include rules
+that only ever grade cells together.
 """
 
 import re
@@ -240,6 +241,28 @@ def test_refusals_at_plan(cell, expected):
     assert _raises(cell) == (expected, "plan")
 
 
+@pytest.mark.parametrize("cell,rule", [
+    ("str/none/isin2", "no_implicit_kind_change"),  # `r.s.is_in([None, 1])`: the 1 is not a string
+    ("bool/none/isin2", "no_implicit_kind_change"),
+    ("date32/none/isin2", "number_with_temporal"),
+    ("ts_ny/none/isin2", "number_with_temporal"),
+    ("case_us_ns/none/isin2", "number_with_temporal"),
+])
+def test_every_item_of_a_membership_list_must_suit_the_column(cell, rule):
+    """§8.5, §17.4 rule 4, §19.2: the int 1 of `isin2` is refused beside a string, bool or
+    temporal column even when the other item is None, and no Boolean outcome passes."""
+    assert _raises(cell) == ("LTSeqTypeError", "plan")
+    assert full(cell).rules == (rule,)
+    assert judged_by_v05(cell, values("bool", [False] * 6)) == "violation"
+    assert judged_by_v05(cell, error("LTSeqTypeError")) == "ok"
+
+
+@pytest.mark.parametrize("cell", ["str/none/isin", "bool/none/isin", "date32/none/isin", "i8/none/isin2", "f64/none/isin2"])
+def test_none_alone_or_beside_a_number_is_membership_of_null(cell):
+    """§8.5: `is_in([None])` on any column, and `is_in([None, 1])` on a number column, are Booleans."""
+    assert full(cell).kind == "values" and full(cell).rules == ("isin_never_null",)
+
+
 def test_strings_concatenate():
     """§8.2: `str + str` concatenates."""
     assert _rows("str/s1/add") == ("string", ["11", None, "1.51", "a1", None, "2024-01-011"])
@@ -280,6 +303,50 @@ def test_m15_makes_the_classes_strict(monkeypatch):
     assert oracle.judge(*cell, error("LTSeqTypeError", stage="collect"))[0] == "violation"
 
 
+def test_m15_reclassifies_the_refusals_of_cells_whose_rules_are_deferred(monkeypatch):
+    """M15 lands before M8: with `error_classes` in force and `shared_value_no_widening`
+    not, `r.i64.fill_null(1.5)` takes v0.5's class and stage (§20.1) while its semantics
+    stay ADR 0018's, and the widened outcome M8 brings is not accepted early."""
+    cell = ("i64", "f1_5", "fill")
+    today = error("ValueError", msg="literal 1.5 does not fit column 'i64' exactly")
+    assert "shared_value_no_widening" not in contract.IN_FORCE
+    assert oracle.legacy_expectation(*cell).kind == "error"
+    assert oracle.judge(*cell, today)[0] == "ok"
+    assert oracle.judge(*cell, error("CastError"))[0] == "violation"
+    monkeypatch.setattr(contract, "IN_FORCE", contract.IN_FORCE | {"error_classes"})
+    assert not contract.in_force(contract.expectation(*cell))
+    assert oracle.expectation(*cell).rules == ("error_classes",)
+    assert oracle.judge(*cell, error("CastError", msg="reworded"))[0] == "ok"
+    assert oracle.judge(*cell, error("CastError", "capture"))[0] == "ok"
+    assert oracle.judge(*cell, today)[0] == "violation"
+    assert oracle.judge(*cell, error("CastError", "collect"))[0] == "violation"
+    assert oracle.judge(*cell, error("LTSeqTypeError"))[0] == "violation"
+
+
+def test_m15_keeps_the_stage_and_semantics_of_deferred_cells(monkeypatch):
+    """A deferred cell whose refusal v0.5 does not share keeps its stage and takes the v0.5
+    classes of today's class; a deferred cell with values keeps ADR 0018's values."""
+    monkeypatch.setattr(contract, "IN_FORCE", contract.IN_FORCE | {"error_classes"})
+    changed = 0
+    for ctx, lit, pos in grid.cells():
+        v05 = contract.expectation(ctx, lit, pos)
+        if contract.in_force(v05):
+            continue
+        before, now = oracle.legacy_expectation(ctx, lit, pos), oracle.expectation(ctx, lit, pos)
+        if before.kind not in ("error", "null_arithmetic"):
+            assert now == before, (ctx, lit, pos)
+            continue
+        changed += 1
+        assert now.kind == before.kind and now.msg is None and now.rules == ("error_classes",), (ctx, lit, pos)
+        assert set(now.cls) <= set(contract.PRE_M15), (ctx, lit, pos, now)
+        if v05.kind == before.kind and before.stage in v05.stage:
+            assert (now.stage, now.cls) == (v05.stage, v05.cls), (ctx, lit, pos)
+        else:
+            assert now.stage == (before.stage,), (ctx, lit, pos)
+            assert all(set(contract.V05_CLASSES[c]) <= set(now.cls) for c in before.cls), (ctx, lit, pos)
+    assert changed
+
+
 def test_a_cell_with_a_rule_not_in_force_keeps_adr_0018():
     for ctx, lit, pos in grid.cells():
         v05 = contract.expectation(ctx, lit, pos)
@@ -307,6 +374,52 @@ def test_the_report_groups_every_cell_once():
     groups = contract.report(outcomes)
     assert sum(len(met) + len(unmet) for met, unmet in groups.values()) == len(outcomes)
     assert set(contract.ready(groups)) <= set(contract.RULES)
+
+
+def _groups(failing=lambda rules: False):
+    """The report of a run in which the cells of the rule sets ``failing`` names do not meet v0.5."""
+    groups = {}
+    for ctx, lit, pos in grid.cells():
+        rules = contract.graded(ctx, lit, pos).rules
+        met, unmet = groups.setdefault(rules, ([], []))
+        (unmet if failing(rules) else met).append(grid.cell_id(ctx, lit, pos))
+    return groups
+
+
+COUPLED = {"integer_result_types", "decimal_result_types", "checked_arithmetic"}
+
+
+def test_coupled_rules_never_grade_a_cell_alone():
+    """The premise of the next tests: integer and decimal result types rest on checked
+    arithmetic in every cell, so no single rule can enter first."""
+    for rules in _groups():
+        if set(rules) & COUPLED:
+            assert "checked_arithmetic" in rules and len(set(rules) & COUPLED) == 2, rules
+
+
+def test_a_conforming_run_could_put_every_rule_in_force():
+    """Coupled rules enter together when their cells meet v0.5."""
+    assert set(contract.ready(_groups())) == set(contract.RULES) - {"error_classes"}
+
+
+def test_a_failing_rule_set_keeps_only_its_coupled_rules_out():
+    decimal_fails = _groups(lambda rules: "decimal_result_types" in rules)
+    chosen = set(contract.ready(decimal_fails))
+    assert {"integer_result_types", "checked_arithmetic"} <= chosen
+    assert "decimal_result_types" not in chosen
+    checked_fails = _groups(lambda rules: rules == ("integer_result_types", "checked_arithmetic"))
+    chosen = set(contract.ready(checked_fails))
+    assert {"decimal_result_types", "checked_arithmetic"} <= chosen and "integer_result_types" not in chosen
+    assert not COUPLED & set(contract.ready(_groups(lambda rules: "checked_arithmetic" in rules)))
+
+
+def test_ready_never_chooses_a_set_with_a_failing_cell():
+    groups = _groups(lambda rules: "float_order" in rules or rules == ("integer_result_types", "checked_arithmetic"))
+    chosen = frozenset(contract.ready(groups))
+    assert "float_order" not in chosen and "integer_result_types" not in chosen
+    assert not any(unmet for rules, (_, unmet) in groups.items() if frozenset(rules) <= chosen)
+    for name in chosen:  # each rule grades a cell of its own
+        assert any(name in rules and frozenset(rules) <= chosen for rules in groups)
 
 
 def test_classification_still_reads_v05_expectations():

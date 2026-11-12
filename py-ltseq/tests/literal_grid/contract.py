@@ -22,8 +22,11 @@ One rule is about errors rather than cells. Until ``error_classes``
 too keeps that oracle's class, stage and cause (a ``ValueError`` alone
 cannot tell a justified refusal from any other), and one it does not
 expect accepts the v0.5 class or the one ltseq raises today for it
-(``PRE_M15``). Stages map onto the grid's: v0.5's plan stage is the grid's
-``capture`` or ``plan``, and execution is ``collect``.
+(``PRE_M15``). Once it is in force, the classes change on every cell,
+not only on those whose rules are in force: M15 lands before M8, so a cell
+ADR 0018 still grades keeps its semantics and takes v0.5's class for its
+refusal (``_classes_only``). Stages map onto the grid's: v0.5's plan stage
+is the grid's ``capture`` or ``plan``, and execution is ``collect``.
 
     PYTHONPATH=py-ltseq/tests python -m literal_grid.contract RUN.jsonl [--classes today] [--cells RULE]
 
@@ -333,10 +336,12 @@ def expectation(ctx, lit, pos, in_force=None):
         return _error("AttributeError", PLAN, "dt_diff_removed")
     t, lt = context_type(ctx, in_force), literal_type(lit)
     ck, lk = _kind(t), _kind(lt)
+    # Every value of an `is_in` list must suit the column (§8.5), the int 1 of
+    # `isin2` included, before a None among them decides anything.
+    if pos == "isin2" and ck != "number":
+        return _error("LTSeqTypeError", PLAN, "number_with_temporal" if ck in TEMPORAL_KINDS else "no_implicit_kind_change")
     if lk == "null":
         return _null(ctx, t, pos)
-    if pos == "isin2" and ck != "number":  # the int 1 in the list
-        return _error("LTSeqTypeError", PLAN, "number_with_temporal" if ck in TEMPORAL_KINDS else "no_implicit_kind_change")
     mismatch = _kind_mismatch(ck, lk, pos)
     if mismatch:
         return _error("LTSeqTypeError", PLAN, mismatch)
@@ -508,11 +513,36 @@ def in_force(e, rules=None):
 
 def for_the_gate(ctx, lit, pos, legacy):
     """The v0.5 expectation when every rule it rests on is in force, adapted to the
-    build's error classes until M15; None when ADR 0018's still grades the cell."""
+    build's error classes until M15; None when ADR 0018's still grades the cell.
+    Once M15 is in force, a cell ADR 0018 still grades takes v0.5's error classes too
+    (``_classes_only``), since M15 lands before the items that change those cells."""
     e = expectation(ctx, lit, pos)
     if not in_force(e):
-        return None
+        return _classes_only(e, legacy()) if "error_classes" in IN_FORCE else None
     return _adapted(e, legacy, IN_FORCE)
+
+
+# What v0.5 calls each class the build raises today: the inverse of PRE_M15.
+V05_CLASSES = {
+    today: tuple(cls for cls, classes in PRE_M15.items() if today in classes)
+    for today in dict.fromkeys(c for classes in PRE_M15.values() for c in classes)
+}
+
+
+def _classes_only(e, before):
+    """ADR 0018's expectation for a cell whose v0.5 rules are not all in force, with
+    M15's classes (§20.1): its semantics stay, its refusals change class. A refusal
+    v0.5 makes too, at the same stage, takes v0.5's class and stage; any other keeps
+    its stage and accepts each v0.5 class of the class it has today. Messages stop
+    counting either way (§20.1)."""
+    if before.kind not in ("error", "null_arithmetic"):
+        return before
+    rules = ("error_classes",)
+    reason = f"{before.reason}; {_reason(rules)}"
+    if e.kind == before.kind and before.stage in e.stage:
+        return replace(before, reason=reason, stage=e.stage, cls=e.cls, msg=None, rules=rules)
+    classes = tuple(dict.fromkeys(v for c in before.cls for v in V05_CLASSES.get(c, (c,))))
+    return replace(before, reason=reason, stage=(before.stage,), cls=classes, msg=None, rules=rules)
 
 
 def _adapted(e, legacy, rules):
@@ -555,19 +585,25 @@ def report(outcomes, classes="v0.5"):
 
 
 def ready(groups):
-    """The largest set of rules that could be in force on this run: every cell whose
+    """A maximal set of rules that could be in force on this run: every cell whose
     rules all lie in the set meets v0.5. A cell that also rests on a rule outside the
     set stays with ADR 0018, so it does not hold a rule back; but a rule must grade
-    some cell of its own, or it would be in force without the build meeting it."""
+    some cell of its own, or it would be in force without the build meeting it.
+
+    The set grows by whole rule sets of the report, not rule by rule: rules whose
+    cells all rest on them together (``integer_result_types`` and
+    ``checked_arithmetic``) can only enter together."""
     sets = {frozenset(rules): bool(unmet) for rules, (_, unmet) in groups.items()}
-    chosen, grown = set(), True
+
+    def meets(candidate):
+        return not any(failing for rules, failing in sets.items() if rules <= candidate)
+
+    chosen, grown = frozenset(), True
     while grown:
         grown = False
-        for name in sorted({n for rules in sets for n in rules} - chosen):
-            graded = [failing for rules, failing in sets.items() if name in rules and rules <= chosen | {name}]
-            if graded and not any(graded):
-                chosen.add(name)
-                grown = True
+        for rules in sorted(sets, key=lambda r: (len(r - chosen), sorted(r))):
+            if not rules <= chosen and meets(chosen | rules):
+                chosen, grown = chosen | rules, True
     return sorted(chosen)
 
 
