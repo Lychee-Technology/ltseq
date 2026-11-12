@@ -332,14 +332,15 @@ def test_sorting_by_a_rolling_extreme_sorts(small_batches, extreme):
     """The same for a sliding frame over values in their sort order, where
     DataFusion also reads the aggregate's monotonicity. The rolling `max` of
     two NaNs whose payloads differ is `float("nan")`, below both in
-    totalOrder."""
+    totalOrder. The NaNs, and the two zeros, are equal in `sort`'s order
+    (§9.4), so `i` orders them, and every read has the same frames."""
     payload_2 = struct.unpack("<d", struct.pack("<Q", 0x7FF8_0000_0000_0002))[0]
     xs = [1.0, NEG_NAN, 2.0, None, -0.0, 0.0, PAYLOAD_NAN, payload_2, -INF, INF]
-    rows = pa.table({"x": pa.array(xs, pa.float64())})
+    rows = pa.table({"i": pa.array(range(len(xs)), pa.int64()), "x": pa.array(xs, pa.float64())})
     for x_desc in (False, True):
         t = (
             LTSeq.from_arrow(rows)
-            .sort("x", desc=x_desc)
+            .sort("x", "i", desc=[x_desc, False])
             .derive(m=lambda r: getattr(r.x.rolling(2), extreme)())
         )
         snapshot = t.collect()

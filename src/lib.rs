@@ -29,6 +29,7 @@ pub(crate) mod m0; // Prototypes priced by the #251 measurements (feature `m0`)
 #[cfg(feature = "stream_spike")]
 pub(crate) mod stream_spike; // #256's stream error spike (feature `stream_spike`)
 pub(crate) mod metadata; // SortSpec and sort-metadata helpers
+pub(crate) mod order_key; // The value a float sorts by in §9.4's order (#268)
 pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
@@ -519,6 +520,15 @@ impl LTSeqTable {
             .collect()
     }
 
+    /// The declared order as (column, descending, nulls_last) triples;
+    /// empty when unsorted.
+    fn get_sort_specs(&self) -> Vec<(String, bool, bool)> {
+        self.sort_specs
+            .iter()
+            .map(|s| (s.column.clone(), s.descending, !s.nulls_first))
+            .collect()
+    }
+
     /// Compute the schema a link()-style prefixed join with `other` under
     /// `alias` would produce, without executing it. Left columns keep their
     /// names; right columns are prefixed `{alias}_`. Single source of truth:
@@ -756,15 +766,18 @@ impl LTSeqTable {
     /// Args:
     ///     sort_exprs: List of serialized expression dicts (from Python)
     ///     desc_flags: List of boolean flags indicating descending order per sort key
+    ///     nulls_last_flags: Per key, whether NULL goes last (default: all last)
     ///
     /// Returns:
     ///     New LTSeqTable with sorted data
+    #[pyo3(signature = (sort_exprs, desc_flags, nulls_last_flags=Vec::new()))]
     fn sort(
         &self,
         sort_exprs: Vec<Bound<'_, PyDict>>,
         desc_flags: Vec<bool>,
+        nulls_last_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::sort::sort_impl(self, sort_exprs, desc_flags)
+        crate::ops::sort::sort_impl(self, sort_exprs, desc_flags, nulls_last_flags)
     }
 
     /// Declare sort order without physically sorting the data.
@@ -778,13 +791,15 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with sort metadata set (same underlying data)
+    #[pyo3(signature = (sort_exprs, desc_flags, nulls_last_flags=Vec::new()))]
     fn assume_sorted(
         &self,
         py: Python<'_>,
         sort_exprs: Vec<Bound<'_, PyDict>>,
         desc_flags: Vec<bool>,
+        nulls_last_flags: Vec<bool>,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::sort::assume_sorted_impl(py, self, sort_exprs, desc_flags)
+        crate::ops::sort::assume_sorted_impl(py, self, sort_exprs, desc_flags, nulls_last_flags)
     }
 
     /// Add __group_id__ column for consecutive identical grouping values

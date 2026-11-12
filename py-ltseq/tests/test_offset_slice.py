@@ -460,9 +460,21 @@ def test_a_sort_after_tail_is_planned_above_the_offset():
     t = LTSeq.from_arrow(input_rows(N)).sort("date")
     _, physical = t.tail(5).sort("date", "volume").explain_plan()
     lines = physical.splitlines()
-    limit = next(i for i, line in enumerate(lines) if "GlobalLimitExec: skip=95, fetch=5" in line)
-    sort = next(i for i, line in enumerate(lines) if re.search(r"SortExec: TopK\(fetch=5\), expr=\[date@\d+ ASC NULLS LAST, volume", line))
-    assert sort < limit, physical
+    # A sort reads its input, the offset limit included, as one stream in
+    # table order, numbered for stability (#268), so the limit is planned
+    # inside that stream and the sort above it.
+    stream = next(i for i, line in enumerate(lines) if "StreamingTableExec" in line)
+    sort = next(
+        i
+        for i, line in enumerate(lines)
+        if re.search(r"SortExec: .*expr=\[date@\d+ ASC NULLS LAST, volume@\d+ ASC NULLS LAST, __ltseq_position", line)
+    )
+    assert sort < stream, physical
+    assert "GlobalLimitExec" not in physical, physical
+    tail = t.tail(5).to_dicts()
+    assert t.tail(5).sort("date", "volume").to_dicts() == sorted(
+        tail, key=lambda r: (r["date"], r["volume"])
+    )
 
     _, physical = t.slice(10).explain_plan()
     assert "GlobalLimitExec" not in physical, physical
@@ -492,8 +504,8 @@ def assert_slice_of_ties(
     boundary keeps, which the declared order leaves open.
 
     Its rows are input rows, each once; its `a` values are `expected`'s in
-    order; and it is sorted by `a` (NULLs last ascending, first descending)
-    and then by `b`.
+    order; and it is sorted by `a` (NULLs last in either direction) and then
+    by `b`.
     """
     got = result.to_pandas()
     assert len(got) == len(expected), (what, len(got), len(expected))
@@ -503,7 +515,7 @@ def assert_slice_of_ties(
     assert original.b.tolist() == got.b.tolist(), what
     assert got.a.fillna(-1).tolist() == expected.a.fillna(-1).tolist(), what
     ordered = got.sort_values(
-        ["a", "b"], ascending=[not desc, True], na_position="first" if desc else "last"
+        ["a", "b"], ascending=[not desc, True], na_position="last", kind="stable"
     )
     assert got.id.tolist() == ordered.id.tolist(), what
 
@@ -519,7 +531,7 @@ def test_an_order_that_extends_the_key_after_an_offset_slice_of_ties_and_nulls(
     rows = tied_rows(N)
     t = layouts.build(layout, rows, tmp_path / "input").sort("a", desc=desc)
     frame = rows.to_pandas()
-    nulls = "first" if desc else "last"
+    nulls = "last"
     ref = frame.sort_values("a", ascending=not desc, na_position=nulls, kind="stable")
     shapes = {
         "sort(a, b)": lambda s: s.sort("a", "b", desc=[desc, False]),

@@ -220,12 +220,14 @@ pub enum PyExpr {
         on: Option<Box<PyExpr>>,
     },
 
-    /// Window expression: {"type": "Window", "expr": {...}, "partition_by": {...}, "order_by": {...}, "descending": bool}
+    /// Window expression: {"type": "Window", "expr": {...}, "partition_by": {...}, "order_by": {...}, "descending": bool, "nulls_last": bool}
     Window {
         expr: Box<PyExpr>,
         partition_by: Option<Box<PyExpr>>,
         order_by: Option<Box<PyExpr>>,
         descending: bool,
+        /// Where `order_by` puts NULL, as in `sort` (§9.4, §10.4).
+        nulls_last: bool,
     },
 
     /// Alias expression: {"type": "Alias", "expr": {...}, "alias": "new_name"}
@@ -586,6 +588,13 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         .flatten()
         .and_then(|v| v.extract::<bool>().ok())
         .unwrap_or(false);
+    // NULL placement of `order_by` (default last, §9.4)
+    let nulls_last = dict
+        .get_item("nulls_last")
+        .ok()
+        .flatten()
+        .and_then(|v| v.extract::<bool>().ok())
+        .unwrap_or(true);
 
     Ok(PyExpr::Window {
         // The inner expression (e.g., row_number(), rank(), etc.)
@@ -593,6 +602,7 @@ fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
         partition_by: optional_expr(dict, "partition_by")?,
         order_by: optional_expr(dict, "order_by")?,
         descending,
+        nulls_last,
     })
 }
 

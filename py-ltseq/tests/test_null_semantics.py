@@ -324,11 +324,16 @@ class TestJoinWithNullKeys:
 
 
 class TestNullOrdering:
-    """NULL is the largest value: last when ascending, first when descending."""
+    """NULL goes last in either direction, or first with ``nulls_last=False``
+    (contract §9.4, #268); ranking and windows place it as ``sort`` does."""
 
     def test_sort(self, t):
         assert [r["v"] for r in _rows(t.sort("v"))] == [1, 3, 4, 6, None, None]
-        assert [r["v"] for r in _rows(t.sort("v", desc=True))] == [None, None, 6, 4, 3, 1]
+        assert [r["v"] for r in _rows(t.sort("v", desc=True))] == [6, 4, 3, 1, None, None]
+        assert [r["v"] for r in _rows(t.sort("v", nulls_last=False))] == [None, None, 1, 3, 4, 6]
+        assert [r["v"] for r in _rows(t.sort("v", desc=True, nulls_last=False))] == [
+            None, None, 6, 4, 3, 1,
+        ]
         assert [r["grp"] for r in _rows(t.sort("grp", "id"))] == ["a", "a", "b", "b", None, None]
 
     def test_rank_and_dense_rank(self, t):
@@ -339,7 +344,11 @@ class TestNullOrdering:
         assert _by_id(asc, "rk") == {1: 1, 3: 2, 4: 3, 6: 4, 2: 5, 5: 5}
         assert _by_id(asc, "drk") == {1: 1, 3: 2, 4: 3, 6: 4, 2: 5, 5: 5}
         desc = t.derive(rk=lambda r: rank().over(order_by=r.v, descending=True))
-        assert _by_id(desc, "rk") == {2: 1, 5: 1, 6: 3, 4: 4, 3: 5, 1: 6}
+        assert _by_id(desc, "rk") == {6: 1, 4: 2, 3: 3, 1: 4, 2: 5, 5: 5}
+        first = t.derive(
+            rk=lambda r: rank().over(order_by=r.v, descending=True, nulls_last=False)
+        )
+        assert _by_id(first, "rk") == {2: 1, 5: 1, 6: 3, 4: 4, 3: 5, 1: 6}
 
     def test_row_number_matches_sort_position(self, t):
         for descending in (False, True):
@@ -358,13 +367,25 @@ class TestNullOrdering:
     def test_sequence_window_over_matches_sort(self, t):
         # cum_sum of id in v order; only non-NULL rows have a well-defined
         # value (the two NULL rows tie).
-        for descending, expected in ((False, {1: 1, 3: 4, 4: 8, 6: 14}), (True, {6: 13, 4: 17, 3: 20, 1: 21})):
+        cases = (
+            (False, True, {1: 1, 3: 4, 4: 8, 6: 14}),
+            (True, True, {6: 6, 4: 10, 3: 13, 1: 14}),
+            (True, False, {6: 13, 4: 17, 3: 20, 1: 21}),
+        )
+        for descending, nulls_last, expected in cases:
             over = _by_id(
-                t.derive(c=lambda r: r.id.cum_sum().over(order_by=r.v, descending=descending)),
+                t.derive(
+                    c=lambda r: r.id.cum_sum().over(
+                        order_by=r.v, descending=descending, nulls_last=nulls_last
+                    )
+                ),
                 "c",
             )
             sorted_first = _by_id(
-                t.sort("v", desc=descending).derive(c=lambda r: r.id.cum_sum()), "c"
+                t.sort("v", desc=descending, nulls_last=nulls_last).derive(
+                    c=lambda r: r.id.cum_sum()
+                ),
+                "c",
             )
             for i in V_NOT_NULL_IDS:
                 assert over[i] == sorted_first[i] == expected[i]

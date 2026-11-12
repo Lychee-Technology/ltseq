@@ -1760,6 +1760,7 @@ mod tests {
                 partition_by: None,
                 order_by: None,
                 descending: false,
+                nulls_last: true,
             },
             &schema,
         )

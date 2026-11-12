@@ -113,10 +113,15 @@ class TestOperatorCounts:
         assert len(scans) == 1, explained["physical_plan"]
         assert scans[0]["partitions"] == 3, explained["physical_plan"]
 
-        # Sorting three partitions sorts each and merges them.
+        # A sort reads its input as one stream in table order, numbered for
+        # stability (#268): the scan's partitions are read in file order
+        # inside that stream. The stream's batches are shared out over the
+        # session's partitions, each sorted and then merged.
         sorted_plan = t.sort("x")._explain_pipeline()
         counts = sorted_plan["operator_counts"]
         assert counts.get("SortExec") == 1, sorted_plan["physical_plan"]
         assert counts.get("SortPreservingMergeExec") == 1, sorted_plan["physical_plan"]
-        assert sorted_plan["operators"][0]["name"] == "SortPreservingMergeExec"
+        assert "DataSourceExec" not in counts, sorted_plan["physical_plan"]
+        stream = [op for op in sorted_plan["operators"] if op["name"] == "StreamingTableExec"]
+        assert [op["partitions"] for op in stream] == [4], sorted_plan["physical_plan"]
         assert sorted_plan["operators"][0]["partitions"] == 1

@@ -80,6 +80,7 @@ class CallExpr(Expr):
         order_by: Any | None = ...,
         descending: bool | None = ...,
         desc: bool | None = ...,
+        nulls_last: bool = ...,
     ) -> WindowExpr: ...
 
     def __getattr__(self, name: str) -> Any: ...
@@ -90,6 +91,7 @@ class WindowExpr(Expr):
     partition_by: Any | None
     order_by: Any | None
     descending: bool
+    nulls_last: bool
 
     def __init__(
         self,
@@ -97,6 +99,7 @@ class WindowExpr(Expr):
         partition_by: Any | None = ...,
         order_by: Any | None = ...,
         descending: bool = ...,
+        nulls_last: bool = ...,
     ) -> None: ...
     def serialize(self) -> dict[str, Any]: ...
 

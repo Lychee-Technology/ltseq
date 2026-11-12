@@ -14,7 +14,7 @@ use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
-use datafusion::logical_expr::{Expr, LogicalPlanBuilder, SortExpr};
+use datafusion::logical_expr::{Expr, LogicalPlanBuilder};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -284,11 +284,7 @@ pub fn select_in_order(
     for spec in specs {
         let name = hidden.next().expect("an unbounded range has a free name");
         stage.push(Expr::Column(Column::new_unqualified(&spec.column)).alias(&name));
-        order.push(SortExpr::new(
-            Expr::Column(Column::new_unqualified(name)),
-            !spec.descending,
-            spec.nulls_first,
-        ));
+        order.push(spec.sort_expr_on(&name));
     }
     let stage = df.select(stage)?;
     let picked: Vec<Expr> = stage

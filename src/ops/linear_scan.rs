@@ -1218,8 +1218,8 @@ mod tests {
     /// linear-scan path collects.
     fn physical_plan_string(declare_order: bool) -> String {
         let specs = vec![
-            SortSpec::new("userid".to_string(), false),
-            SortSpec::new("eventtime".to_string(), false),
+            SortSpec::new("userid".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64),
+            SortSpec::new("eventtime".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64),
         ];
 
         let batch = sample_batch();
@@ -1272,8 +1272,8 @@ mod tests {
 
     fn declared_specs() -> Vec<SortSpec> {
         vec![
-            SortSpec::new("userid".to_string(), false),
-            SortSpec::new("eventtime".to_string(), false),
+            SortSpec::new("userid".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64),
+            SortSpec::new("eventtime".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64),
         ]
     }
 
