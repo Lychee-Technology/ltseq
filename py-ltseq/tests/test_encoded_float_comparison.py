@@ -15,7 +15,7 @@ column, run by this build, and against Python's floats, which follow IEEE
 754, under SQL's three-valued logic. The operands are a column and a
 literal in both orders, two columns in both orders (encoded with plain,
 encoded with the other encoding, encoded with itself) and computed values,
-in `derive` and in `filter`; the inputs are split into chunks that each
+in `derive` and in `filter`, and a volatile value holding `rand()`; the inputs are split into chunks that each
 carry their own dictionary or runs, and run at every engine layout. NaN is
 #290's and stays out of the data, except where only parity with the decoded
 column is asserted.
@@ -29,7 +29,7 @@ import operator
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq, if_else
+from ltseq import LTSeq, if_else, rand
 
 NAN = math.nan
 
@@ -170,6 +170,50 @@ def test_filters_follow_the_decoded_column(engine_layout, encoding, op):
             if not got == plain == want:
                 wrong[f"{value_type} {pair} {op}"] = (got, plain, want)
     assert wrong == {}
+
+
+def volatile_x(r):
+    """`x`, through an expression holding `rand()`: DataFusion evaluates each
+    copy of it, so lowering may not name it twice."""
+    return if_else(rand() >= 0.0, r.x, r.x)
+
+
+VOLATILE_PREDICATES = {
+    f"{left} {op} {right}": (
+        lambda r, op=op, v=value, swap=swap: OPS[op](v, volatile_x(r)) if swap else OPS[op](volatile_x(r), v),
+        lambda k, op=op, v=value, swap=swap: ieee(OPS[op], v, X[k]) if swap else ieee(OPS[op], X[k], v),
+    )
+    for op in OPS
+    for name, value in LITERALS.items()
+    for swap, (left, right) in ((False, ("volatile(x)", name)), (True, (name, "volatile(x)")))
+}
+
+
+@pytest.mark.parametrize("chunks", [1, 3])
+@pytest.mark.parametrize("encoding", ENCODINGS)
+@pytest.mark.parametrize("value_type", VALUE_TYPES)
+def test_volatile_operands_follow_the_decoded_column(value_type, encoding, chunks):
+    """An encoded float in a volatile expression, compared with a literal in
+    either order. `==` and `!=` with a zero are ranges elsewhere, but a range
+    names its operand twice and would draw twice, so a volatile operand is
+    decoded instead, once. Checked in `derive` and in `filter`."""
+    encoded, decoded = tables(VALUE_TYPES[value_type], encoding, chunks)
+    names = list(VOLATILE_PREDICATES)
+
+    def derived(t):
+        got = t.derive(**{f"c{i}": VOLATILE_PREDICATES[name][0] for i, name in enumerate(names)}).to_arrow()
+        return {name: got.column(f"c{i}").to_pylist() for i, name in enumerate(names)}
+
+    def filtered(t):
+        return {name: t.filter(VOLATILE_PREDICATES[name][0]).to_arrow().column("k").to_pylist() for name in names}
+
+    wanted = {name: [VOLATILE_PREDICATES[name][1](k) for k in range(len(X))] for name in names}
+    got, plain = derived(encoded), derived(decoded)
+    assert {name: got[name] for name in names if got[name] != plain[name]} == {}
+    assert {name: got[name] for name in names if got[name] != wanted[name]} == {}
+    kept = {name: [k for k, v in enumerate(flags) if v] for name, flags in wanted.items()}
+    got = filtered(encoded)
+    assert {name: got[name] for name in names if got[name] != kept[name]} == {}
 
 
 @pytest.mark.parametrize("encoding", ENCODINGS)

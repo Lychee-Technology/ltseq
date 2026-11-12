@@ -165,7 +165,7 @@ pub(crate) fn comparison(
             Some(range) => range,
             None => match signed_zero_bound(operand_op, &operand, &literal_expr, rx)? {
                 Some(bound) => rebuild(operand, bound),
-                None => rebuild(operand, literal_expr),
+                None => rebuild(volatile_equality_operand(op, operand, rx), literal_expr),
             },
         },
     })
@@ -215,6 +215,24 @@ fn signed_zero_bound(
     })
 }
 
+/// `operand` of `operand == literal` or `operand != literal` decoded
+/// ([`decoded_float`]) when it is volatile (holds `rand()`), else as it is.
+///
+/// [`float_equality`] writes an equality with a zero as the range of both
+/// zeros, which keeps an encoded operand's encoding, but it leaves a
+/// volatile operand as written: the range names the operand twice, and
+/// each copy would draw again. An encoded float then reaches DataFusion's
+/// `=` as stored and decides a zero by its sign (#292). The cast names the
+/// operand once, so the comparison sees the decoded value of one draw. A
+/// volatile operand is rare, so it is decoded next to any literal, not
+/// only a zero: a non-zero literal gives the same answer either way.
+fn volatile_equality_operand(op: Operator, operand: Expr, rx: &Resolver<'_>) -> Expr {
+    match op {
+        Operator::Eq | Operator::NotEq if operand.is_volatile() => decoded_float(operand, rx),
+        _ => operand,
+    }
+}
+
 /// `left op right` as [`float_equality`] builds it, when one side has one
 /// value per query and the other varies by row
 /// ([`Resolver::query_constant`]).
@@ -252,8 +270,11 @@ fn query_constant_equality(
 /// A volatile `value` (one holding `rand()`) is left as written: the range
 /// names it twice, and DataFusion evaluates each copy, so the two bounds
 /// would test two different draws. Its `=` already takes the zeros as
-/// equal, and DataFusion merges no `=` on it into a list: the merge takes
-/// only a column, and CSE makes no column of a volatile expression.
+/// equal on a plain float (an encoded one is decoded instead:
+/// [`volatile_equality_operand`] next to a literal, [`decoded_float`] next
+/// to a row value), and DataFusion merges no `=` on it into a list: the
+/// merge takes only a column, and CSE makes no column of a volatile
+/// expression.
 fn float_equality(
     op: Operator,
     value: &Expr,

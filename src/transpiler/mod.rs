@@ -1555,6 +1555,43 @@ mod tests {
         );
     }
 
+    /// A volatile encoded float compared with `==` or `!=` is decoded once:
+    /// the range of both zeros would name it twice, and each copy would draw
+    /// again, so it is not a range (#292).
+    #[test]
+    fn a_volatile_encoded_float_is_decoded_for_equality() {
+        use datafusion::functions::math::expr_fn::random;
+        use datafusion::logical_expr::{BinaryExpr, Operator};
+        use datafusion::prelude::cast;
+        let schema = ArrowSchema::new(vec![Field::new(
+            "x",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Float64)),
+            true,
+        )]);
+        let rx = Resolver::new(&schema).unwrap();
+        let volatile = || {
+            datafusion::logical_expr::when(
+                random().gt_eq(lit(0.0)),
+                Expr::Column(Column::new_unqualified("x")),
+            )
+            .otherwise(Expr::Column(Column::new_unqualified("x")))
+            .unwrap()
+        };
+        for (op, zero) in [(Operator::Eq, 0.0), (Operator::NotEq, -0.0)] {
+            let lowered = literals::comparison(op, volatile(), lit(zero), &rx).unwrap();
+            let Expr::BinaryExpr(BinaryExpr { left, op: got, .. }) = &lowered else {
+                panic!("{op}: one comparison, not a range: {lowered}");
+            };
+            assert_eq!(*got, op);
+            assert_eq!(**left, cast(volatile(), DataType::Float64), "{op}");
+            let lowered = literals::comparison(op, lit(zero), volatile(), &rx).unwrap();
+            let Expr::BinaryExpr(BinaryExpr { right, .. }) = &lowered else {
+                panic!("{op}: one comparison, not a range: {lowered}");
+            };
+            assert_eq!(**right, cast(volatile(), DataType::Float64), "{op}");
+        }
+    }
+
     #[test]
     fn binop_floor_div_builds_udf_call() {
         let schema = test_schema();
