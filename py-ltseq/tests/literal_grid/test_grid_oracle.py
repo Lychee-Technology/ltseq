@@ -273,7 +273,10 @@ def test_a_panic_fails_the_gate_in_every_cell():
 def test_every_expected_error_names_its_stage_an_ordinary_class_and_its_cause():
     for ctx, lit, pos in grid.cells():
         e = oracle.expectation(ctx, lit, pos)
-        if e.kind in ("error", "null_arithmetic"):
+        if e.kind in ("error", "null_arithmetic") and isinstance(e.stage, tuple):
+            # a v0.5 refusal ADR 0018 does not expect: its class and stage, no cause (contract.py)
+            assert set(e.stage) <= oracle.STAGES and e.cls and e.rules, (ctx, lit, pos, e)
+        elif e.kind in ("error", "null_arithmetic"):
             assert e.stage in oracle.STAGES and e.cls and e.msg, (ctx, lit, pos, e)
             assert not set(e.cls) & grid.PANIC_CLASSES, (ctx, lit, pos, e)
 
