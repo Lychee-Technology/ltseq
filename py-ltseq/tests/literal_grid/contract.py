@@ -30,12 +30,29 @@ every class that today's ``ValueError`` might become (``_classes_only``).
 Stages map onto the grid's: v0.5's plan stage is the grid's ``capture`` or
 ``plan``, and execution is ``collect``.
 
-    PYTHONPATH=py-ltseq/tests python -m literal_grid.contract RUN.jsonl [--classes today] [--cells RULE]
+    PYTHONPATH=py-ltseq/tests python -m literal_grid.contract RUN.jsonl [--classes today] [--cells RULE] [--baseline MAIN.jsonl]
 
 grades a recorded run (``grid.py --commit``) by every rule at once, counts
 the cells that meet v0.5 and those that do not yet per set of rules, and
 lists the rules the run could put in force: the work each M item has left
-on the grid, and the classification run its gate rests on.
+on the grid.
+
+That contract report is not the classification an M item's gate or the
+re-recording of ``expected/main.jsonl`` rests on. It reads one run and
+groups the oracle's verdicts; it does not compare the run with the
+baseline, give a cell a status of ``classification.STATUSES``, or show that
+every changed cell has a status that cites the contract or an issue. That
+is the classification of the run against ``expected/main.jsonl``
+(``classification.py``), graded by the rules in ``IN_FORCE`` rather than by
+all of them, and it is a separate gate that must pass too: no
+``REGRESSION`` and no ``UNDECIDED``. ``test_literal_grid.py``
+(``test_gate_no_regression_no_undecided``) applies it to the live build,
+and ``--baseline`` applies it to the recorded run, printing each status's
+count and every ``REGRESSION`` and ``UNDECIDED`` cell and exiting non-zero
+if there is any; ``python -m literal_grid.classification MAIN.jsonl RUN.jsonl``
+prints the same counts with its rules. The differential suite
+(``test_differential.py``) has its own classified gate, which this module
+does not touch.
 """
 
 import sys
@@ -43,7 +60,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import grid, oracle
+from . import classification, grid, oracle
 from .oracle import Expectation
 
 
@@ -659,6 +676,22 @@ def ready(groups):
     return sorted(chosen)
 
 
+GATE_FAILURES = ("REGRESSION", "UNDECIDED")
+
+
+def classified_against(baseline, outcomes):
+    """The classification of a recorded run against the baseline, as the merge gate
+    makes it (by the rules in ``IN_FORCE``): ``(count per status, failing cells)``,
+    the failing cells being the ``REGRESSION`` and ``UNDECIDED`` ones."""
+    by_status, failing = {}, []
+    for c in classification.cells(baseline, outcomes):
+        k = classification.classify(c)
+        by_status[k.status] = by_status.get(k.status, 0) + 1
+        if k.status in GATE_FAILURES:
+            failing.append((c, k))
+    return by_status, failing
+
+
 def main(argv):
     import argparse
 
@@ -667,6 +700,8 @@ def main(argv):
     parser.add_argument("--classes", choices=["v0.5", "today"], default="v0.5",
                         help="grade errors by v0.5's classes, or by the classes the build raises before M15")
     parser.add_argument("--cells", help="list the failing cells of the rule sets that include this rule")
+    parser.add_argument("--baseline", help="also classify the run against this recorded baseline, such as "
+                        "expected/main.jsonl, as the merge gate does, and fail on REGRESSION or UNDECIDED")
     args = parser.parse_args(argv)
     _, outcomes = grid.load(Path(args.run))
     groups = report(outcomes, args.classes)
@@ -680,7 +715,19 @@ def main(argv):
             if args.cells in rules:
                 for cid, reason in unmet:
                     print(f"\n{cid}\n  {reason}\n  {oracle._show(outcomes[cid])[:300]}")
+    if not args.baseline:
+        print("\nThis grades the run by the contract only. It is not the classification against the baseline that "
+              "a gate or a re-recording rests on: pass --baseline expected/main.jsonl for that.")
+        return 0
+    base_header, baseline = grid.load(Path(args.baseline))
+    by_status, failing = classified_against(baseline, outcomes)
+    print(f"\nclassified against {args.baseline} (commit {base_header.get('commit')}) by the rules in force:")
+    for status in ("UNCHANGED", "INTENDED_CHANGE", "BUG_FIXED", "PREEXISTING_BUG", *GATE_FAILURES):
+        print(f"{by_status.get(status, 0):6d} {status}")
+    for c, k in failing:
+        print(f"\n{c.id} [{k.status}] {k.reason[:160]}\n  head={classification.show(c.head)}\n  main={classification.show(c.main)}")
+    return 1 if failing else 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

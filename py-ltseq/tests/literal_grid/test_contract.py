@@ -494,3 +494,22 @@ def test_classification_still_reads_v05_expectations():
     _, main = grid.load(BASELINE)
     c = classification.cell("i8", "i1", "eq", main["i8/i1/eq"], main["i8/i1/eq"])
     assert classification.classify(c).status in classification.STATUSES
+
+
+def test_the_contract_report_is_not_the_baseline_classification(tmp_path, capsys):
+    """The report grades one run; only ``--baseline`` classifies it against the recorded
+    baseline as the merge gate does. main's own run grades without complaint, yet the
+    gate's oracle rejects outcomes main shares with itself (the ones the build has since
+    changed), so the classification has UNDECIDED cells and the command fails."""
+    _, main = grid.load(BASELINE)
+    by_status, failing = contract.classified_against(main, main)
+    expected, _ = classification.summary([(c, classification.classify(c)) for c in classification.cells(main, main)])
+    assert by_status == dict(expected)
+    assert sum(by_status.values()) == len(main)
+    assert {k.status for _, k in failing} <= set(contract.GATE_FAILURES) and failing
+
+    assert contract.main([str(BASELINE)]) == 0
+    assert "not the classification against the baseline" in capsys.readouterr().out
+    assert contract.main([str(BASELINE), "--baseline", str(BASELINE)]) == 1
+    out = capsys.readouterr().out
+    assert "classified against" in out and f"{len(failing):6d} UNDECIDED" in out
