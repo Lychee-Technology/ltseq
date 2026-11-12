@@ -32,6 +32,13 @@ DataFusion's business, so types compare modulo the wrapper there.
 Type-level holding is decided here from the type's range and scale alone, so
 the Rust ``holds`` and the Python model are two independent readings of the
 same question.
+
+v0.5 revises these decisions (#275). ``contract.py`` models what the v0.5
+contract requires of each cell, rule by rule, each rule citing its section;
+``expectation`` returns that requirement wherever every rule it rests on is
+in ``contract.IN_FORCE``, and ``legacy_expectation``, the ADR 0018 reading
+described above, everywhere else. A rule enters ``IN_FORCE`` with the M item
+that brings the build to it, and the ADR 0018 reading goes once all have.
 """
 
 import datetime as dt
@@ -638,15 +645,18 @@ class Expectation:
     ``null_arithmetic`` (every row NULL in whatever type DataFusion gives a
     NULL operand, or the planning error ``stage``, ``cls`` and ``msg``
     describe) or ``skip`` (no opinion). ``reason`` names the decision the
-    expectation rests on."""
+    expectation rests on. A v0.5 expectation (``contract.py``) names its
+    rules in ``rules``, may give ``stage`` as the tuple of grid stages it
+    accepts, and leaves ``msg`` None where only the class and stage count."""
 
     kind: str
     reason: str
     type: Optional[tuple] = None
     rows: Optional[tuple] = None
-    stage: Optional[str] = None
+    stage: Optional[object] = None
     cls: Optional[tuple] = None
     msg: Optional[str] = None
+    rules: tuple = ()
 
 
 def _values(t, rows, reason):
@@ -759,7 +769,16 @@ def compare(pos, x, literal):
 
 
 def expectation(ctx, lit, pos):
-    """What the decisions require of the cell."""
+    """What the cell must produce: the v0.5 contract's requirement where every rule it
+    rests on is in force (``contract.IN_FORCE``), else what ADR 0018's decisions require."""
+    from . import contract
+
+    v05 = contract.for_the_gate(ctx, lit, pos, lambda: legacy_expectation(ctx, lit, pos))
+    return v05 if v05 is not None else legacy_expectation(ctx, lit, pos)
+
+
+def legacy_expectation(ctx, lit, pos):
+    """What ADR 0018's decisions require of the cell."""
     ck, lk = context_kind(ctx), literal_kind(lit)
     # D-l: a number or Boolean next to a date or timestamp is a plan-time type
     # error in every position; `isin2` carries the int 1.
@@ -767,7 +786,7 @@ def expectation(ctx, lit, pos):
         cause = NOT_A_NUMBER_FOR_A_DATE
         if lk in TEMPORAL_LITERALS:
             # `isin2` refuses the 1, or first the literal where it alone is refused.
-            alone = expectation(ctx, lit, "isin")
+            alone = legacy_expectation(ctx, lit, "isin")
             cause = cause if alone.kind != "error" else f"{cause}|{alone.msg}"
         return _plan_value_error("D-l: a number or Boolean next to a date or timestamp", cause)
     if ck in NUMERIC and lk in TEMPORAL_LITERALS:
@@ -1100,16 +1119,30 @@ def _fmt(value):
     return repr(v)
 
 
+def _stages(e):
+    return (e.stage,) if isinstance(e.stage, str) else tuple(e.stage)
+
+
 def _describe(e):
-    return f"{' or '.join(e.cls)} at {e.stage} matching /{e.msg}/"
+    cause = "" if e.msg is None else f" matching /{e.msg}/"
+    return f"{' or '.join(e.cls)} at {' or '.join(_stages(e))}{cause}"
 
 
 def _expected_error(e, error):
-    return error["stage"] == e.stage and error["class"] in e.cls and re.search(e.msg, error.get("msg", "")) is not None
+    return (
+        error["stage"] in _stages(e)
+        and error["class"] in e.cls
+        and (e.msg is None or re.search(e.msg, error.get("msg", "")) is not None)
+    )
 
 
 def judge(ctx, lit, pos, outcome):
     """("ok" | "skip" | "violation", reason) for the outcome of a cell."""
+    return judge_by(expectation(ctx, lit, pos), ctx, outcome)
+
+
+def judge_by(e, ctx, outcome):
+    """("ok" | "skip" | "violation", reason) for an outcome against the expectation ``e``."""
     try:
         check_structure(ctx, outcome)
     except ValueError as error:
@@ -1118,7 +1151,6 @@ def judge(ctx, lit, pos, outcome):
     # failure, which no decision authorizes (review of d1eb7b3 on #225, R2).
     if grid.exposed_panic(outcome):
         return _violation(f"an exposed panic is never an authorized outcome: {_show(outcome)}")
-    e = expectation(ctx, lit, pos)
     if e.kind == "skip":
         return ("skip", e.reason)
     if e.kind == "error":
