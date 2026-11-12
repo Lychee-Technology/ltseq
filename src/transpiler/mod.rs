@@ -35,7 +35,7 @@ pub(crate) mod true_div;
 pub(crate) mod window_native;
 
 pub(crate) use float_lists::FloatListZeros;
-pub(crate) use literals::column_value;
+pub(crate) use literals::{column_value, encoded_float};
 pub(crate) use resolve::{binary_input_types, Resolver};
 #[cfg(feature = "m0")]
 pub(crate) use resolve::planned_type;
@@ -1350,6 +1350,27 @@ mod tests {
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::Column;
 
+    /// Runs `test` on a thread with a 16 MiB stack and returns its result.
+    ///
+    /// The `lowering_coerces_each_node_once` tests recurse once per level of
+    /// an expression a hundred or more levels deep. In a debug build that
+    /// takes nearly all of the 2 MiB a test thread gets: built by rustc
+    /// 1.99.1 on x86-64 Linux, the window test needs between 2032 and
+    /// 2040 KiB, so a toolchain or code change of a few KiB per frame makes
+    /// it overflow. On arm64 macOS it overflows already. The tests measure
+    /// how many nodes lowering coerces, not the stack, so they get one
+    /// large enough for either.
+    pub(super) fn on_a_large_stack<T: Send>(test: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(16 << 20)
+                .spawn_scoped(scope, test)
+                .expect("spawn the test thread")
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    }
+
     fn test_schema() -> ArrowSchema {
         ArrowSchema::new(vec![
             Field::new("a", DataType::Int64, false),
@@ -1500,6 +1521,98 @@ mod tests {
         assert_eq!(expr, expected);
     }
 
+    /// An encoded float operand keeps its encoding next to a literal: an
+    /// order with a zero compares with the zero that keeps both zeros on
+    /// one side, and any other literal is compared as written. Next to a
+    /// value that varies by row it is decoded (#292).
+    #[test]
+    fn an_encoded_float_is_decoded_only_next_to_a_row_value() {
+        use datafusion::prelude::cast;
+        let schema = ArrowSchema::new(vec![
+            Field::new(
+                "x",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Float64)),
+                true,
+            ),
+            Field::new("y", DataType::Float64, true),
+        ]);
+        let x = || Expr::Column(Column::new_unqualified("x"));
+        let y = || Expr::Column(Column::new_unqualified("y"));
+        let float = |v: f64| PyExpr::Literal(LiteralValue::Float64(v));
+        let lower = |op: &str, left: PyExpr, right: PyExpr| {
+            let expr = PyExpr::BinOp {
+                op: op.to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            pyexpr_to_datafusion(expr, &schema).unwrap()
+        };
+        // Lowering returns the coerced plan, where a literal next to the
+        // column takes the column's encoding.
+        let coerced = |expr: Expr| Resolver::new(&schema).unwrap().resolve(expr).unwrap();
+        let cases = [
+            ("Lt", 0.0, x().lt(lit(-0.0))),
+            ("Ge", 0.0, x().gt_eq(lit(-0.0))),
+            ("Le", -0.0, x().lt_eq(lit(0.0))),
+            ("Gt", -0.0, x().gt(lit(0.0))),
+            ("Lt", 1.5, x().lt(lit(1.5))),
+        ];
+        for (op, value, expected) in cases {
+            let lowered = lower(op, col_expr("x"), float(value));
+            assert_eq!(lowered, coerced(expected), "x {op} {value}");
+        }
+        // `0.0 > x` is `x < 0.0`, seen from the column.
+        assert_eq!(
+            lower("Gt", float(0.0), col_expr("x")),
+            coerced(lit(-0.0).gt(x()))
+        );
+        assert_eq!(
+            lower("Le", col_expr("x"), col_expr("y")),
+            cast(x(), DataType::Float64).lt_eq(y())
+        );
+        assert_eq!(
+            lower("Eq", col_expr("y"), col_expr("x")),
+            y().eq(cast(x(), DataType::Float64))
+        );
+    }
+
+    /// A volatile encoded float compared with `==` or `!=` is decoded once:
+    /// the range of both zeros would name it twice, and each copy would draw
+    /// again, so it is not a range (#292).
+    #[test]
+    fn a_volatile_encoded_float_is_decoded_for_equality() {
+        use datafusion::functions::math::expr_fn::random;
+        use datafusion::logical_expr::{BinaryExpr, Operator};
+        use datafusion::prelude::cast;
+        let schema = ArrowSchema::new(vec![Field::new(
+            "x",
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Float64)),
+            true,
+        )]);
+        let rx = Resolver::new(&schema).unwrap();
+        let volatile = || {
+            datafusion::logical_expr::when(
+                random().gt_eq(lit(0.0)),
+                Expr::Column(Column::new_unqualified("x")),
+            )
+            .otherwise(Expr::Column(Column::new_unqualified("x")))
+            .unwrap()
+        };
+        for (op, zero) in [(Operator::Eq, 0.0), (Operator::NotEq, -0.0)] {
+            let lowered = literals::comparison(op, volatile(), lit(zero), &rx).unwrap();
+            let Expr::BinaryExpr(BinaryExpr { left, op: got, .. }) = &lowered else {
+                panic!("{op}: one comparison, not a range: {lowered}");
+            };
+            assert_eq!(*got, op);
+            assert_eq!(**left, cast(volatile(), DataType::Float64), "{op}");
+            let lowered = literals::comparison(op, lit(zero), volatile(), &rx).unwrap();
+            let Expr::BinaryExpr(BinaryExpr { right, .. }) = &lowered else {
+                panic!("{op}: one comparison, not a range: {lowered}");
+            };
+            assert_eq!(**right, cast(volatile(), DataType::Float64), "{op}");
+        }
+    }
+
     #[test]
     fn binop_floor_div_builds_udf_call() {
         let schema = test_schema();
@@ -1564,13 +1677,13 @@ mod tests {
                 standalone_call("if_else", vec![cond, int_lit(i), e])
             })
         };
-        for build in [&sum as &dyn Fn(i64) -> PyExpr, &cases] {
+        for build in [&sum as &(dyn Fn(i64) -> PyExpr + Sync), &cases] {
             let coerced = |depth: i64| {
                 let rx = Resolver::new(&schema).unwrap();
                 rx.resolve(lower_expr(build(depth), &rx).unwrap()).unwrap();
                 rx.coerced_nodes()
             };
-            let (shallow, deep) = (coerced(100), coerced(200));
+            let (shallow, deep) = on_a_large_stack(|| (coerced(100), coerced(200)));
             assert!(
                 deep <= 2 * shallow + 10,
                 "{shallow} nodes coerced at depth 100, {deep} at depth 200"
