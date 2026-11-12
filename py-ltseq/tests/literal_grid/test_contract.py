@@ -324,8 +324,9 @@ def test_m15_reclassifies_the_refusals_of_cells_whose_rules_are_deferred(monkeyp
 
 
 def test_m15_keeps_the_stage_and_semantics_of_deferred_cells(monkeypatch):
-    """A deferred cell whose refusal v0.5 does not share keeps its stage and takes the v0.5
-    classes of today's class; a deferred cell with values keeps ADR 0018's values."""
+    """A deferred cell's refusal keeps its stage, read as v0.5's, and takes the one class
+    of its cause, whatever v0.5's own refusal of the cell is; a deferred cell with values
+    keeps ADR 0018's values."""
     monkeypatch.setattr(contract, "IN_FORCE", contract.IN_FORCE | {"error_classes"})
     changed = 0
     for ctx, lit, pos in grid.cells():
@@ -338,13 +339,79 @@ def test_m15_keeps_the_stage_and_semantics_of_deferred_cells(monkeypatch):
             continue
         changed += 1
         assert now.kind == before.kind and now.msg is None and now.rules == ("error_classes",), (ctx, lit, pos)
-        assert set(now.cls) <= set(contract.PRE_M15), (ctx, lit, pos, now)
-        if v05.kind == before.kind and before.stage in v05.stage:
-            assert (now.stage, now.cls) == (v05.stage, v05.cls), (ctx, lit, pos)
-        else:
-            assert now.stage == (before.stage,), (ctx, lit, pos)
-            assert all(set(contract.V05_CLASSES[c]) <= set(now.cls) for c in before.cls), (ctx, lit, pos)
+        assert now.cls == (contract.cause_class(before.msg, pos),), (ctx, lit, pos, now)
+        assert now.cls[0] in contract.PRE_M15, (ctx, lit, pos, now)
+        assert now.stage == {"plan": contract.PLAN, "collect": contract.EXECUTION}[before.stage], (ctx, lit, pos)
     assert changed
+
+
+def test_every_refusal_of_adr_0018_has_one_v05_class():
+    """Each cause the oracle justifies a refusal by has a class, in every position it is
+    expected in, and causes it joins share theirs; an unknown cause or joined causes of
+    two classes have none."""
+    for ctx, lit, pos in grid.cells():
+        before = oracle.legacy_expectation(ctx, lit, pos)
+        if before.kind in ("error", "null_arithmetic"):
+            assert contract.cause_class(before.msg, pos) in contract.PRE_M15, (ctx, lit, pos)
+    assert contract.cause_class(f"{oracle.NOT_A_NUMBER_FOR_A_DATE}|{oracle.AWARE_NEXT_TO_NAIVE}", "isin2") == "LTSeqTypeError"
+    # NaN beside an integer: an inexact literal when compared (§17.4 rule 3, in force
+    # already, so no deferred cell shows it), a value the column cannot hold in it.
+    assert contract.cause_class(oracle.NO_NAN_OR_INFINITY, "isin") == "LTSeqValueError"
+    assert contract.cause_class(oracle.NO_NAN_OR_INFINITY, "shift_def") == "CastError"
+    with pytest.raises(KeyError):
+        contract.cause_class("an unknown refusal", "eq")
+    with pytest.raises(ValueError):
+        contract.cause_class(f"{oracle.NOT_FOR_A_STRING}|{oracle.NO_EXACT_FIT}", "fill")
+
+
+# Deferred cells under M15 alone, each refused today for a cause v0.5's class does not
+# follow from: (cell, today's outcome, the v0.5 class of its cause, its stage).
+DEFERRED_REFUSALS = [
+    # `date - datetime` subtracts at nanoseconds, where the date's value overflows; v0.5
+    # refuses the pair at plan (date_timestamp_arithmetic, M20), which M15 does not bring.
+    (("date32", "dt_mid", "sub"),
+     "Cannot cast Date32 value -1000000 to Timestamp(ns): converted value exceeds the representable i64 range",
+     "ArithmeticOverflowError", "collect"),
+    # Arrow's checked decimal arithmetic overflows while collecting.
+    (("i32", "Dfine33", "add"), "Arithmetic overflow: Overflow happened on: 1 + 2",
+     "ArithmeticOverflowError", "collect"),
+    # `dt.diff` with a number is a type error until M4 removes the method (AttributeError).
+    (("date32", "i0", "dtdiff"),
+     "dt_diff cannot subtract Int64 from Date32; both sides must be dates or timestamps", "LTSeqTypeError", "plan"),
+    # A datetime with a time of day has no exact date (CastError); v0.5's type error for
+    # every datetime beside a date (date_timestamp_shared) waits for M8.
+    (("date32", "dt_1_5s", "fill"),
+     "column 'date32' is a date; the datetime literal 2020-01-01 00:00:01.5 has a time of day; use a date",
+     "CastError", "plan"),
+    # NaN goes into an integer column it has no value in: CastError, as v0.5's
+    # shared_value_no_widening (M8) has it, not the LTSeqValueError of a comparison.
+    (("i8", "fnan", "fill"), "column 'i8' is Int8, which has no value for NaN; NaN and infinity meet only float columns",
+     "CastError", "plan"),
+    # No decimal type of one width holds both sides: DataFusion's planning error.
+    (("d256", "Dfine33", "add"), "Error during planning: Cannot coerce arithmetic expression Decimal256(76, 0) + ",
+     "LTSeqTypeError", "plan"),
+]
+
+
+@pytest.mark.parametrize("cell, msg, cls, stage", DEFERRED_REFUSALS, ids=["/".join(r[0]) for r in DEFERRED_REFUSALS])
+def test_m15_classifies_a_deferred_refusal_by_its_cause(monkeypatch, cell, msg, cls, stage):
+    """M15 alone gives a deferred cell's refusal the one class of its cause, at its stage:
+    no other class v0.5 has for today's ValueError or RuntimeError passes for it, and
+    neither does the class v0.5 gives the cell when its own rules come into force."""
+    before = oracle.legacy_expectation(*cell)
+    assert not contract.in_force(contract.expectation(*cell))
+    assert before.kind in ("error", "null_arithmetic") and before.stage == stage
+    assert re.search(before.msg, msg), (before.msg, msg)
+    today = error(before.cls[0], stage, msg)
+    assert oracle.judge(*cell, today)[0] == "ok"
+    assert oracle.judge(*cell, error(cls, stage, msg))[0] == "violation"  # before M15
+    monkeypatch.setattr(contract, "IN_FORCE", contract.IN_FORCE | {"error_classes"})
+    assert oracle.judge(*cell, error(cls, stage, "reworded"))[0] == "ok"
+    assert oracle.judge(*cell, today)[0] == "violation"
+    other_stage = "collect" if stage == "plan" else "plan"
+    assert oracle.judge(*cell, error(cls, other_stage))[0] == "violation"
+    for other in set(contract.PRE_M15) - {cls}:
+        assert oracle.judge(*cell, error(other, stage, msg))[0] == "violation", other
 
 
 def test_a_cell_with_a_rule_not_in_force_keeps_adr_0018():

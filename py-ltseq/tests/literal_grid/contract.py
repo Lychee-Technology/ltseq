@@ -24,9 +24,11 @@ cannot tell a justified refusal from any other), and one it does not
 expect accepts the v0.5 class or the one ltseq raises today for it
 (``PRE_M15``). Once it is in force, the classes change on every cell,
 not only on those whose rules are in force: M15 lands before M8, so a cell
-ADR 0018 still grades keeps its semantics and takes v0.5's class for its
-refusal (``_classes_only``). Stages map onto the grid's: v0.5's plan stage
-is the grid's ``capture`` or ``plan``, and execution is ``collect``.
+ADR 0018 still grades keeps its semantics and its refusals take v0.5's
+class: the one class the refusal's cause has (``CAUSE_CLASSES``), never
+every class that today's ``ValueError`` might become (``_classes_only``).
+Stages map onto the grid's: v0.5's plan stage is the grid's ``capture`` or
+``plan``, and execution is ``collect``.
 
     PYTHONPATH=py-ltseq/tests python -m literal_grid.contract RUN.jsonl [--classes today] [--cells RULE]
 
@@ -514,35 +516,85 @@ def in_force(e, rules=None):
 def for_the_gate(ctx, lit, pos, legacy):
     """The v0.5 expectation when every rule it rests on is in force, adapted to the
     build's error classes until M15; None when ADR 0018's still grades the cell.
-    Once M15 is in force, a cell ADR 0018 still grades takes v0.5's error classes too
-    (``_classes_only``), since M15 lands before the items that change those cells."""
+    Once M15 is in force, a cell ADR 0018 still grades takes v0.5's error classes too,
+    each refusal the class of its cause (``_classes_only``), since M15 lands before the
+    items that change those cells."""
     e = expectation(ctx, lit, pos)
     if not in_force(e):
-        return _classes_only(e, legacy()) if "error_classes" in IN_FORCE else None
+        return _classes_only(legacy(), pos) if "error_classes" in IN_FORCE else None
     return _adapted(e, legacy, IN_FORCE)
 
 
-# What v0.5 calls each class the build raises today: the inverse of PRE_M15.
-V05_CLASSES = {
-    today: tuple(cls for cls, classes in PRE_M15.items() if today in classes)
-    for today in dict.fromkeys(c for classes in PRE_M15.values() for c in classes)
+# The v0.5 class (§20.1) of each refusal ADR 0018's oracle expects, by its cause.
+# Today's class cannot decide it: ltseq's own refusals and DataFusion's failures
+# while collecting are all ValueErrors, whether a type has no rule, a value has
+# no exact place, or a result overflows. The cause, the message the oracle
+# requires, names which of these the refusal is, and M15 gives it that class.
+CAUSE_CLASSES = {
+    # Operand types that no rule accepts.
+    oracle.NOT_A_NUMBER_FOR_A_DATE: "LTSeqTypeError",
+    oracle.NOT_A_DATE_FOR_A_NUMBER: "LTSeqTypeError",
+    oracle.AWARE_NEXT_TO_NAIVE: "LTSeqTypeError",
+    oracle.NOT_FOR_A_STRING: "LTSeqTypeError",
+    oracle.NO_ARITHMETIC_TYPE: "LTSeqTypeError",
+    # A NaN or infinity beside an integer or decimal: an inexact literal in a
+    # comparison (§17.4 rule 3), and where it goes into the column, as a shared
+    # value or a shift default, a value the column cannot hold exactly (§17.5).
+    oracle.NO_NAN_OR_INFINITY: {"comparison": "LTSeqValueError", "value": "CastError"},
+    # A supplied value that the implicit conversion into the column's type cannot
+    # hold exactly (§17.6): a date column takes a midnight datetime and refuses
+    # any other, a timestamp column refuses an instant out of its range.
+    oracle.NO_EXACT_FIT: "CastError",
+    oracle.NO_EXACT_SHIFT_DEFAULT: "CastError",
+    oracle.OUT_OF_RANGE: "CastError",
+    oracle.NOT_A_WHOLE_DAY: "CastError",
+    # Overflow while computing, an operand's change of unit inside temporal
+    # arithmetic included (§20.1, §19.2).
+    oracle.CAST_OUT_OF_RANGE: "ArithmeticOverflowError",
+    oracle.DECIMAL_OVERFLOW: "ArithmeticOverflowError",
 }
 
+# v0.5's stage of each stage at which ADR 0018's oracle expects a refusal (§20.2).
+LEGACY_STAGES = {"plan": PLAN, "collect": EXECUTION}
 
-def _classes_only(e, before):
+
+def cause_class(cause, pos):
+    """The v0.5 class of a refusal ADR 0018's oracle justifies by ``cause`` in the
+    position ``pos``; a cause whose class depends on whether the literal is compared
+    or goes into the column names one for each. A cause may join the causes of
+    refusals the oracle accepts alike (`isin2` refuses the 1 or the literal first);
+    they must share a class, or the class would depend on which one the build
+    checks first. An unknown cause has no class: a new refusal in the oracle needs
+    its class here before M15 can grade it."""
+    if cause in CAUSE_CLASSES:
+        cls = CAUSE_CLASSES[cause]
+        if isinstance(cls, dict):
+            cls = cls["comparison" if pos in grid.COMPARISON_POSITIONS else "value"]
+        return cls
+    for known in CAUSE_CLASSES:
+        if cause.startswith(known + "|"):
+            cls, rest = cause_class(known, pos), cause_class(cause[len(known) + 1:], pos)
+            if rest != cls:
+                raise ValueError(f"the causes joined in /{cause}/ have the classes {cls} and {rest}")
+            return cls
+    raise KeyError(f"no v0.5 class for the refusal cause /{cause}/")
+
+
+def _classes_only(before, pos):
     """ADR 0018's expectation for a cell whose v0.5 rules are not all in force, with
     M15's classes (§20.1): its semantics stay, its refusals change class. A refusal
-    v0.5 makes too, at the same stage, takes v0.5's class and stage; any other keeps
-    its stage and accepts each v0.5 class of the class it has today. Messages stop
-    counting either way (§20.1)."""
+    takes the one class its cause has in v0.5 (``CAUSE_CLASSES``), at v0.5's stage
+    of the stage it has today; messages stop counting (§20.1). v0.5's own refusal
+    of the cell does not decide the class: it may rest on another cause (a
+    removed method, a type pair that has no rule yet in the build), which M15
+    does not bring."""
     if before.kind not in ("error", "null_arithmetic"):
         return before
     rules = ("error_classes",)
     reason = f"{before.reason}; {_reason(rules)}"
-    if e.kind == before.kind and before.stage in e.stage:
-        return replace(before, reason=reason, stage=e.stage, cls=e.cls, msg=None, rules=rules)
-    classes = tuple(dict.fromkeys(v for c in before.cls for v in V05_CLASSES.get(c, (c,))))
-    return replace(before, reason=reason, stage=(before.stage,), cls=classes, msg=None, rules=rules)
+    return replace(
+        before, reason=reason, stage=LEGACY_STAGES[before.stage], cls=(cause_class(before.msg, pos),), msg=None, rules=rules,
+    )
 
 
 def _adapted(e, legacy, rules):
