@@ -8,7 +8,11 @@ import os
 import tempfile
 import unittest
 
+import pyarrow as pa
+import pytest
+
 from ltseq import LTSeq
+from ltseq.exceptions import SortRequiredError
 
 
 class TestJoinSortedBasic(unittest.TestCase):
@@ -250,6 +254,98 @@ class TestJoinSortedAfterOps(unittest.TestCase):
             users.join(orders, on=lambda u, o: u.user_id == o.user_id, strategy="merge")
 
         self.assertIn("Left table is not sorted", str(ctx.exception))
+
+
+
+class TestJoinSortedNullPlacement:
+    """Merge-join validation reads the NULL placement each key declares
+    (``nulls_last``, #268) instead of requiring the NULL-last default."""
+
+    @staticmethod
+    def _tables():
+        left = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([None, 1, 2], pa.int64()),
+                    "j": pa.array([5, None, 6], pa.int64()),
+                    "l": ["ln", "l1", "l2"],
+                }
+            )
+        )
+        right = LTSeq.from_arrow(
+            pa.table(
+                {
+                    "k": pa.array([2, None, 1], pa.int64()),
+                    "j": pa.array([6, 7, None], pa.int64()),
+                    "r": ["r2", "rn", "r1"],
+                }
+            )
+        )
+        return left, right
+
+    @staticmethod
+    def _pairs(table):
+        d = table.to_arrow().to_pydict()
+        return sorted(zip(d["l"], d["r"]))
+
+    @pytest.mark.parametrize("desc", [False, True])
+    @pytest.mark.parametrize("nulls_last", [False, True])
+    def test_matching_order_succeeds(self, desc, nulls_last):
+        left, right = self._tables()
+        merged = left.sort("k", desc=desc, nulls_last=nulls_last).join(
+            right.sort("k", desc=desc, nulls_last=nulls_last),
+            on="k",
+            strategy="merge",
+        )
+        # A NULL key matches nothing, whatever the placement.
+        assert self._pairs(merged) == [("l1", "r1"), ("l2", "r2")]
+
+    @pytest.mark.parametrize("desc", [False, True])
+    def test_mismatched_placement_raises(self, desc):
+        """A NULL-first left side is still a sorted left side; only the
+        sides disagreeing is an error, and it names NULL placement."""
+        left, right = self._tables()
+        with pytest.raises(ValueError, match="NULL placements don't match"):
+            left.sort("k", desc=desc, nulls_last=False).join(
+                right.sort("k", desc=desc), on="k", strategy="merge"
+            )
+        with pytest.raises(ValueError, match="NULL placements don't match"):
+            left.sort("k", desc=desc).join(
+                right.sort("k", desc=desc, nulls_last=False),
+                on="k",
+                strategy="merge",
+            )
+
+    def test_mixed_per_key_placement_succeeds(self):
+        left, right = self._tables()
+        flags = dict(desc=[True, False], nulls_last=[False, True])
+        merged = left.sort("k", "j", **flags).join(
+            right.sort("k", "j", **flags), on=["k", "j"], strategy="merge"
+        )
+        assert self._pairs(merged) == [("l2", "r2")]
+
+    def test_mixed_per_key_placement_mismatch_raises(self):
+        left, right = self._tables()
+        with pytest.raises(ValueError, match="NULL placements don't match: left 'j'"):
+            left.sort("k", "j", nulls_last=[False, True]).join(
+                right.sort("k", "j", nulls_last=[False, False]),
+                on=["k", "j"],
+                strategy="merge",
+            )
+
+    def test_assume_sorted_null_first_succeeds(self):
+        left, right = self._tables()
+        left = left.sort("k", nulls_last=False)
+        right = LTSeq.from_arrow(
+            pa.table({"k": pa.array([None, 1, 2], pa.int64()), "r": ["rn", "r1", "r2"]})
+        ).assume_sorted("k", nulls_last=False)
+        merged = left.join(right, on="k", strategy="merge")
+        assert self._pairs(merged) == [("l1", "r1"), ("l2", "r2")]
+
+    def test_unsorted_side_still_rejected(self):
+        left, right = self._tables()
+        with pytest.raises(SortRequiredError, match="Right table is not sorted"):
+            left.sort("k", nulls_last=False).join(right, on="k", strategy="merge")
 
 
 if __name__ == "__main__":

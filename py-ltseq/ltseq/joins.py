@@ -191,7 +191,10 @@ class JoinMixin(LTSeqLike):
             strategy: Join strategy (optional):
                 - None: default hash join
                 - "hash": explicit hash join (same as None)
-                - "merge": merge join for pre-sorted tables (validates sort order)
+                - "merge": merge join for pre-sorted tables. Validates that
+                  each table is sorted by the key columns in key order, and
+                  that both use the same direction and NULL placement
+                  (``nulls_last``) per key pair
             left_on / right_on: Column name(s) for differently-named keys
             suffix: Appended to right-table columns that collide with the left
                 table (Polars semantics; default "_right"). For inner/left joins
@@ -203,7 +206,9 @@ class JoinMixin(LTSeqLike):
         Raises:
             ColumnNotFoundError: If a key name given as a string is not a
                 column of its table
-            ValueError: If strategy="merge" and tables are not sorted by join keys
+            ValueError: If strategy="merge" and tables are not sorted by join
+                keys (``SortRequiredError``), or their directions or NULL
+                placements differ for a key pair
             TypeError: If the on= lambda tests a value against None with
                 ``is`` / ``is not``; filter nulls before or after the join instead
 
@@ -259,38 +264,61 @@ class JoinMixin(LTSeqLike):
         if pairs:
             left_cols = [lc for lc, _ in pairs]
             right_cols = [rc for _, rc in pairs]
-            left_descs = [self._get_sort_direction(c) for c in left_cols]
-            right_descs = [other._get_sort_direction(c) for c in right_cols]
+            left_specs = [self._get_sort_spec(c) for c in left_cols]
+            right_specs = [other._get_sort_spec(c) for c in right_cols]
 
             # Merge join needs each table sorted by the FULL key tuple in key
             # order (is_sorted_by does ordered prefix matching), not each column
-            # independently.
+            # independently. Check each key against the direction AND NULL
+            # placement the table declares for it: requiring the defaults
+            # would reject a table sorted NULL-first. A key the table is not
+            # sorted by falls back to the defaults, and is_sorted_by then
+            # rejects it.
             from .exceptions import SortRequiredError
 
-            left_expected = [d if d is not None else False for d in left_descs]
-            if not self.is_sorted_by(*left_cols, desc=left_expected):
+            def _expected(specs):
+                desc = [s[0] if s is not None else False for s in specs]
+                nulls_last = [s[1] if s is not None else True for s in specs]
+                return desc, nulls_last
+
+            left_desc, left_nulls_last = _expected(left_specs)
+            if not self.is_sorted_by(
+                *left_cols, desc=left_desc, nulls_last=left_nulls_last
+            ):
                 cols = "', '".join(left_cols)
                 raise SortRequiredError(
                     f"Left table is not sorted by '{cols}'. "
                     f"Use .sort(...) first or use join() without strategy instead."
                 )
 
-            right_expected = [d if d is not None else False for d in right_descs]
-            if not other.is_sorted_by(*right_cols, desc=right_expected):
+            right_desc, right_nulls_last = _expected(right_specs)
+            if not other.is_sorted_by(
+                *right_cols, desc=right_desc, nulls_last=right_nulls_last
+            ):
                 cols = "', '".join(right_cols)
                 raise SortRequiredError(
                     f"Right table is not sorted by '{cols}'. "
                     f"Use .sort(...) first or use join() without strategy instead."
                 )
 
-            # Directions must match per key pair.
-            for (lc, rc), ld, rd in zip(pairs, left_descs, right_descs):
-                if ld is not None and rd is not None and ld != rd:
+            # Both sides must use the same order per key pair: the same
+            # direction and the same NULL placement. Both passed is_sorted_by,
+            # so the expected flags are the ones each table declares.
+            for (lc, rc), ld, rd, ln, rn in zip(
+                pairs, left_desc, right_desc, left_nulls_last, right_nulls_last
+            ):
+                if ld != rd:
                     raise ValueError(
                         f"Sort directions don't match: left '{lc}' is "
                         f"{'descending' if ld else 'ascending'}, "
                         f"right '{rc}' is "
                         f"{'descending' if rd else 'ascending'}."
+                    )
+                if ln != rn:
+                    raise ValueError(
+                        f"NULL placements don't match: left '{lc}' has NULL "
+                        f"{'last' if ln else 'first'}, right '{rc}' has NULL "
+                        f"{'last' if rn else 'first'}."
                     )
 
         # Execute merge join
@@ -307,13 +335,12 @@ class JoinMixin(LTSeqLike):
 
         return LTSeq._from_inner(joined_inner)
 
-    def _get_sort_direction(self, col_name: str) -> bool | None:
-        """Get sort direction for a column, or None if not sorted by it."""
-        if not self._sort_keys:
-            return None
-        for key, desc in self._sort_keys:
+    def _get_sort_spec(self, col_name: str) -> "tuple[bool, bool] | None":
+        """(descending, nulls_last) the table declares for a column, or None
+        if it is not sorted by it."""
+        for key, desc, nulls_last in self._inner.get_sort_specs():
             if key == col_name:
-                return desc
+                return desc, nulls_last
         return None
 
     def asof_join(
