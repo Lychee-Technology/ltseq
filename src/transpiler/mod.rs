@@ -35,7 +35,7 @@ pub(crate) mod true_div;
 pub(crate) mod window_native;
 
 pub(crate) use float_lists::FloatListZeros;
-pub(crate) use literals::column_value;
+pub(crate) use literals::{column_value, encoded_float};
 pub(crate) use resolve::{binary_input_types, Resolver};
 #[cfg(feature = "m0")]
 pub(crate) use resolve::planned_type;
@@ -1498,6 +1498,61 @@ mod tests {
         .unwrap();
         let expected = Expr::Column(Column::new_unqualified("a")).gt(lit(5_i64));
         assert_eq!(expr, expected);
+    }
+
+    /// An encoded float operand keeps its encoding next to a literal: an
+    /// order with a zero compares with the zero that keeps both zeros on
+    /// one side, and any other literal is compared as written. Next to a
+    /// value that varies by row it is decoded (#292).
+    #[test]
+    fn an_encoded_float_is_decoded_only_next_to_a_row_value() {
+        use datafusion::prelude::cast;
+        let schema = ArrowSchema::new(vec![
+            Field::new(
+                "x",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Float64)),
+                true,
+            ),
+            Field::new("y", DataType::Float64, true),
+        ]);
+        let x = || Expr::Column(Column::new_unqualified("x"));
+        let y = || Expr::Column(Column::new_unqualified("y"));
+        let float = |v: f64| PyExpr::Literal(LiteralValue::Float64(v));
+        let lower = |op: &str, left: PyExpr, right: PyExpr| {
+            let expr = PyExpr::BinOp {
+                op: op.to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+            pyexpr_to_datafusion(expr, &schema).unwrap()
+        };
+        // Lowering returns the coerced plan, where a literal next to the
+        // column takes the column's encoding.
+        let coerced = |expr: Expr| Resolver::new(&schema).unwrap().resolve(expr).unwrap();
+        let cases = [
+            ("Lt", 0.0, x().lt(lit(-0.0))),
+            ("Ge", 0.0, x().gt_eq(lit(-0.0))),
+            ("Le", -0.0, x().lt_eq(lit(0.0))),
+            ("Gt", -0.0, x().gt(lit(0.0))),
+            ("Lt", 1.5, x().lt(lit(1.5))),
+        ];
+        for (op, value, expected) in cases {
+            let lowered = lower(op, col_expr("x"), float(value));
+            assert_eq!(lowered, coerced(expected), "x {op} {value}");
+        }
+        // `0.0 > x` is `x < 0.0`, seen from the column.
+        assert_eq!(
+            lower("Gt", float(0.0), col_expr("x")),
+            coerced(lit(-0.0).gt(x()))
+        );
+        assert_eq!(
+            lower("Le", col_expr("x"), col_expr("y")),
+            cast(x(), DataType::Float64).lt_eq(y())
+        );
+        assert_eq!(
+            lower("Eq", col_expr("y"), col_expr("x")),
+            y().eq(cast(x(), DataType::Float64))
+        );
     }
 
     #[test]

@@ -418,16 +418,24 @@ fn coerce_operands(
 /// `BinaryExpr` compares with. It turns `-0.0` into `0.0` before Arrow's
 /// `cmp` kernels, which order floats by IEEE 754 totalOrder and would put
 /// `-0.0` below `0.0`: `0 / -2 == 0.0` holds in `filter` and must here.
+/// It does so only for a plain float array, so a dictionary or run-end
+/// encoded float is decoded first, as the transpiler decodes it in
+/// `filter` (#292).
 fn compare(
     op: datafusion::logical_expr::Operator,
     left: &ArrayRef,
     right: &ArrayRef,
 ) -> Result<ArrayRef, String> {
+    use datafusion::arrow::compute::cast;
     use datafusion::logical_expr::ColumnarValue;
     use datafusion::physical_expr_common::datum::apply_cmp;
 
-    let left_value = ColumnarValue::Array(Arc::clone(left));
-    let right_value = ColumnarValue::Array(Arc::clone(right));
+    let decoded = |arr: &ArrayRef| match crate::transpiler::encoded_float(arr.data_type()) {
+        Some(value_type) => cast(arr, &value_type).map_err(|e| format!("{op} failed: {e}")),
+        None => Ok(Arc::clone(arr)),
+    };
+    let left_value = ColumnarValue::Array(decoded(left)?);
+    let right_value = ColumnarValue::Array(decoded(right)?);
     apply_cmp(op, &left_value, &right_value)
         .and_then(|result| result.into_array(left.len()))
         .map_err(|e| format!("{op} failed: {e}"))
@@ -1516,6 +1524,65 @@ mod tests {
         let dict: ArrayRef =
             Arc::new(DictionaryArray::try_new(dict_keys, f64s).expect("dictionary"));
         assert_eq!(boundaries(dict), expected, "dictionary of float64");
+    }
+
+    /// A dictionary or run-end encoded float compares as its decoded column
+    /// does, on either side: `-0.0` equals `0.0` and neither orders below
+    /// the other (#292). Arrow's kernels alone decide an encoded zero by its
+    /// sign.
+    #[test]
+    fn encoded_float_comparisons_follow_the_decoded_column() {
+        use datafusion::arrow::array::{DictionaryArray, Float64Array, Int32Array, RunArray};
+        use datafusion::arrow::datatypes::Int32Type;
+
+        let (z, n) = (Some(0.0), Some(-0.0));
+        let left = [z, n, n, Some(1.0), None, Some(-1.0)];
+        let right = [n, z, n, n, z, n];
+        let plain =
+            |values: &[Option<f64>]| -> ArrayRef { Arc::new(Float64Array::from(values.to_vec())) };
+        let dictionary = |values: &[Option<f64>]| -> ArrayRef {
+            let keys = Int32Array::from((0..values.len() as i32).map(Some).collect::<Vec<_>>());
+            Arc::new(DictionaryArray::try_new(keys, plain(values)).expect("dictionary"))
+        };
+        let run_end_encoded = |values: &[Option<f64>]| -> ArrayRef {
+            let run_ends = Int32Array::from((1..=values.len() as i32).collect::<Vec<_>>());
+            Arc::new(
+                RunArray::<Int32Type>::try_new(&run_ends, plain(values).as_ref())
+                    .expect("run-end encoded"),
+            )
+        };
+        let mask = |op: &str, l: &ArrayRef, r: &ArrayRef| {
+            let result = eval_binop(op, l, r).expect("comparison");
+            let result = result
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("Boolean");
+            result.iter().collect::<Vec<_>>()
+        };
+        type Encode<'a> = &'a dyn Fn(&[Option<f64>]) -> ArrayRef;
+        let encodings: [(&str, Encode); 3] = [
+            ("plain", &plain),
+            ("dictionary", &dictionary),
+            ("run-end encoded", &run_end_encoded),
+        ];
+        for op in ["Eq", "Ne", "Lt", "Le", "Gt", "Ge"] {
+            let reference = mask(op, &plain(&left), &plain(&right));
+            for ((l_name, l), (r_name, r)) in encodings
+                .iter()
+                .flat_map(|l| encodings.iter().map(move |r| (l, r)))
+            {
+                assert_eq!(
+                    mask(op, &l(&left), &r(&right)),
+                    reference,
+                    "{l_name} {op} {r_name}"
+                );
+            }
+        }
+        let (t, f) = (Some(true), Some(false));
+        assert_eq!(
+            mask("Eq", &dictionary(&left), &plain(&right)),
+            [t, t, t, f, None, f]
+        );
     }
 
     /// A source that counts how often its plan is executed.

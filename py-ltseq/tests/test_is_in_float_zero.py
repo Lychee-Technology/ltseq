@@ -204,8 +204,8 @@ ENCODED = ["dictionary", "run_end_encoded"]
 
 
 def compared_by_column_equality(x_type: str, items: list) -> bool:
-    """DataFusion's `=` between an encoded float column and a float column
-    compares zeros by sign (#292)."""
+    """Whether `items` compare an encoded float column with a float column,
+    which `=` did by sign until #292 decoded the encoded side."""
     return x_type in ENCODED and Y_ITEM in items
 
 
@@ -217,9 +217,10 @@ def test_membership_and_equalities_follow_the_reference(x_type, receiver):
     assert {name: got[name] for name in wanted if got[name] != wanted[name]} == {}
 
 
-@pytest.mark.xfail(strict=True, reason="#292: `=` on an encoded float column compares zeros by sign")
 @pytest.mark.parametrize("x_type", ENCODED)
 def test_an_encoded_column_meets_a_column_as_the_reference_does(x_type):
+    """`=` decodes an encoded float column before it compares, so it takes
+    -0.0 to equal 0.0 as on the decoded column (#292)."""
     lists = [items for items in LISTS if compared_by_column_equality(x_type, items)]
     got, wanted = outcomes(x_type, "column", lists)
     assert {name: got[name] for name in wanted if got[name] != wanted[name]} == {}
@@ -445,14 +446,13 @@ def test_filter_with_a_zero_a_column_holds(data_layout, staged, form):
 @pytest.mark.parametrize("x_type", X_TYPES)
 def test_a_zero_a_column_holds_on_each_float_type(x_type):
     """The bounds that replace a zero keep the list's type, since no type
-    coercion follows the optimizer: a dictionary or run-end encoded column
-    is compared with encoded bounds. Negated, the simplifier moves the zero
-    out of the list into `x != -0.0`, which on an encoded column decides a
-    zero by its sign (#292), so there only the kept rows are checked."""
+    coercion follows the optimizer. A dictionary or run-end encoded column
+    is compared decoded (#292), so negated, where the simplifier moves the
+    zero out of the list into `x != -0.0`, both zeros are kept out."""
     wrong = {}
     for staged, form in itertools.product(STAGED, STAGED_FORMS):
         for side, (got, want) in filtered_by_staged_zero(table(X_TYPES[x_type]), staged, form).items():
-            if got != want and not (side == "negated" and x_type in ENCODED):
+            if got != want:
                 wrong[f"{side} {staged} {form}"] = got
     assert wrong == {}
 

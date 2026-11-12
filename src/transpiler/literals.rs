@@ -114,6 +114,13 @@ pub(crate) fn arithmetic_operands(
 /// that side's values when it is of an exact domain (see [`placement`]).
 /// A float `==` or `!=` with a value DataFusion may fold into a zero is a
 /// range ([`float_equality`]).
+///
+/// DataFusion normalizes the zeros of a plain float array before it
+/// compares, but not of a dictionary or run-end encoded one (#292). Next
+/// to a literal such an operand keeps its encoding: both zeros fall on the
+/// same side of any other literal, and an order with a zero compares with
+/// the zero that puts them there ([`signed_zero_bound`]). Two operands that
+/// vary by row are compared decoded ([`decoded_float`]).
 pub(crate) fn comparison(
     op: Operator,
     left: Expr,
@@ -125,7 +132,9 @@ pub(crate) fn comparison(
     };
     let Some(literal_on_left) = literal_side(&left, &right, rx) else {
         let equality = query_constant_equality(op, &left, &right, rx)?;
-        return Ok(equality.unwrap_or_else(|| build(left, right)));
+        return Ok(
+            equality.unwrap_or_else(|| build(decoded_float(left, rx), decoded_float(right, rx)))
+        );
     };
     let (operand, literal_expr) = if literal_on_left {
         (right, left)
@@ -154,8 +163,55 @@ pub(crate) fn comparison(
         Holding::Not(placed) => exact_comparison(operand, operand_op, placed),
         Holding::Unjudged => match float_equality(op, &operand, &literal_expr, rx)? {
             Some(range) => range,
-            None => rebuild(operand, literal_expr),
+            None => match signed_zero_bound(operand_op, &operand, &literal_expr, rx)? {
+                Some(bound) => rebuild(operand, bound),
+                None => rebuild(operand, literal_expr),
+            },
         },
+    })
+}
+
+/// The zero `operand op literal` compares with, `op` as seen from the
+/// operand, when `operand` executes as a dictionary or run-end encoded
+/// float and `literal` is a float zero of either sign; `None` otherwise.
+///
+/// DataFusion compares an encoded float as stored, by IEEE 754 totalOrder,
+/// which puts `-0.0` just below `0.0` (#292). Comparing with the zero below
+/// both (`-0.0` for `<` and `>=`) or above both (`0.0` for `<=` and `>`)
+/// keeps the two zeros together, as on the decoded column, without
+/// decoding the operand. `==` and `!=` are ranges ([`float_equality`]).
+fn signed_zero_bound(
+    op: Operator,
+    operand: &Expr,
+    literal: &Expr,
+    rx: &Resolver<'_>,
+) -> Result<Option<Expr>, String> {
+    let encoded = rx
+        .data_type(operand)
+        .is_ok_and(|t| encoded_float(&t).is_some());
+    if !encoded {
+        return Ok(None);
+    }
+    let compared = Expr::BinaryExpr(BinaryExpr::new(
+        Box::new(operand.clone()),
+        op,
+        Box::new(literal.clone()),
+    ));
+    let Some(Expr::BinaryExpr(BinaryExpr { left, right, .. })) = rx.coerced(&compared)? else {
+        return Ok(None);
+    };
+    let float_type = match (rx.value_type(&left), rx.value_type(&right)) {
+        (Ok(left), Ok(right)) if left == right && left.is_floating() => left,
+        _ => return Ok(None),
+    };
+    if !rx.literal(&right).is_some_and(|v| is_float_zero(&v)) {
+        return Ok(None);
+    }
+    let (negative, zero) = zero_bounds(&float_type);
+    Ok(match op {
+        Operator::Lt | Operator::GtEq => Some(negative),
+        Operator::LtEq | Operator::Gt => Some(zero),
+        _ => None,
     })
 }
 
@@ -241,6 +297,46 @@ fn float_equality(
         return Ok(None);
     };
     Ok(Some(within(value.clone(), bounds, negated)))
+}
+
+/// `expr` decoded to its value type when it executes as a dictionary or
+/// run-end encoded float, else `expr` as it is: an operand of a comparison
+/// whose other operand also varies by row.
+///
+/// DataFusion compares floats through `apply_cmp`, which turns `-0.0` into
+/// `0.0` and then orders by IEEE 754 totalOrder, so that `-0.0 == 0.0`
+/// holds and neither zero orders below the other (contract §18). It
+/// normalizes only a plain Float16, Float32 or Float64 array
+/// (`normalize_float_zero`): an encoded float reaches the kernels as it is
+/// stored and decides a zero by its sign there (#292). Decoding it first
+/// gives the comparison of the decoded column, which is the reference.
+///
+/// The decoding is a cast in the plan, evaluated batch by batch, so the
+/// input keeps its encoding everywhere else. DataFusion does not move a cast
+/// off a float operand (`unwrap_cast_in_comparison` takes integers, strings,
+/// dates and dictionaries of those), so the cast stays where it is put.
+/// Encodings of any other value type compare as they are: only a float has
+/// two values that compare equal.
+fn decoded_float(expr: Expr, rx: &Resolver<'_>) -> Expr {
+    match rx.data_type(&expr).ok().as_ref().and_then(encoded_float) {
+        Some(value_type) => cast(expr, value_type),
+        None => expr,
+    }
+}
+
+/// The value type of `data_type` when it is a dictionary or run-end encoded
+/// float (also one encoded twice); `None` for any other type. A comparison
+/// decodes such an operand ([`decoded_float`]).
+pub(crate) fn encoded_float(data_type: &DataType) -> Option<DataType> {
+    let mut value = data_type;
+    loop {
+        value = match value {
+            DataType::Dictionary(_, value) => value,
+            DataType::RunEndEncoded(_, values) => values.data_type(),
+            _ => break,
+        };
+    }
+    (value != data_type && value.is_floating()).then(|| value.clone())
 }
 
 /// `low <= value <= high` as `value >= low AND value <= high`, or for
@@ -955,6 +1051,35 @@ mod tests {
 
     fn write(literal: S, column_type: &T) -> Result<S, String> {
         column_value(literal, column_type, "column 'c'")
+    }
+
+    /// A comparison decodes a dictionary or run-end encoded float, also one
+    /// encoded twice, and no other encoding or plain type (#292).
+    #[test]
+    fn only_an_encoded_float_is_decoded() {
+        let run_ends = Arc::new(Field::new("run_ends", T::Int32, false));
+        let ree = |value: T| {
+            T::RunEndEncoded(
+                Arc::clone(&run_ends),
+                Arc::new(Field::new("values", value, true)),
+            )
+        };
+        let dictionary = |value: T| T::Dictionary(Box::new(T::Int32), Box::new(value));
+        for float in [T::Float16, T::Float32, T::Float64] {
+            let encoded = [
+                dictionary(float.clone()),
+                ree(float.clone()),
+                ree(dictionary(float.clone())),
+            ];
+            for encoded in encoded {
+                assert_eq!(encoded_float(&encoded), Some(float.clone()), "{encoded}");
+            }
+            assert_eq!(encoded_float(&float), None);
+        }
+        for other in [T::Int64, T::Utf8, T::Decimal128(10, 2)] {
+            assert_eq!(encoded_float(&dictionary(other.clone())), None);
+            assert_eq!(encoded_float(&ree(other)), None);
+        }
     }
 
     #[test]
