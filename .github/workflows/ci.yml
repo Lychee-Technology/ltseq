@@ -56,6 +56,12 @@ jobs:
           cargo clippy --all-targets --features m0 -- -D warnings
           cargo test --features m0 --lib m0::
 
+      # The #386 research build (benchmarks/topk_agg): a metrics hook and the
+      # slot-bound pruning spike, compiled only with this feature.
+      - name: Run clippy on the topk_research build
+        if: matrix.python-version == '3.13'
+        run: cargo clippy --all-targets --features topk_research -- -D warnings
+
       # #256's stream error spike (benchmarks/stream_errors) compiles only
       # with the stream_spike feature. Its Python tests need a spike build
       # and skip on the default one.

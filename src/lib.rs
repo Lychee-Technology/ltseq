@@ -33,6 +33,8 @@ pub(crate) mod ops; // Table operations grouped by category
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
 pub(crate) mod stored_zones; // Zones of Parquet timestamps stored in another unit (issue #362)
+#[cfg(feature = "topk_research")]
+pub(crate) mod topk_research; // Plan metrics for the Top-K aggregate research (#386)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization
 
@@ -1394,6 +1396,11 @@ fn ltseq_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(m0::_set_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_prototypes, m)?)?;
         m.add_function(wrap_pyfunction!(m0::_m0_build, m)?)?;
+    }
+    #[cfg(feature = "topk_research")]
+    {
+        m.add_function(wrap_pyfunction!(topk_research::_topk_analyze, m)?)?;
+        m.add_function(wrap_pyfunction!(topk_research::_topk_set_prune, m)?)?;
     }
     #[cfg(feature = "stream_spike")]
     {
