@@ -868,7 +868,8 @@ mod tests {
     /// dialect, so it too coerces each node once: a chain rooted at a
     /// `shift` grows linearly with its depth (review of b6cc39f on #225).
     /// Its recursion is deeper per level than the row dialect's, so the
-    /// depths are kept within a test thread's stack.
+    /// depths are half the row test's, and it runs on the large stack the
+    /// row test uses.
     #[test]
     fn window_lowering_coerces_each_node_once() {
         let schema = ArrowSchema::new(vec![Field::new("a", DataType::Int64, false)]);
@@ -891,7 +892,8 @@ mod tests {
                 .unwrap();
             rx.coerced_nodes()
         };
-        let (shallow, deep) = (coerced(50), coerced(100));
+        let (shallow, deep) =
+            crate::transpiler::tests::on_a_large_stack(|| (coerced(50), coerced(100)));
         assert!(
             deep <= 2 * shallow + 10,
             "{shallow} nodes coerced at depth 50, {deep} at depth 100"

@@ -1350,6 +1350,27 @@ mod tests {
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::Column;
 
+    /// Runs `test` on a thread with a 16 MiB stack and returns its result.
+    ///
+    /// The `lowering_coerces_each_node_once` tests recurse once per level of
+    /// an expression a hundred or more levels deep. In a debug build that
+    /// takes nearly all of the 2 MiB a test thread gets: built by rustc
+    /// 1.99.1 on x86-64 Linux, the window test needs between 2032 and
+    /// 2040 KiB, so a toolchain or code change of a few KiB per frame makes
+    /// it overflow. On arm64 macOS it overflows already. The tests measure
+    /// how many nodes lowering coerces, not the stack, so they get one
+    /// large enough for either.
+    pub(super) fn on_a_large_stack<T: Send>(test: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(16 << 20)
+                .spawn_scoped(scope, test)
+                .expect("spawn the test thread")
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    }
+
     fn test_schema() -> ArrowSchema {
         ArrowSchema::new(vec![
             Field::new("a", DataType::Int64, false),
@@ -1656,13 +1677,13 @@ mod tests {
                 standalone_call("if_else", vec![cond, int_lit(i), e])
             })
         };
-        for build in [&sum as &dyn Fn(i64) -> PyExpr, &cases] {
+        for build in [&sum as &(dyn Fn(i64) -> PyExpr + Sync), &cases] {
             let coerced = |depth: i64| {
                 let rx = Resolver::new(&schema).unwrap();
                 rx.resolve(lower_expr(build(depth), &rx).unwrap()).unwrap();
                 rx.coerced_nodes()
             };
-            let (shallow, deep) = (coerced(100), coerced(200));
+            let (shallow, deep) = on_a_large_stack(|| (coerced(100), coerced(200)));
             assert!(
                 deep <= 2 * shallow + 10,
                 "{shallow} nodes coerced at depth 100, {deep} at depth 200"
