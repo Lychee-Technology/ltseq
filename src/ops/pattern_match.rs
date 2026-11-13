@@ -1666,6 +1666,7 @@ mod tests {
                 column: "k".into(),
                 descending: false,
                 nulls_first: false,
+                float_key: false,
             }]
         } else {
             Vec::new()

@@ -468,18 +468,23 @@ fn convert_rolling_agg(
     }
 }
 
-/// The single sort key of `.over(order_by=..., descending=...)`. NULLs go
-/// where `sort()` puts them, so ranking or accumulating over a column agrees
-/// with sorting by it.
+/// The single sort key of `.over(order_by=..., descending=..., nulls_last=...)`,
+/// in `sort()`'s order (§9.4, §10.4): NULLs where `nulls_last` puts them in
+/// either direction, and a float by its `order_key`, so every NaN ranks above
+/// `+inf` and `-0.0` ties with `0.0`. Ranking or accumulating over a column
+/// agrees with sorting by it.
 fn over_order_by(
     order_by: &PyExpr,
     descending: bool,
+    nulls_last: bool,
     rx: &Resolver<'_>,
 ) -> Result<Sort, String> {
+    let expr = super::lower_expr(order_by.clone(), rx)?;
+    let data_type = rx.data_type(&expr)?;
     Ok(Sort {
-        expr: super::lower_expr(order_by.clone(), rx)?,
+        expr: crate::order_key::order_key(expr, &data_type),
         asc: !descending,
-        nulls_first: crate::metadata::nulls_first(descending),
+        nulls_first: !nulls_last,
     })
 }
 
@@ -494,6 +499,7 @@ fn convert_window_ranking(
         partition_by,
         order_by: window_order_by,
         descending,
+        nulls_last,
     } = py_expr
     {
         // Get the inner function call
@@ -528,7 +534,7 @@ fn convert_window_ranking(
 
         // Build ORDER BY - prefer the window's own order_by, fall back to table sort_exprs
         let window_order: Vec<Sort> = if let Some(ob) = window_order_by {
-            vec![over_order_by(ob, *descending, rx)?]
+            vec![over_order_by(ob, *descending, *nulls_last, rx)?]
         } else if !order_by.is_empty() {
             order_by.to_vec()
         } else {
@@ -572,12 +578,13 @@ fn convert_window_sequence(
         partition_by,
         order_by,
         descending,
+        nulls_last,
     } = py_expr
     {
         // Effective ORDER BY: the wrapper's own single order_by key if given,
         // else fall back to the table sort. Mirrors convert_window_ranking.
         let effective_order_by: Vec<Sort> = if let Some(ob) = order_by {
-            vec![over_order_by(ob, *descending, rx)?]
+            vec![over_order_by(ob, *descending, *nulls_last, rx)?]
         } else {
             table_order_by.to_vec()
         };

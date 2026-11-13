@@ -26,7 +26,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, row_number
 
 # Distinct values, so a sort by `x` fixes the table order.
 VALUES = {
@@ -54,11 +54,12 @@ NULLS = {
 }
 
 # The table's order: by the argument either way, or by row id, which leaves
-# the argument (and its NULLs) unordered.
+# the argument (and its NULLs) unordered. Descending puts the NULLs first, so
+# a running frame starts with them (apache/datafusion#27267).
 ORDERS = {
-    "x_asc": (("x", "i"), [False, False]),
-    "x_desc": (("x", "i"), [True, False]),
-    "row_id": (("i",), [False]),
+    "x_asc": (("x", "i"), [False, False], [True, True]),
+    "x_desc": (("x", "i"), [True, False], [False, True]),
+    "row_id": (("i",), [False], [True]),
 }
 
 # (id, frame width or None for a running frame, aggregate, argument types)
@@ -96,16 +97,16 @@ def window_value(agg, frame):
 
 
 def in_sort_order(values, desc):
-    """`values` where `sort` puts them: NULLs last ascending, first
-    descending, which is what it asks DataFusion for."""
+    """`values` where `sort` puts them: NULLs last in either direction."""
     nulls = [v for v in values if v is None]
     present = sorted((v for v in values if v is not None), reverse=desc)
-    return nulls + present if desc else present + nulls
+    return present + nulls
 
 
 def oracle(rows, order, width, agg, partitioned):
-    """The rows in table order (`ORDERS[order]`), each with its window
-    value `m`, computed from the frame's values."""
+    """The rows in table order (`ORDERS[order]`: NULLs last ascending, first
+    descending), each with its window value `m`, computed from the frame's
+    values."""
     if order == "row_id":
         ordered = sorted(rows, key=lambda r: r["i"])
     else:
@@ -171,9 +172,9 @@ def test_sort_by_window_sorts(engine_config, width, agg, type_name):
     engine_config(target_partitions=2, batch_size=3)
     for nulls in NULLS:
         rows, arrow_rows = table_rows(type_name, nulls)
-        for order, (keys, desc) in ORDERS.items():
+        for order, (keys, desc, nulls_last) in ORDERS.items():
             for partitioned in (False, True):
-                t = LTSeq.from_arrow(arrow_rows).sort(*keys, desc=desc)
+                t = LTSeq.from_arrow(arrow_rows).sort(*keys, desc=desc, nulls_last=nulls_last)
                 t = derive_m(t, width, agg, partitioned)
                 expected = oracle(rows, order, width, agg, partitioned)
                 label = f"{nulls} {order} partitioned={partitioned}"
@@ -214,7 +215,8 @@ def test_issue_cases_in_every_layout(engine_layout, data_layout, case):
     )
     if not as_written:
         pytest.skip(f"this input layout reads x back as {read_type}")
-    t = derive_m(t.sort("x", "i", desc=[x_desc, False]), width, agg, partitioned=False)
+    _, desc, nulls_last = ORDERS["x_desc" if x_desc else "x_asc"]
+    t = derive_m(t.sort("x", "i", desc=desc, nulls_last=nulls_last), width, agg, partitioned=False)
     rows = [{"i": i, "g": 0, "x": x} for i, x in enumerate(xs)]
     expected = oracle(rows, "x_desc" if x_desc else "x_asc", width, agg, partitioned=False)
     check_sorted(t, expected, name)
@@ -234,7 +236,7 @@ def test_table_cum_sum_sorts():
     """`LTSeq.cum_sum` builds its window apart from `derive`."""
     t = (
         LTSeq.from_arrow(pa.table({"x": pa.array([None, 1, 2], pa.uint64())}))
-        .sort("x", desc=True)
+        .sort("x", desc=True, nulls_last=False)
         .cum_sum("x")
     )
     assert [r["x_cumsum"] for r in t.sort("x_cumsum").to_dicts()] == [2, 3, None]
@@ -258,16 +260,24 @@ def test_head_tail_and_writers_read_the_sorted_order(tmp_path):
 
 
 def test_plan_keeps_the_sort():
-    """The physical plan sorts by the window column above the window."""
+    """The physical plan sorts by the window column above the window.
+
+    `sort("m")` reads its input as one stream in table order (#268), so the
+    window and its claims stay inside that stream; a second window ordered by
+    `m` still meets the first in one plan.
+    """
     t = (
         LTSeq.from_dict({"x": [3, 2, 1, 0]})
         .sort("x", desc=True)
         .derive(m=lambda r: r.x.rolling(2).max())
     )
-    physical = t.sort("m").explain_plan()[1]
+    physical = t.derive(o=lambda r: row_number().over(order_by="m")).explain_plan()[1]
     lines = physical.splitlines()
-    window = next(i for i, line in enumerate(lines) if "BoundedWindowAggExec" in line)
+    window = max(i for i, line in enumerate(lines) if "BoundedWindowAggExec" in line)
     assert any(
         "SortExec" in line and "CURRENT ROW@" in line and "ASC NULLS LAST" in line
         for line in lines[:window]
     ), physical
+    ranked = {r["x"]: r["o"] for r in t.derive(o=lambda r: row_number().over(order_by="m")).to_dicts()}
+    # m is [3, 3, 2, 1] for x = [3, 2, 1, 0]; the two 3s tie.
+    assert (ranked[0], ranked[1], {ranked[2], ranked[3]}) == (1, 2, {3, 4})

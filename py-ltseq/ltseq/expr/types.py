@@ -213,6 +213,7 @@ class CallExpr(Expr):
         order_by: "str | Expr | None" = None,
         descending: "bool | None" = None,
         desc: "bool | None" = None,
+        nulls_last: bool = True,
     ) -> "WindowExpr":
         """
         Apply a window specification to this expression.
@@ -237,6 +238,10 @@ class CallExpr(Expr):
             desc: Alias for descending. When both are given, ``descending``
                 takes precedence — matching sort()'s resolution so the same
                 call behaves identically in both APIs.
+            nulls_last: Where ``order_by`` puts NULL: last (the default) or,
+                when False, first, in either direction. ``order_by`` orders
+                values as ``sort()`` does: every NaN ranks above ``+inf``,
+                and ``-0.0`` ties with ``0.0``.
 
         Returns:
             WindowExpr with the window specification
@@ -284,8 +289,16 @@ class CallExpr(Expr):
             resolved = desc
         else:
             resolved = False
+        if not isinstance(nulls_last, bool):
+            raise TypeError(
+                f"nulls_last must be a bool, got {type(nulls_last).__name__}"
+            )
         return WindowExpr(
-            self, partition_by=partition_by, order_by=order_by, descending=resolved
+            self,
+            partition_by=partition_by,
+            order_by=order_by,
+            descending=resolved,
+            nulls_last=nulls_last,
         )
 
 
@@ -301,6 +314,7 @@ class WindowExpr(Expr):
         partition_by (Expr or None): Column(s) to partition by
         order_by (Expr or None): Column(s) to order by
         descending (bool): Whether to order descending
+        nulls_last (bool): Whether ``order_by`` puts NULL last (else first)
     """
 
     def __init__(
@@ -309,12 +323,14 @@ class WindowExpr(Expr):
         partition_by: Any | None = None,
         order_by: Any | None = None,
         descending: bool = False,
+        nulls_last: bool = True,
     ):
         """Initialize a WindowExpr with expression and window specification."""
         self.expr = expr
         self.partition_by = partition_by
         self.order_by = order_by
         self.descending = descending
+        self.nulls_last = nulls_last
 
     def serialize(self) -> dict[str, Any]:
         """
@@ -330,6 +346,7 @@ class WindowExpr(Expr):
             else None,
             "order_by": self.order_by.serialize() if self.order_by is not None else None,
             "descending": self.descending,
+            "nulls_last": self.nulls_last,
         }
 
 

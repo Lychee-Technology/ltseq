@@ -1038,7 +1038,7 @@ mod tests {
             session,
             df,
             schema,
-            vec![SortSpec::new("i".to_string(), false)],
+            vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
             Some(path.to_string()),
         )
     }
@@ -1051,7 +1051,7 @@ mod tests {
             create_session_context(),
             vec![batch.clone()],
             batch.schema(),
-            vec![SortSpec::new("i".to_string(), false)],
+            vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
         )
         .expect("in-memory table");
         group_ordered_count_impl(&table, expr).expect("general path count")
@@ -1223,7 +1223,7 @@ mod tests {
                 create_session_context(),
                 vec![batch.clone()],
                 batch.schema(),
-                vec![SortSpec::new("i".to_string(), false)],
+                vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
             )
             .expect("in-memory table");
             // Hand counts: the partitions hold 3, 3, 3, 1, 2, 2 and 2 rows.
@@ -1315,7 +1315,7 @@ mod tests {
                     create_session_context(),
                     vec![batch.clone()],
                     batch.schema(),
-                    vec![SortSpec::new("i".to_string(), false)],
+                    vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
                 )
                 .expect("in-memory table");
                 let expected = search_pattern_count_impl(&memory, &steps, Some("k".to_string()))

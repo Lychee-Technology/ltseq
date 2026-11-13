@@ -490,8 +490,10 @@ class LTSeq(
         Every call that returns rows (``to_arrow``, ``to_pandas``,
         ``to_dicts``, iteration, ``show``, ``head``, ``tail``, ``slice``,
         ``search_first``, ``fold``, ``collect`` and the writers) returns them
-        sorted by these keys, after any filter, derive or window. The order
-        of rows tied on every key is unspecified.
+        sorted by these keys, after any filter, derive or window. Rows tied
+        on every key keep the order ``sort()`` gives them as far as its
+        docstring says. The pairs do not record where NULL goes;
+        ``is_sorted_by(..., nulls_last=...)`` checks that.
 
         Returns:
             List of (column_name, is_desc) tuples, or None if unknown
@@ -503,7 +505,12 @@ class LTSeq(
         """
         return self._sort_keys
 
-    def is_sorted_by(self, *keys: str, desc: bool | list[bool] = False) -> bool:
+    def is_sorted_by(
+        self,
+        *keys: str,
+        desc: bool | list[bool] = False,
+        nulls_last: bool | list[bool] = True,
+    ) -> bool:
         """
         Check if this table is sorted by the specified keys.
 
@@ -516,9 +523,12 @@ class LTSeq(
                   - Single boolean: applies to all keys
                   - List of booleans: one per key
                   Default: False (all ascending)
+            nulls_last: Expected NULL placement, one bool or one per key.
+                  Default: True (NULL last)
 
         Returns:
-            True if table is sorted by the specified keys with matching direction
+            True if table is sorted by the specified keys with matching
+            direction and NULL placement
 
         Raises:
             ValueError: If desc list length doesn't match number of keys
@@ -544,12 +554,20 @@ class LTSeq(
             desc_flags = desc
         else:
             raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+        from .transforms import _per_key_flags
 
+        nulls_last_flags = _per_key_flags(nulls_last, len(keys), "nulls_last")
+
+        specs = self._inner.get_sort_specs()
         for i, key in enumerate(keys):
-            if i >= len(self._sort_keys):
+            if i >= len(specs):
                 return False
-            col, is_desc = self._sort_keys[i]
-            if col != key or is_desc != desc_flags[i]:
+            col, is_desc, is_nulls_last = specs[i]
+            if (
+                col != key
+                or is_desc != desc_flags[i]
+                or is_nulls_last != nulls_last_flags[i]
+            ):
                 return False
 
         return True

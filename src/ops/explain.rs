@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn explanation_reads_the_plan_terminals_execute() {
         // A MemTable declared in order needs no sort at the root.
-        let t = table(vec![SortSpec::new("x".to_string(), false)]);
+        let t = table(vec![SortSpec::new("x".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)]);
         let e = explain_pipeline_impl(&t).expect("explain");
         assert_eq!(e.sort_keys, vec![("x".to_string(), false)]);
         assert_eq!(e.columns.len(), 1);

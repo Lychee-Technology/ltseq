@@ -125,6 +125,22 @@ def _extract_derive_cols(
     return derived_cols
 
 
+def _per_key_flags(value: Any, n_keys: int, name: str) -> list[bool]:
+    """One flag per key from a bool for every key or a list of one per key."""
+    if isinstance(value, bool):
+        return [value] * n_keys
+    if isinstance(value, list):
+        if len(value) != n_keys:
+            raise ValueError(
+                f"{name} list length ({len(value)}) must match "
+                f"number of keys ({n_keys})"
+            )
+        if not all(isinstance(v, bool) for v in value):
+            raise TypeError(f"{name} list items must be bool")
+        return value
+    raise TypeError(f"{name} must be bool or list, got {type(value).__name__}")
+
+
 def _collect_key_exprs(
     key_exprs: tuple | list,
     schema: dict[str, str],
@@ -548,13 +564,26 @@ class TransformMixin(LookupMixin, LTSeqLike):
         *keys: str | Callable,
         desc: bool | list[bool] = False,
         descending: bool | list[bool] | None = None,
+        nulls_last: bool | list[bool] = True,
     ) -> "LTSeq":
         """
         Sort by one or more keys.
 
+        The sort is stable: rows equal on every key keep the order they had
+        in the input, on any number of batches, files or partitions.
+
+        NULL goes last in either direction, or first with
+        ``nulls_last=False``. Floats are ordered by value with every NaN,
+        whatever its sign bit, above ``+inf``, and ``-0.0`` equal to
+        ``0.0``, so the two zeros keep their input order. Window
+        ``.over(order_by=...)`` and the ranking functions order the same way.
+
         The column keys become the declared order (``sort_keys``). Every call
         that returns rows returns them in that order, whatever filters,
-        derives or windows follow the sort.
+        derives or windows follow the sort. The order of rows tied on every
+        key holds where the sorted table is read directly and after a
+        ``filter`` or ``select``; a ``derive`` that computes a column, or a
+        window, after the sort may still reorder such rows among themselves.
 
         Computed keys (e.g. ``lambda r: r.a * 2``) sort the data physically
         but cannot be tracked as declared order: sort metadata truncates at
@@ -571,12 +600,15 @@ class TransformMixin(LookupMixin, LTSeqLike):
             *keys: Column names or expressions to sort by
             desc: Descending flag(s) - single bool or list per key
             descending: Alias for desc
+            nulls_last: Whether NULL goes last (the default) or first -
+                single bool or list per key
 
         Returns:
             Sorted LTSeq with tracked sort keys
 
         Example:
             >>> t.sort("date", "id", desc=[False, True])
+            >>> t.sort("score", descending=True, nulls_last=False)
         """
         from .core import LTSeq
 
@@ -599,9 +631,10 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 )
         else:
             raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+        nulls_last_list = _per_key_flags(nulls_last, len(keys), "nulls_last")
 
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
-        result_inner = self._inner.sort(key_exprs, desc_list)
+        result_inner = self._inner.sort(key_exprs, desc_list, nulls_last_list)
 
         # Rust captures the sort specs (column + direction) itself.
         return LTSeq._from_inner(result_inner)
@@ -610,6 +643,7 @@ class TransformMixin(LookupMixin, LTSeqLike):
         self,
         *keys: str | Callable,
         desc: bool | list[bool] = False,
+        nulls_last: bool | list[bool] = True,
     ) -> "LTSeq":
         """
         Declare that data is already sorted by the given keys.
@@ -633,9 +667,14 @@ class TransformMixin(LookupMixin, LTSeqLike):
         Like sort(), the declared order truncates at the first computed
         key — only leading plain-column keys count.
 
+        The order declared is ``sort()``'s: NULL last unless
+        ``nulls_last=False``, and every NaN above ``+inf``.
+
         Args:
             *keys: Column names declaring the sort order
             desc: Descending flag(s) - single bool or list per key
+            nulls_last: Whether NULL is last (the default) or first -
+                single bool or list per key
 
         Returns:
             LTSeq with sort metadata set (same underlying data)
@@ -663,9 +702,10 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 )
         else:
             raise TypeError(f"desc must be bool or list, got {type(desc).__name__}")
+        nulls_last_list = _per_key_flags(nulls_last, len(keys), "nulls_last")
 
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
-        result_inner = self._inner.assume_sorted(key_exprs, desc_list)
+        result_inner = self._inner.assume_sorted(key_exprs, desc_list, nulls_last_list)
 
         return LTSeq._from_inner(result_inner)
 
@@ -784,10 +824,13 @@ class TransformMixin(LookupMixin, LTSeqLike):
         result = LTSeq.from_arrow(source.append_column(into, into_column))
         # The accumulation preserved input order; re-declare it so downstream
         # window ops keep working without a redundant physical sort.
-        sort_cols = [c for c, _ in self._sort_keys]
-        sort_desc = [d for _, d in self._sort_keys]
-        if sort_cols:
-            return result.assume_sorted(*sort_cols, desc=sort_desc)
+        specs = self._inner.get_sort_specs()
+        if specs:
+            return result.assume_sorted(
+                *[c for c, _, _ in specs],
+                desc=[d for _, d, _ in specs],
+                nulls_last=[n for _, _, n in specs],
+            )
         return result
 
     def distinct(self, *key_exprs: str | Callable) -> "LTSeq":

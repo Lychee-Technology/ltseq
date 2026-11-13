@@ -461,10 +461,15 @@ def test_a_zero_a_column_holds_on_each_float_type(x_type):
 def test_two_columns_holding_zeros_of_either_sign():
     """Two lists the optimizer builds, each with a zero, are intersected by
     the simplifier before they are split, and `-0.0` and `0.0` are different
-    items there."""
-    t = table(pa.float64()).derive(a=lambda r: LiteralExpr(-0.0), b=lambda r: LiteralExpr(0.0))
+    items there.
+
+    The table is not sorted: a sort reads its input as one stream (#268),
+    and a filter pushed into that stream is planned apart from the derive,
+    which keeps the two lists from meeting."""
+    unsorted = LTSeq.from_arrow(table(pa.float64()).to_arrow())
+    t = unsorted.derive(a=lambda r: LiteralExpr(-0.0), b=lambda r: LiteralExpr(0.0))
     kept = t.filter(lambda r: any_equal(r.x, [r.a, 1.0, 2.5, 7.0]) & any_equal(r.x, [r.b, 3.0, 4.0, 5.0]))
-    assert kept.to_arrow().column("k").to_pylist() == [k for k, v in enumerate(X) if v == 0.0]
+    assert sorted(kept.to_arrow().column("k").to_pylist()) == [k for k, v in enumerate(X) if v == 0.0]
 
 
 # Values of stable functions that a float has no common type with.
