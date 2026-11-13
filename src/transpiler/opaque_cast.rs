@@ -35,29 +35,30 @@ use super::Resolver;
 
 /// `expr` cast to `to`, as `cast()` in a lambda writes it.
 ///
-/// It is a DataFusion `Cast` when DataFusion may see through it, or never
-/// meets it next to a column:
+/// It is a DataFusion `Cast` when DataFusion may see through it:
 ///
 /// - the cast keeps every value of its input exactly ([`cast_class`] is
-///   `Exact`), so comparing the input instead gives the same answer. A
-///   decimal of negative scale is the exception: DataFusion 55 scales the
-///   literal by ten to the power of the scale read as a `u32`
-///   (`try_cast_numeric_literal`, the overflow of #226 and
+///   `Exact`), so comparing the input instead gives the same answer, and
+///   the cast cannot fail. A decimal of negative scale is the exception:
+///   DataFusion 55 scales the literal by ten to the power of the scale read
+///   as a `u32` (`try_cast_numeric_literal`, the overflow of #226 and
 ///   apache/datafusion#24896), which panics in a debug build and scales
 ///   the literal to 0 in a release build;
-/// - the input is a constant, which DataFusion folds into a literal, cast
-///   included, before it rewrites any comparison. A constant that fails to
-///   cast is a planning error there: assessment hazard X1, which #273
-///   resolves;
 /// - Arrow has no such cast, or the input has no type: DataFusion reports
 ///   the error when it plans the query, as it always has.
 ///
-/// Every other cast is an [`OpaqueCast`].
+/// Every other cast is an [`OpaqueCast`], a constant input included
+/// (assessment hazard X1, #273). DataFusion's constant evaluator folds a
+/// `Cast` of a literal when the query is planned, and turns one that fails
+/// into a planning error, however many rows demand the value: `if_else(r.d
+/// == 0, lit("abc").cast("int32"), ...)` failed on a table where no `d` is
+/// 0, and on an empty one. It folds an [`OpaqueCast`] of a literal that
+/// succeeds the same way, and keeps one that fails for execution, where it
+/// raises only on rows that evaluate it.
 pub(crate) fn cast(expr: Expr, to: DataType, rx: &Resolver<'_>) -> Expr {
-    let opaque = !Resolver::query_constant(&expr)
-        && rx
-            .data_type(&expr)
-            .is_ok_and(|from| can_cast_types(&from, &to) && !transparent(&from, &to));
+    let opaque = rx
+        .data_type(&expr)
+        .is_ok_and(|from| can_cast_types(&from, &to) && !transparent(&from, &to));
     if opaque {
         OpaqueCast::call(expr, to)
     } else {
@@ -89,10 +90,10 @@ fn negative_scale(t: &DataType) -> bool {
 /// is neither. Otherwise it is the `Cast` it replaces: it runs the kernel
 /// and options of DataFusion's `CastExpr`, so it gives the same values and
 /// raises the same errors; it is NULL exactly where its input is; and it
-/// names the column it makes after its input, as a `Cast` does. One
-/// difference remains, for an input that becomes a constant only in the
-/// optimizer: DataFusion folds it where it casts, and leaves it for
-/// execution where it fails, which for a `Cast` is a planning error.
+/// names the column it makes after its input, as a `Cast` does. It
+/// differs where its input is a constant, or becomes one in the optimizer:
+/// DataFusion folds it where the cast succeeds, and leaves it for execution
+/// where it fails, where a failing `Cast` is a planning error.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OpaqueCast {
     /// `opaque_cast_<to>`, so that a plan shows the target type.
@@ -215,16 +216,51 @@ mod tests {
     }
 
     #[test]
-    fn constants_and_casts_arrow_lacks_stay_casts() {
+    fn casts_arrow_lacks_stay_casts() {
         let schema = schema(DataType::new_list(DataType::Int64, true), true);
         let rx = Resolver::new(&schema).unwrap();
-        for (expr, to) in [
-            (lit(1_i64 << 40), DataType::Int32),
-            (lit("abc"), DataType::Int32),
-            (col("a"), DataType::Int32),
+        let cast = cast(col("a"), DataType::Int32, &rx);
+        assert!(matches!(cast, Expr::Cast(_)), "{cast}");
+    }
+
+    /// Assessment hazard X1 (#273): a constant cast that can fail is opaque,
+    /// so the simplifier folds it where it succeeds and leaves it for
+    /// execution where it fails, instead of failing the plan. A constant
+    /// cast that cannot fail stays a `Cast`.
+    #[test]
+    fn a_constant_cast_that_can_fail_is_folded_only_where_it_succeeds() {
+        use datafusion::logical_expr::simplify::SimplifyContext;
+        use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+        use datafusion::scalar::ScalarValue;
+
+        let schema = schema(DataType::Int64, true);
+        let rx = Resolver::new(&schema).unwrap();
+        let simplify = |expr: Expr| {
+            let context = SimplifyContext::builder()
+                .with_schema(Arc::new(
+                    datafusion::common::DFSchema::try_from(schema.clone()).unwrap(),
+                ))
+                .build();
+            ExprSimplifier::new(context).simplify(expr)
+        };
+
+        let exact = cast(lit(5_i32), DataType::Int64, &rx);
+        assert!(matches!(exact, Expr::Cast(_)), "{exact}");
+
+        for (constant, folded) in [
+            (lit("12"), ScalarValue::Int32(Some(12))),
+            (lit(1_i64 << 20), ScalarValue::Int32(Some(1 << 20))),
         ] {
-            let cast = cast(expr, to, &rx);
-            assert!(matches!(cast, Expr::Cast(_)), "{cast}");
+            let expr = cast(constant, DataType::Int32, &rx);
+            assert!(is_opaque(&expr), "{expr}");
+            assert_eq!(simplify(expr).unwrap(), Expr::Literal(folded, None));
+        }
+
+        for constant in [lit("abc"), lit(1_i64 << 40)] {
+            let expr = cast(constant, DataType::Int32, &rx);
+            assert!(is_opaque(&expr), "{expr}");
+            let kept = simplify(expr.clone()).unwrap();
+            assert_eq!(kept, expr, "a failing constant cast is left for execution");
         }
     }
 

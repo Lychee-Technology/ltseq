@@ -140,6 +140,9 @@ impl LayoutOverrides {
 /// - `repartition_aggregations`: Enabled for parallel aggregations
 /// - `enable_aggregate_dynamic_filter_pushdown`: Disabled, so a scan keeps
 ///   the values a float `min` or `max` needs (#253)
+/// - `unions_to_filter`, `WindowTopN`, `filter_null_join_keys` and
+///   `HashJoinBuffering`: Off, as DataFusion 55 ships them, but set here,
+///   so that no rule the rewrite table has not rated runs (#273)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
@@ -186,6 +189,7 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
         .options_mut()
         .optimizer
         .enable_aggregate_dynamic_filter_pushdown = false;
+    keep_unrated_rules_off(&mut config);
 
     let session = new_session(config);
     // Appended to DataFusion's rules, so it runs after the ones that build
@@ -218,6 +222,27 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
         Arc::new(LocalFiles::new(footers)),
     );
     Arc::new(session)
+}
+
+/// Turns off, by their flags, the rules the rewrite table rates Disabled
+/// (#273): `unions_to_filter`, `WindowTopN`, `filter_null_join_keys` and
+/// `HashJoinBuffering`.
+///
+/// DataFusion 55 ships each of them off, and none of them has been rated
+/// for row-wise demand or the defined order. One is known to break §20.2:
+/// `unions_to_filter` merges the filters of `UNION DISTINCT` branches over
+/// one source into `p OR q`, which suppresses `p`'s errors where `q` is
+/// TRUE, while each branch demanded its own predicate on every row.
+///
+/// Setting them here, rather than relying on the defaults, keeps them off
+/// through an upgrade that turns one on by default; turning one on is a
+/// change of its rating in the inventory.
+fn keep_unrated_rules_off(config: &mut SessionConfig) {
+    let options = config.options_mut();
+    options.optimizer.enable_unions_to_filter = false;
+    options.optimizer.enable_window_topn = false;
+    options.optimizer.filter_null_join_keys = false;
+    options.execution.hash_join_buffering_capacity = 0;
 }
 
 /// DataFusion's planner, plus the planners of the plan nodes LTSeq adds.
@@ -439,6 +464,18 @@ mod tests {
         assert_eq!(options.target_partitions(), *NUM_CPUS);
         assert_eq!(options.batch_size(), DEFAULT_BATCH_SIZE);
         assert_eq!(LayoutOverrides::of(&session), LayoutOverrides::default());
+    }
+
+    #[test]
+    fn the_rules_rated_disabled_stay_off() {
+        let session = session_context_with(LayoutOverrides::default());
+        let options = session.copied_config();
+        let options = options.options();
+        assert!(!options.optimizer.enable_unions_to_filter);
+        assert!(!options.optimizer.enable_window_topn);
+        assert!(!options.optimizer.filter_null_join_keys);
+        assert_eq!(options.execution.hash_join_buffering_capacity, 0);
+        assert!(!options.optimizer.enable_aggregate_dynamic_filter_pushdown);
     }
 
     #[test]

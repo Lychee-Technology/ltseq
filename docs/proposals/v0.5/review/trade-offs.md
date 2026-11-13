@@ -72,19 +72,90 @@ These are the places where two goals of the brief pulled in different directions
 | `PushDownLimit`, `LimitPushdown` | Move `head(n)` into scans and below projections, and run several partitions concurrently under the limit | Moving the limit down is safe. Concurrent partitions are masked: an error from a row after the *n*-th output row is not demanded, so it must not surface before the earlier partitions have delivered *n* rows | Source |
 | `JoinSelection` | Swaps the build and probe sides by estimated size | Safe without an early stop, since a join reads every row of both sides then. Under `head(n)` over an `inner` or `left` join, building on the left reads it whole, so errors on left rows the output does not need are masked or the swap is not made | Source |
 | `AggregateStatistics` | Answers `count()`, `min` and `max` from Parquet metadata without reading rows | Restricted: not below `assume_sorted` (`count()` checks every pair, [§9.5]), and not for float `min` and `max`, whose Parquet statistics omit NaN | Probe: `agg(m=lambda g: g.x.max())` over a Parquet file holding `[1.0, NaN, 2.0]` returns `2.0`; the same data in memory, ungrouped, returns NaN, which [§14.2] requires (#253) |
-| Constant folding (`SimplifyExpressions`) | Evaluates an expression of literals at plan time | Restricted: a constant that can fail is left for execution, where [§17.2] raises its error only if the value is demanded. The evaluator keeps failing constants other than casts for execution already; a failing literal `cast` it turns into a planning error, so fallible casts need a form it does not fold, such as a UDF (X1) | Probe: `if_else(r.d == 0, lit("abc").cast("int32"), …)` fails in `simplify_expressions` on `to_arrow`, on `count` and on an empty table. Source: `expr_simplifier.rs:546-575` |
+| Constant folding (`SimplifyExpressions`) | Evaluates an expression of literals at plan time | Restricted: a constant that can fail is left for execution, where [§17.2] raises its error only if the value is demanded. The evaluator keeps failing constants other than casts for execution already, and turns a failing `Cast` of a literal into a planning error. So `cast()` lowers a cast that can fail to `OpaqueCast`, a UDF, when its input is a constant too: the evaluator folds it where it succeeds and leaves it for execution where it fails (X1, guarded since #273). A cast that coercion inserts is still a `Cast` (`type_coercion` in the inventory below) | Probe at the baseline: `if_else(r.d == 0, lit("abc").cast("int32"), …)` fails in `simplify_expressions` on `to_arrow`, on `count` and on an empty table. Since #273 it raises only where a row has `d == 0`. Source: `expr_simplifier.rs:546-575` |
 | Simplifier identities and absorption | Identities gated on non-nullability (`A * 0` to `0`, `A = A` to TRUE, `IS NULL` of a non-null input) and absorption (`A OR (A AND B)` to `A`) drop an operand | Restricted: applied only where the dropped operand cannot fail. Reporting every fallible expression as nullable stops the gated identities, and [§6.1] lets planned nullability be conservative. Absorption has no gate, and under D10 it drops `B` on rows where `A` is NULL, where `B` is demanded (X2) | Probe of the identities in an assessment audit pass, not re-run; absorption from source |
 | `unwrap_cast` (`SimplifyExpressions`) | Rewrites `CAST(col AS narrower) > literal` to compare the wider column with the literal, which removes the cast | Restricted: applied only to casts that cannot fail. **A wrong result at the baseline** (#260) (X3) | Probe: with `a = 2**40` (`int64`), `r.a.cast("int32") > 5` returns `True`, while the cast alone raises. Source: `unwrap_cast.rs:110-150` |
 | `PushDownFilter` past `Sort`, `Aggregate`, `Distinct` and a join's right input | Moves a filter below the operator, so the operator's keys and arguments are never evaluated on the rows the filter removes | Restricted under D10a (a): [§20.2] demands those values on every row of the operator's input, so the filter moves only where none of them can fail. The moved predicate's own errors are masked as in the row on joins above (X4) | Probe: `derive(k=10 // r.x).sort("k").filter(r.x != 0)` over `x = [0, 2, 5]` returns two rows, where [§20.2] requires `DivisionByZeroError`. Source: `push_down_filter.rs` |
 | Evaluation order of the plan itself | A `derive` runs before a filter that cannot move below it (one reading the derived column through a window), and before an `inner`, `semi` or `anti` join on every left row, including rows without a match, whose non-key values are not demanded | Masked: errors carried as values and raised only for rows that reach the output | Contract reading |
 
-Rows X1–X4 come from the architectural reassessment (P); #273 tracks rating and guarding them with the rows above. Not assessed: expression simplification beyond those rows, outer-join elimination, join reordering beyond `JoinSelection`'s side swap, and the subquery decorrelation rules. The reassessment found the `CASE` to `AND`/`OR` rewrite and `coalesce`'s short-circuit sound under D10 by reading the source, and pushdown through a union and through a window on its partition keys sound.
+Rows X1–X4 come from the architectural reassessment (P); #273 rated them, with every other rule, in the rule inventory below, and guarded X1 and X3; the guards of X2 and X4 are M16's. Not assessed beyond the inventory's reading of the source: expression simplification beyond those rows, outer-join elimination and join reordering beyond `JoinSelection`'s side swap. The subquery decorrelation rules rewrite plans LTSeq's lowering does not build. The reassessment found the `CASE` to `AND`/`OR` rewrite and `coalesce`'s short-circuit sound under D10 by reading the source, and pushdown through a union and through a window on its partition keys sound.
 
-**Order (X5).** The table rates each rule for errors only. [§9.1] also requires every terminal to deliver the defined order, so M1 rates every rule for order as well. These are unrated: `JoinSelection`'s build and probe swap, which changes the order of an `inner` join's output; partitioned joins and aggregation, which `src/engine.rs:46-47` turns on (`repartition_joins`, `repartition_aggregations`) and which decide the row that `first`, `last` and `string_agg` see first; scan repartitioning; and `SortPreservingMerge`, which is unstable on ties. #273 tracks these ratings with the error ratings.
+**Order (X5).** The table rates each rule for errors only. [§9.1] also requires every terminal to deliver the defined order, so M1 rates every rule for order as well. These are unrated: `JoinSelection`'s build and probe swap, which changes the order of an `inner` join's output; partitioned joins and aggregation, which `src/engine.rs:46-47` turns on (`repartition_joins`, `repartition_aggregations`) and which decide the row that `first`, `last` and `string_agg` see first; scan repartitioning; and `SortPreservingMerge`, which is unstable on ties. The rule inventory below gives each rule an order column, where these are Open until M1 rates them.
 
 The cost of masking is M0's measurement 4, and its prototype gates M5: checked arithmetic makes nearly every numeric expression fallible, so M16's masked evaluation has to exist first. Under D10 the measurement covers both operands of a fallible `&` or `|`. The baseline failures in the `AND`/`OR` and merging rows are tracked in #252.
 
 **`&` and `|`.** The statuses above follow D10 ([Deliverable K]): either operand of `&` guards the other, so the order of conjuncts in one predicate is not observable, while the order of chained filters is. Under the left-to-right rule of `a49af0b`, `reorder_predicates` and pruning on any conjunct but the first would have been restricted, because each can remove the error of a conjunct written first.
+
+### Rule inventory
+
+The table above rates what each kind of rewrite does. This inventory lists every rule a session LTSeq creates runs, by the name DataFusion gives it, with a rating for errors ([§20.2]) and one for order ([§9.1]), and the test that pins a rule rated Restricted or Disabled. `src/rule_inventory.rs` compares the rows between the markers below with the rules of a live session, so a DataFusion upgrade that adds or renames a rule fails a test until the rule has a row, and a row whose rule no longer runs fails too. It runs in the default build; a measurement build (`m0`) adds its prototypes.
+
+Ratings are those of the table above, plus:
+
+- **Disabled:** LTSeq turns the rule off by its flag (`keep_unrated_rules_off` in `src/engine.rs`), so a new default does not turn it on.
+- **Unreached:** the rule rewrites only a plan shape LTSeq's lowering never builds, such as a subquery. A subquery written into `filter_where`'s SQL clause is the one way to reach these, and is not assessed.
+- **Open:** not rated yet. For errors, M16 rates these; for order, M1 does, as the X5 paragraph above describes.
+
+For order, **Safe** means the rule never changes the sequence of the rows it keeps, and **Restricted** that it does in a case a guard rules out. "Reading" in a row means the rating comes from the DataFusion 55 source, not a probe.
+
+<!-- rule-inventory:begin -->
+
+| Rule | Stage | Errors | Order | Guard |
+|---|---|---|---|---|
+| `resolve_grouping_function` | analyzer | Unreached: rewrites `GROUPING()` | Unreached | |
+| `type_coercion` | analyzer | Open: the casts it inserts are part of the expression and run where it runs, but one next to a literal is a plain `Cast` that `unwrap_cast` may remove, and whether any of those can fail is unrated | Safe: changes expressions only | |
+| `rewrite_set_comparison` | logical | Unreached: `= ANY` and `> ALL` subqueries | Unreached | |
+| `optimize_unions` | logical | Safe: flattens nested unions and drops a union of one input | Safe | |
+| `unions_to_filter` | logical | Disabled: merges the filters of `UNION DISTINCT` branches over one source into `p OR q`, which suppresses `p`'s errors where `q` is TRUE, while each branch demanded its own predicate on every row | Disabled | `engine::tests::the_rules_rated_disabled_stay_off` |
+| `simplify_expressions` | logical | Restricted: the constant folding, identity, absorption and `unwrap_cast` rows above. X1 and X3 are guarded; the identities and absorption (X2) are not | Safe: changes expressions only | X1: `test_a_failing_constant_cast_raises_only_where_demanded` in `test_cast_comparison.py`, `opaque_cast` unit tests. X3: `test_cast_comparison.py` |
+| `replace_distinct_aggregate` | logical | Safe: `distinct` becomes a grouping on the same columns, over the same rows | Open: which of the equal rows is kept and in what order the groups come out | |
+| `eliminate_join` | logical | Open: an inner join whose condition is literally FALSE becomes an empty relation, and its inputs are not read (reading) | Safe | |
+| `decorrelate_predicate_subquery` | logical | Unreached: `IN` and `EXISTS` subqueries | Unreached | |
+| `scalar_subquery_to_join` | logical | Unreached: scalar subqueries | Unreached | |
+| `decorrelate_lateral_join` | logical | Unreached: lateral joins | Unreached | |
+| `extract_equijoin_predicate` | logical | Safe: moves `l = r` conjuncts of a join filter into its keys; under D10 the order of conjuncts is not observable | Safe | |
+| `eliminate_duplicated_expr` | logical | Safe: drops a sort or grouping key identical to an earlier one | Safe: a repeated key decides no order | |
+| `eliminate_filter` | logical | Restricted: a filter on a literal FALSE or NULL becomes an empty relation, so a sort, grouping or `distinct` below it never evaluates the keys D10a demands on its input (as X4; reading) | Safe | none yet |
+| `eliminate_cross_join` | logical | Masked: turns a filter over a cross join into a join on its equalities, as the row on conjuncts below joins | Open: join output order | |
+| `eliminate_limit` | logical | Restricted: `head(0)`, and a limit under an offset at least as large, become an empty relation, dropping the keys a sort below demands (as `eliminate_filter`; reading) | Safe | none yet |
+| `propagate_empty_relation` | logical | Restricted: an operator over an empty relation becomes empty, and an inner join with an empty side is not read on the other, so its keys are not evaluated (as X4; reading) | Safe | none yet |
+| `filter_null_join_keys` | logical | Disabled: unrated; adds `IS NOT NULL` filters on join keys below the join | Disabled | `engine::tests::the_rules_rated_disabled_stay_off` |
+| `eliminate_outer_join` | logical | Restricted: turns an outer join into an inner one under a filter that rejects NULL on the padded side, so the filter is no longer evaluated on padded rows. In `(10 // l.a > 1) & (r.b > 0)` the right conjunct is NULL on a padded row, so under D10 the left one is demanded there and must raise where `l.a` is 0 (reading) | Open: join output order | none yet |
+| `push_down_limit` | logical | Safe: the `PushDownLimit` row above | Safe | |
+| `push_down_filter` | logical | Restricted: past a sort, grouping, `distinct` or a join's right side (X4, under D10a (a)); masked when merging filters and below joins, safe below projections (rows above) | Safe: a filter keeps its rows in order | none yet: X4's guard is M16's, after M0's m4b |
+| `single_distinct_aggregation_to_group_by` | logical | Safe: `count(distinct x)` becomes a grouping on `x` and a count, which evaluate `x` on the same rows | Safe | |
+| `eliminate_group_by_constant` | logical | Restricted: drops a constant grouping key, and with it the error of one that fails, which D10a demands; a constant that folds is safe (reading) | Safe | none yet |
+| `common_sub_expression_eliminate` | logical | Masked: the `CommonSubexprEliminate` row above | Safe | |
+| `extract_leaf_expressions` | logical | Safe: extracts only struct field access and file metadata functions, which cannot fail | Safe | |
+| `push_down_leaf_projections` | logical | Safe: moves what `extract_leaf_expressions` extracted towards the scan | Safe | |
+| `optimize_projections` | logical | Safe: the `OptimizeProjections` row above | Safe | |
+| `ltseq_float_list_zeros` | logical | Safe: compares -0.0 equal to 0.0 in a float IN list (#245) | Safe | |
+| `ltseq_drop_float_statistics` | physical | Safe: a guard; a Parquet scan reads no float statistics (#291), which takes float `min` and `max` out of `aggregate_statistics` and float columns out of pruning | Safe | |
+| `ltseq_keep_sorts_above_offsets` | physical | Safe: a guard for `EnsureRequirements` (#339) | Safe | |
+| `OutputRequirements` | physical | Safe: adds and later removes a marker of the root's requirement | Safe | |
+| `aggregate_statistics` | physical | Restricted: the `AggregateStatistics` row above. Floats are guarded; below `assume_sorted` it waits for M3 | Safe: one row | `ltseq_drop_float_statistics`: `test_ungrouped_parquet_is_not_answered_from_statistics` in `test_float_min_max.py`, `test_parquet_float_statistics.py` |
+| `join_selection` | physical | Masked: the `JoinSelection` row above | Open: swapping the build and probe sides changes the order of an `inner` join's output (X5) | |
+| `LimitedDistinctAggregation` | physical | Restricted: under a limit, a `distinct` stops reading once it has enough groups, so the keys D10a demands on later rows are never evaluated (reading) | Open: which groups it keeps depends on the order partitions deliver rows | none yet |
+| `FilterPushdown` | physical | Restricted: pushes a filter below a sort and into a grouping's keys (`gather_filters_for_pushdown`), as `push_down_filter` (X4); into a Parquet scan it is masked (row above) | Safe | none yet |
+| `WindowTopN` | physical | Disabled: unrated; keeps the first rows of each window partition in a heap | Disabled | `engine::tests::the_rules_rated_disabled_stay_off` |
+| `EnsureRequirements` | physical | Safe: adds repartitions and sorts, which evaluate keys their operators demand anyway | Open: repartitioning for joins and aggregation (`repartition_joins`, `repartition_aggregations`) and scans decides the order rows reach `first`, `last` and `string_agg` (X5). Pushing an order requirement through an offset limit is guarded (#339) | `ltseq_keep_sorts_above_offsets`: `test_offset_slice.py` |
+| `CombinePartialFinalAggregate` | physical | Safe: merges the two stages of an aggregation over one partition | Safe | |
+| `OptimizeAggregateOrder` | physical | Safe: changes the ordering an order-sensitive aggregate asks of its input, not what it evaluates | Open: whether the reversed requirement keeps which row `first` and `last` take among ties | |
+| `ProjectionPushdown` | physical | Masked: the `ProjectionPushdown` row above | Safe | |
+| `LimitAggregation` | physical | Safe: keeps accumulators only for the groups a `sort` and limit above keep, but evaluates every row's key and argument | Safe: the sort above orders | |
+| `LimitPushPastWindows` | physical | Open: a limit below a window leaves its order keys unevaluated on the rows past it | Safe | |
+| `HashJoinBuffering` | physical | Disabled: unrated; reads a join's probe side before its build side is complete (`hash_join_buffering_capacity = 0`) | Disabled | `engine::tests::the_rules_rated_disabled_stay_off` |
+| `LimitPushdown` | physical | Masked: the `PushDownLimit`, `LimitPushdown` row above | Restricted: it cleared a declared-sorted scan's `preserve_order` (#325) | `ltseq_keep_file_order`: `test_a_limit_reads_the_first_rows_of_declared_parquet` and its `_at_scale` variant |
+| `TopKRepartition` | physical | Safe: a TopK below a repartition still evaluates every row's keys | Safe: the TopK above merges in order | |
+| `PushdownSort` | physical | Open: a scan that takes a sort may stop early under a limit | Open: a scan may return its rows in an order it only approximates | |
+| `EnsureCooperative` | physical | Safe: adds yield points | Safe | |
+| `FilterPushdown(Post)` | physical | Restricted: pushes the dynamic filters of TopK, joins and aggregates into scans, which skip rows by them (the pruning row above). The aggregates' filter is off (#253); those of TopK and joins run | Safe | aggregates: `engine::tests::the_rules_rated_disabled_stay_off`; TopK and joins: none yet |
+| `SanityCheckPlan` | physical | Safe: changes nothing | Safe | |
+| `ltseq_keep_file_order` | physical | Safe: a guard for `LimitPushdown` (#325) | Safe | |
+
+<!-- rule-inventory:end -->
+
+Every rule rated Restricted with "none yet" in its guard column is applied everywhere for now, whether its condition holds or not; their guards are M16's. The rules rated Open for order are M1's (X5).
 
 <!-- v0.5-modular:footer -->
 
