@@ -8,7 +8,7 @@ This directory holds the proposed public API contract for LTSeq v0.5 and the rev
 - **Which section governs a cross-cutting rule** (numeric types, literals, NULL and NaN, order, errors, interchange, time zones, aggregation, streaming, snapshots, tables without columns): [Rule ownership](#rule-ownership).
 - **What happens to a current API name in v0.5:** the inventory, [Deliverable B].
 - **Why a semantic issue was decided the way it was:** [Deliverable D], and the [trade-off record](review/trade-offs.md#trade-off-record) for costs accepted.
-- **The owner's current decisions** (accepted, modified, deferred, superseded): [Deliverable Q], [Deliverable R] for the three deferred rows it settles (AC3, U2, OD-E), and [Deliverable S] for the three it applies (N9, G5, OD-W).
+- **The owner's current decisions** (accepted, modified, deferred, superseded): [Deliverable Q], [Deliverable R] for the three deferred rows it settles (AC3, U2, OD-E), and [Deliverable S] for G5, which it applies, OD-W, which it keeps as written, and N9, whose proposed rule waits for the owner.
 - **Implementation order and the work items M0–M30:** [Deliverable G], tracked in #257.
 - **How conformance is tested:** [§24]; the worked examples, which are tests too, are [§23].
 - **When and why an earlier rule changed:** the dated records H to S under [review/history/](#review-history), each of which lists the earlier records it changes.

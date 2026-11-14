@@ -199,8 +199,67 @@ def test_an_integer_literal_in_float_arithmetic_is_its_nearest_float64():
     assert rows[0] == oracle.to_float(oracle.Fraction(2**53 + 2) + 2**53)
 
 
+# `dneg` is decimal128(10, -2) with values 100, -100, 10**9 and 0.
+DNEG = [100, NULL, -100, 10**9, NULL, 0]
+NEGATIVE_SCALE = "negative_scale_read_as_scale_0"
+
+
+@pytest.mark.parametrize("cell,expected", [
+    ("dneg/none/fill", DNEG),  # §6.2, N14: read as decimal128(12, 0), same values
+    ("dneg/i1/fill", [100, 1, -100, 10**9, 1, 0]),  # 1 fits scale 0, where scale -2 refused it
+    ("dneg/i1/shift_def", [1, 100, NULL, -100, 10**9, NULL]),
+    ("dneg/D100/coal_rev", [100] * 6),
+])
+def test_a_negative_scale_is_read_as_scale_0(cell, expected):
+    assert _rows(cell) == ("decimal128(12, 0)", expected)
+    assert NEGATIVE_SCALE in full(cell).rules
+
+
+def test_a_negative_scale_column_computes_and_refuses_at_scale_0():
+    """§17.3 sees scale 0 only: a sum takes decimal(13, 0), and a value scale 0 or
+    precision 12 cannot hold is still a CastError."""
+    assert _rows("dneg/D100/add") == ("decimal128(13, 0)", [200, NULL, 0, 10**9 + 100, NULL, 100])
+    assert NEGATIVE_SCALE in full("dneg/D100/add").rules
+    assert _raises("dneg/D1_5/fill") == ("CastError", "plan")
+    assert _raises("dneg/imax/shift_def") == ("CastError", "plan")
+
+
+@pytest.mark.parametrize("arrow,expected", [
+    ("decimal128(10, -2)", ("decimal", 12, 0, 128)),
+    ("decimal128(5, -2)", ("decimal", 7, 0, 128)),
+    ("decimal32(9, -1)", ("decimal", 10, 0, 64)),  # 10 digits need a wider type
+    ("decimal128(38, -2)", ("decimal", 40, 0, 256)),
+    ("decimal256(70, -6)", ("decimal", 76, 0, 256)),
+])
+def test_a_negative_scale_widens_only_when_its_own_width_cannot_hold_it(monkeypatch, arrow, expected):
+    """§6.2: precision p - s, in the column's own width when that holds it."""
+    monkeypatch.setitem(oracle.CONTEXT_TYPE, "dneg", arrow)
+    assert contract.context_type("dneg", contract.ALL) == expected
+    assert contract.context_type("dneg", contract.IN_FORCE) == oracle.parse_type(arrow)
+
+
+def test_the_gate_reads_a_negative_scale_as_the_build_does_until_m18():
+    """Until M18 puts the rule in force, the gate grades `dneg` cells by the type the
+    build reads, decimal128(10, -2), as it did before #276; then by decimal128(12, 0)."""
+    assert NEGATIVE_SCALE not in contract.IN_FORCE
+    assert contract.RULES[NEGATIVE_SCALE].owner == "M18"
+    today = contract.expectation("dneg", "i1", "shift_def")
+    assert (today.kind, today.cls, today.rules) == ("error", ("CastError",), ("fixed_target",))
+    null = contract.expectation("dneg", "none", "fill")
+    assert (oracle.type_text(null.type), null.rules) == ("decimal128(10, -2)", ("null_shared_value",))
+    m18 = contract.expectation("dneg", "i1", "shift_def", in_force=contract.IN_FORCE | {NEGATIVE_SCALE})
+    assert m18.kind == "values" and oracle.type_text(m18.type) == "decimal128(12, 0)"
+    assert m18.rules == ("fixed_target", NEGATIVE_SCALE)
+    assert [None if v is None else v[1] for v in m18.rows] == [1, 100, NULL, -100, 10**9, NULL]
+
+
 @pytest.mark.parametrize("cell,expected", [
     ("f32/i2p24p1/eq", [False, None, False, False, None, False]),  # 2**24 is not 2**24 + 1
+    # A float literal beside float32 is its binary64 value (§17.2), while N9 waits for the owner (#276)
+    ("f32/f0_1/eq", [False, None, False, False, None, False]),  # `r.f32 == 0.1` is FALSE
+    ("f32/f0_1/isin2", [False] * 6),
+    ("f32/f2p24p1/gt", [False, None, False, False, None, True]),  # float32 1e20 is above 2**24 + 1
+    ("f32/f1e20/lt_mirror", [False, None, False, False, None, True]),  # float32 1e20 is above binary64 1e20
     ("f32/f2p24/eq", [True, None, False, False, None, False]),  # float32 holds 16777216.0
     ("f32/fm0/gt", [True, None, True, True, None, True]),
     ("f64/D0_1/eq", [False, None, False, False, None, False]),  # binary64 0.1 is not Decimal("0.1")
@@ -223,10 +282,6 @@ def test_comparisons_are_exact(cell, expected):
 
 @pytest.mark.parametrize("cell,expected", [
     ("i8/fnan/eq", "LTSeqValueError"),  # §17.4 rule 3, N4: NaN literal vs integer
-    ("f32/f0_1/eq", "LTSeqValueError"),  # §17.4 rule 3, N4: `r.f32 == 0.1` (N9, #276)
-    ("f32/f0_1/isin2", "LTSeqValueError"),
-    ("f32/f2p24p1/gt", "LTSeqValueError"),  # float32 has no 16777217.0
-    ("f32/f1e20/lt_mirror", "LTSeqValueError"),
     ("d5/finf/isin2", "LTSeqValueError"),
     ("i8/none/gt", "LTSeqTypeError"),  # §8.2: an ordering comparison with None
     ("i8/s1/eq", "LTSeqTypeError"),  # §17.4 rule 4: a string next to a number

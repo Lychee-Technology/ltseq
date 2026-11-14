@@ -61,7 +61,7 @@ None blocks the merge. Each blocks the item named until the owner decides it. Un
 | OD-S1 | — (v0.4) | Fail-loudly v0.4 safeguards for the affected `partition` and lookup keys | #258, #223 | A v0.4 fix, not postponed to v0.5 | No |
 | OD-S2 | — (v0.4) | An urgent v0.4 fix for #259's file corruption and panic | #259 | A v0.4 fix | No |
 
-*Later:* AC3, U2 and OD-E were settled in the contract on 2026-11-10, with the directions above; [Deliverable R] records how. N9 and G5 were applied in the contract on 2026-11-14 with the directions above, and OD-W was kept as the current text pending the owner's answer to the M0 report's question 4; [Deliverable S] records how.
+*Later:* AC3, U2 and OD-E were settled in the contract on 2026-11-10, with the directions above; [Deliverable R] records how. On 2026-11-14 G5 was applied in the contract with the direction above, and OD-W was kept as the current text pending the owner's answer to the M0 report's question 4. N9 stays deferred: [Deliverable S] proposes a rule and a scope for it, and the current text holds until the owner decides.
 
 ### What the modifications required
 

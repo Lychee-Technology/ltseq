@@ -96,6 +96,10 @@ _RULES = [
          "`if_else(c, r.ts_us, r.date32)` makes a date and a timestamp share a column, so every cell over it raises"),
     Rule("date64_read_as_date32", "§6.2", "M18",
          "A date64 column is date32 when read, so a value it shares has type date32"),
+    Rule("negative_scale_read_as_scale_0", "§6.2", "M18",
+         "A decimal column with a negative scale s is read as scale 0 and precision p - s, in a wider decimal when its "
+         "own cannot hold that (#276, N14): `dneg`, decimal128(10, -2), is decimal128(12, 0), so a value it shares or "
+         "a sum it takes has that type, and 1 fits it"),
     # --- comparisons ---
     Rule("none_is_null", "§8.2", None, "`x == None` is `x.is_null()`"),
     Rule("none_ordering", "§8.2", None, "An ordering comparison with `None` raises LTSeqTypeError"),
@@ -107,9 +111,6 @@ _RULES = [
          "An integer or decimal column compares with a number literal by exact value"),
     Rule("float_comparison_exact", "§17.4 rule 3", "M7",
          "A float column compares with an integer or Decimal literal by exact value, never through the nearest float"),
-    Rule("float32_literal_exact", "§17.4 rule 3", "M8",
-         "A float literal that float32 cannot hold exactly, compared with a float32 column, raises LTSeqValueError "
-         "at plan time (N9, #276): `r.f32 == 0.1` would otherwise be FALSE on every row"),
     Rule("float_order", "§18", "M7",
          "A float column against a float literal: binary64 values, NaN equal to NaN and above +inf, -0.0 equal to 0.0"),
     Rule("temporal_comparison", "§19.2", "M8",
@@ -233,12 +234,35 @@ def literal_type(lit):
     return ("ts", "us", getattr(value.tzinfo, "key", None) or "UTC")
 
 
+_DECIMAL_DIGITS = {32: 9, 64: 18, 128: 38, 256: 76}
+
+
 def context_type(ctx, in_force):
-    """The context's type as v0.5 reads it: a date64 column is date32 (§6.2)."""
+    """The context's type as v0.5 reads it (§6.2): a date64 column is date32, and a
+    decimal with a negative scale *s* and precision *p* is scale 0 and precision
+    *p* - *s*, in its own width when that holds *p* - *s* digits and otherwise in the
+    narrowest wider one. Each applies only while its rule is in force, so the gate
+    grades a cell by the type the build reads until the rule's M item lands."""
     t = oracle.parse_type(oracle.CONTEXT_TYPE[ctx])
     if t == ("date", 64) and "date64_read_as_date32" in in_force:
         return ("date", 32)
+    if t[0] == "decimal" and t[2] < 0 and "negative_scale_read_as_scale_0" in in_force:
+        digits = t[1] - t[2]
+        width = min(w for w, most in _DECIMAL_DIGITS.items() if w >= t[3] and most >= digits)
+        return ("decimal", digits, 0, width)
     return t
+
+
+def _read_rules(ctx, t):
+    """The §6.2 rules a cell's type rests on: those that changed the type the context
+    is read as. A date64 context always rests on its rule (no cell is graded by
+    date64); a negative-scale one does only once its type changed, which the rule
+    being in force decides, so until then the gate grades it as it did before #276."""
+    if ctx == "date64":
+        return ["date64_read_as_date32"]
+    if t != oracle.parse_type(oracle.CONTEXT_TYPE[ctx]) and t[0] == "decimal":
+        return ["negative_scale_read_as_scale_0"]
+    return []
 
 
 def _kind(t):
@@ -350,7 +374,8 @@ def expectation(ctx, lit, pos, in_force=None):
     """What v0.5 requires of the cell, and the rules that requirement rests on.
 
     ``in_force`` matters only where a rule changes a type another rule uses
-    (a date64 column read as date32); it defaults to ``IN_FORCE``."""
+    (a date64 column read as date32, a negative-scale decimal read as scale 0);
+    it defaults to ``IN_FORCE``."""
     in_force = IN_FORCE if in_force is None else in_force
     if ctx == "case_date_ts":
         return _error("LTSeqTypeError", PLAN, "context_date_ts")
@@ -410,7 +435,7 @@ def _null(ctx, t, pos):
         return Expectation(
             "null_arithmetic", _reason(["null_operand"]), stage=PLAN, cls=("LTSeqTypeError",), rules=("null_operand",),
         )
-    rules = ["null_shared_value"] + (["date64_read_as_date32"] if t[0] == "date" and ctx == "date64" else [])
+    rules = ["null_shared_value"] + _read_rules(ctx, t)
     if pos == "shift_def":
         rows = [None] + column[:-1]
     elif pos in ("ifelse_t", "ifelse_f"):
@@ -428,8 +453,6 @@ def _comparison(ctx, lit, pos, t, lt):
     if ck == "number":
         if lk == "special" and t[0] != "float":
             return _error("LTSeqValueError", PLAN, "nan_literal_exact_domain")
-        if t == ("float", 32) and lk == "float" and not oracle.holds(t, literal):
-            return _error("LTSeqValueError", PLAN, "float32_literal_exact")
         if t[0] != "float":
             rule = "exact_comparison"
         elif lk in ("int", "decimal"):
@@ -489,10 +512,11 @@ def _arithmetic(ctx, lit, pos, t, lt):
             result = _decimal_sum_type(result, result)
     else:
         result, rule = _decimal_sum_type(t, lt), "decimal_result_types"
+    read = _read_rules(ctx, t)
     rows = [None if x is None else oracle.num(x[1] + sign * literal[1]) for x in column]
     if any(not oracle.holds(result, v) for v in rows):
-        return _error("ArithmeticOverflowError", EXECUTION, rule, "checked_arithmetic")
-    return _values(result, rows, rule, "checked_arithmetic")
+        return _error("ArithmeticOverflowError", EXECUTION, rule, "checked_arithmetic", *read)
+    return _values(result, rows, rule, "checked_arithmetic", *read)
 
 
 def _difference(ctx, t, lt, column, literal):
@@ -521,7 +545,7 @@ def _shared(ctx, lit, pos, t, lt):
         rule = "fixed_target_float" if t[0] == "float" else "fixed_target"
     else:
         rule = "temporal_shared_value" if ck in TEMPORAL_KINDS else "shared_value_no_widening"
-    rules = [rule] + (["date64_read_as_date32"] if ctx == "date64" else [])
+    rules = [rule] + _read_rules(ctx, t)
     if not oracle.holds(t, literal):
         return _error("CastError", PLAN, *rules)
     return _values(t, oracle._placed(column, literal, pos), *rules)
