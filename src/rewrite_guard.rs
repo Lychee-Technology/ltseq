@@ -18,10 +18,11 @@
 //!   expression's root and simplifies its parts, which stops the identities
 //!   and absorption of assessment hazard X2. Both count occurrences
 //!   ([`Demand`]), each expression of a node on its own: two occurrences of
-//!   one expression are demanded on different rows. An occurrence in a
-//!   `CASE` branch is counted apart from one evaluated on every row
-//!   ([`Reach`]), so a rewrite that moves one out of a branch (`CASE` to
-//!   `AND`) is refused too, and a bitwise operation is never simplified, as
+//!   one expression are demanded on different rows. An occurrence is
+//!   counted with the number of `CASE` branches it is nested in
+//!   ([`Reach`]), so a rewrite that moves one out of a branch, or out of a
+//!   branch nested in another (`CASE` to `AND`), is refused too, and a
+//!   bitwise operation is never simplified, as
 //!   its identities are wrong in value ([`has_bitwise`]). [`Guard::KeepBarriers`]
 //!   keeps `push_down_filter` from moving a filter below a
 //!   [`DemandBarrier`], and [`Guard::KeepJoinShape`] keeps
@@ -52,10 +53,12 @@
 //! reading of DataFusion 55's kernels: a `cast()` that can fail (an
 //! [`OpaqueCast`], from a lambda or `filter_where`'s SQL; a `Cast` is the
 //! engine's), a division or remainder by
-//! anything but a safe constant, a function not known to be total, a
-//! pattern match whose pattern is not a literal. A constant is
-//! fallible only if evaluating it fails. Checked arithmetic (M5) makes more
-//! operations fallible, and extends it.
+//! anything but a safe constant, `+`, `-`, `*` or a negation other than of
+//! integers or of floats (arrow checks temporal, interval and decimal
+//! arithmetic), a function not known to be total, a pattern match whose
+//! pattern is not a literal. A constant is fallible only if evaluating it
+//! fails. Checked integer arithmetic (M5) makes more operations fallible,
+//! and extends it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -65,7 +68,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::arrow::array::RecordBatchOptions;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -91,7 +94,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 
-use crate::transpiler::{planned_type, OpaqueCast};
+use crate::transpiler::{binary_input_types, planned_type, OpaqueCast};
 
 /// Scalar functions DataFusion 55 evaluates without raising for any input
 /// of the types they accept, by name. Every other function is fallible.
@@ -144,14 +147,17 @@ pub(crate) fn fallible_node(expr: &Expr, schema: &DFSchema) -> bool {
             | Operator::IsNotDistinctFrom
             | Operator::And
             | Operator::Or
-            // Integer arithmetic wraps in DataFusion 55 (X9); M5 checks it.
-            | Operator::Plus
-            | Operator::Minus
-            | Operator::Multiply
             | Operator::StringConcat
             | Operator::BitwiseAnd
             | Operator::BitwiseOr
             | Operator::BitwiseXor => false,
+            // Integer and float arithmetic wraps in DataFusion 55 (X9), and
+            // M5 checks it. Temporal, interval, duration and decimal
+            // arithmetic is checked already: `ts + INTERVAL '1 day'` raises
+            // past the last timestamp (R6-F2).
+            Operator::Plus | Operator::Minus | Operator::Multiply => {
+                !wrapping_arithmetic(left, op, right, schema)
+            }
             Operator::Divide | Operator::Modulo => {
                 !(float_typed(left, schema) && float_typed(right, schema)) && !safe_divisor(right)
             }
@@ -166,6 +172,9 @@ pub(crate) fn fallible_node(expr: &Expr, schema: &DFSchema) -> bool {
         // `unwrap_cast` gives by removing the cast; its error is no value
         // the program demands.
         Expr::Cast(_) => false,
+        // Arrow negates integers and floats wrapping, and checks the rest:
+        // the most negative decimal, duration or interval raises (R6-F2).
+        Expr::Negative(inner) => !planned_type(inner, schema).is_some_and(|t| wraps(&t, &t)),
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
             if let Some(cast) = func.inner().downcast_ref::<OpaqueCast>() {
                 match args.as_slice() {
@@ -189,6 +198,26 @@ pub(crate) fn fallible_node(expr: &Expr, schema: &DFSchema) -> bool {
         _ => false,
     };
     fallible && !constant_that_evaluates(expr)
+}
+
+/// Whether arrow's wrapping kernel for `left op right`, with operands of
+/// these types after coercion, cannot raise: integers wrap and floats give
+/// infinities. Every other pair arrow computes checked even in its wrapping
+/// kernels (`arrow-arith`'s `numeric.rs`): a timestamp, date, interval,
+/// duration or decimal result out of range raises. So does DataFusion's
+/// `date - date` and `time ± interval`, which count as fallible here too.
+fn wraps(left: &DataType, right: &DataType) -> bool {
+    (left.is_integer() && right.is_integer()) || (left.is_floating() && right.is_floating())
+}
+
+/// Whether `left op right` (`+`, `-` or `*`) is arithmetic that wraps,
+/// read from the types coercion gives its operands. Where a type cannot be
+/// read, it counts as checked, so fallible.
+fn wrapping_arithmetic(left: &Expr, op: &Operator, right: &Expr, schema: &DFSchema) -> bool {
+    let (Some(l), Some(r)) = (planned_type(left, schema), planned_type(right, schema)) else {
+        return false;
+    };
+    binary_input_types(&l, op, &r).is_ok_and(|(l, r)| wraps(&l, &r))
 }
 
 /// A float divided by anything gives a float or NaN, never an error.
@@ -272,22 +301,37 @@ fn key(expr: &Expr) -> String {
 }
 
 /// Where an occurrence of an expression that can fail is evaluated (R3-F2
-/// of #273).
+/// and R6-F1 of #273): the number of conditional branches it is nested in.
 ///
-/// `Every` is on every row its expression is evaluated on. `Branch` is in a
-/// `CASE`'s `THEN` or `ELSE`, or a condition after its first, or in an
-/// argument after the first of a function that evaluates it only where the
-/// first is NULL (`coalesce`): there it is evaluated only on the rows that
-/// reach it. A rewrite that moves an occurrence from a branch to where it
-/// is always evaluated, as turning `CASE WHEN c THEN false ELSE e END` into
-/// `NOT c AND e` does, raises its errors on rows the `CASE` did not demand
-/// them on. `AND` and `OR` count as `Every`: DataFusion evaluates their
-/// right operand on every row of a batch unless the left one decides it for
-/// the whole batch, which M16's masking will make row-wise.
+/// [`Reach::EVERY`] (0) is on every row its expression is evaluated on. A
+/// `CASE`'s `THEN` or `ELSE`, a condition after its first, and an argument
+/// after the first of a function that evaluates it only where the first is
+/// NULL (`coalesce`) are evaluated only on the rows that reach them, one
+/// level deeper than the `CASE` or the call. A rewrite that moves an
+/// occurrence out of a branch, as turning `CASE WHEN c THEN false ELSE e
+/// END` into `NOT c AND e` does, raises its errors on rows the `CASE` did
+/// not demand them on. The depth tells the branches of a nested `CASE`
+/// apart from the outer one's: inside `CASE WHEN z THEN (CASE WHEN x = 0
+/// THEN false ELSE e END) ... END`, `e` is two levels deep, and the
+/// rewrite to `x != 0 AND e` leaves it one level deep, evaluated on every
+/// row with `z`, so the count changes and the guard refuses it. A single
+/// in-branch label saw `e` in a branch on both sides (R6-F1). DataFusion's
+/// rewrites of a `CASE` keep its arms in place or flatten it into
+/// `AND`/`OR`; none moves an occurrence between two arms at one depth.
+/// `AND` and `OR` count as on every row: DataFusion evaluates their right
+/// operand on every row of a batch unless the left one decides it for the
+/// whole batch, which M16's masking will make row-wise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Reach {
-    Every,
-    Branch,
+pub(crate) struct Reach(u32);
+
+impl Reach {
+    /// Evaluated on every row its expression is evaluated on.
+    pub(crate) const EVERY: Reach = Reach(0);
+
+    /// One branch deeper.
+    fn inner(self) -> Reach {
+        Reach(self.0.saturating_add(1))
+    }
 }
 
 /// The fallible expressions a plan evaluates, by where they are evaluated
@@ -324,31 +368,29 @@ fn covers(after: &Demand, before: &Demand) -> bool {
 const LAZY_FUNCTIONS: &[&str] = &["coalesce", "nvl", "nvl2", "ifnull"];
 
 /// The occurrences of the fallible subexpressions of `expr`, `expr`
-/// included, each with its [`Reach`].
+/// included, each with its [`Reach`] below `expr`.
 fn raw_atoms(expr: &Expr, schema: &DFSchema, out: &mut Demand) {
-    // `apply` visits a node before its children, so a node marks the
-    // children it evaluates only on some rows before they are visited.
-    let mut branches: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    // `apply` visits a node before its children, so a node sets the reach
+    // of its children before they are visited: its own, or one deeper for
+    // those it evaluates only on some rows.
+    let mut reaches: HashMap<*const Expr, Reach> = HashMap::new();
     let _ = expr.apply(|e| {
-        let reach = if branches.contains(&(e as *const Expr)) {
-            Reach::Branch
-        } else {
-            Reach::Every
-        };
+        let reach = reaches
+            .get(&(e as *const Expr))
+            .copied()
+            .unwrap_or(Reach::EVERY);
         if fallible_node(e, schema) {
             *out.entry((reach, key(e))).or_default() += 1;
         }
+        let _ = e.apply_children(|child| {
+            reaches.insert(child as *const Expr, reach);
+            Ok(TreeNodeRecursion::Continue)
+        });
         let mut branch = |child: &Expr| {
-            branches.insert(child as *const Expr);
+            reaches.insert(child as *const Expr, reach.inner());
         };
-        match (reach, e) {
-            (Reach::Branch, e) => {
-                let _ = e.apply_children(|child| {
-                    branch(child);
-                    Ok(TreeNodeRecursion::Continue)
-                });
-            }
-            (Reach::Every, Expr::Case(case)) => {
+        match e {
+            Expr::Case(case) => {
                 for (i, (when, then)) in case.when_then_expr.iter().enumerate() {
                     if i > 0 {
                         branch(when);
@@ -359,7 +401,7 @@ fn raw_atoms(expr: &Expr, schema: &DFSchema, out: &mut Demand) {
                     branch(otherwise);
                 }
             }
-            (Reach::Every, Expr::ScalarFunction(f)) if LAZY_FUNCTIONS.contains(&f.name()) => {
+            Expr::ScalarFunction(f) if LAZY_FUNCTIONS.contains(&f.name()) => {
                 f.args.iter().skip(1).for_each(&mut branch);
             }
             _ => {}
@@ -903,12 +945,12 @@ fn simplify_keeping_failures(
                 // becomes `CASE WHEN a IS NOT NULL THEN a ELSE b END`), the
                 // second time in a branch, on rows where the first one did
                 // not fail. It may not drop one, add another, or move one
-                // out of a branch.
+                // out of a branch, or to a shallower one.
                 let (hooked_atoms, atoms) = (atoms(&hooked), atoms(&expr));
+                // An added one is as deep as one the call evaluated, or
+                // deeper: it runs only where that one ran.
                 let added_in_a_branch = |(reach, key): &(Reach, String)| {
-                    atoms.contains_key(&(*reach, key.clone()))
-                        || (*reach == Reach::Branch
-                            && atoms.contains_key(&(Reach::Every, key.clone())))
+                    atoms.keys().any(|(before, k)| k == key && before <= reach)
                 };
                 if covers(&hooked_atoms, &atoms) && hooked_atoms.keys().all(added_in_a_branch) {
                     return Ok(hooked);
@@ -1014,25 +1056,38 @@ impl PhysicalOptimizerRule for GuardedPhysical {
 /// Whether any expression of `plan` can fail, as [`fallible_node`] reads
 /// the physical expressions DataFusion plans from logical ones.
 pub(crate) fn physical_plan_can_fail(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    use datafusion::physical_expr::expressions::{BinaryExpr, LikeExpr, Literal};
+    use datafusion::physical_expr::expressions::{BinaryExpr, LikeExpr, Literal, NegativeExpr};
     let mut fails = false;
     let _ = plan.apply(|node| {
-        let schema = node
-            .children()
-            .first()
-            .map_or_else(|| node.schema(), |child| child.schema());
+        // The schema a node's expressions read: its input's, or its own for
+        // a leaf. A node of several inputs, a join, evaluates each key and
+        // its filter over a schema of its own, so no type is read there and
+        // its arithmetic counts as fallible.
+        let children = node.children();
+        let schema = match children.as_slice() {
+            [] => Some(node.schema()),
+            [child] => Some(child.schema()),
+            _ => None,
+        };
+        let type_of = |e: &Arc<dyn PhysicalExpr>| -> Option<DataType> {
+            schema.as_ref().and_then(|schema| e.data_type(schema).ok())
+        };
         let _ = node.apply_expressions(&mut |root| {
             root.apply(|e| {
                 let fallible = if let Some(binary) = e.downcast_ref::<BinaryExpr>() {
+                    let (left, right) = (type_of(binary.left()), type_of(binary.right()));
                     match binary.op() {
                         Operator::Divide | Operator::Modulo => {
-                            let float = |e: &Arc<dyn PhysicalExpr>| {
-                                e.data_type(&schema).is_ok_and(|t| t.is_floating())
-                            };
+                            let float =
+                                |t: &Option<DataType>| t.as_ref().is_some_and(|t| t.is_floating());
                             let safe = binary.right().downcast_ref::<Literal>().is_some_and(|l| {
                                 safe_divisor(&Expr::Literal(l.value().clone(), None))
                             });
-                            !(float(binary.left()) && float(binary.right())) && !safe
+                            !(float(&left) && float(&right)) && !safe
+                        }
+                        // As `fallible_node` reads them (R6-F2).
+                        Operator::Plus | Operator::Minus | Operator::Multiply => {
+                            !matches!((&left, &right), (Some(l), Some(r)) if wraps(l, r))
                         }
                         op => {
                             let total = [
@@ -1046,9 +1101,6 @@ pub(crate) fn physical_plan_can_fail(plan: &Arc<dyn ExecutionPlan>) -> bool {
                                 Operator::IsNotDistinctFrom,
                                 Operator::And,
                                 Operator::Or,
-                                Operator::Plus,
-                                Operator::Minus,
-                                Operator::Multiply,
                                 Operator::StringConcat,
                                 Operator::BitwiseAnd,
                                 Operator::BitwiseOr,
@@ -1057,6 +1109,8 @@ pub(crate) fn physical_plan_can_fail(plan: &Arc<dyn ExecutionPlan>) -> bool {
                             !total.contains(op)
                         }
                     }
+                } else if let Some(negative) = e.downcast_ref::<NegativeExpr>() {
+                    !type_of(negative.arg()).is_some_and(|t| wraps(&t, &t))
                 } else if let Some(function) = e.downcast_ref::<ScalarFunctionExpr>() {
                     function.name().starts_with("opaque_cast_")
                         || !TOTAL_FUNCTIONS.contains(&function.name())
@@ -1779,6 +1833,114 @@ mod tests {
             Box::new(col("x")),
             DataType::Int32
         ))));
+        // Integer and float arithmetic wraps in DataFusion 55, and so does
+        // negating an integer or a float.
+        assert!(!fails(col("x") * col("i")));
+        assert!(!fails(col("f") - col("f")));
+        assert!(!fails(Expr::Negative(Box::new(col("x")))));
+    }
+
+    /// R6-F2: arrow checks temporal, interval and decimal arithmetic even
+    /// in its wrapping kernels, so `ts + INTERVAL '1 day'` raises past the
+    /// last timestamp and counts as fallible, logically and physically.
+    #[test]
+    fn the_classifier_reads_checked_arithmetic_as_fallible() {
+        use datafusion::arrow::datatypes::TimeUnit;
+        let schema = DFSchema::try_from(Schema::new(vec![
+            Field::new("x", DataType::Int64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("d", DataType::Date32, false),
+            Field::new("dec", DataType::Decimal128(10, 2), false),
+            Field::new("dur", DataType::Duration(TimeUnit::Second), false),
+        ]))
+        .unwrap();
+        let fails = |e: Expr| fallible_node(&e, &schema);
+        assert!(fails(col("ts") + day()));
+        assert!(fails(col("ts") - day()));
+        assert!(fails(col("d") + day()));
+        assert!(fails(col("ts") - col("ts")));
+        assert!(fails(col("dec") + col("dec")));
+        assert!(fails(col("dec") * col("x")));
+        assert!(fails(Expr::Negative(Box::new(col("dec")))));
+        assert!(fails(Expr::Negative(Box::new(col("dur")))));
+        assert!(!fails(col("x") + lit(1_i64)));
+
+        let session = session();
+        let t = session
+            .read_batch(timestamps(vec![i64::MAX, 0]))
+            .unwrap()
+            .with_column("x", lit(1_i64))
+            .unwrap();
+        let plan = |e: Expr| {
+            let df = t.clone().select(vec![e.alias("v")]).unwrap();
+            RUNTIME.block_on(df.create_physical_plan()).unwrap()
+        };
+        assert!(physical_plan_can_fail(&plan(col("ts") + day())));
+        assert!(physical_plan_can_fail(&plan(col("ts") - day())));
+        assert!(!physical_plan_can_fail(&plan(col("x") + lit(1_i64))));
+    }
+
+    /// `INTERVAL '1 day'`, as SQL writes it.
+    fn day() -> Expr {
+        use datafusion::arrow::datatypes::IntervalMonthDayNano;
+        lit(ScalarValue::IntervalMonthDayNano(Some(
+            IntervalMonthDayNano::new(0, 1, 0),
+        )))
+    }
+
+    /// A non-nullable `timestamp[us]` column `ts`.
+    fn timestamps(values: Vec<i64>) -> RecordBatch {
+        use datafusion::arrow::array::TimestampMicrosecondArray;
+        use datafusion::arrow::datatypes::TimeUnit;
+        let schema = Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]);
+        RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef],
+        )
+        .unwrap()
+    }
+
+    /// R6-F2: `ts + INTERVAL '1 day'` raises where `ts` is the last
+    /// timestamp. Read as wrapping, it let the simplifier turn `v = v` into
+    /// TRUE and `v IS NULL` into FALSE on a non-nullable `ts`, which
+    /// removed the filter or emptied the relation without evaluating it.
+    #[test]
+    fn plan_guard_checked_arithmetic() {
+        let session = session();
+        let t = session.read_batch(timestamps(vec![i64::MAX, 0])).unwrap();
+        let shifted = || col("ts") + day();
+        for (name, predicate) in [
+            ("self equal", shifted().eq(shifted())),
+            ("is null", shifted().is_null()),
+            ("is not null", shifted().is_not_null()),
+        ] {
+            let df = t.clone().filter(predicate).unwrap();
+            let plan = logical(&df);
+            assert!(
+                plan.contains("Filter:"),
+                "{name}: the filter is gone\n{plan}"
+            );
+            let error = collect(&df).expect_err(&format!("{name}: no error\n{plan}"));
+            assert!(
+                error.to_string().contains("out of range"),
+                "{name}: {error}"
+            );
+        }
+        // Where every timestamp has a next day, nothing fails.
+        let df = session
+            .read_batch(timestamps(vec![0, 1]))
+            .unwrap()
+            .filter(shifted().eq(shifted()))
+            .unwrap();
+        assert_eq!(collect(&df).unwrap(), 2);
     }
 
     /// X2: identities gated on non-nullability, and absorption, which has
@@ -1926,9 +2088,56 @@ mod tests {
         assert!(plan.contains("CASE WHEN"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 2, "{plan}");
         // Where no branch can fail, the rewrite still applies.
-        let df = t.filter(guarded(col("x").gt(lit(1_i64)))).unwrap();
+        let df = t.clone().filter(guarded(col("x").gt(lit(1_i64)))).unwrap();
         let plan = logical(&df);
         assert!(!plan.contains("CASE"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 1, "{plan}");
+    }
+
+    /// R6-F1: a `CASE` nested in another's branch. In `CASE WHEN z THEN
+    /// CASE WHEN (CASE WHEN x = 0 THEN false ELSE 10 / x > 1 END) THEN 1
+    /// ELSE 0 END ELSE 0 END > 0` the division is in a branch both before
+    /// and after the innermost `CASE` becomes `x != 0 AND 10 / x > 1`, so a
+    /// single in-branch label accepted that rewrite, and the division was
+    /// evaluated on every row with `z`, `x = 0` among them. Counting how
+    /// deep the branch is refuses it.
+    #[test]
+    fn plan_guard_nested_case_rewrites() {
+        use datafusion::logical_expr::when;
+        let session = session();
+        let t = table(&session, &[("x", vec![0, 2]), ("z", vec![1, 1])]);
+        let nested = |value: Expr| {
+            let innermost = when(col("x").eq(lit(0_i64)), lit(false))
+                .otherwise(value)
+                .unwrap();
+            let middle = when(innermost, lit(1_i64)).otherwise(lit(0_i64)).unwrap();
+            when(col("z").eq(lit(1_i64)), middle)
+                .otherwise(lit(0_i64))
+                .unwrap()
+                .gt(lit(0_i64))
+        };
+        let df = t.clone().filter(nested(fallible().gt(lit(1_i64)))).unwrap();
+        let plan = logical(&df);
+        assert!(plan.contains("THEN Boolean(false) ELSE"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 1, "{plan}");
+        // In a projection, and a level deeper still.
+        let df = t
+            .clone()
+            .select(vec![when(
+                col("z").eq(lit(1_i64)),
+                nested(fallible().gt(lit(1_i64))),
+            )
+            .otherwise(lit(false))
+            .unwrap()
+            .alias("v")])
+            .unwrap();
+        let plan = logical(&df);
+        assert!(plan.contains("THEN Boolean(false) ELSE"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 2, "{plan}");
+        // Where no branch can fail, the rewrite still applies.
+        let df = t.filter(nested(col("x").gt(lit(1_i64)))).unwrap();
+        let plan = logical(&df);
+        assert!(!plan.contains("THEN Boolean(false)"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 1, "{plan}");
     }
 

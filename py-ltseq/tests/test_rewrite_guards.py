@@ -401,3 +401,62 @@ def test_a_case_branch_that_can_fail_stays_conditional(engine_layout):
         logical, _ = kept.explain_plan()
         assert "CASE" in logical and "opaque_cast_Int32" in logical, logical
         assert kept.to_arrow().column("x").to_pylist() == [1]
+
+
+def test_a_case_nested_in_a_branch_stays_conditional(engine_layout):
+    """R6-F1. The cast is in a branch of the outer `CASE` both before and
+    after the innermost `CASE` becomes `x != 0 AND CAST(s AS INTEGER) > 0`,
+    so a guard that only told a branch from every row accepted the rewrite,
+    and the cast was evaluated on every row with `z`, raising on `'abc'`,
+    which no branch reaches. The guard counts how deep the branch is, so the
+    innermost `CASE` is kept and the row with `x = 1` comes back."""
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "x": pa.array([0, 1], pa.int64()),
+                "s": pa.array(["abc", "1"]),
+                "z": pa.array([True, True]),
+            }
+        )
+    )
+    clause = (
+        "CASE WHEN z THEN CASE WHEN (CASE WHEN x = 0 THEN false"
+        " ELSE CAST(s AS INTEGER) > 0 END) THEN 1 ELSE 0 END ELSE 0 END > 0"
+    )
+    kept = LTSeq._from_inner(t._inner.filter_where(clause))
+    logical, _ = kept.explain_plan()
+    assert "THEN Boolean(false) ELSE opaque_cast_Int32" in logical, logical
+    assert kept.to_arrow().column("x").to_pylist() == [1]
+
+
+LAST, FIRST = 2**63 - 1, -(2**63)
+
+
+def timestamps(values):
+    """A table of one non-nullable `timestamp[us]` column `ts`."""
+    field = pa.field("ts", pa.timestamp("us"), nullable=False)
+    return LTSeq.from_arrow(
+        pa.table({"ts": pa.array(values, pa.timestamp("us"))}, schema=pa.schema([field]))
+    )
+
+
+@pytest.mark.parametrize(
+    "clause, edge, rows",
+    [
+        ("(ts + INTERVAL '1 day') = (ts + INTERVAL '1 day')", LAST, 2),
+        ("(ts + INTERVAL '1 day') IS NULL", LAST, 0),
+        ("(ts - INTERVAL '1 day') IS NOT NULL", FIRST, 2),
+    ],
+)
+def test_temporal_arithmetic_that_fails_keeps_its_error(engine_layout, clause, edge, rows):
+    """R6-F2. Arrow checks timestamp arithmetic even where integer
+    arithmetic wraps: a day past the last timestamp, or before the first,
+    raises. Read as infallible, `v = v` became TRUE and `v IS NULL` FALSE
+    on a non-nullable `ts`, so the filter was removed, or the relation
+    emptied, without evaluating `v`. Both now raise where a row is at the
+    edge, and keep their value where every row has a day on either side."""
+    failing = LTSeq._from_inner(timestamps([edge, 0])._inner.filter_where(clause))
+    with pytest.raises(Exception, match="out of range"):
+        failing.to_arrow()
+    fine = LTSeq._from_inner(timestamps([0, 1])._inner.filter_where(clause))
+    assert fine.to_arrow().num_rows == rows
