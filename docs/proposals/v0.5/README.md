@@ -449,6 +449,8 @@ Every heading of every module, in reading order. Each list is collapsed; expand 
 - **[review/trade-offs.md](review/trade-offs.md)**
   - [Trade-off record](review/trade-offs.md#trade-off-record)
     - [Rewrites under row-wise demand](review/trade-offs.md#rewrites-under-row-wise-demand)
+    - [Rule inventory](review/trade-offs.md#rule-inventory)
+    - [Expression rewrites](review/trade-offs.md#expression-rewrites)
 - **[review/impact-map.md](review/impact-map.md)**
   - [E. Canonical examples](review/impact-map.md#e-canonical-examples)
   - [F. Contract test matrix](review/impact-map.md#f-contract-test-matrix)

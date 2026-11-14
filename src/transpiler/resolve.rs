@@ -118,8 +118,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// The analyzer has coerced such a plan and coercion is idempotent, but the
 /// type is read from `expr` coerced again, as [`Resolver::data_type`] reads
 /// it. The plan's schema keeps its column qualifiers, which the Arrow schema
-/// [`Resolver::new`] takes would drop.
-#[cfg(feature = "m0")]
+/// [`Resolver::new`] takes would drop. `rewrite_guard` asks too (#273).
 pub(crate) fn planned_type(expr: &Expr, schema: &DFSchema) -> Option<DataType> {
     let mut analyzer = TypeCoercionRewriter::new(schema);
     let coerced = ask(|| expr.clone().rewrite(&mut analyzer)).ok()?.data;
