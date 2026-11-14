@@ -175,7 +175,8 @@ def test_a_sql_cast_that_can_fail_raises_only_where_demanded(engine_layout):
     t = LTSeq.from_arrow(pa.table({"x": pa.array([1, 2], pa.int64())}))
     clause = "CASE WHEN x = 0 THEN CAST('abc' AS INTEGER) ELSE x END > 0"
     kept = LTSeq._from_inner(t._inner.filter_where(clause))
-    assert kept.to_arrow().column("x").to_pylist() == [1, 2]
+    # The table declares no order, so its rows come in any order (#148).
+    assert sorted(kept.to_arrow().column("x").to_pylist()) == [1, 2]
     zero = LTSeq.from_arrow(pa.table({"x": pa.array([0, 2], pa.int64())}))
     with pytest.raises(ValueError, match="Cast error"):
         LTSeq._from_inner(zero._inner.filter_where(clause)).to_arrow()
