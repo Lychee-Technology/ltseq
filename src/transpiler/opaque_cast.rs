@@ -103,7 +103,12 @@ pub(crate) struct OpaqueCast {
 }
 
 impl OpaqueCast {
-    fn call(expr: Expr, to: DataType) -> Expr {
+    /// The type it casts to.
+    pub(crate) fn target(&self) -> &DataType {
+        &self.to
+    }
+
+    pub(crate) fn call(expr: Expr, to: DataType) -> Expr {
         ScalarUDF::new_from_impl(OpaqueCast {
             name: format!("opaque_cast_{to}"),
             to,

@@ -32,6 +32,7 @@ use tokio::runtime::Runtime;
 
 use crate::float_statistics::DropFloatStatistics;
 use crate::ops::lookup::OneRowPerKeyPlanner;
+use crate::rewrite_guard::{self, Guarded, GuardedPhysical, KeepDemandedKeys};
 use crate::source::LocalFiles;
 use crate::transpiler::FloatListZeros;
 
@@ -143,6 +144,10 @@ impl LayoutOverrides {
 /// - `unions_to_filter`, `WindowTopN`, `filter_null_join_keys` and
 ///   `HashJoinBuffering`: Off, as DataFusion 55 ships them, but set here,
 ///   so that no rule the rewrite table has not rated runs (#273)
+/// - `KeepDemandedKeys`: First optimizer rule, so a filter does not skip
+///   the keys a sort, grouping, `distinct` or join demands (X4, #273)
+/// - The rules the rule inventory rates Restricted run behind their guards
+///   (`rewrite_guard::Guarded`, `GuardedPhysical`; #273)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
@@ -192,23 +197,41 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     keep_unrated_rules_off(&mut config);
 
     let session = new_session(config);
-    // Appended to DataFusion's rules, so it runs after the ones that build
-    // IN lists in every pass.
-    session.add_optimizer_rule(Arc::new(FloatListZeros));
+    let state = session.state();
+    // `KeepDemandedKeys` runs first in every pass, before `push_down_filter`
+    // (X4, #273). The rules
+    // the rule inventory rates Restricted run behind their guards
+    // (`rewrite_guard`). `FloatListZeros` is appended, so it runs after the
+    // rules that build IN lists in every pass.
+    let logical = std::iter::once(Arc::new(KeepDemandedKeys) as _)
+        .chain(state.optimizers().iter().map(|rule| {
+            match rewrite_guard::logical_guard(rule.name()) {
+                Some(guard) => Arc::new(Guarded::new(Arc::clone(rule), guard)) as _,
+                None => Arc::clone(rule),
+            }
+        }))
+        .chain(std::iter::once(Arc::new(FloatListZeros) as _))
+        .collect();
     // `DropFloatStatistics` goes before DataFusion's physical rules, so the
     // ones that read a scan's statistics see what the scan reads, and
     // `KeepSortsAboveOffsets` too, so `EnsureRequirements` sees its limits;
     // `KeepFileOrder` after them, so it runs after `LimitPushdown`.
-    let state = session.state();
     let rules = [
         Arc::new(DropFloatStatistics) as _,
         Arc::new(KeepSortsAboveOffsets) as _,
     ]
     .into_iter()
-    .chain(state.physical_optimizers().iter().cloned())
+    .chain(state.physical_optimizers().iter().map(|rule| {
+        if rewrite_guard::physical_guarded(rule.name()) {
+            Arc::new(GuardedPhysical::new(Arc::clone(rule))) as _
+        } else {
+            Arc::clone(rule)
+        }
+    }))
     .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
     .collect();
     let state = SessionStateBuilder::new_from_existing(state)
+        .with_optimizer_rules(logical)
         .with_physical_optimizer_rules(rules)
         .with_query_planner(Arc::new(QueryPlanner))
         .build();
@@ -258,6 +281,8 @@ impl datafusion::execution::context::QueryPlanner for QueryPlanner {
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         let planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
             Arc::new(OneRowPerKeyPlanner),
+            // The barrier of `KeepDemandedKeys` (X4, #273).
+            Arc::new(rewrite_guard::DemandBarrierPlanner),
             // A measurement build's filter barrier (`crate::m0`).
             #[cfg(feature = "m0")]
             Arc::new(crate::m0::pushdown::BarrierPlanner),

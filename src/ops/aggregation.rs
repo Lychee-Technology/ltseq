@@ -544,6 +544,7 @@ fn parse_where_clause(
 
         let predicate = extract_filter_predicate(parsed_df.logical_plan())
             .ok_or_else(|| format!("No filter expression found in: {}", where_clause))?;
+        refuse_subqueries(&predicate, where_clause)?;
 
         // Clean up temp table
         let _ = session.deregister_table(temp_name);
@@ -553,6 +554,34 @@ fn parse_where_clause(
         strip_table_qualifiers(predicate)
             .map_err(|e| format!("Failed to unqualify WHERE clause columns: {}", e))
     })
+}
+
+/// A WHERE clause with a subquery (`EXISTS`, `IN (SELECT ...)`, a scalar
+/// subquery, `= ANY`) is refused (#273). The DataFusion rules that rewrite
+/// subqueries into joins are rated Unreached in the rule inventory: LTSeq's
+/// lowering builds no subquery, and this parser is the one place SQL could
+/// add one. A subquery also reads tables of the parse session, not the
+/// table being filtered.
+fn refuse_subqueries(predicate: &Expr, where_clause: &str) -> Result<(), String> {
+    let subquery = predicate
+        .exists(|e| {
+            Ok(matches!(
+                e,
+                Expr::Exists(_)
+                    | Expr::InSubquery(_)
+                    | Expr::ScalarSubquery(_)
+                    | Expr::SetComparison(_)
+                    | Expr::OuterReferenceColumn(..)
+            ))
+        })
+        .unwrap_or(true);
+    if subquery {
+        return Err(format!(
+            "A WHERE clause may not hold a subquery: {}",
+            where_clause
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -613,5 +642,29 @@ mod tests {
             [1, 3]
         );
         assert_eq!(filtered_x(r#"NOT ("s" IS NULL) AND abs(-"x") > 1"#), [2, 3]);
+    }
+
+    /// The subquery rules are rated Unreached in the rule inventory (#273),
+    /// so the one place SQL enters a plan refuses a subquery.
+    #[test]
+    fn a_where_clause_with_a_subquery_is_refused() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "x",
+            DataType::Int64,
+            false,
+        )]));
+        let session = SessionContext::new();
+        for clause in [
+            "EXISTS (SELECT 1)",
+            r#""x" IN (SELECT 1)"#,
+            r#""x" > (SELECT 1)"#,
+            r#"NOT EXISTS (SELECT 1) OR "x" > 1"#,
+        ] {
+            let error = parse_where_clause(&session, &schema, clause).unwrap_err();
+            assert!(
+                error.contains("may not hold a subquery"),
+                "{clause}: {error}"
+            );
+        }
     }
 }

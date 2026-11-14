@@ -239,7 +239,12 @@ pub fn sort_impl(
         });
     }
 
-    let (positioned, position) = in_table_order_with_position(table)?;
+    // Under D10a a sort demands its keys on every row of its input, so a
+    // filter after it may not skip rows whose key can fail (X4, #273).
+    let keys = order.iter().map(|key| key.expr.clone()).collect::<Vec<_>>();
+    let keys_can_fail =
+        crate::rewrite_guard::can_fail_over(table.require_df()?.logical_plan(), &keys);
+    let (positioned, position) = in_table_order_with_position(table, keys_can_fail)?;
     order.push(SortExpr {
         expr: Expr::Column(Column::new_unqualified(&position)),
         asc: true,
@@ -283,7 +288,10 @@ pub fn sort_impl(
 /// cost is that the input's operators run on one partition, as
 /// `assume_sorted`'s collection does, and that a plan shows the stream
 /// rather than them.
-fn in_table_order_with_position(table: &LTSeqTable) -> Result<(DataFrame, String), LtseqError> {
+fn in_table_order_with_position(
+    table: &LTSeqTable,
+    keys_can_fail: bool,
+) -> Result<(DataFrame, String), LtseqError> {
     let (state, plan) = in_table_order(table)?.into_parts();
     let input = Arc::clone(plan.schema().inner());
     let position = (0..)
@@ -300,6 +308,7 @@ fn in_table_order_with_position(table: &LTSeqTable) -> Result<(DataFrame, String
         schema,
         state,
         plan,
+        keys_can_fail,
     };
     let df = table
         .session
@@ -315,12 +324,14 @@ fn in_table_order_with_position(table: &LTSeqTable) -> Result<(DataFrame, String
 /// applies them to `plan` before numbering, so a filter after a `sort` still
 /// reaches the input's own scan (Parquet pruning included). A filter keeps
 /// the surviving rows in their order, so numbering after it orders them as
-/// numbering before it would.
+/// numbering before it would. Where a key of the sort above can fail, it
+/// takes no filter: the sort demands its keys on every row (D10a, #273).
 #[derive(Clone)]
 struct TableOrder {
     schema: SchemaRef,
     state: SessionState,
     plan: LogicalPlan,
+    keys_can_fail: bool,
 }
 
 impl std::fmt::Debug for TableOrder {
@@ -373,7 +384,7 @@ impl TableProvider for TableOrder {
                     .column_refs()
                     .iter()
                     .any(|column| column.name == *position);
-                if names_position || filter.is_volatile() {
+                if self.keys_can_fail || names_position || filter.is_volatile() {
                     TableProviderFilterPushDown::Unsupported
                 } else {
                     TableProviderFilterPushDown::Exact

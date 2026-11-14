@@ -33,6 +33,7 @@ pub(crate) mod order_key; // The value a float sorts by in §9.4's order (#268)
 pub(crate) mod ops; // Table operations grouped by category
 #[cfg(all(test, not(feature = "m0")))]
 mod rule_inventory; // Every optimizer rule a session runs is rated (issue #273)
+pub(crate) mod rewrite_guard; // Guards of the rewrites rated Restricted (issue #273)
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
 pub(crate) mod stored_zones; // Zones of Parquet timestamps stored in another unit (issue #362)
