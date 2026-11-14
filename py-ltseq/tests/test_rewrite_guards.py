@@ -219,3 +219,20 @@ def test_rows_equal_on_the_sort_keys_keep_their_order_after_row_wise_operations(
     pairs = list(zip(result.column("k").to_pylist(), result.column("i").to_pylist()))
     assert pairs == sorted(pairs), pairs[:20]
     assert result.num_rows > 0
+
+
+def test_a_window_over_ties_reads_rows_in_the_stable_order(engine_layout):
+    """R2-F4, `EnsureRequirements` (X5). A window ordered by the declared
+    key `k` asks its input only for `k`, and DataFusion met that with an
+    unstable sort by `k` in place of the stable one, so `shift(1)` read
+    whichever tied row that sort put first, even at one partition.
+    `ltseq_keep_stable_sorts` keeps the sort by `k` and position, so each
+    row reads the row before it in the input among those equal on `k`."""
+    n = 120
+    t = LTSeq.from_arrow(pa.table({"k": [i % 3 for i in range(n)], "i": list(range(n))}))
+    result = t.sort("k").derive(p=lambda r: r.i.shift(1)).to_arrow()
+    k = result.column("k").to_pylist()
+    i = result.column("i").to_pylist()
+    p = result.column("p").to_pylist()
+    assert list(zip(k, i)) == sorted(zip(k, i))
+    assert p == [None] + i[:-1]
