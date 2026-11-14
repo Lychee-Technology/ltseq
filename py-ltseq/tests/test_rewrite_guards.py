@@ -221,6 +221,63 @@ def test_rows_equal_on_the_sort_keys_keep_their_order_after_row_wise_operations(
     assert result.num_rows > 0
 
 
+@pytest.mark.parametrize(
+    "after",
+    [
+        pytest.param(lambda t: t.filter(lambda r: r.x != 0), id="filter"),
+        pytest.param(
+            lambda t: t.derive(y=lambda r: r.x + 1).filter(lambda r: r.x != 0),
+            id="derive_filter",
+        ),
+        pytest.param(lambda t: t.filter(lambda r: r.x != 0).head(5), id="filter_head"),
+    ],
+)
+def test_a_filter_after_a_sort_does_not_skip_a_key_the_sort_computes(engine_layout, after):
+    """R4-F1, X4 under D10a (a). Reading a sorted table moves the stable
+    sort above the filters and projections after it (R2-F4), so the filter
+    `x != 0` ran below the sort, and the sort computed its second key, a
+    cast, only on the row the filter kept: one row came back, while the
+    sort alone raises on `'bad'`. `TableOrder` cannot keep a key the sort
+    computes itself. Where a key can fail, the sort's computed keys are
+    now computed on every row of its input, under a barrier the filter
+    does not cross, and the sort reads them as columns."""
+    t = LTSeq.from_arrow(
+        pa.table({"x": pa.array([0, 1], pa.int64()), "s": pa.array(["bad", "1"])})
+    )
+    sorted_ = t.sort("x", lambda r: r.s.cast("int32"))
+    with pytest.raises(ValueError, match="Cast error"):
+        sorted_.to_arrow()
+    filtered = after(sorted_)
+    logical, _ = filtered.explain_plan()
+    lines = logical.splitlines()
+    barrier = next(i for i, l in enumerate(lines) if "DemandBarrier" in l)
+    moved = next(i for i, l in enumerate(lines) if "x != Int64(0)" in l)
+    cast = next(i for i, l in enumerate(lines) if "opaque_cast_Int32" in l)
+    assert moved < barrier < cast, logical
+    with pytest.raises(ValueError, match="Cast error"):
+        filtered.to_arrow()
+
+
+def test_a_filter_after_a_sort_by_computed_keys_that_cannot_fail_still_moves(engine_layout):
+    """R4-F1. Where no key can fail, the sort is moved above the filter as
+    before, with no barrier, and ties on `x` keep the order of the second
+    key and then of the input."""
+    n = 60
+    t = LTSeq.from_arrow(
+        pa.table({"x": [i % 3 for i in range(n)], "i": list(range(n))})
+    )
+    filtered = t.sort("x", lambda r: 3 - r.i % 4).filter(lambda r: r.i % 5 != 0)
+    logical, _ = filtered.explain_plan()
+    assert "DemandBarrier" not in logical, logical
+    result = filtered.to_arrow()
+    rows = list(zip(result.column("x").to_pylist(), result.column("i").to_pylist()))
+    expected = sorted(
+        ((x, i) for x, i in zip([i % 3 for i in range(n)], range(n)) if i % 5 != 0),
+        key=lambda row: (row[0], 3 - row[1] % 4, row[1]),
+    )
+    assert rows == expected
+
+
 def test_a_window_over_ties_reads_rows_in_the_stable_order(engine_layout):
     """R2-F4, `EnsureRequirements` (X5). A window ordered by the declared
     key `k` asks its input only for `k`, and DataFusion met that with an

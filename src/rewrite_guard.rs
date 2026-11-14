@@ -1148,7 +1148,7 @@ fn is_barrier(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Extension(Extension { node }) if node.as_any().is::<DemandBarrier>())
 }
 
-fn barrier(plan: LogicalPlan) -> LogicalPlan {
+pub(crate) fn barrier(plan: LogicalPlan) -> LogicalPlan {
     if is_barrier(&plan) {
         return plan;
     }

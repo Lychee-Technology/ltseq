@@ -81,6 +81,10 @@ pub(crate) fn sort_unless_ordered(
 /// rows in the sort's order, and DataFusion keeps that order up to the
 /// root (a projection that only picks columns, as after `sort` alone).
 ///
+/// A filter moved below the sort would leave the sort's keys uncomputed on
+/// the rows it removes; where a key can fail, the keys are computed below
+/// the filters, under a [`crate::rewrite_guard::DemandBarrier`] (R4-F1).
+///
 /// Limits stay above it. Any other operator between the root and the sort
 /// (a join, a window, a grouping) orders rows of its own, so the root sort
 /// is planned as before.
@@ -127,29 +131,59 @@ fn hoist_stable_sort(
         return Ok(None);
     }
 
-    // The columns the sort's keys read, and a free name for each.
-    let mut columns: Vec<Column> = Vec::new();
-    for key in &sort.expr {
-        for column in key.expr.column_refs() {
-            if !columns.contains(column) {
-                columns.push(column.clone());
-            }
-        }
-    }
     let taken: HashSet<String> = path
         .iter()
         .copied()
         .chain([node, sort.input.as_ref()])
         .flat_map(|n| n.schema().fields().iter().map(|f| f.name().clone()))
         .collect();
-    let hidden: Vec<String> = (0..)
+    let mut free = (0..)
         .map(|i| format!("__ltseq_hoisted_{i}"))
-        .filter(|name| !taken.contains(name))
-        .take(columns.len())
-        .collect();
+        .filter(|name| !taken.contains(name));
+
+    // Under D10a a sort demands its keys on every row of its input, and a
+    // filter moved below it would compute them only on the rows it keeps
+    // (X4, R4-F1 of #273). Where a key can fail and a filter moves, each
+    // key the sort computes is computed first, on every row of its input,
+    // under a barrier no filter crosses, and the sort reads it as a column.
+    // A column key computed below is computed there on every row as well,
+    // as the barrier keeps the filter above the sort's input.
+    let mut input = sort.input.as_ref().clone();
+    let mut sort_keys = sort.expr.clone();
+    let moves_filter = path.iter().any(|n| matches!(n, LogicalPlan::Filter(_)));
+    let key_exprs: Vec<Expr> = sort.expr.iter().map(|key| key.expr.clone()).collect();
+    if moves_filter && crate::rewrite_guard::can_fail_over(&input, &key_exprs) {
+        let mut exprs: Vec<Expr> = input
+            .schema()
+            .columns()
+            .into_iter()
+            .map(Expr::Column)
+            .collect();
+        for key in &mut sort_keys {
+            if matches!(key.expr, Expr::Column(_)) {
+                continue;
+            }
+            let name = free.next().expect("an unbounded range has a free name");
+            exprs.push(key.expr.clone().alias(&name));
+            key.expr = Expr::Column(Column::new_unqualified(name));
+        }
+        let computed = LogicalPlanBuilder::from(input).project(exprs)?.build()?;
+        input = crate::rewrite_guard::barrier(computed);
+    }
+
+    // The columns the sort's keys read, and a free name for each.
+    let mut columns: Vec<Column> = Vec::new();
+    for key in &sort_keys {
+        for column in key.expr.column_refs() {
+            if !columns.contains(column) {
+                columns.push(column.clone());
+            }
+        }
+    }
+    let hidden: Vec<String> = free.by_ref().take(columns.len()).collect();
 
     // The filters and projections again, bottom up, over the sort's input.
-    let mut rebuilt = LogicalPlanBuilder::from(sort.input.as_ref().clone());
+    let mut rebuilt = LogicalPlanBuilder::from(input);
     let mut passed = false;
     for node in path.iter().rev() {
         rebuilt = match node {
@@ -170,8 +204,7 @@ fn hoist_stable_sort(
             _ => unreachable!("the path holds filters and projections"),
         };
     }
-    let keys = sort
-        .expr
+    let keys = sort_keys
         .iter()
         .map(|key| {
             let expr = key
