@@ -2,7 +2,7 @@
 
 # v0.5 review history: API surface and interchange follow-ups (R)
 
-[Index](../../README.md) › Review history · Previous: [Owner decision closure (Q)](owner-decision-closure.md)
+[Index](../../README.md) › Review history · Previous: [Owner decision closure (Q)](owner-decision-closure.md) · Next: [Numeric follow-ups (S)](numeric-follow-up-closure.md)
 
 **Non-normative, historical.** A dated record of the [review](../../README.md#ltseq-v05-api-review), kept as written. Later records name the earlier records they change. [Deliverable Q] is the decision register, and this record settles three of its deferred rows.
 
@@ -88,7 +88,7 @@ For U2, #274's R3 harness measured both candidates over 640 MiB of decoded Parqu
 
 ---
 
-Previous: [Owner decision closure (Q)](owner-decision-closure.md) · [Index](../../README.md)
+Previous: [Owner decision closure (Q)](owner-decision-closure.md) · [Index](../../README.md) · Next: [Numeric follow-ups (S)](numeric-follow-up-closure.md)
 
 <!-- /v0.5-modular:footer -->
 

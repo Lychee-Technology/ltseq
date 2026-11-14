@@ -107,6 +107,9 @@ _RULES = [
          "An integer or decimal column compares with a number literal by exact value"),
     Rule("float_comparison_exact", "§17.4 rule 3", "M7",
          "A float column compares with an integer or Decimal literal by exact value, never through the nearest float"),
+    Rule("float32_literal_exact", "§17.4 rule 3", "M8",
+         "A float literal that float32 cannot hold exactly, compared with a float32 column, raises LTSeqValueError "
+         "at plan time (N9, #276): `r.f32 == 0.1` would otherwise be FALSE on every row"),
     Rule("float_order", "§18", "M7",
          "A float column against a float literal: binary64 values, NaN equal to NaN and above +inf, -0.0 equal to 0.0"),
     Rule("temporal_comparison", "§19.2", "M8",
@@ -425,6 +428,8 @@ def _comparison(ctx, lit, pos, t, lt):
     if ck == "number":
         if lk == "special" and t[0] != "float":
             return _error("LTSeqValueError", PLAN, "nan_literal_exact_domain")
+        if t == ("float", 32) and lk == "float" and not oracle.holds(t, literal):
+            return _error("LTSeqValueError", PLAN, "float32_literal_exact")
         if t[0] != "float":
             rule = "exact_comparison"
         elif lk in ("int", "decimal"):

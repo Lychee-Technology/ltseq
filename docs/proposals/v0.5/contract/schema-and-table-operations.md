@@ -41,7 +41,7 @@ def columns(self) -> list[str]
 | `bool` | Full |
 | `int8`–`int64`, `uint8`–`uint64` | Full |
 | `float32`, `float64` | Full. `float16` is widened to `float32` when read (exact; only that column is copied). |
-| `decimal32`, `decimal64`, `decimal128`, `decimal256` | Full ([§17.4] for coercions) |
+| `decimal32`, `decimal64`, `decimal128`, `decimal256` | Full ([§17.4] for coercions). A decimal column with a negative scale *s* and precision *p* is converted when read to scale 0 and precision *p* − *s*, in its own width when that width holds *p* − *s* digits (9, 18, 38 and 76) and otherwise in the narrowest wider one: `decimal128(5, -2)` becomes `decimal128(7, 0)` and `decimal128(38, -2)` becomes `decimal256(40, 0)`, with the same values (exact; only that column is copied). One that needs more than 76 digits raises `LTSeqTypeError` at the call. So no expression or result has a negative scale ([§17.3]); a decimal inside a pass-through type keeps its type. |
 | `string`, `large_string` | Full |
 | `binary`, `large_binary`, `fixed_size_binary` | Comparison, sort, keys, `is_in`, NULL helpers |
 | `date32` | Full. `date64` is converted to `date32` when read (exact: `date64` values are whole days; only that column is copied). A `date64` value that `date32` cannot hold (2**31 days or more after 1970, or more than 2**31 days before) raises `CastError` during execution. |
@@ -247,6 +247,7 @@ Previous: [Loading and lazy evaluation (§4–§5)](loading-and-laziness.md) · 
 [§16.5]: streaming-and-output.md#165-writers
 [§17]: numeric-null-temporal.md#17-numeric-semantics-and-literals
 [§17.2]: numeric-null-temporal.md#172-literals
+[§17.3]: numeric-null-temporal.md#173-arithmetic-operators
 [§17.4]: numeric-null-temporal.md#174-types-of-mixed-operands
 [§17.5]: numeric-null-temporal.md#175-shared-values
 [§17.6]: numeric-null-temporal.md#176-explicit-casts
