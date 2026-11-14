@@ -460,3 +460,44 @@ def test_temporal_arithmetic_that_fails_keeps_its_error(engine_layout, clause, e
         failing.to_arrow()
     fine = LTSeq._from_inner(timestamps([0, 1])._inner.filter_where(clause))
     assert fine.to_arrow().num_rows == rows
+
+
+def decimals(values):
+    """A table of one non-nullable `decimal128(38, 0)` column `x`."""
+    field = pa.field("x", pa.decimal128(38, 0), nullable=False)
+    return LTSeq.from_arrow(
+        pa.table({"x": pa.array(values, pa.decimal128(38, 0))}, schema=pa.schema([field]))
+    )
+
+
+@pytest.mark.parametrize(
+    "clause, rows",
+    [
+        ("x / 2 > 0", 2),
+        ("(x / 2) = (x / 2)", 2),
+        ("(x / 2) IS NULL", 0),
+        ("(x / 2) IS NOT NULL", 2),
+        ("(x % 2) = (x % 2)", 2),
+    ],
+)
+def test_decimal_division_by_a_constant_keeps_its_error(engine_layout, clause, rows):
+    """R7-F1. A decimal division scales its numerator before it divides,
+    which overflows at `10**38 - 1` even when the divisor is 2. Read as
+    infallible because its divisor is a safe constant, `v = v` became TRUE
+    and `v IS NULL` FALSE on a non-nullable `x`, so the filter was removed,
+    or the relation emptied, without evaluating `v`. Each now raises the
+    overflow `x / 2 > 0` raises, and keeps its value where none overflows."""
+    from decimal import Decimal
+
+    if "/" in clause:
+        failing = LTSeq._from_inner(
+            decimals([Decimal(10**38 - 1), Decimal(1)])._inner.filter_where(clause)
+        )
+        logical, _ = failing.explain_plan()
+        assert "Filter:" in logical and " / " in logical, logical
+        with pytest.raises(Exception, match="(?i)overflow"):
+            failing.to_arrow()
+    fine = LTSeq._from_inner(decimals([Decimal(2), Decimal(1)])._inner.filter_where(clause))
+    logical, _ = fine.explain_plan()
+    assert "Filter:" in logical, logical
+    assert fine.to_arrow().num_rows == rows

@@ -52,8 +52,9 @@
 //! Whether an expression can fail is [`fallible_node`]'s conservative
 //! reading of DataFusion 55's kernels: a `cast()` that can fail (an
 //! [`OpaqueCast`], from a lambda or `filter_where`'s SQL; a `Cast` is the
-//! engine's), a division or remainder by
-//! anything but a safe constant, `+`, `-`, `*` or a negation other than of
+//! engine's), a division or remainder other than of floats or of an
+//! integer by a safe integer constant (a decimal division scales its
+//! numerator first, which can overflow), `+`, `-`, `*` or a negation other than of
 //! integers or of floats (arrow checks temporal, interval and decimal
 //! arithmetic), a function not known to be total, a pattern match whose
 //! pattern is not a literal. A constant is fallible only if evaluating it
@@ -158,8 +159,12 @@ pub(crate) fn fallible_node(expr: &Expr, schema: &DFSchema) -> bool {
             Operator::Plus | Operator::Minus | Operator::Multiply => {
                 !wrapping_arithmetic(left, op, right, schema)
             }
+            // Only integer division by a safe constant cannot raise:
+            // decimal division scales its numerator first, which overflows
+            // whatever the divisor (R7-F1).
             Operator::Divide | Operator::Modulo => {
-                !(float_typed(left, schema) && float_typed(right, schema)) && !safe_divisor(right)
+                !(float_typed(left, schema) && float_typed(right, schema))
+                    && !(integer_division(left, op, right, schema) && safe_divisor(right))
             }
             _ => true,
         },
@@ -225,7 +230,20 @@ fn float_typed(expr: &Expr, schema: &DFSchema) -> bool {
     planned_type(expr, schema).is_some_and(|t| t.is_floating())
 }
 
-/// A divisor of a constant other than 0, -1 and NULL cannot fail.
+/// Whether `left op right` (`/` or `%`) divides an integer by an integer,
+/// read from the types coercion gives its operands. Where a type cannot be
+/// read, it does not.
+fn integer_division(left: &Expr, op: &Operator, right: &Expr, schema: &DFSchema) -> bool {
+    let (Some(l), Some(r)) = (planned_type(left, schema), planned_type(right, schema)) else {
+        return false;
+    };
+    binary_input_types(&l, op, &r).is_ok_and(|(l, r)| l.is_integer() && r.is_integer())
+}
+
+/// A divisor of a constant other than 0, -1 and NULL cannot fail an
+/// integer division (`i64::MIN / -1` overflows). It does not make any other
+/// division total: a decimal division scales its numerator before it
+/// divides, and that overflows even by 2 (R7-F1).
 fn safe_divisor(expr: &Expr) -> bool {
     let Expr::Literal(value, _) = expr else {
         return false;
@@ -1080,9 +1098,14 @@ pub(crate) fn physical_plan_can_fail(plan: &Arc<dyn ExecutionPlan>) -> bool {
                         Operator::Divide | Operator::Modulo => {
                             let float =
                                 |t: &Option<DataType>| t.as_ref().is_some_and(|t| t.is_floating());
-                            let safe = binary.right().downcast_ref::<Literal>().is_some_and(|l| {
-                                safe_divisor(&Expr::Literal(l.value().clone(), None))
-                            });
+                            // As `fallible_node` reads them (R7-F1).
+                            let integer =
+                                |t: &Option<DataType>| t.as_ref().is_some_and(|t| t.is_integer());
+                            let safe = integer(&left)
+                                && integer(&right)
+                                && binary.right().downcast_ref::<Literal>().is_some_and(|l| {
+                                    safe_divisor(&Expr::Literal(l.value().clone(), None))
+                                });
                             !(float(&left) && float(&right)) && !safe
                         }
                         // As `fallible_node` reads them (R6-F2).
@@ -1868,6 +1891,15 @@ mod tests {
         assert!(fails(Expr::Negative(Box::new(col("dec")))));
         assert!(fails(Expr::Negative(Box::new(col("dur")))));
         assert!(!fails(col("x") + lit(1_i64)));
+        // R7-F1: a decimal division scales its numerator first, which
+        // overflows whatever the divisor, so a safe constant does not make
+        // it total. An integer divided by one is.
+        assert!(fails(col("dec") / lit(2_i64)));
+        assert!(fails(col("dec") % lit(2_i64)));
+        assert!(fails(col("dec") / lit(dec(2))));
+        assert!(fails(col("x") / lit(dec(2))));
+        assert!(!fails(col("x") / lit(2_i64)));
+        assert!(!fails(col("x") % lit(2_i64)));
 
         let session = session();
         let t = session
@@ -1882,6 +1914,31 @@ mod tests {
         assert!(physical_plan_can_fail(&plan(col("ts") + day())));
         assert!(physical_plan_can_fail(&plan(col("ts") - day())));
         assert!(!physical_plan_can_fail(&plan(col("x") + lit(1_i64))));
+        assert!(!physical_plan_can_fail(&plan(col("x") / lit(2_i64))));
+        assert!(!physical_plan_can_fail(&plan(col("x") % lit(2_i64))));
+
+        let t = session.read_batch(decimals(vec![1])).unwrap();
+        let plan = |e: Expr| {
+            let df = t.clone().select(vec![e.alias("v")]).unwrap();
+            RUNTIME.block_on(df.create_physical_plan()).unwrap()
+        };
+        assert!(physical_plan_can_fail(&plan(col("x") / lit(2_i64))));
+        assert!(physical_plan_can_fail(&plan(col("x") % lit(2_i64))));
+    }
+
+    /// A `decimal128(38, 0)` scalar.
+    fn dec(value: i128) -> ScalarValue {
+        ScalarValue::Decimal128(Some(value), 38, 0)
+    }
+
+    /// A non-nullable `decimal128(38, 0)` column `x`.
+    fn decimals(values: Vec<i128>) -> RecordBatch {
+        use datafusion::arrow::array::Decimal128Array;
+        let schema = Schema::new(vec![Field::new("x", DataType::Decimal128(38, 0), false)]);
+        let array = Decimal128Array::from(values)
+            .with_precision_and_scale(38, 0)
+            .unwrap();
+        RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array) as ArrayRef]).unwrap()
     }
 
     /// `INTERVAL '1 day'`, as SQL writes it.
@@ -1940,6 +1997,56 @@ mod tests {
             .unwrap()
             .filter(shifted().eq(shifted()))
             .unwrap();
+        assert_eq!(collect(&df).unwrap(), 2);
+
+        // R7-F1: a decimal division by 2 scales its numerator first, which
+        // overflows at `10**38 - 1`. Read as total, it let the simplifier
+        // remove the filter or empty the relation, at every layout.
+        let max = 10_i128.pow(38) - 1;
+        let halved = || col("x") / lit(2_i64);
+        for partitions in [1, 2, 4] {
+            for batch_size in [1, 7, 8192] {
+                let session = session_context_with(LayoutOverrides {
+                    target_partitions: NonZeroUsize::new(partitions),
+                    batch_size: NonZeroUsize::new(batch_size),
+                });
+                let layout = format!("{partitions} partitions, batches of {batch_size}");
+                let t = session.read_batch(decimals(vec![max, 1])).unwrap();
+                for (name, predicate) in [
+                    ("greater", halved().gt(lit(0_i64))),
+                    ("self equal", halved().eq(halved())),
+                    ("is null", halved().is_null()),
+                    ("is not null", halved().is_not_null()),
+                ] {
+                    let df = t.clone().filter(predicate).unwrap();
+                    let plan = logical(&df);
+                    assert!(
+                        plan.contains("Filter:") && plan.contains(" / "),
+                        "{name}, {layout}: the division is gone\n{plan}"
+                    );
+                    let error =
+                        collect(&df).expect_err(&format!("{name}, {layout}: no error\n{plan}"));
+                    assert!(error.to_string().contains("overflow"), "{name}: {error}");
+                }
+                // Where no value overflows, every row is kept.
+                let t = session.read_batch(decimals(vec![2, 1])).unwrap();
+                for predicate in [halved().eq(halved()), halved().is_not_null()] {
+                    let df = t.clone().filter(predicate).unwrap();
+                    assert_eq!(collect(&df).unwrap(), 2, "{layout}");
+                }
+                assert_eq!(
+                    collect(&t.clone().filter(halved().is_null()).unwrap()).unwrap(),
+                    0,
+                    "{layout}"
+                );
+            }
+        }
+        // An integer divided by 2 cannot fail, so `v = v` is still TRUE.
+        let df = table(&session, &[("x", vec![i64::MIN, 1])])
+            .filter((col("x") / lit(2_i64)).eq(col("x") / lit(2_i64)))
+            .unwrap();
+        let plan = logical(&df);
+        assert!(!plan.contains(" / "), "{plan}");
         assert_eq!(collect(&df).unwrap(), 2);
     }
 

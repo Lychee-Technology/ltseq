@@ -133,7 +133,7 @@ The ratings are those of the table above, plus:
 **What "fallible" means here.** The guards decide whether an expression can fail with `rewrite_guard::fallible_node`. It is a conservative reading of DataFusion 55's kernels. These count as fallible:
 
 - a cast the program writes that can fail: a `cast()`, or a `CAST`, `::` or `arrow_cast` in `filter_where`'s SQL, each lowered to an `OpaqueCast` (`lower_casts` in `src/ops/aggregation.rs`). A `Cast` that coercion or LTSeq's lowering inserts does not count (`type_coercion` below);
-- a division or remainder, unless the divisor is a constant other than 0 and −1, or both operands are floats;
+- a division or remainder, unless both operands are floats, or both are integers after coercion and the divisor is a constant other than 0, −1 and NULL. A decimal division scales its numerator before it divides, which overflows whatever the divisor: on a `decimal128(38, 0)` holding `10**38 - 1`, `x / 2` raises (R7-F1);
 - `+`, `-`, `*` or a negation, unless the operands are integers or floats after coercion. Arrow checks temporal, interval, duration and decimal arithmetic even in the wrapping kernels DataFusion 55 calls, so `ts + INTERVAL '1 day'` raises past the last timestamp (R6-F2). Where an operand's type cannot be read, as in a join's keys in the physical plan, the operation counts as fallible;
 - a pattern match whose pattern is not a literal;
 - a subquery;
