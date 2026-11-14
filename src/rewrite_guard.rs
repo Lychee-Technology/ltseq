@@ -29,8 +29,9 @@
 //!   [`Guard::SkipFallible`] does not run the rule on a node whose own
 //!   expressions can fail (`eliminate_outer_join`).
 //! - [`GuardedPhysical`] wraps a physical rule, and runs it only on a plan
-//!   in which no expression can fail (`LimitedDistinctAggregation`,
-//!   `LimitPushPastWindows`, `PushdownSort` and the dynamic filters of
+//!   in which no expression can fail (`aggregate_statistics`,
+//!   `LimitedDistinctAggregation`, `LimitPushPastWindows`, `PushdownSort`
+//!   and the dynamic filters of
 //!   `FilterPushdown(Post)`), runs `join_selection` without swapping a
 //!   join's inputs, or does not run `OptimizeAggregateOrder` (X5).
 //! - [`KeepDemandedKeys`] guards `push_down_filter` and the physical
@@ -42,6 +43,10 @@
 //!   same way where either predicate can fail.
 //! - [`KeepStableSorts`] keeps `EnsureRequirements` from replacing a stable
 //!   sort with an unstable one by a prefix of its keys (X5).
+//! - [`NoZeroFetchSorts`] plans a sort that `eliminate_limit`'s guard keeps
+//!   under `head(0)` as a whole sort under a limit of 0 rows, so its keys
+//!   are evaluated and DataFusion's TopK of no rows, which panics, is not
+//!   planned.
 //!
 //! Whether an expression can fail is [`fallible_node`]'s conservative
 //! reading of DataFusion 55's kernels: a `cast()` that can fail (an
@@ -1432,6 +1437,56 @@ impl PhysicalOptimizerRule for KeepStableSorts {
     }
 }
 
+/// Keeps a sort under `head(0)` from being planned as a TopK of no rows
+/// (R5-F1 of #273).
+///
+/// Where a sort's key can fail, `eliminate_limit` keeps the sort under
+/// `head(0)`, as the sort demands its keys on every row of its input
+/// (D10a). `push_down_limit` and `LimitPushdown` then give it the limit's
+/// fetch of 0, and DataFusion 55 panics on it: a `SortExec` with a fetch
+/// plans a TopK, whose heap asserts `k > 0`, and a
+/// `SortPreservingMergeExec` asserts its fetch is not 0. This rule runs
+/// last and gives each such operator no fetch, under a `LocalLimitExec` of
+/// 0 rows. The limit still polls its input once, and a sort without a
+/// fetch reads its whole input before it returns its first batch, so every
+/// key is evaluated, and one that fails raises, as under a TopK of `k > 0`.
+#[derive(Debug)]
+pub(crate) struct NoZeroFetchSorts;
+
+impl PhysicalOptimizerRule for NoZeroFetchSorts {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::physical_plan::limit::LocalLimitExec;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+        plan.transform_up(|node| {
+            let sorts = node.downcast_ref::<SortExec>().is_some()
+                || node.downcast_ref::<SortPreservingMergeExec>().is_some();
+            if !sorts || node.fetch() != Some(0) {
+                return Ok(Transformed::no(node));
+            }
+            let Some(whole) = node.with_fetch(None) else {
+                return Ok(Transformed::no(node));
+            };
+            Ok(Transformed::yes(
+                Arc::new(LocalLimitExec::new(whole, 0)) as Arc<dyn ExecutionPlan>
+            ))
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "ltseq_no_zero_fetch_sorts"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
 /// Its input's batches, unchanged, required in `ordering` on one partition
 /// ([`KeepStableSorts`]).
 #[derive(Debug)]
@@ -1572,7 +1627,8 @@ pub(crate) fn logical_guard(name: &str) -> Option<Guard> {
 /// rated Restricted or Disabled and wrapped.
 pub(crate) fn physical_guard(name: &str) -> Option<PhysicalGuard> {
     match name {
-        "LimitedDistinctAggregation"
+        "aggregate_statistics"
+        | "LimitedDistinctAggregation"
         | "LimitPushPastWindows"
         | "PushdownSort"
         | "FilterPushdown(Post)" => Some(PhysicalGuard::NoFailures),
@@ -1902,7 +1958,11 @@ mod tests {
         );
     }
 
-    /// `head(0)` of a sort whose key can fail keeps the sort.
+    /// `head(0)` of a sort whose key can fail keeps the sort, and
+    /// `ltseq_no_zero_fetch_sorts` plans it as a whole sort under a limit
+    /// of 0 rows: DataFusion's TopK of no rows panics (R5-F1). The key is
+    /// evaluated on every row, at one partition and at several, with the
+    /// key computed below the sort or by the sort itself.
     #[test]
     fn plan_guard_eliminate_limit() {
         let session = session();
@@ -1918,6 +1978,53 @@ mod tests {
         };
         let guarded = limited(fallible());
         assert!(logical(&guarded).contains("Sort:"), "{}", logical(&guarded));
+        for partitions in [1, 2, 4] {
+            let session = session_context_with(LayoutOverrides {
+                target_partitions: NonZeroUsize::new(partitions),
+                batch_size: NonZeroUsize::new(1),
+            });
+            for (rows, fails) in [(vec![0, 2], true), (vec![1, 2], false)] {
+                let t = table(&session, &[("x", rows)]);
+                let computed = t
+                    .clone()
+                    .with_column("k", fallible())
+                    .unwrap()
+                    .sort(vec![col("k").sort(true, true)])
+                    .unwrap();
+                let own = t.sort(vec![fallible().sort(true, true)]).unwrap();
+                for (name, sorted) in [("computed", computed), ("own", own)] {
+                    let limited = sorted.limit(0, Some(0)).unwrap();
+                    let counted = limited
+                        .clone()
+                        .aggregate(vec![], vec![count(lit(1_i64))])
+                        .unwrap();
+                    let plan = physical(&limited);
+                    let zero = plan.lines().filter(|l| l.contains("fetch=0"));
+                    assert!(
+                        zero.clone().all(|l| l.contains("LocalLimitExec")),
+                        "{name}: {:?}\n{plan}",
+                        zero.collect::<Vec<_>>()
+                    );
+                    assert!(plan.contains("LocalLimitExec: fetch=0"), "{name}\n{plan}");
+                    assert!(plan.contains("SortExec: expr="), "{name}\n{plan}");
+                    let context = format!("{name} at {partitions} partitions, failing {fails}");
+                    match collect(&limited) {
+                        Err(e) => assert!(fails, "{context}: {e}"),
+                        Ok(n) => assert!(!fails && n == 0, "{context}: {n} rows\n{plan}"),
+                    }
+                    let batches = RUNTIME.block_on(counted.clone().collect());
+                    match batches {
+                        Err(e) => assert!(fails, "{context}: count: {e}"),
+                        Ok(batches) => {
+                            assert!(!fails, "{context}: count returned\n{}", physical(&counted));
+                            let column = batches[0].column(0);
+                            let counts = column.as_any().downcast_ref::<Int64Array>().unwrap();
+                            assert_eq!(counts.value(0), 0, "{context}");
+                        }
+                    }
+                }
+            }
+        }
         let free = limited(col("x"));
         assert!(
             logical(&free).contains("EmptyRelation"),
@@ -2212,7 +2319,10 @@ mod tests {
     }
 
     /// A float `max` over Parquet is not answered from statistics, which
-    /// leave NaN out (#253, #291); an integer one still is.
+    /// leave NaN out (#253, #291); an integer one still is. A `count` of
+    /// the first row of a sort whose key can fail is not answered from the
+    /// sort's exact row count either, which would leave the key
+    /// unevaluated (R5-F1).
     #[test]
     fn plan_guard_aggregate_statistics() {
         let session = session();
@@ -2229,6 +2339,22 @@ mod tests {
         assert!(plan.contains("AggregateExec"), "{plan}");
         let t = parquet(&session, "statistics_int", &[("x", vec![1, 3])]);
         let plan = physical(&t.aggregate(vec![], vec![max(col("x"))]).unwrap());
+        assert!(!plan.contains("AggregateExec"), "{plan}");
+        let t = table(&session, &[("x", vec![0, 2])]);
+        let counted = |key: Expr| {
+            t.clone()
+                .sort(vec![key.sort(true, true)])
+                .unwrap()
+                .limit(0, Some(1))
+                .unwrap()
+                .aggregate(vec![], vec![count(lit(1_i64))])
+                .unwrap()
+        };
+        let guarded = counted(fallible());
+        let plan = physical(&guarded);
+        assert!(plan.contains("AggregateExec"), "{plan}");
+        assert!(collect(&guarded).is_err(), "{plan}");
+        let plan = physical(&counted(col("x") + lit(1_i64)));
         assert!(!plan.contains("AggregateExec"), "{plan}");
     }
 

@@ -278,6 +278,54 @@ def test_a_filter_after_a_sort_by_computed_keys_that_cannot_fail_still_moves(eng
     assert rows == expected
 
 
+def test_a_projection_after_a_sort_keeps_its_computed_keys(engine_layout):
+    """R5-F1. Reading a sorted table moves the stable sort above a `derive`
+    after it (R2-F4), and DataFusion's plan builder rewrote the sort's keys
+    in terms of the projection below it by name. A cast is named as its
+    argument is, so `cast(s)` became the column passing `s` through: the
+    rows came back ordered by `s` as strings, and a cast that fails was
+    never evaluated."""
+    t = LTSeq.from_arrow(
+        pa.table({"x": pa.array([0, 0, 1], pa.int64()), "s": ["10", "9", "1"]})
+    )
+    derived = t.sort("x", lambda r: r.s.cast("int32")).derive(y=lambda r: r.x + 1)
+    assert derived.to_arrow().column("s").to_pylist() == ["9", "10", "1"]
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([0, 1], pa.int64()), "s": ["bad", "2"]}))
+    with pytest.raises(ValueError, match="Cast error"):
+        t.sort("x", lambda r: r.s.cast("int32")).derive(y=lambda r: r.x + 1).to_arrow()
+
+
+@pytest.mark.parametrize(
+    "limited",
+    [
+        pytest.param(lambda t: t.head(0), id="head_0"),
+        pytest.param(lambda t: t.filter(lambda r: r.x != 0).head(0), id="filter_head_0"),
+        pytest.param(
+            lambda t: t.derive(y=lambda r: r.x + 1).head(0), id="derive_head_0"
+        ),
+    ],
+)
+@pytest.mark.parametrize("terminal", ["to_arrow", "count"])
+@pytest.mark.parametrize("s, fails", [(["1", "2"], False), (["bad", "2"], True)])
+def test_head_0_of_a_sort_evaluates_its_keys(engine_layout, limited, terminal, s, fails):
+    """R5-F1. `eliminate_limit` keeps a sort whose key can fail under
+    `head(0)`, since the sort demands its keys on every row of its input.
+    DataFusion then gave the sort the limit's fetch of 0 and planned a TopK
+    of no rows, which panicked (`k > 0`) whether or not a key failed.
+    `ltseq_no_zero_fetch_sorts` plans it as a whole sort under a limit of
+    0 rows: no rows come back where every key converts, and the cast's
+    error is raised where one does not. `count()` is not answered from
+    the limit's exact row count either (`aggregate_statistics`)."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([0, 1], pa.int64()), "s": s}))
+    result = limited(t.sort("x", lambda r: r.s.cast("int32")))
+    run = (lambda: result.to_arrow().num_rows) if terminal == "to_arrow" else result.count
+    if fails:
+        with pytest.raises(ValueError, match="Cast error"):
+            run()
+    else:
+        assert run() == 0
+
+
 def test_a_window_over_ties_reads_rows_in_the_stable_order(engine_layout):
     """R2-F4, `EnsureRequirements` (X5). A window ordered by the declared
     key `k` asks its input only for `k`, and DataFusion met that with an

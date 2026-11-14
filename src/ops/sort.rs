@@ -231,7 +231,20 @@ fn hoist_stable_sort(
         })
         .collect::<datafusion::error::Result<Vec<_>>>()?;
     let outputs: Vec<Expr> = plan.schema().columns().into_iter().map(Expr::Column).collect();
-    Ok(Some(rebuilt.sort(keys)?.project(outputs)?.build()?))
+    // The sort is built as a node, not by `LogicalPlanBuilder::sort`: that
+    // rewrites a key in terms of the projection below it by name, and an
+    // opaque cast is named as its argument is, so `cast(s)` became the
+    // column passing `s` through, and the sort ordered by `s` and never
+    // evaluated the cast (R5-F1 of #273). Every column a key reads is in
+    // the rebuilt input by construction.
+    let sorted = LogicalPlan::Sort(datafusion::logical_expr::Sort {
+        expr: keys,
+        input: Arc::new(rebuilt.build()?),
+        fetch: None,
+    });
+    Ok(Some(
+        LogicalPlanBuilder::from(sorted).project(outputs)?.build()?,
+    ))
 }
 
 /// `order` in the column names of `projection`'s input, when each key is a

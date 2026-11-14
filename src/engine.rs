@@ -32,7 +32,9 @@ use tokio::runtime::Runtime;
 
 use crate::float_statistics::DropFloatStatistics;
 use crate::ops::lookup::OneRowPerKeyPlanner;
-use crate::rewrite_guard::{self, Guarded, GuardedPhysical, KeepDemandedKeys, KeepStableSorts};
+use crate::rewrite_guard::{
+    self, Guarded, GuardedPhysical, KeepDemandedKeys, KeepStableSorts, NoZeroFetchSorts,
+};
 use crate::source::LocalFiles;
 use crate::transpiler::FloatListZeros;
 
@@ -155,9 +157,12 @@ impl LayoutOverrides {
 ///   #273)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
-/// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
+/// - `KeepFileOrder`: After DataFusion's physical rules, so a scan with a
 ///   declared order reads its files in order however DataFusion planned
 ///   it (#325)
+/// - `NoZeroFetchSorts`: Last physical optimizer rule, so a sort kept under
+///   `head(0)` for a key that can fail reads its whole input instead of
+///   planning a TopK of no rows, which panics (#273)
 /// - `DropFloatStatistics`: First physical optimizer rule, so no Parquet
 ///   scan skips or replaces float values by statistics that leave NaN out
 ///   or by bloom filters that tell the zeros apart (#291)
@@ -220,7 +225,8 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     // `DropFloatStatistics` goes before DataFusion's physical rules, so the
     // ones that read a scan's statistics see what the scan reads, and
     // `KeepSortsAboveOffsets` too, so `EnsureRequirements` sees its limits;
-    // `KeepFileOrder` after them, so it runs after `LimitPushdown`.
+    // `KeepFileOrder` after them, so it runs after `LimitPushdown`, and
+    // `NoZeroFetchSorts` last, after every rule that gives a sort a fetch.
     let rules = [
         Arc::new(DropFloatStatistics) as _,
         Arc::new(KeepSortsAboveOffsets) as _,
@@ -234,7 +240,10 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
             Arc::clone(rule)
         }
     }))
-    .chain(std::iter::once(Arc::new(KeepFileOrder) as _))
+    .chain([
+        Arc::new(KeepFileOrder) as _,
+        Arc::new(NoZeroFetchSorts) as _,
+    ])
     .collect();
     let state = SessionStateBuilder::new_from_existing(state)
         .with_optimizer_rules(logical)
