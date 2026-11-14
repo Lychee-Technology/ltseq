@@ -16,31 +16,40 @@
 //!   every expression that can fail in the node's own expressions: where
 //!   simplifying one whole would drop or add one, it keeps that
 //!   expression's root and simplifies its parts, which stops the identities
-//!   and absorption of assessment hazard X2. [`Guard::KeepBarriers`] keeps
-//!   `push_down_filter` from moving a filter below a [`DemandBarrier`].
+//!   and absorption of assessment hazard X2. Both count occurrences
+//!   ([`Demand`]), each expression of a node on its own: two occurrences of
+//!   one expression are demanded on different rows. [`Guard::KeepBarriers`]
+//!   keeps `push_down_filter` from moving a filter below a
+//!   [`DemandBarrier`], and [`Guard::KeepJoinShape`] keeps
+//!   `eliminate_cross_join` from changing a join's inputs (X5).
 //!   [`Guard::SkipFallible`] does not run the rule on a node whose own
 //!   expressions can fail (`eliminate_outer_join`).
 //! - [`GuardedPhysical`] wraps a physical rule, and runs it only on a plan
 //!   in which no expression can fail (`LimitedDistinctAggregation`,
 //!   `LimitPushPastWindows`, `PushdownSort` and the dynamic filters of
-//!   `FilterPushdown(Post)`).
+//!   `FilterPushdown(Post)`), runs `join_selection` without swapping a
+//!   join's inputs, or does not run `OptimizeAggregateOrder` (X5).
 //! - [`KeepDemandedKeys`] guards `push_down_filter` and the physical
 //!   `FilterPushdown` (hazard X4, D10a option (a)): a sort, grouping,
 //!   `distinct` or aggregate demands its keys and arguments on every row of
 //!   its input, and a join on every row of its right input, so a filter
 //!   above one whose keys can fail is stopped by a [`DemandBarrier`] where
-//!   it would leave a key unevaluated.
+//!   it would leave a key unevaluated. Chained filters are kept apart the
+//!   same way where either predicate can fail.
+//! - [`KeepStableSorts`] keeps `EnsureRequirements` from replacing a stable
+//!   sort with an unstable one by a prefix of its keys (X5).
 //!
 //! Whether an expression can fail is [`fallible_node`]'s conservative
 //! reading of DataFusion 55's kernels: a `cast()` that can fail (an
-//! [`OpaqueCast`]; a `Cast` is the engine's), a division or remainder by
+//! [`OpaqueCast`], from a lambda or `filter_where`'s SQL; a `Cast` is the
+//! engine's), a division or remainder by
 //! anything but a safe constant, a function not known to be total, a
 //! pattern match whose pattern is not a literal. A constant is
 //! fallible only if evaluating it fails. Checked arithmetic (M5) makes more
 //! operations fallible, and extends it.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -141,7 +150,8 @@ pub(crate) fn fallible_node(expr: &Expr, schema: &DFSchema) -> bool {
         },
         // A `Cast` is the engine's: coercion inserts it, and so does LTSeq's
         // lowering, to compare or combine two types. A cast the program
-        // writes that can fail is an `OpaqueCast` (#260, X1). Where an
+        // writes that can fail is an `OpaqueCast` (#260, X1), whether
+        // `cast()` or `filter_where`'s SQL writes it (R2-F3). Where an
         // engine cast next to a literal could fail, as `µs` to `ns` can,
         // the comparison the contract defines is the exact one, which
         // `unwrap_cast` gives by removing the cast; its error is no value
@@ -252,17 +262,61 @@ fn key(expr: &Expr) -> String {
         .map_or_else(|_| expr.to_string(), |t| t.data.to_string())
 }
 
-/// The keys of the fallible subexpressions of `expr`, `expr` included.
-fn raw_atoms(expr: &Expr, schema: &DFSchema, out: &mut BTreeSet<String>) {
+/// The fallible expressions a plan evaluates, by key, each with the number
+/// of places it is evaluated in (R2-F1 of #273).
+///
+/// A set would not do: an expression that can fail is demanded where its
+/// occurrence is, and two occurrences of the same expression are demanded
+/// on different rows. `v = a | (a & (c > 0))` and `w = if_else(a, c, 0)`
+/// both evaluate `c`, but `v` demands it where `a` is NULL and `w` only
+/// where `a` is TRUE, so a rewrite that drops the occurrence in `v` drops a
+/// demanded failure although `c` is still evaluated in `w`. Counting the
+/// occurrences catches it; a rewrite that keeps every occurrence keeps the
+/// expression under the same conditions, as no guarded rule moves one into
+/// another branch.
+pub(crate) type Demand = BTreeMap<String, u64>;
+
+fn add(out: &mut Demand, from: &Demand, times: u64) {
+    for (key, count) in from {
+        let entry = out.entry(key.clone()).or_default();
+        *entry = entry.saturating_add(count.saturating_mul(times));
+    }
+}
+
+/// Whether `after` evaluates every occurrence `before` does.
+fn covers(after: &Demand, before: &Demand) -> bool {
+    before
+        .iter()
+        .all(|(key, count)| after.get(key).is_some_and(|n| n >= count))
+}
+
+/// The occurrences of the fallible subexpressions of `expr`, `expr`
+/// included.
+fn raw_atoms(expr: &Expr, schema: &DFSchema, out: &mut Demand) {
     let _ = expr.apply(|e| {
         if fallible_node(e, schema) {
-            out.insert(key(e));
+            *out.entry(key(e)).or_default() += 1;
         }
         Ok(TreeNodeRecursion::Continue)
     });
 }
 
-type Atoms = Rc<BTreeSet<String>>;
+/// How many times `expr` reads each column.
+fn column_occurrences(expr: &Expr) -> Vec<(Column, u64)> {
+    let mut out: Vec<(Column, u64)> = Vec::new();
+    let _ = expr.apply(|e| {
+        if let Expr::Column(column) = e {
+            match out.iter_mut().find(|(c, _)| c == column) {
+                Some((_, n)) => *n += 1,
+                None => out.push((column.clone(), 1)),
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+    out
+}
+
+type Atoms = Rc<Demand>;
 
 /// The fallible expressions that the values of a plan's columns are
 /// computed from, through the projections, aggregates and windows below.
@@ -272,18 +326,18 @@ struct Inliner {
 }
 
 impl Inliner {
-    /// The fallible expressions `exprs` evaluate, over `plan`'s inputs.
-    fn exprs(&self, plan: &LogicalPlan, exprs: &[Expr]) -> BTreeSet<String> {
+    /// The fallible expressions `exprs` evaluate, over `plan`'s inputs: the
+    /// ones they hold, and those of the columns they read, once for each
+    /// time they read the column.
+    fn exprs(&self, plan: &LogicalPlan, exprs: &[Expr]) -> Demand {
         let schema = input_schema(plan);
-        let mut out = BTreeSet::new();
+        let mut out = Demand::new();
         for expr in exprs {
             raw_atoms(expr, &schema, &mut out);
-            let mut columns = std::collections::HashSet::new();
-            let _ = expr_to_columns(expr, &mut columns);
-            for column in &columns {
+            for (column, times) in column_occurrences(expr) {
                 for input in plan.inputs() {
-                    if let Some(index) = index_of(input.schema(), column) {
-                        out.extend(self.column(input, index).iter().cloned());
+                    if let Some(index) = index_of(input.schema(), &column) {
+                        add(&mut out, &self.column(input, index), times);
                         break;
                     }
                 }
@@ -303,7 +357,7 @@ impl Inliner {
         atoms
     }
 
-    fn compute_column(&self, plan: &LogicalPlan, index: usize) -> BTreeSet<String> {
+    fn compute_column(&self, plan: &LogicalPlan, index: usize) -> Demand {
         let defining = |expr: &Expr| self.exprs(plan, std::slice::from_ref(expr));
         match plan {
             LogicalPlan::Projection(p) => p.expr.get(index).map(defining).unwrap_or_default(),
@@ -329,15 +383,15 @@ impl Inliner {
                 }
             }
             LogicalPlan::Union(u) => {
-                let mut out = BTreeSet::new();
+                let mut out = Demand::new();
                 for input in &u.inputs {
                     if index < input.schema().fields().len() {
-                        out.extend(self.column(input, index).iter().cloned());
+                        add(&mut out, &self.column(input, index), 1);
                     }
                 }
                 out
             }
-            LogicalPlan::TableScan(_) | LogicalPlan::EmptyRelation(_) => BTreeSet::new(),
+            LogicalPlan::TableScan(_) | LogicalPlan::EmptyRelation(_) => Demand::new(),
             plan => {
                 let column = Column::from(plan.schema().qualified_field(index));
                 for input in plan.inputs() {
@@ -347,7 +401,7 @@ impl Inliner {
                         return self.column(input, i).as_ref().clone();
                     }
                 }
-                BTreeSet::new()
+                Demand::new()
             }
         }
     }
@@ -356,7 +410,7 @@ impl Inliner {
     /// those of the columns they read (§20.2): the predicate of a filter,
     /// the keys of a sort, grouping, `distinct` or join, the arguments of
     /// an aggregate or window function, an extension's expressions.
-    fn demanded_by(&self, plan: &LogicalPlan) -> BTreeSet<String> {
+    fn demanded_by(&self, plan: &LogicalPlan) -> Demand {
         let exprs: Vec<Expr> = match plan {
             LogicalPlan::Filter(f) => vec![f.predicate.clone()],
             LogicalPlan::Sort(s) => s.expr.iter().map(|s| s.expr.clone()).collect(),
@@ -388,8 +442,8 @@ impl Inliner {
     /// [`DemandBarrier`] included, so below one it may stand where a sort
     /// above demands what it would remove. Everything that can fail below
     /// it counts as demanded.
-    fn demanded_in(&self, plan: &LogicalPlan) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
+    fn demanded_in(&self, plan: &LogicalPlan) -> Demand {
+        let mut out = Demand::new();
         let _ = plan.apply(|node| {
             match node {
                 LogicalPlan::Filter(f) if f.predicate.column_refs().is_empty() => {
@@ -401,7 +455,7 @@ impl Inliner {
                         Ok(TreeNodeRecursion::Continue)
                     });
                 }
-                node => out.extend(self.demanded_by(node)),
+                node => add(&mut out, &self.demanded_by(node), 1),
             }
             Ok(TreeNodeRecursion::Continue)
         });
@@ -426,7 +480,7 @@ pub(crate) fn can_fail_over(input: &LogicalPlan, exprs: &[Expr]) -> bool {
     let inliner = Inliner::default();
     let schema = input.schema();
     exprs.iter().any(|expr| {
-        let mut atoms = BTreeSet::new();
+        let mut atoms = Demand::new();
         raw_atoms(expr, schema, &mut atoms);
         let mut columns = std::collections::HashSet::new();
         let _ = expr_to_columns(expr, &mut columns);
@@ -515,6 +569,9 @@ pub(crate) enum Guard {
     /// [`DemandBarrier`]. `push_down_filter` moves a conjunct that reads
     /// no column through every extension node.
     KeepBarriers,
+    /// Accept a rewrite only if every join keeps its inputs, in their
+    /// places (`eliminate_cross_join`, X5).
+    KeepJoinShape,
 }
 
 /// A DataFusion logical rule held to its rating by `guard`. It keeps the
@@ -562,6 +619,13 @@ impl OptimizerRule for Guarded {
                 }
                 self.inner.rewrite(plan, config)
             }
+            Guard::KeepJoinShape => {
+                let rewritten = self.inner.rewrite(plan.clone(), config)?;
+                if rewritten.transformed && join_shape(&rewritten.data) != join_shape(&plan) {
+                    return Ok(Transformed::no(plan));
+                }
+                Ok(rewritten)
+            }
             Guard::KeepBarriers => {
                 let before = filtered_below_barriers(&plan);
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
@@ -572,54 +636,116 @@ impl OptimizerRule for Guarded {
                 }
                 Ok(rewritten)
             }
-            Guard::KeepFailures { own } => {
-                let demanded = |plan: &LogicalPlan| {
-                    let inliner = Inliner::default();
-                    if own {
-                        inliner.exprs(plan, &plan.expressions())
-                    } else {
-                        inliner.demanded_in(plan)
-                    }
-                };
+            Guard::KeepFailures { own: false } => {
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
                 if !rewritten.transformed {
                     return Ok(rewritten);
                 }
-                let before = demanded(&plan);
-                if before.is_empty() && !own {
+                // Every occurrence of a demanded expression that can fail
+                // is still demanded: one left elsewhere in the plan does
+                // not stand in for one the rewrite removed (R2-F1).
+                let before = Inliner::default().demanded_in(&plan);
+                if before.is_empty() {
                     return Ok(rewritten);
                 }
-                let after = if own {
-                    // `simplify_expressions` may put a projection above an
-                    // aggregate it rewrote; what it computes is below.
-                    let mut after = demanded(&rewritten.data);
-                    if let LogicalPlan::Projection(p) = &rewritten.data {
-                        if !matches!(plan, LogicalPlan::Projection(_)) {
-                            after.extend(demanded(&p.input));
-                        }
-                    }
-                    after
-                } else {
-                    demanded(&rewritten.data)
-                };
-                // A rewrite of a node's own expressions neither drops nor
-                // adds one that can fail.
-                if own && before != after {
-                    // Simplify what does keep them, expression by expression
-                    // and subexpression by subexpression. Refusing the
-                    // node's rewrite whole would also refuse rewrites
-                    // DataFusion requires: `coalesce` and `now()` fail at
-                    // execution unless they are simplified.
-                    return simplify_keeping_failures(plan, config);
-                }
-                Ok(if before.is_subset(&after) {
+                let after = Inliner::default().demanded_in(&rewritten.data);
+                Ok(if covers(&after, &before) {
                     rewritten
                 } else {
                     Transformed::no(plan)
                 })
             }
+            Guard::KeepFailures { own: true } => {
+                let rewritten = self.inner.rewrite(plan.clone(), config)?;
+                if !rewritten.transformed || keeps_each_expression(&plan, &rewritten.data) {
+                    return Ok(rewritten);
+                }
+                // Simplify what does keep them, expression by expression
+                // and subexpression by subexpression. Refusing the node's
+                // rewrite whole would also refuse rewrites DataFusion
+                // requires: `coalesce` and `now()` fail at execution unless
+                // they are simplified.
+                simplify_keeping_failures(plan, config)
+            }
         }
     }
+}
+
+/// The joins of `plan` and what each joins, as a string: a join is
+/// `(left JOIN right)`, and any other input is the names of its columns,
+/// which stay the same through the filters and projections that
+/// `eliminate_cross_join` moves.
+///
+/// A join returns its rows in an order its inputs decide (the probe side's
+/// for a hash join), so a rule that flattens a tree of inner joins and
+/// builds it again in another shape changes the order of the rows below
+/// the root sort, and of a table without a declared order. With the same
+/// shape, it only moves equalities between the filter and the join keys.
+fn join_shape(plan: &LogicalPlan) -> String {
+    match plan {
+        LogicalPlan::Join(join) => format!(
+            "({} {} JOIN {})",
+            join_shape(&join.left),
+            join.join_type,
+            join_shape(&join.right)
+        ),
+        plan if plan.inputs().len() == 1 && !matches!(plan, LogicalPlan::Aggregate(_)) => {
+            join_shape(plan.inputs()[0])
+        }
+        plan if plan.inputs().is_empty() || !plan_has_join(plan) => {
+            let mut names: Vec<&str> = plan
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
+            names.sort_unstable();
+            format!("[{}]", names.join(","))
+        }
+        plan => plan
+            .inputs()
+            .into_iter()
+            .map(join_shape)
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
+fn plan_has_join(plan: &LogicalPlan) -> bool {
+    plan.exists(|p| Ok(matches!(p, LogicalPlan::Join(_))))
+        .unwrap_or(true)
+}
+
+/// Whether `rewritten`, `simplify_expressions`' rewrite of `plan`, keeps
+/// every occurrence of an expression that can fail in each of the node's
+/// expressions, and adds none (R2-F1).
+///
+/// Each expression is compared with its own rewrite: the occurrences of
+/// two expressions are demanded on different rows, so one expression's
+/// occurrence does not stand in for another's. A rewrite that changes the
+/// node's shape, as one that puts a projection above an aggregate does, is
+/// accepted only where neither side evaluates anything that can fail.
+fn keeps_each_expression(plan: &LogicalPlan, rewritten: &LogicalPlan) -> bool {
+    let inliner = Inliner::default();
+    let each = |plan: &LogicalPlan| -> Vec<Demand> {
+        plan.expressions()
+            .iter()
+            .map(|e| inliner.exprs(plan, std::slice::from_ref(e)))
+            .collect()
+    };
+    let before = each(plan);
+    let after = each(rewritten);
+    if std::mem::discriminant(plan) == std::mem::discriminant(rewritten)
+        && before.len() == after.len()
+    {
+        return before == after;
+    }
+    // A projection the rewrite put above the node computes from below.
+    let mut after: Vec<Demand> = after;
+    if let LogicalPlan::Projection(p) = rewritten {
+        after.extend(each(&p.input));
+    }
+    before.iter().chain(&after).all(Demand::is_empty)
 }
 
 /// `simplify_expressions` on one node, keeping every expression that can
@@ -655,10 +781,13 @@ fn simplify_keeping_failures(
     let original = plan.clone();
     let atoms = |e: &Expr| inliner.exprs(&original, std::slice::from_ref(e));
 
+    // An expression is simplified whole only where that keeps every
+    // occurrence of what can fail in it, and adds none: a set would let a
+    // kept occurrence stand in for a dropped one (R2-F1).
     fn keep(
         expr: Expr,
         simplify: &dyn Fn(Expr) -> Result<Expr>,
-        atoms: &dyn Fn(&Expr) -> BTreeSet<String>,
+        atoms: &dyn Fn(&Expr) -> Demand,
         info: &SimplifyContext,
     ) -> Result<Expr> {
         let before = atoms(&expr);
@@ -671,7 +800,12 @@ fn simplify_keeping_failures(
             .data;
         if let Expr::ScalarFunction(f) = &expr {
             if let ExprSimplifyResult::Simplified(hooked) = f.func.simplify(f.args.clone(), info)? {
-                if atoms(&hooked) == atoms(&expr) {
+                // A hook may evaluate an argument twice (`coalesce(a, b)`
+                // becomes `CASE WHEN a IS NOT NULL THEN a ELSE b END`), the
+                // second time where the first one did not fail. It may not
+                // drop one or add another.
+                let (hooked_atoms, atoms) = (atoms(&hooked), atoms(&expr));
+                if covers(&hooked_atoms, &atoms) && hooked_atoms.keys().eq(atoms.keys()) {
                     return Ok(hooked);
                 }
             }
@@ -711,21 +845,37 @@ fn simplify_keeping_failures(
     })
 }
 
-/// A DataFusion physical rule that runs only on a plan in which no
-/// expression can fail. It keeps the rule's name.
+/// How a [`GuardedPhysical`] rule is held to its rating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhysicalGuard {
+    /// Run the rule only on a plan in which no expression can fail.
+    NoFailures,
+    /// Run the rule with `join_reordering` off, so that it chooses how to
+    /// execute a join without swapping its inputs (`join_selection`, X5).
+    NoSwap,
+    /// Do not run the rule (`OptimizeAggregateOrder`, X5).
+    Off,
+}
+
+/// A DataFusion physical rule held to its rating by `guard`. It keeps the
+/// rule's name.
 pub(crate) struct GuardedPhysical {
     inner: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+    guard: PhysicalGuard,
 }
 
 impl GuardedPhysical {
-    pub(crate) fn new(inner: Arc<dyn PhysicalOptimizerRule + Send + Sync>) -> Self {
-        GuardedPhysical { inner }
+    pub(crate) fn new(
+        inner: Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+        guard: PhysicalGuard,
+    ) -> Self {
+        GuardedPhysical { inner, guard }
     }
 }
 
 impl fmt::Debug for GuardedPhysical {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GuardedPhysical({})", self.inner.name())
+        write!(f, "GuardedPhysical({}, {:?})", self.inner.name(), self.guard)
     }
 }
 
@@ -735,10 +885,15 @@ impl PhysicalOptimizerRule for GuardedPhysical {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        if physical_plan_can_fail(&plan) {
-            Ok(plan)
-        } else {
-            self.inner.optimize(plan, config)
+        match self.guard {
+            PhysicalGuard::NoFailures if physical_plan_can_fail(&plan) => Ok(plan),
+            PhysicalGuard::NoFailures => self.inner.optimize(plan, config),
+            PhysicalGuard::NoSwap => {
+                let mut config = config.clone();
+                config.optimizer.join_reordering = false;
+                self.inner.optimize(plan, &config)
+            }
+            PhysicalGuard::Off => Ok(plan),
         }
     }
 
@@ -932,30 +1087,42 @@ impl OptimizerRule for KeepDemandedKeys {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        guard_keys(plan, false, false)
+        guard_keys(plan, None, false)
     }
 }
 
-/// `plan` with barriers below the filters above it (`under_filter`).
-/// `barred` says `plan` is the input of a barrier already.
+/// `plan` with barriers below the filters above it. `under_filter` is
+/// `Some` below a filter that `push_down_filter` could move down to `plan`,
+/// and says whether its predicate can fail. `barred` says `plan` is the
+/// input of a barrier already.
 fn guard_keys(
     plan: LogicalPlan,
-    under_filter: bool,
+    under_filter: Option<bool>,
     barred: bool,
 ) -> Result<Transformed<LogicalPlan>> {
     if is_barrier(&plan) {
-        return plan.map_children(|child| guard_keys(child, false, true));
+        return plan.map_children(|child| guard_keys(child, None, true));
     }
     // A limit, a scan and an extension stop a filter; a filter starts one.
     let below = match &plan {
-        LogicalPlan::Limit(_) | LogicalPlan::Extension(_) => false,
-        LogicalPlan::Filter(_) => true,
+        LogicalPlan::Limit(_) | LogicalPlan::Extension(_) => None,
+        LogicalPlan::Filter(f) => Some(can_fail_over(&f.input, std::slice::from_ref(&f.predicate))),
         _ => under_filter,
     };
-    let guarded = if under_filter && !barred {
-        keys_guard(&plan)
-    } else {
-        KeysGuard::None
+    let guarded = match under_filter {
+        Some(upper_fails) if !barred => match &plan {
+            // Chained filters (R2-F2). Each demands its predicate on every
+            // row it reads, so the lower one on rows the upper one would
+            // remove, and the upper one only on rows the lower one keeps.
+            // `push_down_filter` merges them into `lower AND upper` and puts
+            // the cheaper conjunct first, after which either suppresses the
+            // other's errors where it is FALSE, and evaluates the upper one
+            // on rows the lower one removes. Where either can fail, the
+            // upper one stops above the lower one.
+            LogicalPlan::Filter(_) if upper_fails || below == Some(true) => KeysGuard::Above,
+            _ => keys_guard(&plan),
+        },
+        _ => KeysGuard::None,
     };
     let plan = match guarded {
         KeysGuard::Inputs(ref sides) => {
@@ -1012,7 +1179,7 @@ fn keys_guard(plan: &LogicalPlan) -> KeysGuard {
     };
     let inliner = Inliner::default();
     let schema = input_schema(plan);
-    let mut own = BTreeSet::new();
+    let mut own = Demand::new();
     for expr in plan.expressions() {
         for expr in arguments(&expr) {
             raw_atoms(&expr, &schema, &mut own);
@@ -1108,6 +1275,159 @@ impl ExecutionPlan for DemandBarrierExec {
     }
 }
 
+/// Keeps the order of every stable sort LTSeq plans (X5, R2-F4 of #273).
+///
+/// `sort` is stable: its last key is each row's position in the input
+/// (`sort_impl`), so no two rows tie. Above it, an operator that requires an
+/// order asks only for the declared keys: a window `ORDER BY k`, or the
+/// root sort that re-imposes the declared order. `EnsureRequirements` then
+/// replaces the stable sort with a sort by those keys, or removes it under
+/// the root's, as either meets the requirement; DataFusion's sort is not
+/// stable, so rows equal on `k` came back in any order, and `shift(1)` over
+/// them read whichever row the sort put before, even on one partition.
+///
+/// This rule runs before `EnsureRequirements` and puts a
+/// [`StableOrderExec`] above each such sort. It requires its input in the
+/// sort's full order, on one partition, so `EnsureRequirements` has to keep
+/// a sort by every key, position included; above it the rows are in that
+/// order, which meets any requirement of a prefix of its keys.
+#[derive(Debug)]
+pub(crate) struct KeepStableSorts;
+
+impl PhysicalOptimizerRule for KeepStableSorts {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::physical_expr::expressions::Column as PhysicalColumn;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+        plan.transform_up(|node| {
+            let Some(sort) = node.downcast_ref::<SortExec>() else {
+                return Ok(Transformed::no(node));
+            };
+            let stable = sort.expr().last().is_some_and(|key| {
+                key.expr
+                    .downcast_ref::<PhysicalColumn>()
+                    .is_some_and(|c| c.name().starts_with(crate::ops::sort::POSITION_PREFIX))
+            });
+            if !stable {
+                return Ok(Transformed::no(node));
+            }
+            let ordering = sort.expr().clone();
+            Ok(Transformed::yes(Arc::new(StableOrderExec {
+                input: node,
+                ordering,
+            }) as Arc<dyn ExecutionPlan>))
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "ltseq_keep_stable_sorts"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// Its input's batches, unchanged, required in `ordering` on one partition
+/// ([`KeepStableSorts`]).
+#[derive(Debug)]
+pub(crate) struct StableOrderExec {
+    input: Arc<dyn ExecutionPlan>,
+    ordering: datafusion::physical_expr::LexOrdering,
+}
+
+impl DisplayAs for StableOrderExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "StableOrderExec: [{}]", self.ordering)
+    }
+}
+
+impl ExecutionPlan for StableOrderExec {
+    fn name(&self) -> &str {
+        "StableOrderExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.input.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn required_input_distribution(&self) -> Vec<datafusion::physical_plan::Distribution> {
+        vec![datafusion::physical_plan::Distribution::SinglePartition]
+    }
+
+    fn required_input_ordering(
+        &self,
+    ) -> Vec<Option<datafusion::physical_expr::OrderingRequirements>> {
+        vec![Some(datafusion::physical_expr::OrderingRequirements::from(
+            self.ordering.clone(),
+        ))]
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
+    }
+
+    // A limit above it may still reach the sort, which then keeps only
+    // the first rows (TopK).
+    fn supports_limit_pushdown(&self) -> bool {
+        true
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        for key in self.ordering.iter() {
+            if f(&key.expr)? == TreeNodeRecursion::Stop {
+                return Ok(TreeNodeRecursion::Stop);
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn replace_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(StableOrderExec {
+            input: children.swap_remove(0),
+            ordering: self.ordering.clone(),
+        }))
+    }
+
+    #[allow(deprecated)]
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.input.execute(partition, context)
+    }
+}
+
 /// Plans a [`DemandBarrier`] as a [`DemandBarrierExec`]; the engine's
 /// query planner holds it.
 pub(crate) struct DemandBarrierPlanner;
@@ -1143,20 +1463,23 @@ pub(crate) fn logical_guard(name: &str) -> Option<Guard> {
         | "eliminate_group_by_constant" => Some(Guard::KeepFailures { own: false }),
         "eliminate_outer_join" => Some(Guard::SkipFallible),
         "push_down_filter" => Some(Guard::KeepBarriers),
+        "eliminate_cross_join" => Some(Guard::KeepJoinShape),
         _ => None,
     }
 }
 
-/// Whether the session runs the physical rule `name` only on plans in
-/// which nothing can fail.
-pub(crate) fn physical_guarded(name: &str) -> bool {
-    matches!(
-        name,
+/// How the session holds the physical rule `name` to its rating, if it is
+/// rated Restricted or Disabled and wrapped.
+pub(crate) fn physical_guard(name: &str) -> Option<PhysicalGuard> {
+    match name {
         "LimitedDistinctAggregation"
-            | "LimitPushPastWindows"
-            | "PushdownSort"
-            | "FilterPushdown(Post)"
-    )
+        | "LimitPushPastWindows"
+        | "PushdownSort"
+        | "FilterPushdown(Post)" => Some(PhysicalGuard::NoFailures),
+        "join_selection" => Some(PhysicalGuard::NoSwap),
+        "OptimizeAggregateOrder" => Some(PhysicalGuard::Off),
+        _ => None,
+    }
 }
 
 /// Plan-guard tests: one minimal plan per rule the inventory rates
@@ -1324,6 +1647,43 @@ mod tests {
             assert!(plan.contains(" / "), "{name}: the division is gone\n{plan}");
             assert!(collect(&df).is_err(), "{name}: no error\n{plan}");
         }
+        // R2-F1: the occurrence absorption would drop is demanded where `a`
+        // is NULL, and the one `w` keeps only where `a` is TRUE, so `v`
+        // keeps its own.
+        let df = t
+            .clone()
+            .select(vec![
+                a.clone()
+                    .or(a.clone().and(fallible().gt(lit(1_i64))))
+                    .alias("v"),
+                datafusion::logical_expr::when(a.clone(), fallible())
+                    .otherwise(lit(0_i64))
+                    .unwrap()
+                    .alias("w"),
+            ])
+            .unwrap();
+        let plan = logical(&df);
+        let v = plan
+            .lines()
+            .find(|l| l.contains(" AS v"))
+            .unwrap_or_else(|| panic!("{plan}"));
+        assert_eq!(v.matches("Int64(10) / ").count(), 2, "{plan}");
+        // The same within one expression: two occurrences stay two.
+        let df = t
+            .clone()
+            .select(vec![(datafusion::logical_expr::when(a.clone(), fallible())
+                .otherwise(lit(0_i64))
+                .unwrap()
+                + datafusion::logical_expr::when(
+                    a.clone().or(a.clone().and(fallible().gt(lit(1_i64)))),
+                    lit(1_i64),
+                )
+                .otherwise(lit(0_i64))
+                .unwrap())
+            .alias("v")])
+            .unwrap();
+        let plan = logical(&df);
+        assert_eq!(plan.matches("Int64(10) / ").count(), 2, "{plan}");
         // A rewrite that drops nothing that can fail still applies.
         let df = t.select(vec![(col("x") * lit(0_i64)).alias("v")]).unwrap();
         assert!(logical(&df).contains("Int64(0) AS v"), "{}", logical(&df));
@@ -1545,6 +1905,26 @@ mod tests {
             assert!(!plan.contains("DemandBarrier"), "{name}\n{plan}");
             assert!(collect(&free).is_ok(), "{name}\n{plan}");
         }
+        // R2-F2: chained filters are not merged where either can fail. The
+        // lower one demands its predicate on every row, the upper one only
+        // on the rows the lower one keeps.
+        let chained = |lower: Expr, upper: Expr| t().filter(lower).unwrap().filter(upper).unwrap();
+        let guarded = chained(fallible().gt(lit(1_i64)), col("x").not_eq(lit(0_i64)));
+        let plan = logical(&guarded);
+        assert_eq!(plan.matches("Filter:").count(), 2, "{plan}");
+        assert!(
+            depth(&plan, "x != Int64(0)") < depth(&plan, "DemandBarrier"),
+            "{plan}"
+        );
+        assert!(collect(&guarded).is_err(), "{plan}");
+        let guarded = chained(col("x").not_eq(lit(0_i64)), fallible().gt(lit(1_i64)));
+        let plan = logical(&guarded);
+        assert!(plan.contains("DemandBarrier"), "{plan}");
+        assert_eq!(collect(&guarded).unwrap(), 2, "{plan}");
+        let free = chained(col("x").gt(lit(0_i64)), col("x").not_eq(lit(2_i64)));
+        let plan = logical(&free);
+        assert!(!plan.contains("DemandBarrier"), "{plan}");
+        assert_eq!(plan.matches("Filter:").count(), 1, "{plan}");
     }
 
     /// X4 in the physical plan: the filter stays above the barrier and out
@@ -1696,6 +2076,118 @@ mod tests {
         );
         assert!(free.contains("reverse"), "{free}");
         assert!(!guarded.contains("reverse"), "{guarded}");
+    }
+
+    /// X5: a hash join returns its rows in its probe side's order, so
+    /// swapping the inputs changes the order of an inner join's rows.
+    /// `join_selection` still picks how a join runs, but keeps its sides
+    /// where DataFusion's rule would build on the smaller one.
+    #[test]
+    fn plan_guard_join_selection() {
+        let joined = |session: &SessionContext| {
+            let big = table(session, &[("a", (0..1000).collect())]);
+            let small = table(session, &[("k", vec![1, 2, 3])]);
+            physical(
+                &big.join(small, JoinType::Inner, &["a"], &["k"], None)
+                    .unwrap(),
+            )
+        };
+        let guarded = joined(&session());
+        assert!(guarded.contains("on=[(a@0, k@0)]"), "{guarded}");
+        // Unguarded, DataFusion builds on the small right input.
+        let swapped = joined(&SessionContext::new());
+        assert!(swapped.contains("on=[(k@0, a@0)]"), "{swapped}");
+    }
+
+    /// X5: over an input in descending order, DataFusion turns a
+    /// `first_value` ordered ascending into a `last_value` ordered
+    /// descending, which takes the other end of a run of ties. LTSeq keeps
+    /// the aggregate it planned.
+    #[test]
+    fn plan_guard_optimize_aggregate_order() {
+        use datafusion::functions_aggregate::expr_fn::first_value;
+        let aggregated = |session: &SessionContext| {
+            let batch = batch(&[("x", vec![3, 2, 2, 1]), ("v", vec![1, 2, 3, 4])]);
+            let table = MemTable::try_new(batch.schema(), vec![vec![batch]])
+                .unwrap()
+                .with_sort_order(vec![vec![col("x").sort(false, false)]]);
+            let t = session.read_table(Arc::new(table)).unwrap();
+            physical(
+                &t.aggregate(
+                    vec![],
+                    vec![first_value(col("v"), vec![col("x").sort(true, false)])],
+                )
+                .unwrap(),
+            )
+        };
+        let guarded = aggregated(&session());
+        assert!(!guarded.contains("last_value"), "{guarded}");
+        let reversed = aggregated(&SessionContext::new());
+        assert!(reversed.contains("last_value"), "{reversed}");
+    }
+
+    /// X5: a filter over a tree of inner joins is rebuilt in the shape
+    /// `eliminate_cross_join` chooses, which changes which side each join
+    /// probes. LTSeq keeps a rewrite only where every join keeps its
+    /// inputs.
+    #[test]
+    fn plan_guard_eliminate_cross_join() {
+        let shaped = |session: &SessionContext| {
+            let a = table(session, &[("a", vec![1, 2])]);
+            let b = table(session, &[("b", vec![1, 2]), ("b2", vec![1, 2])]);
+            let c = table(session, &[("c", vec![1, 2])]);
+            let right = b.join(c, JoinType::Inner, &["b2"], &["c"], None).unwrap();
+            let df = a
+                .join(right, JoinType::Inner, &["a"], &["b"], None)
+                .unwrap()
+                .filter(col("a").gt(lit(0_i64)))
+                .unwrap();
+            let plan = df.into_optimized_plan().unwrap();
+            join_shape(&plan)
+        };
+        let guarded = shaped(&session());
+        assert_eq!(
+            guarded, "([a] Inner JOIN ([b,b2] Inner JOIN [c]))",
+            "the joins keep their inputs"
+        );
+        let rebuilt = shaped(&SessionContext::new());
+        assert_ne!(rebuilt, guarded, "DataFusion's rule reshapes the tree");
+    }
+
+    /// X5: `EnsureRequirements` meets a window's `ORDER BY k` over a stable
+    /// sort by `(k, position)` with a sort by `k` alone, which is not
+    /// stable. `ltseq_keep_stable_sorts` keeps the sort by every key.
+    #[test]
+    fn plan_guard_ensure_requirements() {
+        use datafusion::functions_window::expr_fn::lag;
+        let windowed = |session: &SessionContext| {
+            let position = format!("{}0", crate::ops::sort::POSITION_PREFIX);
+            let t = table(
+                session,
+                &[("k", vec![1, 0, 1, 0]), ("i", vec![0, 1, 2, 3]), (&position, vec![0, 1, 2, 3])],
+            );
+            let sorted = t
+                .sort(vec![col("k").sort(true, false), col(position.as_str()).sort(true, false)])
+                .unwrap()
+                .select(vec![col("k"), col("i")])
+                .unwrap();
+            physical(
+                &sorted
+                    .with_column(
+                        "p",
+                        lag(col("i"), Some(1), None)
+                            .order_by(vec![col("k").sort(true, false)])
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            )
+        };
+        let guarded = windowed(&session());
+        assert!(guarded.contains("StableOrderExec"), "{guarded}");
+        assert!(guarded.contains("__ltseq_position_0@2 ASC"), "{guarded}");
+        let coarsened = windowed(&SessionContext::new());
+        assert!(!coarsened.contains("__ltseq_position_0@2 ASC"), "{coarsened}");
     }
 
     /// The rules LTSeq turns off by their flags leave the plans they would

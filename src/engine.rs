@@ -32,7 +32,7 @@ use tokio::runtime::Runtime;
 
 use crate::float_statistics::DropFloatStatistics;
 use crate::ops::lookup::OneRowPerKeyPlanner;
-use crate::rewrite_guard::{self, Guarded, GuardedPhysical, KeepDemandedKeys};
+use crate::rewrite_guard::{self, Guarded, GuardedPhysical, KeepDemandedKeys, KeepStableSorts};
 use crate::source::LocalFiles;
 use crate::transpiler::FloatListZeros;
 
@@ -147,7 +147,12 @@ impl LayoutOverrides {
 /// - `KeepDemandedKeys`: First optimizer rule, so a filter does not skip
 ///   the keys a sort, grouping, `distinct` or join demands (X4, #273)
 /// - The rules the rule inventory rates Restricted run behind their guards
-///   (`rewrite_guard::Guarded`, `GuardedPhysical`; #273)
+///   (`rewrite_guard::Guarded`, `GuardedPhysical`; #273). For order (X5),
+///   `join_selection` keeps each join's inputs and `OptimizeAggregateOrder`
+///   does not run
+/// - `KeepStableSorts`: Before DataFusion's physical rules, so
+///   `EnsureRequirements` keeps the full order of every stable sort (X5,
+///   #273)
 /// - `FloatListZeros`: Last optimizer rule, so a float IN list compares
 ///   -0.0 equal to 0.0 however DataFusion built it (#245)
 /// - `KeepFileOrder`: Last physical optimizer rule, so a scan with a
@@ -219,11 +224,12 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
     let rules = [
         Arc::new(DropFloatStatistics) as _,
         Arc::new(KeepSortsAboveOffsets) as _,
+        Arc::new(KeepStableSorts) as _,
     ]
     .into_iter()
     .chain(state.physical_optimizers().iter().map(|rule| {
-        if rewrite_guard::physical_guarded(rule.name()) {
-            Arc::new(GuardedPhysical::new(Arc::clone(rule))) as _
+        if let Some(guard) = rewrite_guard::physical_guard(rule.name()) {
+            Arc::new(GuardedPhysical::new(Arc::clone(rule), guard)) as _
         } else {
             Arc::clone(rule)
         }

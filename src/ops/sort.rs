@@ -37,6 +37,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
+/// The name a stable sort's position column starts with: its last key
+/// (`sort_impl`). `rewrite_guard::KeepStableSorts` finds stable sorts by it.
+pub(crate) const POSITION_PREFIX: &str = "__ltseq_position_";
+
 /// Sort `df` by `order` unless its plan already ends in that order: a sort
 /// whose keys start with `order`, under nothing but limits and projections
 /// that only pick or rename columns.
@@ -53,7 +57,179 @@ pub(crate) fn sort_unless_ordered(
     if ends_in_order(df.logical_plan(), &order) {
         return Ok(df);
     }
+    if let Some(plan) = hoist_stable_sort(df.logical_plan(), &order)? {
+        let (state, _) = df.into_parts();
+        return Ok(DataFrame::new(state, plan));
+    }
     df.sort(order)
+}
+
+/// `plan` with the sort it ends in moved above the filters and projections
+/// over it, when that sort's keys start with `order`: the order LTSeq
+/// reads, ties included, is then the sort's own (R2-F4 of #273).
+///
+/// A stable sort orders by its keys and then by each row's position
+/// (`sort_impl`), and the position is dropped above it. Sorting again by
+/// `order` at the root, as the other path does, leaves DataFusion free to
+/// plan the rows beneath in any sequence: `EnsureRequirements` repartitions
+/// a projection that computes a column (#311) and removes the inner sort as
+/// redundant under the root's, and the root sort breaks ties as it likes.
+/// On more than one partition, `sort("k").derive(...)` returned rows equal
+/// on `k` out of their input order. Filters and projections work row by
+/// row, so moving the sort above them, with the columns its keys read
+/// passed through each projection under hidden names, returns the same
+/// rows in the sort's order, and DataFusion keeps that order up to the
+/// root (a projection that only picks columns, as after `sort` alone).
+///
+/// Limits stay above it. Any other operator between the root and the sort
+/// (a join, a window, a grouping) orders rows of its own, so the root sort
+/// is planned as before.
+fn hoist_stable_sort(
+    plan: &LogicalPlan,
+    order: &[SortExpr],
+) -> datafusion::error::Result<Option<LogicalPlan>> {
+    use datafusion::logical_expr::{Limit, LogicalPlanBuilder};
+    use std::collections::HashSet;
+
+    if let LogicalPlan::Limit(limit) = plan {
+        return Ok(hoist_stable_sort(&limit.input, order)?.map(|input| {
+            LogicalPlan::Limit(Limit {
+                input: Arc::new(input),
+                ..limit.clone()
+            })
+        }));
+    }
+    let mut path: Vec<&LogicalPlan> = Vec::new();
+    let mut want = order.to_vec();
+    let mut node = plan;
+    let sort = loop {
+        match node {
+            LogicalPlan::Projection(projection) => {
+                let Some(through) = keys_through(projection, &want) else {
+                    return Ok(None);
+                };
+                want = through;
+                path.push(node);
+                node = &projection.input;
+            }
+            LogicalPlan::Filter(filter) => {
+                path.push(node);
+                node = &filter.input;
+            }
+            LogicalPlan::Sort(sort) if sort.fetch.is_none() => break sort,
+            _ => return Ok(None),
+        }
+    };
+    if path.is_empty()
+        || sort.expr.len() < want.len()
+        || !sort.expr.iter().zip(&want).all(|(have, want)| same_key(have, want))
+    {
+        return Ok(None);
+    }
+
+    // The columns the sort's keys read, and a free name for each.
+    let mut columns: Vec<Column> = Vec::new();
+    for key in &sort.expr {
+        for column in key.expr.column_refs() {
+            if !columns.contains(column) {
+                columns.push(column.clone());
+            }
+        }
+    }
+    let taken: HashSet<String> = path
+        .iter()
+        .copied()
+        .chain([node, sort.input.as_ref()])
+        .flat_map(|n| n.schema().fields().iter().map(|f| f.name().clone()))
+        .collect();
+    let hidden: Vec<String> = (0..)
+        .map(|i| format!("__ltseq_hoisted_{i}"))
+        .filter(|name| !taken.contains(name))
+        .take(columns.len())
+        .collect();
+
+    // The filters and projections again, bottom up, over the sort's input.
+    let mut rebuilt = LogicalPlanBuilder::from(sort.input.as_ref().clone());
+    let mut passed = false;
+    for node in path.iter().rev() {
+        rebuilt = match node {
+            LogicalPlan::Filter(filter) => rebuilt.filter(filter.predicate.clone())?,
+            LogicalPlan::Projection(projection) => {
+                let mut exprs = projection.expr.clone();
+                for (column, name) in columns.iter().zip(&hidden) {
+                    let source = if passed {
+                        Expr::Column(Column::new_unqualified(name))
+                    } else {
+                        Expr::Column(column.clone())
+                    };
+                    exprs.push(source.alias(name));
+                }
+                passed = true;
+                rebuilt.project(exprs)?
+            }
+            _ => unreachable!("the path holds filters and projections"),
+        };
+    }
+    let keys = sort
+        .expr
+        .iter()
+        .map(|key| {
+            let expr = key
+                .expr
+                .clone()
+                .transform(|e| {
+                    Ok(match e {
+                        Expr::Column(column) if passed => {
+                            match columns.iter().position(|c| *c == column) {
+                                Some(i) => Transformed::yes(Expr::Column(
+                                    Column::new_unqualified(&hidden[i]),
+                                )),
+                                None => Transformed::no(Expr::Column(column)),
+                            }
+                        }
+                        e => Transformed::no(e),
+                    })
+                })?
+                .data;
+            Ok(SortExpr {
+                expr,
+                ..key.clone()
+            })
+        })
+        .collect::<datafusion::error::Result<Vec<_>>>()?;
+    let outputs: Vec<Expr> = plan.schema().columns().into_iter().map(Expr::Column).collect();
+    Ok(Some(rebuilt.sort(keys)?.project(outputs)?.build()?))
+}
+
+/// `order` in the column names of `projection`'s input, when each key is a
+/// column the projection passes through or renames, whatever it computes
+/// besides.
+fn keys_through(projection: &Projection, order: &[SortExpr]) -> Option<Vec<SortExpr>> {
+    order
+        .iter()
+        .map(|want| {
+            let (key, float) = key_column(&want.expr)?;
+            let mut found = projection
+                .schema
+                .fields()
+                .iter()
+                .zip(&projection.expr)
+                .filter(|(field, _)| field.name() == &key.name)
+                .map(|(_, expr)| match expr {
+                    Expr::Alias(alias) => alias.expr.try_as_col(),
+                    expr => expr.try_as_col(),
+                });
+            let source = found.next()??;
+            if found.next().is_some() {
+                return None;
+            }
+            let source = Expr::Column(source.clone());
+            Some(SortExpr {
+                expr: if float { float_order_key(source) } else { source },
+                ..want.clone()
+            })
+        })
+        .collect()
 }
 
 fn ends_in_order(plan: &LogicalPlan, order: &[SortExpr]) -> bool {
@@ -295,7 +471,7 @@ fn in_table_order_with_position(
     let (state, plan) = in_table_order(table)?.into_parts();
     let input = Arc::clone(plan.schema().inner());
     let position = (0..)
-        .map(|i| format!("__ltseq_position_{i}"))
+        .map(|i| format!("{POSITION_PREFIX}{i}"))
         .find(|name| input.field_with_name(name).is_err())
         .expect("an unbounded range has a free name");
     let mut fields: Vec<Field> = input.fields().iter().map(|f| (**f).clone()).collect();

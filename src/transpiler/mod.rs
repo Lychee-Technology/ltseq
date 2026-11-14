@@ -35,7 +35,7 @@ pub(crate) mod true_div;
 pub(crate) mod window_native;
 
 pub(crate) use float_lists::FloatListZeros;
-pub(crate) use opaque_cast::OpaqueCast;
+pub(crate) use opaque_cast::{cast as lower_cast, OpaqueCast};
 pub(crate) use literals::{column_value, encoded_float};
 pub(crate) use resolve::{binary_input_types, Resolver};
 pub(crate) use resolve::planned_type;

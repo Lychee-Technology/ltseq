@@ -21,7 +21,7 @@
 use std::collections::BTreeSet;
 
 use crate::engine::{session_context_with, LayoutOverrides};
-use crate::rewrite_guard::{logical_guard, physical_guarded};
+use crate::rewrite_guard::{logical_guard, physical_guard};
 
 /// The trade-off record that holds the inventory.
 const RECORD: &str = include_str!("../docs/proposals/v0.5/review/trade-offs.md");
@@ -42,9 +42,12 @@ const TESTS: &[&str] = &[
 const LOCK: &str = include_str!("../Cargo.lock");
 
 /// The ratings a row may give for errors, and for order. There is no
-/// rating for "not rated yet": a row rates both, or the test fails.
+/// rating for "not rated yet": a row rates both, or the test fails. Nor is
+/// there one for a rule that changes the order and runs anyway (R2-F4): a
+/// rule that changes the sequence of rows is Restricted, behind a guard
+/// that rules the change out, or Disabled.
 const ERROR_RATINGS: [&str; 5] = ["Safe", "Masked", "Restricted", "Disabled", "Unreached"];
-const ORDER_RATINGS: [&str; 5] = ["Safe", "Restricted", "Disabled", "Unreached", "Reorders"];
+const ORDER_RATINGS: [&str; 4] = ["Safe", "Restricted", "Disabled", "Unreached"];
 
 /// One row of a table: a rule or rewrite as DataFusion names it, the stage
 /// it runs in, the first word of each rating, and its guard.
@@ -198,7 +201,8 @@ fn every_row_is_rated_and_every_restricted_row_names_its_guard() {
 }
 
 /// A rule rated Restricted runs behind the guard its row names, and every
-/// rule the session wraps is rated Restricted.
+/// rule the session wraps is rated Restricted or Disabled, for errors or for
+/// order.
 #[test]
 fn every_restricted_rule_runs_behind_its_guard() {
     let running = running();
@@ -206,7 +210,7 @@ fn every_restricted_rule_runs_behind_its_guard() {
         let names = row.guard_names();
         let wrapped = match row.stage {
             "logical" => logical_guard(row.name).is_some(),
-            "physical" => physical_guarded(row.name),
+            "physical" => physical_guard(row.name).is_some(),
             _ => false,
         };
         assert_eq!(
@@ -215,7 +219,7 @@ fn every_restricted_rule_runs_behind_its_guard() {
             "the session wraps a rule exactly when its row says so: {row:?}"
         );
         if wrapped {
-            assert_eq!(row.errors, "Restricted", "{row:?}");
+            assert!(row.guarded_by_rating(), "{row:?}");
         }
         if row.errors == "Restricted" || row.order == "Restricted" {
             let rule = names
@@ -241,7 +245,7 @@ fn every_restricted_rule_runs_behind_its_guard() {
     for rule in state.physical_optimizers() {
         let shown = format!("{rule:?}");
         assert_eq!(
-            physical_guarded(rule.name()),
+            physical_guard(rule.name()).is_some(),
             shown.starts_with("GuardedPhysical("),
             "{shown}"
         );
