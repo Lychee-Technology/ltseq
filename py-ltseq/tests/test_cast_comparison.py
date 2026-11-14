@@ -29,7 +29,8 @@ from decimal import Decimal
 import pyarrow as pa
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, if_else
+from ltseq.expr import LiteralExpr
 
 from . import layouts
 
@@ -340,3 +341,44 @@ def test_cast_keeps_its_output_name():
     widening = t.select(lambda r: r.a.cast("int64") > 5).to_arrow()
     assert narrowing.schema.names == ["?table?.a > Int32(5)"]
     assert widening.schema.names == ["?table?.a > Int64(5)"]
+
+
+def test_a_failing_constant_cast_raises_only_where_demanded(engine_layout):
+    """Assessment hazard X1 (#273). DataFusion's constant evaluator turns a
+    `Cast` of a literal that fails into a planning error, however many rows
+    demand the value: the pipeline below failed on a table where no `d` is
+    0, and on an empty one. A cast that can fail is an `opaque_cast` for a
+    constant too, which the evaluator leaves for execution when it fails, so
+    it raises only on the rows that evaluate it (contract §20.2). The plan
+    keeps the cast: an upgrade whose evaluator folds it fails here."""
+
+    def picked(r):
+        return if_else(r.d == 0, LiteralExpr("abc").cast("int32"), r.d)
+
+    def table(values):
+        return LTSeq.from_arrow(pa.table({"d": pa.array(values, pa.int32())}))
+
+    for values in ([1, 2, 3], []):
+        derived = table(values).derive(v=picked)
+        # Sorted: a table with no declared order has no defined row order (M1).
+        assert sorted(derived.to_arrow().column("v").to_pylist()) == values
+        assert derived.count() == len(values)
+        assert table(values).filter(lambda r: picked(r) > 1).count() == sum(v > 1 for v in values)
+
+    logical, _ = table([1]).derive(v=picked).explain_plan()
+    assert 'opaque_cast_Int32(Utf8("abc"))' in logical, logical
+
+    with pytest.raises(ValueError, match="Cast error"):
+        table([1, 0, 3]).derive(v=picked).to_arrow()
+    with pytest.raises(ValueError, match="Cast error"):
+        table([1, 0, 3]).filter(lambda r: picked(r) > 1).count()
+
+
+def test_a_constant_cast_that_succeeds_is_folded():
+    """A constant cast that can fail but does not is folded into a literal,
+    as a `Cast` is, and one that cannot fail stays a `Cast` (#273)."""
+    t = LTSeq.from_arrow(pa.table({"d": pa.array([1, 2], pa.int64())}))
+    folded = t.derive(v=lambda r: r.d + LiteralExpr("12").cast("int32"))
+    assert sorted(folded.to_arrow().column("v").to_pylist()) == [13, 14]
+    logical, _ = folded.explain_plan()
+    assert "opaque_cast" not in logical, logical

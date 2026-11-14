@@ -544,15 +544,88 @@ fn parse_where_clause(
 
         let predicate = extract_filter_predicate(parsed_df.logical_plan())
             .ok_or_else(|| format!("No filter expression found in: {}", where_clause))?;
+        refuse_subqueries(&predicate, where_clause)?;
 
         // Clean up temp table
         let _ = session.deregister_table(temp_name);
 
         // Columns parsed from SQL are qualified with the temp table name;
         // the original DataFrame needs them unqualified.
-        strip_table_qualifiers(predicate)
-            .map_err(|e| format!("Failed to unqualify WHERE clause columns: {}", e))
+        let predicate = strip_table_qualifiers(predicate)
+            .map_err(|e| format!("Failed to unqualify WHERE clause columns: {}", e))?;
+        lower_casts(predicate, schema)
     })
+}
+
+/// The casts a WHERE clause writes, lowered as `cast()` in a lambda lowers
+/// them (R2-F3 of #273).
+///
+/// SQL's `CAST(e AS T)`, `e::T` and `arrow_cast(e, 'T')` are casts the
+/// program writes, not ones coercion inserts. As plain `Cast`s, DataFusion
+/// would fold a constant one that fails into a planning error whatever the
+/// rows (X1), and `unwrap_cast` would remove a narrowing one next to a
+/// literal (X3): `CAST(x AS INTEGER) > 5` returned a row with `x = 2**40`
+/// instead of raising. Lowered here, a cast that can fail is an
+/// `OpaqueCast`, which raises where a row evaluates it and which no rewrite
+/// sees through; one that keeps every value stays a `Cast`.
+fn lower_casts(predicate: Expr, schema: &Arc<ArrowSchema>) -> Result<Expr, String> {
+    use datafusion::logical_expr::Cast;
+    let rx = Resolver::new(schema)?;
+    predicate
+        .transform_up(|e| {
+            Ok(match e {
+                Expr::Cast(Cast { expr, field }) => {
+                    let to = field.data_type().clone();
+                    Transformed::yes(crate::transpiler::lower_cast(*expr, to, &rx))
+                }
+                Expr::ScalarFunction(call) if call.name() == "arrow_cast" => {
+                    let target = match call.args.as_slice() {
+                        [_, Expr::Literal(ScalarValue::Utf8(Some(t)), _)] => {
+                            t.parse::<DataType>().ok()
+                        }
+                        _ => None,
+                    };
+                    match target {
+                        Some(to) => {
+                            let input = call.args.into_iter().next().expect("two arguments");
+                            Transformed::yes(crate::transpiler::lower_cast(input, to, &rx))
+                        }
+                        None => Transformed::no(Expr::ScalarFunction(call)),
+                    }
+                }
+                e => Transformed::no(e),
+            })
+        })
+        .map(|t| t.data)
+        .map_err(|e| format!("Failed to lower WHERE clause casts: {}", e))
+}
+
+/// A WHERE clause with a subquery (`EXISTS`, `IN (SELECT ...)`, a scalar
+/// subquery, `= ANY`) is refused (#273). The DataFusion rules that rewrite
+/// subqueries into joins are rated Unreached in the rule inventory: LTSeq's
+/// lowering builds no subquery, and this parser is the one place SQL could
+/// add one. A subquery also reads tables of the parse session, not the
+/// table being filtered.
+fn refuse_subqueries(predicate: &Expr, where_clause: &str) -> Result<(), String> {
+    let subquery = predicate
+        .exists(|e| {
+            Ok(matches!(
+                e,
+                Expr::Exists(_)
+                    | Expr::InSubquery(_)
+                    | Expr::ScalarSubquery(_)
+                    | Expr::SetComparison(_)
+                    | Expr::OuterReferenceColumn(..)
+            ))
+        })
+        .unwrap_or(true);
+    if subquery {
+        return Err(format!(
+            "A WHERE clause may not hold a subquery: {}",
+            where_clause
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -613,5 +686,82 @@ mod tests {
             [1, 3]
         );
         assert_eq!(filtered_x(r#"NOT ("s" IS NULL) AND abs(-"x") > 1"#), [2, 3]);
+    }
+
+    /// R2-F3 of #273: a cast a WHERE clause writes is lowered as `cast()`
+    /// is. A constant one that fails raises only where a row evaluates it,
+    /// and a narrowing one is not removed next to a literal.
+    #[test]
+    fn a_where_clause_cast_that_can_fail_is_opaque() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "x",
+            DataType::Int64,
+            false,
+        )]));
+        let session = SessionContext::new();
+        let rows = |clause: &str, values: Vec<i64>| {
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int64Array::from(values))],
+            )
+            .expect("valid batch");
+            let session = crate::engine::create_session_context();
+            let df = session
+                .read_table(Arc::new(
+                    MemTable::try_new(Arc::clone(&schema), vec![vec![batch]]).expect("MemTable"),
+                ))
+                .expect("read MemTable");
+            let predicate = parse_where_clause(&session, &schema, clause).expect("parse");
+            RUNTIME
+                .block_on(df.filter(predicate).expect("apply filter").collect())
+                .map(|b| b.iter().map(RecordBatch::num_rows).sum::<usize>())
+        };
+        for clause in [
+            "CAST('abc' AS INTEGER) > 0",
+            "CAST(x AS INTEGER) > 5",
+            "x::INTEGER > 5",
+            "arrow_cast(x, 'Int32') > 5",
+        ] {
+            let predicate = parse_where_clause(&session, &schema, clause).expect("parse");
+            assert!(
+                predicate.to_string().contains("opaque_cast_Int32"),
+                "{clause}: {predicate}"
+            );
+        }
+        // No row has x = 0, so none evaluates the failing cast.
+        let conditional = "CASE WHEN x = 0 THEN CAST('abc' AS INTEGER) ELSE x END > 0";
+        assert_eq!(rows(conditional, vec![1, 2]).expect("no row demands the cast"), 2);
+        assert!(rows(conditional, vec![0, 2]).is_err());
+        // 2**40 does not fit an INTEGER: the comparison raises.
+        assert!(rows("CAST(x AS INTEGER) > 5", vec![1 << 40]).is_err());
+        assert_eq!(rows("CAST(x AS INTEGER) > 5", vec![6, 1]).expect("fits"), 1);
+        // A cast that keeps every value stays a cast.
+        let widening = parse_where_clause(&session, &schema, "CAST(x AS DECIMAL(20, 0)) > 1")
+            .expect("parse");
+        assert!(!widening.to_string().contains("opaque_cast"), "{widening}");
+    }
+
+    /// The subquery rules are rated Unreached in the rule inventory (#273),
+    /// so the one place SQL enters a plan refuses a subquery.
+    #[test]
+    fn a_where_clause_with_a_subquery_is_refused() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "x",
+            DataType::Int64,
+            false,
+        )]));
+        let session = SessionContext::new();
+        for clause in [
+            "EXISTS (SELECT 1)",
+            r#""x" IN (SELECT 1)"#,
+            r#""x" > (SELECT 1)"#,
+            r#"NOT EXISTS (SELECT 1) OR "x" > 1"#,
+        ] {
+            let error = parse_where_clause(&session, &schema, clause).unwrap_err();
+            assert!(
+                error.contains("may not hold a subquery"),
+                "{clause}: {error}"
+            );
+        }
     }
 }
