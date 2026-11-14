@@ -236,3 +236,63 @@ def test_a_window_over_ties_reads_rows_in_the_stable_order(engine_layout):
     p = result.column("p").to_pylist()
     assert list(zip(k, i)) == sorted(zip(k, i))
     assert p == [None] + i[:-1]
+
+
+@pytest.mark.parametrize(
+    "clause, expected",
+    [
+        pytest.param("(-x & x) = 0", [], id="neg_and"),
+        pytest.param("(-x & x) = 2", [2], id="neg_and_kept"),
+        pytest.param("(-x | x) = -1", [3], id="neg_or"),
+        pytest.param("(-x ^ x) = -1", [], id="neg_xor"),
+        pytest.param("-(x & 3) = -2", [2], id="negated_and"),
+    ],
+)
+def test_sql_bitwise_operations_keep_their_value(engine_layout, clause, expected):
+    """R3-F1. `filter_where`'s SQL writes bitwise operators, and the
+    simplifier's identities for them are wrong in value: `-A & A` became 0,
+    `-A | A` and `-A ^ A` became -1, and `-(A & B)` became `-A | -B`, each
+    on a column that is not nullable. `(-x & x) = 0` became TRUE, the filter
+    was removed and every row came back. The guarded simplifier now keeps
+    every bitwise operation."""
+    schema = pa.schema([pa.field("x", pa.int64(), nullable=False)])
+    t = LTSeq.from_arrow(pa.table({"x": [2, 3, 4]}, schema=schema))
+    kept = LTSeq._from_inner(t._inner.filter_where(clause))
+    logical, _ = kept.explain_plan()
+    assert "Filter:" in logical and "x" in logical.split("Filter:")[1], logical
+    # The table declares no order, so its rows come in any order (#148).
+    assert sorted(kept.to_arrow().column("x").to_pylist()) == expected
+
+
+@pytest.mark.parametrize("clause", ["(x ^ x) IS NULL", "(x ^ y ^ x) IS NULL"])
+def test_sql_xor_of_a_null_is_null(engine_layout, clause):
+    """R3-F1. XOR cancellation (`A ^ A` to 0, `A ^ B ^ A` to `B`) has no
+    nullability gate, so a NULL `x` gave 0 or `y` instead of NULL."""
+    t = LTSeq.from_arrow(
+        pa.table({"x": pa.array([None, 2], pa.int64()), "y": pa.array([1, 1], pa.int64())})
+    )
+    kept = LTSeq._from_inner(t._inner.filter_where(clause))
+    assert kept.to_arrow().column("x").to_pylist() == [None]
+
+
+def test_a_case_branch_that_can_fail_stays_conditional(engine_layout):
+    """R3-F2. A `CASE` evaluates a branch only on the rows that reach it.
+    The simplifier turned `CASE WHEN x = 0 THEN false ELSE CAST(s AS
+    INTEGER) > 0 END` into `x != 0 AND CAST(s AS INTEGER) > 0`, which keeps
+    the one cast but evaluates it on every row, and raised on `'abc'`,
+    which no row demands. The guard tells an occurrence in a branch from
+    one evaluated on every row, so it keeps the `CASE` here, whether SQL or
+    `if_else` writes it."""
+    from ltseq.expr import if_else
+
+    t = LTSeq.from_arrow(
+        pa.table({"x": pa.array([0, 1], pa.int64()), "s": pa.array(["abc", "1"])})
+    )
+    clause = "CASE WHEN x = 0 THEN false ELSE CAST(s AS INTEGER) > 0 END"
+    for kept in (
+        LTSeq._from_inner(t._inner.filter_where(clause)),
+        t.filter(lambda r: if_else(r.x == 0, False, r.s.cast("int32") > 0)),
+    ):
+        logical, _ = kept.explain_plan()
+        assert "CASE" in logical and "opaque_cast_Int32" in logical, logical
+        assert kept.to_arrow().column("x").to_pylist() == [1]

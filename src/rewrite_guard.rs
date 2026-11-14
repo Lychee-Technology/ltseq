@@ -18,7 +18,11 @@
 //!   expression's root and simplifies its parts, which stops the identities
 //!   and absorption of assessment hazard X2. Both count occurrences
 //!   ([`Demand`]), each expression of a node on its own: two occurrences of
-//!   one expression are demanded on different rows. [`Guard::KeepBarriers`]
+//!   one expression are demanded on different rows. An occurrence in a
+//!   `CASE` branch is counted apart from one evaluated on every row
+//!   ([`Reach`]), so a rewrite that moves one out of a branch (`CASE` to
+//!   `AND`) is refused too, and a bitwise operation is never simplified, as
+//!   its identities are wrong in value ([`has_bitwise`]). [`Guard::KeepBarriers`]
 //!   keeps `push_down_filter` from moving a filter below a
 //!   [`DemandBarrier`], and [`Guard::KeepJoinShape`] keeps
 //!   `eliminate_cross_join` from changing a join's inputs (X5).
@@ -262,8 +266,28 @@ fn key(expr: &Expr) -> String {
         .map_or_else(|_| expr.to_string(), |t| t.data.to_string())
 }
 
-/// The fallible expressions a plan evaluates, by key, each with the number
-/// of places it is evaluated in (R2-F1 of #273).
+/// Where an occurrence of an expression that can fail is evaluated (R3-F2
+/// of #273).
+///
+/// `Every` is on every row its expression is evaluated on. `Branch` is in a
+/// `CASE`'s `THEN` or `ELSE`, or a condition after its first, or in an
+/// argument after the first of a function that evaluates it only where the
+/// first is NULL (`coalesce`): there it is evaluated only on the rows that
+/// reach it. A rewrite that moves an occurrence from a branch to where it
+/// is always evaluated, as turning `CASE WHEN c THEN false ELSE e END` into
+/// `NOT c AND e` does, raises its errors on rows the `CASE` did not demand
+/// them on. `AND` and `OR` count as `Every`: DataFusion evaluates their
+/// right operand on every row of a batch unless the left one decides it for
+/// the whole batch, which M16's masking will make row-wise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Reach {
+    Every,
+    Branch,
+}
+
+/// The fallible expressions a plan evaluates, by where they are evaluated
+/// and their key, each with the number of places it is evaluated in (R2-F1
+/// of #273).
 ///
 /// A set would not do: an expression that can fail is demanded where its
 /// occurrence is, and two occurrences of the same expression are demanded
@@ -271,10 +295,10 @@ fn key(expr: &Expr) -> String {
 /// both evaluate `c`, but `v` demands it where `a` is NULL and `w` only
 /// where `a` is TRUE, so a rewrite that drops the occurrence in `v` drops a
 /// demanded failure although `c` is still evaluated in `w`. Counting the
-/// occurrences catches it; a rewrite that keeps every occurrence keeps the
-/// expression under the same conditions, as no guarded rule moves one into
-/// another branch.
-pub(crate) type Demand = BTreeMap<String, u64>;
+/// occurrences catches it. Their [`Reach`] keeps an occurrence in a branch
+/// apart from one evaluated on every row, so a rewrite that moves one out
+/// of a branch changes the count too (R3-F2).
+pub(crate) type Demand = BTreeMap<(Reach, String), u64>;
 
 fn add(out: &mut Demand, from: &Demand, times: u64) {
     for (key, count) in from {
@@ -290,15 +314,78 @@ fn covers(after: &Demand, before: &Demand) -> bool {
         .all(|(key, count)| after.get(key).is_some_and(|n| n >= count))
 }
 
+/// Functions that evaluate an argument after the first only where the
+/// first is NULL. DataFusion simplifies each into a `CASE`.
+const LAZY_FUNCTIONS: &[&str] = &["coalesce", "nvl", "nvl2", "ifnull"];
+
 /// The occurrences of the fallible subexpressions of `expr`, `expr`
-/// included.
+/// included, each with its [`Reach`].
 fn raw_atoms(expr: &Expr, schema: &DFSchema, out: &mut Demand) {
+    // `apply` visits a node before its children, so a node marks the
+    // children it evaluates only on some rows before they are visited.
+    let mut branches: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
     let _ = expr.apply(|e| {
+        let reach = if branches.contains(&(e as *const Expr)) {
+            Reach::Branch
+        } else {
+            Reach::Every
+        };
         if fallible_node(e, schema) {
-            *out.entry(key(e)).or_default() += 1;
+            *out.entry((reach, key(e))).or_default() += 1;
+        }
+        let mut branch = |child: &Expr| {
+            branches.insert(child as *const Expr);
+        };
+        match (reach, e) {
+            (Reach::Branch, e) => {
+                let _ = e.apply_children(|child| {
+                    branch(child);
+                    Ok(TreeNodeRecursion::Continue)
+                });
+            }
+            (Reach::Every, Expr::Case(case)) => {
+                for (i, (when, then)) in case.when_then_expr.iter().enumerate() {
+                    if i > 0 {
+                        branch(when);
+                    }
+                    branch(then);
+                }
+                if let Some(otherwise) = &case.else_expr {
+                    branch(otherwise);
+                }
+            }
+            (Reach::Every, Expr::ScalarFunction(f)) if LAZY_FUNCTIONS.contains(&f.name()) => {
+                f.args.iter().skip(1).for_each(&mut branch);
+            }
+            _ => {}
         }
         Ok(TreeNodeRecursion::Continue)
     });
+}
+
+/// Whether `expr` holds a bitwise operator (R3-F1 of #273).
+///
+/// The simplifier's bitwise identities are wrong in value: `-A & A`, `-A |
+/// A` and `-A ^ A` become 0, -1 and -1 (`-2 & 2` is 2), `-(A & B)` becomes
+/// `-A | -B`, and `A ^ A` and `A ^ B ^ A` drop `A` with no nullability
+/// gate, so a NULL `A` gives 0 or `B`. LTSeq's lambdas lower no bitwise
+/// operator, but `filter_where`'s SQL writes them. The guarded simplifier
+/// keeps every bitwise operation, and simplifies its operands on their own.
+fn has_bitwise(expr: &Expr) -> bool {
+    expr.exists(|e| {
+        Ok(matches!(
+            e,
+            Expr::BinaryExpr(BinaryExpr {
+                op: Operator::BitwiseAnd
+                    | Operator::BitwiseOr
+                    | Operator::BitwiseXor
+                    | Operator::BitwiseShiftLeft
+                    | Operator::BitwiseShiftRight,
+                ..
+            })
+        ))
+    })
+    .unwrap_or(true)
 }
 
 /// How many times `expr` reads each column.
@@ -657,7 +744,10 @@ impl OptimizerRule for Guarded {
             }
             Guard::KeepFailures { own: true } => {
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
-                if !rewritten.transformed || keeps_each_expression(&plan, &rewritten.data) {
+                if !rewritten.transformed
+                    || (keeps_each_expression(&plan, &rewritten.data)
+                        && !plan.expressions().iter().any(has_bitwise))
+                {
                     return Ok(rewritten);
                 }
                 // Simplify what does keep them, expression by expression
@@ -790,10 +880,14 @@ fn simplify_keeping_failures(
         atoms: &dyn Fn(&Expr) -> Demand,
         info: &SimplifyContext,
     ) -> Result<Expr> {
-        let before = atoms(&expr);
-        let simplified = simplify(expr.clone())?;
-        if atoms(&simplified) == before {
-            return Ok(simplified);
+        // A bitwise operation is kept, its operands simplified on their
+        // own: the simplifier's bitwise identities are wrong in value
+        // (R3-F1).
+        if !has_bitwise(&expr) {
+            let simplified = simplify(expr.clone())?;
+            if atoms(&simplified) == atoms(&expr) {
+                return Ok(simplified);
+            }
         }
         let expr = expr
             .map_children(|child| keep(child, simplify, atoms, info).map(Transformed::yes))?
@@ -802,10 +896,16 @@ fn simplify_keeping_failures(
             if let ExprSimplifyResult::Simplified(hooked) = f.func.simplify(f.args.clone(), info)? {
                 // A hook may evaluate an argument twice (`coalesce(a, b)`
                 // becomes `CASE WHEN a IS NOT NULL THEN a ELSE b END`), the
-                // second time where the first one did not fail. It may not
-                // drop one or add another.
+                // second time in a branch, on rows where the first one did
+                // not fail. It may not drop one, add another, or move one
+                // out of a branch.
                 let (hooked_atoms, atoms) = (atoms(&hooked), atoms(&expr));
-                if covers(&hooked_atoms, &atoms) && hooked_atoms.keys().eq(atoms.keys()) {
+                let added_in_a_branch = |(reach, key): &(Reach, String)| {
+                    atoms.contains_key(&(*reach, key.clone()))
+                        || (*reach == Reach::Branch
+                            && atoms.contains_key(&(Reach::Every, key.clone())))
+                };
+                if covers(&hooked_atoms, &atoms) && hooked_atoms.keys().all(added_in_a_branch) {
                     return Ok(hooked);
                 }
             }
@@ -1687,6 +1787,93 @@ mod tests {
         // A rewrite that drops nothing that can fail still applies.
         let df = t.select(vec![(col("x") * lit(0_i64)).alias("v")]).unwrap();
         assert!(logical(&df).contains("Int64(0) AS v"), "{}", logical(&df));
+    }
+
+    /// R3-F1: the simplifier's bitwise identities are wrong in value
+    /// (`-2 & 2` is 2, not 0), and `filter_where`'s SQL writes bitwise
+    /// operators, so the guarded simplifier keeps every bitwise operation.
+    /// Unguarded, `-x & x = 0` became TRUE and the filter was removed.
+    #[test]
+    fn plan_guard_bitwise_identities() {
+        use datafusion::logical_expr::binary_expr;
+        let session = session();
+        let t = table(&session, &[("x", vec![2, 3, 4])]);
+        let negated = || Expr::Negative(Box::new(col("x")));
+        let op = |l: Expr, op: Operator, r: Expr| binary_expr(l, op, r);
+        for (name, expr, rows) in [
+            (
+                "-x & x = 0",
+                op(negated(), Operator::BitwiseAnd, col("x")).eq(lit(0_i64)),
+                0,
+            ),
+            (
+                "-x & x = 2",
+                op(negated(), Operator::BitwiseAnd, col("x")).eq(lit(2_i64)),
+                1,
+            ),
+            (
+                "x | -x = -1",
+                op(col("x"), Operator::BitwiseOr, negated()).eq(lit(-1_i64)),
+                // `3 | -3` is -1; `2 | -2` is -2.
+                1,
+            ),
+            (
+                "-x ^ x = -1",
+                op(negated(), Operator::BitwiseXor, col("x")).eq(lit(-1_i64)),
+                0,
+            ),
+            (
+                "-(x & 3) = -2",
+                Expr::Negative(Box::new(op(col("x"), Operator::BitwiseAnd, lit(3_i64))))
+                    .eq(lit(-2_i64)),
+                1,
+            ),
+        ] {
+            let df = t.clone().filter(expr).unwrap();
+            let plan = logical(&df);
+            assert!(
+                plan.contains("Filter:"),
+                "{name}: the filter is gone\n{plan}"
+            );
+            assert_eq!(collect(&df).unwrap(), rows, "{name}\n{plan}");
+        }
+    }
+
+    /// R3-F2: a `CASE` evaluates a branch only on the rows that reach it.
+    /// The simplifier turned `CASE WHEN x = 0 THEN false ELSE 10 / x > 1
+    /// END` into `x != 0 AND 10 / x > 1`, which keeps the one occurrence of
+    /// the division but evaluates it on every row, and raised on `x = 0`.
+    /// The guarded simplifier keeps the `CASE` where a branch can fail.
+    #[test]
+    fn plan_guard_case_rewrites() {
+        use datafusion::logical_expr::when;
+        let session = session();
+        let t = table(&session, &[("x", vec![0, 2])]);
+        let guarded = |value: Expr| {
+            when(col("x").eq(lit(0_i64)), lit(false))
+                .otherwise(value)
+                .unwrap()
+        };
+        let df = t
+            .clone()
+            .filter(guarded(fallible().gt(lit(1_i64))))
+            .unwrap();
+        let plan = logical(&df);
+        assert!(plan.contains("CASE WHEN"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 1, "{plan}");
+        // The same in a projection, and nested in a branch.
+        let df = t
+            .clone()
+            .select(vec![guarded(guarded(fallible().gt(lit(1_i64)))).alias("v")])
+            .unwrap();
+        let plan = logical(&df);
+        assert!(plan.contains("CASE WHEN"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 2, "{plan}");
+        // Where no branch can fail, the rewrite still applies.
+        let df = t.filter(guarded(col("x").gt(lit(1_i64)))).unwrap();
+        let plan = logical(&df);
+        assert!(!plan.contains("CASE"), "{plan}");
+        assert_eq!(collect(&df).unwrap(), 1, "{plan}");
     }
 
     /// A filter of a literal FALSE above a sort whose key can fail keeps
