@@ -19,7 +19,7 @@ DataFusion is a "battle-tested SQL engine." Staying on its lazy plan path yields
 
 ## Consequences
 
-- LTSeq inherits DataFusion's behavior, bugs included. Documented example: a ProjectionPushdown bug affecting in-memory sources (`from_pandas`/`from_arrow`) after a join; the documented workaround is to read from CSV/Parquet instead, or select columns after `collect()` (see `LINKING_GUIDE.md` Troubleshooting).
+- LTSeq inherits DataFusion's behavior, bugs included. Documented example (#301): a join's schema merges its inputs' schema metadata, the left input winning a key both carry (the right one in a right join), as the `pandas` key of two `from_pandas` tables. When `join_selection` swapped the inputs it swapped the winner, and the physical optimizer failed its own schema check ("Schema metadata mismatch", reported from `ProjectionPushdown` or `join_selection`), so a filter after a join of two in-memory sources failed at collect. LTSeq's session keeps each join's inputs (#273, for row order), which also keeps the merged metadata; the bug is masked, not fixed upstream.
 - DataFusion alone is explicitly *not* sufficient for every sequence workload; that gap is what justifies the multi-path execution strategy ([ADR 0006](0006-multi-path-execution-strategy.md)) and is recorded as design lesson §7.3 ("DataFusion Is Strong, but Not Sufficient for Everything").
 - Engine upgrades (DataFusion/Arrow major versions) are a recurring maintenance cost pinned in `Cargo.toml` (the direct `parquet` dependency must match DataFusion's Arrow version).
 
@@ -27,6 +27,6 @@ DataFusion is a "battle-tested SQL engine." Staying on its lazy plan path yields
 
 - `docs/ARCHITECTURE.md`: Overview, Lazy Execution Model
 - `docs/DESIGN_SUMMARY.md`: §5.1, §7.3
-- `docs/LINKING_GUIDE.md`: Troubleshooting (ProjectionPushdown caveat)
+- `src/rewrite_guard.rs`: `join_selection_keeps_clashing_schema_metadata` (#301)
 - `README.md`: Performance, Technology Stack
 - `Cargo.toml`

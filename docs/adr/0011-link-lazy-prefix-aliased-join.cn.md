@@ -39,7 +39,7 @@
 
 ## 来源
 
-- `docs/LINKING_GUIDE.cn.md`: 全文（含 “link() 与 join()”、被移除的快捷路径、ProjectionPushdown 注意事项）
+- `docs/LINKING_GUIDE.cn.md`: 全文（含 “link() 与 join()”、被移除的快捷路径）
 - `docs/DESIGN_SUMMARY.cn.md`: §4.1、§4.2
 - `docs/USER_MODEL.cn.md`: Linking 与 Joining 的区别
 - `docs/api.cn.md`: `LTSeq.link`、`LTSeq.join`、`asof_join`、Join 策略总览

@@ -242,14 +242,6 @@ Target columns are prefixed with the alias. Inspect the joined schema:
 print(linked.to_ltseq().columns)   # id, ..., prod_name, prod_price, ...
 ```
 
-### In-memory (`from_pandas`) source + column projection
-
-Selecting a subset of columns after a join over an in-memory
-(`from_pandas` / `from_arrow`) source can hit a DataFusion
-ProjectionPushdown bug (a plain `join().select(...)` triggers it too). Read
-the source from CSV/Parquet, or select after `collect()`, if you encounter
-it.
-
 ## Best Practices
 
 1. Let the optimizer push down. Predicate and projection pushdown are the

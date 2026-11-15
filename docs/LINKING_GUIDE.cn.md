@@ -225,12 +225,6 @@ lambda。
 print(linked.to_ltseq().columns)   # id, ..., prod_name, prod_price, ...
 ```
 
-### 内存（`from_pandas`）源 + 列投影
-
-在内存源（`from_pandas` / `from_arrow`）之上 join 后再投影列的子集，可能触发
-DataFusion 的 ProjectionPushdown bug（普通 `join().select(...)` 同样会）。遇到时
-改用 CSV/Parquet 读入，或在 `collect()` 之后再 select。
-
 ## 最佳实践
 
 1. 交给优化器下推。谓词与投影下推是查询优化器的职责：写你真正想要的变换，它会在

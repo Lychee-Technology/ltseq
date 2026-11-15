@@ -39,7 +39,7 @@ Foreign-key navigation and fact-to-dimension enrichment need cross-table access;
 
 ## Sources
 
-- `docs/LINKING_GUIDE.md`: entire document (incl. "link() vs join()", the removed shortcut, ProjectionPushdown caveat)
+- `docs/LINKING_GUIDE.md`: entire document (incl. "link() vs join()", the removed shortcut)
 - `docs/DESIGN_SUMMARY.md`: §4.1, §4.2
 - `docs/USER_MODEL.md`: Linking vs Joining
 - `docs/api.md`: `LTSeq.link`, `LTSeq.join`, `asof_join`, Join Strategy Summary
