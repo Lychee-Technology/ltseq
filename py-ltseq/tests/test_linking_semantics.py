@@ -6,10 +6,10 @@ one-to-many fan-out silently disappeared; chained link() dropped the first
 join from the plan and stitched a preview schema. These tests lock the
 corrected behavior: every transform runs on the real joined plan.
 
-Fixtures write CSV files (like the other linking tests) rather than using
-LTSeq.from_pandas — an in-memory MemTable source trips a pre-existing
-DataFusion ProjectionPushdown bug on join+projection that is orthogonal to
-this change (a plain join().select() hits it too).
+Fixtures write CSV files, like the other linking tests. They once had to:
+two `from_pandas` sources carry clashing `pandas` schema metadata, which
+failed DataFusion's schema check when `join_selection` swapped a join's
+inputs (#301). That is masked now; `test_join_schema_metadata.py` covers it.
 """
 
 import pandas as pd

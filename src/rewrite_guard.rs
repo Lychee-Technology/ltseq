@@ -1017,6 +1017,9 @@ pub(crate) enum PhysicalGuard {
     NoFailures,
     /// Run the rule with `join_reordering` off, so that it chooses how to
     /// execute a join without swapping its inputs (`join_selection`, X5).
+    /// This also keeps a join's merged schema metadata, which DataFusion's
+    /// schema check rejects a swap for when both inputs carry one key with
+    /// different values, as two `from_pandas` tables do (#301).
     NoSwap,
     /// Do not run the rule (`OptimizeAggregateOrder`, X5).
     Off,
@@ -2726,6 +2729,85 @@ mod tests {
         // Unguarded, DataFusion builds on the small right input.
         let swapped = joined(&SessionContext::new());
         assert!(swapped.contains("on=[(k@0, a@0)]"), "{swapped}");
+    }
+
+    /// #301: a join's schema merges its inputs' schema metadata, the left
+    /// input's value winning a key both carry (the right one's in a right
+    /// join), as the `pandas` key of two `from_pandas` tables. Swapping the
+    /// inputs swaps the winner, and DataFusion's physical optimizer then
+    /// fails its own schema check at collect. Keeping each join's inputs
+    /// (`PhysicalGuard::NoSwap`) keeps the merged metadata.
+    #[test]
+    fn join_selection_keeps_clashing_schema_metadata() {
+        use datafusion::arrow::array::LargeStringArray;
+        use datafusion::execution::SessionStateBuilder;
+        use datafusion::physical_optimizer::join_selection::JoinSelection;
+
+        let side = |session: &SessionContext, origin: &str, columns: Vec<(Field, ArrayRef)>| {
+            let (fields, arrays): (Vec<_>, Vec<_>) = columns.into_iter().unzip();
+            let metadata = HashMap::from([("pandas".to_string(), origin.to_string())]);
+            let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+            let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+            let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+            session.read_table(Arc::new(table)).unwrap()
+        };
+        let int = |name: &str, values: Vec<i64>| {
+            (
+                Field::new(name, DataType::Int64, true),
+                Arc::new(Int64Array::from(values)) as ArrayRef,
+            )
+        };
+        // `l.join(r, on="id").filter(lambda q: q.x == "p")` with `l` and `r`
+        // from `from_pandas`, planned as `join_impl` plans it.
+        let filtered = |session: &SessionContext| {
+            let v = Arc::new(Float64Array::from(vec![Some(10.0), None, Some(30.0)])) as ArrayRef;
+            let left = side(
+                session,
+                "left",
+                vec![
+                    int("id", vec![1, 2, 3]),
+                    (Field::new("v", DataType::Float64, true), v),
+                ],
+            );
+            let x = Arc::new(LargeStringArray::from(vec![None, Some("p"), None])) as ArrayRef;
+            let right = side(
+                session,
+                "right",
+                vec![
+                    int("id", vec![1, 2, 4]),
+                    (Field::new("x", DataType::LargeUtf8, true), x),
+                    int("n", vec![5, 6, 7]),
+                ],
+            )
+            .select(vec![col("id").alias("id_right"), col("x"), col("n")])
+            .unwrap();
+            let joined = left
+                .join(right, JoinType::Inner, &["id"], &["id_right"], None)
+                .unwrap()
+                .select(vec![col("id"), col("v"), col("x"), col("n")])
+                .unwrap();
+            collect(&joined.filter(col("x").eq(lit("p"))).unwrap())
+        };
+        assert_eq!(filtered(&session()).unwrap(), 1);
+
+        // The same session with DataFusion's own `join_selection`.
+        let guarded = session();
+        let rules = guarded
+            .state()
+            .physical_optimizers()
+            .iter()
+            .map(|rule| match rule.name() {
+                "join_selection" => Arc::new(JoinSelection::new()) as _,
+                _ => Arc::clone(rule),
+            })
+            .collect();
+        let unguarded = SessionContext::new_with_state(
+            SessionStateBuilder::new_from_existing(guarded.state())
+                .with_physical_optimizer_rules(rules)
+                .build(),
+        );
+        let error = filtered(&unguarded).unwrap_err().to_string();
+        assert!(error.contains("Schema metadata mismatch"), "{error}");
     }
 
     /// X5: over an input in descending order, DataFusion turns a
