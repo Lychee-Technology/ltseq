@@ -38,7 +38,7 @@ Operands may be expressions or literals on either side (`1 - r.x` works). All op
 | `a / b` | True division ([§17.3]). |
 | `a // b`, `a % b` | Floored division and its remainder, as in Python: `-7 // 2 == -4`, `-7 % 2 == 1`, `7 % -2 == -1` ([§17.3]). |
 | `a ** b` | Power ([§17.3]). |
-| `-a`, `abs(a)` | Negation and absolute value, checked: `-(-2**63)` raises `ArithmeticOverflowError`. |
+| `-a`, `abs(a)` | Negation and absolute value, checked: `-(-2**63)` raises `ArithmeticOverflowError`. A duration keeps its unit, and a date, time or timestamp raises `LTSeqTypeError` ([§19.2]). |
 | `round(a, n)`, `math.floor(a)`, `math.ceil(a)` | Same as `a.round(n)`, `a.floor()`, `a.ceil()` ([§8.5]). |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | Comparison. NULL operands give NULL. Numeric comparisons compare exact values ([§17.4]); NaN follows [§18]. |
 | `a == None`, `a != None` | Same as `a.is_null()` and `a.is_not_null()`. This applies when an operand is the literal `None` or `lit(None)`; ordering comparisons with them raise `LTSeqTypeError`. |
@@ -169,6 +169,7 @@ Previous: [Schema, types and basic table operations (§6–§7)](schema-and-tabl
 [§17.6]: numeric-null-temporal.md#176-explicit-casts
 [§18]: numeric-null-temporal.md#18-null-nan-and-boolean-logic
 [§19]: numeric-null-temporal.md#19-temporal-semantics
+[§19.2]: numeric-null-temporal.md#192-arithmetic-and-comparison
 [§20.2]: errors-and-performance.md#202-stages
 [Deliverable B]: ../review/inventory.md#b-api-inventory-and-review
 

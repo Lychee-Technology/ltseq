@@ -38,9 +38,10 @@ def join(self, other: LTSeq, on: str | Sequence[str] | None = None, *,
 | Boolean | `bool` | |
 | Date | `date32` | |
 | Timestamp | `timestamp` of any unit | Naive with naive, aware with aware (by instant); naive with aware raises `LTSeqTypeError` |
-| Duration, time | `duration`, `time32`/`time64` of any unit | By value |
+| Duration | `duration` of any unit | By value, exactly across units |
+| Time | `time32`/`time64` of any unit | By value, exactly across units |
 
-An integer key does not match a float key, and a date key does not match a timestamp key: cast one side explicitly. NULL keys never match anything, including NULL.
+An integer key does not match a float key, a date key does not match a timestamp key, and a duration key does not match a time key, which [§19.2] refuses to compare and [§17.6] to cast (#277): cast one side explicitly where a rule exists. NULL keys never match anything, including NULL.
 
 **Output columns.**
 
@@ -101,7 +102,7 @@ def asof_join(self, other: LTSeq, on: str | None = None, *,
   Distances are compared exactly, for every key type (#276): a distance is the exact difference of the two keys' values, never one rounded to a float or computed in an integer type that can overflow, and a key equal to the left key is at distance 0, an infinite one included. An infinite distance (a finite key against `±inf`) is greater than every finite one and ties with another. So with left key `0.25` and right keys `-2.0**53` and `2.0**53`, `nearest` picks `2.0**53`, at 2**53 − 0.25 against 2**53 + 0.25, although both distances round to `2.0**53` in `float64`; with `int64` left key `-1` and right keys `-2**63` and `2**63 - 1`, it picks `-2**63`, at 2**63 − 1 against 2**63, a distance `int64` cannot hold. `tolerance` is compared with the exact distance too.
 - **Result.** Exactly one row per left row, in left order, with the right columns NULL when there is no match. Keeps the left `sort_keys`. Neither input needs to be sorted.
 - **Keys.** The as-of key is one column per side, of the same class ([§12.1]) among exact numeric, floating, date, timestamp and duration; units are compared exactly. `by` keys follow `join`. NULL and NaN left keys never match.
-- **`tolerance`.** A non-negative literal: a number exact in the key type for numeric keys, a `timedelta` for date, timestamp and duration keys. A negative value raises `LTSeqValueError`, a value of the wrong kind `LTSeqTypeError`.
+- **`tolerance`.** A non-negative literal: a number exact in the key type for numeric keys, a `timedelta` for date, timestamp and duration keys. For date keys it MUST be a whole number of days, as a duration added to a date must ([§19.2]); `timedelta(hours=36)` raises `CastError` at plan time (#277). A negative value raises `LTSeqValueError`, a value of the wrong kind `LTSeqTypeError`.
 - **Columns.** As `join` with `how="left"`: `on=` and `by=` coalesce the key, `left_on`/`right_on` and `left_by`/`right_by` keep both.
 - **Order requirement.** `other` is in the positional tier (its order resolves ties). The left table needs no order.
 - **Errors.** As `join`, plus: `on` with `left_on`/`right_on`, or `by` with `left_by`/`right_by`, raises `LTSeqValueError`.
@@ -156,7 +157,9 @@ Previous: [Windows and ordered grouping (§10–§11)](windows-and-grouping.md) 
 [§9]: ordering.md#9-ordering-contract
 [§9.2]: ordering.md#92-sources-and-propagation
 [§12.1]: #121-join
+[§17.6]: numeric-null-temporal.md#176-explicit-casts
 [§18]: numeric-null-temporal.md#18-null-nan-and-boolean-logic
+[§19.2]: numeric-null-temporal.md#192-arithmetic-and-comparison
 [§20]: errors-and-performance.md#20-errors
 [§20.2]: errors-and-performance.md#202-stages
 

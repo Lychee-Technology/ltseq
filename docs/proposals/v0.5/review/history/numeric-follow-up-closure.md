@@ -2,7 +2,7 @@
 
 # v0.5 review history: Numeric follow-ups (S)
 
-[Index](../../README.md) › Review history · Previous: [API surface and interchange follow-ups (R)](follow-up-closure.md)
+[Index](../../README.md) › Review history · Previous: [API surface and interchange follow-ups (R)](follow-up-closure.md) · Next: [Temporal follow-ups (T)](temporal-follow-up-closure.md)
 
 **Non-normative, historical.** A dated record of the [review](../../README.md#ltseq-v05-api-review), kept as written. Later records name the earlier records they change. [Deliverable Q] is the decision register. This record applies two of its deferred rows (G5, and N9 as the owner decided it on 2026-11-15) and keeps the third as written (OD-W).
 
@@ -92,7 +92,7 @@ OD-W has its evidence: M0's measurement 2 is reported in `benchmarks/m0/REPORT.m
 
 ---
 
-Previous: [API surface and interchange follow-ups (R)](follow-up-closure.md) · [Index](../../README.md)
+Previous: [API surface and interchange follow-ups (R)](follow-up-closure.md) · [Index](../../README.md) · Next: [Temporal follow-ups (T)](temporal-follow-up-closure.md)
 
 <!-- /v0.5-modular:footer -->
 

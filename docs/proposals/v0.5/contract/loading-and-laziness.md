@@ -83,7 +83,7 @@ def from_arrow(cls, data: object, /) -> LTSeq
   - An object that implements neither protocol, or whose schema is not a struct, raises `LTSeqTypeError`. That includes a bare array (`pa.array([1, 2])`) and a `ChunkedArray` of a non-struct type; name the column instead: `LTSeq.from_arrow(pa.table({"x": arr}))`.
   - A struct array with a NULL at the top level raises `LTSeqValueError`, because a row cannot be NULL as a whole. pyarrow refuses the same import (`pa.table`, `pa.record_batch`).
   - An exception raised by a `pyarrow.RecordBatchReader` while it is read, including the reader of `t.to_batches()` ([§15.1]), propagates unchanged. A PyCapsule stream reports a failure only as an error code and a message ([§15.1]), so a stream that fails raises `LTSeqIOError` carrying the producer's message. To keep the class of another table's error, read `t.to_batches()` rather than `t`, or use `t.collect()`.
-  - A `date64` value that `date32` cannot hold raises `CastError` during execution ([§6.2]).
+  - A `date64` value that is not a whole day or that `date32` cannot hold, and a `time32` or `time64` value outside one day, raise `CastError` during execution ([§6.2]).
 - **Example.** `t = LTSeq.from_arrow(pa.table({"id": [1, 2], "v": [0.5, None]}))`
 
 ### 4.5 `LTSeq.from_pandas`
