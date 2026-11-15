@@ -8,10 +8,10 @@ This directory holds the proposed public API contract for LTSeq v0.5 and the rev
 - **Which section governs a cross-cutting rule** (numeric types, literals, NULL and NaN, order, errors, interchange, time zones, aggregation, streaming, snapshots, tables without columns): [Rule ownership](#rule-ownership).
 - **What happens to a current API name in v0.5:** the inventory, [Deliverable B].
 - **Why a semantic issue was decided the way it was:** [Deliverable D], and the [trade-off record](review/trade-offs.md#trade-off-record) for costs accepted.
-- **The owner's current decisions** (accepted, modified, deferred, superseded): [Deliverable Q], and [Deliverable R] for the three deferred rows it settles (AC3, U2, OD-E).
+- **The owner's current decisions** (accepted, modified, deferred, superseded): [Deliverable Q], [Deliverable R] for the three deferred rows it settles (AC3, U2, OD-E), and [Deliverable S] for the three it settles: G5 and N9 (decided by the owner on 2026-11-15), which it applies, and OD-W, which it keeps as written.
 - **Implementation order and the work items M0–M30:** [Deliverable G], tracked in #257.
 - **How conformance is tested:** [§24]; the worked examples, which are tests too, are [§23].
-- **When and why an earlier rule changed:** the dated records H to R under [review/history/](#review-history), each of which lists the earlier records it changes.
+- **When and why an earlier rule changed:** the dated records H to S under [review/history/](#review-history), each of which lists the earlier records it changes.
 
 ## Status and scope
 
@@ -133,6 +133,7 @@ This README, and the header and footer of each module, are navigation only. They
 | [assessment-closure.md](review/history/assessment-closure.md) | P | Assessment closure pass |
 | [owner-decision-closure.md](review/history/owner-decision-closure.md) | Q | Owner decision closure |
 | [follow-up-closure.md](review/history/follow-up-closure.md) | R | API surface and interchange follow-ups (#278) |
+| [numeric-follow-up-closure.md](review/history/numeric-follow-up-closure.md) | S | Numeric follow-ups (#276) |
 
 ## Section map
 
@@ -188,6 +189,7 @@ Every subsection §N.M is in the module of chapter §N, except that [§23.10]–
 | [P](review/history/assessment-closure.md#p-assessment-closure-pass) | Assessment closure pass | [review/history/assessment-closure.md](review/history/assessment-closure.md) |
 | [Q](review/history/owner-decision-closure.md#q-owner-decision-closure) | Owner decision closure | [review/history/owner-decision-closure.md](review/history/owner-decision-closure.md) |
 | [R](review/history/follow-up-closure.md#r-api-surface-and-interchange-follow-ups) | API surface and interchange follow-ups | [review/history/follow-up-closure.md](review/history/follow-up-closure.md) |
+| [S](review/history/numeric-follow-up-closure.md#s-numeric-follow-ups) | Numeric follow-ups | [review/history/numeric-follow-up-closure.md](review/history/numeric-follow-up-closure.md) |
 
 ## Rule ownership
 
@@ -395,7 +397,7 @@ Every heading of every module, in reading order. Each list is collapsed; expand 
 ### Review
 
 <details>
-<summary>12 modules, deliverables A–R</summary>
+<summary>13 modules, deliverables A–S</summary>
 
 - **[review/verdict.md](review/verdict.md)**
   - [A. Executive verdict](review/verdict.md#a-executive-verdict)
@@ -541,6 +543,14 @@ Every heading of every module, in reading order. Each list is collapsed; expand 
     - [Checks](review/history/follow-up-closure.md#checks)
     - [Earlier records this pass changes](review/history/follow-up-closure.md#earlier-records-this-pass-changes)
     - [Open](review/history/follow-up-closure.md#open)
+- **[review/history/numeric-follow-up-closure.md](review/history/numeric-follow-up-closure.md)**
+  - [S. Numeric follow-ups](review/history/numeric-follow-up-closure.md#s-numeric-follow-ups)
+    - [Owner rows](review/history/numeric-follow-up-closure.md#owner-rows)
+    - [Other rows](review/history/numeric-follow-up-closure.md#other-rows)
+    - [Judgment](review/history/numeric-follow-up-closure.md#judgment)
+    - [Checks](review/history/numeric-follow-up-closure.md#checks)
+    - [Earlier records this pass changes](review/history/numeric-follow-up-closure.md#earlier-records-this-pass-changes)
+    - [Open](review/history/numeric-follow-up-closure.md#open)
 
 </details>
 
@@ -670,5 +680,6 @@ Headings that repeat within one history module (for example "Findings and resolu
 [Deliverable P]: review/history/assessment-closure.md#p-assessment-closure-pass
 [Deliverable Q]: review/history/owner-decision-closure.md#q-owner-decision-closure
 [Deliverable R]: review/history/follow-up-closure.md#r-api-surface-and-interchange-follow-ups
+[Deliverable S]: review/history/numeric-follow-up-closure.md#s-numeric-follow-ups
 
 <!-- /v0.5-modular:links -->

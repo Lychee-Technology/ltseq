@@ -97,6 +97,8 @@ def asof_join(self, other: LTSeq, on: str | None = None, *,
   - `nearest`: the right key with the smallest absolute distance, preferring the `backward` candidate on a tie of distances.
 
   Among right rows with the chosen key value, the last one in right order is used. With `tolerance`, a candidate further than `tolerance` from the left key is not a match.
+
+  Distances are compared exactly, for every key type (#276): a distance is the exact difference of the two keys' values, never one rounded to a float or computed in an integer type that can overflow, and a key equal to the left key is at distance 0, an infinite one included. An infinite distance (a finite key against `±inf`) is greater than every finite one and ties with another. So with left key `0.25` and right keys `-2.0**53` and `2.0**53`, `nearest` picks `2.0**53`, at 2**53 − 0.25 against 2**53 + 0.25, although both distances round to `2.0**53` in `float64`; with `int64` left key `-1` and right keys `-2**63` and `2**63 - 1`, it picks `-2**63`, at 2**63 − 1 against 2**63, a distance `int64` cannot hold. `tolerance` is compared with the exact distance too.
 - **Result.** Exactly one row per left row, in left order, with the right columns NULL when there is no match. Keeps the left `sort_keys`. Neither input needs to be sorted.
 - **Keys.** The as-of key is one column per side, of the same class ([§12.1]) among exact numeric, floating, date, timestamp and duration; units are compared exactly. `by` keys follow `join`. NULL and NaN left keys never match.
 - **`tolerance`.** A non-negative literal: a number exact in the key type for numeric keys, a `timedelta` for date, timestamp and duration keys. A negative value raises `LTSeqValueError`, a value of the wrong kind `LTSeqTypeError`.

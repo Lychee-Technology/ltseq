@@ -61,7 +61,7 @@ None blocks the merge. Each blocks the item named until the owner decides it. Un
 | OD-S1 | — (v0.4) | Fail-loudly v0.4 safeguards for the affected `partition` and lookup keys | #258, #223 | A v0.4 fix, not postponed to v0.5 | No |
 | OD-S2 | — (v0.4) | An urgent v0.4 fix for #259's file corruption and panic | #259 | A v0.4 fix | No |
 
-*Later:* AC3, U2 and OD-E were settled in the contract on 2026-11-10, with the directions above; [Deliverable R] records how.
+*Later:* AC3, U2 and OD-E were settled in the contract on 2026-11-10, with the directions above; [Deliverable R] records how. On 2026-11-14 G5 was applied in the contract with the direction above, and OD-W was kept as the current text pending the owner's answer to the M0 report's question 4. The owner decided N9 on 2026-11-15, adopting the comparison-only rule [Deliverable S] proposed, and it was applied in the contract; [Deliverable S] records how.
 
 ### What the modifications required
 
@@ -152,5 +152,6 @@ Previous: [Assessment closure pass (P)](assessment-closure.md) · [Index](../../
 [§24]: ../../contract/acceptance.md#24-acceptance-criteria-and-contract-test-matrix
 [Deliverable Q]: #q-owner-decision-closure
 [Deliverable R]: follow-up-closure.md#r-api-surface-and-interchange-follow-ups
+[Deliverable S]: numeric-follow-up-closure.md#s-numeric-follow-ups
 
 <!-- /v0.5-modular:links -->
