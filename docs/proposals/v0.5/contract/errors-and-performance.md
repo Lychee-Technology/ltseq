@@ -28,7 +28,7 @@ Every exception LTSeq raises for a documented failure is an instance of one of t
 | `SortRequiredError` | `LTSeqValueError` | An order requirement ([§9.3]) not met |
 | `OrderViolationError` | `LTSeqValueError` | Data that violates `assume_sorted` |
 | `DuplicateKeyError` | `LTSeqValueError` | A `validate=` violation |
-| `CastError` | `LTSeqValueError` | A value that fails to convert: a supplied value that an implicit conversion cannot hold exactly ([§17.6]), a value the [§17.6] table says fails in an explicit cast, or a value that a conversion defined elsewhere cannot hold (`date64` to `date32` in [§6.2], a writer's in [§16.5]) |
+| `CastError` | `LTSeqValueError` | A value that fails to convert: a supplied value that an implicit conversion cannot hold exactly ([§17.6]), a value the [§17.6] table says fails in an explicit cast, or a value that a conversion defined elsewhere cannot hold (`date64` to `date32` in [§6.2], a writer's in [§16.5]), and a value read that breaks its Arrow type's invariant (a `date64` that is not a whole day, a time outside one day, [§6.2]) |
 | `LTSeqIndexError` | `LTSeqError`, `IndexError` | A row position outside the table |
 | `ArithmeticOverflowError` | `LTSeqError`, `OverflowError` | Integer, decimal or temporal overflow, including an operand's change of unit inside temporal arithmetic ([§19.2]) |
 | `DivisionByZeroError` | `LTSeqError`, `ZeroDivisionError` | Integer, decimal or duration division by zero |

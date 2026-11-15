@@ -119,7 +119,7 @@ def partition(self, *keys: str) -> dict[Any, LTSeq]
 - **Dict order.** Keys are in the order `sort(*keys)` gives them with its defaults ([§9.4]): ascending, the first key column most significant, NULL last in each column. Tuple keys are ordered by their first component, then the next, with `None` last within each: `("E", "x")`, `("E", None)`, `("W", "x")`, `(None, "x")`.
 - **Values.** Each value is plan-building: the rows of `self` whose keys equal the dict key (NULL equal to `None`), with `self`'s order and `sort_keys`.
 - **Consistency.** The keys come from one read of the source at the call, and each value reads the source again when it executes ([§5.1]), so executing every value reads the source N + 1 times for N keys, counting the read at the call, and two values executed at different times can see different versions of the source: the dict is not an atomic snapshot of it. If the source changes in between, rows with a key added since the call appear in no value, and a value whose rows were removed is empty. To split a source that may change, or to scan it once, partition a snapshot: `t.collect().partition("region")`.
-- **Errors.** No keys raise `LTSeqValueError`. A NaN key value raises `LTSeqValueError` at the call, because NaN cannot be looked up in a `dict`. A key value that `to_dicts` cannot convert ([§16.3]) raises that `CastError` at the call, naming the column, even though the key itself is in UTC. No key is rounded or truncated to fit; to split on such a column, partition on a derived key that converts, such as `r.ts.dt.truncate("second")`. A pass-through-type key raises `LTSeqTypeError`.
+- **Errors.** No keys raise `LTSeqValueError`. A NaN key value raises `LTSeqValueError` at the call, because NaN cannot be looked up in a `dict`. A key value that `to_dicts` cannot convert ([§16.3]) raises that `CastError` at the call, naming the column, even though the key itself is in UTC. No key is rounded or truncated to fit; to split on such a column, partition on a derived key that converts: `t.derive(k=lambda r: r.ts.dt.truncate("second")).partition("k")` for a naive `ts`. For an aware `ts`, truncate in UTC, `r.ts.dt.convert_time_zone("UTC").dt.truncate("second")`: `truncate` works in local time and raises in a repeated hour ([§19.4]), as at 01:30:00.5 EST on 2024-11-03 in New York, while the UTC key raises no DST error (only `ArithmeticOverflowError` at the timestamp type's lower bound, [§19.4]), and the dict key is the UTC instant either way (#277). A pass-through-type key raises `LTSeqTypeError`.
 
 `PartitionedTable`, `SQLPartitionedTable` and `partition(by=lambda ...)` are removed. To apply a function per partition: `{k: f(v) for k, v in t.partition("region").items()}`.
 
@@ -162,6 +162,7 @@ Previous: [Joins and set operations (§12–§13)](joins-and-sets.md) · [Index]
 [§16.3]: streaming-and-output.md#163-to_dicts
 [§17.4]: numeric-null-temporal.md#174-types-of-mixed-operands
 [§18]: numeric-null-temporal.md#18-null-nan-and-boolean-logic
+[§19.4]: numeric-null-temporal.md#194-dt-methods
 [§20.2]: errors-and-performance.md#202-stages
 
 <!-- /v0.5-modular:links -->
