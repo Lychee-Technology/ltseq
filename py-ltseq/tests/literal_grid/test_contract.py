@@ -255,11 +255,6 @@ def test_the_gate_reads_a_negative_scale_as_the_build_does_until_m18():
 
 @pytest.mark.parametrize("cell,expected", [
     ("f32/i2p24p1/eq", [False, None, False, False, None, False]),  # 2**24 is not 2**24 + 1
-    # A float literal beside float32 is its binary64 value (§17.2), while N9 waits for the owner (#276)
-    ("f32/f0_1/eq", [False, None, False, False, None, False]),  # `r.f32 == 0.1` is FALSE
-    ("f32/f0_1/isin2", [False] * 6),
-    ("f32/f2p24p1/gt", [False, None, False, False, None, True]),  # float32 1e20 is above 2**24 + 1
-    ("f32/f1e20/lt_mirror", [False, None, False, False, None, True]),  # float32 1e20 is above binary64 1e20
     ("f32/f2p24/eq", [True, None, False, False, None, False]),  # float32 holds 16777216.0
     ("f32/fm0/gt", [True, None, True, True, None, True]),
     ("f64/D0_1/eq", [False, None, False, False, None, False]),  # binary64 0.1 is not Decimal("0.1")
@@ -282,6 +277,10 @@ def test_comparisons_are_exact(cell, expected):
 
 @pytest.mark.parametrize("cell,expected", [
     ("i8/fnan/eq", "LTSeqValueError"),  # §17.4 rule 3, N4: NaN literal vs integer
+    ("f32/f0_1/eq", "LTSeqValueError"),  # §17.4 rule 3, N4: `r.f32 == 0.1` (N9, #276)
+    ("f32/f0_1/isin2", "LTSeqValueError"),
+    ("f32/f2p24p1/gt", "LTSeqValueError"),  # float32 has no 16777217.0
+    ("f32/f1e20/lt_mirror", "LTSeqValueError"),
     ("d5/finf/isin2", "LTSeqValueError"),
     ("i8/none/gt", "LTSeqTypeError"),  # §8.2: an ordering comparison with None
     ("i8/s1/eq", "LTSeqTypeError"),  # §17.4 rule 4: a string next to a number
