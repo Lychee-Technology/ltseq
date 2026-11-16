@@ -21,7 +21,11 @@ HERE = Path(__file__).resolve().parent
 RESULTS = HERE / "results"
 
 # The mode every other mode of a measurement is compared with.
-BASELINE = {"m1": "off", "m2": "off", "m3": "off", "m4": "today", "m4b": "pushdown", "m5": "off", "m6": "off"}
+BASELINE = {"m1": "off", "m2": "off", "m3": "off", "m4": "today", "m4b": "pushdown", "m5": "off", "m6": "off",
+            # m7: today's i128 kernel. m8: DataFusion's percentile_cont, the
+            # baseline #306 names (`off`, today's median and t-digest, is a
+            # reference).
+            "m7": "off", "m8": "cont"}
 
 
 def summarize(cell: dict) -> dict:

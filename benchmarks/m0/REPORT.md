@@ -1,4 +1,4 @@
-# M0 feasibility report (#251)
+# M0 feasibility report (#251, #306)
 
 PR #250's API review (finding V9) found that the v0.5 contract's costliest
 commitments would be priced only after being built. #251 prices them first,
@@ -10,6 +10,13 @@ them.
 Nothing here is a budget. Recording budgets is the owner's step (#251's third
 acceptance criterion), and the questions for it are at the end.
 
+#306 added two kernels that the reassessment found unpriced ([#251
+comment](https://github.com/Lychee-Technology/ltseq/issues/251#issuecomment-6072922309)),
+with the same harness: m7, decimal `/` and `%` through a 256-bit
+intermediate (gates M6), and m8, exact `quantile` and `median` (gates M13).
+They ran later, on another machine, so their ratios are not comparable
+cell by cell with m1 to m6 ([Setup](#setup)).
+
 ## Setup
 
 | | |
@@ -20,6 +27,22 @@ acceptance criterion), and the questions for it are at the end.
 | Command | `python benchmarks/m0/run.py --only m6,m4b,m3,m5,m1,m2,m4`, one run started 2026-10-17 17:22 EDT; m4b again with `--only m4b`, started 2026-10-18 21:09 EDT; m4 again with `--only m2,m4`, started 2026-10-19 11:09 EDT (its m2 results were replaced); m2 again with `--only m2`, started 2026-10-19 12:19 EDT |
 | Partitions | 1, 2, 4 and 12 (the CPU count) through #274's `pinned_engine`; m3 adds 24 for the baseline comment |
 | Data | bench_core's synthetic table at 10K, 100K and 1M rows (m1 and m2 add 10M); ClickBench's 1M-row sample and its 100M-row file sorted by `(userid, eventtime, watchid)` (16 GiB, 814 row groups); the R3 harness's 640 MiB input |
+
+**#306's measurements (m7, m8).**
+
+| | |
+|---|---|
+| Machine | An LXC container limited to 8 of the 12 threads (CPUs 0 to 7) of an Intel Core i7-8700K (6 cores), 23 GiB, Linux 7.0.14 (Proxmox) |
+| Build | `maturin develop --release --features m0` (fat LTO), rustc 1.97.1, Python 3.13.18, pyarrow 25.0.1 |
+| Commit | m7 at `fa38940`, m8 at `0ec3c3b`, each with a clean worktree. `0ec3c3b` changes only how m8's global accumulator hands on its state (m8 section) |
+| Command | `python benchmarks/m0/run.py --only m7,m8`, started 2026-11-16 19:24 UTC (its m8 results were replaced); m8 again with `--only m8`, started 2026-11-16 20:08 UTC |
+| Partitions | 1, 2, 4 and 8 (the CPU count the container reports) |
+| Data | m7: generated `decimal128` columns at 1M and 10M rows (`inputs.decimals`); m8: bench_core at 1M and 10M rows |
+| Contention | None of the 444 cells ran while other processes kept more than half a core busy |
+
+With `decimal` and `quantile` off, `session` adds neither rule, so a
+measurement build's baseline is still today's engine. The test suite was
+not rerun on this machine.
 
 **Baseline.** Each measurement compares a prototype with the same build and
 every flag off. With every flag off a measurement build is today's engine:
@@ -80,6 +103,8 @@ the same build with every prototype off.
 | m4b | Pushdown lost to D10a | M16 | If every checked operation counts as fallible: filter kept above the keys' computation, no cost where statistics cannot prune, 59 to 265× on a repeated lookup by a sorted key and 7.5 to 22× on a first one; kept above the operator, 1.2 to 2.3× and up to 1,440× (117× first). Every measured key is infallible by its operand types | Where M16 places the filter; how it decides a key cannot fail |
 | m5 | `assume_sorted` checked, no pruning | M3 | The check: 5 to 7% on top of D7's read, 1.2 to 1.8× on full scans; the lost pruning: 156 to 604× on a repeated sort-key lookup, 70 to 245× on a first one | D7 as written, or a weaker check that keeps pruning |
 | m6 | `string_view` normalized | M18 | Plain at the scan: up to 1.3× on filters and grouping; cast at the root: 1.1 to 1.45× on string-heavy results; both hold 25 to 35% less memory on export at one partition, and between 14% less and 32% more at 12 | Where M18 normalizes |
+| m7 | Decimal `/` and `%` through 256 bits (#306) | M6 | Guarded fallback: `/` at today's time (0.87 to 1.10×) with none or 1% of rows needing 256 bits, `%` 1.1 to 1.3× from the floored remainder and checks, not the guard; every row at 256 bits: 2.0 to 2.6× (`/`) and 2.2 to 4.1× (`%`) today's time on rows that fit, where today raises. 256 bits on every row: 2× (`/`), 1.6 to 2.8× (`%`). Memory unchanged | Guarded or always-wide; whether `%` shares the intermediate |
+| m8 | Exact `quantile` and `median` (#306) | M13 | 0.70 to 0.95× `percentile_cont` globally, within noise of it grouped; exact interpolation not measurable (about 0.1 µs a group); same memory. 1.06 to 1.10× today's `median`; 8 to 24× faster than today's t-digest `percentile` over 100,000 groups | The budget only; windowed quantiles still unpriced |
 
 The two large costs are both lost row-group pruning (m4b and m5), and
 both come from rules that forbid a filter or a skip below a point the
@@ -673,6 +698,199 @@ that decodes plain strings when the plan keeps most of them and casts at
 the root after a selective filter would avoid both costs. It was not
 prototyped, and it needs an estimate of selectivity before execution.
 
+## m7: decimal `/` and `%` through a 256-bit intermediate (gates M6, #306)
+
+**What it prices.** Contract §17.3 gives decimal `/` the type
+`decimal(min(p1 − s1 + s2 + s, 38), s)` with `s = min(s1 + 4, 38)` and
+truncates the quotient at that scale; `%` takes the larger scale and the
+divisor's sign. Both raise `ArithmeticOverflowError` only when the result
+does not fit. arrow-rs rescales an operand in `i128` before it divides, so
+it raises where the result fits (#276's N5): `decimal128(38, 10)` 1e15 `/`
+`decimal128(38, 10)` 1 multiplies 1e25 by 10¹⁴, and `decimal128(38, 0)`
+10³⁷ `%` `decimal128(38, 10)` 7 multiplies 10³⁷ by 10¹⁰. M6 needs a wider
+intermediate, either on every row or only on the rows whose rescaling
+overflows.
+
+**Prototypes** (`decimal.rs`). Both rewrite `decimal128` `/` and `%` into a
+function that computes the contract's value: the quotient truncated, the
+remainder floored, a zero divisor raising `DivisionByZeroError` and a
+result beyond the precision raising. `wide` computes every row in arrow's
+`i256`. `guarded` computes a row in `i128` with checked multiplications
+and recomputes it in `i256` when one overflows. `i256` always suffices for
+`decimal128` operands: a dividend that overflows it has a quotient of more
+than 38 digits, which raises. The prototypes keep DataFusion's result type
+for `%`, which is narrower than the contract's. This does not change the
+work done per row.
+
+**Inputs** (`inputs.decimals`). No benchmark file has a decimal column, so
+the cells generate them: `a` and divisor `b` as `decimal128(38, 10)`,
+`c` as `decimal128(38, 0)`. On a set share of the rows (the wide rows),
+`a` lies in [10¹⁵, 10¹⁶) and `c` in [10²⁹, 10³⁰), so `a / b` and `c % b`
+overflow arrow's rescaling exactly there. Elsewhere `a` is below 10⁶ and
+`c` below 10¹². `b` is in [1, 1000) (`small`: a scaled value of one 64-bit
+word, where `i256` division takes a short path) or in [10⁹, 10¹²)
+(`large`: two words). `a % b` has equal scales and rescales nothing. It
+is the control.
+
+**Results.** 10M rows held in memory, streamed. The columns give today's
+median time at one partition, then each prototype's time as a multiple of
+today's at 1, 2, 4 and 8 partitions. Today's kernel raises on any wide row.
+Rows with 1% or all wide rows are therefore compared with today's time on
+the input of the same divisor with no wide rows, which is the work the
+operation does when it fits. Peak memory at 10M rows was 0.1 to 0.2 MiB
+at one partition and 6 to 11 MiB at 8, in every mode. The 1M-row cells, at 1 and 8 partitions,
+show the same pattern ([results/m7.md](results/m7.md)).
+
+| pipeline | divisor | wide rows | off s (p=1) | wide × at p=1/2/4/8 | guarded × at p=1/2/4/8 |
+|---|---|---|---|---|---|
+| `a / b` | small | none | 0.345 | 1.98 / 2.02 / 1.65 / 2.14 | 0.98 / 1.00 / 0.87 / 1.07 |
+| `a / b` | small | 1% | raises | 1.99 / 2.02 / 1.74 / 1.96 | 0.99 / 1.04 / 0.91 / 1.10 |
+| `a / b` | small | all | raises | 2.39 / 2.40 / 2.00 / 2.43 | 2.39 / 2.40 / 2.03 / 2.46 |
+| `a / b` | large | none | 0.385 | 1.96 / 2.00 / 1.88 / 2.00 | 1.04 / 1.02 / 1.02 / 1.03 |
+| `a / b` | large | 1% | raises | 1.96 / 2.00 / 1.91 / 1.98 | 1.04 / 1.04 / 1.00 / 1.03 |
+| `a / b` | large | all | raises | 2.52 / 2.57 / 2.35 / 2.53 | 2.54 / 2.60 / 2.35 / 2.53 |
+| `c % b` | small | none | 0.211 | 2.74 / 2.62 / 1.61 / 2.79 | 1.12 / 1.13 / 0.69 / 1.21 |
+| `c % b` | small | 1% | raises | 2.74 / 2.63 / 1.66 / 2.84 | 1.17 / 1.15 / 0.71 / 1.28 |
+| `c % b` | small | all | raises | 3.93 / 3.78 / 2.16 / 3.42 | 3.97 / 3.73 / 2.26 / 3.51 |
+| `c % b` | large | none | 0.246 | 1.75 / 1.72 / 1.66 / 1.83 | 1.13 / 1.12 / 1.42 / 1.20 |
+| `c % b` | large | 1% | raises | 1.84 / 1.76 / 1.70 / 1.96 | 1.20 / 1.20 / 1.22 / 1.31 |
+| `c % b` | large | all | raises | 4.10 / 3.89 / 3.75 / 3.91 | 4.14 / 3.97 / 3.81 / 3.46 |
+| `a % b` (control) | small | none | 0.182 | 2.64 / 2.45 / 2.17 / 2.56 | 1.13 / 1.06 / 1.37 / 1.29 |
+| `a % b` (control) | large | none | 0.217 | 1.64 / 1.68 / 1.26 / 1.78 | 1.16 / 1.18 / 0.97 / 1.18 |
+
+At 4 partitions a cell's runs were bimodal. Today's `c % b` took 0.07 s in
+two runs and 0.11 s in three, so its ratios at 4 partitions (0.69, 1.42)
+are noise. The cells at 1, 2 and 8 partitions are steady. At one partition
+today's `/` takes 34 to 38 ns a row and `%` 21 to 25. `wide` takes 68 to 75
+and 43 to 58. With every row wide, both prototypes take 82 to 102 ns.
+
+**Reading.** The guarded fallback dominates: it costs today's time when no
+row needs 256 bits and `wide`'s time when every row does.
+
+- With no wide rows, `guarded` `/` takes 0.98 to 1.07 of today's time,
+  leaving out the bimodal 4-partition cells. `wide` costs about 2 times for
+  `/`, whether the divisor fills one word or two, and 1.6 to 2.8 times for
+  `%`.
+- A 1% share of wide rows costs the same as none, in both modes.
+- With every row wide, the two modes take the same time: the failed `i128`
+  attempt costs nothing measurable. That is 2.0 to 2.6 times today's time
+  on rows that fit for `/`, and 2.2 to 4.1 times for `%`, where today's
+  `i128` remainder is cheaper. Today raises on these rows.
+- `guarded` `%` costs 1.1 to 1.3 times today's with no wide rows, and so
+  does the control, which never rescales and never falls back. That cost
+  comes from what the prototype computes on every row, which today's
+  kernel does not: the floored remainder's sign fix-up, the precision
+  check and an error check per row. The guard adds nothing measurable to
+  it. The measurement does not separate those three.
+- `wide` costs least against today's `%` with a two-word divisor (1.6 to
+  1.8 times): today's `i128` remainder by such a divisor is itself slower.
+
+For M6: the guarded fallback is within 10% of today for `/`. `%` costs
+1.1 to 1.3 times, from the contract's floored remainder and checks, not
+from the wider intermediate. A row that needs 256 bits costs 2 to 4 times
+a row that does not, against today's error. #306 asked whether `%` should
+share `/`'s intermediate or get a remainder kernel of its own. Sharing it
+costs nothing measurable, because the control without rescaling costs the
+same, so a separate kernel would have little to gain.
+
+## m8: exact `quantile` and `median` (gates M13, #306)
+
+**What it prices.** Contract §14.2 makes `quantile(q)` the exact value of
+*x*ⱼ + *t*(*x*ⱼ₊₁ − *x*ⱼ), with *h* = *q̂*(*n* − 1) for the decimal *q̂* that
+*q* was written as, rounded once. Every input takes part at its exact
+value: `median([1, 2**53 + 1])` is `4503599627370497.0`. DataFusion 55's
+`percentile_cont` coerces an integer input to `float64`, computes *h* in
+`float64` and interpolates there with *t* cut to six decimals. Its
+`median` returns the input type. LTSeq's `percentile` today is the
+t-digest `approx_percentile_cont`. §21.1 lets `quantile` hold its input,
+so the cost to price is time: selecting the two ranks, and the exact
+interpolation, which runs once per group.
+
+**Prototypes** (`quantile.rs`). A rule replaces `median` over `float64`
+and `approx_percentile_cont` (LTSeq's `percentile`) with one of:
+
+- `cont`: DataFusion's `percentile_cont`, the baseline #306 names, given
+  no `WITHIN GROUP` ordering, which would make the aggregate demand sorted
+  input. The ratios below are against it.
+- `select`: the prototype's accumulators, which hold every value as
+  `percentile_cont`'s do. It selects *x*ⱼ with `select_nth_unstable` and
+  takes *x*ⱼ₊₁ as the least value above it, where DataFusion selects a
+  second time. It interpolates in `float64`. This is a control, not the
+  contract: it separates the selection's cost from the interpolation's.
+- `exact`: the same selection, *j* and *t* from *q̂* in integer
+  arithmetic, and the interpolation in `BigInt`, rounded once with m2's
+  rounding. An `int64` input stays `int64`. NaN and infinities follow
+  §14.2.
+
+`off`, today's `median` and t-digest, is given for reference. Not
+prototyped: `median` over an integer type (DataFusion's returns the input
+type, which a rule may not change), decimal inputs, `DISTINCT` and windows.
+The first measurement is global and grouped only, one of the two options
+#306 left open.
+
+**Results.** bench_core in memory at 10M rows, streamed, with partial
+aggregation never skipped (as in m2). `percentile_cont`'s median time at
+1, 2, 4 and 8 partitions, then each mode's time as a multiple of it, and
+peak memory at one and at 8 partitions. Over 100,000 groups each group
+holds 100 values. 1M rows show the same pattern with more noise
+([results/m8.md](results/m8.md)).
+
+| pipeline | cont s at p=1/2/4/8 | off × at p=1/2/4/8 | select × | exact × | peak MiB p=1: off/cont/select/exact | p=8 |
+|---|---|---|---|---|---|---|
+| `median` (`float64`) | 0.087 / 0.110 / 0.102 / 0.110 | 0.75 / 0.81 / 0.81 / 0.89 | 0.81 / 0.87 / 0.86 / 0.89 | 0.81 / 0.89 / 0.86 / 0.95 | 76 / 76 / 76 / 76 | 89 / 90 / 93 / 90 |
+| `percentile(0.9)` (`float64`) | 0.076 / 0.103 / 0.094 / 0.105 | 3.49 / 1.31 / 0.76 / 0.57 | 0.86 / 0.90 / 0.89 / 0.95 | 0.89 / 0.88 / 0.92 / 0.95 | 0 / 76 / 76 / 76 | 0 / 92 / 87 / 86 |
+| `percentile(0.9)` (`int64`) | 0.083 / 0.106 / 0.095 / 0.101 | 2.37 / 0.97 / 0.66 / 0.49 | 0.70 / 0.79 / 0.80 / 0.86 | 0.70 / 0.78 / 0.79 / 0.87 | 0 / 76 / 76 / 76 | 0 / 92 / 90 / 89 |
+| `median` by 5 categories | 0.176 / 0.211 / 0.132 / 0.124 | 0.96 / 0.87 / 0.98 / 0.94 | 0.94 / 0.95 / 1.05 / 1.04 | 0.97 / 0.83 / 1.10 / 1.04 | 77 / 81 / 77 / 77 | 233 / 208 / 207 / 277 |
+| `median` by 100,000 groups | 0.362 / 0.381 / 0.307 / 0.319 | 0.94 / 0.90 / 1.01 / 1.01 | 0.97 / 0.99 / 0.95 / 0.96 | 0.98 / 0.97 / 0.98 / 1.01 | 103 / 104 / 104 / 104 | 246 / 250 / 248 / 243 |
+| `percentile(0.9)` (`int64`) by 100,000 groups | 0.390 / 0.356 / 0.334 / 0.330 | 20.86 / 11.95 / 9.26 / 7.49 | 0.84 / 0.99 / 0.87 / 0.87 | 0.86 / 0.97 / 0.94 / 0.94 | 161 / 104 / 104 / 104 | 919 / 280 / 263 / 233 |
+
+m8 ran twice, before and after a fix to how the prototype's global
+accumulator hands on its state. Before the fix it copied every value and
+held about 50 MiB more than `percentile_cont` at 8 partitions. The tables
+are from the second run. Between the two runs, the cells the fix did not
+touch (`off` and every grouped cell) moved by 0.03 to 0.12 in their
+ratio at one and two partitions, and by up to 0.28 at 4 and 8, most in
+the grouped cells. Read a ratio within 0.15 of 1 as no difference, and
+within 0.3 for a grouped cell at 4 or 8 partitions.
+
+**Reading.** An exact quantile costs no more than DataFusion's
+`percentile_cont`, and the exact interpolation costs nothing measurable.
+
+- Selection: the prototype (`select`) takes 0.70 to 0.95 of
+  `percentile_cont`'s time globally, and is within noise of it grouped
+  (0.84 to 1.05). It selects once where DataFusion selects twice, and an
+  `int64` input is not converted to `float64` first (0.70 to 0.86).
+- Interpolation: `exact` and `select` differ by at most 8%, either way,
+  in every 10M-row cell but one (0.87). Over 100,000 groups at one
+  partition, where every group's interpolation runs on one thread,
+  `exact` took 3.6 to 9.4 ms
+  more than `select`, about 0.1 µs a group, inside the noise. #306's
+  assumption holds: the interpolation's cost is small next to the
+  selection's. Every 100-value group interpolates (*t* > 0), so this is the
+  case that exercises the `BigInt` path most.
+- Against today's `median` the exact one costs 1.06 to 1.10 times
+  globally and 0.96 to 1.12 grouped. Against today's `percentile`, the
+  t-digest, it is 3 to 4 times faster at one partition and 1.2 to 1.8 times
+  slower at 4 and 8. Over 100,000 groups it is 8 to 24 times faster, and
+  the t-digest holds 919 MiB at 8 partitions against the exact one's 233.
+- Memory matches `percentile_cont`'s: every value is held, 8 bytes each,
+  about 76 MiB for 10M values at one partition. The one gap, 277 MiB
+  against 208 over 5 categories at 8 partitions, lies within that cell's
+  spread across modes and runs (207 to 277 MiB).
+- Partition scaling: neither DataFusion's quantile nor the prototype
+  gains from partitions. One partition is fastest for the global
+  quantiles (0.06 to 0.09 s against 0.09 to 0.11 at 8), most likely
+  because every value moves to one final accumulator, which selects on
+  one thread; this was not profiled.
+  Grouped quantiles gain at most 1.4 times from 1 to 8 partitions.
+
+For M13 the exact quantile needs no budget beyond `percentile_cont`'s
+time and memory. One cost is common to both: a quantile holds its input
+and does not scale with partitions. Windowed quantiles were not measured.
+DataFusion's `percentile_cont` retracts by scanning every value it holds
+and selects again for every frame, so a windowed quantile needs its own
+measurement before M13 commits to one.
+
 ## Questions for the owner
 
 Recording a budget for each gated item (D9) is the owner's step; the
@@ -714,6 +932,16 @@ decisions open:
    and a CSV schedule, be prototyped before M1 starts?
 6. **M18.** Normalize at the scan, at the root, or by estimated
    selectivity (not prototyped)?
+7. **M6 (#306).** The guarded fallback costs today's time on `/` when no
+   row needs 256 bits, and the same as 256 bits on every row when all do.
+   Always-wide arithmetic costs about 2 times on every row. Should M6
+   build the guarded fallback, with `%` going through the same
+   intermediate as `/`? The 1.1 to 1.3 times on `%` comes from the
+   floored remainder and the checks, which either design pays.
+8. **M13 (#306).** The exact quantile is priced at `percentile_cont`'s time
+   and memory, with the exact interpolation not measurable. Should its
+   budget be `percentile_cont`'s, and should windowed quantiles, which were
+   not measured, be priced before M13 builds them?
 
 One observation concerns today's engine rather than the contract. LTSeq
 turns on the Parquet scan's row filter (`pushdown_filters`). In m4b it
@@ -748,3 +976,9 @@ widely.
   filters), time to first row equals the total time.
 - Peak memory is the resident growth over the first measured run; values
   under about 5 MiB are at its resolution.
+- m7 and m8 ran on a container whose 8 CPUs are 6 cores, two of them with
+  both threads. At 4 partitions a cell's runs were often bimodal (for
+  example 0.07 s and 0.11 s), plausibly as threads did or did not land on
+  sibling threads; this was not verified. Their 4-partition ratios move
+  more than the others. m7's inputs are generated, and m8 prices `int64`
+  and `float64` inputs only.

@@ -14,6 +14,8 @@
 //! | m4b | `pushdown`: a filter kept above a sort, aggregate or distinct, or its input (D10a) | M16 |
 //! | m5 | `validate`: `assume_sorted` checked on every row, no pruning (D7) | M3 |
 //! | m6 | `views`: `string_view` normalized to `string` | M18 |
+//! | m7 | `decimal`: decimal `/` and `%` through a 256-bit intermediate (#306) | M6 |
+//! | m8 | `quantile`: exact `quantile` and `median` (#306) | M13 |
 //!
 //! Flags are process-wide and read when a session is created, like the
 //! layout overrides of `engine::LayoutOverrides`: a table keeps the
@@ -32,11 +34,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 pub(crate) mod checked;
+pub(crate) mod decimal;
 pub(crate) mod exact;
 pub(crate) mod exact_acc;
 pub(crate) mod masked;
 pub(crate) mod ordered;
 pub(crate) mod pushdown;
+pub(crate) mod quantile;
 pub(crate) mod validate;
 pub(crate) mod views;
 
@@ -51,6 +55,33 @@ pub(crate) enum Checked {
     Arrow,
     /// Wrapping arithmetic plus a branch-free overflow mask per batch.
     Fast,
+}
+
+/// m7: how decimal `/` and `%` compute (#306).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum Decimal {
+    /// arrow's `i128` kernels, which rescale an operand in `i128`.
+    #[default]
+    Off,
+    /// Every row through an `i256` intermediate.
+    Wide,
+    /// `i128`, and `i256` for a row whose rescaling overflows `i128`.
+    Guarded,
+}
+
+/// m8: how `median` and `quantile` (today `approx_percentile_cont`) are
+/// computed (#306).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(crate) enum Quantile {
+    /// Today: DataFusion's `median`, and the t-digest for `percentile`.
+    #[default]
+    Off,
+    /// DataFusion's `percentile_cont`: exact ranks, `float64` interpolation.
+    Cont,
+    /// The prototype's selection with `float64` interpolation (a control).
+    Select,
+    /// The prototype's selection with exact interpolation (the contract).
+    Exact,
 }
 
 /// m4: how `&` and `|` evaluate a fallible operand in a filter.
@@ -184,6 +215,8 @@ pub(crate) struct Prototypes {
     pub(crate) views: Views,
     pub(crate) restrict_pushdown: Restrict,
     pub(crate) partial_skip: PartialSkip,
+    pub(crate) decimal: Decimal,
+    pub(crate) quantile: Quantile,
 }
 
 impl Default for Prototypes {
@@ -201,6 +234,8 @@ impl Default for Prototypes {
             views: Views::Off,
             restrict_pushdown: Restrict::Off,
             partial_skip: PartialSkip::Default,
+            decimal: Decimal::Off,
+            quantile: Quantile::Off,
         }
     }
 }
@@ -297,6 +332,23 @@ impl Prototypes {
                         _ => return Err(bad()),
                     }
                 }
+                "decimal" => {
+                    p.decimal = match v {
+                        "off" => Decimal::Off,
+                        "wide" => Decimal::Wide,
+                        "guarded" => Decimal::Guarded,
+                        _ => return Err(bad()),
+                    }
+                }
+                "quantile" => {
+                    p.quantile = match v {
+                        "off" => Quantile::Off,
+                        "cont" => Quantile::Cont,
+                        "select" => Quantile::Select,
+                        "exact" => Quantile::Exact,
+                        _ => return Err(bad()),
+                    }
+                }
                 _ => return Err(format!("unknown prototype flag {key:?}")),
             }
         }
@@ -382,6 +434,23 @@ impl Prototypes {
                 PartialSkip::Never => "never",
             }),
         );
+        out.insert(
+            name("decimal"),
+            name(match self.decimal {
+                Decimal::Off => "off",
+                Decimal::Wide => "wide",
+                Decimal::Guarded => "guarded",
+            }),
+        );
+        out.insert(
+            name("quantile"),
+            name(match self.quantile {
+                Quantile::Off => "off",
+                Quantile::Cont => "cont",
+                Quantile::Select => "select",
+                Quantile::Exact => "exact",
+            }),
+        );
         out
     }
 }
@@ -457,6 +526,12 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
     if p.exact != FloatSums::Off {
         builder = builder.with_optimizer_rule(Arc::new(exact::ExactFloat::new(p.exact)));
     }
+    if p.decimal != Decimal::Off {
+        builder = builder.with_optimizer_rule(Arc::new(decimal::WideDecimal::new(p.decimal)));
+    }
+    if p.quantile != Quantile::Off {
+        builder = builder.with_optimizer_rule(Arc::new(quantile::ExactQuantile::new(p.quantile)));
+    }
     // Physical rules run in this order: the scan is wrapped first, the root
     // last, so that the ordered merge ends up on top.
     if p.validate == Sorted::Validate {
@@ -531,6 +606,8 @@ mod tests {
             ("restrict_pushdown", "keys"),
             ("pruning", "off"),
             ("partial_skip", "never"),
+            ("decimal", "guarded"),
+            ("quantile", "exact"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -538,6 +615,7 @@ mod tests {
         let p = Prototypes::parse(&flags).unwrap();
         assert_eq!(p.checked, Checked::Fast);
         assert_eq!(p.order_window, NonZeroUsize::new(3));
+        assert_eq!((p.decimal, p.quantile), (Decimal::Guarded, Quantile::Exact));
         assert_eq!(Prototypes::parse(&p.to_flags()).unwrap(), p);
         assert!(
             Prototypes::parse(&HashMap::from([("nope".to_string(), "1".to_string())])).is_err()
