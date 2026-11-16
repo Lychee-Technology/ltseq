@@ -299,10 +299,20 @@ impl<T: Value> Accumulator for QuantileAcc<T> {
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        let list = list_of(vec![std::mem::take(&mut self.values)]);
-        Ok(vec![ScalarValue::List(Arc::new(
-            list.as_list::<i32>().clone(),
-        ))])
+        // The values move into the list without a copy, as DataFusion's
+        // percentile_cont hands them on.
+        let values = std::mem::take(&mut self.values);
+        let offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0, values.len() as i32]));
+        let list = ListArray::new(
+            Arc::new(Field::new_list_field(T::Arrow::DATA_TYPE, true)),
+            offsets,
+            Arc::new(PrimitiveArray::<T::Arrow>::new(
+                ScalarBuffer::from(values),
+                None,
+            )),
+            None,
+        );
+        Ok(vec![ScalarValue::List(Arc::new(list))])
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
