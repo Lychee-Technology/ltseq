@@ -171,6 +171,25 @@ class TestEmpty:
         assert out.schema.field("id").type == pa.int64()
         assert out.schema.field("s").type == pa.string()
 
+    def test_derived_table_with_zero_rows_keeps_pandas_index(self):
+        """A table whose schema was rebuilt from its plan (``derive``) keeps the
+        schema metadata when a filter leaves no batches to take it from (#206).
+
+        The control is the same filter without ``derive``: that table keeps the
+        source schema, metadata included, so it never lost the index.
+        """
+        pd = pytest.importorskip("pandas")
+        full = LTSeq.from_pandas(pd.DataFrame({"x": [1, 2]}, index=pd.Index([10, 11], name="idx")))
+        control = full.filter(lambda r: r.x > 5)
+        derived = full.derive(y=lambda r: r.x + 1).filter(lambda r: r.x > 5)
+        assert len(control) == 0 and len(derived) == 0
+
+        for table, columns in ((control, ["x"]), (derived, ["x", "y"])):
+            assert b"pandas" in (table.to_arrow().schema.metadata or {})
+            out = table.to_pandas()
+            assert out.columns.tolist() == columns
+            assert out.index.names == ["idx"]
+
     def test_unloaded_ltseq_exports(self):
         t = LTSeq()
         assert t.to_arrow().num_rows == 0

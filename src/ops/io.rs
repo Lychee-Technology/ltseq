@@ -1293,15 +1293,25 @@ pub fn collect_arrow_reader_impl(table: &LTSeqTable) -> Result<BoxedBatchReader,
     if table.dataframe.is_none() {
         return Ok(collected_reader(schema_or_empty(table), Vec::new()));
     }
-    let batches = RUNTIME
-        .block_on(table.ordered_df()?.collect())
+    let df = table.ordered_df()?;
+    // `DataFrame::collect`, split so the physical plan's schema is kept. A
+    // plan that yields no batches (a filter matching nothing) still has it,
+    // and it is the schema every batch of this execution carries, metadata
+    // included. The table's own schema is not a substitute: one rebuilt from
+    // a plan (`schema_from_df`, as after `derive`) drops the schema-level
+    // metadata, such as the `pandas` key that `from_pandas` stores (#206).
+    let task_ctx = Arc::new(df.task_ctx());
+    let (schema, batches) = RUNTIME
+        .block_on(async {
+            let plan = df.create_physical_plan().await?;
+            let schema = plan.schema();
+            let batches = datafusion::physical_plan::collect(plan, task_ctx).await?;
+            Ok::<_, datafusion::error::DataFusionError>((schema, batches))
+        })
         .map_err(LtseqError::collect)?;
-    // Batches from one execution share a schema; prefer it over the logical
-    // schema so nullability/metadata match what pyarrow will see per batch.
-    let schema = batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| schema_or_empty(table));
+    // Batches from one execution share a schema; prefer it over the plan's
+    // so nullability/metadata match exactly what pyarrow will see per batch.
+    let schema = batches.first().map(|b| b.schema()).unwrap_or(schema);
     Ok(collected_reader(schema, batches))
 }
 
