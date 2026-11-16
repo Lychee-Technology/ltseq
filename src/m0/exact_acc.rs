@@ -879,7 +879,7 @@ fn shift_with_sticky(num: &BigUint, t: i64) -> (BigUint, bool) {
 }
 
 /// Correctly rounded `(-1)^neg * num / den * 2^exp`, `num, den > 0`.
-fn div_round(neg: bool, num: &BigUint, den: &BigUint, exp: i64) -> f64 {
+pub(crate) fn div_round(neg: bool, num: &BigUint, den: &BigUint, exp: i64) -> f64 {
     // a = num * 2^t has bits(den) + 65 bits, so q = floor(a / den) is in
     // [2^64, 2^66). Truncating num (t < 0) keeps q exact: for integers a, d
     // and 0 <= eps < 1, floor((a + eps) / d) == floor(a / d).

@@ -190,7 +190,33 @@ M6: dict[str, Pipeline] = {
 }
 
 
-PIPELINES: dict[str, Pipeline] = {**M1, **M2, **M3, **M4, **M4B, **M5, **M6}
+# m7: decimal `/` and `%` through a 256-bit intermediate (M6, #306).
+# inputs.decimals: `a / b` and `c % b` rescale an operand (by 10^14 and 10^10)
+# before dividing; `a % b` has equal scales and rescales nothing, a control.
+M7: dict[str, Pipeline] = {
+    "m7.div": lambda t: t.derive(x=lambda r: r.a / r.b),
+    "m7.rem": lambda t: t.derive(x=lambda r: r.c % r.b),
+    "m7.rem_same_scale": lambda t: t.derive(x=lambda r: r.a % r.b),
+}
+
+
+# m8: exact `quantile` and `median` (M13, #306). bench_core in memory:
+# `amount` is float64, `value` an integer in [1, 1000]. Today `median` is
+# DataFusion's and `percentile` its t-digest; the prototype's modes replace
+# both (src/m0/quantile.rs).
+M8: dict[str, Pipeline] = {
+    "m8.median": lambda t: t.agg(m=lambda g: g.amount.median()),
+    "m8.quantile": lambda t: t.agg(q=lambda g: g.amount.percentile(0.9)),
+    "m8.quantile_int": lambda t: t.agg(q=lambda g: g.value.percentile(0.9)),
+    "m8.median_by_category": lambda t: t.group_by("category").agg(m=lambda g: g.amount.median()),
+    "m8.median_by_id_mod": lambda t: t.agg(by=lambda r: r.id % 100_000, m=lambda g: g.amount.median()),
+    "m8.quantile_int_by_id_mod": lambda t: t.agg(
+        by=lambda r: r.id % 100_000, q=lambda g: g.value.percentile(0.9)
+    ),
+}
+
+
+PIPELINES: dict[str, Pipeline] = {**M1, **M2, **M3, **M4, **M4B, **M5, **M6, **M7, **M8}
 
 
 @dataclass

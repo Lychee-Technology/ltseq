@@ -14,6 +14,9 @@ The issue asks for the existing benchmark data:
 - ``zones`` (m4 only): ``bench_core``'s columns cannot make an operand fail
   exactly where the other is FALSE, so m4 generates columns that do, at
   ``bench_core``'s sizes.
+- ``decimals`` (m7 only, #306): no benchmark file has a decimal column, so
+  m7 generates ``decimal128`` columns whose share of rows that overflow
+  arrow's ``i128`` rescaling is set.
 
 A spec is a JSON-able dict; ``build`` turns it into an ``LTSeq`` inside the
 cell's process, under the cell's layout and prototypes.
@@ -51,6 +54,8 @@ def build(spec: dict) -> LTSeq:
         table = LTSeq.read_parquet(spec["path"])
     elif kind == "zones":
         table = LTSeq.from_arrow(zones(**spec["params"]))
+    elif kind == "decimals":
+        table = LTSeq.from_arrow(decimals(**spec["params"]))
     else:
         raise ValueError(f"unknown input kind {kind!r}")
     if spec.get("sorted_by"):
@@ -219,5 +224,58 @@ def zones(rows: int, demanded: float, failing: bool, seed: int = 251) -> pa.Tabl
             "b1": b1,
             "b2": b2,
             "x": rng.integers(0, 1000, rows, dtype=np.int64),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# m7's generated decimal columns (#306).
+
+
+def decimals_spec(rows: int, share: float, divisor: str) -> dict:
+    return {
+        "kind": "decimals",
+        "params": {"rows": rows, "share": share, "divisor": divisor},
+        "rows": rows,
+    }
+
+
+def _magnitudes(rng, rows: int, low: float, high: float) -> np.ndarray:
+    """Log-uniform magnitudes in [low, high) with random signs."""
+    m = np.exp(rng.uniform(np.log(low), np.log(high), rows))
+    return np.where(rng.random(rows) < 0.5, -m, m)
+
+
+def decimals(rows: int, share: float, divisor: str, seed: int = 306) -> pa.Table:
+    """Columns for m7's decimal ``/`` and ``%``.
+
+    - ``a``, ``decimal128(38, 10)``: magnitude in [1e15, 1e16) on a
+      ``share`` of the rows (the wide rows), below 1e6 elsewhere;
+    - ``c``, ``decimal128(38, 0)``: magnitude in [1e29, 1e30) on the wide
+      rows, below 1e12 elsewhere;
+    - ``b``, ``decimal128(38, 10)``: the divisor, never zero (``divisor``).
+
+    ``a / b`` is ``decimal(38, 14)``: arrow multiplies ``a``'s scaled value
+    by 10^14 in ``i128``, which overflows from a magnitude of about 1.7e14,
+    so exactly the wide rows overflow it. ``c % b`` brings ``c`` to scale 10,
+    which overflows from about 1.7e28, again on the wide rows. Every result
+    fits the contract's type. ``divisor`` sets ``b``'s magnitude: ``small``
+    is in [1, 1000), a scaled value below 2^64, where a 256-bit division
+    takes its one-word path; ``large`` is in [1e9, 1e12), a scaled value of
+    two words. Values are converted from ``float64``, so a value carries
+    about 16 significant digits.
+    """
+    rng = np.random.default_rng(seed)
+    wide = rng.random(rows) < share
+    a = np.where(wide, _magnitudes(rng, rows, 1e15, 1e16), _magnitudes(rng, rows, 1e-3, 1e6))
+    c = np.where(wide, _magnitudes(rng, rows, 1e29, 1e30), np.round(_magnitudes(rng, rows, 1, 1e12)))
+    low, high = {"small": (1.0, 1e3), "large": (1e9, 1e12)}[divisor]
+    b = _magnitudes(rng, rows, low, high)
+    return pa.table(
+        {
+            "id": np.arange(rows, dtype=np.int64),
+            "a": pa.array(a).cast(pa.decimal128(38, 10)),
+            "b": pa.array(b).cast(pa.decimal128(38, 10)),
+            "c": pa.array(c).cast(pa.decimal128(38, 0)),
         }
     )

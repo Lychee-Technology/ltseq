@@ -30,6 +30,8 @@ MEASUREMENTS = {
     "m4b": {"title": "Filter pushdown lost past sort, aggregate and distinct (D10a)", "gates": "M16"},
     "m5": {"title": "assume_sorted validation without pruning (D7)", "gates": "M3"},
     "m6": {"title": "string_view normalized to string", "gates": "M18"},
+    "m7": {"title": "Decimal / and % through a 256-bit intermediate", "gates": "M6 (#306)"},
+    "m8": {"title": "Exact quantile and median", "gates": "M13 (#306)"},
 }
 
 
@@ -255,4 +257,43 @@ def m6() -> list[dict]:
     return cells
 
 
-CASES = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m4b": m4b, "m5": m5, "m6": m6}
+def m7() -> list[dict]:
+    """Every share of rows that overflow arrow's ``i128`` rescaling (none,
+    1% and all), both divisor widths and every partition count at 10M rows;
+    at 1M rows the same at one partition and the CPU count. The control
+    ``a % b`` rescales nothing, so it runs only without wide rows. Today's
+    kernel raises on any wide row, so its cells with wide rows record the
+    error."""
+    cells = []
+    warmup = inputs.decimals_spec(inputs.WARMUP_ROWS, 0.0, "small")
+    for rows, counts in ((10_000_000, PARTITIONS), (1_000_000, sorted({1, CPUS}))):
+        for divisor in ("small", "large"):
+            for share in (0.0, 0.01, 1.0):
+                source = inputs.decimals_spec(rows, share, divisor)
+                for name in pipelines.M7:
+                    if name == "m7.rem_same_scale" and share:
+                        continue
+                    for p in counts:
+                        for mode in ("off", "wide", "guarded"):
+                            cells.append(
+                                _cell("m7", name, "stream", source, warmup, p, {"decimal": mode},
+                                      rows=rows, divisor=divisor, share=share, mode=mode)
+                            )
+    return cells
+
+
+def m8() -> list[dict]:
+    """Every pipeline at 1M and 10M rows and every partition count, four
+    modes, with partial aggregation never skipped, as in m2."""
+    cells = []
+    for rows in (1_000_000, 10_000_000):
+        for name in pipelines.M8:
+            source, warmup = _memory(rows, name), _memory(inputs.WARMUP_ROWS, name)
+            for p in PARTITIONS:
+                for mode in ("off", "cont", "select", "exact"):
+                    flags = {"quantile": mode, "partial_skip": "never"}
+                    cells.append(_cell("m8", name, "stream", source, warmup, p, flags, rows=rows, mode=mode))
+    return cells
+
+
+CASES = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m4b": m4b, "m5": m5, "m6": m6, "m7": m7, "m8": m8}

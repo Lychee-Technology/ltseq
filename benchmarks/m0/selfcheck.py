@@ -305,6 +305,95 @@ def m6_views_become_plain_strings():
         assert types == {"off": pa.string_view(), "plain": pa.string(), "cast": pa.string()}, types
 
 
+@check
+def m7_wide_decimals_compute_where_i128_overflows():
+    from decimal import Decimal
+
+    d38_10, d38_0 = pa.decimal128(38, 10), pa.decimal128(38, 0)
+    probes = pa.table({
+        "a": pa.array([Decimal(10**15), Decimal("-10.5")], d38_10),
+        "b": pa.array([Decimal(1), Decimal(360)], d38_10),
+        "c": pa.array([Decimal(10**37), Decimal(-7)], d38_0),
+        "s": pa.array([Decimal(7), Decimal(2)], d38_10),
+    })
+    today = LTSeq.from_arrow(probes)
+    # #306's probes: arrow's i128 rescaling overflows.
+    raises(lambda: today.derive(x=lambda r: r.a / r.b).to_arrow(), "Overflow")
+    raises(lambda: today.derive(x=lambda r: r.c % r.s).to_arrow(), "Overflow")
+    for mode in ("wide", "guarded"):
+        with prototypes(decimal=mode):
+            t = LTSeq.from_arrow(probes)
+        q = t.derive(x=lambda r: r.a / r.b, m=lambda r: r.c % r.s, f=lambda r: r.a % r.b)
+        assert "m0_decimal_div" in plan(q) and "m0_decimal_rem" in plan(q), plan(q)
+        out = q.to_arrow()
+        assert out.schema.field("x").type == pa.decimal128(38, 14), out.schema
+        assert out.column("x").to_pylist()[0] == Decimal(10**15), out.column("x")
+        # 10^37 % 7 is 3; -7 % 2 is 1, floored.
+        assert out.column("m").to_pylist() == [Decimal(3), Decimal(1)], out.column("m")
+        # -10.5 % 360 is 349.5, floored; today's is -10.5.
+        assert out.column("f").to_pylist()[1] == Decimal("349.5"), out.column("f")
+        raises(lambda: t.derive(x=lambda r: r.a / (r.b - r.b)).to_arrow(), "DivisionByZeroError")
+    # Each m7 pipeline: both modes agree everywhere; with no wide rows they
+    # agree with today's where today's truncated remainder is the floored one.
+    for divisor in ("small", "large"):
+        for share in (0.0, 0.01, 1.0):
+            data = inputs.decimals(2_000, share, divisor)
+            for name, pipeline in pipelines.M7.items():
+                outs = {}
+                for mode in ("off", "wide", "guarded"):
+                    with pinned_engine(target_partitions=3), prototypes(decimal=mode):
+                        t = LTSeq.from_arrow(data)
+                    try:
+                        outs[mode] = pipeline(t).sort("id").to_arrow().column("x").to_pylist()
+                    except Exception as error:  # noqa: BLE001
+                        assert mode == "off" and share and name != "m7.rem_same_scale", (name, error)
+                        outs[mode] = None
+                assert outs["wide"] == outs["guarded"], (name, share, divisor)
+                if outs["off"] is not None:
+                    b = data.column("b").to_pylist()
+                    for i, (today, wide) in enumerate(zip(outs["off"], outs["wide"])):
+                        floored = today + b[i] if today and (today < 0) != (b[i] < 0) else today
+                        assert wide == (floored if "rem" in name else today), (name, i, today, wide)
+
+
+@check
+def m8_exact_quantiles_are_exact():
+    big = 2**53 + 1
+    ints = pa.table({"x": pa.array([1, big], pa.int64()), "f": [1.0, 2.0]})
+    tens = pa.table({"x": pa.array([0, 0] + [10**18] * 9, pa.int64())})
+    expected = {"cont": 4503599627370496.0, "select": 4503599627370496.0, "exact": 4503599627370497.0}
+    for mode, value in expected.items():
+        with prototypes(quantile=mode):
+            t = LTSeq.from_arrow(ints)
+            u = LTSeq.from_arrow(tens)
+        q = t.agg(q=lambda g: g.x.percentile(0.5), m=lambda g: g.f.median())
+        name = "percentile_cont" if mode == "cont" else "m0_quantile"
+        assert name in plan(q) and "approx_percentile_cont" not in plan(q), plan(q)
+        assert q.to_arrow().to_pylist() == [{"q": value, "m": 1.5}], (mode, q.to_arrow())
+        if mode == "exact":
+            assert u.agg(q=lambda g: g.x.percentile(0.1)).to_arrow().column("q").to_pylist() == [0.0]
+    # Each m8 pipeline: exact results do not depend on the partition count
+    # and stay within rounding of percentile_cont's, which interpolates in
+    # float64 with t cut to six decimals.
+    csv = str(inputs.bench_core_csv(inputs.WARMUP_ROWS))
+    for name, pipeline in pipelines.M8.items():
+        outs = {}
+        for mode, p in (("cont", 1), ("select", 4), ("exact", 1), ("exact", 12)):
+            with pinned_engine(target_partitions=p), prototypes(quantile=mode, partial_skip="never"):
+                t = LTSeq.read_csv(csv).collect()
+            out = pipeline(t)
+            assert ("percentile_cont" if mode == "cont" else "m0_quantile") in plan(out), (name, plan(out))
+            table = out.to_arrow()
+            keys = [f.name for f in table.schema if not pa.types.is_floating(f.type)]
+            outs[(mode, p)] = table.sort_by([(k, "ascending") for k in keys]).to_pylist() if keys else table.to_pylist()
+        assert outs[("exact", 1)] == outs[("exact", 12)], name
+        for mode in (("cont", 1), ("select", 4)):
+            for a, b in zip(outs[mode], outs[("exact", 1)]):
+                for k, v in a.items():
+                    if isinstance(v, float):
+                        assert abs(v - b[k]) <= 1e-6 * max(1.0, abs(v)), (name, mode, k, v, b[k])
+
+
 def main() -> int:
     failed = 0
     for fn in CHECKS:

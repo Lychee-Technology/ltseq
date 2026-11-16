@@ -1,7 +1,8 @@
-# M0 feasibility measurements (#251)
+# M0 feasibility measurements (#251, #306)
 
-Prototypes and a harness that price six commitments of the v0.5 contract
-before they are built. The findings are in [REPORT.md](REPORT.md); the
+Prototypes and a harness that price the v0.5 contract's costly commitments
+before they are built: six from #251 (m1 to m6), and the two kernels #306
+found unpriced (m7, m8). The findings are in [REPORT.md](REPORT.md); the
 per-cell tables are under [results/](results/).
 
 | | Measurement | Prototype (`src/m0/`) | Gates |
@@ -13,6 +14,8 @@ per-cell tables are under [results/](results/).
 | m4b | Filter pushdown lost past sort, aggregate and distinct (D10a) | `pushdown.rs` | M16 |
 | m5 | `assume_sorted` validated on every pair, no pruning (D7) | `validate.rs` | M3 |
 | m6 | `string_view` normalized to `string` | `views.rs` | M18 |
+| m7 | Decimal `/` and `%` through a 256-bit intermediate (#306) | `decimal.rs` | M6 |
+| m8 | Exact `quantile` and `median` (#306) | `quantile.rs` | M13 |
 
 ## How the prototypes are built and switched
 
@@ -41,7 +44,9 @@ with pinned_engine(target_partitions=4), prototypes(checked="fast"):
 | `validate` | `off`, `prune_off` (D7's read without the check), `validate`; both turn `pruning` off and keep each partition to its own range (no file-stream work stealing) |
 | `pruning` | `on`, `off` (no statistics, page-index or bloom-filter pruning and no row filter in the scan, scheduling as today; m4b's `scan_filter_off`) |
 | `views` | `off`, `plain` (scan decodes `string`), `cast` (cast at the plan's root) |
-| `partial_skip` | `default`, `never` (DataFusion never skips partial aggregation; m2 sets it so that a grouping over many keys takes the same path in every run) |
+| `partial_skip` | `default`, `never` (DataFusion never skips partial aggregation; m2 and m8 set it so that a grouping over many keys takes the same path in every run) |
+| `decimal` | `off`, `wide` (decimal128 `/` and `%` through `i256` on every row), `guarded` (`i128`, and `i256` for a row whose rescaling overflows `i128`) |
+| `quantile` | `off` (today: DataFusion's `median`, the t-digest for `percentile`), `cont` (DataFusion's `percentile_cont`), `select` (the prototype's selection, `float64` interpolation; a control), `exact` (the prototype's selection, exact interpolation) |
 
 Each prototype module's header says what it does and where it stops short
 of the item it gates.
@@ -52,7 +57,7 @@ of the item it gates.
 maturin develop --release --features m0           # ~11 min
 uv run --group bench python benchmarks/prepare_data.py   # ClickBench files, for m3-m6
 python benchmarks/m0/selfcheck.py                  # each prototype does what its measurement assumes
-python benchmarks/m0/run.py --only m1,m2           # results/<m>.json, one subprocess per cell
+python benchmarks/m0/run.py --only m1,m2           # results/<m>.json, one subprocess per cell (m7, m8: #306)
 python benchmarks/m0/report.py                     # results/<m>.md
 ```
 
@@ -78,7 +83,8 @@ with the kernel's peak counter reset first. TTFR is the time to the first
 non-empty batch of the Arrow C stream, which is what `to_batches` will
 return. Inputs are `bench_core.py`'s synthetic table (held in memory for
 operator measurements, read from CSV for the scan), the ClickBench files
-and the R3 harness's input; `inputs.py` documents each.
+and the R3 harness's input, plus generated decimal columns for m7;
+`inputs.py` documents each.
 
 Before each cell the harness waits until the whole machine is at most 8%
 busy over a second, and records how many cores other processes kept busy
