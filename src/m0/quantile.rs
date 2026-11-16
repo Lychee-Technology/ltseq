@@ -144,6 +144,9 @@ impl Rank {
         if !(0.0..=1.0).contains(&q) {
             return plan_err!("quantile q must be in [0, 1], got {q}");
         }
+        // -0.0 passes the range check but prints as "-0", which the
+        // unsigned parse below cannot read: it is the rank 0.
+        let q = if q == 0.0 { 0.0 } else { q };
         // Rust prints a float as the shortest decimal that reads back as it,
         // never in exponent notation.
         let text = format!("{q}");
@@ -663,6 +666,20 @@ mod tests {
         let r = Rank::new(0.30000000000000004).unwrap();
         assert_eq!((r.num, r.den), (30000000000000004, 10u128.pow(17)));
         assert!(Rank::new(1.5).is_err());
+        let r = Rank::new(-0.0).unwrap();
+        assert_eq!((r.num, r.den), (0, 1));
+        assert!(r.q.is_sign_positive());
+    }
+
+    /// q = -0.0 is the rank 0 in both modes, as 0.0 is.
+    #[test]
+    fn negative_zero_q() {
+        for mode in [Quantile::Select, Quantile::Exact] {
+            let mut v = vec![2.0f64, 1.0];
+            assert_eq!(quantile(&mut v, Rank::new(-0.0).unwrap(), mode), Some(1.0));
+            let mut v = vec![5i64, 1, 3];
+            assert_eq!(quantile(&mut v, Rank::new(-0.0).unwrap(), mode), Some(1.0));
+        }
     }
 
     /// Exact agrees with a float interpolation wherever that one is exact.

@@ -372,6 +372,13 @@ def m8_exact_quantiles_are_exact():
         assert q.to_arrow().to_pylist() == [{"q": value, "m": 1.5}], (mode, q.to_arrow())
         if mode == "exact":
             assert u.agg(q=lambda g: g.x.percentile(0.1)).to_arrow().column("q").to_pylist() == [0.0]
+    # q = -0.0 is the rank 0 in every mode, as 0.0 is.
+    for mode in ("off", "cont", "select", "exact"):
+        with prototypes(quantile=mode):
+            t = LTSeq.from_arrow(ints)
+        for q in (0.0, -0.0):
+            out = t.agg(q=lambda g, q=q: g.f.percentile(q)).to_arrow().column("q").to_pylist()
+            assert out == [1.0], (mode, q, out)
     # Each m8 pipeline: exact results do not depend on the partition count
     # and stay within rounding of percentile_cont's, which interpolates in
     # float64 with t cut to six decimals.
