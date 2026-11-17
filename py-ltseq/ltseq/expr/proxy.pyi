@@ -17,6 +17,13 @@ class NestedSchemaProxy:
     def __getattr__(self, name: str) -> ColumnExpr: ...
 
 
+class _GroupCount(_SchemaAttr):
+    """``g.count``: ``g.count()`` counts the group's rows; ``g.count.sum()``
+    (a column named ``count``) and ``g.count.v`` (a ``count_v`` column of a
+    link with ``as_="count"``) read columns."""
+    def __call__(self) -> CallExpr: ...
+
+
 class GroupAggProxy(SchemaProxy):
     """The ``g`` of ``group_by().agg()`` and ``LTSeq.agg()`` lambdas."""
-    def count(self) -> CallExpr: ...
+    count: _GroupCount

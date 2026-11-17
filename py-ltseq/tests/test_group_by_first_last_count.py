@@ -145,6 +145,55 @@ class TestFirstLast:
             {"k": "a", "x": 2}
         ]
 
+    def test_linked_alias_columns_keep_their_prefix(self):
+        # Columns of link(..., as_="first"/"last"/"count") read as
+        # g.first.v / g.last.v / g.count.v, as on the row proxy; g.count()
+        # still counts rows.
+        rows = [
+            {"k": "a", "first_v": 1, "last_v": 10, "count_v": 100},
+            {"k": "a", "first_v": 2, "last_v": 20, "count_v": 200},
+            {"k": "b", "first_v": 3, "last_v": 30, "count_v": 300},
+        ]
+        t = LTSeq.from_rows(rows)
+        aggs = dict(
+            f=lambda g: g.first.v.sum(),
+            l=lambda g: g.last.v.max(),
+            c=lambda g: g.count.v.sum(),
+            n=lambda g: g.count(),
+        )
+        assert by_key(t.group_by("k").agg(**aggs)) == {
+            "a": {"k": "a", "f": 3, "l": 20, "c": 300, "n": 2},
+            "b": {"k": "b", "f": 3, "l": 30, "c": 300, "n": 1},
+        }
+        assert t.agg(**aggs).to_dicts() == [{"f": 6, "l": 30, "c": 600, "n": 3}]
+        assert t.agg(by=lambda r: r.k, **aggs).sort("k").to_dicts() == [
+            {"k": "a", "f": 3, "l": 20, "c": 300, "n": 2},
+            {"k": "b", "f": 3, "l": 30, "c": 300, "n": 1},
+        ]
+
+    def test_linked_alias_from_link(self):
+        orders = LTSeq.from_rows(
+            [{"k": "a", "pid": 1}, {"k": "a", "pid": 2}, {"k": "b", "pid": 1}]
+        )
+        products = LTSeq.from_rows([{"pid": 1, "price": 5}, {"pid": 2, "price": 7}])
+        for alias in ("first", "last", "count"):
+            linked = orders.link(
+                products, on=lambda o, p: o.pid == p.pid, as_=alias
+            ).select("k", f"{alias}_price")
+            agg = {"total": lambda g, a=alias: getattr(g, a).price.sum()}
+            assert by_key(linked.group_by("k").agg(**agg)) == {
+                "a": {"k": "a", "total": 12},
+                "b": {"k": "b", "total": 5},
+            }
+            assert linked.agg(**agg).to_dicts() == [{"total": 17}]
+
+    def test_count_attribute_without_count_column(self):
+        from ltseq.exceptions import ColumnNotFoundError
+
+        t = LTSeq.from_rows(ROWS)
+        with pytest.raises(ColumnNotFoundError, match=r"g\.count\(\) counts"):
+            t.group_by("k").agg(x=lambda g: g.count.sum())
+
     def test_engine_layouts(self, engine_layout):
         # Many groups spread over every row of the input, read back from a
         # multi-partition plan, against a reference over the sorted rows.

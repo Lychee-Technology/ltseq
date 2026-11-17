@@ -156,15 +156,20 @@ class GroupAggProxy(SchemaProxy):
     ``g.count()``, the number of rows in the group. ``g.first()`` and
     ``g.last()``, the row proxies of ``NestedTable.agg``, are not group
     attributes here: they read as columns and raise ``ColumnNotFoundError``
-    naming ``g.<col>.first()``. A column named ``count`` keeps its name, so
-    ``g.count`` is then that column.
+    naming ``g.<col>.first()``.
+
+    Column access of :class:`SchemaProxy` is kept whole. A column named
+    ``count``, ``first`` or ``last`` keeps its name, so ``g.count`` is then
+    that column. A linked alias keeps its prefixed columns too: with a
+    ``first_v`` column, ``g.first.v`` is that column, and with ``count_v``,
+    ``g.count.v`` is that column while ``g.count()`` still counts rows.
     """
 
     def __getattr__(self, name: str) -> "ColumnExpr | NestedSchemaProxy | Any":
         if not name.startswith("_") and name not in self._schema:
             if name == "count":
-                return _count_rows
-            if name in ("first", "last"):
+                return _GroupCount(self._linked(name))
+            if name in ("first", "last") and self._linked(name) is None:
                 from ..exceptions import ColumnNotFoundError
 
                 raise ColumnNotFoundError(
@@ -177,7 +182,38 @@ class GroupAggProxy(SchemaProxy):
                 )
         return super().__getattr__(name)
 
+    def _linked(self, alias: str) -> "NestedSchemaProxy | None":
+        """The linked-table proxy :class:`SchemaProxy` gives ``alias`` (its
+        ``<alias>_*`` columns), or None when the schema has none."""
+        prefixed = {
+            col: typ for col, typ in self._schema.items() if col.startswith(f"{alias}_")
+        }
+        return NestedSchemaProxy(alias, prefixed) if prefixed else None
 
-def _count_rows() -> "CallExpr":
-    """``g.count()``: the number of rows in the group."""
-    return CallExpr("count", (), {}, on=None)
+
+class _GroupCount:
+    """``g.count`` when the schema has no ``count`` column.
+
+    Calling it, ``g.count()``, counts the group's rows. When the schema has
+    ``count_*`` columns (a link with ``as_="count"``), its attributes are
+    those columns, as on :class:`SchemaProxy`: ``g.count.v`` is ``count_v``.
+    """
+
+    def __init__(self, linked: "NestedSchemaProxy | None"):
+        self._linked = linked
+
+    def __call__(self) -> "CallExpr":
+        return CallExpr("count", (), {}, on=None)
+
+    def __getattr__(self, name: str) -> ColumnExpr:
+        if name.startswith("_"):
+            raise AttributeError(f"No attribute {name}")
+        if self._linked is not None:
+            return getattr(self._linked, name)
+        from ..exceptions import ColumnNotFoundError
+
+        raise ColumnNotFoundError(
+            f"Column 'count' not found in schema, so g.count has no "
+            f"attribute '{name}'. In agg(), g.count() counts the group's "
+            f"rows and g.<col>.count() counts a column's non-NULL values."
+        )
