@@ -68,6 +68,7 @@ from .grouping.nested_table import NestedTable
 from .linking import LinkedTable
 from .partitioning import PartitionedTable, SQLPartitionedTable
 from .aggregation import GroupBy
+from .expr.proxy import GroupAggProxy
 from .exceptions import (
     LTSeqError as LTSeqError,
     SortRequiredError as SortRequiredError,
@@ -267,7 +268,7 @@ class LTSeq:
     def agg(
         self,
         by: Callable[[SchemaProxy], Expr] | None = ...,
-        **aggregations: Callable[[SchemaProxy], Expr],
+        **aggregations: Callable[[GroupAggProxy], Expr],
     ) -> "LTSeq": ...
     def group_by(self, key: str | Callable[[SchemaProxy], Expr]) -> GroupBy: ...
     def group_ordered(self, grouping_fn: Callable[[SchemaProxy], Expr]) -> NestedTable: ...
