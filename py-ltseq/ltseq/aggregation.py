@@ -11,6 +11,19 @@ if TYPE_CHECKING:
 from .transforms import _collect_key_exprs
 
 
+def _capture_agg_expr(table: "LTSeqLike", fn: Callable) -> dict[str, Any]:
+    """Capture one aggregate lambda of ``group_by().agg()`` or ``LTSeq.agg()``
+    against the group proxy, which adds ``g.count()`` to the columns (#314)."""
+    from .expr.proxy import GroupAggProxy
+    from .expr.transforms import _lambda_to_expr
+
+    if not table._schema:
+        raise ValueError(
+            "Schema not initialized. Call read_csv() first to populate the schema."
+        )
+    return _lambda_to_expr(fn, table._schema, GroupAggProxy)
+
+
 class GroupBy:
     """
     Intermediate object returned by LTSeq.group_by().
@@ -28,14 +41,29 @@ class GroupBy:
 
         Args:
             **aggregations: Named aggregation expressions.
-                           E.g., total=lambda r: r.sales.sum()
+                           E.g., total=lambda g: g.sales.sum()
+
+        Each lambda receives the group ``g``. Aggregates are methods of a
+        column (``g.sales.sum()``, ``g.id.count()``, ...); ``g.col.first()``
+        and ``g.col.last()`` give the value of the group's first or last row
+        in table order, NULL included. ``g.count()`` counts the group's rows.
+        A column named ``count`` keeps its name, so ``g.count`` is then that
+        column. ``g.first().col``, the form of ``group_ordered(...).agg()``,
+        is not available here: ``g.first`` reads as a column.
 
         Returns:
             Aggregated LTSeq with one row per group
 
+        Raises:
+            SortRequiredError: If an aggregate uses ``first`` or ``last`` and
+                the table declares no order. Call ``.sort(...)`` or
+                ``.assume_sorted(...)`` first; ``.min()`` / ``.max()`` need
+                no order.
+
         Example:
-            >>> t.group_by("region").agg(total=lambda r: r.sales.sum())
-            >>> t.group_by(lambda r: r.region).agg(total=lambda r: r.sales.sum(), n=lambda r: r.id.count())
+            >>> t.group_by("region").agg(total=lambda g: g.sales.sum())
+            >>> t.group_by(lambda r: r.region).agg(total=lambda g: g.sales.sum(), n=lambda g: g.count())
+            >>> t.sort("date").group_by("region").agg(opened=lambda g: g.date.first())
         """
         from .core import LTSeq
 
@@ -60,7 +88,7 @@ class GroupBy:
                 raise TypeError(
                     f"Aggregation '{name}' must be callable, got {type(fn).__name__}"
                 )
-            agg_exprs[name] = self._table._capture_expr(fn)
+            agg_exprs[name] = _capture_agg_expr(self._table, fn)
 
         result_inner = self._table._inner.agg(grouping_expr, agg_exprs)
 
@@ -241,7 +269,11 @@ class AggregationMixin(LTSeqLike):
 
         Args:
             by: Grouping key lambda (None for full-table aggregation)
-            **aggregations: Aggregation expressions as keyword arguments
+            **aggregations: Aggregation expressions as keyword arguments.
+                Each lambda receives the group ``g``, as in
+                ``group_by().agg()``: ``g.count()`` counts rows, and
+                ``g.col.first()`` / ``g.col.last()`` need a declared order
+                (``SortRequiredError`` otherwise).
 
         Returns:
             Aggregated LTSeq
@@ -271,7 +303,7 @@ class AggregationMixin(LTSeqLike):
                 raise TypeError(
                     f"Aggregation '{name}' must be callable, got {type(fn).__name__}"
                 )
-            agg_exprs[name] = self._capture_expr(fn)
+            agg_exprs[name] = _capture_agg_expr(self, fn)
 
         result_inner = self._inner.agg(grouping_expr, agg_exprs)
 

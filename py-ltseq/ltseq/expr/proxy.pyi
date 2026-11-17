@@ -1,3 +1,4 @@
+
 from .types import ColumnExpr, CallExpr
 
 
@@ -14,3 +15,8 @@ class SchemaProxy:
 class NestedSchemaProxy:
     def __init__(self, alias: str, prefixed_columns: dict[str, str]) -> None: ...
     def __getattr__(self, name: str) -> ColumnExpr: ...
+
+
+class GroupAggProxy(SchemaProxy):
+    """The ``g`` of ``group_by().agg()`` and ``LTSeq.agg()`` lambdas."""
+    def count(self) -> CallExpr: ...

@@ -677,8 +677,12 @@ def _describe_reached(reached: _ReachedCode) -> str:
     return f"{name} (reached by name from {first!r}{route})"
 
 
-def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
-    """Run a user row lambda against a :class:`SchemaProxy` for ``schema``.
+def _invoke_row_lambda(
+    fn: Callable, schema: dict[str, str], proxy_type: type[SchemaProxy] = SchemaProxy
+) -> Any:
+    """Run a user row lambda against a :class:`SchemaProxy` for ``schema``
+    (or the ``proxy_type`` subclass given, such as the group proxy of
+    ``group_by().agg()``).
 
     Every public API that accepts ``lambda r: ...`` must call the lambda
     through this function rather than on a proxy of its own, so the
@@ -709,7 +713,7 @@ def _invoke_row_lambda(fn: Callable, schema: dict[str, str]) -> Any:
         )
     # An is_in error reads the table's columns to name a new one (#294).
     with _capturing(schema):
-        return fn(SchemaProxy(schema))
+        return fn(proxy_type(schema))
 
 
 def _invoke_condition_lambda(
@@ -815,7 +819,9 @@ def _none_check_hint(result: Any) -> str:
     return ""
 
 
-def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
+def _lambda_to_expr(
+    fn: Callable, schema: dict[str, str], proxy_type: type[SchemaProxy] = SchemaProxy
+) -> dict[str, Any]:
     """
     Execute a lambda with a SchemaProxy to capture its expression tree.
 
@@ -825,6 +831,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
     Args:
         fn: Lambda function, e.g., lambda r: r.age > 18 or lambda r: {"col": r.age}
         schema: Dict mapping column name -> type string
+        proxy_type: The proxy class the lambda receives
 
     Returns:
         Serialized expression dict, ready for Rust deserialization
@@ -846,7 +853,7 @@ def _lambda_to_expr(fn: Callable, schema: dict[str, str]) -> dict[str, Any]:
         >>> expr_dict["type"]
         'Dict'
     """
-    result = _invoke_row_lambda(fn, schema)
+    result = _invoke_row_lambda(fn, schema, proxy_type)
 
     if isinstance(result, dict):
         # Handle dict returns: {"col_name": Expr, "col_name2": Expr}

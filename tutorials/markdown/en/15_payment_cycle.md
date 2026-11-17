@@ -222,10 +222,10 @@ Matches the expected answer: AAA 40/30, BBB 60/60. ✔
   needed (every cycle here closes on its last row; a trailing cycle that is not
   invoiced yet would report its latest month instead).
 - `group_ordered(...).agg()` returns one row per cycle in sequence order, so no
-  trailing `sort` is needed. `group_by().agg()` is the other option, but it is
-  hash grouping with no defined output order, and its aggregates work on
-  columns: there is no first or last row (`g.first()` raises
-  `ColumnNotFoundError`).
+  trailing `sort` is needed. `group_by().agg()` is the other option: its
+  `g.month.last()` reads each group's rows in the table's declared order
+  too, but it is hash grouping with no defined output order, so its result
+  needs a trailing `sort`.
 - A common SQL spelling numbers the cycles with
   `sum(invoiced) OVER (PARTITION BY project ORDER BY month DESC)`: counting
   invoices backwards gives every row of a cycle the same number, because the

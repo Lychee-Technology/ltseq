@@ -40,10 +40,14 @@ enum AggPlan {
 }
 
 /// Every supported aggregate maps to a native plan — there is no fallback.
+///
+/// `table_order` is the input's declared order (its `sort_specs`), which
+/// `first` and `last` read when no order column is passed.
 fn pyexpr_to_agg_plan(
     py_expr: &PyExpr,
     schema: &ArrowSchema,
     out_key: &str,
+    table_order: &[SortExpr],
 ) -> Result<AggPlan, String> {
     let PyExpr::Call { func, on, args, .. } = py_expr else {
         return Err("Expected aggregate function call".to_string());
@@ -262,30 +266,37 @@ fn pyexpr_to_agg_plan(
                 post,
             })
         }
-        // First/last row value within each group, ordered by an explicit order
-        // column passed in args[0] (NestedTable.agg passes __rn__). "last" is
-        // first_value over the reversed order.
+        // First/last row value within each group, NULL included, in table
+        // order. NestedTable.agg passes its in-group row number (__rn__) as
+        // args[0]; group_by().agg() and LTSeq.agg() pass nothing and read the
+        // input's declared order (#314), which `agg_impl` has already
+        // required. "last" is first_value over the reversed order.
         "first" | "last" => {
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err(format!("{} requires a column reference", func));
             };
             let col_expr = Expr::Column(Column::new_unqualified(col_name));
-            let order_col = match args.first() {
-                Some(PyExpr::Column(name)) if !name.is_empty() => name.clone(),
-                _ => {
+            let order: Vec<SortExpr> = match args.first() {
+                Some(PyExpr::Column(name)) if !name.is_empty() => vec![SortExpr::new(
+                    Expr::Column(Column::new_unqualified(name)),
+                    true,
+                    false,
+                )],
+                None if !table_order.is_empty() => table_order.to_vec(),
+                None => return Err(format!("{}() requires a declared row order", func)),
+                Some(_) => {
                     return Err(format!(
-                        "{} requires an order column argument (in-group row order)",
+                        "{}() takes no arguments in agg(); it reads each group's rows in table order",
                         func
                     ))
                 }
             };
-            let asc = func == "first";
-            let sort = SortExpr::new(
-                Expr::Column(Column::new_unqualified(&order_col)),
-                asc,
-                false,
-            );
-            Ok(AggPlan::Plain(agg_fn::first_value(col_expr, vec![sort])))
+            let order = if func == "first" {
+                order
+            } else {
+                order.iter().map(SortExpr::reverse).collect()
+            };
+            Ok(AggPlan::Plain(agg_fn::first_value(col_expr, order)))
         }
         // mode keeps the legacy behavior (FIRST_VALUE ordered ascending —
         // i.e. min, not a true statistical mode). Real mode semantics are
@@ -345,6 +356,32 @@ fn pyexpr_to_agg_plan(
     }
 }
 
+/// Whether `py_expr` is a `first` or `last` aggregate that reads the input's
+/// row order rather than an order column passed by `NestedTable.agg`.
+fn reads_table_order(py_expr: &PyExpr) -> bool {
+    matches!(
+        py_expr,
+        PyExpr::Call { func, args, .. } if (func == "first" || func == "last") && args.is_empty()
+    )
+}
+
+/// The error for a `first` or `last` aggregate over a table without a
+/// declared order. Hash aggregation keeps no row order of its own, so the
+/// group's first row is defined only by the order the input declares
+/// (positional tier, contract §9.3).
+fn table_order_required(py_expr: &PyExpr, out_key: &str) -> LtseqError {
+    let func = match py_expr {
+        PyExpr::Call { func, .. } => func.as_str(),
+        _ => "first",
+    };
+    LtseqError::SortRequired(format!(
+        "agg() output '{out_key}': {func}() reads each group's rows in table order, \
+         and the table declares none. Call .sort(...) first, or .assume_sorted(...) \
+         if the data is already ordered. For a group's smallest or largest value, \
+         use .min() or .max(), which need no order."
+    ))
+}
+
 /// Parse group expression into DataFusion Expr(s)
 fn parse_group_exprs(
     group_expr: Option<Bound<'_, PyDict>>,
@@ -377,6 +414,7 @@ pub fn agg_impl(
     // the Aggregate stores its schema.
     let rx = Resolver::new(schema).map_err(LtseqError::Validation)?;
     let resolve = |expr: Expr| rx.resolve(expr).map_err(LtseqError::Validation);
+    let table_order = crate::metadata::sort_specs_to_df_sort_exprs(&table.sort_specs);
 
     // Plan each requested aggregate.
     let mut agg_exprs: Vec<Expr> = Vec::new();
@@ -397,7 +435,11 @@ pub fn agg_impl(
         let py_expr = dict_to_py_expr(val_dict)
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
 
-        match pyexpr_to_agg_plan(&py_expr, schema, &key_str)
+        if reads_table_order(&py_expr) && table.sort_specs.is_empty() {
+            return Err(table_order_required(&py_expr, &key_str).into());
+        }
+
+        match pyexpr_to_agg_plan(&py_expr, schema, &key_str, &table_order)
             .map_err(LtseqError::Validation)?
         {
             AggPlan::Plain(expr) => {

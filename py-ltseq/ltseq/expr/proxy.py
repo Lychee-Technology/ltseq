@@ -1,6 +1,8 @@
 """Schema proxy classes for expression capturing."""
 
-from .types import ColumnExpr
+from typing import Any
+
+from .types import CallExpr, ColumnExpr
 
 
 class SchemaProxy:
@@ -137,3 +139,45 @@ class NestedSchemaProxy:
 
         full_col_name = self._column_map[name]
         return ColumnExpr(full_col_name)
+
+
+class GroupAggProxy(SchemaProxy):
+    """
+    The group proxy ('g') passed to the lambdas of ``group_by().agg()`` and
+    ``LTSeq.agg()`` (#314).
+
+    Columns read as on :class:`SchemaProxy`, and their aggregates are methods
+    of the column: ``g.v.sum()``, ``g.v.first()``, ``g.v.last()``. ``first``
+    and ``last`` give the value of the group's first or last row in table
+    order, NULL included; they need a declared order (``sort`` or
+    ``assume_sorted``) and raise ``SortRequiredError`` without one.
+
+    The group has one attribute of its own, as in contract §8.1:
+    ``g.count()``, the number of rows in the group. ``g.first()`` and
+    ``g.last()``, the row proxies of ``NestedTable.agg``, are not group
+    attributes here: they read as columns and raise ``ColumnNotFoundError``
+    naming ``g.<col>.first()``. A column named ``count`` keeps its name, so
+    ``g.count`` is then that column.
+    """
+
+    def __getattr__(self, name: str) -> "ColumnExpr | NestedSchemaProxy | Any":
+        if not name.startswith("_") and name not in self._schema:
+            if name == "count":
+                return _count_rows
+            if name in ("first", "last"):
+                from ..exceptions import ColumnNotFoundError
+
+                raise ColumnNotFoundError(
+                    f"Column '{name}' not found in schema. "
+                    f"Available columns: {list(self._schema.keys())}. "
+                    f"In agg(), the value of a group's {name} row is an "
+                    f"aggregate of its column: g.<col>.{name}(), which reads "
+                    f"the table's declared order (call .sort(...) first). "
+                    f"g.{name}().<col> is the form of group_ordered(...).agg()."
+                )
+        return super().__getattr__(name)
+
+
+def _count_rows() -> "CallExpr":
+    """``g.count()``: the number of rows in the group."""
+    return CallExpr("count", (), {}, on=None)
