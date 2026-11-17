@@ -27,8 +27,28 @@ jobs:
         with:
           components: clippy
 
+      # Python is set up before any cargo step, so pyo3 builds against this
+      # interpreter and never against the runner image's system Python
+      # (#401). The cargo steps name it in PYO3_PYTHON: pyo3's build script
+      # reruns when that value changes, and the path carries the full
+      # Python version, so a cached target/ built for another interpreter
+      # is rebuilt rather than linked against a libpython that is gone.
+      - name: Set up Python ${{ matrix.python-version }}
+        id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # ImageOS names the runner image (ubuntu24, ubuntu26, macos15).
+      # Build outputs from one image are not reused on another (#401). A
+      # step reads it because the `env` context holds only the variables a
+      # workflow sets, not the runner's own.
+      - name: Name the runner image
+        id: image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+
       # pyo3 is built for the interpreter it finds, so each Python version
-      # keeps a target directory of its own.
+      # keeps a target directory of its own, and so does each runner image.
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -36,15 +56,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-py${{ matrix.python-version }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-py${{ matrix.python-version }}-cargo-
+          key: ${{ runner.os }}-${{ steps.image.outputs.os }}-py${{ matrix.python-version }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ steps.image.outputs.os }}-py${{ matrix.python-version }}-cargo-
 
       - name: Run clippy
         if: matrix.python-version == '3.13'
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run Rust tests
         if: matrix.python-version == '3.13'
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test
 
       # The #251 measurement prototypes (benchmarks/m0) compile only with the
@@ -52,6 +76,8 @@ jobs:
       # dependency features, so this rebuilds only this crate.
       - name: Run clippy and Rust tests on the m0 prototypes
         if: matrix.python-version == '3.13'
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           cargo clippy --all-targets --features m0 -- -D warnings
           cargo test --features m0 --lib m0::
@@ -61,14 +87,11 @@ jobs:
       # and skip on the default one.
       - name: Run clippy and Rust tests on the stream error spike
         if: matrix.python-version == '3.13'
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           cargo clippy --all-targets --features stream_spike -- -D warnings
           cargo test --features stream_spike --lib stream_spike::
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -109,6 +132,18 @@ jobs:
         with:
           components: clippy
 
+      # As in build-and-test: Python first, named in PYO3_PYTHON for the
+      # cargo steps, and the runner image in the cache key (#401).
+      - name: Set up Python 3.13
+        id: python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Name the runner image
+        id: image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -116,10 +151,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ steps.image.outputs.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ steps.image.outputs.os }}-cargo-
 
       - name: Run clippy
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo clippy --all-targets -- -D warnings
 
       # The two `lowering_coerces_each_node_once` tests nest expressions 200
@@ -127,12 +164,9 @@ jobs:
       # (#320). They now run on a 16 MiB stack of their own (#292), so they
       # run here too.
       - name: Run Rust tests
+        env:
+          PYO3_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -169,6 +203,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # The runner image is in the cache key, as in build-and-test (#401).
+      - name: Name the runner image
+        id: image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -176,8 +215,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ steps.image.outputs.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ steps.image.outputs.os }}-cargo-
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v7
