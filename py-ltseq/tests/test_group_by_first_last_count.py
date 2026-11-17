@@ -62,6 +62,50 @@ class TestCount:
         out = t.group_by("k").agg(total=lambda g: g.count.sum()).to_dicts()
         assert out == [{"k": "a", "total": 10}]
 
+    COUNT_ROWS = [
+        {"k": "a", "count": 4},
+        {"k": "a", "count": None},
+        {"k": "a", "count": 6},
+        {"k": "b", "count": None},
+    ]
+
+    def test_counts_rows_with_count_column_in_group_by(self):
+        # A `count` column does not hide the row count: g.count() counts
+        # rows, NULLs of the column included, next to aggregates of the
+        # column itself in the same agg().
+        t = LTSeq.from_rows(self.COUNT_ROWS)
+        out = by_key(
+            t.group_by("k").agg(
+                rows=lambda g: g.count(),
+                values=lambda g: g.count.count(),
+                total=lambda g: g.count.sum(),
+                top=lambda g: g.count.max(),
+            )
+        )
+        assert out["a"]["rows"] == 3 and out["a"]["values"] == 2
+        assert out["a"]["total"] == 10 and out["a"]["top"] == 6
+        assert out["b"]["rows"] == 1 and out["b"]["values"] == 0
+        assert out["b"]["total"] is None
+
+    def test_counts_rows_with_count_column_in_table_agg(self):
+        t = LTSeq.from_rows(self.COUNT_ROWS)
+        out = t.agg(
+            rows=lambda g: g.count(),
+            values=lambda g: g.count.count(),
+            total=lambda g: g.count.sum(),
+        ).to_dicts()
+        assert out == [{"rows": 4, "values": 2, "total": 10}]
+        grouped = by_key(
+            t.agg(by=lambda r: r.k, rows=lambda g: g.count(), total=lambda g: g.count.sum())
+        )
+        assert grouped["a"]["rows"] == 3 and grouped["a"]["total"] == 10
+        assert grouped["b"]["rows"] == 1 and grouped["b"]["total"] is None
+
+    def test_count_column_call_takes_no_arguments(self):
+        t = LTSeq.from_rows(self.COUNT_ROWS)
+        with pytest.raises(TypeError):
+            t.group_by("k").agg(n=lambda g: g.count(1))
+
 
 class TestFirstLast:
     def test_reads_table_order_with_nulls(self):

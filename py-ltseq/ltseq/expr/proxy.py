@@ -160,12 +160,15 @@ class GroupAggProxy(SchemaProxy):
 
     Column access of :class:`SchemaProxy` is kept whole. A column named
     ``count``, ``first`` or ``last`` keeps its name, so ``g.count`` is then
-    that column. A linked alias keeps its prefixed columns too: with a
+    that column (``g.count.sum()``), and calling it, ``g.count()``, still
+    counts the group's rows. A linked alias keeps its prefixed columns too: with a
     ``first_v`` column, ``g.first.v`` is that column, and with ``count_v``,
     ``g.count.v`` is that column while ``g.count()`` still counts rows.
     """
 
     def __getattr__(self, name: str) -> "ColumnExpr | NestedSchemaProxy | Any":
+        if name == "count" and name in self._schema:
+            return _GroupCountColumn(name)
         if not name.startswith("_") and name not in self._schema:
             if name == "count":
                 return _GroupCount(self._linked(name))
@@ -217,3 +220,14 @@ class _GroupCount:
             f"attribute '{name}'. In agg(), g.count() counts the group's "
             f"rows and g.<col>.count() counts a column's non-NULL values."
         )
+
+
+class _GroupCountColumn(ColumnExpr):
+    """``g.count`` when the schema has a ``count`` column.
+
+    It is that column, so ``g.count.sum()`` and ``g.count.max()`` aggregate
+    it, and calling it, ``g.count()``, still counts the group's rows (#314).
+    """
+
+    def __call__(self) -> "CallExpr":
+        return CallExpr("count", (), {}, on=None)

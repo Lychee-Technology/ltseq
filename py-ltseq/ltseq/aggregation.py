@@ -48,8 +48,9 @@ class GroupBy:
         and ``g.col.last()`` give the value of the group's first or last row
         in table order, NULL included. ``g.count()`` counts the group's rows.
         A column named ``count`` keeps its name, so ``g.count`` is then that
-        column. ``g.first().col``, the form of ``group_ordered(...).agg()``,
-        is not available here: ``g.first`` reads as a column. Linked-table
+        column (``g.count.sum()``) while ``g.count()`` still counts rows.
+        ``g.first().col``, the form of ``group_ordered(...).agg()``, is not
+        available here: ``g.first`` reads as a column. Linked-table
         columns keep their access: with a ``first_v`` or ``count_v`` column
         (``link(..., as_="first")``), ``g.first.v`` and ``g.count.v`` read it.
 
