@@ -728,12 +728,20 @@ def _spell(value: Any, *, as_expr: bool = True) -> str | None:
 def _is_volatile(value: Any) -> bool:
     """Whether an expression holds ``rand()``, which draws a new value at each
     place it is written, so two copies of it are two values."""
-    from .types import BinOpExpr, CallExpr, UnaryOpExpr
+    from .types import BinOpExpr, CallExpr, UnaryOpExpr, WindowExpr
 
     if isinstance(value, BinOpExpr):
         return _is_volatile(value.left) or _is_volatile(value.right)
     if isinstance(value, UnaryOpExpr):
         return _is_volatile(value.operand)
+    if isinstance(value, WindowExpr):
+        # An explicit window (`.over(...)`) holds rand() in its function or
+        # in its keys (R1-F1 of #413's review).
+        return (
+            _is_volatile(value.expr)
+            or _is_volatile(value.partition_by)
+            or _is_volatile(value.order_by)
+        )
     if isinstance(value, CallExpr):
         return (
             value.func == "math_rand"
@@ -756,7 +764,7 @@ def _pinned(value: Any) -> Any:
     """
     import copy
 
-    from .types import BinOpExpr, CallExpr, SharedDrawExpr, UnaryOpExpr
+    from .types import BinOpExpr, CallExpr, SharedDrawExpr, UnaryOpExpr, WindowExpr
 
     if not _is_volatile(value):
         return value
@@ -768,6 +776,10 @@ def _pinned(value: Any) -> Any:
         pinned.right = _pinned(value.right)
     elif isinstance(value, UnaryOpExpr):
         pinned.operand = _pinned(value.operand)
+    elif isinstance(value, WindowExpr):
+        pinned.expr = _pinned(value.expr)
+        pinned.partition_by = _pinned(value.partition_by)
+        pinned.order_by = _pinned(value.order_by)
     elif isinstance(value, CallExpr):
         if value.func == "math_rand":
             return SharedDrawExpr()

@@ -57,12 +57,49 @@ class NestedTable:
         self._group_filter = None
         self._group_derive = None
 
+        # Set by filter() when the key holds rand() (R1-F4 of #413's
+        # review): the captured key, reading the draws staged as columns of
+        # ``ltseq_instance``, and those columns, which no result shows.
+        self._key_expr: "dict[str, Any] | None" = None
+        self._hidden: list[str] = []
+
+    def _with_hidden(self, key_expr: "dict[str, Any]", hidden: list[str]) -> "NestedTable":
+        """This grouping keyed by ``key_expr``, over a table holding the
+        columns ``hidden`` that its results drop."""
+        self._key_expr = key_expr
+        self._hidden = hidden
+        for name in hidden:
+            self._schema.pop(name, None)
+        return self
+
+    def _visible_schema(self) -> dict[str, str]:
+        """The schema of the grouped table without its hidden columns."""
+        return {
+            name: dtype
+            for name, dtype in self._ltseq._schema.items()
+            if name not in self._hidden
+        }
+
+    def _staged_key(self) -> "tuple[Any, dict[str, Any], list[str]]":
+        """The grouped table with each ``rand()`` of the key staged as a
+        column, the key reading those columns, and every column the results
+        drop (#298)."""
+        if self._key_expr is not None:
+            return self._ltseq._inner, self._key_expr, list(self._hidden)
+        expr_dict = self._ltseq._capture_expr(self._grouping_lambda)
+        staged, (expr_dict,), draws = stage_draws(self._ltseq._inner, [expr_dict])
+        return staged, expr_dict, draws
+
     def __len__(self) -> int:
         """Return the number of rows in the grouped table."""
         return len(self._ltseq)
 
     def to_pandas(self) -> Any:
         """Convert the grouped table to a pandas DataFrame."""
+        if self._hidden:
+            from ..core import LTSeq
+
+            return LTSeq._from_inner(unstage(self._ltseq._inner, self._hidden)).to_pandas()
         return self._ltseq.to_pandas()
 
     def first(self) -> "LTSeq":
@@ -123,14 +160,13 @@ class NestedTable:
             >>> grouped = t.group_ordered(lambda r: r.is_up)
             >>> flattened = grouped.flatten()  # Now has __group_id__ column
         """
-        expr_dict = self._ltseq._capture_expr(self._grouping_lambda)
         # The key is compared with the previous row's key; with rand() in it
         # each row's one draw is compared with the previous row's (#298).
-        staged, (expr_dict,), draws = stage_draws(self._ltseq._inner, [expr_dict])
+        staged, expr_dict, hidden = self._staged_key()
 
         result = self._ltseq.__class__()
         result._schema = self._schema.copy()
-        result._inner = unstage(staged.group_id(expr_dict), draws)
+        result._inner = unstage(staged.group_id(expr_dict), hidden)
 
         return result
 
@@ -156,7 +192,7 @@ class NestedTable:
             >>> grouped.filter(lambda g: g.first().price > 100)
             >>> grouped.filter(lambda g: g.all(lambda r: r.amount > 0))
         """
-        result = _invoke_group_lambda(group_predicate, FilterGroupProxy(self._ltseq._schema))
+        result = _invoke_group_lambda(group_predicate, FilterGroupProxy(self._visible_schema()))
 
         if not isinstance(result, FilterExpr):
             raise ValueError(
@@ -179,10 +215,20 @@ class NestedTable:
         # the original columns. No SQL strings, plan stays lazy.
         from ..core import LTSeq
 
-        inner = self.flatten()._inner.filter_group_window(result.serialize())
-        return NestedTable(
+        # The rows a group filter keeps keep the draws their key read (R1-F4
+        # of #413's review): grouping them again draws no new key, so the
+        # groups that passed stay whole. A rand() in the predicate is drawn
+        # once per row beneath the filter, and dropped after it.
+        staged, key_expr, hidden = self._staged_key()
+        flat = staged.group_id(key_expr)
+        flat, (predicate,), draws = stage_draws(flat, [result.serialize()])
+        inner = unstage(flat.filter_group_window(predicate), draws)
+        nested = NestedTable(
             LTSeq._from_inner(inner), self._grouping_lambda, is_sorted=self._is_sorted
         )
+        if hidden:
+            nested._with_hidden(key_expr, hidden)
+        return nested
 
     def derive(self, group_mapper: Callable) -> "LTSeq":
         """
@@ -386,7 +432,7 @@ class _LazyFirstLTSeq:
         # LTSeq._schema is a lazy property backed by _inner, which this lazy
         # wrapper doesn't have yet — pre-seed the cache from the source table
         # so schema reads work before materialization.
-        self._schema_cache = dict(nested._ltseq._schema)
+        self._schema_cache = nested._visible_schema()
         self._name = None
 
     @property
@@ -416,11 +462,8 @@ class _LazyFirstLTSeq:
 
     def count(self) -> int:
         """Fast path: count groups without materializing per-row arrays."""
-        nested = self._nested
-        ltseq = nested._ltseq
-        expr_dict = ltseq._capture_expr(nested._grouping_lambda)
         # As flatten() does (#298).
-        staged, (expr_dict,), _ = stage_draws(ltseq._inner, [expr_dict])
+        staged, expr_dict, _ = self._nested._staged_key()
         try:
             return staged.group_ordered_count(expr_dict)
         except Exception:

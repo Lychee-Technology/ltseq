@@ -38,6 +38,20 @@ def _holds_draw(value: Any) -> bool:
     return any(_holds_draw(v) for v in value.values())
 
 
+def _columns(value: Any) -> set[str]:
+    """The names of the columns serialized expressions read."""
+    if isinstance(value, list):
+        return set().union(*(_columns(v) for v in value))
+    if not isinstance(value, dict) or value.get("type") == "Literal":
+        return set()
+    names = set()
+    if value.get("type") == "Column" and isinstance(value.get("name"), str):
+        names.add(value["name"])
+    for v in value.values():
+        names |= _columns(v)
+    return names
+
+
 def stage_draws(
     inner: Any, exprs: list[Any], taken: Iterable[str] = ()
 ) -> tuple[Any, list[Any], list[str]]:
@@ -45,12 +59,14 @@ def stage_draws(
 
     Returns the table with one new column per draw, the expressions reading
     those columns in place of the calls, and the new columns' names, which
-    are none of the table's columns and none of ``taken``. Expressions
-    without ``rand()`` come back unchanged, on the same table.
+    are none of the table's columns, none of ``taken`` and none of the
+    columns the expressions read: a reference to a missing column stays one
+    (R1-F5 of #413's review). Expressions without ``rand()`` come back
+    unchanged, on the same table.
     """
     if not _holds_draw(exprs):
         return inner, exprs, []
-    used = set(inner.get_schema_dict()) | set(taken)
+    used = set(inner.get_schema_dict()) | set(taken) | _columns(exprs)
     names: list[str] = []
     by_draw: dict[Any, str] = {}
 
@@ -83,11 +99,36 @@ def stage_draws(
     return staged, rewritten, names
 
 
+def keep_names(inner: Any, originals: list[Any], rewritten: list[Any]) -> list[Any]:
+    """``rewritten`` with each expression :func:`stage_draws` changed named
+    as its original is in a projection of ``inner`` (R1-F3 of #413's
+    review).
+
+    A projection or a group key that is not a column takes its expression's
+    text as its name, and the text of a staged expression names the staged
+    column (``round(__ltseq_draw_0,Int64(0))`` for ``round(random(),
+    Int64(0))``); an alias keeps the name the operation gives without
+    staging. An expression the plan cannot name is left as it is, for the
+    operation to report.
+    """
+    out = []
+    for original, new in zip(originals, rewritten):
+        if new != original and isinstance(original, dict) and original.get("type") != "Alias":
+            try:
+                (name,) = inner.select([original]).get_schema_dict()
+            except Exception:
+                name = None
+            if name is not None:
+                new = {"type": "Alias", "expr": new, "alias": name}
+        out.append(new)
+    return out
+
+
 def unstage(inner: Any, names: list[str]) -> Any:
     """Drop the columns :func:`stage_draws` added."""
-    if not names:
+    dropped = set(names) & set(inner.get_schema_dict())
+    if not dropped:
         return inner
-    dropped = set(names)
     return inner.select(
         [
             {"type": "Column", "name": col}

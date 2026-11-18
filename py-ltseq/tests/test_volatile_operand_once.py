@@ -18,6 +18,7 @@ read two draws gives other answers on a share of the rows, so with a few
 hundred rows it fails every time.
 """
 
+import collections
 import datetime
 import math
 
@@ -25,6 +26,7 @@ import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq, if_else, rand
+from ltseq.expr.types import ColumnExpr
 
 # Odd, for the group_ordered and diff probes (see `pairs_table`).
 ROWS = 401
@@ -229,3 +231,138 @@ def test_a_draw_takes_a_name_no_column_has():
     assert got.column("__ltseq_draw_1").to_pylist() == [True] * 3
     kept = t.filter(lambda r: rand() < 2.0).to_arrow()
     assert kept.column_names == ["__ltseq_draw_0"]
+
+
+# Review round 1 of #413.
+
+NEVER = (lambda r: (rand().round(0) - 0.5).between(-0.1, 0.1))
+
+
+def test_between_on_an_explicit_window_reads_one_draw(engine_layout):
+    """R1-F1: `between` pins a `rand()` inside `.over(...)` too. Neither
+    -0.5 nor 0.5 is between -0.1 and 0.1, inline or staged."""
+    t = pairs_table()
+
+    def draw(r):
+        return rand().shift(0).over(order_by=r.k).round(0) - 0.5
+
+    inline = column(t.derive(out=lambda r: draw(r).between(-0.1, 0.1)))
+    staged = column(t.derive(v=draw).derive(out=lambda r: r.v.between(-0.1, 0.1)))
+    assert not any(staged)
+    assert not any(inline)
+
+
+def test_window_partition_and_order_keys_are_pinned():
+    """R1-F1: pinning reaches a window's keys, and keeps two calls two."""
+    from ltseq.expr.base import _pinned
+    from ltseq.expr.types import SharedDrawExpr
+
+    t = table()
+    captured = []
+    t.derive(out=lambda r: captured.append(
+        rand().shift(1).over(partition_by=rand().round(0), order_by=rand())
+    ) or r.k)
+    pinned = _pinned(captured[0])
+    draws = [pinned.expr.on, pinned.partition_by.on, pinned.order_by]
+    assert all(isinstance(d, SharedDrawExpr) for d in draws)
+    assert len({d.draw for d in draws}) == 3
+
+
+def test_search_first_reads_one_draw():
+    """R1-F2: `search_first` finds no row where `filter` keeps none."""
+    t = pairs_table()
+    assert t.filter(NEVER).count() == 0
+    assert t.search_first(NEVER).count() == 0
+    assert t.search_first(lambda r: rand() < 2.0).to_arrow().column_names == ["k"]
+
+
+def test_aggregate_keys_read_one_draw():
+    """R1-F2: a computed `group_by` / `agg` key is false on every row, and
+    keeps the name it has without staging."""
+    t = pairs_table()
+    plain = t.group_by(lambda r: (r.k * 0.0).between(-0.1, 0.1)).agg(n=lambda g: g.count())
+    for got in (
+        t.group_by(NEVER).agg(n=lambda g: g.count()),
+        t.agg(by=NEVER, n=lambda g: g.count()),
+    ):
+        table_ = got.to_arrow()
+        key = table_.column_names[0]
+        assert table_.column(key).to_pylist() == [False]
+        assert table_.column("n").to_pylist() == [ROWS]
+        assert "random()" in key and "__ltseq_draw_" not in key
+        assert list(got._schema) == [key, "n"]
+    assert len(plain._schema) == 2
+
+
+def test_sort_key_reads_one_draw(engine_layout):
+    """R1-F2: a computed sort key that is false on every row leaves the order
+    of a stable sort by `k` alone."""
+    t = pairs_table()
+    got = t.sort(NEVER, "k")
+    assert column(got, "k") == list(range(ROWS))
+    assert list(got._schema) == ["k"]
+    assert got.sort_keys == t.sort(lambda r: r.k > ROWS, "k").sort_keys
+
+
+def test_cum_sum_and_search_pattern_read_one_draw():
+    """R1-F2: the other consumers of a row expression stage too."""
+    t = pairs_table()
+    sums = t.cum_sum(lambda r: if_else(NEVER(r), 1, 0))
+    assert set(column(sums, sums.to_arrow().column_names[-1])) == {0}
+    assert list(sums._schema)[0] == "k" and len(sums._schema) == 2
+    # search_pattern's kernel takes no `round`; it reads a staged draw.
+    always = (lambda r: (rand() - 0.5).between(-1.0, 1.0))
+    assert t.search_pattern(always, lambda r: r.k >= 0).count() == ROWS - 1
+    assert t.search_pattern_count(lambda r: r.k >= 0, always) == ROWS - 1
+    assert t.search_pattern(always).to_arrow().column_names == ["k"]
+
+
+def test_select_keeps_the_names_of_its_expressions():
+    """R1-F3: a selected expression holding `rand()` is named as without
+    staging, bare or computed."""
+    t = table()
+    assert list(t.select(lambda r: [r.k, rand()])._schema) == ["k", "random()"]
+    computed = t.select(lambda r: rand().round(0))
+    assert list(computed._schema) == ["round(random(),Int64(0))"]
+    assert set(column(computed, "round(random(),Int64(0))")) <= {0.0, 1.0}
+    assert t.select(lambda r: [r.k, rand()]).select("random()").count() == ROWS
+
+
+def test_group_filter_keeps_the_draws_of_the_key(engine_layout):
+    """R1-F4: rows 2m and 2m+1 have key 2m, or 2m and 2m+1 by the draw of
+    row 2m+1. Keeping the groups of two keeps the pairs that drew 0, and
+    grouping them again keeps those pairs whole, as for a derived key."""
+
+    def key(r):
+        return 2 * (r.k // 2) + (r.k % 2) * rand().round(0)
+
+    t = pairs_table()
+
+    def sizes(grouped):
+        ids = column(grouped.filter(lambda g: g.count() == 2).flatten(), "__group_id__")
+        return set(collections.Counter(ids).values())
+
+    assert sizes(t.derive(v=key).group_ordered(lambda r: r.v)) == {2}
+    kept = t.group_ordered(key).filter(lambda g: g.count() == 2)
+    assert sizes(t.group_ordered(key)) == {2}
+    flat = kept.flatten()
+    assert set(collections.Counter(column(flat, "__group_id__")).values()) == {2}
+    assert list(flat._schema) == ["k", "__group_id__", "__group_count__", "__rn__"]
+    assert list(kept.to_pandas().columns) == ["k"]
+    assert list(kept.first()._schema) == ["k"]
+    # Each execution draws anew, so each check reads one execution.
+    again = kept.filter(lambda g: g.count() == 2).flatten()
+    assert set(collections.Counter(column(again, "__group_id__")).values()) == {2}
+    assert list(again._schema) == list(flat._schema)
+
+
+def test_a_draw_never_takes_a_name_the_expression_reads():
+    """R1-F5: a missing column named like a staged draw stays missing."""
+    t = table()
+    missing = ColumnExpr("__ltseq_draw_0")
+    with pytest.raises(Exception) as unstaged:
+        t.derive(out=lambda r: missing + r.k).to_arrow()
+    with pytest.raises(type(unstaged.value)):
+        t.derive(out=lambda r: missing + rand()).to_arrow()
+    with pytest.raises(Exception):
+        t.filter(lambda r: missing > rand()).to_arrow()

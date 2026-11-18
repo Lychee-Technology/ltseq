@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING
 
+from ._draws import keep_names, stage_draws, unstage
 from ._typing import LTSeqLike
 
 if TYPE_CHECKING:
@@ -22,6 +23,23 @@ def _capture_agg_expr(table: "LTSeqLike", fn: Callable) -> dict[str, Any]:
             "Schema not initialized. Call read_csv() first to populate the schema."
         )
     return _lambda_to_expr(fn, table._schema, GroupAggProxy)
+
+
+def _agg_staged(inner: Any, grouping_expr: Any, agg_exprs: dict[str, Any]) -> Any:
+    """``inner.agg(grouping_expr, agg_exprs)``, with each ``rand()`` drawn once
+    per row in a column beneath the aggregate, as in ``filter`` (R1-F2 of
+    #413's review). A computed key keeps the name it has without staging."""
+    names = list(agg_exprs)
+    exprs = list(agg_exprs.values())
+    keyed = grouping_expr is not None
+    staged, rewritten, _ = stage_draws(inner, ([grouping_expr] if keyed else []) + exprs)
+    if keyed:
+        (key,) = keep_names(inner, [grouping_expr], rewritten[:1])
+        rewritten = rewritten[1:]
+    else:
+        key = None
+    # The output holds only the key and the aggregates, never a draw.
+    return staged.agg(key, dict(zip(names, rewritten)))
 
 
 class GroupBy:
@@ -93,7 +111,7 @@ class GroupBy:
                 )
             agg_exprs[name] = _capture_agg_expr(self._table, fn)
 
-        result_inner = self._table._inner.agg(grouping_expr, agg_exprs)
+        result_inner = _agg_staged(self._table._inner, grouping_expr, agg_exprs)
 
         return LTSeq._from_inner(result_inner)
 
@@ -136,7 +154,10 @@ class AggregationMixin(LTSeqLike):
 
         cum_exprs = _collect_key_exprs(cols, self._schema, self._capture_expr)
 
-        result_inner = self._inner.cum_sum(cum_exprs)
+        # One value per row for each rand() (R1-F2 of #413's review); the
+        # sums are named by position, so staging leaves their names.
+        staged, cum_exprs, draws = stage_draws(self._inner, cum_exprs)
+        result_inner = unstage(staged.cum_sum(cum_exprs), draws)
         return LTSeq._from_inner(result_inner)
 
     def group_ordered(self, grouping_fn: Callable) -> "NestedTable":
@@ -308,7 +329,7 @@ class AggregationMixin(LTSeqLike):
                 )
             agg_exprs[name] = _capture_agg_expr(self, fn)
 
-        result_inner = self._inner.agg(grouping_expr, agg_exprs)
+        result_inner = _agg_staged(self._inner, grouping_expr, agg_exprs)
 
         return LTSeq._from_inner(result_inner)
 
