@@ -11,6 +11,7 @@ Other types are imported from:
 - lookup_expr: LookupExpr
 """
 
+import itertools
 from typing import Any
 
 from .base import Expr
@@ -300,6 +301,30 @@ class CallExpr(Expr):
             descending=resolved,
             nulls_last=nulls_last,
         )
+
+
+class SharedDrawExpr(CallExpr):
+    """``rand()`` in an operand that an expression method writes more than
+    once (#298).
+
+    ``between`` and ``pct_change`` read their receiver two and three times,
+    and DataFusion draws a new value for each copy of ``rand()``. They pin
+    the receiver (``base._pinned``), which replaces each ``rand()`` in it by
+    one of these, so the copies serialize with the same ``"draw"`` token.
+    The operations that stage draws (``ltseq._draws``) give all calls with
+    one token one column, and the copies read one value per row.
+    """
+
+    _tokens = itertools.count()
+
+    def __init__(self) -> None:
+        super().__init__("math_rand", (), {}, on=None)
+        self.draw = next(SharedDrawExpr._tokens)
+
+    def serialize(self) -> dict[str, Any]:
+        serialized = super().serialize()
+        serialized["draw"] = self.draw
+        return serialized
 
 
 class WindowExpr(Expr):

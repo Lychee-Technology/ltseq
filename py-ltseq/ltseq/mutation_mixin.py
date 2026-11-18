@@ -6,6 +6,7 @@ All operations return new LTSeq instances — the original is never modified.
 
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
+from ._draws import stage_draws, unstage
 from ._typing import LTSeqLike
 from .exceptions import ColumnNotFoundError
 from .expr.core_types import _encode_literal
@@ -150,7 +151,9 @@ class MutationMixin(LTSeqLike):
                 "kwargs": {},
                 "on": expr_dict,
             }
-            return LTSeq._from_inner(self._inner.filter(negated))
+            # One value per row for each rand() (#298).
+            staged, (negated,), draws = stage_draws(self._inner, [negated])
+            return LTSeq._from_inner(unstage(staged.filter(negated), draws))
 
         # integer positional delete — delegate to Rust
         pos = int(predicate_or_pos)
@@ -195,7 +198,11 @@ class MutationMixin(LTSeqLike):
             return result
 
         expr_dict = self._capture_expr(predicate)
-        result_inner = self._inner.conditional_update(expr_dict, _literal_values(self._schema, updates))
+        values = _literal_values(self._schema, updates)
+        # The predicate is written once per updated column; each copy reads
+        # the same draw of a rand() in it (#298).
+        staged, (expr_dict,), draws = stage_draws(self._inner, [expr_dict])
+        result_inner = unstage(staged.conditional_update(expr_dict, values), draws)
         result = LTSeq._from_inner(result_inner)
         return result
 

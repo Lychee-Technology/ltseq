@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from .._draws import stage_draws, unstage
 from ..expr.transforms import _invoke_group_lambda
 from .proxies import FilterGroupProxy, FilterExpr
 
@@ -123,10 +124,13 @@ class NestedTable:
             >>> flattened = grouped.flatten()  # Now has __group_id__ column
         """
         expr_dict = self._ltseq._capture_expr(self._grouping_lambda)
+        # The key is compared with the previous row's key; with rand() in it
+        # each row's one draw is compared with the previous row's (#298).
+        staged, (expr_dict,), draws = stage_draws(self._ltseq._inner, [expr_dict])
 
         result = self._ltseq.__class__()
         result._schema = self._schema.copy()
-        result._inner = self._ltseq._inner.group_id(expr_dict)
+        result._inner = unstage(staged.group_id(expr_dict), draws)
 
         return result
 
@@ -415,8 +419,10 @@ class _LazyFirstLTSeq:
         nested = self._nested
         ltseq = nested._ltseq
         expr_dict = ltseq._capture_expr(nested._grouping_lambda)
+        # As flatten() does (#298).
+        staged, (expr_dict,), _ = stage_draws(ltseq._inner, [expr_dict])
         try:
-            return ltseq._inner.group_ordered_count(expr_dict)
+            return staged.group_ordered_count(expr_dict)
         except Exception:
             # Fallback: materialize and count
             return self._materialize().count()
