@@ -96,27 +96,30 @@ tree built, whatever the working directory.
 # The matrix (about nine minutes each on a debug build), then the comparison.
 /tmp/venv55/bin/python benchmarks/datafusion56/repro_296.py --label 55.0.0 --out /tmp/repro-55.json.gz
 /tmp/venv56/bin/python benchmarks/datafusion56/repro_296.py --label 56.0.0-rc1 --out /tmp/repro-56.json.gz
-python benchmarks/datafusion56/repro_296.py --compare /tmp/repro-55.json.gz /tmp/repro-56.json.gz
+/tmp/venv55/bin/python benchmarks/datafusion56/repro_296.py --compare /tmp/repro-55.json.gz /tmp/repro-56.json.gz
 
 # Full plans of the representative cases, with the sorted scan's inner plan.
 /tmp/venv55/bin/python benchmarks/datafusion56/repro_296.py --plans --label 55.0.0 --out /tmp/plans-55.json
 /tmp/venv56/bin/python benchmarks/datafusion56/repro_296.py --plans --label 56.0.0-rc1 --out /tmp/plans-56.json
-python benchmarks/datafusion56/repro_296.py --compare-plans /tmp/plans-55.json /tmp/plans-56.json
+/tmp/venv55/bin/python benchmarks/datafusion56/repro_296.py --compare-plans /tmp/plans-55.json /tmp/plans-56.json
 
 # The direct DataFusion probe: runtime items and volatile values.
-python benchmarks/datafusion56/probes.py --emit /tmp/cases.txt
+/tmp/venv55/bin/python benchmarks/datafusion56/probes.py --emit /tmp/cases.txt
 (cd benchmarks/datafusion56/df_probe/df55 && cargo run --locked -q -- /tmp/cases.txt) > /tmp/probe-55.jsonl
 (cd benchmarks/datafusion56/df_probe/df56 && cargo run --locked -q -- /tmp/cases.txt) > /tmp/probe-56.jsonl
-python benchmarks/datafusion56/probes.py --report /tmp/probe-55.jsonl /tmp/probe-56.jsonl
+/tmp/venv55/bin/python benchmarks/datafusion56/probes.py --report /tmp/probe-55.jsonl /tmp/probe-56.jsonl
 
 # B1's filter witness and §8.5's contract.
 /tmp/venv55/bin/python benchmarks/datafusion56/witnesses.py --label 55.0.0 --out /tmp/witnesses-55.json
 /tmp/venv56/bin/python benchmarks/datafusion56/witnesses.py --label 56.0.0-rc1 --out /tmp/witnesses-56.json
-python benchmarks/datafusion56/witnesses.py --compare /tmp/witnesses-55.json /tmp/witnesses-56.json
+/tmp/venv55/bin/python benchmarks/datafusion56/witnesses.py --compare /tmp/witnesses-55.json /tmp/witnesses-56.json
 ```
 
 `repro_296.py` and `witnesses.py` import `ltseq` and `pyarrow` even to
-compare, so run their comparisons with either virtualenv's Python.
+compare, so their comparisons run under a prepared virtualenv's Python too:
+the block uses `/tmp/venv55/bin/python`, and `/tmp/venv56/bin/python` works
+the same. `probes.py` needs only the standard library; it runs under the
+same interpreter for consistency.
 
 ### Switches (spike-only; each is a no-op unless set)
 
