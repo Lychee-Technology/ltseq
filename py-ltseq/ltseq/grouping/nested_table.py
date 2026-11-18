@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any, Callable, cast
 
-from .._draws import stage_draws, unstage
+from .._draws import _columns, rename_draws, stage_draws, unstage
 from ..expr.transforms import _invoke_group_lambda
 from .proxies import FilterGroupProxy, FilterExpr
 
@@ -80,14 +80,21 @@ class NestedTable:
             if name not in self._hidden
         }
 
-    def _staged_key(self) -> "tuple[Any, dict[str, Any], list[str]]":
+    def _staged_key(
+        self, taken: "set[str] | frozenset[str]" = frozenset()
+    ) -> "tuple[Any, dict[str, Any], list[str]]":
         """The grouped table with each ``rand()`` of the key staged as a
         column, the key reading those columns, and every column the results
-        drop (#298)."""
+        drop (#298). The staged columns take none of the names in ``taken``,
+        the columns an expression evaluated over them reads, which then stay
+        missing columns (R3-F1 of #413's review)."""
         if self._key_expr is not None:
-            return self._ltseq._inner, self._key_expr, list(self._hidden)
+            staged, (key_expr,), hidden = rename_draws(
+                self._ltseq._inner, [self._key_expr], self._hidden, taken
+            )
+            return staged, key_expr, hidden
         expr_dict = self._ltseq._capture_expr(self._grouping_lambda)
-        staged, (expr_dict,), draws = stage_draws(self._ltseq._inner, [expr_dict])
+        staged, (expr_dict,), draws = stage_draws(self._ltseq._inner, [expr_dict], taken)
         return staged, expr_dict, draws
 
     def __len__(self) -> int:
@@ -219,9 +226,12 @@ class NestedTable:
         # of #413's review): grouping them again draws no new key, so the
         # groups that passed stay whole. A rand() in the predicate is drawn
         # once per row beneath the filter, and dropped after it.
-        staged, key_expr, hidden = self._staged_key()
+        # The predicate reads the columns the user sees: a column it names
+        # like a staged draw of the key stays missing (R3-F1).
+        predicate = result.serialize()
+        staged, key_expr, hidden = self._staged_key(_columns(predicate))
         flat = staged.group_id(key_expr)
-        flat, (predicate,), draws = stage_draws(flat, [result.serialize()])
+        flat, (predicate,), draws = stage_draws(flat, [predicate])
         inner = unstage(flat.filter_group_window(predicate), draws)
         nested = NestedTable(
             LTSeq._from_inner(inner), self._grouping_lambda, is_sorted=self._is_sorted

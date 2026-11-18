@@ -366,3 +366,39 @@ def test_a_draw_never_takes_a_name_the_expression_reads():
         t.derive(out=lambda r: missing + rand()).to_arrow()
     with pytest.raises(Exception):
         t.filter(lambda r: missing > rand()).to_arrow()
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        lambda g: g.sum("__ltseq_draw_0") >= 0,
+        lambda g: g.first().__ltseq_draw_0 >= 0,
+    ],
+    ids=["aggregate", "first-row"],
+)
+def test_a_group_filter_never_reads_a_draw_of_the_key(predicate):
+    """R3-F1: a group filter naming a missing column like a staged draw of
+    the key reports the column missing, as it does for a key without
+    `rand()`, in a first filter and in a filter of its result, whose rows
+    keep the key's draws."""
+    t = LTSeq.from_arrow(pa.table({"k": list(range(ROWS))})).sort("k")
+
+    def volatile(r):
+        return rand().round(0)
+
+    def stable(r):
+        return r.k // 2
+
+    with pytest.raises(Exception) as unstaged:
+        t.group_ordered(stable).filter(predicate).flatten().to_arrow()
+    assert "__ltseq_draw_0" in str(unstaged.value)
+    with pytest.raises(type(unstaged.value), match="__ltseq_draw_0"):
+        t.group_ordered(volatile).filter(predicate).flatten().to_arrow()
+    kept = t.group_ordered(volatile).filter(lambda g: g.count() >= 1)
+    assert list(kept.to_pandas().columns) == ["k"]
+    with pytest.raises(type(unstaged.value), match="__ltseq_draw_0"):
+        kept.filter(predicate).flatten().to_arrow()
+    # The renamed draws still key the groups that passed.
+    again = kept.filter(lambda g: g.count() >= 1).flatten()
+    assert list(again._schema) == ["k", "__group_id__", "__group_count__", "__rn__"]
+    assert again.count() == ROWS
