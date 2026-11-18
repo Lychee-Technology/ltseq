@@ -27,7 +27,7 @@ repeat it on the published patch.
 | `cargo clippy --all-targets -- -D warnings` | passes (CI) | passes, with the two deprecations allowed |
 | `cargo clippy --all-targets --features m0 -- -D warnings` | passes (CI) | passes |
 | `cargo clippy --all-targets --features stream_spike -- -D warnings` | passes (CI) | **fails**: `src/stream_spike/capsule.rs` writes `FFI_ArrowArrayStream`'s fields, which arrow 60 made private (8 errors in the library), and uses the deprecated `ArrowArrayStreamReader`. Not ported |
-| `cargo test --locked --lib` | 235 passed | the published patch (S2): **231 passed, 5 failed** of 236 (the patch adds the trace test). With `LTSEQ_SPIKE_NO_PDF_GUARD=1`: 230 passed, 6 failed (adds `plan_guard_eliminate_filter`). With `resolve.rs`'s 55 control restored (`git apply -R --include=src/transpiler/resolve.rs df56-migration.patch`): 230 passed, 6 failed (adds `a_case_is_typed_by_every_branch`). The first run, in S0 (no trace test, original control, no guard), gave 228 passed, 7 failed of 235 |
+| `cargo test --locked --lib` | 235 passed | the published patch (S2): **231 passed, 5 failed** of 236 (the patch adds the trace test). With `LTSEQ_SPIKE_NO_PDF_GUARD=1`: 230 passed, 6 failed (adds `plan_guard_eliminate_filter`). With `resolve.rs`'s 55 control restored (from the root of `/tmp/ltseq-df56`: `git apply -R --include=src/transpiler/resolve.rs benchmarks/datafusion56/df56-migration.patch`): 230 passed, 6 failed (adds `a_case_is_typed_by_every_branch`). The first run, in S0 (no trace test, original control, no guard), gave 228 passed, 7 failed of 235 |
 
 The 56 failures (the first five fail on the published patch; the last two
 only in the variants named):

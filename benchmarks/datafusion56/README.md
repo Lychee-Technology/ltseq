@@ -41,22 +41,32 @@ byte, but a networked rerun later may resolve newer versions.)
 Debug builds (`maturin develop`, as CI builds them), CPython 3.13, rustc
 1.97.1, each in its own virtualenv from `uv.lock`:
 
+Run the block from a checkout of this branch: `REPO` records its root, and
+every `git archive` runs against it with `git -C "$REPO"`, because the
+extracted trees below hold no Git metadata. Each `cd` then moves into a
+patched tree, and the commands after it run from that tree's root.
+
 ```bash
+REPO=$(git rev-parse --show-toplevel)   # the checkout of this branch
+
 # Baseline, 55.0.0: this tree with the 55 switches only (no-ops unless set).
-mkdir /tmp/ltseq-df55 && git archive HEAD | tar -x -C /tmp/ltseq-df55
-cd /tmp/ltseq-df55 && git apply benchmarks/datafusion56/df55-spike-switches.patch
+mkdir /tmp/ltseq-df55 && git -C "$REPO" archive HEAD | tar -x -C /tmp/ltseq-df55
+cd /tmp/ltseq-df55   # the 55 tree's root, for the next three commands
+git apply benchmarks/datafusion56/df55-spike-switches.patch
 UV_PROJECT_ENVIRONMENT=/tmp/venv55 uv sync --no-install-project --group dev --group bench
 VIRTUAL_ENV=/tmp/venv55 /tmp/venv55/bin/maturin develop --locked
 
 # Candidate, 56.0.0-rc1: the patch and the candidate's lockfile.
-mkdir /tmp/ltseq-df56 && git archive HEAD | tar -x -C /tmp/ltseq-df56
-cd /tmp/ltseq-df56 && git apply benchmarks/datafusion56/df56-migration.patch
+mkdir /tmp/ltseq-df56 && git -C "$REPO" archive HEAD | tar -x -C /tmp/ltseq-df56
+cd /tmp/ltseq-df56   # the 56 tree's root, for the next four commands
+git apply benchmarks/datafusion56/df56-migration.patch
 cp benchmarks/datafusion56/df56-Cargo.lock Cargo.lock
 UV_PROJECT_ENVIRONMENT=/tmp/venv56 uv sync --no-install-project --group dev --group bench
 VIRTUAL_ENV=/tmp/venv56 /tmp/venv56/bin/maturin develop --locked
 ```
 
-The Rust tests need libpython on the loader path:
+The Rust tests need libpython on the loader path; run them from the root of
+the patched tree under test (`/tmp/ltseq-df55` or `/tmp/ltseq-df56`):
 `PYO3_PYTHON=<python> LD_LIBRARY_PATH=<python prefix>/lib cargo test --locked --lib`.
 
 ### Patch states
@@ -76,6 +86,11 @@ On 55 the matrix ran on this tree unchanged; the ablations, `--plans` and
 change nothing unless set.
 
 ## Reproducing
+
+Every path below is relative to a tree's root: run the block from the root
+of either patched tree (both hold the same `benchmarks/datafusion56/`) or of
+the checkout itself. Each virtualenv's Python imports the `ltseq` its own
+tree built, whatever the working directory.
 
 ```bash
 # The matrix (about nine minutes each on a debug build), then the comparison.
