@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING, cast
 
+from ._draws import stage_draws, unstage
 from ._typing import LTSeqLike
 from .exceptions import ColumnNotFoundError
 
@@ -351,9 +352,12 @@ class AdvancedOpsMixin(LTSeqLike):
             )
 
         expr_dict = self._capture_expr(predicate)
+        # One value per row for each rand(), as in filter() (R1-F2 of #413's
+        # review).
+        staged, (expr_dict,), draws = stage_draws(self._inner, [expr_dict])
 
         try:
-            result_inner = self._inner.search_first(expr_dict)
+            result_inner = unstage(staged.search_first(expr_dict), draws)
         except RuntimeError as e:
             raise RuntimeError(
                 f"search_first() failed: {e}. "

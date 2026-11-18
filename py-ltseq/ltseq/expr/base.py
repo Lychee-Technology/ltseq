@@ -728,12 +728,20 @@ def _spell(value: Any, *, as_expr: bool = True) -> str | None:
 def _is_volatile(value: Any) -> bool:
     """Whether an expression holds ``rand()``, which draws a new value at each
     place it is written, so two copies of it are two values."""
-    from .types import BinOpExpr, CallExpr, UnaryOpExpr
+    from .types import BinOpExpr, CallExpr, UnaryOpExpr, WindowExpr
 
     if isinstance(value, BinOpExpr):
         return _is_volatile(value.left) or _is_volatile(value.right)
     if isinstance(value, UnaryOpExpr):
         return _is_volatile(value.operand)
+    if isinstance(value, WindowExpr):
+        # An explicit window (`.over(...)`) holds rand() in its function or
+        # in its keys (R1-F1 of #413's review).
+        return (
+            _is_volatile(value.expr)
+            or _is_volatile(value.partition_by)
+            or _is_volatile(value.order_by)
+        )
     if isinstance(value, CallExpr):
         return (
             value.func == "math_rand"
@@ -742,6 +750,43 @@ def _is_volatile(value: Any) -> bool:
             or any(_is_volatile(v) for v in value.kwargs.values())
         )
     return False
+
+
+def _pinned(value: Any) -> Any:
+    """``value`` with each ``rand()`` in it naming one draw, for a method that
+    writes ``value`` more than once (#298).
+
+    Each copy of the result serializes each of its ``rand()`` calls with the
+    same token, and the operations that lower a captured expression stage a
+    token as one column (``ltseq._draws``), so the copies read one value per
+    row. Two ``rand()`` calls in ``value`` stay two draws. A value without
+    ``rand()`` is returned as it is.
+    """
+    import copy
+
+    from .types import BinOpExpr, CallExpr, SharedDrawExpr, UnaryOpExpr, WindowExpr
+
+    if not _is_volatile(value):
+        return value
+    if isinstance(value, SharedDrawExpr):
+        return value
+    pinned = copy.copy(value)
+    if isinstance(value, BinOpExpr):
+        pinned.left = _pinned(value.left)
+        pinned.right = _pinned(value.right)
+    elif isinstance(value, UnaryOpExpr):
+        pinned.operand = _pinned(value.operand)
+    elif isinstance(value, WindowExpr):
+        pinned.expr = _pinned(value.expr)
+        pinned.partition_by = _pinned(value.partition_by)
+        pinned.order_by = _pinned(value.order_by)
+    elif isinstance(value, CallExpr):
+        if value.func == "math_rand":
+            return SharedDrawExpr()
+        pinned.args = tuple(_pinned(a) for a in value.args)
+        pinned.kwargs = {k: _pinned(v) for k, v in value.kwargs.items()}
+        pinned.on = _pinned(value.on)
+    return pinned
 
 
 def _column_names(value: Any) -> set[str]:
@@ -1127,7 +1172,8 @@ class Expr(ABC):
         """
         Check if the value is between low and high (inclusive).
 
-        Equivalent to: (expr >= low) & (expr <= high)
+        Equivalent to: (expr >= low) & (expr <= high), where both tests read
+        one value: an expression holding ``rand()`` is drawn once per row.
 
         Args:
             low: Lower bound (inclusive)
@@ -1140,7 +1186,9 @@ class Expr(ABC):
             >>> t.filter(lambda r: r.price.between(10, 100))
             >>> t.filter(lambda r: r.age.between(18, 65))
         """
-        return (self >= self._coerce(low)) & (self <= self._coerce(high))
+        # Both tests read one draw of a rand() in the receiver (#298).
+        value = _pinned(self)
+        return (value >= self._coerce(low)) & (value <= self._coerce(high))
 
     def cast(self, dtype: str) -> "CallExpr":
         """
@@ -1243,7 +1291,9 @@ class Expr(ABC):
         matches pandas' ``pct_change(fill_method=None)``: a decrease on an
         unsigned column is negative, and a previous value of 0 gives ``inf``
         (NaN when the value is 0 too) instead of raising as integer ``/``
-        does. A NULL value or previous value gives NULL.
+        does. A NULL value or previous value gives NULL. An expression holding
+        ``rand()`` is drawn once per row, so the three reads see one value
+        on each row.
 
         Requires the table to be sorted. Common in financial analysis.
 
@@ -1255,11 +1305,14 @@ class Expr(ABC):
         """
         from .types import CallExpr
 
-        shifted = CallExpr("shift", (self._coerce(1),), {}, on=cast(Any, self))
+        # The three reads of the receiver read one draw of a rand() in it
+        # (#298).
+        value = _pinned(self)
+        shifted = CallExpr("shift", (self._coerce(1),), {}, on=cast(Any, value))
         # In float64 throughout (#218): integer `/` raises on a zero divisor
         # where pct_change gives inf, and an unsigned difference would wrap.
         previous = shifted.cast("float64")
-        return (self.cast("float64") - previous) / previous
+        return (value.cast("float64") - previous) / previous
 
     @staticmethod
     def _coerce(value: Any) -> Any:

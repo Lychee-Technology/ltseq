@@ -2,6 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING, cast
 
+from ._draws import keep_names, stage_draws, unstage
 from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -247,7 +248,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
             )
 
         expr_dict = self._capture_expr(predicate)
-        result_inner = self._inner.filter(expr_dict)
+        # One value per row for each rand() (#298).
+        staged, (expr_dict,), draws = stage_draws(self._inner, [expr_dict])
+        result_inner = unstage(staged.filter(expr_dict), draws)
 
         return LTSeq._from_inner(result_inner)
 
@@ -293,7 +296,12 @@ class TransformMixin(LookupMixin, LTSeqLike):
                 if result.get("type") == "Column" and "name" in result:
                     selected_cols.add(result["name"])
 
-        result_inner = self._inner.select(exprs)
+        # One value per row for each rand() (#298); the output holds only
+        # the selected expressions, so the staged draws need no drop. Each
+        # selected expression keeps the name it has without staging (R1-F3
+        # of #413's review): `random()`, not the staged column's name.
+        staged, rewritten, _ = stage_draws(self._inner, exprs)
+        result_inner = staged.select(keep_names(self._inner, exprs, rewritten))
 
         # Schema and sort metadata now come from the Rust kernel (issue #93);
         # select's sort-prefix retention lives in Rust's select_impl.
@@ -347,14 +355,19 @@ class TransformMixin(LookupMixin, LTSeqLike):
 
         if table._has_implicit_order_window(derived_cols) and not table._sort_keys:
             raise _window_sort_required_error()
+        # One value per row for each rand() (#298), under names no derived
+        # column takes.
+        names = list(derived_cols)
+        staged, exprs, draws = stage_draws(
+            table._inner, list(derived_cols.values()), taken=names
+        )
+        derived_cols = dict(zip(names, exprs))
         if has_window:
-            result_inner = table._inner.derive_with_window_functions(
-                derived_cols
-            )
+            result_inner = staged.derive_with_window_functions(derived_cols)
         else:
-            result_inner = table._inner.derive(derived_cols)
+            result_inner = staged.derive(derived_cols)
 
-        result = LTSeq._from_inner(result_inner)
+        result = LTSeq._from_inner(unstage(result_inner, draws))
         # A lookup's join adds every target column, under names no input or
         # derived column has (_resolve_lookups); drop them all.
         joined = [col for col in table._schema if col not in self._schema]
@@ -634,7 +647,12 @@ class TransformMixin(LookupMixin, LTSeqLike):
         nulls_last_list = _per_key_flags(nulls_last, len(keys), "nulls_last")
 
         key_exprs = _collect_key_exprs(keys, self._schema, self._capture_expr)
-        result_inner = self._inner.sort(key_exprs, desc_list, nulls_last_list)
+        # One value per row for each rand() in a computed key (R1-F2 of
+        # #413's review): the rows are ordered by the draws they keep.
+        staged, key_exprs, draws = stage_draws(self._inner, key_exprs)
+        result_inner = unstage(
+            staged.sort(key_exprs, desc_list, nulls_last_list), draws
+        )
 
         # Rust captures the sort specs (column + direction) itself.
         return LTSeq._from_inner(result_inner)
@@ -984,7 +1002,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
             _require_partition_by_column(partition_by, self._schema)
 
         step_dicts = [self._capture_expr(p) for p in step_predicates]
-        result_inner = self._inner.search_pattern(step_dicts, partition_by)
+        # One value per row for each rand() (R1-F2 of #413's review).
+        staged, step_dicts, draws = stage_draws(self._inner, step_dicts)
+        result_inner = unstage(staged.search_pattern(step_dicts, partition_by), draws)
 
         return LTSeq._from_inner(result_inner)
 
@@ -1025,4 +1045,6 @@ class TransformMixin(LookupMixin, LTSeqLike):
             _require_partition_by_column(partition_by, self._schema)
 
         step_dicts = [self._capture_expr(p) for p in step_predicates]
-        return self._inner.search_pattern_count(step_dicts, partition_by)
+        # One value per row for each rand() (R1-F2 of #413's review).
+        staged, step_dicts, _ = stage_draws(self._inner, step_dicts)
+        return staged.search_pattern_count(step_dicts, partition_by)

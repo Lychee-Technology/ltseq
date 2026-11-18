@@ -86,6 +86,12 @@ class CallExpr(Expr):
     def __getattr__(self, name: str) -> Any: ...
 
 
+class SharedDrawExpr(CallExpr):
+    draw: int
+
+    def __init__(self) -> None: ...
+
+
 class WindowExpr(Expr):
     expr: Any
     partition_by: Any | None
