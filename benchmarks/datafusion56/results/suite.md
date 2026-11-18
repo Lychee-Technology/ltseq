@@ -4,15 +4,20 @@ Machine: 8 CPUs visible (Intel Core i7-8700K under Proxmox), 23 GiB, Linux
 7.0.14. rustc 1.97.1, CPython 3.13 (uv), pyarrow from `uv.lock`, maturin
 debug builds (`maturin develop`, as CI builds them) unless noted.
 
-- **55.0.0**: this branch's tree, unchanged.
+- **55.0.0**: this branch's tree, unchanged (the matrix), or with
+  `df55-spike-switches.patch` (the ablations, `--plans`, `witnesses.py`).
 - **56.0.0-rc1**: the same tree with `df56-migration.patch` applied and
-  `cargo update -p datafusion -p arrow -p parquet`.
+  `df56-Cargo.lock` as its `Cargo.lock` (built `--locked`; see the README
+  for the commands).
 
 The patch carries spike-only code the upgrade PR would not ship as is: the
-`push_down_filter` guard extension (finding B2 in the report), the
-`LTSEQ_SPIKE_SKIP` / `LTSEQ_SPIKE_NO_PDF_GUARD` switches, a trace test
-(`spike411_probe_eliminate_filter`), and `#[allow(deprecated)]` on two calls.
-Without either environment variable, the switches change nothing.
+`push_down_filter` guard extension (finding B2 in the report, on unless
+`LTSEQ_SPIKE_NO_PDF_GUARD=1`), the `LTSEQ_SPIKE_SKIP` and
+`LTSEQ_SPIKE_TRACE_INNER` switches (no-ops unless set), a trace test
+(`spike411_probe_eliminate_filter`), `resolve.rs`'s 55 control replaced by
+a print, and `#[allow(deprecated)]` on two calls. The README's *Patch
+states* table names the state (S0, S1, S2) each run below used and how to
+repeat it on the published patch.
 
 ## Rust
 
@@ -22,9 +27,10 @@ Without either environment variable, the switches change nothing.
 | `cargo clippy --all-targets -- -D warnings` | passes (CI) | passes, with the two deprecations allowed |
 | `cargo clippy --all-targets --features m0 -- -D warnings` | passes (CI) | passes |
 | `cargo clippy --all-targets --features stream_spike -- -D warnings` | passes (CI) | **fails**: `src/stream_spike/capsule.rs` writes `FFI_ArrowArrayStream`'s fields, which arrow 60 made private (8 errors in the library), and uses the deprecated `ArrowArrayStreamReader`. Not ported |
-| `cargo test --lib` | 235 passed | 230 passed, 6 failed of 236 (the patch adds the trace test), with the patch's guard extension; 228 passed, 7 failed without it |
+| `cargo test --locked --lib` | 235 passed | the published patch (S2): **231 passed, 5 failed** of 236 (the patch adds the trace test). With `LTSEQ_SPIKE_NO_PDF_GUARD=1`: 230 passed, 6 failed (adds `plan_guard_eliminate_filter`). With `resolve.rs`'s 55 control restored (`git apply -R --include=src/transpiler/resolve.rs df56-migration.patch`): 230 passed, 6 failed (adds `a_case_is_typed_by_every_branch`). The first run, in S0 (no trace test, original control, no guard), gave 228 passed, 7 failed of 235 |
 
-The 56 failures, each run in the patched tree:
+The 56 failures (the first five fail on the published patch; the last two
+only in the variants named):
 
 | Test | Why it fails |
 |---|---|
@@ -32,8 +38,8 @@ The 56 failures, each run in the patched tree:
 | `rule_inventory::the_expression_rewrites_were_rated_for_the_datafusion_in_use` | The marker says 55.0.0. Working as designed |
 | `rewrite_guard::tests::plan_guard_case_rewrites`, `plan_guard_nested_case_rewrites` | The guarded halves pass. The control, that DataFusion still lowers a `CASE` none of whose branches can fail to `AND`, does not: 56 lowers a `CASE` to `AND`/`OR` only when every condition and branch is a column or a literal (`can_lower_case_to_boolean`) |
 | `rewrite_guard::tests::join_selection_keeps_clashing_schema_metadata` | The guarded half passes. The control, that DataFusion's own `join_selection` fails on clashing schema metadata, no longer fails |
-| `transpiler::resolve::tests::a_case_is_typed_by_every_branch` | The control, that an uncoerced `CASE` reports its first branch's type (`Timestamp(Second)`), now reports the coerced `Timestamp(Microsecond)`. With the control removed, the test passes |
-| `rewrite_guard::tests::plan_guard_eliminate_filter` (without the guard extension only) | `push_down_filter` turns `Filter(false)` over a sort whose key can fail into an empty relation (finding B2) |
+| `transpiler::resolve::tests::a_case_is_typed_by_every_branch` (only with the 55 control restored; the published patch replaces that assertion with a print, so the test passes there) | The control, that an uncoerced `CASE` reports its first branch's type (`Timestamp(Second)`), now reports the coerced `Timestamp(Microsecond)` |
+| `rewrite_guard::tests::plan_guard_eliminate_filter` (only with `LTSEQ_SPIKE_NO_PDF_GUARD=1`, or in S0) | `push_down_filter` turns `Filter(false)` over a sort whose key can fail into an empty relation (finding B2) |
 
 ## Python
 
@@ -44,7 +50,7 @@ the whole run otherwise.
 
 | | 55.0.0 | 56.0.0-rc1 |
 |---|---|---|
-| Full suite | not rerun here; CI runs it on `main` | 18 failed, 24,293 passed, 203 skipped (17 min 58 s); `test_is_in_literal_items.py`: 117 passed |
+| Full suite | not rerun here; CI runs it on `main` | S0 (17 Nov): 18 failed, 24,293 passed, 203 skipped (17 min 58 s); `test_is_in_literal_items.py`: 117 passed. Rerun on the published patch (S2, 18 Nov): the same 18 ids failed, 24,293 passed, 203 skipped (16 min 37 s); `test_is_in_literal_items.py`: 117 passed |
 | The 18 failing ids, on 55 | 17 passed, 1 xfailed (the strict xfail of #296) | |
 
 The 18, by cause:
@@ -62,11 +68,29 @@ Not run: `pyright`, the tutorial notebooks (`pytest --nbmake tutorials/`),
 (`-m memory`), and the macOS job. None of them was expected to move with the
 engine, but none is evidence either way.
 
+## The matrix and the other scripts
+
+| Run | 55.0.0 | 56.0.0-rc1 |
+|---|---|---|
+| `repro_296.py` (`results/repro-*.json.gz`) | this tree unchanged | S0, 17 Nov. Rerun on the published patch (S2, 18 Nov): the same answer and the same plan digest for each of the 24,336 case-layout pairs, and the same xfail results |
+| `repro_296.py --plans` (`results/plans-*.json`) | with `df55-spike-switches.patch` | S2 |
+| `probes.py` / `df_probe` (`results/probe-*.jsonl`) | `df_probe/df55`, `cargo build --locked` (debug) | `df_probe/df56`, `cargo build --locked` (debug) |
+| `witnesses.py` (`results/witnesses-*.json`) | with `df55-spike-switches.patch` | S2 |
+
 ## Guard ablations
 
-Each LTSeq rule left out with `LTSEQ_SPIKE_SKIP`, on both engines (a copy of
-this tree with the same switch applied for 55), running the tests that cover
-it (`pytest -n 4`). Control: all six files with every rule in.
+Each LTSeq rule left out with `LTSEQ_SPIKE_SKIP`, on both engines (55: this
+tree with `df55-spike-switches.patch`; 56: the patch in state S1, which
+behaves as the published patch), running the tests that cover it, from the
+patched tree's root:
+
+```bash
+LTSEQ_SPIKE_SKIP=<rule> <venv>/bin/python -m pytest -q -p no:cacheprovider -n 4 <test files>
+LTSEQ_SPIKE_NO_PDF_GUARD=1 /tmp/venv56/bin/python -m pytest -q -p no:cacheprovider -n 4 py-ltseq/tests/test_rewrite_guards.py
+```
+
+with `<rule>` and `<test files>` from the table. Control: all six files with
+every rule in, no variable set.
 
 | Rule left out | Tests | 55.0.0 | 56.0.0-rc1 | Reading |
 |---|---|---|---|---|

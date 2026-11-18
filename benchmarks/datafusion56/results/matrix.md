@@ -21,7 +21,7 @@
 | unsorted int64 run-end | 1352 | 3 | 3 | 180 | 0 |
 | unsorted string | 1352 | 43 | 24 | 0 | 0 |
 
-- Wrong under 55.0.0, right under 56.0.0-rc1: 302 cases. 176 of them had a wrong filter; the filter's optimized plan differs under 56.0.0-rc1 for 164, and is the same for 12. The plan recorded is the filter's only, and over a sorted table the scan plans a filter pushed into it in a plan of its own (`TableOrder::scan`), which `explain_plan` does not show.
+- Wrong under 55.0.0, right under 56.0.0-rc1: 302 cases (a measured result). 176 of them had a wrong filter; the digest of the filter's optimized logical plan differs under 56.0.0-rc1 for 164, and is the same for 12. A digest is not plan evidence: it changes with any text of the plan, generated aliases included, and says nothing of whether both tests survived. A run keeps no projection plan, and over a sorted table the scan plans a filter pushed into it in a plan of its own (`TableOrder::scan`), which `explain_plan` does not show. The plans of representative cases are in `plans.md` (`repro_296.py --plans`).
 - Right under 55.0.0, wrong under 56.0.0-rc1: 558 cases.
 - Wrong under both: 6 cases.
 
@@ -203,10 +203,10 @@ Share of TRUE rows of 2000, projection / filter. Inline, each test draws once an
 | Test | Two draws | One draw | 55.0.0 inline | 55.0.0 staged | 56.0.0-rc1 inline | 56.0.0-rc1 staged |
 |---|---|---|---|---|---|---|
 | `float in[0,5,6,7] & in[1,5,6,7]` | 0.25 | 0.0 | 0.26 / 0.24 ok | 0.00 / 0.00 ok | 0.23 / 0.25 ok | 0.00 / 0.00 ok |
-| `float in[0,5,6,7] | in[1,5,6,7]` | 0.75 | 1.0 | 0.75 / 0.75 ok | 1.00 / 1.00 ok | 0.76 / 0.76 ok | 1.00 / 1.00 ok |
+| `float in[0,5,6,7] \| in[1,5,6,7]` | 0.75 | 1.0 | 0.75 / 0.75 ok | 1.00 / 1.00 ok | 0.76 / 0.76 ok | 1.00 / 1.00 ok |
 | `int in[0,5,6,7] & in[1,5,6,7]` | 0.25 | 0.0 | 0.25 / 0.25 ok | 0.00 / 0.00 ok | 0.25 / 0.24 ok | 0.00 / 0.00 ok |
 | `int in[0,5,6,7] & ~in[0,8,9,10]` | 0.25 | 0.0 | 0.24 / 0.24 ok | 0.00 / 0.00 ok | 0.26 / 0.26 ok | 0.00 / 0.00 ok |
-| `int in[0,5,6,7] | in[1,5,6,7]` | 0.75 | 1.0 | 0.75 / 0.75 ok | 1.00 / 1.00 ok | 0.75 / 0.75 ok | 1.00 / 1.00 ok |
+| `int in[0,5,6,7] \| in[1,5,6,7]` | 0.75 | 1.0 | 0.75 / 0.75 ok | 1.00 / 1.00 ok | 0.75 / 0.75 ok | 1.00 / 1.00 ok |
 | `zero in[0.0,5,6,7] & in[-0.0,5,6,7]` | 1.0 | 1.0 | 1.00 / 1.00 ok | 1.00 / 1.00 ok | 1.00 / 1.00 ok | 1.00 / 1.00 ok |
 
 ## `test_two_columns_holding_zeros_of_either_sign` (strict xfail, #296; PR #402's unsorted input)

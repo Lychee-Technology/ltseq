@@ -1,6 +1,8 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d38d7f8..8ccd8e5 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -13,7 +13,8 @@
+@@ -13,7 +13,8 @@ crate-type = ["cdylib"]
  # keeping it out of the cargo features lets `cargo test` link on Linux (pyo3 FAQ).
  pyo3 = { version = "0.29.2", features = ["macros"] }
  
@@ -10,7 +12,7 @@
  
  # exact rational arithmetic for literal placement
  num-bigint = "0.4"
-@@ -30,12 +31,12 @@
+@@ -30,12 +31,12 @@ bytes = "1.12.1"
  rayon = "1.12.0"
  
  # Direct Parquet reading (must match datafusion's arrow version)
@@ -25,9 +27,11 @@
  
  tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
  
+diff --git a/src/arrow_ffi.rs b/src/arrow_ffi.rs
+index 2c0f6a6..30f034f 100644
 --- a/src/arrow_ffi.rs
 +++ b/src/arrow_ffi.rs
-@@ -238,11 +238,11 @@
+@@ -238,11 +238,11 @@ impl ImportedStream {
      }
  
      fn try_new(mut stream: FFI_ArrowArrayStream) -> Result<Self, LtseqError> {
@@ -41,7 +45,7 @@
              .ok_or_else(|| import_error("the stream has no get_schema"))?;
          let mut ffi_schema = FFI_ArrowSchema::empty();
          // SAFETY: `get_schema` is the callback of this live stream, called with
-@@ -278,7 +278,7 @@
+@@ -278,7 +278,7 @@ impl ImportedStream {
      fn next_batch(&mut self, first_row: usize) -> Result<Option<RecordBatch>, LtseqError> {
          let get_next = self
              .stream
@@ -50,7 +54,7 @@
              .ok_or_else(|| import_error("the stream has no get_next"))?;
          let mut array = FFI_ArrowArray::empty();
          // SAFETY: `get_next` is the callback of this live stream, called with
-@@ -323,7 +323,7 @@
+@@ -323,7 +323,7 @@ fn import_error(message: &str) -> LtseqError {
  /// producer's message when it gives one.
  fn stream_error(stream: &mut FFI_ArrowArrayStream) -> LtseqError {
      let message = stream
@@ -59,9 +63,11 @@
          .and_then(|get_last_error| {
              // SAFETY: `get_last_error` is the callback of this live stream; the
              // string it returns stays valid until the next call on the stream,
+diff --git a/src/engine.rs b/src/engine.rs
+index b2b4b5e..ef86463 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -245,6 +245,21 @@
+@@ -245,6 +245,21 @@ pub(crate) fn session_context_with(overrides: LayoutOverrides) -> Arc<SessionCon
          Arc::new(NoZeroFetchSorts) as _,
      ])
      .collect();
@@ -83,7 +89,7 @@
      let state = SessionStateBuilder::new_from_existing(state)
          .with_optimizer_rules(logical)
          .with_physical_optimizer_rules(rules)
-@@ -393,7 +408,10 @@
+@@ -393,7 +408,10 @@ impl PhysicalOptimizerRule for KeepFileOrder {
              if !lost_order {
                  return Ok(Transformed::no(node));
              }
@@ -95,9 +101,11 @@
                  Some(scan) => Transformed::yes(scan),
                  None => Transformed::no(node),
              })
+diff --git a/src/float_statistics.rs b/src/float_statistics.rs
+index 41861a5..fe8d40e 100644
 --- a/src/float_statistics.rs
 +++ b/src/float_statistics.rs
-@@ -56,7 +56,9 @@
+@@ -56,7 +56,9 @@ use datafusion::parquet::arrow::arrow_reader::ArrowReaderOptions;
  use datafusion::parquet::arrow::async_reader::AsyncFileReader;
  use datafusion::parquet::basic::{LogicalType, Type as PhysicalType};
  use datafusion::parquet::errors::Result as ParquetResult;
@@ -107,7 +115,7 @@
  use datafusion::parquet::file::page_index::column_index::ColumnIndexMetaData;
  use datafusion::parquet::file::statistics::Statistics as ChunkStatistics;
  use datafusion::parquet::schema::types::ColumnDescriptor;
-@@ -260,29 +262,59 @@
+@@ -260,29 +262,59 @@ fn without_float_statistics(metadata: Arc<ParquetMetaData>) -> ParquetResult<Arc
              row_group.set_column_metadata(columns).build()
          })
          .collect::<ParquetResult<_>>()?;
@@ -182,7 +190,7 @@
  /// A float leaf: `float32` and `float64`, and `float16`, which Parquet
  /// stores as two-byte fixed-length binary.
  fn is_float_leaf(column: &ColumnDescriptor) -> bool {
-@@ -401,10 +433,9 @@
+@@ -401,10 +433,9 @@ mod tests {
              .collect();
          assert_eq!(floats, [false, true, true, true]);
          let (index_before, index_after) = (
@@ -195,7 +203,7 @@
          assert_eq!(after.num_row_groups(), 4);
          for (g, (group_before, group_after)) in before
              .row_groups()
-@@ -421,7 +452,8 @@
+@@ -421,7 +452,8 @@ mod tests {
              {
                  if !floats[c] {
                      assert_eq!(chunk_after, chunk_before);
@@ -205,7 +213,7 @@
                      continue;
                  }
                  let (stats_before, stats_after) = (
-@@ -442,8 +474,9 @@
+@@ -442,8 +474,9 @@ mod tests {
                  assert!(chunk_before.bloom_filter_offset().is_some());
                  assert_eq!(chunk_after.bloom_filter_offset(), None);
                  assert_eq!(chunk_after.bloom_filter_length(), None);
@@ -217,9 +225,11 @@
              }
          }
      }
+diff --git a/src/ops/lookup.rs b/src/ops/lookup.rs
+index faefa42..ae0946e 100644
 --- a/src/ops/lookup.rs
 +++ b/src/ops/lookup.rs
-@@ -47,7 +47,7 @@
+@@ -47,7 +47,7 @@ use datafusion::logical_expr::{
  };
  use datafusion::physical_expr::PhysicalExpr;
  use datafusion::physical_plan::aggregates::group_values::{new_group_values, GroupValues};
@@ -228,7 +238,7 @@
  use datafusion::physical_plan::execution_plan::CardinalityEffect;
  use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
  use datafusion::physical_plan::{
-@@ -307,7 +307,7 @@
+@@ -307,7 +307,7 @@ impl ExecutionPlan for OneRowPerKeyExec {
              column: self.column.clone(),
              seen: new_group_values(
                  Arc::new(ArrowSchema::new(vec![key_field])),
@@ -237,9 +247,11 @@
              )?,
              groups: Vec::new(),
          };
+diff --git a/src/ops/sort.rs b/src/ops/sort.rs
+index 5a026e7..b6dd8bb 100644
 --- a/src/ops/sort.rs
 +++ b/src/ops/sort.rs
-@@ -618,13 +618,13 @@
+@@ -618,13 +618,13 @@ impl TableProvider for TableOrder {
      async fn scan(
          &self,
          session: &dyn Session,
@@ -255,9 +267,33 @@
              None => (0..=position).collect(),
          };
          let mut df = DataFrame::new(self.state.clone(), self.plan.clone());
+@@ -694,6 +694,21 @@ impl Positioned {
+         let plan = self.plan.clone();
+         let rows = stream::once(async move {
+             let physical = state.create_physical_plan(&plan).await?;
++            // Spike (#411): `LTSEQ_SPIKE_TRACE_INNER=<file>` appends the plan a
++            // sorted table runs for the filters pushed into its scan, which
++            // `explain_plan` does not show (it plans them on execution).
++            if let Some(path) = std::env::var_os("LTSEQ_SPIKE_TRACE_INNER") {
++                use std::io::Write;
++                let logical = state.optimize(&plan)?;
++                let text = format!(
++                    "=== inner logical\n{}\n=== inner physical\n{}\n",
++                    logical.display_indent(),
++                    datafusion::physical_plan::displayable(physical.as_ref()).indent(true)
++                );
++                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
++                    let _ = file.write_all(text.as_bytes());
++                }
++            }
+             // An operator with several inputs can return one partition per
+             // input, in their order (`in_table_order`): read them in turn.
+             let partitions = execute_stream_partitioned(physical, state.task_ctx())?;
+diff --git a/src/rewrite_guard.rs b/src/rewrite_guard.rs
+index e2c68d4..8636928 100644
 --- a/src/rewrite_guard.rs
 +++ b/src/rewrite_guard.rs
-@@ -786,6 +786,18 @@
+@@ -786,6 +786,18 @@ impl OptimizerRule for Guarded {
                  {
                      return Ok(Transformed::no(plan));
                  }
@@ -276,7 +312,7 @@
                  Ok(rewritten)
              }
              Guard::KeepFailures { own: false } => {
-@@ -2277,6 +2289,49 @@
+@@ -2277,6 +2289,49 @@ mod tests {
          );
      }
  
@@ -326,9 +362,11 @@
      /// `head(0)` of a sort whose key can fail keeps the sort, and
      /// `ltseq_no_zero_fetch_sorts` plans it as a whole sort under a limit
      /// of 0 rows: DataFusion's TopK of no rows panics (R5-F1). The key is
+diff --git a/src/transpiler/no_order_claim.rs b/src/transpiler/no_order_claim.rs
+index 1312dea..84b9a00 100644
 --- a/src/transpiler/no_order_claim.rs
 +++ b/src/transpiler/no_order_claim.rs
-@@ -112,6 +112,8 @@
+@@ -112,6 +112,8 @@ impl AggregateUDFImpl for NoOrderClaim {
          self.inner().return_field(arg_fields)
      }
  
@@ -337,7 +375,7 @@
      fn is_nullable(&self) -> bool {
          self.inner().is_nullable()
      }
-@@ -247,7 +249,9 @@
+@@ -247,7 +249,9 @@ mod tests {
              );
              assert_eq!(wrapped.name(), inner.name());
              assert_eq!(wrapped.signature(), inner.signature());
@@ -348,9 +386,11 @@
              assert_eq!(
                  wrapped.return_type(std::slice::from_ref(&data_type)).ok(),
                  inner.return_type(std::slice::from_ref(&data_type)).ok()
+diff --git a/src/transpiler/resolve.rs b/src/transpiler/resolve.rs
+index e68b63a..3cc627d 100644
 --- a/src/transpiler/resolve.rs
 +++ b/src/transpiler/resolve.rs
-@@ -480,10 +480,8 @@
+@@ -480,10 +480,8 @@ mod tests {
          let rx = Resolver::new(&arrow).unwrap();
          // Uncoerced, DataFusion reports the first THEN branch's type.
          let df_schema = DFSchema::try_from(arrow.clone()).unwrap();

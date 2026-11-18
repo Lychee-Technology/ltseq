@@ -15,11 +15,15 @@ the same table sorted by `k`.
 
     python benchmarks/datafusion56/repro_296.py --label 55.0.0 --out results/repro-55.json.gz
     python benchmarks/datafusion56/repro_296.py --compare results/repro-55.json.gz results/repro-56.json.gz
+    python benchmarks/datafusion56/repro_296.py --plans --label 55.0.0 --out results/plans-55.json
+    python benchmarks/datafusion56/repro_296.py --compare-plans results/plans-55.json results/plans-56.json
 
-A run records, for each case, whether each answer matched, and the
-optimized logical plan's filter, so that a comparison of two runs can tell
-a case one engine fixes (both tests still in the plan, the answer right)
-from one whose plan merely changed shape.
+A run records, for each case, whether each answer matched and a digest of
+the filter's optimized logical plan (the whole plan only for a wrong answer
+and for `SHOWN`). A digest only says the plan's text changed; whether both
+tests survived is read from the full plans `--plans` records for
+representative cases: projection and filter, logical and physical, and the
+plan a sorted table's scan runs for a filter pushed into it.
 """
 
 from __future__ import annotations
@@ -446,6 +450,113 @@ def run_xfail_cases() -> dict:
     return out
 
 
+# --- Plans of representative cases (review finding R1-F2) -------------------
+
+# One case per kind of answer 55 got wrong and 56 got right, on both layouts:
+# (kind, case name without its layout).
+PLANNED = [
+    ("NULL item, Int64, IN minus NOT IN", "int64 (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])"),
+    ("NULL item, string, IN minus NOT IN", "string (is_in['s1', 's2', 's5'] & ~is_in[None, 's3', 's4', 's6'])"),
+    ("NULL item, dictionary Int64, IN minus NOT IN", "int64 dictionary (is_in[1, 2, 5] & ~is_in[None, 3, 4, 6])"),
+    ("NULL item, Int64, intersection (projection only)", "int64 (eq|[1, 2, 5, 9] & is_in[None, 3, 4, 6])"),
+    ("NULL item and signed zero, float64, negated intersection", "float64 ~(is_in[None, 0.0, 1.0, 2.5] & is_in[-0.0, 3.0, 4.0, 5.0])"),
+    ("Staged signed zeros, float64 (filter only)", "float64 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])"),
+    ("Staged signed zeros, float32 (filter only)", "float32 (eq|['z(-0.0)', 1.0, 2.5, 7.0] & eq|['z(0.0)', 3.0, 4.0, 5.0])"),
+    ("Staged Int64 item and NULL item (filter only)", "int64 (eq|['z(1)', 2, 10, 11] & ~is_in[None, 3, 4, 6])"),
+]
+
+
+def inner_plans(t: LTSeq) -> str | None:
+    """The plans a sorted table runs for the filters pushed into its scan,
+    which a build with the spike's `LTSEQ_SPIKE_TRACE_INNER` switch writes
+    when the table executes; None on a build without the switch."""
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("r", suffix=".txt") as trace:
+        os.environ["LTSEQ_SPIKE_TRACE_INNER"] = trace.name
+        try:
+            t.to_arrow()
+        finally:
+            del os.environ["LTSEQ_SPIKE_TRACE_INNER"]
+        text = trace.read().strip()
+    return text or None
+
+
+def run_plans() -> dict:
+    out = {}
+    for kind, name in PLANNED:
+        type_name = name.split(" (")[0].split(" ~(")[0]
+        case = next(c for c in cases(type_name) if f"{type_name} {c.name}" == name)
+        _, xs, cs, _ = TYPES[type_name]
+        want = case.reference(xs, cs)
+        for layout in ("unsorted", "sorted"):
+            t = base_table(type_name, sort=layout == "sorted")
+            projected_t = t.derive(p=case.predicate)
+            filtered_t = t.filter(case.predicate)
+            p_logical, p_physical = projected_t.explain_plan()
+            f_logical, f_physical = filtered_t.explain_plan()
+            projection = projected_t.to_arrow().column("p").to_pylist()
+            kept = sorted(filtered_t.to_arrow().column("k").to_pylist())
+            out[f"{layout} {name}"] = {
+                "kind": kind,
+                "want": want,
+                "want_kept": [k for k, v in enumerate(want) if v is True],
+                "projection": projection,
+                "kept": kept,
+                "projection_logical": p_logical.strip(),
+                "projection_physical": p_physical.strip(),
+                "filter_logical": f_logical.strip(),
+                "filter_physical": f_physical.strip(),
+                "filter_inner": inner_plans(filtered_t) if layout == "sorted" else None,
+            }
+    return out
+
+
+def show_values(values) -> str:
+    return "[" + ", ".join("NULL" if v is None else str(v).upper() if isinstance(v, bool) else str(v) for v in values) + "]"
+
+
+def compare_plans(before_path: str, after_path: str) -> str:
+    before, after = load(before_path), load(after_path)
+    bl, al = before["label"], after["label"]
+    lines = [
+        "# Plans of representative cases (`repro_296.py --plans`)\n",
+        "For one case of each kind the matrix found wrong on the first engine and right on the second, on both layouts: the answers, and the"
+        " projection's and the filter's optimized logical and physical plans. Over a sorted table the filter is pushed into the scan, which"
+        " plans it apart when it executes; that inner plan is recorded through the spike's `LTSEQ_SPIKE_TRACE_INNER` switch. `REPORT.md`"
+        " reads each case as a demonstrated rewrite fix, a valid fold, or inconclusive plan evidence.\n",
+        f"| Kind | Layout | Expected projection / kept | {bl} | {al} |",
+        "|---|---|---|---|---|",
+    ]
+    for kind, name in PLANNED:
+        for layout in ("unsorted", "sorted"):
+            key = f"{layout} {name}"
+            cells = []
+            for run in (before, after):
+                row = run["plans"][key]
+                p_ok = row["projection"] == row["want"]
+                f_ok = row["kept"] == row["want_kept"]
+                cells.append(
+                    ("projection right" if p_ok else f"projection **wrong** {show_values(row['projection'])}")
+                    + "; "
+                    + ("filter right" if f_ok else f"filter **wrong**, kept {row['kept']}")
+                )
+            row = before["plans"][key]
+            lines.append(f"| {kind} | {layout} | {show_values(row['want'])} / kept {row['want_kept']} | {cells[0]} | {cells[1]} |")
+    for kind, name in PLANNED:
+        lines.append(f"\n## {kind}\n\n`{name}`\n")
+        for layout in ("unsorted", "sorted"):
+            key = f"{layout} {name}"
+            for what in ("projection_logical", "projection_physical", "filter_logical", "filter_physical", "filter_inner"):
+                for label, run in ((bl, before), (al, after)):
+                    text = run["plans"][key][what]
+                    if text is None:
+                        continue
+                    lines.append(f"{layout}, {label}, {what.replace('_', ' ')}:\n\n```text\n{text}\n```\n")
+    return "\n".join(lines) + "\n"
+
+
 # --- Reports ----------------------------------------------------------------
 
 
@@ -495,6 +606,12 @@ def ok(row: dict) -> bool:
     return row["projection_ok"] and row["filter_ok"]
 
 
+def cell_text(text: str) -> str:
+    """`text` for a Markdown table cell: a literal pipe would end the cell,
+    even inside a code span."""
+    return text.replace("|", "\\|")
+
+
 def compare(before_path: str, after_path: str) -> str:
     before, after = load(before_path), load(after_path)
     lines = []
@@ -517,10 +634,12 @@ def compare(before_path: str, after_path: str) -> str:
     filter_fixed = [n for n in fixed if not bm[n]["filter_ok"]]
     filter_same = [n for n in filter_fixed if n in same_plan]
     lines.append(
-        f"- Wrong under {b_names}, right under {a_names}: {len(fixed)} cases. {len(filter_fixed)} of them had a wrong filter;"
-        f" the filter's optimized plan differs under {a_names} for {len(filter_fixed) - len(filter_same)}, and is the same for"
-        f" {len(filter_same)}. The plan recorded is the filter's only, and over a sorted table the scan plans a filter pushed"
-        " into it in a plan of its own (`TableOrder::scan`), which `explain_plan` does not show."
+        f"- Wrong under {b_names}, right under {a_names}: {len(fixed)} cases (a measured result). {len(filter_fixed)} of them had a wrong filter;"
+        f" the digest of the filter's optimized logical plan differs under {a_names} for {len(filter_fixed) - len(filter_same)}, and is the same for"
+        f" {len(filter_same)}. A digest is not plan evidence: it changes with any text of the plan, generated aliases included,"
+        " and says nothing of whether both tests survived. A run keeps no projection plan, and over a sorted table the scan plans a"
+        " filter pushed into it in a plan of its own (`TableOrder::scan`), which `explain_plan` does not show. The plans of"
+        " representative cases are in `plans.md` (`repro_296.py --plans`)."
     )
     lines.append(f"- Right under {b_names}, wrong under {a_names}: {len(broken)} cases.")
     lines.append(f"- Wrong under both: {len(still)} cases.")
@@ -551,7 +670,7 @@ def compare(before_path: str, after_path: str) -> str:
                 r = row[form]
                 cells.append(f"{r['projection_share']:.2f} / {r['filter_share']:.2f} {judge_volatile(row, form)}")
         row = before["volatile"][name]
-        lines.append(f"| `{name}` | {row['two_draws']} | {row['one_draw']} | " + " | ".join(cells) + " |")
+        lines.append(f"| `{cell_text(name)}` | {row['two_draws']} | {row['one_draw']} | " + " | ".join(cells) + " |")
     lines.append("\n## `test_two_columns_holding_zeros_of_either_sign` (strict xfail, #296; PR #402's unsorted input)\n")
     lines.append(f"| Layout | {b_names} | {a_names} |")
     lines.append("|---|---|---|")
@@ -570,9 +689,20 @@ def main():
     parser.add_argument("--out", help="write this run's results as JSON")
     parser.add_argument("--label", default=None, help="the run's name in a comparison, such as 55.0.0")
     parser.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"), help="compare two runs as Markdown")
+    parser.add_argument("--plans", action="store_true", help="record the full plans of the representative cases only (with --out)")
+    parser.add_argument("--compare-plans", nargs=2, metavar=("BEFORE", "AFTER"), help="compare two --plans runs as Markdown")
     args = parser.parse_args()
     if args.compare:
         print(compare(*args.compare), end="")
+        return
+    if args.compare_plans:
+        print(compare_plans(*args.compare_plans), end="")
+        return
+    if args.plans:
+        run = {"label": args.label, "environment": environment(), "plans": run_plans()}
+        opener = gzip.open if args.out and args.out.endswith(".gz") else open
+        with opener(args.out, "wt") as f:
+            json.dump(run, f, sort_keys=True, indent=1)
         return
     run = {
         "label": args.label,

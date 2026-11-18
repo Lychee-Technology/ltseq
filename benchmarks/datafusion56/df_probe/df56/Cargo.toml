@@ -1,0 +1,18 @@
+# #411 / R1-F1: the direct DataFusion probe against the 56.0.0-rc1 candidate,
+# pinned by commit as df56-migration.patch pins it. Cargo.lock beside this
+# file pins the resolved graph; build with `cargo run --locked -q -- CASES`.
+[package]
+name = "df411_probe_56"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "df411_probe_56"
+path = "../probe.rs"
+
+[dependencies]
+datafusion = { git = "https://github.com/apache/datafusion", rev = "cce6374e6256b3b8892ec60674578cf32bc3a32c" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+
+[workspace]

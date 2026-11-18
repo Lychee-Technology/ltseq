@@ -1,0 +1,47 @@
+setup	CREATE TABLE t AS SELECT CAST(column1 AS BIGINT) AS k, CAST(column2 AS BIGINT) AS x, CAST(column3 AS BIGINT) AS y, CAST(column4 AS VARCHAR) AS s, CAST(column5 AS VARCHAR) AS u FROM (VALUES (0, 1, 1, 'v1', 'v1'), (1, 5, 5, 'v5', 'v5'), (2, 1, 2, 'v1', 'v2'), (3, 2, 1, 'v2', 'v1'), (4, 5, 7, 'v5', 'v7'), (5, 6, 6, 'v6', 'v6'), (6, 1, NULL, 'v1', NULL), (7, NULL, 1, NULL, 'v1'), (8, 7, 7, 'v7', 'v7'), (9, 42, NULL, 'v42', NULL))
+setup	CREATE TABLE r AS SELECT value AS i FROM generate_series(1, 200000)
+setup	CREATE TABLE r1 AS SELECT i, CAST(random() * 10 AS BIGINT) AS v FROM r
+query	int64 | R1 in and in | projection	SELECT k, x IN (y, 5, 50, 500) AND x IN (1, 6, 60, 600) AS p FROM t ORDER BY k
+query	int64 | R1 in and in | filter	SELECT k FROM t WHERE x IN (y, 5, 50, 500) AND x IN (1, 6, 60, 600) ORDER BY k
+query	int64 | R2 in and not in | projection	SELECT k, x IN (y, 5, 50, 500) AND x NOT IN (y, 6, 60, 600) AS p FROM t ORDER BY k
+query	int64 | R2 in and not in | filter	SELECT k FROM t WHERE x IN (y, 5, 50, 500) AND x NOT IN (y, 6, 60, 600) ORDER BY k
+query	int64 | R3 not in and in | projection	SELECT k, x NOT IN (y, 6, 60, 600) AND x IN (1, 2, 20, 200) AS p FROM t ORDER BY k
+query	int64 | R3 not in and in | filter	SELECT k FROM t WHERE x NOT IN (y, 6, 60, 600) AND x IN (1, 2, 20, 200) ORDER BY k
+query	int64 | R4 not in or not in | projection	SELECT k, x NOT IN (y, 5, 50, 500) OR x NOT IN (1, 6, 60, 600) AS p FROM t ORDER BY k
+query	int64 | R4 not in or not in | filter	SELECT k FROM t WHERE x NOT IN (y, 5, 50, 500) OR x NOT IN (1, 6, 60, 600) ORDER BY k
+query	int64 | C1 not in and not in (control) | projection	SELECT k, x NOT IN (y, 5, 50, 500) AND x NOT IN (y, 6, 60, 600) AS p FROM t ORDER BY k
+query	int64 | C1 not in and not in (control) | filter	SELECT k FROM t WHERE x NOT IN (y, 5, 50, 500) AND x NOT IN (y, 6, 60, 600) ORDER BY k
+query	int64 | C2 in and in, shared column item (control) | projection	SELECT k, x IN (y, 5, 50, 500) AND x IN (y, 6, 60, 600) AS p FROM t ORDER BY k
+query	int64 | C2 in and in, shared column item (control) | filter	SELECT k FROM t WHERE x IN (y, 5, 50, 500) AND x IN (y, 6, 60, 600) ORDER BY k
+query	string | R1 in and in | projection	SELECT k, s IN (u, 'v5', 'v50', 'v500') AND s IN ('v1', 'v6', 'v60', 'v600') AS p FROM t ORDER BY k
+query	string | R1 in and in | filter	SELECT k FROM t WHERE s IN (u, 'v5', 'v50', 'v500') AND s IN ('v1', 'v6', 'v60', 'v600') ORDER BY k
+query	string | R2 in and not in | projection	SELECT k, s IN (u, 'v5', 'v50', 'v500') AND s NOT IN (u, 'v6', 'v60', 'v600') AS p FROM t ORDER BY k
+query	string | R2 in and not in | filter	SELECT k FROM t WHERE s IN (u, 'v5', 'v50', 'v500') AND s NOT IN (u, 'v6', 'v60', 'v600') ORDER BY k
+query	string | R3 not in and in | projection	SELECT k, s NOT IN (u, 'v6', 'v60', 'v600') AND s IN ('v1', 'v2', 'v20', 'v200') AS p FROM t ORDER BY k
+query	string | R3 not in and in | filter	SELECT k FROM t WHERE s NOT IN (u, 'v6', 'v60', 'v600') AND s IN ('v1', 'v2', 'v20', 'v200') ORDER BY k
+query	string | R4 not in or not in | projection	SELECT k, s NOT IN (u, 'v5', 'v50', 'v500') OR s NOT IN ('v1', 'v6', 'v60', 'v600') AS p FROM t ORDER BY k
+query	string | R4 not in or not in | filter	SELECT k FROM t WHERE s NOT IN (u, 'v5', 'v50', 'v500') OR s NOT IN ('v1', 'v6', 'v60', 'v600') ORDER BY k
+query	string | C1 not in and not in (control) | projection	SELECT k, s NOT IN (u, 'v5', 'v50', 'v500') AND s NOT IN (u, 'v6', 'v60', 'v600') AS p FROM t ORDER BY k
+query	string | C1 not in and not in (control) | filter	SELECT k FROM t WHERE s NOT IN (u, 'v5', 'v50', 'v500') AND s NOT IN (u, 'v6', 'v60', 'v600') ORDER BY k
+query	string | C2 in and in, shared column item (control) | projection	SELECT k, s IN (u, 'v5', 'v50', 'v500') AND s IN (u, 'v6', 'v60', 'v600') AS p FROM t ORDER BY k
+query	string | C2 in and in, shared column item (control) | filter	SELECT k FROM t WHERE s IN (u, 'v5', 'v50', 'v500') AND s IN (u, 'v6', 'v60', 'v600') ORDER BY k
+query	volatile | V1 in and in | inline | projection	SELECT CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) IN (3, 4, 5, 6, 7) AS p FROM r
+query	volatile | V1 in and in | inline | filter	SELECT count(*) AS n FROM r WHERE CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) IN (3, 4, 5, 6, 7)
+query	volatile | V1 in and in | stored | projection	SELECT v IN (0, 1, 2, 3, 4) AND v IN (3, 4, 5, 6, 7) AS p FROM r1
+query	volatile | V1 in and in | stored | filter	SELECT count(*) AS n FROM r1 WHERE v IN (0, 1, 2, 3, 4) AND v IN (3, 4, 5, 6, 7)
+query	volatile | V2 in and not in | inline | projection	SELECT CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7) AS p FROM r
+query	volatile | V2 in and not in | inline | filter	SELECT count(*) AS n FROM r WHERE CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7)
+query	volatile | V2 in and not in | stored | projection	SELECT v IN (0, 1, 2, 3, 4) AND v NOT IN (3, 4, 5, 6, 7) AS p FROM r1
+query	volatile | V2 in and not in | stored | filter	SELECT count(*) AS n FROM r1 WHERE v IN (0, 1, 2, 3, 4) AND v NOT IN (3, 4, 5, 6, 7)
+query	volatile | V3 not in and not in | inline | projection	SELECT CAST(random() * 10 AS BIGINT) NOT IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7) AS p FROM r
+query	volatile | V3 not in and not in | inline | filter	SELECT count(*) AS n FROM r WHERE CAST(random() * 10 AS BIGINT) NOT IN (0, 1, 2, 3, 4) AND CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7)
+query	volatile | V3 not in and not in | stored | projection	SELECT v NOT IN (0, 1, 2, 3, 4) AND v NOT IN (3, 4, 5, 6, 7) AS p FROM r1
+query	volatile | V3 not in and not in | stored | filter	SELECT count(*) AS n FROM r1 WHERE v NOT IN (0, 1, 2, 3, 4) AND v NOT IN (3, 4, 5, 6, 7)
+query	volatile | V4 not in or not in | inline | projection	SELECT CAST(random() * 10 AS BIGINT) NOT IN (0, 1, 2, 3, 4) OR CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7) AS p FROM r
+query	volatile | V4 not in or not in | inline | filter	SELECT count(*) AS n FROM r WHERE CAST(random() * 10 AS BIGINT) NOT IN (0, 1, 2, 3, 4) OR CAST(random() * 10 AS BIGINT) NOT IN (3, 4, 5, 6, 7)
+query	volatile | V4 not in or not in | stored | projection	SELECT v NOT IN (0, 1, 2, 3, 4) OR v NOT IN (3, 4, 5, 6, 7) AS p FROM r1
+query	volatile | V4 not in or not in | stored | filter	SELECT count(*) AS n FROM r1 WHERE v NOT IN (0, 1, 2, 3, 4) OR v NOT IN (3, 4, 5, 6, 7)
+query	volatile | V5 in or in | inline | projection	SELECT CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) OR CAST(random() * 10 AS BIGINT) IN (3, 4, 5, 6, 7) AS p FROM r
+query	volatile | V5 in or in | inline | filter	SELECT count(*) AS n FROM r WHERE CAST(random() * 10 AS BIGINT) IN (0, 1, 2, 3, 4) OR CAST(random() * 10 AS BIGINT) IN (3, 4, 5, 6, 7)
+query	volatile | V5 in or in | stored | projection	SELECT v IN (0, 1, 2, 3, 4) OR v IN (3, 4, 5, 6, 7) AS p FROM r1
+query	volatile | V5 in or in | stored | filter	SELECT count(*) AS n FROM r1 WHERE v IN (0, 1, 2, 3, 4) OR v IN (3, 4, 5, 6, 7)
