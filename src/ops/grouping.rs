@@ -124,7 +124,16 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     // Deserialize grouping expression
     let py_expr = dict_to_py_expr(&grouping_expr)?;
+    crate::stack::planned(|| group_id_parsed(table, df, schema, py_expr))
+}
 
+/// [`group_id_impl`] once its expression is deserialized.
+fn group_id_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    py_expr: PyExpr,
+) -> Result<LTSeqTable, LtseqError> {
     // NOTE: no linear-scan branch here. linear_scan_group_id returns a
     // METADATA-ONLY table (__group_id__/__group_count__/__rn__ without the
     // user columns) — sufficient for counting, so group_ordered_count_impl
@@ -234,8 +243,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         _ => {
             return Err(LtseqError::Runtime(
                 "Expected AggregateFunction from sum()".into(),
-            )
-            .into());
+            ));
         }
     };
 
@@ -276,8 +284,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         _ => {
             return Err(LtseqError::Runtime(
                 "Expected AggregateFunction from count()".into(),
-            )
-            .into());
+            ));
         }
     };
 
@@ -348,17 +355,20 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 }
 
 /// Get only the first row of each group
-pub fn first_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+///
+/// It clones a plan that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+pub fn first_row_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     first_or_last_row_impl(table, true)
 }
 
 /// Get only the last row of each group
-pub fn last_row_impl(table: &LTSeqTable) -> PyResult<LTSeqTable> {
+pub fn last_row_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     first_or_last_row_impl(table, false)
 }
 
 /// Shared implementation for first_row and last_row
-fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqTable> {
+fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
@@ -369,8 +379,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
     if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
         return Err(LtseqError::Validation(
             "__group_id__ column not found. Call flatten() first.".into(),
-        )
-        .into());
+        ));
     }
 
     let has_rn = schema.fields().iter().any(|f| f.name() == "__rn__");
@@ -391,8 +400,7 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> PyResult<LTSeqT
                 "first_row/last_row require __rn__ and __group_count__ from flatten(); \
                  legacy group_id tables without them are no longer supported"
                     .into(),
-            )
-            .into())
+            ))
         }
     };
 

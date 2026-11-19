@@ -24,10 +24,23 @@
 use crate::error::LtseqError;
 use pyo3::{PyErr, PyResult, Python};
 
-/// Run a pure-Rust computation with the GIL released.
+/// Run a pure-Rust computation with the GIL released, on a stack deep
+/// enough for the plans of the deepest expressions (`crate::stack`).
 ///
 /// See the module docs for the contract the closure must follow.
 pub(crate) fn detached<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    T: Send,
+    F: Send + FnOnce() -> Result<T, LtseqError>,
+{
+    py.detach(|| crate::stack::guarded(f)).map_err(PyErr::from)
+}
+
+/// [`detached`] on the thread's own stack, for a closure that reads an Arrow
+/// C stream from Python: its producer may run Python (a pyarrow reader over
+/// a generator), which must not run on a switched stack (`crate::stack`).
+/// Such a closure plans no expression.
+pub(crate) fn detached_on_own_stack<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
     T: Send,
     F: Send + FnOnce() -> Result<T, LtseqError>,

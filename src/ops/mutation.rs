@@ -171,14 +171,24 @@ pub fn conditional_update_impl(
         ));
     }
 
-    let predicate_expr = crate::transpiler::pyexpr_to_datafusion(
-        crate::types::dict_to_py_expr(expr_dict)?,
-        schema,
-    )
-    .map_err(LtseqError::Validation)?;
-
+    // A failure reading the values drops the predicate on a guarded stack.
+    let predicate = crate::stack::Parsed::new(crate::types::dict_to_py_expr(expr_dict)?);
     let update_map: std::collections::HashMap<String, ScalarValue> =
         column_values(updates, schema)?.into_iter().collect();
+    let predicate = predicate.into_inner();
+    crate::stack::planned(|| conditional_update_parsed(table, df, schema, predicate, update_map))
+}
+
+/// [`conditional_update_impl`] once its predicate and values are deserialized.
+fn conditional_update_parsed(
+    table: &LTSeqTable,
+    df: &Arc<datafusion::dataframe::DataFrame>,
+    schema: &Arc<Schema>,
+    predicate: crate::types::PyExpr,
+    update_map: std::collections::HashMap<String, ScalarValue>,
+) -> Result<LTSeqTable, LtseqError> {
+    let predicate_expr = crate::transpiler::pyexpr_to_datafusion(predicate, schema)
+        .map_err(LtseqError::Validation)?;
 
     // Plan building only; nothing executes here.
     let result_df = {

@@ -903,6 +903,14 @@ class Expr(ABC):
 
     Implements magic methods (__add__, __gt__, etc.) that return new Expr objects
     instead of evaluating. This allows building expression trees from Python code.
+
+    An expression may be at most 1000 levels deep: a column or a literal is one
+    level, ``r.a + 1`` two, and each operator or call is one level above its
+    deepest operand. An operation given a deeper expression raises
+    ``ValueError`` (#335). A chain as long as ``functools.reduce(operator.or_,
+    terms)`` is as deep as it has terms; a balanced tree of the same terms is
+    far shallower. Python's default recursion limit stops a lambda deeper than
+    about 1000 levels first, with ``RecursionError``, while it is serialized.
     """
 
     @abstractmethod

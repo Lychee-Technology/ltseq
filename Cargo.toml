@@ -57,6 +57,11 @@ url = "2.5.8"
 # are async. Already in the tree through DataFusion; the version follows it.
 async-trait = "0.1.92"
 
+# Stack growth for the recursion of planning a deep expression (#335).
+# Already in the tree through DataFusion's `recursive`; the version
+# follows it.
+stacker = "0.1.25"
+
 # The POSIX ACL of a file a writer replaces (#259). Already in the tree
 # through tempfile; the version follows it.
 [target.'cfg(target_os = "linux")'.dependencies]

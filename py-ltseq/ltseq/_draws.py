@@ -22,20 +22,66 @@ volatile projection, and merges no projection whose non-trivial expression
 the one above reads more than once.
 """
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 _RAND = "math_rand"
 _PREFIX = "__ltseq_draw_"
 
 
+def containers(value: Any, skip: Callable[[dict], bool] = lambda node: False) -> Iterator[Any]:
+    """Each dict and list of a serialized expression, once, but for the
+    dicts ``skip`` accepts and what is beneath them.
+
+    The walk keeps its own stack: recursing through ``any()`` or
+    ``set().union()`` takes C stack per level, which a deep expression
+    exhausts on a small thread (#335). It visits a dict or list reached
+    twice, a subtree the expression reuses, once, and raises ``ValueError``
+    on one that contains itself, which no expression does and which would
+    otherwise keep the walk going forever (R1-F3 of #335's review).
+    """
+    on_path: set[int] = set()
+    done: set[int] = set()
+    # (container, True) leaves the container once its children are walked.
+    pending: list[tuple[Any, bool]] = [(value, False)]
+    while pending:
+        item, leaving = pending.pop()
+        if leaving:
+            on_path.discard(id(item))
+            done.add(id(item))
+            continue
+        if isinstance(item, dict):
+            if skip(item):
+                continue
+            children: Iterable[Any] = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        key = id(item)
+        if key in on_path:
+            raise ValueError(
+                "A serialized expression contains itself; an expression must be a tree"
+            )
+        if key in done:
+            continue
+        on_path.add(key)
+        pending.append((item, True))
+        yield item
+        pending.extend((child, False) for child in children)
+
+
+def _nodes(value: Any) -> Iterable[dict]:
+    """The expression nodes of serialized expressions, but for literals."""
+    for item in containers(value, skip=lambda node: node.get("type") == "Literal"):
+        if isinstance(item, dict):
+            yield item
+
+
 def _holds_draw(value: Any) -> bool:
-    if isinstance(value, list):
-        return any(_holds_draw(v) for v in value)
-    if not isinstance(value, dict) or value.get("type") == "Literal":
-        return False
-    if value.get("type") == "Call" and value.get("func") == _RAND:
-        return True
-    return any(_holds_draw(v) for v in value.values())
+    return any(
+        node.get("type") == "Call" and node.get("func") == _RAND
+        for node in _nodes(value)
+    )
 
 
 # Group-dialect nodes naming the column they read in ``column`` (R3-F1 of
@@ -46,17 +92,12 @@ _GROUP_COLUMN_NODES = ("GroupAgg", "GroupRowColumn")
 def _columns(value: Any) -> set[str]:
     """The names of the columns serialized expressions read, in the row
     dialect and in the group dialect."""
-    if isinstance(value, list):
-        return set().union(*(_columns(v) for v in value))
-    if not isinstance(value, dict) or value.get("type") == "Literal":
-        return set()
     names = set()
-    if value.get("type") == "Column" and isinstance(value.get("name"), str):
-        names.add(value["name"])
-    if value.get("type") in _GROUP_COLUMN_NODES and isinstance(value.get("column"), str):
-        names.add(value["column"])
-    for v in value.values():
-        names |= _columns(v)
+    for node in _nodes(value):
+        if node.get("type") == "Column" and isinstance(node.get("name"), str):
+            names.add(node["name"])
+        if node.get("type") in _GROUP_COLUMN_NODES and isinstance(node.get("column"), str):
+            names.add(node["column"])
     return names
 
 
@@ -156,29 +197,39 @@ def rename_draws(
     )
 
 
-def keep_names(inner: Any, originals: list[Any], rewritten: list[Any]) -> list[Any]:
-    """``rewritten`` with each expression :func:`stage_draws` changed named
-    as its original is in a projection of ``inner`` (R1-F3 of #413's
-    review).
+def kept_names(
+    inner: Any, staged: Any, originals: list[Any], rewritten: list[Any]
+) -> dict[str, str]:
+    """The renames that give each expression :func:`stage_draws` changed
+    the name its original has in a projection of ``inner`` (R1-F3 of #413's
+    review): the name the rewritten expression takes over ``staged``, mapped
+    to the original's.
 
     A projection or a group key that is not a column takes its expression's
     text as its name, and the text of a staged expression names the staged
     column (``round(__ltseq_draw_0,Int64(0))`` for ``round(random(),
-    Int64(0))``); an alias keeps the name the operation gives without
-    staging. An expression the plan cannot name is left as it is, for the
-    operation to report.
+    Int64(0))``). The operation renames its output column afterwards rather
+    than wrap the expression in an alias, which would make it one level
+    deeper than the caller wrote it, past the depth limit for an expression
+    at the limit (R1-F2 of #335's review). An expression the plan cannot
+    name is left as it is, for the operation to report.
     """
-    out = []
+    renames: dict[str, str] = {}
     for original, new in zip(originals, rewritten):
         if new != original and isinstance(original, dict) and original.get("type") != "Alias":
             try:
                 (name,) = inner.select([original]).get_schema_dict()
+                (staged_name,) = staged.select([new]).get_schema_dict()
             except Exception:
-                name = None
-            if name is not None:
-                new = {"type": "Alias", "expr": new, "alias": name}
-        out.append(new)
-    return out
+                continue
+            if staged_name != name:
+                renames[staged_name] = name
+    return renames
+
+
+def renamed(inner: Any, renames: dict[str, str]) -> Any:
+    """``inner`` with the columns :func:`kept_names` lists renamed."""
+    return inner.rename_columns(renames) if renames else inner
 
 
 def unstage(inner: Any, names: list[str]) -> Any:

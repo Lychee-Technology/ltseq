@@ -21,6 +21,8 @@ use crate::error::LtseqError;
 use crate::transpiler::pyexpr_to_datafusion;
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::dataframe::DataFrame;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -38,8 +40,9 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     let (df, schema) = table.require_df_and_schema()?;
 
     // 2. Deserialize all expressions once (avoids double deserialization)
-    let mut parsed_cols: Vec<(String, PyExpr)> = Vec::with_capacity(derived_cols.len());
-    let mut has_window_functions = false;
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let mut parsed_cols: crate::stack::Parsed<Vec<(String, PyExpr)>> =
+        crate::stack::Parsed::new(Vec::with_capacity(derived_cols.len()));
 
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
@@ -50,14 +53,22 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
             LtseqError::Validation("Expression must be dict".into())
         })?;
 
-        let py_expr = dict_to_py_expr(expr_dict)?;
-
-        if crate::transpiler::contains_window_function(&py_expr) {
-            has_window_functions = true;
-        }
-
-        parsed_cols.push((col_name_str, py_expr));
+        parsed_cols.push((col_name_str, dict_to_py_expr(expr_dict)?));
     }
+
+    let parsed_cols = parsed_cols.into_inner();
+    crate::stack::planned(|| derive_parsed(table, df, schema, parsed_cols))
+}
+
+fn derive_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    parsed_cols: Vec<(String, PyExpr)>,
+) -> Result<LTSeqTable, LtseqError> {
+    let has_window_functions = parsed_cols
+        .iter()
+        .any(|(_, py_expr)| crate::transpiler::contains_window_function(py_expr));
 
     // 3. Handle window functions — pass pre-parsed expressions to avoid re-deserialization
     if has_window_functions {

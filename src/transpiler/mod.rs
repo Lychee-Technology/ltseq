@@ -1032,7 +1032,7 @@ pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, Str
 /// lowered through `Resolver::lowering`, so questions about it while its
 /// parent is lowered do not coerce it again.
 fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
-    rx.lowering(|| lower_node(py_expr, rx))
+    crate::stack::guarded(|| rx.lowering(|| lower_node(py_expr, rx)))
 }
 
 fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
@@ -1350,25 +1350,17 @@ mod tests {
     use datafusion::arrow::datatypes::Field;
     use datafusion::common::Column;
 
-    /// Runs `test` on a thread with a 16 MiB stack and returns its result.
+    /// Runs `test` as an operation plans an expression (`stack::planned`),
+    /// on a thread whose 256 KiB stack is far too small for the recursion.
     ///
     /// The `lowering_coerces_each_node_once` tests recurse once per level of
-    /// an expression a hundred or more levels deep. In a debug build that
-    /// takes nearly all of the 2 MiB a test thread gets: built by rustc
-    /// 1.99.1 on x86-64 Linux, the window test needs between 2032 and
-    /// 2040 KiB, so a toolchain or code change of a few KiB per frame makes
-    /// it overflow. On arm64 macOS it overflows already. The tests measure
-    /// how many nodes lowering coerces, not the stack, so they get one
-    /// large enough for either.
-    pub(super) fn on_a_large_stack<T: Send>(test: impl FnOnce() -> T + Send) -> T {
-        std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(16 << 20)
-                .spawn_scoped(scope, test)
-                .expect("spawn the test thread")
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-        })
+    /// an expression a hundred or more levels deep. On a debug test thread's
+    /// 2 MiB that overflowed on arm64 macOS and nearly did on x86-64 Linux
+    /// (#320), before lowering grew its stack (#335).
+    pub(super) fn as_planned<T: Send>(depth: usize, test: impl FnOnce() -> T + Send) -> T {
+        // Deserializing the expression would record its depth.
+        crate::stack::saw_depth(depth);
+        crate::stack::tests::on_a_small_stack(|| crate::stack::guarded(test))
     }
 
     fn test_schema() -> ArrowSchema {
@@ -1683,12 +1675,32 @@ mod tests {
                 rx.resolve(lower_expr(build(depth), &rx).unwrap()).unwrap();
                 rx.coerced_nodes()
             };
-            let (shallow, deep) = on_a_large_stack(|| (coerced(100), coerced(200)));
+            let (shallow, deep) = as_planned(200, || (coerced(100), coerced(200)));
             assert!(
                 deep <= 2 * shallow + 10,
                 "{shallow} nodes coerced at depth 100, {deep} at depth 200"
             );
         }
+    }
+
+    /// An expression as deep as the limit lowers on a small thread: lowering
+    /// grows its stack (#335).
+    #[test]
+    fn lowering_at_the_depth_limit_runs_on_a_small_stack() {
+        let schema = test_schema();
+        crate::stack::saw_depth(crate::stack::MAX_EXPR_DEPTH);
+        let lowered = crate::stack::tests::on_a_small_stack(|| {
+            let deepest =
+                (1..crate::stack::MAX_EXPR_DEPTH).fold(col_expr("a"), |e, i| PyExpr::BinOp {
+                    op: "Add".to_string(),
+                    left: Box::new(e),
+                    right: Box::new(int_lit(i as i64)),
+                });
+            crate::stack::guarded(|| {
+                pyexpr_to_datafusion(deepest, &schema).map(|expr| expr.to_string().len())
+            })
+        });
+        assert!(matches!(lowered, Ok(len) if len > 0), "{lowered:?}");
     }
 
     #[test]

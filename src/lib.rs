@@ -36,6 +36,7 @@ mod rule_inventory; // Every optimizer rule a session runs is rated (issue #273)
 pub(crate) mod rewrite_guard; // Guards of the rewrites rated Restricted (issue #273)
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
+pub(crate) mod stack; // Stack for planning deep expressions (issue #335)
 pub(crate) mod stored_zones; // Zones of Parquet timestamps stored in another unit (issue #362)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization
@@ -51,10 +52,7 @@ use crate::types::{dict_to_py_expr, PyExpr};
 /// Deserialize a list of serialized expression dicts under the GIL, so the
 /// resulting pure-Rust `PyExpr`s can be handed to a detached execution.
 fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
-    dicts
-        .iter()
-        .map(|d| dict_to_py_expr(d).map_err(PyErr::from))
-        .collect()
+    stack::parse_each(dicts, |d| dict_to_py_expr(d).map_err(PyErr::from))
 }
 
 /// [`source::read_files`] with the GIL released. A path that names no file
@@ -94,6 +92,17 @@ pub struct LTSeqTable {
     // those operations set it (`with_plan_in_order`); every other result,
     // including a transform of theirs, starts without it.
     plan_in_order: bool,
+}
+
+/// A table's plan can hold an expression as deep as
+/// [`stack::MAX_EXPR_DEPTH`], and dropping it recurses through it: the
+/// last table to hold the plan drops it on a stack deep enough (#335).
+impl Drop for LTSeqTable {
+    fn drop(&mut self) {
+        if let Some(dataframe) = self.dataframe.take() {
+            stack::guarded(move || drop(dataframe));
+        }
+    }
 }
 
 /// Helper constructors for LTSeqTable (non-PyO3).
@@ -459,12 +468,12 @@ impl LTSeqTable {
     ///     Formatted table as string
     fn show(&self, py: Python<'_>, n: usize) -> PyResult<String> {
         let schema = self.require_schema()?;
-        let df_clone = self.ordered_df()?;
 
-        // Full-table collect + formatting: release the GIL.
+        // Full-table collect + formatting: release the GIL. Ordering clones
+        // the plan, which recurses through its expressions (#335).
         detached(py, || {
             let batches = RUNTIME
-                .block_on(df_clone.collect())
+                .block_on(self.ordered_df()?.collect())
                 .map_err(LtseqError::collect)?;
             Ok(format_table(&batches, schema, n))
         })
@@ -558,7 +567,7 @@ impl LTSeqTable {
     /// Args:
     ///     mapping: Dict of {old_name: new_name}
     fn rename_columns(&self, mapping: std::collections::HashMap<String, String>) -> PyResult<LTSeqTable> {
-        crate::ops::basic::rename_columns_impl(self, &mapping)
+        stack::planned(|| crate::ops::basic::rename_columns_impl(self, &mapping))
     }
 
     /// Get the number of rows in the table
@@ -566,10 +575,10 @@ impl LTSeqTable {
     /// Returns:
     ///     The number of rows
     fn count(&self, py: Python<'_>) -> PyResult<usize> {
-        let df_clone = (**self.require_df()?).clone();
+        // Cloning the plan recurses through its expressions (#335).
         detached(py, || {
             RUNTIME
-                .block_on(df_clone.count())
+                .block_on((**self.require_df()?).clone().count())
                 .map_err(|e| LtseqError::with_context("Failed to count rows", e))
         })
     }
@@ -577,13 +586,16 @@ impl LTSeqTable {
     /// Return optimized logical and physical plans for debugging: the plans
     /// a terminal executes, with the declared order at the root.
     fn explain_plan(&self, py: Python<'_>) -> PyResult<(String, String)> {
-        let df = self.ordered_df()?;
-
-        let logical = df
-            .clone()
-            .into_optimized_plan()
-            .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
-        let logical_text = format!("{}", logical.display_indent());
+        // Ordering, optimizing and printing recurse through the plan's
+        // expressions.
+        let (logical_text, df) = stack::planned(|| {
+            let df = self.ordered_df()?;
+            let logical = df
+                .clone()
+                .into_optimized_plan()
+                .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
+            Ok((format!("{}", logical.display_indent()), df))
+        })?;
 
         // Physical planning lists files / reads footers for file sources.
         let physical_text = detached(py, || {
@@ -675,7 +687,7 @@ impl LTSeqTable {
     /// that key. Its stream is taken under the GIL and read detached.
     fn filter_key_row(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
         let key = crate::arrow_ffi::ImportedStream::from_py(key)?;
-        detached(py, || crate::ops::basic::filter_key_row_impl(self, key))
+        crate::gil::detached_on_own_stack(py, || crate::ops::basic::filter_key_row_impl(self, key))
     }
 
     /// Find the first row matching a predicate
@@ -708,7 +720,8 @@ impl LTSeqTable {
         partition_by: Option<String>,
     ) -> PyResult<LTSeqTable> {
         let steps = parse_exprs(&step_predicates)?;
-        detached(py, || {
+        // Moved into the closure, so they drop on its guarded stack.
+        detached(py, move || {
             crate::ops::pattern_match::search_pattern_impl(self, &steps, partition_by)
         })
     }
@@ -729,7 +742,8 @@ impl LTSeqTable {
         partition_by: Option<String>,
     ) -> PyResult<usize> {
         let steps = parse_exprs(&step_predicates)?;
-        detached(py, || {
+        // Moved into the closure, so they drop on its guarded stack.
+        detached(py, move || {
             crate::ops::pattern_match::search_pattern_count_impl(self, &steps, partition_by)
         })
     }
@@ -824,7 +838,8 @@ impl LTSeqTable {
         grouping_expr: Bound<'_, PyDict>,
     ) -> PyResult<usize> {
         let py_expr = dict_to_py_expr(&grouping_expr)?;
-        detached(py, || {
+        // Moved into the closure, so it drops on its guarded stack.
+        detached(py, move || {
             crate::ops::grouping::group_ordered_count_impl(self, &py_expr)
         })
     }
@@ -834,7 +849,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// first row per group.
     fn first_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::grouping::first_row_impl(self)
+        stack::planned(|| crate::ops::grouping::first_row_impl(self))
     }
 
     /// Get only the last row of each group (Phase B4)
@@ -842,7 +857,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// last row per group.
     fn last_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::grouping::last_row_impl(self)
+        stack::planned(|| crate::ops::grouping::last_row_impl(self))
     }
 
     /// Remove duplicate rows based on key columns
@@ -866,7 +881,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with selected row range
     fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
-        crate::ops::basic::slice_impl(self, offset, length)
+        stack::planned(|| crate::ops::basic::slice_impl(self, offset, length))
     }
 
     /// Add cumulative sum columns for specified columns
@@ -913,7 +928,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with rows matching the WHERE clause
     fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
-        crate::ops::aggregation::filter_where_impl(self, where_clause)
+        stack::planned(|| crate::ops::aggregation::filter_where_impl(self, where_clause))
     }
 
     /// NestedTable.derive(): add group-window derived columns natively
@@ -996,7 +1011,7 @@ impl LTSeqTable {
         target_key: &str,
         alias: &str,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::lookup::lookup_join_impl(self, other, key, target_key, alias)
+        stack::planned(|| crate::ops::lookup::lookup_join_impl(self, other, key, target_key, alias))
     }
 
     /// As-of Join: Time-series join matching each left row with nearest right row
@@ -1197,7 +1212,7 @@ impl LTSeqTable {
     ///
     /// Returns error if schemas don't match or data operations fail
     fn union(&self, other: &LTSeqTable) -> PyResult<LTSeqTable> {
-        crate::ops::set_ops::union_impl(self, other)
+        stack::planned(|| crate::ops::set_ops::union_impl(self, other))
     }
 
     /// Intersect: Return rows present in both tables
@@ -1278,7 +1293,7 @@ impl LTSeqTable {
     #[staticmethod]
     fn from_arrow(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
         let stream = crate::arrow_ffi::ImportedStream::from_py(data)?;
-        detached(py, || crate::ops::io::from_arrow_impl(stream))
+        crate::gil::detached_on_own_stack(py, || crate::ops::io::from_arrow_impl(stream))
     }
 
     /// Is Subset: Check if this table is a subset of another table

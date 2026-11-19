@@ -398,19 +398,29 @@ pub fn sort_impl(
     }
 
     let schema = table.require_schema()?;
+    let keys = crate::stack::parse_each(&sort_exprs, dict_to_py_expr)?;
+    crate::stack::planned(|| sort_parsed(table, schema, keys, &desc_flags, &nulls_last_flags))
+}
 
+/// [`sort_impl`] once its keys are deserialized.
+fn sort_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    keys: Vec<PyExpr>,
+    desc_flags: &[bool],
+    nulls_last_flags: &[bool],
+) -> Result<LTSeqTable, LtseqError> {
     // Capture full sort specs (column + direction + NULL placement) for
     // downstream window ops
     let mut captured_specs = Vec::new();
     let mut metadata_truncated = false;
 
-    // Deserialize and transpile each sort expression
+    // Transpile each sort expression
     let rx = Resolver::new(schema).map_err(LtseqError::Validation)?;
     let mut order = Vec::new();
-    for (i, expr_dict) in sort_exprs.iter().enumerate() {
-        let py_expr = dict_to_py_expr(expr_dict)?;
-        let is_desc = flag(&desc_flags, i, false);
-        let nulls_last = flag(&nulls_last_flags, i, true);
+    for (i, py_expr) in keys.into_iter().enumerate() {
+        let is_desc = flag(desc_flags, i, false);
+        let nulls_last = flag(nulls_last_flags, i, true);
         let column = match &py_expr {
             PyExpr::Column(name) => Some(name.clone()),
             _ => None,
@@ -870,6 +880,8 @@ pub fn assume_sorted_impl(
                 schema,
             ));
         } else {
+            // A computed key may be deep, and dropping it recurses (#335).
+            crate::stack::guarded(move || drop(py_expr));
             break;
         }
     }
@@ -899,10 +911,10 @@ pub fn assume_sorted_impl(
 
     // Non-Parquet fallback: collect batches and create MemTable with sort
     // order. The declaration is about the rows in their current table order.
-    let in_order = in_table_order(table)?;
+    // Ordering clones the plan, which recurses through its expressions.
     let batches = detached(py, || {
         RUNTIME
-            .block_on(in_order.collect_partitioned())
+            .block_on(in_table_order(table)?.collect_partitioned())
             .map(|partitions| partitions.into_iter().flatten().collect::<Vec<_>>())
             .map_err(|e| {
                 LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))

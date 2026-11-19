@@ -161,8 +161,8 @@ jobs:
 
       # The two `lowering_coerces_each_node_once` tests nest expressions 200
       # deep and overflowed the test threads' 2 MiB in an arm64 debug build
-      # (#320). They now run on a 16 MiB stack of their own (#292), so they
-      # run here too.
+      # (#320). Planning now grows its stack (#335), and the tests run on a
+      # 256 KiB thread through it, so they run here too.
       - name: Run Rust tests
         env:
           PYO3_PYTHON: ${{ steps.python.outputs.python-path }}

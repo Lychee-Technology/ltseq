@@ -22,9 +22,11 @@
 use crate::arrow_ffi::ImportedStream;
 use crate::error::LtseqError;
 use crate::metadata::{sort_specs_to_window_sorts, SortSpec};
+use crate::stack::planned;
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::math::expr_fn::isnan;
@@ -46,7 +48,10 @@ use std::sync::Arc;
 pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // 1. Deserialize expression
     let py_expr = dict_to_py_expr(expr_dict)?;
+    planned(|| filter_parsed(table, py_expr))
+}
 
+fn filter_parsed(table: &LTSeqTable, py_expr: PyExpr) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
@@ -91,7 +96,19 @@ pub fn filter_key_row_impl(
     table: &LTSeqTable,
     key: ImportedStream,
 ) -> Result<LTSeqTable, LtseqError> {
+    // The key's stream may run Python, so it is read on the thread's own
+    // stack; the plan, which may hold deep expressions, is built on a
+    // guarded one (#335).
     let (key_schema, batches) = key.read_all()?;
+    crate::stack::guarded(|| filter_on_key_row(table, &key_schema, batches))
+}
+
+/// [`filter_key_row_impl`] once the key is read.
+fn filter_on_key_row(
+    table: &LTSeqTable,
+    key_schema: &ArrowSchema,
+    batches: Vec<datafusion::arrow::record_batch::RecordBatch>,
+) -> Result<LTSeqTable, LtseqError> {
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let Some(row) = batches
         .iter()
@@ -160,14 +177,21 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // 1. Get schema
     let schema = table.require_schema()?;
 
-    // 2. Deserialize and transpile all expressions, noting the columns that
-    // pass through unchanged
+    // 2. Deserialize all expressions, then transpile them
+    let py_exprs = crate::stack::parse_each(&exprs, dict_to_py_expr)?;
+    planned(|| select_parsed(table, schema, py_exprs))
+}
+
+fn select_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    py_exprs: Vec<PyExpr>,
+) -> Result<LTSeqTable, LtseqError> {
+    // Transpile, noting the columns that pass through unchanged
     let mut df_exprs = Vec::new();
     let mut passed = std::collections::HashSet::new();
 
-    for expr_dict in exprs {
-        // Deserialize
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+    for py_expr in py_exprs {
         if let PyExpr::Column(name) = &py_expr {
             passed.insert(name.clone());
         }
@@ -217,13 +241,16 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
 /// remaps each sort spec's column to its new name so declared order survives.
 /// Execution cost is identical to the aliased select it wraps.
 ///
+/// It clones a plan that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+///
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     mapping: old column name -> new column name
 pub fn rename_columns_impl(
     table: &LTSeqTable,
     mapping: &std::collections::HashMap<String, String>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     use datafusion::logical_expr::ident;
 
     let schema = table.require_schema()?;
@@ -234,8 +261,7 @@ pub fn rename_columns_impl(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in schema",
                 old_name
-            ))
-            .into());
+            )));
         }
     }
 
@@ -295,7 +321,14 @@ pub fn search_first_impl(
 
     // Deserialize the expression
     let py_expr = dict_to_py_expr(expr_dict)?;
+    planned(|| search_first_parsed(table, schema, py_expr))
+}
 
+fn search_first_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    py_expr: PyExpr,
+) -> Result<LTSeqTable, LtseqError> {
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(LtseqError::Validation)?;
@@ -342,7 +375,14 @@ pub fn search_first_impl(
 ///     table: Reference to LTSeqTable
 ///     offset: First row to keep (0-based, validated in Python)
 ///     length: Number of rows to keep; None keeps the rest
-pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
+///
+/// It clones and orders a plan that may hold deep expressions, so `lib.rs`
+/// runs it through `stack::planned` (#335).
+pub fn slice_impl(
+    table: &LTSeqTable,
+    offset: i64,
+    length: Option<i64>,
+) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table slices to another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));

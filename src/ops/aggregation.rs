@@ -384,15 +384,12 @@ fn table_order_required(py_expr: &PyExpr, out_key: &str) -> LtseqError {
 
 /// Parse group expression into DataFusion Expr(s)
 fn parse_group_exprs(
-    group_expr: Option<Bound<'_, PyDict>>,
+    group_expr: Option<PyExpr>,
     schema: &ArrowSchema,
-) -> PyResult<Vec<Expr>> {
-    let Some(group_expr_dict) = group_expr else {
+) -> Result<Vec<Expr>, LtseqError> {
+    let Some(py_expr) = group_expr else {
         return Ok(Vec::new());
     };
-
-    let py_expr = dict_to_py_expr(&group_expr_dict)
-        .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))?;
 
     let df_expr = crate::transpiler::pyexpr_to_named_datafusion(py_expr, schema)
         .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
@@ -409,6 +406,41 @@ pub fn agg_impl(
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let group_expr = crate::stack::Parsed::new(
+        group_expr
+            .map(|dict| {
+                dict_to_py_expr(&dict)
+                    .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))
+            })
+            .transpose()?,
+    );
+    let mut aggs = crate::stack::Parsed::new(Vec::with_capacity(agg_dict.len()));
+    for (key, value) in agg_dict.iter() {
+        let key_str = key
+            .extract::<String>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg key must be string".into()))?;
+
+        let val_dict = value
+            .cast::<PyDict>()
+            .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
+
+        let py_expr = dict_to_py_expr(val_dict)
+            .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
+        aggs.push((key_str, py_expr));
+    }
+    let (group_expr, aggs) = (group_expr.into_inner(), aggs.into_inner());
+    crate::stack::planned(|| agg_parsed(table, df, schema, group_expr, aggs))
+}
+
+/// [`agg_impl`] once its expressions are deserialized.
+fn agg_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    group_expr: Option<PyExpr>,
+    aggs: Vec<(String, PyExpr)>,
+) -> Result<LTSeqTable, LtseqError> {
     // Each aggregate is resolved as an expression is, so its arguments are
     // coerced (a decimal32/64 widened for `sum` and `mean`, #241) before
     // the Aggregate stores its schema.
@@ -423,20 +455,9 @@ pub fn agg_impl(
     let mut staged_posts: Vec<(String, Option<Expr>)> = Vec::new();
     let mut any_staged = false;
 
-    for (key, value) in agg_dict.iter() {
-        let key_str = key
-            .extract::<String>()
-            .map_err(|_| LtseqError::TypeMismatch("Agg key must be string".into()))?;
-
-        let val_dict = value
-            .cast::<PyDict>()
-            .map_err(|_| LtseqError::TypeMismatch("Agg value must be dict".into()))?;
-
-        let py_expr = dict_to_py_expr(val_dict)
-            .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
-
+    for (key_str, py_expr) in aggs {
         if reads_table_order(&py_expr) && table.sort_specs.is_empty() {
-            return Err(table_order_required(&py_expr, &key_str).into());
+            return Err(table_order_required(&py_expr, &key_str));
         }
 
         match pyexpr_to_agg_plan(&py_expr, schema, &key_str, &table_order)
@@ -517,7 +538,12 @@ fn strip_table_qualifiers(expr: Expr) -> datafusion::error::Result<Expr> {
 ///
 /// Uses DataFusion's SQL parser to convert the WHERE clause into a native
 /// expression, then applies it via DataFrame::filter() to preserve laziness.
-pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTSeqTable> {
+/// It clones a plan that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+pub fn filter_where_impl(
+    table: &LTSeqTable,
+    where_clause: &str,
+) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
     let filter_expr =

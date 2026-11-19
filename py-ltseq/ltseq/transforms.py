@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING, cast
 
-from ._draws import keep_names, stage_draws, unstage
+from ._draws import kept_names, renamed, stage_draws, unstage
 from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -162,6 +162,61 @@ def _collect_key_exprs(
     return result
 
 
+
+def _output_names(inner: Any, exprs: list[Any]) -> list[str]:
+    """The name each expression takes in a projection of ``inner``, for
+    those the plan can name."""
+    names = []
+    for expr in exprs:
+        try:
+            names.extend(inner.select([expr]).get_schema_dict())
+        except Exception:
+            continue
+    return names
+
+
+def _select_staged(inner: Any, exprs: list[Any]) -> tuple[Any, list[Any], dict[str, str]]:
+    """Stage the draws of ``select``'s expressions: the staged table, the
+    rewritten expressions and the renames that give each staged expression
+    its own name back.
+
+    A staged expression is named after its staged column until it is
+    renamed, so that name must be none of the projection's other outputs
+    (R3-F1 of #335's review): a column named ``__ltseq_draw_0 * Int64(2)``
+    selected beside ``rand() * 2`` would otherwise make the projection
+    ambiguous. Such a projection is staged again with other draw names.
+
+    A duplicate the caller wrote is not the staging's: ``[x, x]`` for one
+    pinned ``x = rand() ...`` stages both copies on the same draw, so no
+    draw name tells them apart (R4-F1 of #335's review). It is left for the
+    projection to report, as it is without a draw. Each retry excludes the
+    names it tried, and a collision needs another output or column of that
+    exact name, so the retries are also bounded by their number.
+    """
+    taken: set[str] = set()
+    original: list[str] | None = None
+    retries = len(exprs) + len(inner.get_schema_dict()) + 1
+    while True:
+        staged, rewritten, draws = stage_draws(inner, exprs, taken)
+        renames = kept_names(inner, staged, exprs, rewritten)
+        if not renames or not draws or retries <= 0:
+            return staged, rewritten, renames
+        if original is None:
+            original = _output_names(inner, exprs)
+        # A staged name another output also takes, or another staged
+        # expression is renamed to; duplicates the caller wrote stay theirs.
+        interim = _output_names(staged, rewritten)
+        clash = set(renames.values()) | {
+            n
+            for n in renames
+            if interim.count(n) > max(1, original.count(renames[n]))
+        }
+        if not clash & set(renames):
+            return staged, rewritten, renames
+        taken |= set(draws)
+        retries -= 1
+
+
 class _FoldRow:
     """Read-only view of a row passed to ``fold``'s callback.
 
@@ -300,8 +355,8 @@ class TransformMixin(LookupMixin, LTSeqLike):
         # the selected expressions, so the staged draws need no drop. Each
         # selected expression keeps the name it has without staging (R1-F3
         # of #413's review): `random()`, not the staged column's name.
-        staged, rewritten, _ = stage_draws(self._inner, exprs)
-        result_inner = staged.select(keep_names(self._inner, exprs, rewritten))
+        staged, rewritten, renames = _select_staged(self._inner, exprs)
+        result_inner = renamed(staged.select(rewritten), renames)
 
         # Schema and sort metadata now come from the Rust kernel (issue #93);
         # select's sort-prefix retention lives in Rust's select_impl.

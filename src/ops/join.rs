@@ -52,7 +52,7 @@ fn is_string_type(dt: &DataType) -> bool {
 fn extract_join_key_columns(
     left_expr: &PyExpr,
     right_expr: &PyExpr,
-) -> PyResult<(Vec<String>, Vec<String>)> {
+) -> Result<(Vec<String>, Vec<String>), LtseqError> {
     // Handle simple case: single column on each side
     if let (PyExpr::Column(left_name), PyExpr::Column(right_name)) = (left_expr, right_expr) {
         return Ok((vec![left_name.clone()], vec![right_name.clone()]));
@@ -73,8 +73,7 @@ fn extract_join_key_columns(
 
     Err(LtseqError::Validation(
         "Join keys must be either simple columns or matching And-expressions".into(),
-    )
-    .into())
+    ))
 }
 
 /// Recursively extract column names from And-expressions containing Eq operations
@@ -82,7 +81,7 @@ fn extract_cols_from_and(
     expr: &PyExpr,
     left_cols: &mut Vec<String>,
     right_cols: &mut Vec<String>,
-) -> PyResult<()> {
+) -> Result<(), LtseqError> {
     match expr {
         PyExpr::BinOp { op, left, right } => {
             match op.as_str() {
@@ -99,8 +98,7 @@ fn extract_cols_from_and(
                     } else {
                         return Err(LtseqError::Validation(
                             "Left side of join equality must be a column reference".into(),
-                        )
-                        .into());
+                        ));
                     }
 
                     if let PyExpr::Column(right_name) = right.as_ref() {
@@ -108,44 +106,48 @@ fn extract_cols_from_and(
                     } else {
                         return Err(LtseqError::Validation(
                             "Right side of join equality must be a column reference".into(),
-                        )
-                        .into());
+                        ));
                     }
                     Ok(())
                 }
                 other => Err(LtseqError::Validation(format!(
                     "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
                     other
-                ))
-                .into()),
+                ))),
             }
         }
         _ => Err(LtseqError::Validation(
             "Expected And or Eq expression in composite join".into(),
-        )
-        .into()),
+        )),
     }
 }
 
-/// Extract and validate join key column names from expressions
-fn extract_and_validate_join_keys(
+/// Deserialize the join key expressions; [`validate_join_keys`] checks them
+/// once the plan work runs on a guarded stack.
+fn parse_join_keys(
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
+) -> PyResult<(PyExpr, PyExpr)> {
+    // A failing right key drops the left one on a guarded stack.
+    let left_key_expr = crate::stack::Parsed::new(dict_to_py_expr(left_key_expr_dict)?);
+    let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
+    Ok((left_key_expr.into_inner(), right_key_expr))
+}
+
+/// Extract and validate join key column names from the parsed key expressions.
+fn validate_join_keys(
+    left_key_expr: PyExpr,
+    right_key_expr: PyExpr,
     schema_left: &ArrowSchema,
     schema_right: &ArrowSchema,
-) -> PyResult<(Vec<String>, Vec<String>)> {
-    let left_key_expr = dict_to_py_expr(left_key_expr_dict)?;
-
-    let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
-
+) -> Result<(Vec<String>, Vec<String>), LtseqError> {
     let (left_col_names, right_col_names) =
         extract_join_key_columns(&left_key_expr, &right_key_expr)?;
 
     if left_col_names.is_empty() || right_col_names.is_empty() {
         return Err(LtseqError::Validation(
             "No join keys found in expressions".into(),
-        )
-        .into());
+        ));
     }
 
     // Validate left columns exist
@@ -154,8 +156,7 @@ fn extract_and_validate_join_keys(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in left table",
                 left_col
-            ))
-            .into());
+            )));
         }
     }
 
@@ -165,8 +166,7 @@ fn extract_and_validate_join_keys(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in right table",
                 right_col
-            ))
-            .into());
+            )));
         }
     }
 
@@ -273,7 +273,7 @@ fn rename_right_df_for_join(
     right_schema: &ArrowSchema,
     suffix: &str,
     right_key_cols: &[String],
-) -> PyResult<RenamedRight> {
+) -> Result<RenamedRight, LtseqError> {
     let rename_map = right_rename_map(left_schema, right_schema, suffix)?;
 
     let select_exprs: Vec<Expr> = rename_map
@@ -320,7 +320,7 @@ fn build_result_table_from_df(
     result_df: DataFrame,
     expected_schema: Arc<ArrowSchema>,
     sort_specs: Vec<crate::SortSpec>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(session),
         result_df,
@@ -343,6 +343,26 @@ pub fn join_impl(
     join_type_str: &str,
     suffix: &str,
 ) -> PyResult<LTSeqTable> {
+    // The checks that read no expression come first, as they did.
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    JoinType::from_str(join_type_str).ok_or_else(|| {
+        LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+    })?;
+    let keys = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    // Cloning, joining and dropping a plan recurse through its expressions,
+    // which may be deep (#335).
+    crate::stack::planned(|| join_parsed(table, other, keys, join_type_str, suffix))
+}
+
+/// [`join_impl`] once its keys are deserialized.
+fn join_parsed(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    (left_key_expr, right_key_expr): (PyExpr, PyExpr),
+    join_type_str: &str,
+    suffix: &str,
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
@@ -351,10 +371,10 @@ pub fn join_impl(
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
     })?;
 
-    // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
+    // Validate join keys
+    let (left_col_names, right_col_names) = validate_join_keys(
+        left_key_expr,
+        right_key_expr,
         stored_schema_left,
         stored_schema_right,
     )?;
@@ -441,31 +461,40 @@ pub fn join_prefixed_impl(
     join_type_str: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
-    let (_, stored_schema_left) = table.require_df_and_schema()?;
-    let (_, stored_schema_right) = other.require_df_and_schema()?;
-
-    let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+    // The checks that read no expression come first, as they did.
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    JoinType::from_str(join_type_str).ok_or_else(|| {
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
     })?;
+    let (left_key_expr, right_key_expr) = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    crate::stack::planned(|| {
+        let (_, stored_schema_left) = table.require_df_and_schema()?;
+        let (_, stored_schema_right) = other.require_df_and_schema()?;
 
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
-        stored_schema_left,
-        stored_schema_right,
-    )?;
+        let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+            LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+        })?;
 
-    // A link's join can repeat a left row for each match, drop it or add
-    // right rows, so its result declares no order (ADR 0011).
-    prefixed_join(
-        table,
-        other,
-        &left_col_names,
-        &right_col_names,
-        join_type,
-        alias,
-        Vec::new(),
-    )
+        let (left_col_names, right_col_names) = validate_join_keys(
+            left_key_expr,
+            right_key_expr,
+            stored_schema_left,
+            stored_schema_right,
+        )?;
+
+        // A link's join can repeat a left row for each match, drop it or add
+        // right rows, so its result declares no order (ADR 0011).
+        prefixed_join(
+            table,
+            other,
+            &left_col_names,
+            &right_col_names,
+            join_type,
+            alias,
+            Vec::new(),
+        )
+    })
 }
 
 /// [`join_prefixed_impl`] on key columns that both tables have, declaring
@@ -478,7 +507,7 @@ pub(crate) fn prefixed_join(
     join_type: JoinType,
     alias: &str,
     sort_specs: Vec<crate::SortSpec>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
@@ -604,13 +633,26 @@ fn semi_anti_join_impl(
     right_key_expr_dict: &Bound<'_, PyDict>,
     is_anti: bool,
 ) -> PyResult<LTSeqTable> {
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    let keys = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    crate::stack::planned(|| semi_anti_join_parsed(table, other, keys, is_anti))
+}
+
+/// [`semi_anti_join_impl`] once its keys are deserialized.
+fn semi_anti_join_parsed(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    (left_key_expr, right_key_expr): (PyExpr, PyExpr),
+    is_anti: bool,
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
-    // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
+    // Validate join keys
+    let (left_col_names, right_col_names) = validate_join_keys(
+        left_key_expr,
+        right_key_expr,
         stored_schema_left,
         stored_schema_right,
     )?;

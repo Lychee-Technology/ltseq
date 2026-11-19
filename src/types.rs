@@ -1,6 +1,7 @@
 //! PyExpr type definition and deserialization
 
 use crate::error::PyExprError;
+use crate::stack::MAX_EXPR_DEPTH;
 use datafusion::arrow::array::timezone::Tz;
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::scalar::ScalarValue;
@@ -248,36 +249,6 @@ fn required_str(dict: &Bound<'_, PyDict>, key: &str) -> Result<String, PyExprErr
         .map_err(|_| PyExprError::InvalidType(format!("{} must be string", key)))
 }
 
-/// A nested expression that must be present.
-fn required_expr(dict: &Bound<'_, PyDict>, key: &str) -> Result<Box<PyExpr>, PyExprError> {
-    let value = required(dict, key)?;
-    let nested = value
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict", key)))?;
-    Ok(Box::new(dict_to_py_expr(nested)?))
-}
-
-/// A nested expression that may be absent or None.
-fn optional_expr(dict: &Bound<'_, PyDict>, key: &str) -> Result<Option<Box<PyExpr>>, PyExprError> {
-    match dict
-        .get_item(key)
-        .map_err(|_| PyExprError::MissingField(key.to_string()))?
-    {
-        Some(value) if !value.is_none() => {
-            let nested = value
-                .cast::<PyDict>()
-                .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict or None", key)))?;
-            Ok(Some(Box::new(dict_to_py_expr(nested)?)))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Deserialize a Column expression
-fn parse_column_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    Ok(PyExpr::Column(required_str(dict, "name")?))
-}
-
 /// A Literal payload being decoded. The typed getters check each field's
 /// exact Python type before extracting it (PyO3 alone would read `True` as
 /// `1` and `1` as `1.0`) and record the field as read, so `finish` can reject
@@ -456,10 +427,6 @@ fn parse_time_zone(tz: &str) -> Result<Arc<str>, String> {
         .map_err(|_| format!("Timestamp literal tz '{tz}' is not a valid time zone"))
 }
 
-fn parse_literal_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    parse_literal(dict).map(PyExpr::Literal)
-}
-
 /// Deserialize a value that `insert` or `update` writes: a Literal
 /// expression, decoded exactly as a literal inside an expression is.
 pub fn dict_to_literal(dict: &Bound<'_, PyDict>) -> Result<LiteralValue, PyExprError> {
@@ -512,121 +479,352 @@ fn parse_literal(dict: &Bound<'_, PyDict>) -> Result<LiteralValue, PyExprError> 
     Ok(value)
 }
 
-/// Deserialize a BinOp expression
-fn parse_binop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    Ok(PyExpr::BinOp {
-        op: required_str(dict, "op")?,
-        left: required_expr(dict, "left")?,
-        right: required_expr(dict, "right")?,
-    })
+/// A child of an expression node: a nested expression, or an optional one
+/// that is absent.
+enum Child<'py> {
+    Expr(Bound<'py, PyDict>),
+    Absent,
 }
 
-/// Deserialize a UnaryOp expression
-fn parse_unaryop_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    Ok(PyExpr::UnaryOp {
-        op: required_str(dict, "op")?,
-        operand: required_expr(dict, "operand")?,
-    })
+/// Where the next child of a node is, looked up only when the walk reaches
+/// it, so a node's children deserialize in order and an error names the
+/// first malformed field in that order: `left` deserializes before `right`
+/// is looked up.
+enum Slot<'py> {
+    /// A nested expression that must be present.
+    Required(&'static str),
+    /// A nested expression that may be absent or None.
+    Optional(&'static str),
+    /// A Call's args list, one child per item.
+    Args,
+    Arg(Bound<'py, PyAny>),
+    /// A Call's kwargs dict, one child per value.
+    Kwargs,
+    Kwarg(Bound<'py, PyAny>, Bound<'py, PyAny>),
 }
 
-/// Deserialize args list for a Call expression
-fn parse_call_args(args_obj: &Bound<'_, pyo3::PyAny>) -> Result<Vec<PyExpr>, PyExprError> {
-    let args_list = args_obj
-        .cast::<pyo3::types::PyList>()
-        .map_err(|_| PyExprError::InvalidType("args must be a list".to_string()))?;
+/// A nested expression that must be present.
+fn required_child<'py>(dict: &Bound<'py, PyDict>, key: &str) -> Result<Child<'py>, PyExprError> {
+    required(dict, key)?
+        .cast_into::<PyDict>()
+        .map(Child::Expr)
+        .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict", key)))
+}
 
-    let mut args = Vec::new();
-    for item in args_list.iter() {
-        let arg_dict = item
-            .cast::<PyDict>()
-            .map_err(|_| PyExprError::InvalidType("args items must be dicts".to_string()))?;
-        args.push(dict_to_py_expr(arg_dict)?);
+/// A nested expression that may be absent or None.
+fn optional_child<'py>(dict: &Bound<'py, PyDict>, key: &str) -> Result<Child<'py>, PyExprError> {
+    match dict
+        .get_item(key)
+        .map_err(|_| PyExprError::MissingField(key.to_string()))?
+    {
+        Some(value) if !value.is_none() => value
+            .cast_into::<PyDict>()
+            .map(Child::Expr)
+            .map_err(|_| PyExprError::InvalidType(format!("{} must be a dict or None", key))),
+        _ => Ok(Child::Absent),
     }
-    Ok(args)
 }
 
-/// Deserialize kwargs dict for a Call expression
-fn parse_call_kwargs(
-    kwargs_obj: &Bound<'_, pyo3::PyAny>,
-) -> Result<HashMap<String, PyExpr>, PyExprError> {
-    let kwargs_dict = kwargs_obj
-        .cast::<PyDict>()
-        .map_err(|_| PyExprError::InvalidType("kwargs must be a dict".to_string()))?;
+/// An expression node's own fields, read before its children.
+enum Shell {
+    BinOp {
+        op: String,
+    },
+    UnaryOp {
+        op: String,
+    },
+    /// `args` children, then one per kwarg name, then `on`.
+    Call {
+        func: String,
+        args: usize,
+        kwargs: Vec<String>,
+    },
+    /// `expr`, `partition_by`, then `order_by`.
+    Window {
+        descending: bool,
+        nulls_last: bool,
+    },
+    Alias {
+        alias: String,
+    },
+}
 
-    let mut kwargs = HashMap::new();
-    for (key, value) in kwargs_dict.iter() {
-        let key_str = key
-            .extract::<String>()
-            .map_err(|_| PyExprError::InvalidType("kwargs keys must be strings".to_string()))?;
-
-        let value_dict: &Bound<'_, PyDict> = value
-            .cast::<PyDict>()
-            .map_err(|_| PyExprError::InvalidType("kwargs values must be dicts".to_string()))?;
-        kwargs.insert(key_str, dict_to_py_expr(value_dict)?);
+impl Shell {
+    /// The node, given one parsed value per child slot, in slot order.
+    fn build(self, children: Vec<Option<PyExpr>>) -> Result<PyExpr, PyExprError> {
+        let mut children = Children(children.into_iter());
+        Ok(match self {
+            Shell::BinOp { op } => PyExpr::BinOp {
+                op,
+                left: children.required()?,
+                right: children.required()?,
+            },
+            Shell::UnaryOp { op } => PyExpr::UnaryOp {
+                op,
+                operand: children.required()?,
+            },
+            Shell::Window {
+                descending,
+                nulls_last,
+            } => PyExpr::Window {
+                expr: children.required()?,
+                partition_by: children.optional()?,
+                order_by: children.optional()?,
+                descending,
+                nulls_last,
+            },
+            Shell::Alias { alias } => PyExpr::Alias {
+                expr: children.required()?,
+                alias,
+            },
+            Shell::Call { func, args, kwargs } => {
+                let args = (0..args)
+                    .map(|_| children.required().map(|arg| *arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let kwargs = kwargs
+                    .into_iter()
+                    .map(|name| children.required().map(|value| (name, *value)))
+                    .collect::<Result<HashMap<_, _>, _>>()?;
+                PyExpr::Call {
+                    func,
+                    args,
+                    kwargs,
+                    on: children.optional()?,
+                }
+            }
+        })
     }
-    Ok(kwargs)
 }
 
-/// Deserialize a Call expression
-fn parse_call_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    Ok(PyExpr::Call {
-        func: required_str(dict, "func")?,
-        args: parse_call_args(&required(dict, "args")?)?,
-        kwargs: parse_call_kwargs(&required(dict, "kwargs")?)?,
+/// The parsed children of a node, taken in slot order.
+struct Children(std::vec::IntoIter<Option<PyExpr>>);
+
+impl Children {
+    fn optional(&mut self) -> Result<Option<Box<PyExpr>>, PyExprError> {
+        self.0
+            .next()
+            .map(|child| child.map(Box::new))
+            .ok_or_else(|| PyExprError::InvalidType("expression node lost a child".to_string()))
+    }
+
+    fn required(&mut self) -> Result<Box<PyExpr>, PyExprError> {
+        self.optional()?
+            .ok_or_else(|| PyExprError::InvalidType("expression node lost a child".to_string()))
+    }
+}
+
+/// One node read from its dict: a leaf, or a node whose children follow.
+enum Node {
+    Leaf(PyExpr),
+    Inner(Shell, Vec<Slot<'static>>),
+}
+
+/// Read one node of an expression dict, without its children.
+fn read_node(dict: &Bound<'_, PyDict>) -> Result<Node, PyExprError> {
+    let expr_type = required_str(dict, "type")?;
+    Ok(match expr_type.as_str() {
+        "Column" => Node::Leaf(PyExpr::Column(required_str(dict, "name")?)),
+        "Literal" => Node::Leaf(PyExpr::Literal(parse_literal(dict)?)),
+        "BinOp" => Node::Inner(
+            Shell::BinOp {
+                op: required_str(dict, "op")?,
+            },
+            vec![Slot::Required("left"), Slot::Required("right")],
+        ),
+        "UnaryOp" => Node::Inner(
+            Shell::UnaryOp {
+                op: required_str(dict, "op")?,
+            },
+            vec![Slot::Required("operand")],
+        ),
         // "on" is None (or absent) for standalone functions like abs(x),
         // whose inputs are all in args.
-        on: optional_expr(dict, "on")?,
+        "Call" => Node::Inner(
+            Shell::Call {
+                func: required_str(dict, "func")?,
+                args: 0,
+                kwargs: Vec::new(),
+            },
+            vec![Slot::Args, Slot::Kwargs, Slot::Optional("on")],
+        ),
+        "Window" => {
+            // NULL placement of `order_by` defaults to last (§9.4).
+            let flag = |key: &str, default: bool| {
+                dict.get_item(key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<bool>().ok())
+                    .unwrap_or(default)
+            };
+            Node::Inner(
+                Shell::Window {
+                    descending: flag("descending", false),
+                    nulls_last: flag("nulls_last", true),
+                },
+                // The inner expression (e.g., row_number(), rank(), etc.)
+                vec![
+                    Slot::Required("expr"),
+                    Slot::Optional("partition_by"),
+                    Slot::Optional("order_by"),
+                ],
+            )
+        }
+        "Alias" => Node::Inner(
+            Shell::Alias {
+                alias: required_str(dict, "alias")?,
+            },
+            vec![Slot::Required("expr")],
+        ),
+        _ => return Err(PyExprError::UnknownVariant(expr_type)),
     })
 }
 
-/// Deserialize a Window expression
-fn parse_window_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    // Parse descending (default false)
-    let descending = dict
-        .get_item("descending")
-        .ok()
-        .flatten()
-        .and_then(|v| v.extract::<bool>().ok())
-        .unwrap_or(false);
-    // NULL placement of `order_by` (default last, §9.4)
-    let nulls_last = dict
-        .get_item("nulls_last")
-        .ok()
-        .flatten()
-        .and_then(|v| v.extract::<bool>().ok())
-        .unwrap_or(true);
-
-    Ok(PyExpr::Window {
-        // The inner expression (e.g., row_number(), rank(), etc.)
-        expr: required_expr(dict, "expr")?,
-        partition_by: optional_expr(dict, "partition_by")?,
-        order_by: optional_expr(dict, "order_by")?,
-        descending,
-        nulls_last,
-    })
+/// A node whose children are being deserialized.
+struct Open<'py> {
+    dict: Bound<'py, PyDict>,
+    shell: Shell,
+    /// The slots still to read; the next is last.
+    pending: Vec<Slot<'py>>,
+    parsed: Vec<Option<PyExpr>>,
 }
 
-/// Deserialize an Alias expression
-fn parse_alias_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    Ok(PyExpr::Alias {
-        alias: required_str(dict, "alias")?,
-        expr: required_expr(dict, "expr")?,
-    })
+impl<'py> Open<'py> {
+    fn new(dict: Bound<'py, PyDict>, shell: Shell, slots: Vec<Slot<'static>>) -> Self {
+        Self {
+            dict,
+            shell,
+            pending: slots.into_iter().rev().collect(),
+            parsed: Vec::new(),
+        }
+    }
+
+    /// The next child, looked up now, or `None` once every slot is read.
+    fn next_child(&mut self) -> Result<Option<Child<'py>>, PyExprError> {
+        while let Some(slot) = self.pending.pop() {
+            match slot {
+                Slot::Required(key) => return required_child(&self.dict, key).map(Some),
+                Slot::Optional(key) => return optional_child(&self.dict, key).map(Some),
+                Slot::Args => {
+                    let args = required(&self.dict, "args")?;
+                    let list = args
+                        .cast::<pyo3::types::PyList>()
+                        .map_err(|_| PyExprError::InvalidType("args must be a list".to_string()))?;
+                    if let Shell::Call { args, .. } = &mut self.shell {
+                        *args = list.len();
+                    }
+                    let items: Vec<_> = list.iter().map(Slot::Arg).collect();
+                    self.pending.extend(items.into_iter().rev());
+                }
+                Slot::Arg(item) => {
+                    return item
+                        .cast_into::<PyDict>()
+                        .map(|d| Some(Child::Expr(d)))
+                        .map_err(|_| {
+                            PyExprError::InvalidType("args items must be dicts".to_string())
+                        })
+                }
+                Slot::Kwargs => {
+                    let kwargs = required(&self.dict, "kwargs")?;
+                    let dict = kwargs.cast::<PyDict>().map_err(|_| {
+                        PyExprError::InvalidType("kwargs must be a dict".to_string())
+                    })?;
+                    let items: Vec<_> = dict.iter().map(|(k, v)| Slot::Kwarg(k, v)).collect();
+                    self.pending.extend(items.into_iter().rev());
+                }
+                Slot::Kwarg(key, value) => {
+                    let name = key.extract::<String>().map_err(|_| {
+                        PyExprError::InvalidType("kwargs keys must be strings".to_string())
+                    })?;
+                    if let Shell::Call { kwargs, .. } = &mut self.shell {
+                        kwargs.push(name);
+                    }
+                    return value
+                        .cast_into::<PyDict>()
+                        .map(|d| Some(Child::Expr(d)))
+                        .map_err(|_| {
+                            PyExprError::InvalidType("kwargs values must be dicts".to_string())
+                        });
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
-/// Recursively deserialize a Python dict to PyExpr
+/// Deserialize a Python dict to PyExpr.
+///
+/// The walk keeps the open nodes in a vector rather than on the call stack,
+/// since it reads Python objects and so cannot grow the stack
+/// (`crate::stack`). It refuses an expression deeper than
+/// [`MAX_EXPR_DEPTH`].
 pub fn dict_to_py_expr(dict: &Bound<'_, PyDict>) -> Result<PyExpr, PyExprError> {
-    // Dispatch to type-specific parser
-    let expr_type = required_str(dict, "type")?;
-    match expr_type.as_str() {
-        "Column" => parse_column_expr(dict),
-        "Literal" => parse_literal_expr(dict),
-        "BinOp" => parse_binop_expr(dict),
-        "UnaryOp" => parse_unaryop_expr(dict),
-        "Call" => parse_call_expr(dict),
-        "Window" => parse_window_expr(dict),
-        "Alias" => parse_alias_expr(dict),
-        _ => Err(PyExprError::UnknownVariant(expr_type)),
+    dict_to_py_expr_within(dict, MAX_EXPR_DEPTH)
+}
+
+/// [`dict_to_py_expr`] for an expression nested in another, which leaves it
+/// `levels` of the [`MAX_EXPR_DEPTH`] levels.
+pub fn dict_to_py_expr_within(
+    dict: &Bound<'_, PyDict>,
+    levels: usize,
+) -> Result<PyExpr, PyExprError> {
+    let mut open = Vec::new();
+    let mut depth = 0;
+    let parsed = walk(dict, levels, &mut open, &mut depth);
+    // Counting the levels above it, for an expression nested in another.
+    let depth = MAX_EXPR_DEPTH.saturating_sub(levels) + depth;
+    if parsed.is_ok() {
+        crate::stack::saw_depth(depth);
+    }
+    // Drop what an error leaves parsed on a stack deep enough for it.
+    let partial: Vec<_> = open.drain(..).map(|node| node.parsed).collect();
+    if !partial.is_empty() {
+        crate::stack::guarded_for(depth, move || drop(partial));
+    }
+    parsed
+}
+
+fn walk<'py>(
+    dict: &Bound<'py, PyDict>,
+    levels: usize,
+    open: &mut Vec<Open<'py>>,
+    depth: &mut usize,
+) -> Result<PyExpr, PyExprError> {
+    let mut next = dict.clone();
+    loop {
+        if open.len() >= levels {
+            return Err(PyExprError::TooDeep(MAX_EXPR_DEPTH));
+        }
+        *depth = (*depth).max(open.len() + 1);
+        let mut done = match read_node(&next)? {
+            Node::Leaf(expr) => Some(expr),
+            Node::Inner(shell, slots) => {
+                open.push(Open::new(next, shell, slots));
+                None
+            }
+        };
+        // Hand the finished node to its parent, and find the next child to
+        // read, closing each node whose children are all parsed.
+        loop {
+            let Some(top) = open.last_mut() else {
+                return done
+                    .ok_or_else(|| PyExprError::InvalidType("expression has no root".to_string()));
+            };
+            if let Some(expr) = done.take() {
+                top.parsed.push(Some(expr));
+            }
+            match top.next_child()? {
+                Some(Child::Expr(child)) => {
+                    next = child;
+                    break;
+                }
+                Some(Child::Absent) => top.parsed.push(None),
+                None => {
+                    if let Some(node) = open.pop() {
+                        done = Some(node.shell.build(node.parsed)?);
+                    }
+                }
+            }
+        }
     }
 }
 

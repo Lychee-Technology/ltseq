@@ -29,6 +29,9 @@
 //! GIL layering (issue #142): key-column parsing happens under the GIL; the
 //! position snapshot (`rvs` / `step` / keyed `distinct`) and the `is_subset`
 //! count run through `gil::detached`, so those halves return `LtseqError`.
+//! The rest of each operation clones and joins plans that may hold deep
+//! expressions, so it runs through `stack::planned` once its keys are
+//! parsed (#335).
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
@@ -162,7 +165,7 @@ pub fn distinct_impl(
 
     // If no key columns specified, use simple distinct on all columns
     if key_exprs.is_empty() {
-        return distinct_all_columns(table, df);
+        return crate::stack::planned(|| distinct_all_columns(table, df));
     }
 
     // Convert key expressions to column names (needs the GIL)
@@ -176,7 +179,7 @@ pub fn distinct_impl(
 fn distinct_all_columns(
     table: &LTSeqTable,
     df: &Arc<datafusion::dataframe::DataFrame>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // Plan building only; nothing executes here.
     let distinct_df = (**df)
         .clone()
@@ -200,9 +203,10 @@ fn extract_key_cols_from_exprs(
 ) -> PyResult<Vec<String>> {
     let mut key_cols = Vec::new();
     for expr_dict in key_exprs.iter() {
-        let py_expr = crate::types::dict_to_py_expr(expr_dict)?;
+        // A refused key may be deep: it drops on a guarded stack.
+        let py_expr = crate::stack::Parsed::new(crate::types::dict_to_py_expr(expr_dict)?);
 
-        let col_name = match &py_expr {
+        let col_name = match &*py_expr {
             crate::types::PyExpr::Column(name) => name.clone(),
             _ => {
                 return Err(LtseqError::Validation(
@@ -280,7 +284,10 @@ fn distinct_with_keys(
 ///
 /// Combines all rows from both tables (equivalent to UNION ALL).
 /// Schemas must match exactly in column names and order.
-pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTable> {
+///
+/// It clones plans that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     let (df1, schema1) = table1.require_df_and_schema()?;
     let (df2, schema2) = table2.require_df_and_schema()?;
 
@@ -292,8 +299,7 @@ pub fn union_impl(table1: &LTSeqTable, table2: &LTSeqTable) -> PyResult<LTSeqTab
         return Err(LtseqError::SchemaMismatch(format!(
             "Schema mismatch: {:?} vs {:?}",
             cols1, cols2
-        ))
-        .into());
+        )));
     }
 
     // Plan building only; nothing executes here.
@@ -341,12 +347,15 @@ pub fn intersect_impl(
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
-    let joined = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftSemi)?;
-    // LeftSemi does not deduplicate the left side; the legacy semantics did.
-    let deduped = joined
-        .distinct()
-        .map_err(|e| LtseqError::Runtime(format!("Intersect distinct failed: {}", e)))?;
-    Ok(create_result_table(&table1.session, deduped))
+    let compare_cols = compare_columns(table1, table2, key_expr_dict)?;
+    crate::stack::planned(|| {
+        let joined = semi_anti_on_keys(table1, table2, &compare_cols, JoinType::LeftSemi)?;
+        // LeftSemi does not deduplicate the left side; the legacy semantics did.
+        let deduped = joined
+            .distinct()
+            .map_err(|e| LtseqError::Runtime(format!("Intersect distinct failed: {}", e)))?;
+        Ok(create_result_table(&table1.session, deduped))
+    })
 }
 
 /// Diff: Return rows in first table but not in second
@@ -359,8 +368,11 @@ pub fn diff_impl(
     table2: &LTSeqTable,
     key_expr_dict: Option<Bound<'_, PyDict>>,
 ) -> PyResult<LTSeqTable> {
-    let joined = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftAnti)?;
-    Ok(create_result_table(&table1.session, joined))
+    let compare_cols = compare_columns(table1, table2, key_expr_dict)?;
+    crate::stack::planned(|| {
+        let joined = semi_anti_on_keys(table1, table2, &compare_cols, JoinType::LeftAnti)?;
+        Ok(create_result_table(&table1.session, joined))
+    })
 }
 
 /// Is Subset: Check if first table is a subset of second table
@@ -375,13 +387,27 @@ pub fn is_subset_impl(
 ) -> PyResult<bool> {
     // t1 ⊆ t2 iff anti-join(t1, t2) is empty. count() is a scalar terminal,
     // so executing it here is within the no-materialization rule.
-    let anti = semi_anti_on_keys(table1, table2, key_expr_dict, JoinType::LeftAnti)?;
+    let compare_cols = compare_columns(table1, table2, key_expr_dict)?;
     let missing = detached(py, || {
+        let anti = semi_anti_on_keys(table1, table2, &compare_cols, JoinType::LeftAnti)?;
         RUNTIME
             .block_on(anti.count())
             .map_err(|e| LtseqError::Runtime(format!("Subset count failed: {}", e)))
     })?;
     Ok(missing == 0)
+}
+
+/// The columns `intersect`, `diff` and `is_subset` compare, read from the
+/// key expression under the GIL, once both tables are checked to have a
+/// plan and a schema.
+fn compare_columns(
+    table1: &LTSeqTable,
+    table2: &LTSeqTable,
+    key_expr_dict: Option<Bound<'_, PyDict>>,
+) -> PyResult<Vec<String>> {
+    let (_, schema1) = table1.require_df_and_schema()?;
+    table2.require_df_and_schema()?;
+    get_compare_columns(key_expr_dict.as_ref(), schema1)
 }
 
 /// Native LeftSemi / LeftAnti join of the two tables on the comparison
@@ -390,15 +416,14 @@ pub fn is_subset_impl(
 fn semi_anti_on_keys(
     table1: &LTSeqTable,
     table2: &LTSeqTable,
-    key_expr_dict: Option<Bound<'_, PyDict>>,
+    compare_cols: &[String],
     join_type: JoinType,
-) -> PyResult<datafusion::dataframe::DataFrame> {
+) -> Result<datafusion::dataframe::DataFrame, LtseqError> {
     let (df1, schema1) = table1.require_df_and_schema()?;
     let (df2, schema2) = table2.require_df_and_schema()?;
-    let compare_cols = get_compare_columns(key_expr_dict.as_ref(), schema1)?;
 
-    let failed = |e| LtseqError::Runtime(format!("Set operation join failed: {}", e)).into();
-    if let Some(on) = widened_set_keys(&compare_cols, schema1, schema2) {
+    let failed = |e| LtseqError::Runtime(format!("Set operation join failed: {}", e));
+    if let Some(on) = widened_set_keys(compare_cols, schema1, schema2) {
         // Both sides name each key alike, so they are told apart by alias.
         return (**df1)
             .clone()
@@ -511,11 +536,12 @@ fn extract_key_columns(
     use crate::types::dict_to_py_expr;
     use crate::types::PyExpr;
 
-    let py_expr = dict_to_py_expr(expr_dict)?;
+    // A refused key may be deep: it drops on a guarded stack.
+    let py_expr = crate::stack::Parsed::new(dict_to_py_expr(expr_dict)?);
 
     let mut columns = Vec::new();
 
-    match &py_expr {
+    match &*py_expr {
         PyExpr::Column(name) => columns.push(name.clone()),
         _ => {
             return Err(LtseqError::Validation(

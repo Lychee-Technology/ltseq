@@ -47,7 +47,10 @@ pub fn derive_with_window_functions_impl(
     // Deserialize all expressions once
     let parsed_cols = parse_derived_cols(derived_cols)?;
 
-    derive_with_window_functions_from_parsed(table, schema, df, &parsed_cols)
+    // Moved into the closure, so they drop on its guarded stack.
+    crate::stack::planned(move || {
+        derive_with_window_functions_from_parsed(table, schema, df, &parsed_cols)
+    })
 }
 
 /// Internal entry point when expressions are already parsed (avoids double deserialization).
@@ -56,7 +59,7 @@ pub(crate) fn derive_with_window_functions_from_parsed(
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
     parsed_cols: &[(String, PyExpr)],
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     // NOTE: Arrow shift fast path disabled.
     // The native DataFusion window path (below) stays lazy and benefits from column
     // pruning and predicate pushdown, making it ~150x faster for Parquet sources
@@ -72,7 +75,7 @@ pub(crate) fn derive_with_window_functions_from_parsed(
 /// two-step derive workaround. Two-level nesting is planned natively by the
 /// staged planner (issue #101); this hint now covers what remains — three
 /// and deeper levels, and ranking-over-window shapes.
-fn nested_window_hint(err: PyErr) -> PyErr {
+fn nested_window_hint(err: LtseqError) -> LtseqError {
     let msg = err.to_string();
     if msg.contains("requires DataFrame context") {
         LtseqError::Validation(format!(
@@ -82,7 +85,6 @@ fn nested_window_hint(err: PyErr) -> PyErr {
              .derive(out=lambda r: r.mid.shift(1))",
             msg.trim_end_matches('.')
         ))
-        .into()
     } else {
         err
     }
@@ -90,7 +92,8 @@ fn nested_window_hint(err: PyErr) -> PyErr {
 
 /// Deserialize derived column expressions from a Python dict into Vec<(String, PyExpr)>.
 pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<Vec<(String, PyExpr)>> {
-    let mut parsed = Vec::with_capacity(derived_cols.len());
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let mut parsed = crate::stack::Parsed::new(Vec::with_capacity(derived_cols.len()));
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
             LtseqError::Validation("Column name must be string".into())
@@ -101,7 +104,7 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
         let py_expr = dict_to_py_expr(expr_dict)?;
         parsed.push((col_name_str, py_expr));
     }
-    Ok(parsed)
+    Ok(parsed.into_inner())
 }
 
 
@@ -239,7 +242,7 @@ fn native_window_derive(
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
     parsed_cols: &[(String, PyExpr)],
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let plan = build_staged_plan(schema, parsed_cols);
 
     // Overwriting a sort key invalidates the declared order from that key on
@@ -333,7 +336,13 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
     }
 
     let (df, schema) = table.require_df_and_schema()?;
-    native_cum_sum(table, schema, df, &cum_exprs)
+    let cum_exprs = crate::stack::parse_each(&cum_exprs, |expr_item| -> PyResult<_> {
+        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
+            LtseqError::Validation("Expression must be dict".into())
+        })?;
+        Ok(dict_to_py_expr(expr_dict)?)
+    })?;
+    crate::stack::planned(|| native_cum_sum(table, schema, df, cum_exprs))
 }
 
 /// Native cum_sum implementation using DataFusion Expr
@@ -341,8 +350,8 @@ fn native_cum_sum(
     table: &LTSeqTable,
     schema: &ArrowSchema,
     df: &Arc<DataFrame>,
-    cum_exprs: &[Bound<'_, PyDict>],
-) -> PyResult<LTSeqTable> {
+    cum_exprs: Vec<PyExpr>,
+) -> Result<LTSeqTable, LtseqError> {
     use datafusion::logical_expr::expr::Sort;
     use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
     use datafusion::scalar::ScalarValue;
@@ -361,13 +370,7 @@ fn native_cum_sum(
     let rx = crate::transpiler::Resolver::new(schema).map_err(LtseqError::Transpile)?;
 
     // Add cumulative sum columns for each input column
-    for (idx, expr_item) in cum_exprs.iter().enumerate() {
-        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-            LtseqError::Validation("Expression must be dict".into())
-        })?;
-
-        let py_expr = dict_to_py_expr(expr_dict)?;
-
+    for (idx, py_expr) in cum_exprs.into_iter().enumerate() {
         // Extract column name
         let col_name = if let PyExpr::Column(name) = &py_expr {
             name.clone()
@@ -380,10 +383,10 @@ fn native_cum_sum(
             if let Ok(field) = schema.field_with_name(col_name_ref) {
                 let field_type = field.data_type();
                 if !crate::transpiler::is_numeric_type(field_type) {
-                    return Err(PyErr::from(LtseqError::TypeMismatch(format!(
+                    return Err(LtseqError::TypeMismatch(format!(
                         "cum_sum() requires numeric columns. Column '{}' has type {:?}",
                         col_name_ref, field_type
-                    ))));
+                    )));
                 }
             }
         }

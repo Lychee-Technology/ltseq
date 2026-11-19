@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING
 
-from ._draws import keep_names, stage_draws, unstage
+from ._draws import kept_names, renamed, stage_draws, unstage
 from ._typing import LTSeqLike
 
 if TYPE_CHECKING:
@@ -28,18 +28,29 @@ def _capture_agg_expr(table: "LTSeqLike", fn: Callable) -> dict[str, Any]:
 def _agg_staged(inner: Any, grouping_expr: Any, agg_exprs: dict[str, Any]) -> Any:
     """``inner.agg(grouping_expr, agg_exprs)``, with each ``rand()`` drawn once
     per row in a column beneath the aggregate, as in ``filter`` (R1-F2 of
-    #413's review). A computed key keeps the name it has without staging."""
+    #413's review). A computed key keeps the name it has without staging.
+
+    The staged key carries a name the aggregate renames afterwards, so it
+    must not be one of the aggregates' names (R2-F2 of #335's review): the
+    draws avoid those names, and a key whose text still matches one
+    (``round(__ltseq_draw_1,Int64(0))`` as an aggregate's name) is staged
+    again with other draw names.
+    """
     names = list(agg_exprs)
     exprs = list(agg_exprs.values())
-    keyed = grouping_expr is not None
-    staged, rewritten, _ = stage_draws(inner, ([grouping_expr] if keyed else []) + exprs)
-    if keyed:
-        (key,) = keep_names(inner, [grouping_expr], rewritten[:1])
-        rewritten = rewritten[1:]
-    else:
-        key = None
+    if grouping_expr is None:
+        staged, rewritten, _ = stage_draws(inner, exprs)
+        # The output holds only the aggregates, never a draw.
+        return staged.agg(None, dict(zip(names, rewritten)))
+    taken = set(names)
+    while True:
+        staged, rewritten, draws = stage_draws(inner, [grouping_expr] + exprs, taken)
+        renames = kept_names(inner, staged, [grouping_expr], rewritten[:1])
+        if not taken & set(renames) or not draws:
+            break
+        taken |= set(draws)
     # The output holds only the key and the aggregates, never a draw.
-    return staged.agg(key, dict(zip(names, rewritten)))
+    return renamed(staged.agg(rewritten[0], dict(zip(names, rewritten[1:]))), renames)
 
 
 class GroupBy:
