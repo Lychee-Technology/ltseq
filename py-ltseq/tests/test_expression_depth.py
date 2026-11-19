@@ -503,3 +503,27 @@ def test_an_aggregate_may_take_the_name_of_a_staged_key(key, agg_name):
     out = t.agg(by=key, **{agg_name: lambda g: g.a.sum()}).to_arrow()
     assert out.schema.names == [want, agg_name]
     assert sum(out.column(agg_name).to_pylist()) == 6
+
+
+@pytest.mark.parametrize(
+    "other",
+    ["__ltseq_draw_0 * Int64(2)", "__ltseq_draw_1 * Int64(2)"],
+    ids=["named-like-the-staged-select", "named-like-the-next-staged-select"],
+)
+def test_a_selected_column_may_take_the_name_of_a_staged_select(other):
+    # R3-F1 of #335's review: a staged expression is renamed after the
+    # projection, so meanwhile it must not carry another output's name.
+    t = LTSeq.from_dict({other: [3, 4]})
+    out = t.select(other, lambda r: rand() * 2).to_arrow()
+    assert out.schema.names == [other, "random() * Int64(2)"]
+    assert out.column(other).to_pylist() == [3, 4]
+    assert all(0 <= v < 2 for v in out.column(1).to_pylist())
+
+
+def test_selecting_a_column_twice_beside_a_draw_still_terminates():
+    # Duplicates the caller wrote are not the staging's to resolve.
+    t = LTSeq.from_dict({"a": [1, 2]})
+    try:
+        t.select("a", "a", lambda r: rand()).to_arrow()
+    except Exception:
+        pass
