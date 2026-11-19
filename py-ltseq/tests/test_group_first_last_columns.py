@@ -74,3 +74,23 @@ def test_first_last_schema_keeps_lookalike_user_columns(table, pick):
     out = getattr(table.group_ordered(lambda r: r.k), pick)()
     assert out.columns == ["k", "v", *LOOKALIKES]
     assert out.to_arrow().column_names == out.columns
+
+
+class _TaggedLTSeq(LTSeq):
+    def __init__(self):
+        super().__init__()
+        self.tag = "initialized"
+
+
+def test_last_runs_subclass_init_and_reads_result_schema():
+    # last() used to copy flattened's schema; building the result with
+    # _from_inner fixed that but skipped a subclass's __init__ (#315).
+    base = LTSeq.from_rows([{"k": "a", "v": 1}, {"k": "a", "v": 2}, {"k": "b", "v": 3}]).sort("k", "v")
+    t = _TaggedLTSeq._from_inner(base._inner)
+    out = t.group_ordered(lambda r: r.k).last()
+    assert type(out) is _TaggedLTSeq
+    assert out.tag == "initialized"
+    assert out.columns == ["k", "v"]
+    assert list(out.schema) == ["k", "v"]
+    assert out.to_arrow().column_names == ["k", "v"]
+    assert out.to_pandas()["v"].tolist() == [2, 3]
