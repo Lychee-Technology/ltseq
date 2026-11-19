@@ -45,3 +45,52 @@ def test_first_last_keep_names_sql_would_rewrite(pick, rows):
     assert list(out.columns) == ["k", "UserID", "a.b"]
     assert out["UserID"].tolist() == [1 + r for r in rows]
     assert out["a.b"].tolist() == [4 + r for r in rows]
+
+
+def _picked(t: LTSeq, grouping: str, pick: str, filtered: bool) -> LTSeq:
+    grouped = getattr(t, grouping)(lambda r: r.k)
+    if filtered:
+        grouped = grouped.filter(lambda g: g.count() > 1)
+    return getattr(grouped, pick)()
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+@pytest.mark.parametrize("grouping", ["group_ordered", "group_sorted"])
+@pytest.mark.parametrize("pick", ["first", "last"])
+def test_first_last_schema_lists_only_the_result_columns(pick, grouping, filtered):
+    # last() used to copy the schema of the flattened plan it filters, so
+    # .columns and .schema listed the grouping columns its plan projects
+    # away; select() of them failed and no export held them (issue #315).
+    t = LTSeq.from_rows([{"k": "a", "v": 1}, {"k": "a", "v": 2}, {"k": "b", "v": 3}]).sort("k", "v")
+    out = _picked(t, grouping, pick, filtered)
+    assert out.columns == ["k", "v"]
+    assert list(out.schema) == ["k", "v"]
+    assert out.to_arrow().column_names == out.columns
+    assert out.select(*out.columns).to_arrow().column_names == ["k", "v"]
+
+
+@pytest.mark.parametrize("pick", ["first", "last"])
+def test_first_last_schema_keeps_lookalike_user_columns(table, pick):
+    out = getattr(table.group_ordered(lambda r: r.k), pick)()
+    assert out.columns == ["k", "v", *LOOKALIKES]
+    assert out.to_arrow().column_names == out.columns
+
+
+class _TaggedLTSeq(LTSeq):
+    def __init__(self):
+        super().__init__()
+        self.tag = "initialized"
+
+
+def test_last_runs_subclass_init_and_reads_result_schema():
+    # last() used to copy flattened's schema; building the result with
+    # _from_inner fixed that but skipped a subclass's __init__ (#315).
+    base = LTSeq.from_rows([{"k": "a", "v": 1}, {"k": "a", "v": 2}, {"k": "b", "v": 3}]).sort("k", "v")
+    t = _TaggedLTSeq._from_inner(base._inner)
+    out = t.group_ordered(lambda r: r.k).last()
+    assert type(out) is _TaggedLTSeq
+    assert out.tag == "initialized"
+    assert out.columns == ["k", "v"]
+    assert list(out.schema) == ["k", "v"]
+    assert out.to_arrow().column_names == ["k", "v"]
+    assert out.to_pandas()["v"].tolist() == [2, 3]

@@ -135,9 +135,14 @@ class NestedTable:
             >>> grouped.last()  # Returns LTSeq with last row per group
         """
         flattened = self.flatten()
-        result = flattened.__class__()
-        result._schema = flattened._schema.copy()
+        # Construct through __init__ so a subclass keeps the state it sets
+        # there. The schema cache stays unset so it is read from the
+        # result's own plan, which projects the grouping columns away;
+        # copying flattened's would list __group_id__, __group_count__ and
+        # __rn__ (#315).
+        result = type(flattened)()
         result._inner = flattened._inner.last_row()
+        result._schema_cache = None
         return result
 
     def count(self) -> "CallExpr":
