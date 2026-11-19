@@ -105,30 +105,58 @@ class StringAccessor:
         """
         return self._make_call("str_concat", others)
 
-    def pad_left(self, width: int, char: str = " ") -> "CallExpr":
+    def pad_left(self, width: "int | Expr", char: "str | Expr" = " ") -> "CallExpr":
         """Pad string on the left to reach specified width.
 
         Args:
-            width: Target width of the resulting string
-            char: Character to use for padding (default: space)
+            width: Target width of the resulting string, in characters: an
+                int or an integer expression such as a column. A negative
+                width gives ``""``; a longer string is cut to ``width``.
+            char: String to pad with, repeated as needed (default: space): a
+                str or a string expression such as a column. An empty one
+                leaves a shorter string as it is.
 
         Returns:
             Left-padded string expression
+
+        Raises:
+            ValueError: When the query runs, if a width is above
+                ``2**31 - 1`` characters, or if the padded strings of one
+                batch would need more bytes than the result column holds:
+                ``2**31 - 1`` bytes for a Utf8 result, the type a Utf8 or
+                Utf8View string gives, and ``2**63 - 1`` for a LargeUtf8
+                one. A result computed from literals only is one value
+                repeated for each row, so it counts once per row of the
+                batch.
 
         Example:
             >>> t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
         """
         return self._make_call("str_pad_left", (width, char))
 
-    def pad_right(self, width: int, char: str = " ") -> "CallExpr":
+    def pad_right(self, width: "int | Expr", char: "str | Expr" = " ") -> "CallExpr":
         """Pad string on the right to reach specified width.
 
         Args:
-            width: Target width of the resulting string
-            char: Character to use for padding (default: space)
+            width: Target width of the resulting string, in characters: an
+                int or an integer expression such as a column. A negative
+                width gives ``""``; a longer string is cut to ``width``.
+            char: String to pad with, repeated as needed (default: space): a
+                str or a string expression such as a column. An empty one
+                leaves a shorter string as it is.
 
         Returns:
             Right-padded string expression
+
+        Raises:
+            ValueError: When the query runs, if a width is above
+                ``2**31 - 1`` characters, or if the padded strings of one
+                batch would need more bytes than the result column holds:
+                ``2**31 - 1`` bytes for a Utf8 result, the type a Utf8 or
+                Utf8View string gives, and ``2**63 - 1`` for a LargeUtf8
+                one. A result computed from literals only is one value
+                repeated for each row, so it counts once per row of the
+                batch.
 
         Example:
             >>> t.derive(padded_name=lambda r: r.name.s.pad_right(20, "."))
@@ -377,6 +405,12 @@ class TemporalAccessor:
             minutes: Number of minutes to add
             seconds: Number of seconds to add
             weeks: Number of weeks to add (converted to days × 7)
+
+        Raises:
+            ValueError: When the query is built, if ``years * 12 + months`` or
+                ``weeks * 7 + days`` does not fit 32 bits, or ``hours``,
+                ``minutes`` and ``seconds`` together do not fit 64 bits of
+                nanoseconds.
 
         Example:
             >>> t.derive(next_month=lambda r: r.date.dt.add(months=1))

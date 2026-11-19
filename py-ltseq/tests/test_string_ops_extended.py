@@ -8,8 +8,11 @@ Tests the new StringAccessor methods:
 - s.split(delimiter, index) - split and get part
 """
 
+import pyarrow as pa
 import pytest
 from ltseq import LTSeq
+from ltseq.expr import LiteralExpr
+from ltseq.expr.accessors import StringAccessor
 
 
 # Test data file with string columns
@@ -212,6 +215,102 @@ class TestStringPadRight:
             assert row["padded"].startswith(row["name"])
             if len(row["name"]) < 15:
                 assert row["padded"].endswith("_")
+
+
+class TestStringPadLimits:
+    """pad_left/pad_right raise where arrow's Utf8 offsets would overflow (#192).
+
+    Before #192 these crossed the FFI as ``pyo3_runtime.PanicException``,
+    which derives from ``BaseException``, after allocating gigabytes.
+    """
+
+    @pytest.mark.parametrize("method", ["pad_left", "pad_right"])
+    def test_result_over_utf8_limit_raises(self, method):
+        # "a" and 2**30 two-byte characters are 2**31 + 1 bytes: over the
+        # limit whatever the batch layout, and refused before anything is built.
+        t = LTSeq.from_arrow(pa.table({"s": ["a"]}))
+        derived = t.derive(p=lambda r: getattr(r.s.s, method)(2**30 + 1, "é"))
+        with pytest.raises(ValueError, match="2147483647 a Utf8 column holds"):
+            derived.to_arrow()
+
+    @pytest.mark.parametrize("method", ["pad_left", "pad_right"])
+    def test_issue_width_raises(self, method, engine_config):
+        # The width from the issue report, on two rows in one batch. Pinned
+        # to one partition and the default batch size: rows in batches of
+        # their own would each fit, and each build a 2 GiB string.
+        engine_config(target_partitions=1)
+        t = LTSeq.from_arrow(pa.table({"s": ["a", "b"]}))
+        derived = t.derive(p=lambda r: getattr(r.s.s, method)(2**31 - 1))
+        with pytest.raises(ValueError, match="Utf8 column holds"):
+            derived.to_arrow()
+
+    def test_width_beyond_i32_raises(self):
+        t = LTSeq.from_arrow(pa.table({"s": ["a"]}))
+        derived = t.derive(p=lambda r: r.s.s.pad_left(2**63 - 1))
+        with pytest.raises(ValueError, match="too large"):
+            derived.to_arrow()
+
+    def test_negative_width_column_pads_to_empty(self):
+        # A negative width reads as 0. DataFusion's kernel reserved its buffer
+        # from the width column, read -1 as a huge size, and panicked.
+        t = LTSeq.from_arrow(pa.table({"s": ["ab", "cd", None], "w": [-1, 3, 2]}))
+        left = t.derive(p=lambda r: r.s.s.pad_left(r.w)).to_arrow()
+        right = t.derive(p=lambda r: r.s.s.pad_right(r.w)).to_arrow()
+        assert left.column("p").to_pylist() == ["", " cd", None]
+        assert right.column("p").to_pylist() == ["", "cd ", None]
+
+    def test_negative_literal_width_with_fill_column(self):
+        t = LTSeq.from_arrow(pa.table({"s": ["ab", "cd"], "c": ["*", ""]}))
+        derived = t.derive(p=lambda r: r.s.s.pad_left(-1, r.c))
+        assert derived.to_arrow().column("p").to_pylist() == ["", ""]
+
+    def test_empty_fill_column_keeps_short_strings(self):
+        # An empty fill pads nothing, so a huge width builds a small result.
+        # DataFusion's kernel reserved the sum of the widths, 4 GiB here.
+        t = LTSeq.from_arrow(pa.table({"s": ["ab", "cdef"], "c": ["", ""]}))
+        derived = t.derive(p=lambda r: r.s.s.pad_right(2**31 - 1, r.c))
+        assert derived.to_arrow().column("p").to_pylist() == ["ab", "cdef"]
+
+    @pytest.mark.parametrize("method", ["pad_left", "pad_right"])
+    def test_constant_pad_over_batch_raises(self, method, engine_config):
+        # A pad of literals is one value, repeated for each row of the batch:
+        # 8192 rows of 2**18 bytes are 2**31, one byte past Utf8's offsets.
+        # DataFusion folded the call into a literal checked for one row, and
+        # repeating that literal panicked. Refused before anything is built.
+        engine_config(target_partitions=1, batch_size=8192)
+        t = LTSeq.from_arrow(pa.table({"x": range(8192)}))
+        derived = t.derive(p=lambda r: getattr(StringAccessor(LiteralExpr("a")), method)(2**18))
+        with pytest.raises(ValueError, match="in one batch of 8192 rows"):
+            derived.to_arrow()
+
+    def test_constant_pad_values(self):
+        t = LTSeq.from_arrow(pa.table({"x": [1, 2, 3]}))
+        derived = t.derive(
+            l=lambda r: StringAccessor(LiteralExpr("ab")).pad_left(4, "*"),
+            r=lambda r: StringAccessor(LiteralExpr("ab")).pad_right(5, "é"),
+        ).to_arrow()
+        assert derived.column("l").to_pylist() == ["**ab"] * 3
+        assert derived.column("r").to_pylist() == ["abééé"] * 3
+
+    @pytest.mark.parametrize("method", ["pad_left", "pad_right"])
+    def test_width_beyond_i32_raises_on_null_strings(self, method):
+        # A literal width is checked before the rows, as in DataFusion, so
+        # an all-NULL string column raises too.
+        t = LTSeq.from_arrow(pa.table({"s": pa.array([None, None], pa.string())}))
+        derived = t.derive(p=lambda r: getattr(r.s.s, method)(2**40))
+        with pytest.raises(ValueError, match="too large"):
+            derived.to_arrow()
+
+    @pytest.mark.parametrize("method", ["pad_left", "pad_right"])
+    def test_long_fill_on_zero_widths(self, method, engine_config):
+        # Every width is 0, so the result is empty strings. DataFusion repeated
+        # the 1 MiB literal fill into a column of 4096 rows first, 4 GiB, past
+        # Utf8's offsets, and panicked.
+        engine_config(target_partitions=1)
+        t = LTSeq.from_arrow(pa.table({"s": ["ab"] * 4096, "w": [0] * 4096}))
+        fill = "x" * 2**20
+        derived = t.derive(p=lambda r: getattr(r.s.s, method)(r.w, fill))
+        assert derived.to_arrow().column("p").to_pylist() == [""] * 4096
 
 
 class TestStringSplit:
