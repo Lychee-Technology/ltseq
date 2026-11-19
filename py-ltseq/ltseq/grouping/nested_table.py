@@ -135,10 +135,10 @@ class NestedTable:
             >>> grouped.last()  # Returns LTSeq with last row per group
         """
         flattened = self.flatten()
-        result = flattened.__class__()
-        result._schema = flattened._schema.copy()
-        result._inner = flattened._inner.last_row()
-        return result
+        # The schema is read from the result's own plan, which projects the
+        # grouping columns away; copying flattened's would list
+        # __group_id__, __group_count__ and __rn__ (#315).
+        return type(flattened)._from_inner(flattened._inner.last_row())
 
     def count(self) -> "CallExpr":
         """
