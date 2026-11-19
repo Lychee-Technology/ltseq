@@ -206,6 +206,35 @@ class TestTemporalArithmetic:
         df = result.to_pandas()
         assert "future_date" in df.columns
 
+    @pytest.mark.parametrize(
+        "kwargs, fields",
+        [
+            # Overflows i64 when scaled: panicked in a debug build and moved
+            # the date by a wrapped amount in a release one (#192).
+            ({"years": 2**62}, "years=4611686018427387904, months=0"),
+            ({"weeks": 2**61}, "weeks=2305843009213693952, days=0"),
+            ({"hours": 2**40}, "hours=1099511627776, minutes=0, seconds=0"),
+            ({"seconds": -(2**62)}, "hours=0, minutes=0, seconds=-4611686018427387904"),
+            ({"months": 2**63 - 1, "years": 1}, "years=1, months=9223372036854775807"),
+            # Fits i64 but not the interval's i32 field: was truncated.
+            ({"days": 2**31}, "weeks=0, days=2147483648"),
+            ({"years": 2**28}, "years=268435456, months=0"),
+        ],
+    )
+    def test_dt_add_out_of_range_raises(self, kwargs, fields):
+        t = LTSeq.from_arrow(pa.table({"d": [dt.date(2024, 1, 1)]}))
+        with pytest.raises(ValueError, match=f"dt_add {fields} is out of range"):
+            t.derive(x=lambda r: r.d.dt.add(**kwargs)).to_arrow()
+
+    def test_dt_add_every_field(self):
+        t = LTSeq.from_arrow(pa.table({"d": [dt.date(2024, 1, 1)]}))
+        derived = t.derive(
+            x=lambda r: r.d.dt.add(
+                years=1, months=-1, weeks=1, days=-1, hours=47, minutes=59, seconds=60
+            )
+        )
+        assert derived.to_arrow().column("x").to_pylist() == [dt.date(2024, 12, 9)]
+
 
 class TestTemporalFilter:
     """Tests for filtering on temporal expressions."""

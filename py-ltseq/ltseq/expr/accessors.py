@@ -115,6 +115,11 @@ class StringAccessor:
         Returns:
             Left-padded string expression
 
+        Raises:
+            ValueError: When the query runs, if a width is above ``2**31 - 1``
+                or the padded strings of one batch would need more bytes
+                than a Utf8 column holds (``2**31 - 1``).
+
         Example:
             >>> t.derive(padded_id=lambda r: r.id.s.pad_left(5, "0"))
         """
@@ -129,6 +134,11 @@ class StringAccessor:
 
         Returns:
             Right-padded string expression
+
+        Raises:
+            ValueError: When the query runs, if a width is above ``2**31 - 1``
+                or the padded strings of one batch would need more bytes
+                than a Utf8 column holds (``2**31 - 1``).
 
         Example:
             >>> t.derive(padded_name=lambda r: r.name.s.pad_right(20, "."))
@@ -377,6 +387,12 @@ class TemporalAccessor:
             minutes: Number of minutes to add
             seconds: Number of seconds to add
             weeks: Number of weeks to add (converted to days × 7)
+
+        Raises:
+            ValueError: When the query is built, if ``years * 12 + months`` or
+                ``weeks * 7 + days`` does not fit 32 bits, or ``hours``,
+                ``minutes`` and ``seconds`` together do not fit 64 bits of
+                nanoseconds.
 
         Example:
             >>> t.derive(next_month=lambda r: r.date.dt.add(months=1))

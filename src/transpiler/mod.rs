@@ -20,6 +20,7 @@
 //! simplifier, which folds them with DataFusion's own types and checks
 //! (decision D-f on #225).
 
+mod checked_pad;
 mod exact;
 mod float_lists;
 pub(crate) mod floor_div;
@@ -54,7 +55,7 @@ use datafusion::functions::string::expr_fn::{
 };
 // Unicode functions (for length, substr, padding, left/right)
 use datafusion::functions::unicode::expr_fn::{
-    character_length, left, lpad, rpad, right, strpos, substring,
+    character_length, left, right, strpos, substring,
 };
 // Datetime functions
 use datafusion::functions::datetime::expr_fn::{current_date, date_part, now};
@@ -692,7 +693,7 @@ fn parse_call_string(
             } else {
                 lit(" ")
             };
-            Ok(lpad(vec![on_expr, width_expr, char_expr]))
+            Ok(checked_pad::lpad(vec![on_expr, width_expr, char_expr]))
         }
         "str_pad_right" => {
             validate_string_column(&on, rx.arrow(), "str_pad_right")?;
@@ -706,7 +707,7 @@ fn parse_call_string(
             } else {
                 lit(" ")
             };
-            Ok(rpad(vec![on_expr, width_expr, char_expr]))
+            Ok(checked_pad::rpad(vec![on_expr, width_expr, char_expr]))
         }
         "str_split" => {
             validate_string_column(&on, rx.arrow(), "str_split")?;
@@ -858,11 +859,31 @@ fn parse_call_temporal(
             let seconds = field(5, "seconds")?;
             let weeks = field(6, "weeks")?;
 
-            let total_months = (years * 12 + months) as i32;
-            let total_days = (days + weeks * 7) as i32;
-            let total_nanos = (hours * 3_600_000_000_000)
-                + (minutes * 60_000_000_000)
-                + (seconds * 1_000_000_000);
+            // Checked (#192): the operators panic on overflow in a debug
+            // build and wrap in a release one, and `as i32` truncates, so an
+            // out-of-range literal moved the date by some other amount.
+            let total_months = years
+                .checked_mul(12)
+                .and_then(|m| m.checked_add(months))
+                .and_then(|m| i32::try_from(m).ok())
+                .ok_or_else(|| format!("dt_add years={years}, months={months} is out of range"))?;
+            let total_days = weeks
+                .checked_mul(7)
+                .and_then(|d| d.checked_add(days))
+                .and_then(|d| i32::try_from(d).ok())
+                .ok_or_else(|| format!("dt_add weeks={weeks}, days={days} is out of range"))?;
+            let total_nanos = hours
+                .checked_mul(3_600_000_000_000)
+                .zip(minutes.checked_mul(60_000_000_000))
+                .and_then(|(h, m)| h.checked_add(m))
+                .zip(seconds.checked_mul(1_000_000_000))
+                .and_then(|(hm, s)| hm.checked_add(s))
+                .ok_or_else(|| {
+                    format!(
+                        "dt_add hours={hours}, minutes={minutes}, seconds={seconds} \
+                         is out of range"
+                    )
+                })?;
 
             let interval = ScalarValue::new_interval_mdn(total_months, total_days, total_nanos);
             Ok(on_expr + lit(interval))
