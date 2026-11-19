@@ -190,7 +190,7 @@ fn pyexpr_to_window_inner(
     rx: &Resolver<'_>,
     order_by: &[Sort],
 ) -> Result<Expr, String> {
-    rx.lowering(|| lower_window_node(py_expr, rx, order_by))
+    crate::stack::guarded(|| rx.lowering(|| lower_window_node(py_expr, rx, order_by)))
 }
 
 fn lower_window_node(
@@ -875,8 +875,7 @@ mod tests {
     /// dialect, so it too coerces each node once: a chain rooted at a
     /// `shift` grows linearly with its depth (review of b6cc39f on #225).
     /// Its recursion is deeper per level than the row dialect's, so the
-    /// depths are half the row test's, and it runs on the large stack the
-    /// row test uses.
+    /// depths are half the row test's; it runs as the row test does.
     #[test]
     fn window_lowering_coerces_each_node_once() {
         let schema = ArrowSchema::new(vec![Field::new("a", DataType::Int64, false)]);
@@ -900,7 +899,7 @@ mod tests {
             rx.coerced_nodes()
         };
         let (shallow, deep) =
-            crate::transpiler::tests::on_a_large_stack(|| (coerced(50), coerced(100)));
+            crate::transpiler::tests::as_planned(100, || (coerced(50), coerced(100)));
         assert!(
             deep <= 2 * shallow + 10,
             "{shallow} nodes coerced at depth 50, {deep} at depth 100"

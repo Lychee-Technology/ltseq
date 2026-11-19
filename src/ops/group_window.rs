@@ -16,9 +16,11 @@
 //! - `{"type": "GroupQuantifier", "quant": "all|any|none", "pred": <row-dialect dict>}`
 
 use crate::error::LtseqError;
+use crate::error::PyExprError;
+use crate::stack::MAX_EXPR_DEPTH;
 use crate::transpiler::window_native::aggregate_to_window;
 use crate::transpiler::{min_max, Resolver};
-use crate::types::{dict_to_py_expr, PyExpr};
+use crate::types::{dict_to_py_expr, dict_to_py_expr_within, PyExpr};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
@@ -59,7 +61,129 @@ enum GroupNode {
     Literal(PyExpr),
 }
 
+/// One group-dialect node read from its dict: a leaf, or an operator whose
+/// operands follow.
+enum GroupRead<'py> {
+    Leaf(GroupNode),
+    BinOp {
+        op: String,
+        left: Bound<'py, PyDict>,
+        right: Bound<'py, PyDict>,
+    },
+    UnaryOp {
+        op: String,
+        operand: Bound<'py, PyDict>,
+    },
+}
+
+/// An operator whose operands are being read.
+enum OpenGroup<'py> {
+    BinOp {
+        op: String,
+        right: Bound<'py, PyDict>,
+        left: Option<GroupNode>,
+    },
+    UnaryOp {
+        op: String,
+    },
+}
+
+/// Deserialize a group-dialect expression. Like `types::dict_to_py_expr`,
+/// the walk keeps its open operators in a vector rather than on the call
+/// stack (`crate::stack`), and refuses an expression deeper than
+/// [`MAX_EXPR_DEPTH`], counting the levels of a quantifier's predicate too.
 fn dict_to_group_node(dict: &Bound<'_, PyDict>) -> PyResult<GroupNode> {
+    let mut open = Vec::new();
+    let mut depth = 0;
+    let parsed = walk_group(dict, &mut open, &mut depth);
+    if parsed.is_ok() {
+        crate::stack::saw_depth(depth);
+    }
+    // Drop what an error leaves parsed on a stack deep enough for it.
+    let partial: Vec<GroupNode> = open
+        .drain(..)
+        .filter_map(|node| match node {
+            OpenGroup::BinOp { left, .. } => left,
+            OpenGroup::UnaryOp { .. } => None,
+        })
+        .collect();
+    if !partial.is_empty() {
+        crate::stack::guarded_for(depth, move || drop(partial));
+    }
+    parsed
+}
+
+fn walk_group<'py>(
+    dict: &Bound<'py, PyDict>,
+    open: &mut Vec<OpenGroup<'py>>,
+    depth: &mut usize,
+) -> PyResult<GroupNode> {
+    let mut next = dict.clone();
+    loop {
+        if open.len() >= MAX_EXPR_DEPTH {
+            return Err(PyExprError::TooDeep(MAX_EXPR_DEPTH).into());
+        }
+        *depth = (*depth).max(open.len() + 1);
+        let mut done = match read_group_node(&next, MAX_EXPR_DEPTH - open.len())? {
+            GroupRead::Leaf(node) => node,
+            GroupRead::BinOp { op, left, right } => {
+                open.push(OpenGroup::BinOp {
+                    op,
+                    right,
+                    left: None,
+                });
+                next = left;
+                continue;
+            }
+            GroupRead::UnaryOp { op, operand } => {
+                open.push(OpenGroup::UnaryOp { op });
+                next = operand;
+                continue;
+            }
+        };
+        // Close each operator whose operands are read, up to one whose right
+        // operand is next.
+        loop {
+            match open.pop() {
+                None => return Ok(done),
+                Some(OpenGroup::UnaryOp { op }) => {
+                    done = GroupNode::UnaryOp {
+                        op,
+                        operand: Box::new(done),
+                    }
+                }
+                Some(OpenGroup::BinOp {
+                    op,
+                    right,
+                    left: None,
+                }) => {
+                    next = right.clone();
+                    open.push(OpenGroup::BinOp {
+                        op,
+                        right,
+                        left: Some(done),
+                    });
+                    break;
+                }
+                Some(OpenGroup::BinOp {
+                    op,
+                    left: Some(left),
+                    ..
+                }) => {
+                    done = GroupNode::BinOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(done),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read one group-dialect node, `levels` being the most its subtree may
+/// have.
+fn read_group_node<'py>(dict: &Bound<'py, PyDict>, levels: usize) -> PyResult<GroupRead<'py>> {
     let node_type: String = dict
         .get_item("type")?
         .ok_or_else(|| LtseqError::Validation("Group expression missing 'type'".into()))?
@@ -100,7 +224,7 @@ fn dict_to_group_node(dict: &Bound<'_, PyDict>) -> PyResult<GroupNode> {
             })
     };
 
-    Ok(match node_type.as_str() {
+    Ok(GroupRead::Leaf(match node_type.as_str() {
         "GroupCount" => GroupNode::Count,
         "GroupAgg" => GroupNode::Agg {
             func: get_str("func")?,
@@ -136,17 +260,22 @@ fn dict_to_group_node(dict: &Bound<'_, PyDict>) -> PyResult<GroupNode> {
                     .into())
                 }
             },
-            pred: dict_to_py_expr(&get_dict("pred")?)?,
+            // The quantifier is a level above its predicate.
+            pred: dict_to_py_expr_within(&get_dict("pred")?, levels - 1)?,
         },
-        "BinOp" => GroupNode::BinOp {
-            op: get_str("op")?,
-            left: Box::new(dict_to_group_node(&get_dict("left")?)?),
-            right: Box::new(dict_to_group_node(&get_dict("right")?)?),
-        },
-        "UnaryOp" => GroupNode::UnaryOp {
-            op: get_str("op")?,
-            operand: Box::new(dict_to_group_node(&get_dict("operand")?)?),
-        },
+        "BinOp" => {
+            return Ok(GroupRead::BinOp {
+                op: get_str("op")?,
+                left: get_dict("left")?,
+                right: get_dict("right")?,
+            })
+        }
+        "UnaryOp" => {
+            return Ok(GroupRead::UnaryOp {
+                op: get_str("op")?,
+                operand: get_dict("operand")?,
+            })
+        }
         // Row-dialect literal: let the existing parser handle value/dtype.
         "Literal" => GroupNode::Literal(dict_to_py_expr(dict)?),
         other => {
@@ -156,7 +285,7 @@ fn dict_to_group_node(dict: &Bound<'_, PyDict>) -> PyResult<GroupNode> {
             ))
             .into())
         }
-    })
+    }))
 }
 
 /// `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` — every row in
@@ -191,7 +320,7 @@ fn group_node_to_expr(node: GroupNode, schema: &ArrowSchema) -> Result<Expr, Str
 
 /// Lower one group-dialect node, through `Resolver::lowering`.
 fn lower_group_node(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
-    rx.lowering(|| lower_group_node_once(node, rx))
+    crate::stack::guarded(|| rx.lowering(|| lower_group_node_once(node, rx)))
 }
 
 fn lower_group_node_once(node: GroupNode, rx: &Resolver<'_>) -> Result<Expr, String> {
@@ -336,7 +465,26 @@ pub fn derive_group_window_impl(
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
     require_grouping_columns(schema)?;
+    let mut nodes = Vec::with_capacity(derived.len());
+    for (col_name, expr_item) in derived.iter() {
+        let name: String = col_name
+            .extract()
+            .map_err(|_| LtseqError::TypeMismatch("Column name must be string".into()))?;
+        let expr_dict = expr_item
+            .cast::<PyDict>()
+            .map_err(|_| LtseqError::TypeMismatch("Group expression must be dict".into()))?;
+        nodes.push((name, dict_to_group_node(expr_dict)?));
+    }
+    crate::stack::planned(|| derive_group_window_parsed(table, df, schema, nodes))
+}
 
+/// [`derive_group_window_impl`] once its expressions are deserialized.
+fn derive_group_window_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    nodes: Vec<(String, GroupNode)>,
+) -> Result<LTSeqTable, LtseqError> {
     // Stage A keeps every current column (the internals are needed to restore
     // row order afterwards) and appends the derived window columns.
     let mut stage_a: Vec<Expr> = schema
@@ -345,14 +493,7 @@ pub fn derive_group_window_impl(
         .map(|f| Expr::Column(Column::new_unqualified(f.name())))
         .collect();
     let mut final_names: Vec<String> = Vec::new();
-    for (col_name, expr_item) in derived.iter() {
-        let name: String = col_name
-            .extract()
-            .map_err(|_| LtseqError::TypeMismatch("Column name must be string".into()))?;
-        let expr_dict = expr_item
-            .cast::<PyDict>()
-            .map_err(|_| LtseqError::TypeMismatch("Group expression must be dict".into()))?;
-        let node = dict_to_group_node(expr_dict)?;
+    for (name, node) in nodes {
         let expr = group_node_to_expr(node, schema).map_err(LtseqError::Transpile)?;
         stage_a.push(expr.alias(&name));
         final_names.push(name);
@@ -396,6 +537,16 @@ pub fn filter_group_window_impl(
     require_grouping_columns(schema)?;
 
     let node = dict_to_group_node(predicate)?;
+    crate::stack::planned(|| filter_group_window_parsed(table, df, schema, node))
+}
+
+/// [`filter_group_window_impl`] once its predicate is deserialized.
+fn filter_group_window_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    node: GroupNode,
+) -> Result<LTSeqTable, LtseqError> {
     let pred_expr = group_node_to_expr(node, schema).map_err(LtseqError::Transpile)?;
 
     // Stage A: all current columns + the predicate as a hidden column.

@@ -22,9 +22,11 @@
 use crate::arrow_ffi::ImportedStream;
 use crate::error::LtseqError;
 use crate::metadata::{sort_specs_to_window_sorts, SortSpec};
+use crate::stack::planned;
 use crate::transpiler::{pyexpr_to_datafusion, pyexpr_to_named_datafusion};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
+use datafusion::arrow::datatypes::Schema as ArrowSchema;
 use datafusion::common::Column;
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::math::expr_fn::isnan;
@@ -46,7 +48,10 @@ use std::sync::Arc;
 pub fn filter_impl(table: &LTSeqTable, expr_dict: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
     // 1. Deserialize expression
     let py_expr = dict_to_py_expr(expr_dict)?;
+    planned(|| filter_parsed(table, py_expr))
+}
 
+fn filter_parsed(table: &LTSeqTable, py_expr: PyExpr) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
@@ -160,14 +165,24 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     // 1. Get schema
     let schema = table.require_schema()?;
 
-    // 2. Deserialize and transpile all expressions, noting the columns that
-    // pass through unchanged
+    // 2. Deserialize all expressions, then transpile them
+    let py_exprs = exprs
+        .iter()
+        .map(dict_to_py_expr)
+        .collect::<Result<Vec<_>, _>>()?;
+    planned(|| select_parsed(table, schema, py_exprs))
+}
+
+fn select_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    py_exprs: Vec<PyExpr>,
+) -> Result<LTSeqTable, LtseqError> {
+    // Transpile, noting the columns that pass through unchanged
     let mut df_exprs = Vec::new();
     let mut passed = std::collections::HashSet::new();
 
-    for expr_dict in exprs {
-        // Deserialize
-        let py_expr = dict_to_py_expr(&expr_dict)?;
+    for py_expr in py_exprs {
         if let PyExpr::Column(name) = &py_expr {
             passed.insert(name.clone());
         }
@@ -295,7 +310,14 @@ pub fn search_first_impl(
 
     // Deserialize the expression
     let py_expr = dict_to_py_expr(expr_dict)?;
+    planned(|| search_first_parsed(table, schema, py_expr))
+}
 
+fn search_first_parsed(
+    table: &LTSeqTable,
+    schema: &ArrowSchema,
+    py_expr: PyExpr,
+) -> Result<LTSeqTable, LtseqError> {
     // Transpile to DataFusion Expr
     let df_expr = pyexpr_to_datafusion(py_expr, schema)
         .map_err(LtseqError::Validation)?;

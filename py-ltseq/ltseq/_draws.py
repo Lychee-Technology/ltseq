@@ -28,14 +28,28 @@ _RAND = "math_rand"
 _PREFIX = "__ltseq_draw_"
 
 
+def _nodes(value: Any) -> Iterable[dict]:
+    """The expression nodes of serialized expressions, but for literals.
+
+    The walk keeps its own stack: recursing through ``any()`` or
+    ``set().union()`` takes C stack per level, which a deep expression
+    exhausts on a small thread (#335).
+    """
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, dict) and value.get("type") != "Literal":
+            yield value
+            pending.extend(value.values())
+
+
 def _holds_draw(value: Any) -> bool:
-    if isinstance(value, list):
-        return any(_holds_draw(v) for v in value)
-    if not isinstance(value, dict) or value.get("type") == "Literal":
-        return False
-    if value.get("type") == "Call" and value.get("func") == _RAND:
-        return True
-    return any(_holds_draw(v) for v in value.values())
+    return any(
+        node.get("type") == "Call" and node.get("func") == _RAND
+        for node in _nodes(value)
+    )
 
 
 # Group-dialect nodes naming the column they read in ``column`` (R3-F1 of
@@ -46,17 +60,12 @@ _GROUP_COLUMN_NODES = ("GroupAgg", "GroupRowColumn")
 def _columns(value: Any) -> set[str]:
     """The names of the columns serialized expressions read, in the row
     dialect and in the group dialect."""
-    if isinstance(value, list):
-        return set().union(*(_columns(v) for v in value))
-    if not isinstance(value, dict) or value.get("type") == "Literal":
-        return set()
     names = set()
-    if value.get("type") == "Column" and isinstance(value.get("name"), str):
-        names.add(value["name"])
-    if value.get("type") in _GROUP_COLUMN_NODES and isinstance(value.get("column"), str):
-        names.add(value["column"])
-    for v in value.values():
-        names |= _columns(v)
+    for node in _nodes(value):
+        if node.get("type") == "Column" and isinstance(node.get("name"), str):
+            names.add(node["name"])
+        if node.get("type") in _GROUP_COLUMN_NODES and isinstance(node.get("column"), str):
+            names.add(node["column"])
     return names
 
 

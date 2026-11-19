@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 _IsInValue = bool | int | float | str | Decimal | date | SupportsIndex | SupportsFloat | LiteralExpr | None
 
 
+# An expression may be at most 1000 levels deep; an operation given a deeper
+# one raises ValueError (#335). See `Expr`'s docstring.
 class Expr:
     @staticmethod
     def _coerce(value: Any) -> Expr: ...

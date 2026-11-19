@@ -47,6 +47,7 @@ pub(crate) const DEFAULT_BATCH_SIZE: usize = 16384;
 pub static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(*NUM_CPUS)
+        .thread_stack_size(crate::stack::WORKER_STACK)
         .enable_all()
         .build()
         .expect("Failed to create Tokio runtime")

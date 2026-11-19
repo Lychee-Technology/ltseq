@@ -36,6 +36,7 @@ mod rule_inventory; // Every optimizer rule a session runs is rated (issue #273)
 pub(crate) mod rewrite_guard; // Guards of the rewrites rated Restricted (issue #273)
 pub(crate) mod python_glob; // Python's glob.glob, for a reader's glob (issue #261)
 pub(crate) mod source; // File sources listed at the call (issue #262)
+pub(crate) mod stack; // Stack for planning deep expressions (issue #335)
 pub(crate) mod stored_zones; // Zones of Parquet timestamps stored in another unit (issue #362)
 pub(crate) mod transpiler; // PyExpr to DataFusion transpilation
 mod types; // PyExpr deserialization
@@ -94,6 +95,17 @@ pub struct LTSeqTable {
     // those operations set it (`with_plan_in_order`); every other result,
     // including a transform of theirs, starts without it.
     plan_in_order: bool,
+}
+
+/// A table's plan can hold an expression as deep as
+/// [`stack::MAX_EXPR_DEPTH`], and dropping it recurses through it: the
+/// last table to hold the plan drops it on a stack deep enough (#335).
+impl Drop for LTSeqTable {
+    fn drop(&mut self) {
+        if let Some(dataframe) = self.dataframe.take() {
+            stack::guarded(move || drop(dataframe));
+        }
+    }
 }
 
 /// Helper constructors for LTSeqTable (non-PyO3).
@@ -579,11 +591,14 @@ impl LTSeqTable {
     fn explain_plan(&self, py: Python<'_>) -> PyResult<(String, String)> {
         let df = self.ordered_df()?;
 
-        let logical = df
-            .clone()
-            .into_optimized_plan()
-            .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
-        let logical_text = format!("{}", logical.display_indent());
+        // Optimizing and printing recurse through the plan's expressions.
+        let logical_text = stack::planned(|| {
+            let logical = df
+                .clone()
+                .into_optimized_plan()
+                .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
+            Ok(format!("{}", logical.display_indent()))
+        })?;
 
         // Physical planning lists files / reads footers for file sources.
         let physical_text = detached(py, || {
@@ -675,7 +690,7 @@ impl LTSeqTable {
     /// that key. Its stream is taken under the GIL and read detached.
     fn filter_key_row(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
         let key = crate::arrow_ffi::ImportedStream::from_py(key)?;
-        detached(py, || crate::ops::basic::filter_key_row_impl(self, key))
+        crate::gil::detached_on_own_stack(py, || crate::ops::basic::filter_key_row_impl(self, key))
     }
 
     /// Find the first row matching a predicate
@@ -1278,7 +1293,7 @@ impl LTSeqTable {
     #[staticmethod]
     fn from_arrow(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<LTSeqTable> {
         let stream = crate::arrow_ffi::ImportedStream::from_py(data)?;
-        detached(py, || crate::ops::io::from_arrow_impl(stream))
+        crate::gil::detached_on_own_stack(py, || crate::ops::io::from_arrow_impl(stream))
     }
 
     /// Is Subset: Check if this table is a subset of another table

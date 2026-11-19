@@ -52,7 +52,7 @@ fn is_string_type(dt: &DataType) -> bool {
 fn extract_join_key_columns(
     left_expr: &PyExpr,
     right_expr: &PyExpr,
-) -> PyResult<(Vec<String>, Vec<String>)> {
+) -> Result<(Vec<String>, Vec<String>), LtseqError> {
     // Handle simple case: single column on each side
     if let (PyExpr::Column(left_name), PyExpr::Column(right_name)) = (left_expr, right_expr) {
         return Ok((vec![left_name.clone()], vec![right_name.clone()]));
@@ -73,8 +73,7 @@ fn extract_join_key_columns(
 
     Err(LtseqError::Validation(
         "Join keys must be either simple columns or matching And-expressions".into(),
-    )
-    .into())
+    ))
 }
 
 /// Recursively extract column names from And-expressions containing Eq operations
@@ -82,7 +81,7 @@ fn extract_cols_from_and(
     expr: &PyExpr,
     left_cols: &mut Vec<String>,
     right_cols: &mut Vec<String>,
-) -> PyResult<()> {
+) -> Result<(), LtseqError> {
     match expr {
         PyExpr::BinOp { op, left, right } => {
             match op.as_str() {
@@ -99,8 +98,7 @@ fn extract_cols_from_and(
                     } else {
                         return Err(LtseqError::Validation(
                             "Left side of join equality must be a column reference".into(),
-                        )
-                        .into());
+                        ));
                     }
 
                     if let PyExpr::Column(right_name) = right.as_ref() {
@@ -108,22 +106,19 @@ fn extract_cols_from_and(
                     } else {
                         return Err(LtseqError::Validation(
                             "Right side of join equality must be a column reference".into(),
-                        )
-                        .into());
+                        ));
                     }
                     Ok(())
                 }
                 other => Err(LtseqError::Validation(format!(
                     "Unsupported operator in join condition: {}. Expected 'And' or 'Eq'",
                     other
-                ))
-                .into()),
+                ))),
             }
         }
         _ => Err(LtseqError::Validation(
             "Expected And or Eq expression in composite join".into(),
-        )
-        .into()),
+        )),
     }
 }
 
@@ -138,14 +133,25 @@ fn extract_and_validate_join_keys(
 
     let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
 
+    crate::stack::planned(|| {
+        validate_join_keys(left_key_expr, right_key_expr, schema_left, schema_right)
+    })
+}
+
+/// [`extract_and_validate_join_keys`] once its keys are deserialized.
+fn validate_join_keys(
+    left_key_expr: PyExpr,
+    right_key_expr: PyExpr,
+    schema_left: &ArrowSchema,
+    schema_right: &ArrowSchema,
+) -> Result<(Vec<String>, Vec<String>), LtseqError> {
     let (left_col_names, right_col_names) =
         extract_join_key_columns(&left_key_expr, &right_key_expr)?;
 
     if left_col_names.is_empty() || right_col_names.is_empty() {
         return Err(LtseqError::Validation(
             "No join keys found in expressions".into(),
-        )
-        .into());
+        ));
     }
 
     // Validate left columns exist
@@ -154,8 +160,7 @@ fn extract_and_validate_join_keys(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in left table",
                 left_col
-            ))
-            .into());
+            )));
         }
     }
 
@@ -165,8 +170,7 @@ fn extract_and_validate_join_keys(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in right table",
                 right_col
-            ))
-            .into());
+            )));
         }
     }
 

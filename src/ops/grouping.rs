@@ -124,7 +124,16 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
 
     // Deserialize grouping expression
     let py_expr = dict_to_py_expr(&grouping_expr)?;
+    crate::stack::planned(|| group_id_parsed(table, df, schema, py_expr))
+}
 
+/// [`group_id_impl`] once its expression is deserialized.
+fn group_id_parsed(
+    table: &LTSeqTable,
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+    py_expr: PyExpr,
+) -> Result<LTSeqTable, LtseqError> {
     // NOTE: no linear-scan branch here. linear_scan_group_id returns a
     // METADATA-ONLY table (__group_id__/__group_count__/__rn__ without the
     // user columns) — sufficient for counting, so group_ordered_count_impl
@@ -234,8 +243,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         _ => {
             return Err(LtseqError::Runtime(
                 "Expected AggregateFunction from sum()".into(),
-            )
-            .into());
+            ));
         }
     };
 
@@ -276,8 +284,7 @@ pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> Py
         _ => {
             return Err(LtseqError::Runtime(
                 "Expected AggregateFunction from count()".into(),
-            )
-            .into());
+            ));
         }
     };
 

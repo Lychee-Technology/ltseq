@@ -57,6 +57,8 @@ pub enum PyExprError {
     /// encoder never produces one, so reaching this means an LTSeq bug or a
     /// hand-built payload, not a user typo.
     InvalidLiteral(String),
+    /// An expression deeper than the limit given (`crate::stack`).
+    TooDeep(usize),
 }
 
 impl fmt::Display for PyExprError {
@@ -66,6 +68,12 @@ impl fmt::Display for PyExprError {
             PyExprError::InvalidType(msg) => write!(f, "Invalid type: {}", msg),
             PyExprError::UnknownVariant(var) => write!(f, "Unknown expression type: {}", var),
             PyExprError::InvalidLiteral(msg) => write!(f, "Malformed literal payload: {}", msg),
+            PyExprError::TooDeep(limit) => write!(
+                f,
+                "Expression is nested more than {limit} levels deep, the most LTSeq plans; \
+                 build it from shallower parts (for example, a balanced tree of `|` \
+                 rather than a chain)"
+            ),
         }
     }
 }

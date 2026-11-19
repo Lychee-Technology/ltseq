@@ -59,13 +59,18 @@ class LookupMixin:
             True if expression contains a Lookup type
         """
         # Walk every field, so a lookup under a window, an argument list or
-        # any other node is found and _bare_lookup can reject it.
-        if isinstance(expr_dict, dict):
-            return expr_dict.get("type") == "Lookup" or any(
-                self._contains_lookup(value) for value in expr_dict.values()
-            )
-        if isinstance(expr_dict, list):
-            return any(self._contains_lookup(item) for item in expr_dict)
+        # any other node is found and _bare_lookup can reject it. The walk
+        # keeps its own stack: recursing through any() takes C stack per
+        # level, which a deep expression exhausts on a small thread (#335).
+        pending = [expr_dict]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if value.get("type") == "Lookup":
+                    return True
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
         return False
 
     def _resolve_lookups(

@@ -93,7 +93,11 @@ impl Iterator for DataFrameBatchReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         let stream = self.stream.as_mut()?;
-        let pulled = catch_unwind(AssertUnwindSafe(|| RUNTIME.block_on(stream.next())));
+        // Pulling a batch evaluates the plan's expressions, which may be deep
+        // (`crate::stack`).
+        let pulled = catch_unwind(AssertUnwindSafe(|| {
+            crate::stack::guarded(|| RUNTIME.block_on(stream.next()))
+        }));
         match pulled {
             Ok(Some(Ok(batch))) => Some(Ok(batch)),
             Ok(None) => {
