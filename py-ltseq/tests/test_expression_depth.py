@@ -527,3 +527,41 @@ def test_selecting_a_column_twice_beside_a_draw_still_terminates():
         t.select("a", "a", lambda r: rand()).to_arrow()
     except Exception:
         pass
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda x: (lambda r: [x, x]),
+        lambda x: (lambda r: [x, r.a, x]),
+    ],
+    ids=["twice", "twice-around-a-column"],
+)
+def test_selecting_a_pinned_draw_twice_terminates(build):
+    # R4-F1 of #335's review: both copies share the pinned draw, so no draw
+    # name tells them apart; the staging must not retry forever. Run on a
+    # thread with a deadline so a regression fails rather than hangs.
+    import threading
+
+    t = LTSeq.from_dict({"a": [1, 2]})
+    x = rand().between(0, 1)
+    outcome: dict[str, object] = {}
+
+    def run():
+        try:
+            outcome["names"] = t.select(build(x)).to_arrow().schema.names
+        except Exception as exc:  # the projection's own duplicate error
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive(), "select of a duplicated pinned draw hung"
+    assert outcome
+    without_draw = {}
+    try:
+        without_draw["names"] = t.select(lambda r: [r.a, r.a]).to_arrow().schema.names
+    except Exception as exc:
+        without_draw["error"] = exc
+    # It behaves as a duplicate without a draw does: both fail, or both pass.
+    assert ("error" in outcome) == ("error" in without_draw)

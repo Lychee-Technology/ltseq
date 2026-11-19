@@ -185,20 +185,36 @@ def _select_staged(inner: Any, exprs: list[Any]) -> tuple[Any, list[Any], dict[s
     (R3-F1 of #335's review): a column named ``__ltseq_draw_0 * Int64(2)``
     selected beside ``rand() * 2`` would otherwise make the projection
     ambiguous. Such a projection is staged again with other draw names.
+
+    A duplicate the caller wrote is not the staging's: ``[x, x]`` for one
+    pinned ``x = rand() ...`` stages both copies on the same draw, so no
+    draw name tells them apart (R4-F1 of #335's review). It is left for the
+    projection to report, as it is without a draw. Each retry excludes the
+    names it tried, and a collision needs another output or column of that
+    exact name, so the retries are also bounded by their number.
     """
     taken: set[str] = set()
+    original: list[str] | None = None
+    retries = len(exprs) + len(inner.get_schema_dict()) + 1
     while True:
         staged, rewritten, draws = stage_draws(inner, exprs, taken)
         renames = kept_names(inner, staged, exprs, rewritten)
-        if not renames or not draws:
+        if not renames or not draws or retries <= 0:
             return staged, rewritten, renames
+        if original is None:
+            original = _output_names(inner, exprs)
         # A staged name another output also takes, or another staged
         # expression is renamed to; duplicates the caller wrote stay theirs.
         interim = _output_names(staged, rewritten)
-        clash = set(renames.values()) | {n for n in renames if interim.count(n) > 1}
+        clash = set(renames.values()) | {
+            n
+            for n in renames
+            if interim.count(n) > max(1, original.count(renames[n]))
+        }
         if not clash & set(renames):
             return staged, rewritten, renames
         taken |= set(draws)
+        retries -= 1
 
 
 class _FoldRow:
