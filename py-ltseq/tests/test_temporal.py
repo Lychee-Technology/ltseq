@@ -226,6 +226,24 @@ class TestTemporalArithmetic:
         with pytest.raises(ValueError, match=f"dt_add {fields} is out of range"):
             t.derive(x=lambda r: r.d.dt.add(**kwargs)).to_arrow()
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            # Terms that cancel: the total is checked, not each scaled term,
+            # which here is beyond i64.
+            {"hours": 2**40, "minutes": -60 * 2**40},
+            {"hours": 3_000_000, "minutes": -180_000_000},
+            {"years": 2**40, "months": -12 * 2**40},
+            {"weeks": 2**60, "days": -7 * 2**60 + 1},
+            {"minutes": 2**56, "seconds": -60 * 2**56},
+        ],
+    )
+    def test_dt_add_cancelling_terms(self, kwargs):
+        t = LTSeq.from_arrow(pa.table({"d": [dt.date(2024, 1, 1)]}))
+        derived = t.derive(x=lambda r: r.d.dt.add(**kwargs))
+        expected = dt.date(2024, 1, 2) if "weeks" in kwargs else dt.date(2024, 1, 1)
+        assert derived.to_arrow().column("x").to_pylist() == [expected]
+
     def test_dt_add_every_field(self):
         t = LTSeq.from_arrow(pa.table({"d": [dt.date(2024, 1, 1)]}))
         derived = t.derive(

@@ -9,64 +9,125 @@
 //! to `2**31 - 1` are enough, and so are 8192 rows (one default batch) padded
 //! to `2**18`.
 //!
-//! The kernels also reserve their output buffer from the widths alone: the
-//! sum of every non-NULL width in the batch, on the path taken for a width
-//! column, a fill column or a literal width above 16384. That sum counts rows
-//! whose string is NULL, rows whose empty fill pads nothing, and reads a
-//! negative width as a huge `usize`, so the reservation can be far larger than
-//! the result, or fail: an allocation failure aborts the process.
+//! The kernels also size their work from the arguments rather than the
+//! result: they reserve the sum of the widths (or `rows * width`, four times
+//! that for a non-ASCII string or fill), counting rows whose string is NULL
+//! and empty fills that pad nothing, and reading a negative width as a huge
+//! `usize`; and they first repeat each literal string argument into a column
+//! of the batch's length, which can itself overflow the offsets however small
+//! the result. An allocation failure aborts the process.
 //!
-//! The wrapper keeps DataFusion's kernels and semantics and fixes both before
-//! delegating to them:
+//! So this wrapper keeps DataFusion's signature, types and semantics, and
+//! pads itself:
 //!
-//! - It computes the exact byte length of the result (cheaply first, as an
-//!   upper bound, and exactly only when that bound exceeds the limit) and
-//!   returns an execution error when it does not fit the result's offsets.
-//! - On the kernels' reserving path it rewrites the width argument to one
-//!   that gives the same result but reserves no more than the result needs:
-//!   NULL where the row's result is NULL, 0 for a negative width (which the
-//!   kernels read as 0), and the string's byte length where an empty fill
-//!   leaves a shorter string as it is.
+//! - It reads each argument as it comes, a literal as one value, and
+//!   computes the exact byte length of the result before building anything;
+//!   it returns an execution error when that does not fit the result's
+//!   offsets, and reserves exactly that length otherwise.
+//! - A literal width above `i32::MAX` is an error before any row is read, as
+//!   in DataFusion, even when every string is NULL; a width column is checked
+//!   on the rows whose string, width and fill are all non-NULL.
+//! - When every argument is a literal, the result is one value that the
+//!   projection repeats for every row of the batch, so the check covers the
+//!   batch's rows times that value. A call whose arguments reference no
+//!   column is planned as volatile ([`lpad`]): DataFusion would otherwise
+//!   fold it to a literal while planning, checked against a single row, and
+//!   repeat that literal into each batch with a panic on overflow.
 //!
 //! The wrapper keeps the name `lpad` / `rpad`, so plans and default column
 //! names read as before.
 
+use std::fmt::Write;
 use std::sync::{Arc, LazyLock};
 
-use datafusion::arrow::array::{Array, AsArray, Int64Array};
+use datafusion::arrow::array::{
+    Array, ArrayRef, AsArray, GenericStringBuilder, Int64Array, OffsetSizeTrait,
+};
 use datafusion::arrow::datatypes::{DataType, Int64Type};
-use datafusion::common::{exec_err, Result, ScalarValue};
+use datafusion::common::{exec_datafusion_err, exec_err, Result, ScalarValue};
 use datafusion::logical_expr::{
     ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+    Volatility,
 };
 
-/// The widest a literal width may be and still take DataFusion's scalar fast
-/// path, which reserves `rows * width` bytes and never the width sum
-/// (`MAX_SCALAR_TARGET_LEN` in `datafusion-functions` 55).
-const MAX_SCALAR_TARGET_LEN: i64 = 16384;
+static LPAD: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
+    checked(
+        datafusion::functions::unicode::lpad(),
+        Side::Left,
+        Volatility::Immutable,
+    )
+});
+static RPAD: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
+    checked(
+        datafusion::functions::unicode::rpad(),
+        Side::Right,
+        Volatility::Immutable,
+    )
+});
+static LPAD_CONSTANT: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
+    checked(
+        datafusion::functions::unicode::lpad(),
+        Side::Left,
+        Volatility::Volatile,
+    )
+});
+static RPAD_CONSTANT: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
+    checked(
+        datafusion::functions::unicode::rpad(),
+        Side::Right,
+        Volatility::Volatile,
+    )
+});
 
-static LPAD: LazyLock<Arc<ScalarUDF>> =
-    LazyLock::new(|| checked(datafusion::functions::unicode::lpad()));
-static RPAD: LazyLock<Arc<ScalarUDF>> =
-    LazyLock::new(|| checked(datafusion::functions::unicode::rpad()));
+fn checked(inner: Arc<ScalarUDF>, side: Side, volatility: Volatility) -> Arc<ScalarUDF> {
+    let signature = Signature {
+        volatility,
+        ..inner.signature().clone()
+    };
+    Arc::new(ScalarUDF::new_from_impl(CheckedPad {
+        inner,
+        side,
+        signature,
+    }))
+}
 
-fn checked(inner: Arc<ScalarUDF>) -> Arc<ScalarUDF> {
-    Arc::new(ScalarUDF::new_from_impl(CheckedPad { inner }))
+/// Whether a call on `args` is constant: no argument references a column.
+/// The optimizer would fold such a call to a literal, which the projection
+/// repeats for every row without a check, so it is planned as volatile and
+/// evaluated per batch, where the check sees the batch's rows.
+fn constant(args: &[Expr]) -> bool {
+    !args.iter().any(Expr::any_column_refs)
 }
 
 /// `lpad(string, width[, fill])`, checked as the module describes.
 pub(crate) fn lpad(args: Vec<Expr>) -> Expr {
-    LPAD.call(args)
+    if constant(&args) {
+        LPAD_CONSTANT.call(args)
+    } else {
+        LPAD.call(args)
+    }
 }
 
 /// `rpad(string, width[, fill])`, checked as the module describes.
 pub(crate) fn rpad(args: Vec<Expr>) -> Expr {
-    RPAD.call(args)
+    if constant(&args) {
+        RPAD_CONSTANT.call(args)
+    } else {
+        RPAD.call(args)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Side {
+    Left,
+    Right,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CheckedPad {
     inner: Arc<ScalarUDF>,
+    side: Side,
+    signature: Signature,
 }
 
 impl ScalarUDFImpl for CheckedPad {
@@ -75,7 +136,7 @@ impl ScalarUDFImpl for CheckedPad {
     }
 
     fn signature(&self) -> &Signature {
-        self.inner.signature()
+        &self.signature
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
@@ -90,15 +151,21 @@ impl ScalarUDFImpl for CheckedPad {
         self.inner.documentation()
     }
 
-    fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let limit = match args.return_field.data_type() {
-            DataType::LargeUtf8 => i64::MAX as u128,
-            _ => i32::MAX as u128,
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let Some(operands) = Operands::of(&args.args) else {
+            // A type the kernels do not take either; they report it.
+            return self.inner.invoke_with_args(args);
         };
-        if let Some(width) = guard(self.name(), &args.args, args.number_rows, limit)? {
-            args.args[1] = width;
+        let pad = Pad {
+            name: self.name(),
+            side: self.side,
+            operands,
+            number_rows: args.number_rows,
+        };
+        match args.return_field.data_type() {
+            DataType::LargeUtf8 => pad.run::<i64>(),
+            _ => pad.run::<i32>(),
         }
-        self.inner.invoke_with_args(args)
     }
 }
 
@@ -111,7 +178,7 @@ enum Strs<'a> {
 }
 
 impl<'a> Strs<'a> {
-    /// `None` for a type the kernels do not take either; they report it.
+    /// `None` for a type the kernels do not take either.
     fn of(value: &'a ColumnarValue) -> Option<Self> {
         Some(match value {
             ColumnarValue::Scalar(s) => Strs::Scalar(s.try_as_str()?),
@@ -157,123 +224,244 @@ impl<'a> Widths<'a> {
     }
 }
 
-/// Checks that the result fits `limit` bytes, and returns the width argument
-/// to pass the kernel instead of the original when the kernel would reserve
-/// its buffer from the widths. `None` leaves the arguments as they are, also
-/// for argument types the kernel itself rejects.
-fn guard(
-    name: &str,
-    args: &[ColumnarValue],
-    number_rows: usize,
-    limit: u128,
-) -> Result<Option<ColumnarValue>> {
-    let (Some(string_arg), Some(width_arg)) = (args.first(), args.get(1)) else {
-        return Ok(None);
-    };
-    let fill_arg = args.get(2);
-    let (Some(strings), Some(widths)) = (Strs::of(string_arg), Widths::of(width_arg)) else {
-        return Ok(None);
-    };
-    let fills = match fill_arg {
-        None => Strs::Scalar(Some(" ")),
-        Some(f) => match Strs::of(f) {
-            Some(fills) => fills,
-            None => return Ok(None),
-        },
-    };
-    let all_scalar = args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_)));
-    let rows = if all_scalar { 1 } else { number_rows };
-    let row = |i: usize| match (strings.get(i), widths.get(i), fills.get(i)) {
-        (Some(s), Some(w), Some(f)) => Some((s, w, f)),
-        _ => None,
-    };
+/// The three arguments, read without copying a literal into a column.
+struct Operands<'a> {
+    strings: Strs<'a>,
+    widths: Widths<'a>,
+    fills: Strs<'a>,
+    /// Every argument is a literal: the result is one value.
+    all_scalar: bool,
+}
 
-    // A cheap upper bound first, then the exact length only near the limit.
-    let mut bound: u128 = 0;
-    for i in 0..rows {
-        let Some((s, w, f)) = row(i) else { continue };
-        if w > i32::MAX as i64 {
+impl<'a> Operands<'a> {
+    fn of(args: &'a [ColumnarValue]) -> Option<Self> {
+        if !(2..=3).contains(&args.len()) {
+            return None;
+        }
+        Some(Operands {
+            strings: Strs::of(&args[0])?,
+            widths: Widths::of(&args[1])?,
+            fills: match args.get(2) {
+                None => Strs::Scalar(Some(" ")),
+                Some(f) => Strs::of(f)?,
+            },
+            all_scalar: args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_))),
+        })
+    }
+
+    /// The row's string, width and fill, or `None` where the result is NULL.
+    fn row(&self, i: usize) -> Option<(&'a str, i64, &'a str)> {
+        match (self.strings.get(i), self.widths.get(i), self.fills.get(i)) {
+            (Some(s), Some(w), Some(f)) => Some((s, w, f)),
+            _ => None,
+        }
+    }
+}
+
+struct Pad<'a> {
+    name: &'a str,
+    side: Side,
+    operands: Operands<'a>,
+    number_rows: usize,
+}
+
+impl Pad<'_> {
+    fn check_width(&self, width: i64) -> Result<()> {
+        if width > i32::MAX as i64 {
             return exec_err!(
-                "{name} requested length {w} too large, maximum allowed length is {}",
+                "{} requested length {width} too large, maximum allowed length is {}",
+                self.name,
                 i32::MAX
             );
         }
-        bound += s.len() as u128 + w.max(0) as u128 * if f.is_ascii() { 1 } else { 4 };
+        Ok(())
     }
-    if bound > limit {
-        let exact: u128 = (0..rows)
-            .filter_map(row)
-            .map(|(s, w, f)| padded_len(s, w.max(0) as usize, f))
-            .sum();
-        if exact > limit {
+
+    fn run<O: OffsetSizeTrait>(&self) -> Result<ColumnarValue> {
+        let ops = &self.operands;
+        // A literal width is checked before any row, NULL or not, as in
+        // DataFusion.
+        if let Widths::Scalar(Some(w)) = ops.widths {
+            self.check_width(w)?;
+        }
+        let rows = if ops.all_scalar { 1 } else { self.number_rows };
+
+        let mut bytes: u128 = 0;
+        for i in 0..rows {
+            if let Some((s, w, f)) = ops.row(i) {
+                self.check_width(w)?;
+                bytes += padded_len(s, w.max(0) as usize, f);
+            }
+        }
+        // One literal result is repeated for each row of the batch.
+        let batch_bytes = if ops.all_scalar {
+            bytes * self.number_rows.max(1) as u128
+        } else {
+            bytes
+        };
+        let (limit, kind) = if O::IS_LARGE {
+            (i64::MAX as u128, "LargeUtf8")
+        } else {
+            (i32::MAX as u128, "Utf8")
+        };
+        if batch_bytes > limit {
             return exec_err!(
-                "{name} would build {exact} bytes of strings in one batch of {rows} rows, \
-                 more than the {limit} a {} column holds; use a smaller width",
-                if limit == i32::MAX as u128 {
-                    "Utf8"
-                } else {
-                    "LargeUtf8"
-                }
+                "{} would build {batch_bytes} bytes of strings in one batch of {} rows, \
+                 more than the {limit} a {kind} column holds; use a smaller width",
+                self.name,
+                self.number_rows
             );
         }
-    }
 
-    // The kernels' scalar fast path reserves `rows * width` for a literal
-    // width of at most 16384 and a literal fill; leave it alone.
-    let fast_path = matches!(widths, Widths::Scalar(Some(w)) if w <= MAX_SCALAR_TARGET_LEN)
-        && matches!(fills, Strs::Scalar(Some(_)));
-    if fast_path {
-        return Ok(None);
-    }
-    let reserved = |i: usize| {
-        row(i).map(|(s, w, f)| {
-            let w = w.max(0);
-            if f.is_empty() {
-                // An empty fill pads nothing: a width at or beyond the
-                // string's byte length (and so its length in characters)
-                // leaves the string as it is.
-                w.min(s.len() as i64)
-            } else {
-                w
+        let capacity = usize::try_from(bytes)
+            .map_err(|_| exec_datafusion_err!("{} result of {bytes} bytes", self.name))?;
+        let mut builder = GenericStringBuilder::<O>::with_capacity(rows, capacity);
+        // A literal fill is cycled from one buffer for every row.
+        let shared = match ops.fills {
+            Strs::Scalar(Some(f)) => Some(Cycle::new(f, usize::MAX)),
+            _ => None,
+        };
+        for i in 0..rows {
+            let Some((s, w, f)) = ops.row(i) else {
+                builder.append_null();
+                continue;
+            };
+            let width = w.max(0) as usize;
+            let (kept, pad_chars) = cut(s, width, f);
+            if pad_chars == 0 {
+                builder.append_value(kept);
+                continue;
             }
+            let own;
+            let cycle = match &shared {
+                Some(c) => c,
+                None => {
+                    own = Cycle::new(f, pad_chars);
+                    &own
+                }
+            };
+            let written = match self.side {
+                Side::Left => cycle
+                    .write(&mut builder, pad_chars)
+                    .and_then(|()| builder.write_str(kept)),
+                Side::Right => builder
+                    .write_str(kept)
+                    .and_then(|()| cycle.write(&mut builder, pad_chars)),
+            };
+            written.map_err(|e| exec_datafusion_err!("{}: {e}", self.name))?;
+            builder.append_value("");
+        }
+        let array = Arc::new(builder.finish()) as ArrayRef;
+        Ok(if ops.all_scalar {
+            ColumnarValue::Scalar(ScalarValue::try_from_array(&array, 0)?)
+        } else {
+            ColumnarValue::Array(array)
         })
-    };
-    Ok(Some(if all_scalar {
-        ColumnarValue::Scalar(ScalarValue::Int64(reserved(0)))
-    } else {
-        ColumnarValue::Array(Arc::new((0..rows).map(reserved).collect::<Int64Array>()))
-    }))
+    }
 }
 
-/// The byte length of `lpad(s, width, fill)` (and of `rpad`, which places
-/// the same characters on the other side): `s` cut to `width` characters, or
-/// `s` with `fill` repeated until the result has `width` characters. An
-/// empty fill leaves a shorter `s` as it is.
-fn padded_len(s: &str, width: usize, fill: &str) -> u128 {
-    if width == 0 {
-        return 0;
-    }
-    let chars = if s.is_ascii() {
+/// The part of `s` that `lpad` / `rpad` keep for `width`, and the number of
+/// fill characters they add: `s` cut to `width` characters, or `s` and the
+/// characters missing to `width` (none for an empty fill).
+fn cut<'s>(s: &'s str, width: usize, fill: &str) -> (&'s str, usize) {
+    // Only the first `width` characters matter, so only the first `width`
+    // bytes are read when they are ASCII.
+    let chars = if s.as_bytes()[..s.len().min(width)].is_ascii() {
         if width <= s.len() {
-            return width as u128;
+            return (&s[..width], 0);
         }
         s.len()
     } else {
         match s.char_indices().nth(width) {
-            Some((cut, _)) => return cut as u128,
+            Some((at, _)) => return (&s[..at], 0),
             None => s.chars().count(),
         }
     };
-    if fill.is_empty() || chars >= width {
-        return s.len() as u128;
-    }
-    s.len() as u128 + fill_len(fill, width - chars)
+    let pad = if fill.is_empty() {
+        0
+    } else {
+        width.saturating_sub(chars)
+    };
+    (s, pad)
 }
 
-/// The byte length of the first `n` characters of `fill` repeated.
+/// A fill repeated: whole cycles of it in one buffer of about 4 KiB at most,
+/// written as often as a padding needs.
+struct Cycle {
+    block: String,
+    /// Characters in `block`.
+    block_chars: usize,
+    ascii: bool,
+}
+
+impl Cycle {
+    const BLOCK_BYTES: usize = 4096;
+
+    /// A cycle of `fill` for paddings of up to about `chars` characters.
+    /// Reads no more of `fill` than such a padding holds.
+    fn new(fill: &str, chars: usize) -> Self {
+        if let Some((at, _)) = fill.char_indices().nth(chars) {
+            let block = &fill[..at];
+            return Cycle {
+                block: block.to_string(),
+                block_chars: chars,
+                ascii: block.is_ascii(),
+            };
+        }
+        let fill_chars = fill.chars().count();
+        if fill_chars == 0 {
+            return Cycle {
+                block: String::new(),
+                block_chars: 0,
+                ascii: true,
+            };
+        }
+        let wanted = chars.div_ceil(fill_chars).max(1);
+        let fit = (Self::BLOCK_BYTES / fill.len()).max(1);
+        let reps = wanted.min(fit);
+        Cycle {
+            block: fill.repeat(reps),
+            block_chars: reps * fill_chars,
+            ascii: fill.is_ascii(),
+        }
+    }
+
+    /// Writes the first `n` characters of the fill repeated.
+    fn write(&self, out: &mut impl Write, mut n: usize) -> std::fmt::Result {
+        if n == 0 || self.block_chars == 0 {
+            return Ok(());
+        }
+        while n >= self.block_chars {
+            out.write_str(&self.block)?;
+            n -= self.block_chars;
+        }
+        let at = if self.ascii {
+            n
+        } else {
+            self.block
+                .char_indices()
+                .nth(n)
+                .map_or(self.block.len(), |(b, _)| b)
+        };
+        out.write_str(&self.block[..at])
+    }
+}
+
+/// The byte length of `lpad(s, width, fill)` (and of `rpad`, which places
+/// the same characters on the other side).
+fn padded_len(s: &str, width: usize, fill: &str) -> u128 {
+    let (kept, pad) = cut(s, width, fill);
+    kept.len() as u128 + if pad == 0 { 0 } else { fill_len(fill, pad) }
+}
+
+/// The byte length of the first `n` characters of `fill` repeated. Reads
+/// no more of `fill` than the padding holds.
 fn fill_len(fill: &str, n: usize) -> u128 {
-    if fill.is_ascii() {
-        return n as u128;
+    if fill.is_empty() {
+        return 0;
+    }
+    if let Some((at, _)) = fill.char_indices().nth(n) {
+        return at as u128;
     }
     let per_cycle = fill.chars().count();
     let partial = fill
@@ -286,20 +474,26 @@ fn fill_len(fill: &str, n: usize) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{ArrayRef, StringArray};
+    use datafusion::arrow::array::{LargeStringArray, StringArray, StringViewArray};
     use datafusion::arrow::datatypes::Field;
+    use datafusion::common::DFSchema;
     use datafusion::config::ConfigOptions;
+    use datafusion::logical_expr::lit;
+    use datafusion::logical_expr::simplify::SimplifyContext;
+    use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 
     fn invoke(udf: &ScalarUDF, args: Vec<ColumnarValue>, rows: usize) -> Result<ColumnarValue> {
         let arg_fields = args
             .iter()
             .map(|a| Arc::new(Field::new("a", a.data_type(), true)))
             .collect::<Vec<_>>();
+        let types = args.iter().map(|a| a.data_type()).collect::<Vec<_>>();
+        let return_type = udf.return_type(&types)?;
         udf.invoke_with_args(ScalarFunctionArgs {
             args,
             arg_fields,
             number_rows: rows,
-            return_field: Arc::new(Field::new("r", DataType::Utf8, true)),
+            return_field: Arc::new(Field::new("r", return_type, true)),
             config_options: Arc::new(ConfigOptions::default()),
         })
     }
@@ -320,26 +514,142 @@ mod tests {
         ColumnarValue::Scalar(ScalarValue::Utf8(Some(f.to_string())))
     }
 
-    fn values(result: ColumnarValue) -> Vec<Option<String>> {
-        let array = result.into_array(1).unwrap();
-        array
-            .as_string::<i32>()
-            .iter()
-            .map(|v| v.map(str::to_string))
-            .collect()
+    /// The values of a result, `rows` of them for a scalar one.
+    fn values_of(result: ColumnarValue, rows: usize) -> (DataType, Vec<Option<String>>) {
+        let array = result.into_array(rows).unwrap();
+        let data_type = array.data_type().clone();
+        let values = match &data_type {
+            DataType::Utf8 => array
+                .as_string::<i32>()
+                .iter()
+                .map(|v| v.map(str::to_string))
+                .collect(),
+            DataType::LargeUtf8 => array
+                .as_string::<i64>()
+                .iter()
+                .map(|v| v.map(str::to_string))
+                .collect(),
+            other => panic!("unexpected result type {other}"),
+        };
+        (data_type, values)
     }
 
-    /// The lengths [`padded_len`] predicts are the lengths the kernels build.
+    fn values(result: ColumnarValue) -> Vec<Option<String>> {
+        values_of(result, 1).1
+    }
+
+    fn pads() -> [(&'static ScalarUDF, Arc<ScalarUDF>); 2] {
+        [
+            (&LPAD, datafusion::functions::unicode::lpad()),
+            (&RPAD, datafusion::functions::unicode::rpad()),
+        ]
+    }
+
+    /// The wrapper builds what DataFusion's kernels build, for every layout
+    /// of the arguments: each string type, literals and columns, NULLs,
+    /// negative widths, empty and multi-byte fills, and the two-argument
+    /// form.
+    #[test]
+    fn matches_datafusion() {
+        let texts = [
+            Some(""),
+            Some("a"),
+            Some("abc"),
+            Some("héllo"),
+            Some("日本語"),
+            Some("a😀b"),
+            None,
+        ];
+        let string_args = |layout: usize| -> ColumnarValue {
+            match layout {
+                0 => strings(&texts),
+                1 => ColumnarValue::Array(Arc::new(LargeStringArray::from(texts.to_vec()))),
+                2 => ColumnarValue::Array(Arc::new(StringViewArray::from(texts.to_vec()))),
+                _ => ColumnarValue::Scalar(ScalarValue::Utf8(Some("héllo".into()))),
+            }
+        };
+        let width_args = [
+            width(0),
+            width(2),
+            width(5),
+            width(-3),
+            width(9000),
+            ColumnarValue::Scalar(ScalarValue::Int64(None)),
+            // No negative width: DataFusion reads it as a huge reservation
+            // here (`negative_width_column_pads_to_nothing`).
+            widths(&[
+                Some(0),
+                Some(4),
+                Some(1),
+                Some(9000),
+                None,
+                Some(3),
+                Some(8),
+            ]),
+        ];
+        let fill_args = [
+            None,
+            Some(fill("")),
+            Some(fill(" ")),
+            Some(fill("xy")),
+            Some(fill("é")),
+            Some(fill("日😀a")),
+            Some(ColumnarValue::Scalar(ScalarValue::Utf8(None))),
+            Some(ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(
+                "ab".into(),
+            )))),
+            Some(strings(&[
+                Some("xy"),
+                Some(""),
+                Some("é"),
+                None,
+                Some("日😀a"),
+                Some("-"),
+                Some("ab"),
+            ])),
+        ];
+        let rows = texts.len();
+        for (ours, theirs) in pads() {
+            for layout in 0..4 {
+                for w in &width_args {
+                    for f in &fill_args {
+                        let mut args = vec![string_args(layout), w.clone()];
+                        args.extend(f.clone());
+                        // DataFusion reads a negative width as 0, but off its
+                        // literal-fill path it reserves it as a huge size and
+                        // panics: ask it for width 0 there.
+                        let literal_fill = match f {
+                            None => true,
+                            Some(ColumnarValue::Scalar(v)) => !v.is_null(),
+                            Some(_) => false,
+                        };
+                        let mut theirs_args = args.clone();
+                        if !literal_fill
+                            && matches!(w, ColumnarValue::Scalar(ScalarValue::Int64(Some(n))) if *n < 0)
+                        {
+                            theirs_args[1] = width(0);
+                        }
+                        let expected = values_of(invoke(&theirs, theirs_args, rows).unwrap(), rows);
+                        let got = values_of(invoke(ours, args.clone(), rows).unwrap(), rows);
+                        assert_eq!(got, expected, "{}({args:?})", ours.name());
+                    }
+                }
+            }
+        }
+    }
+
+    /// The lengths [`padded_len`] predicts are the lengths DataFusion's
+    /// kernels build.
     #[test]
     fn padded_len_matches_the_kernels() {
         let inputs = ["", "a", "abc", "héllo", "日本語", "a😀b"];
         let fills = ["", " ", "xy", "é", "日😀", "aé"];
-        for udf in [&*LPAD, &*RPAD] {
+        for (_, udf) in pads() {
             for s in inputs {
                 for f in fills {
                     for w in 0..9usize {
                         let out = values(
-                            invoke(udf, vec![strings(&[Some(s)]), width(w as i64), fill(f)], 1)
+                            invoke(&udf, vec![strings(&[Some(s)]), width(w as i64), fill(f)], 1)
                                 .unwrap(),
                         );
                         let built = out[0].as_deref().unwrap();
@@ -371,6 +681,59 @@ mod tests {
         }
     }
 
+    /// A call on literals only gives one value, which the projection repeats
+    /// for each row of the batch: the check counts the batch's rows, so
+    /// 8192 rows of `2**18` bytes are refused although one row fits.
+    #[test]
+    fn literal_result_counts_the_batch_rows() {
+        for udf in [&*LPAD, &*RPAD, &*LPAD_CONSTANT, &*RPAD_CONSTANT] {
+            let args = || {
+                vec![
+                    ColumnarValue::Scalar(ScalarValue::Utf8(Some("a".into()))),
+                    width(1 << 18),
+                    fill(" "),
+                ]
+            };
+            let err = invoke(udf, args(), 8192).unwrap_err().to_string();
+            assert!(
+                err.contains("2147483648 bytes of strings in one batch of 8192 rows"),
+                "{err}"
+            );
+            let one = invoke(udf, args(), 1).unwrap();
+            assert!(matches!(one, ColumnarValue::Scalar(_)));
+            assert_eq!(values(one)[0].as_ref().map(String::len), Some(1 << 18));
+        }
+    }
+
+    /// DataFusion folds a call on literals into a literal while planning,
+    /// evaluated for one row, and the projection repeats that literal into
+    /// each batch with a panic on overflow. A call that references no
+    /// column is volatile, so it is evaluated per batch; one that does stays
+    /// immutable, as DataFusion's own.
+    #[test]
+    fn a_constant_call_is_not_folded() {
+        let simplify = |expr: Expr| {
+            let schema = DFSchema::empty();
+            let context = SimplifyContext::builder()
+                .with_schema(Arc::new(schema))
+                .build();
+            ExprSimplifier::new(context).simplify(expr).unwrap()
+        };
+        for pad in [lpad, rpad] {
+            let call = pad(vec![lit("a"), lit(1i64 << 18), lit(" ")]);
+            let simplified = simplify(call);
+            assert!(
+                matches!(simplified, Expr::ScalarFunction(_)),
+                "{simplified}"
+            );
+            let on_column = pad(vec![datafusion::prelude::col("s"), lit(3i64), lit(" ")]);
+            let Expr::ScalarFunction(f) = on_column else {
+                panic!("{on_column}")
+            };
+            assert_eq!(f.func.signature().volatility, Volatility::Immutable);
+        }
+    }
+
     /// The bound is on the result, not on rows times width: NULL strings and
     /// an empty fill add nothing, so this result is small and must build.
     #[test]
@@ -390,6 +753,52 @@ mod tests {
             values(out),
             [Some("a".into()), None, Some("b".into()), None]
         );
+    }
+
+    /// Small results whose operands DataFusion's kernels would have expanded
+    /// or reserved for far beyond the result: a 1 MiB literal fill (or
+    /// string) repeated for each of 4096 rows is 4 GiB, past Utf8's offsets,
+    /// though every width is 0; and a million NULL strings padded to 16384
+    /// reserved 16 GiB. The wrapper reserves what the result holds.
+    #[test]
+    fn small_results_reserve_no_more_than_they_hold() {
+        let mib = "x".repeat(1 << 20);
+        let rows = 4096;
+        let zeros = widths(&vec![Some(0); rows]);
+        for udf in [&*LPAD, &*RPAD] {
+            let wide_fill = vec![strings(&vec![Some("ab"); rows]), zeros.clone(), fill(&mib)];
+            let out = values_of(invoke(udf, wide_fill, rows).unwrap(), rows).1;
+            assert!(out.iter().all(|v| v.as_deref() == Some("")));
+
+            let wide_string = vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some(mib.clone()))),
+                zeros.clone(),
+                fill(" "),
+            ];
+            let out = values_of(invoke(udf, wide_string, rows).unwrap(), rows).1;
+            assert!(out.iter().all(|v| v.as_deref() == Some("")));
+
+            let nulls = 1 << 20;
+            let all_null = ColumnarValue::Array(Arc::new(StringArray::new_null(nulls)));
+            let out = invoke(udf, vec![all_null, width(16384), fill("é")], nulls)
+                .unwrap()
+                .into_array(nulls)
+                .unwrap();
+            assert_eq!(out.null_count(), nulls);
+            assert!(out.as_string::<i32>().values().capacity() < 64 * 1024);
+
+            let short = invoke(
+                udf,
+                vec![strings(&vec![Some("ab"); 1000]), width(5), fill("é")],
+                1000,
+            )
+            .unwrap()
+            .into_array(1000)
+            .unwrap();
+            let held = short.as_string::<i32>().values().len();
+            assert_eq!(held, 1000 * 8);
+            assert!(short.as_string::<i32>().values().capacity() < held + 64);
+        }
     }
 
     /// A width column with negative widths reads them as 0, as the kernels
@@ -425,5 +834,35 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("too large"), "{err}");
+    }
+
+    /// A literal width beyond `i32::MAX` is an error before any row is read,
+    /// as in DataFusion, even when every string is NULL; in a width column it
+    /// is checked on the rows whose result is not NULL.
+    #[test]
+    fn literal_width_beyond_i32_is_an_error_on_null_strings() {
+        for udf in [&*LPAD, &*RPAD] {
+            for string in [
+                strings(&[None, None]),
+                ColumnarValue::Scalar(ScalarValue::Utf8(None)),
+            ] {
+                let err = invoke(udf, vec![string, width(1 << 40), fill(" ")], 2)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("too large"), "{err}");
+            }
+            let out = invoke(
+                udf,
+                vec![
+                    strings(&[None, Some("a")]),
+                    widths(&[Some(1 << 40), Some(2)]),
+                    fill("-"),
+                ],
+                2,
+            )
+            .unwrap();
+            let expected = if udf.name() == "lpad" { "-a" } else { "a-" };
+            assert_eq!(values(out), [None, Some(expected.into())]);
+        }
     }
 }
