@@ -52,10 +52,7 @@ use crate::types::{dict_to_py_expr, PyExpr};
 /// Deserialize a list of serialized expression dicts under the GIL, so the
 /// resulting pure-Rust `PyExpr`s can be handed to a detached execution.
 fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
-    dicts
-        .iter()
-        .map(|d| dict_to_py_expr(d).map_err(PyErr::from))
-        .collect()
+    stack::parse_each(dicts, |d| dict_to_py_expr(d).map_err(PyErr::from))
 }
 
 /// [`source::read_files`] with the GIL released. A path that names no file
@@ -723,7 +720,8 @@ impl LTSeqTable {
         partition_by: Option<String>,
     ) -> PyResult<LTSeqTable> {
         let steps = parse_exprs(&step_predicates)?;
-        detached(py, || {
+        // Moved into the closure, so they drop on its guarded stack.
+        detached(py, move || {
             crate::ops::pattern_match::search_pattern_impl(self, &steps, partition_by)
         })
     }
@@ -744,7 +742,8 @@ impl LTSeqTable {
         partition_by: Option<String>,
     ) -> PyResult<usize> {
         let steps = parse_exprs(&step_predicates)?;
-        detached(py, || {
+        // Moved into the closure, so they drop on its guarded stack.
+        detached(py, move || {
             crate::ops::pattern_match::search_pattern_count_impl(self, &steps, partition_by)
         })
     }
@@ -839,7 +838,8 @@ impl LTSeqTable {
         grouping_expr: Bound<'_, PyDict>,
     ) -> PyResult<usize> {
         let py_expr = dict_to_py_expr(&grouping_expr)?;
-        detached(py, || {
+        // Moved into the closure, so it drops on its guarded stack.
+        detached(py, move || {
             crate::ops::grouping::group_ordered_count_impl(self, &py_expr)
         })
     }

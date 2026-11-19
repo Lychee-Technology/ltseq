@@ -406,13 +406,16 @@ pub fn agg_impl(
     agg_dict: &Bound<'_, PyDict>,
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
-    let group_expr = group_expr
-        .map(|dict| {
-            dict_to_py_expr(&dict)
-                .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))
-        })
-        .transpose()?;
-    let mut aggs = Vec::with_capacity(agg_dict.len());
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let group_expr = crate::stack::Parsed::new(
+        group_expr
+            .map(|dict| {
+                dict_to_py_expr(&dict)
+                    .map_err(|e| LtseqError::Validation(format!("Failed to parse group: {}", e)))
+            })
+            .transpose()?,
+    );
+    let mut aggs = crate::stack::Parsed::new(Vec::with_capacity(agg_dict.len()));
     for (key, value) in agg_dict.iter() {
         let key_str = key
             .extract::<String>()
@@ -426,6 +429,7 @@ pub fn agg_impl(
             .map_err(|e| LtseqError::Validation(format!("Failed to parse: {}", e)))?;
         aggs.push((key_str, py_expr));
     }
+    let (group_expr, aggs) = (group_expr.into_inner(), aggs.into_inner());
     crate::stack::planned(|| agg_parsed(table, df, schema, group_expr, aggs))
 }
 

@@ -178,10 +178,7 @@ pub fn select_impl(table: &LTSeqTable, exprs: Vec<Bound<'_, PyDict>>) -> PyResul
     let schema = table.require_schema()?;
 
     // 2. Deserialize all expressions, then transpile them
-    let py_exprs = exprs
-        .iter()
-        .map(dict_to_py_expr)
-        .collect::<Result<Vec<_>, _>>()?;
+    let py_exprs = crate::stack::parse_each(&exprs, dict_to_py_expr)?;
     planned(|| select_parsed(table, schema, py_exprs))
 }
 

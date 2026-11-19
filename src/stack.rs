@@ -131,6 +131,58 @@ pub(crate) fn guarded_for<R>(depth: usize, f: impl FnOnce() -> R) -> R {
     stacker::maybe_grow(red_zone, 2 * red_zone, f)
 }
 
+/// What the deserializers returned, held until it moves into a [`guarded`]
+/// closure. An op parses its expressions one after another under the GIL,
+/// and a later one, or a later check, can fail after an earlier deep one
+/// parsed: dropping that one recurses through it, so this drops it on a
+/// [`guarded`] stack. [`Parsed::into_inner`] hands it over once every
+/// fallible step that needs Python is done.
+pub(crate) struct Parsed<T>(Option<T>);
+
+impl<T> Parsed<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Parsed(Some(value))
+    }
+
+    pub(crate) fn into_inner(mut self) -> T {
+        self.0.take().expect("a Parsed value is taken once")
+    }
+}
+
+impl<T> std::ops::Deref for Parsed<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("a Parsed value is taken once")
+    }
+}
+
+impl<T> std::ops::DerefMut for Parsed<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.as_mut().expect("a Parsed value is taken once")
+    }
+}
+
+impl<T> Drop for Parsed<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            guarded(move || drop(value));
+        }
+    }
+}
+
+/// Collect what `parse` makes of each item, dropping the ones already
+/// parsed on a [`guarded`] stack when a later one fails.
+pub(crate) fn parse_each<I, T, E>(
+    items: impl IntoIterator<Item = I>,
+    mut parse: impl FnMut(I) -> Result<T, E>,
+) -> Result<Vec<T>, E> {
+    let mut parsed = Parsed::new(Vec::new());
+    for item in items {
+        parsed.push(parse(item)?);
+    }
+    Ok(parsed.into_inner())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -128,9 +128,10 @@ fn parse_join_keys(
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
 ) -> PyResult<(PyExpr, PyExpr)> {
-    let left_key_expr = dict_to_py_expr(left_key_expr_dict)?;
+    // A failing right key drops the left one on a guarded stack.
+    let left_key_expr = crate::stack::Parsed::new(dict_to_py_expr(left_key_expr_dict)?);
     let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
-    Ok((left_key_expr, right_key_expr))
+    Ok((left_key_expr.into_inner(), right_key_expr))
 }
 
 /// Extract and validate join key column names from the parsed key expressions.

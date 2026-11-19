@@ -47,7 +47,8 @@ pub fn derive_with_window_functions_impl(
     // Deserialize all expressions once
     let parsed_cols = parse_derived_cols(derived_cols)?;
 
-    crate::stack::planned(|| {
+    // Moved into the closure, so they drop on its guarded stack.
+    crate::stack::planned(move || {
         derive_with_window_functions_from_parsed(table, schema, df, &parsed_cols)
     })
 }
@@ -91,7 +92,8 @@ fn nested_window_hint(err: LtseqError) -> LtseqError {
 
 /// Deserialize derived column expressions from a Python dict into Vec<(String, PyExpr)>.
 pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<Vec<(String, PyExpr)>> {
-    let mut parsed = Vec::with_capacity(derived_cols.len());
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let mut parsed = crate::stack::Parsed::new(Vec::with_capacity(derived_cols.len()));
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
             LtseqError::Validation("Column name must be string".into())
@@ -102,7 +104,7 @@ pub(crate) fn parse_derived_cols(derived_cols: &Bound<'_, PyDict>) -> PyResult<V
         let py_expr = dict_to_py_expr(expr_dict)?;
         parsed.push((col_name_str, py_expr));
     }
-    Ok(parsed)
+    Ok(parsed.into_inner())
 }
 
 
@@ -334,15 +336,12 @@ pub fn cum_sum_impl(table: &LTSeqTable, cum_exprs: Vec<Bound<'_, PyDict>>) -> Py
     }
 
     let (df, schema) = table.require_df_and_schema()?;
-    let cum_exprs = cum_exprs
-        .iter()
-        .map(|expr_item| {
-            let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
-                LtseqError::Validation("Expression must be dict".into())
-            })?;
-            Ok(dict_to_py_expr(expr_dict)?)
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+    let cum_exprs = crate::stack::parse_each(&cum_exprs, |expr_item| -> PyResult<_> {
+        let expr_dict = expr_item.cast::<PyDict>().map_err(|_| {
+            LtseqError::Validation("Expression must be dict".into())
+        })?;
+        Ok(dict_to_py_expr(expr_dict)?)
+    })?;
     crate::stack::planned(|| native_cum_sum(table, schema, df, cum_exprs))
 }
 

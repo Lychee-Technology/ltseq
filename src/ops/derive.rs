@@ -40,7 +40,9 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
     let (df, schema) = table.require_df_and_schema()?;
 
     // 2. Deserialize all expressions once (avoids double deserialization)
-    let mut parsed_cols: Vec<(String, PyExpr)> = Vec::with_capacity(derived_cols.len());
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let mut parsed_cols: crate::stack::Parsed<Vec<(String, PyExpr)>> =
+        crate::stack::Parsed::new(Vec::with_capacity(derived_cols.len()));
 
     for (col_name, expr_item) in derived_cols.iter() {
         let col_name_str = col_name.extract::<String>().map_err(|_| {
@@ -54,6 +56,7 @@ pub fn derive_impl(table: &LTSeqTable, derived_cols: &Bound<'_, PyDict>) -> PyRe
         parsed_cols.push((col_name_str, dict_to_py_expr(expr_dict)?));
     }
 
+    let parsed_cols = parsed_cols.into_inner();
     crate::stack::planned(|| derive_parsed(table, df, schema, parsed_cols))
 }
 

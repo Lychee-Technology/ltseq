@@ -32,9 +32,13 @@ pub(crate) fn _holds<'py>(
     to: PyArrowType<DataType>,
     literal: &Bound<'py, PyDict>,
 ) -> PyResult<(String, Option<Bound<'py, PyAny>>, Option<String>)> {
+    // Anything but a literal may be deep: it drops on a guarded stack.
     let value = match dict_to_py_expr(literal)? {
         PyExpr::Literal(value) => value.to_scalar_value(),
-        _ => return Err(PyValueError::new_err("expected a literal")),
+        other => {
+            crate::stack::guarded(move || drop(other));
+            return Err(PyValueError::new_err("expected a literal"));
+        }
     };
     let array = |value: datafusion::scalar::ScalarValue| -> PyResult<Bound<'py, PyAny>> {
         value

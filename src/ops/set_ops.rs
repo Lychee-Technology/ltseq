@@ -203,9 +203,10 @@ fn extract_key_cols_from_exprs(
 ) -> PyResult<Vec<String>> {
     let mut key_cols = Vec::new();
     for expr_dict in key_exprs.iter() {
-        let py_expr = crate::types::dict_to_py_expr(expr_dict)?;
+        // A refused key may be deep: it drops on a guarded stack.
+        let py_expr = crate::stack::Parsed::new(crate::types::dict_to_py_expr(expr_dict)?);
 
-        let col_name = match &py_expr {
+        let col_name = match &*py_expr {
             crate::types::PyExpr::Column(name) => name.clone(),
             _ => {
                 return Err(LtseqError::Validation(
@@ -535,11 +536,12 @@ fn extract_key_columns(
     use crate::types::dict_to_py_expr;
     use crate::types::PyExpr;
 
-    let py_expr = dict_to_py_expr(expr_dict)?;
+    // A refused key may be deep: it drops on a guarded stack.
+    let py_expr = crate::stack::Parsed::new(dict_to_py_expr(expr_dict)?);
 
     let mut columns = Vec::new();
 
-    match &py_expr {
+    match &*py_expr {
         PyExpr::Column(name) => columns.push(name.clone()),
         _ => {
             return Err(LtseqError::Validation(

@@ -18,7 +18,7 @@ import textwrap
 
 import pytest
 
-from ltseq import LTSeq
+from ltseq import LTSeq, rand
 
 LIMIT = 1000
 TOO_DEEP = "nested more than 1000 levels deep"
@@ -68,6 +68,44 @@ def nested_dict(depth):
     for _ in range(depth - 1):
         node = {"type": "BinOp", "op": "Add", "left": node, "right": one}
     return node
+
+
+def run_on_a_thread(stack, body):
+    """Run ``body`` on a thread of ``stack`` bytes, for the subprocess
+    scripts below. Returns the tracebacks of what escaped it, or a note that
+    it did not finish: an exception ends only the thread, and the script
+    must not then report ``ok`` (R2-F3 of #335's review)."""
+    import threading
+    import traceback
+
+    escaped = []
+    finished = []
+
+    def target():
+        try:
+            body()
+        except BaseException:
+            escaped.append(traceback.format_exc())
+        else:
+            finished.append(True)
+
+    threading.stack_size(stack)
+    try:
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(0)
+    return escaped or ([] if finished else ["the thread did not finish"])
+
+
+def test_run_on_a_thread_reports_what_escapes():
+    def fail():
+        raise RuntimeError("boom")
+
+    (escaped,) = run_on_a_thread(256 << 10, fail)
+    assert "RuntimeError: boom" in escaped
+    assert run_on_a_thread(256 << 10, lambda: None) == []
 
 
 def test_expression_at_the_limit_plans_and_runs(deep_recursion):
@@ -121,10 +159,10 @@ def test_deserializer_refuses_a_deeper_dict_without_recursing(depth):
 
 SMALL_THREAD = textwrap.dedent(
     """
-    import sys, threading
+    import sys
     sys.path[:0] = [{tests!r}]
     from test_expression_depth import (
-        DEEP, LIMIT, TOO_DEEP, predicate_of_depth, sum_of_depth,
+        DEEP, LIMIT, TOO_DEEP, predicate_of_depth, run_on_a_thread, sum_of_depth,
     )
     from ltseq import LTSeq
 
@@ -164,10 +202,7 @@ SMALL_THREAD = textwrap.dedent(
             for depth in (DEEP, LIMIT + 1):
                 check(name, run, depth)
 
-    threading.stack_size({stack})
-    thread = threading.Thread(target=body)
-    thread.start()
-    thread.join()
+    failures += run_on_a_thread({stack}, body)
     print(failures or "ok")
     """
 )
@@ -196,10 +231,10 @@ def test_deep_expressions_on_a_small_thread(stack_kib):
 # more levels to crash, which `LTSEQ_DEPTH_TEST_LEVELS` sets.
 DOWNSTREAM = textwrap.dedent(
     """
-    import sys, threading
+    import sys
     sys.path[:0] = [{tests!r}]
     import pyarrow as pa
-    from test_expression_depth import sum_of_depth
+    from test_expression_depth import run_on_a_thread, sum_of_depth
     from ltseq import LTSeq
 
     sys.setrecursionlimit(20_000)
@@ -251,10 +286,7 @@ DOWNSTREAM = textwrap.dedent(
                     if got != want:
                         failures.append(f"{{base}} {{name}}: {{got!r}} != {{want!r}}")
 
-    threading.stack_size(256 << 10)
-    thread = threading.Thread(target=body)
-    thread.start()
-    thread.join()
+    failures += run_on_a_thread(256 << 10, body)
     print(failures or "ok")
     """
 )
@@ -276,7 +308,6 @@ def test_operations_on_a_deep_plan_on_a_small_thread():
 
 def sum_and_draw_of_depth(depth):
     """``r.a + 1 + ... + rand()``, ``depth`` levels deep."""
-    from ltseq import rand
 
     def build(r):
         return sum_of_depth(depth - 1)(r) + rand()
@@ -358,3 +389,117 @@ def test_cyclic_serialized_expression_raises_and_reused_subtree_plans():
     )
     assert run.returncode == 0, run.stderr[-2000:]
     assert run.stdout.strip() == "ok", run.stdout
+
+
+# An operation parses its expressions one after another before it plans
+# them. When a later one fails to parse (or a later check fails), the earlier
+# ones are dropped, and dropping a deep one recurses through it: before
+# R2-F1 of #335's review that drop ran on the caller's thread and crashed a
+# 64 KiB one. Each case gives a valid expression at the limit, then one that
+# fails; the operation must raise, and a case marked `ok` may also succeed
+# (it drops its parsed expression after running). The script prints each
+# case before running it, so a crash names the case.
+ERROR_PATH = textwrap.dedent(
+    """
+    import sys
+    sys.path[:0] = [{tests!r}]
+    from test_expression_depth import LIMIT, nested_dict, run_on_a_thread
+    from ltseq import LTSeq
+
+    # Built here: a 64 KiB thread is too small for pyarrow's first import,
+    # and for CPython to free a 1000-level dict.
+    deep = nested_dict(LIMIT)
+    bads = {{"unknown": {{"type": "NoSuchNode"}}, "too deep": nested_dict(LIMIT + 1)}}
+    t = LTSeq.from_dict({{"a": [1, 2, 3]}})._inner
+    failures = []
+
+    def body():
+        cases = []
+        for kind, bad in bads.items():
+            cases += [
+                (f"derive, {{kind}}", lambda bad=bad: t.derive({{"s": deep, "z": bad}})),
+                (
+                    f"window derive, {{kind}}",
+                    lambda bad=bad: t.derive_with_window_functions({{"s": deep, "z": bad}}),
+                ),
+                (f"select, {{kind}}", lambda bad=bad: t.select([deep, bad])),
+                (
+                    f"sort, {{kind}}",
+                    lambda bad=bad: t.sort([deep, bad], [False, False], [True, True]),
+                ),
+                (f"cum_sum, {{kind}}", lambda bad=bad: t.cum_sum([deep, bad])),
+                (f"agg key, {{kind}}", lambda bad=bad: t.agg(deep, {{"n": bad}})),
+                (
+                    f"agg value, {{kind}}",
+                    lambda bad=bad: t.agg(None, {{"n": deep, "m": bad}}),
+                ),
+                (
+                    f"join, {{kind}}",
+                    lambda bad=bad: t.join(t, deep, bad, "inner", "_r"),
+                ),
+                (f"semi_join, {{kind}}", lambda bad=bad: t.semi_join(t, deep, bad)),
+                (
+                    f"search_pattern, {{kind}}",
+                    lambda bad=bad: t.search_pattern([deep, bad], None),
+                ),
+            ]
+        cases += [
+            ("update values", lambda: t.conditional_update(deep, {{"no_such": 1}})),
+            ("distinct key", lambda: t.distinct([deep])),
+            ("intersect key", lambda: t.intersect(t, deep)),
+        ]
+        for name, run in cases:
+            print(name, flush=True)
+            try:
+                run()
+            except Exception:
+                pass
+            else:
+                failures.append(f"{{name}} did not raise")
+        # The parsed expressions outlive the work here: they must drop on
+        # the guarded stack too.
+        for name, run in (
+            ("search_pattern_count", lambda: t.search_pattern_count([deep], None)),
+            ("group_ordered_count", lambda: t.group_ordered_count(deep)),
+        ):
+            print(name, flush=True)
+            try:
+                run()
+            except Exception:
+                pass
+
+    failures += run_on_a_thread(64 << 10, body)
+    print(failures or "ok")
+    """
+)
+
+
+def test_a_failing_expression_after_a_deep_one_raises_on_a_small_thread():
+    import os
+
+    script = ERROR_PATH.format(tests=os.path.dirname(os.path.abspath(__file__)))
+    run = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600
+    )
+    lines = run.stdout.strip().splitlines()
+    assert run.returncode == 0, (lines[-1:], run.stderr[-2000:])
+    assert lines[-1] == "ok", run.stdout[-4000:]
+
+
+@pytest.mark.parametrize(
+    "key, agg_name",
+    [
+        (lambda r: rand(), "__ltseq_draw_0"),
+        (lambda r: (rand() * 2).floor(), "floor(__ltseq_draw_0 * Int64(2))"),
+        (lambda r: (rand() * 2).floor(), "floor(__ltseq_draw_1 * Int64(2))"),
+    ],
+    ids=["bare", "named-like-the-key", "named-like-the-next-key"],
+)
+def test_an_aggregate_may_take_the_name_of_a_staged_key(key, agg_name):
+    # R2-F2 of #335's review: the staged key is renamed after the aggregate,
+    # so it must not carry an aggregate's name meanwhile.
+    t = LTSeq.from_dict({"a": [1, 2, 3]})
+    want = t.agg(by=key, n=lambda g: g.a.sum()).to_arrow().schema.names[0]
+    out = t.agg(by=key, **{agg_name: lambda g: g.a.sum()}).to_arrow()
+    assert out.schema.names == [want, agg_name]
+    assert sum(out.column(agg_name).to_pylist()) == 6

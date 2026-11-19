@@ -171,9 +171,11 @@ pub fn conditional_update_impl(
         ));
     }
 
-    let predicate = crate::types::dict_to_py_expr(expr_dict)?;
+    // A failure reading the values drops the predicate on a guarded stack.
+    let predicate = crate::stack::Parsed::new(crate::types::dict_to_py_expr(expr_dict)?);
     let update_map: std::collections::HashMap<String, ScalarValue> =
         column_values(updates, schema)?.into_iter().collect();
+    let predicate = predicate.into_inner();
     crate::stack::planned(|| conditional_update_parsed(table, df, schema, predicate, update_map))
 }
 

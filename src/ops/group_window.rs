@@ -465,7 +465,8 @@ pub fn derive_group_window_impl(
 ) -> PyResult<LTSeqTable> {
     let (df, schema) = table.require_df_and_schema()?;
     require_grouping_columns(schema)?;
-    let mut nodes = Vec::with_capacity(derived.len());
+    // A later failure drops the expressions already parsed on a guarded stack.
+    let mut nodes = crate::stack::Parsed::new(Vec::with_capacity(derived.len()));
     for (col_name, expr_item) in derived.iter() {
         let name: String = col_name
             .extract()
@@ -475,6 +476,7 @@ pub fn derive_group_window_impl(
             .map_err(|_| LtseqError::TypeMismatch("Group expression must be dict".into()))?;
         nodes.push((name, dict_to_group_node(expr_dict)?));
     }
+    let nodes = nodes.into_inner();
     crate::stack::planned(|| derive_group_window_parsed(table, df, schema, nodes))
 }
 

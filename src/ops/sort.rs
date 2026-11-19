@@ -398,10 +398,7 @@ pub fn sort_impl(
     }
 
     let schema = table.require_schema()?;
-    let keys = sort_exprs
-        .iter()
-        .map(dict_to_py_expr)
-        .collect::<Result<Vec<_>, _>>()?;
+    let keys = crate::stack::parse_each(&sort_exprs, dict_to_py_expr)?;
     crate::stack::planned(|| sort_parsed(table, schema, keys, &desc_flags, &nulls_last_flags))
 }
 
