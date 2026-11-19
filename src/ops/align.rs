@@ -150,7 +150,7 @@ pub fn align_impl(
     ref_sequence: Vec<Py<PyAny>>,
     key_col: &str,
 ) -> PyResult<LTSeqTable> {
-    let (df, schema) = table.require_df_and_schema()?;
+    let (_, schema) = table.require_df_and_schema()?;
 
     // Validate key column exists
     let key_field = schema.field_with_name(key_col).map_err(|_| {
@@ -164,9 +164,20 @@ pub fn align_impl(
     // Build the reference DataFrame: typed __ref_key__ + __pos__ position.
     let ref_key_array =
         build_ref_key_array(py, &ref_sequence, key_field.data_type(), key_col)?;
-    let pos_array: ArrayRef = Arc::new(UInt64Array::from(
-        (0..ref_sequence.len() as u64).collect::<Vec<_>>(),
-    ));
+    let positions = ref_sequence.len() as u64;
+    // The rest clones and joins a plan that may hold deep expressions (#335).
+    crate::stack::planned(|| align_on_keys(table, ref_key_array, positions, key_col))
+}
+
+/// [`align_impl`] once the reference keys are read from Python.
+fn align_on_keys(
+    table: &LTSeqTable,
+    ref_key_array: ArrayRef,
+    positions: u64,
+    key_col: &str,
+) -> Result<LTSeqTable, LtseqError> {
+    let (df, schema) = table.require_df_and_schema()?;
+    let pos_array: ArrayRef = Arc::new(UInt64Array::from((0..positions).collect::<Vec<_>>()));
 
     let ref_schema = Arc::new(ArrowSchema::new(vec![
         Field::new("__ref_key__", ref_key_array.data_type().clone(), true),

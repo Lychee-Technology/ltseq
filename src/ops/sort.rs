@@ -883,6 +883,8 @@ pub fn assume_sorted_impl(
                 schema,
             ));
         } else {
+            // A computed key may be deep, and dropping it recurses (#335).
+            crate::stack::guarded(move || drop(py_expr));
             break;
         }
     }
@@ -912,10 +914,10 @@ pub fn assume_sorted_impl(
 
     // Non-Parquet fallback: collect batches and create MemTable with sort
     // order. The declaration is about the rows in their current table order.
-    let in_order = in_table_order(table)?;
+    // Ordering clones the plan, which recurses through its expressions.
     let batches = detached(py, || {
         RUNTIME
-            .block_on(in_order.collect_partitioned())
+            .block_on(in_table_order(table)?.collect_partitioned())
             .map(|partitions| partitions.into_iter().flatten().collect::<Vec<_>>())
             .map_err(|e| {
                 LtseqError::Runtime(format!("Failed to collect data for assume_sorted: {}", e))

@@ -471,12 +471,12 @@ impl LTSeqTable {
     ///     Formatted table as string
     fn show(&self, py: Python<'_>, n: usize) -> PyResult<String> {
         let schema = self.require_schema()?;
-        let df_clone = self.ordered_df()?;
 
-        // Full-table collect + formatting: release the GIL.
+        // Full-table collect + formatting: release the GIL. Ordering clones
+        // the plan, which recurses through its expressions (#335).
         detached(py, || {
             let batches = RUNTIME
-                .block_on(df_clone.collect())
+                .block_on(self.ordered_df()?.collect())
                 .map_err(LtseqError::collect)?;
             Ok(format_table(&batches, schema, n))
         })
@@ -570,7 +570,7 @@ impl LTSeqTable {
     /// Args:
     ///     mapping: Dict of {old_name: new_name}
     fn rename_columns(&self, mapping: std::collections::HashMap<String, String>) -> PyResult<LTSeqTable> {
-        crate::ops::basic::rename_columns_impl(self, &mapping)
+        stack::planned(|| crate::ops::basic::rename_columns_impl(self, &mapping))
     }
 
     /// Get the number of rows in the table
@@ -578,10 +578,10 @@ impl LTSeqTable {
     /// Returns:
     ///     The number of rows
     fn count(&self, py: Python<'_>) -> PyResult<usize> {
-        let df_clone = (**self.require_df()?).clone();
+        // Cloning the plan recurses through its expressions (#335).
         detached(py, || {
             RUNTIME
-                .block_on(df_clone.count())
+                .block_on((**self.require_df()?).clone().count())
                 .map_err(|e| LtseqError::with_context("Failed to count rows", e))
         })
     }
@@ -589,15 +589,15 @@ impl LTSeqTable {
     /// Return optimized logical and physical plans for debugging: the plans
     /// a terminal executes, with the declared order at the root.
     fn explain_plan(&self, py: Python<'_>) -> PyResult<(String, String)> {
-        let df = self.ordered_df()?;
-
-        // Optimizing and printing recurse through the plan's expressions.
-        let logical_text = stack::planned(|| {
+        // Ordering, optimizing and printing recurse through the plan's
+        // expressions.
+        let (logical_text, df) = stack::planned(|| {
+            let df = self.ordered_df()?;
             let logical = df
                 .clone()
                 .into_optimized_plan()
                 .map_err(|e| LtseqError::with_context("Failed to optimize logical plan", e))?;
-            Ok(format!("{}", logical.display_indent()))
+            Ok((format!("{}", logical.display_indent()), df))
         })?;
 
         // Physical planning lists files / reads footers for file sources.
@@ -849,7 +849,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// first row per group.
     fn first_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::grouping::first_row_impl(self)
+        stack::planned(|| crate::ops::grouping::first_row_impl(self))
     }
 
     /// Get only the last row of each group (Phase B4)
@@ -857,7 +857,7 @@ impl LTSeqTable {
     /// Requires __group_id__ column to exist. Returns a new table with only the
     /// last row per group.
     fn last_row(&self) -> PyResult<LTSeqTable> {
-        crate::ops::grouping::last_row_impl(self)
+        stack::planned(|| crate::ops::grouping::last_row_impl(self))
     }
 
     /// Remove duplicate rows based on key columns
@@ -881,7 +881,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with selected row range
     fn slice(&self, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
-        crate::ops::basic::slice_impl(self, offset, length)
+        stack::planned(|| crate::ops::basic::slice_impl(self, offset, length))
     }
 
     /// Add cumulative sum columns for specified columns
@@ -928,7 +928,7 @@ impl LTSeqTable {
     /// Returns:
     ///     New LTSeqTable with rows matching the WHERE clause
     fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
-        crate::ops::aggregation::filter_where_impl(self, where_clause)
+        stack::planned(|| crate::ops::aggregation::filter_where_impl(self, where_clause))
     }
 
     /// NestedTable.derive(): add group-window derived columns natively
@@ -1011,7 +1011,7 @@ impl LTSeqTable {
         target_key: &str,
         alias: &str,
     ) -> PyResult<LTSeqTable> {
-        crate::ops::lookup::lookup_join_impl(self, other, key, target_key, alias)
+        stack::planned(|| crate::ops::lookup::lookup_join_impl(self, other, key, target_key, alias))
     }
 
     /// As-of Join: Time-series join matching each left row with nearest right row
@@ -1212,7 +1212,7 @@ impl LTSeqTable {
     ///
     /// Returns error if schemas don't match or data operations fail
     fn union(&self, other: &LTSeqTable) -> PyResult<LTSeqTable> {
-        crate::ops::set_ops::union_impl(self, other)
+        stack::planned(|| crate::ops::set_ops::union_impl(self, other))
     }
 
     /// Intersect: Return rows present in both tables

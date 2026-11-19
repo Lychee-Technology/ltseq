@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING
 
-from ._draws import keep_names, stage_draws, unstage
+from ._draws import kept_names, renamed, stage_draws, unstage
 from ._typing import LTSeqLike
 
 if TYPE_CHECKING:
@@ -34,12 +34,13 @@ def _agg_staged(inner: Any, grouping_expr: Any, agg_exprs: dict[str, Any]) -> An
     keyed = grouping_expr is not None
     staged, rewritten, _ = stage_draws(inner, ([grouping_expr] if keyed else []) + exprs)
     if keyed:
-        (key,) = keep_names(inner, [grouping_expr], rewritten[:1])
+        renames = kept_names(inner, staged, [grouping_expr], rewritten[:1])
+        key = rewritten[0]
         rewritten = rewritten[1:]
     else:
-        key = None
+        renames, key = {}, None
     # The output holds only the key and the aggregates, never a draw.
-    return staged.agg(key, dict(zip(names, rewritten)))
+    return renamed(staged.agg(key, dict(zip(names, rewritten))), renames)
 
 
 class GroupBy:

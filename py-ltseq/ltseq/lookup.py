@@ -2,6 +2,8 @@
 
 from typing import TYPE_CHECKING, Any, cast
 
+from ._draws import containers
+
 if TYPE_CHECKING:
     from .core import LTSeq
 
@@ -60,18 +62,12 @@ class LookupMixin:
         """
         # Walk every field, so a lookup under a window, an argument list or
         # any other node is found and _bare_lookup can reject it. The walk
-        # keeps its own stack: recursing through any() takes C stack per
-        # level, which a deep expression exhausts on a small thread (#335).
-        pending = [expr_dict]
-        while pending:
-            value = pending.pop()
-            if isinstance(value, dict):
-                if value.get("type") == "Lookup":
-                    return True
-                pending.extend(value.values())
-            elif isinstance(value, list):
-                pending.extend(value)
-        return False
+        # keeps its own stack (#335) and refuses an expression that contains
+        # itself (R1-F3 of #335's review).
+        return any(
+            isinstance(node, dict) and node.get("type") == "Lookup"
+            for node in containers(expr_dict)
+        )
 
     def _resolve_lookups(
         self, derived_cols: dict[str, dict]

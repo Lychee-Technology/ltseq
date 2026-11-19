@@ -57,7 +57,6 @@ use datafusion::physical_plan::{
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::*;
 use futures_util::StreamExt;
-use pyo3::prelude::*;
 
 use crate::error::LtseqError;
 use crate::ops::common::JoinType;
@@ -70,13 +69,16 @@ use crate::LTSeqTable;
 /// `join_prefixed` builds it, in `table`'s declared order. The query fails
 /// during execution when `target_key` holds a key in more than one row of
 /// `other`.
+///
+/// It clones and joins plans that may hold deep expressions, so `lib.rs`
+/// runs it through `stack::planned` (#335).
 pub fn lookup_join_impl(
     table: &LTSeqTable,
     other: &LTSeqTable,
     key: &str,
     target_key: &str,
     alias: &str,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let (_, input_schema) = table.require_df_and_schema()?;
     let (target, target_schema) = other.require_df_and_schema()?;
     let type_of = |schema: &ArrowSchema, name: &str| {

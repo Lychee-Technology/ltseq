@@ -96,7 +96,19 @@ pub fn filter_key_row_impl(
     table: &LTSeqTable,
     key: ImportedStream,
 ) -> Result<LTSeqTable, LtseqError> {
+    // The key's stream may run Python, so it is read on the thread's own
+    // stack; the plan, which may hold deep expressions, is built on a
+    // guarded one (#335).
     let (key_schema, batches) = key.read_all()?;
+    crate::stack::guarded(|| filter_on_key_row(table, &key_schema, batches))
+}
+
+/// [`filter_key_row_impl`] once the key is read.
+fn filter_on_key_row(
+    table: &LTSeqTable,
+    key_schema: &ArrowSchema,
+    batches: Vec<datafusion::arrow::record_batch::RecordBatch>,
+) -> Result<LTSeqTable, LtseqError> {
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let Some(row) = batches
         .iter()
@@ -232,13 +244,16 @@ fn select_parsed(
 /// remaps each sort spec's column to its new name so declared order survives.
 /// Execution cost is identical to the aliased select it wraps.
 ///
+/// It clones a plan that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+///
 /// Args:
 ///     table: Reference to LTSeqTable
 ///     mapping: old column name -> new column name
 pub fn rename_columns_impl(
     table: &LTSeqTable,
     mapping: &std::collections::HashMap<String, String>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     use datafusion::logical_expr::ident;
 
     let schema = table.require_schema()?;
@@ -249,8 +264,7 @@ pub fn rename_columns_impl(
             return Err(LtseqError::Validation(format!(
                 "Column '{}' not found in schema",
                 old_name
-            ))
-            .into());
+            )));
         }
     }
 
@@ -364,7 +378,14 @@ fn search_first_parsed(
 ///     table: Reference to LTSeqTable
 ///     offset: First row to keep (0-based, validated in Python)
 ///     length: Number of rows to keep; None keeps the rest
-pub fn slice_impl(table: &LTSeqTable, offset: i64, length: Option<i64>) -> PyResult<LTSeqTable> {
+///
+/// It clones and orders a plan that may hold deep expressions, so `lib.rs`
+/// runs it through `stack::planned` (#335).
+pub fn slice_impl(
+    table: &LTSeqTable,
+    offset: i64,
+    length: Option<i64>,
+) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table slices to another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));

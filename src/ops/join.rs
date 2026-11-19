@@ -122,23 +122,18 @@ fn extract_cols_from_and(
     }
 }
 
-/// Extract and validate join key column names from expressions
-fn extract_and_validate_join_keys(
+/// Deserialize the join key expressions; [`validate_join_keys`] checks them
+/// once the plan work runs on a guarded stack.
+fn parse_join_keys(
     left_key_expr_dict: &Bound<'_, PyDict>,
     right_key_expr_dict: &Bound<'_, PyDict>,
-    schema_left: &ArrowSchema,
-    schema_right: &ArrowSchema,
-) -> PyResult<(Vec<String>, Vec<String>)> {
+) -> PyResult<(PyExpr, PyExpr)> {
     let left_key_expr = dict_to_py_expr(left_key_expr_dict)?;
-
     let right_key_expr = dict_to_py_expr(right_key_expr_dict)?;
-
-    crate::stack::planned(|| {
-        validate_join_keys(left_key_expr, right_key_expr, schema_left, schema_right)
-    })
+    Ok((left_key_expr, right_key_expr))
 }
 
-/// [`extract_and_validate_join_keys`] once its keys are deserialized.
+/// Extract and validate join key column names from the parsed key expressions.
 fn validate_join_keys(
     left_key_expr: PyExpr,
     right_key_expr: PyExpr,
@@ -277,7 +272,7 @@ fn rename_right_df_for_join(
     right_schema: &ArrowSchema,
     suffix: &str,
     right_key_cols: &[String],
-) -> PyResult<RenamedRight> {
+) -> Result<RenamedRight, LtseqError> {
     let rename_map = right_rename_map(left_schema, right_schema, suffix)?;
 
     let select_exprs: Vec<Expr> = rename_map
@@ -324,7 +319,7 @@ fn build_result_table_from_df(
     result_df: DataFrame,
     expected_schema: Arc<ArrowSchema>,
     sort_specs: Vec<crate::SortSpec>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     Ok(LTSeqTable::from_df_with_schema(
         Arc::clone(session),
         result_df,
@@ -347,6 +342,26 @@ pub fn join_impl(
     join_type_str: &str,
     suffix: &str,
 ) -> PyResult<LTSeqTable> {
+    // The checks that read no expression come first, as they did.
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    JoinType::from_str(join_type_str).ok_or_else(|| {
+        LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+    })?;
+    let keys = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    // Cloning, joining and dropping a plan recurse through its expressions,
+    // which may be deep (#335).
+    crate::stack::planned(|| join_parsed(table, other, keys, join_type_str, suffix))
+}
+
+/// [`join_impl`] once its keys are deserialized.
+fn join_parsed(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    (left_key_expr, right_key_expr): (PyExpr, PyExpr),
+    join_type_str: &str,
+    suffix: &str,
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
@@ -355,10 +370,10 @@ pub fn join_impl(
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
     })?;
 
-    // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
+    // Validate join keys
+    let (left_col_names, right_col_names) = validate_join_keys(
+        left_key_expr,
+        right_key_expr,
         stored_schema_left,
         stored_schema_right,
     )?;
@@ -445,31 +460,40 @@ pub fn join_prefixed_impl(
     join_type_str: &str,
     alias: &str,
 ) -> PyResult<LTSeqTable> {
-    let (_, stored_schema_left) = table.require_df_and_schema()?;
-    let (_, stored_schema_right) = other.require_df_and_schema()?;
-
-    let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+    // The checks that read no expression come first, as they did.
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    JoinType::from_str(join_type_str).ok_or_else(|| {
         LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
     })?;
+    let (left_key_expr, right_key_expr) = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    crate::stack::planned(|| {
+        let (_, stored_schema_left) = table.require_df_and_schema()?;
+        let (_, stored_schema_right) = other.require_df_and_schema()?;
 
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
-        stored_schema_left,
-        stored_schema_right,
-    )?;
+        let join_type = JoinType::from_str(join_type_str).ok_or_else(|| {
+            LtseqError::Validation(format!("Unknown join type: {}", join_type_str))
+        })?;
 
-    // A link's join can repeat a left row for each match, drop it or add
-    // right rows, so its result declares no order (ADR 0011).
-    prefixed_join(
-        table,
-        other,
-        &left_col_names,
-        &right_col_names,
-        join_type,
-        alias,
-        Vec::new(),
-    )
+        let (left_col_names, right_col_names) = validate_join_keys(
+            left_key_expr,
+            right_key_expr,
+            stored_schema_left,
+            stored_schema_right,
+        )?;
+
+        // A link's join can repeat a left row for each match, drop it or add
+        // right rows, so its result declares no order (ADR 0011).
+        prefixed_join(
+            table,
+            other,
+            &left_col_names,
+            &right_col_names,
+            join_type,
+            alias,
+            Vec::new(),
+        )
+    })
 }
 
 /// [`join_prefixed_impl`] on key columns that both tables have, declaring
@@ -482,7 +506,7 @@ pub(crate) fn prefixed_join(
     join_type: JoinType,
     alias: &str,
     sort_specs: Vec<crate::SortSpec>,
-) -> PyResult<LTSeqTable> {
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
@@ -608,13 +632,26 @@ fn semi_anti_join_impl(
     right_key_expr_dict: &Bound<'_, PyDict>,
     is_anti: bool,
 ) -> PyResult<LTSeqTable> {
+    table.require_df_and_schema()?;
+    other.require_df_and_schema()?;
+    let keys = parse_join_keys(left_key_expr_dict, right_key_expr_dict)?;
+    crate::stack::planned(|| semi_anti_join_parsed(table, other, keys, is_anti))
+}
+
+/// [`semi_anti_join_impl`] once its keys are deserialized.
+fn semi_anti_join_parsed(
+    table: &LTSeqTable,
+    other: &LTSeqTable,
+    (left_key_expr, right_key_expr): (PyExpr, PyExpr),
+    is_anti: bool,
+) -> Result<LTSeqTable, LtseqError> {
     let (df_left, stored_schema_left) = table.require_df_and_schema()?;
     let (df_right, stored_schema_right) = other.require_df_and_schema()?;
 
-    // Parse and validate join keys
-    let (left_col_names, right_col_names) = extract_and_validate_join_keys(
-        left_key_expr_dict,
-        right_key_expr_dict,
+    // Validate join keys
+    let (left_col_names, right_col_names) = validate_join_keys(
+        left_key_expr,
+        right_key_expr,
         stored_schema_left,
         stored_schema_right,
     )?;

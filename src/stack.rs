@@ -13,8 +13,12 @@
 //!   expression the process has deserialized ([`red_zone`]), switching to a
 //!   heap-allocated stack twice that size when the thread has less left.
 //!   Each operation that plans an expression runs its planning through
-//!   [`planned`], execution runs through `gil::detached`, a table drops its
-//!   plan through it, and LTSeq's lowering calls it once per level.
+//!   [`planned`], and so does each operation on a table's plan that takes
+//!   none (a slice, a rename, a union, a join): a plan an earlier operation
+//!   accepted holds the expression, and cloning, ordering, joining, printing
+//!   or dropping the plan recurses through it. Execution runs through
+//!   `gil::detached`, a table drops its plan through it, so does an Arrow
+//!   stream that ends, and LTSeq's lowering calls it once per level.
 //! - The Tokio runtime's threads, which evaluate a plan's physical
 //!   expressions, get [`WORKER_STACK`] each.
 //!

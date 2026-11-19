@@ -2,7 +2,7 @@
 
 from typing import Any, Callable, TYPE_CHECKING, cast
 
-from ._draws import keep_names, stage_draws, unstage
+from ._draws import kept_names, renamed, stage_draws, unstage
 from ._typing import LTSeqLike
 if TYPE_CHECKING:
     from .core import LTSeq
@@ -301,7 +301,9 @@ class TransformMixin(LookupMixin, LTSeqLike):
         # selected expression keeps the name it has without staging (R1-F3
         # of #413's review): `random()`, not the staged column's name.
         staged, rewritten, _ = stage_draws(self._inner, exprs)
-        result_inner = staged.select(keep_names(self._inner, exprs, rewritten))
+        result_inner = renamed(
+            staged.select(rewritten), kept_names(self._inner, staged, exprs, rewritten)
+        )
 
         # Schema and sort metadata now come from the Rust kernel (issue #93);
         # select's sort-prefix retention lives in Rust's select_impl.

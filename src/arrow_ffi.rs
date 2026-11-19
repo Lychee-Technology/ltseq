@@ -86,6 +86,21 @@ impl DataFrameBatchReader {
             schema,
         }
     }
+
+    /// End the stream. Dropping it drops the physical plan, which recurses
+    /// through its expressions, so it is dropped on a stack deep enough for
+    /// them (#335).
+    fn finish(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            crate::stack::guarded(move || drop(stream));
+        }
+    }
+}
+
+impl Drop for DataFrameBatchReader {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 impl Iterator for DataFrameBatchReader {
@@ -101,15 +116,15 @@ impl Iterator for DataFrameBatchReader {
         match pulled {
             Ok(Some(Ok(batch))) => Some(Ok(batch)),
             Ok(None) => {
-                self.stream = None;
+                self.finish();
                 None
             }
             Ok(Some(Err(e))) => {
-                self.stream = None;
+                self.finish();
                 Some(Err(ArrowError::ExternalError(Box::new(e))))
             }
             Err(panic) => {
-                self.stream = None;
+                self.finish();
                 let msg = panic
                     .downcast_ref::<&str>()
                     .map(|s| s.to_string())

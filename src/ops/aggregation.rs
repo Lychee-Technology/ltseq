@@ -534,7 +534,12 @@ fn strip_table_qualifiers(expr: Expr) -> datafusion::error::Result<Expr> {
 ///
 /// Uses DataFusion's SQL parser to convert the WHERE clause into a native
 /// expression, then applies it via DataFrame::filter() to preserve laziness.
-pub fn filter_where_impl(table: &LTSeqTable, where_clause: &str) -> PyResult<LTSeqTable> {
+/// It clones a plan that may hold deep expressions, so `lib.rs` runs it
+/// through `stack::planned` (#335).
+pub fn filter_where_impl(
+    table: &LTSeqTable,
+    where_clause: &str,
+) -> Result<LTSeqTable, LtseqError> {
     let (df, schema) = table.require_df_and_schema()?;
 
     let filter_expr =
