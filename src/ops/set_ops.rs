@@ -36,7 +36,7 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::gil::detached;
-use crate::ops::common::{column, free_names, join_on_columns};
+use crate::ops::common::{column, free_names, join_on_columns, select_windowed};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::Column;
@@ -257,13 +257,13 @@ fn distinct_with_keys(
         .map_err(|e| LtseqError::Runtime(format!("Failed to build distinct window: {}", e)))?
         .alias(&rn_name);
 
-    let distinct_df = snapshot_single_partition(table)?
-        .select(stage)
+    // The windows are staged under free names too (`select_windowed`).
+    let distinct_df = select_windowed(snapshot_single_partition(table)?, stage)
         .and_then(|d| {
             let mut with_rn = all_column_exprs(schema);
             with_rn.push(column(&pos));
             with_rn.push(rn);
-            d.select(with_rn)
+            select_windowed(d, with_rn)
         })
         .and_then(|d| d.filter(column(&rn_name).eq(lit(1i64))))
         .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
@@ -477,8 +477,7 @@ pub fn rvs_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     let mut stage = all_column_exprs(schema);
     stage.push(row_position_expr().alias(&pos));
 
-    let result_df = snapshot_single_partition(table)?
-        .select(stage)
+    let result_df = select_windowed(snapshot_single_partition(table)?, stage)
         .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), false, true)]))
         .and_then(|d| d.select(all_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("rvs failed: {}", e)))?;
@@ -509,8 +508,7 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> Result<LTSeqTable, LtseqError>
 
     // The sort by position keeps the kept rows in input order: DataFusion
     // may repartition the filter, and nothing above it requires an order.
-    let result_df = snapshot_single_partition(table)?
-        .select(stage)
+    let result_df = select_windowed(snapshot_single_partition(table)?, stage)
         .and_then(|d| d.filter((column(&pos) % lit(n as i64)).eq(lit(0i64))))
         .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
         .and_then(|d| d.select(all_column_exprs(schema)))

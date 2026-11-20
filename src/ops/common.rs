@@ -319,16 +319,77 @@ pub(crate) fn free_names<const N: usize>(
         .map(|f| f.name().clone())
         .chain(avoid.iter().cloned())
         .collect();
-    bases.map(|base| {
-        let stem = base.trim_end_matches('_');
-        let tail = &base[stem.len()..];
-        let name = std::iter::once(base.to_string())
-            .chain((1..).map(|i| format!("{stem}_{i}{tail}")))
-            .find(|n| !taken.contains(n))
-            .expect("an unbounded range has a free name");
-        taken.insert(name.clone());
-        name
-    })
+    bases.map(|base| free_name(base, &mut taken))
+}
+
+/// The first name of `base`'s kind (see [`free_names`]) that `taken` does
+/// not hold, which is then added to it.
+fn free_name(base: &str, taken: &mut HashSet<String>) -> String {
+    let stem = base.trim_end_matches('_');
+    let tail = &base[stem.len()..];
+    let name = std::iter::once(base.to_string())
+        .chain((1..).map(|i| format!("{stem}_{i}{tail}")))
+        .find(|n| !taken.contains(n))
+        .expect("an unbounded range has a free name");
+    taken.insert(name.clone());
+    name
+}
+
+/// `df.select(exprs)`, with each window function in `exprs` computed first
+/// under a name no column of `df` has (#346).
+///
+/// `DataFrame::select` computes the window functions of its expressions in a
+/// window node beneath the projection, where each takes its expression text
+/// as its name (`row_number() ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED
+/// FOLLOWING`) before the projection applies an alias. A user column with
+/// that text as its name makes the window node's schema ambiguous, and
+/// contract §6.4 reserves no name. Here the window node holds each function
+/// under a free name (`__ltseq_window__`, `__ltseq_window_1__`, ...), and the
+/// projection reads that column in the function's place.
+pub(crate) fn select_windowed(
+    df: DataFrame,
+    exprs: Vec<Expr>,
+) -> datafusion::error::Result<DataFrame> {
+    use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+    use std::collections::HashMap;
+
+    use datafusion::logical_expr::utils::{find_window_exprs, group_window_expr_by_sort_keys};
+
+    let windows = find_window_exprs(exprs.iter());
+    if windows.is_empty() {
+        return df.select(exprs);
+    }
+    let mut taken: HashSet<String> =
+        df.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let mut by_window: HashMap<Expr, String> = HashMap::with_capacity(windows.len());
+    // One window node holds windows of one sort key only, so they are
+    // grouped as `select` groups them; the groups with more sort keys go
+    // lower, as `LogicalPlanBuilder::window_plan` puts them.
+    let mut groups = group_window_expr_by_sort_keys(windows)?;
+    groups.sort_by_key(|(key, _)| std::cmp::Reverse(key.len()));
+    let mut df = df;
+    for (_, group) in groups {
+        let staged: Vec<Expr> = group
+            .into_iter()
+            .map(|window| {
+                let name = free_name("__ltseq_window__", &mut taken);
+                by_window.insert(window.clone(), name.clone());
+                window.alias(name)
+            })
+            .collect();
+        df = df.window(staged)?;
+    }
+    let exprs = exprs
+        .into_iter()
+        .map(|expr| {
+            expr.transform_down(|e| match by_window.get(&e) {
+                Some(name) => Ok(Transformed::new(column(name), true, TreeNodeRecursion::Jump)),
+                None => Ok(Transformed::no(e)),
+            })
+            .map(|t| t.data)
+        })
+        .collect::<datafusion::error::Result<Vec<_>>>()?;
+    df.select(exprs)
 }
 
 /// A column reference to `name`, taken verbatim (see [`free_names`]).

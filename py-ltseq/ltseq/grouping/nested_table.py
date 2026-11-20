@@ -240,9 +240,13 @@ class NestedTable:
         # once per row beneath the filter, and dropped after it.
         # The predicate reads the columns the user sees: a column it names
         # like a staged draw of the key stays missing (R3-F1).
+        # The grouping columns take none of the names the predicate reads
+        # either (#346): a column it names that the table lacks stays missing
+        # rather than reading one of them.
         predicate = result.serialize()
-        staged, key_expr, hidden = self._staged_key(_columns(predicate))
-        flat, names = staged.group_id(key_expr)
+        read = _columns(predicate)
+        staged, key_expr, hidden = self._staged_key(read)
+        flat, names = staged.group_id(key_expr, sorted(read))
         flat, (predicate,), draws = stage_draws(flat, [predicate])
         inner = unstage(flat.filter_group_window(predicate, names), draws)
         nested = NestedTable(
@@ -285,8 +289,14 @@ class NestedTable:
             ...     "end": g.last().date,
             ... })
         """
-        flattened, names = self._flatten()
         derive_exprs = self._capture_derive_via_proxy(group_mapper)
+        # The grouping columns take none of the output names and none of the
+        # columns the expressions read (#346): an output may have any name,
+        # and a column the table lacks stays missing rather than reading one
+        # of them.
+        flattened, names = self._flatten(
+            avoid=[*derive_exprs, *sorted(_columns(list(derive_exprs.values())))]
+        )
         from ..core import LTSeq
 
         return LTSeq._from_inner(flattened._inner.derive_group_window(derive_exprs, names))
@@ -349,8 +359,11 @@ class NestedTable:
 
         # The grouping columns take names no input column and no output has
         # (#346): the group id is the group-by key beside the outputs, and
-        # the sort key below.
-        flattened, (group_id, _, rn) = self._flatten(avoid=list(result))
+        # the sort key below. Nor do they take a name the expressions read:
+        # a column the table lacks stays missing rather than reading one of
+        # them.
+        read = _columns([expr.serialize() for expr in result.values()])
+        flattened, (group_id, _, rn) = self._flatten(avoid=[*result, *sorted(read)])
         agg_exprs = {
             col_name: self._group_expr_to_agg_call(expr, group_id, rn)
             for col_name, expr in result.items()

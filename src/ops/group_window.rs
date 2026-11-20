@@ -19,7 +19,7 @@
 
 use crate::error::LtseqError;
 use crate::error::PyExprError;
-use crate::ops::common::{column, free_names};
+use crate::ops::common::{column, free_names, select_windowed};
 use crate::ops::grouping::GroupColumns;
 use crate::stack::MAX_EXPR_DEPTH;
 use crate::transpiler::window_native::aggregate_to_window;
@@ -512,9 +512,8 @@ fn derive_group_window_parsed(
             .map(|n| Expr::Column(Column::new_unqualified(n))),
     );
 
-    let result_df = (**df)
-        .clone()
-        .select(stage_a)
+    // The window functions are staged under free names (#346).
+    let result_df = select_windowed((**df).clone(), stage_a)
         .and_then(|df| df.sort(original_order(names)))
         .and_then(|df| df.select(final_exprs))
         .map_err(|e| LtseqError::Runtime(format!("Group derive failed: {}", e)))?;
@@ -567,9 +566,8 @@ fn filter_group_window_parsed(
         .collect();
     stage_a.push(pred_expr.alias(&flag));
 
-    let result_df = (**df)
-        .clone()
-        .select(stage_a)
+    // The window functions are staged under free names (#346).
+    let result_df = select_windowed((**df).clone(), stage_a)
         .and_then(|df| df.filter(column(&flag)))
         .and_then(|df| df.sort(original_order(names)))
         .and_then(|df| df.select(original_column_exprs(schema, names)))

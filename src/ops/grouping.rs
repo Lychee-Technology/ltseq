@@ -29,7 +29,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
-use crate::ops::common::{column, free_names};
+use crate::ops::common::{column, free_names, select_windowed};
 use crate::ops::group_window::{original_column_exprs, original_order};
 use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
@@ -251,9 +251,9 @@ fn group_id_parsed(
         .collect();
     select_exprs.push(boundary_expr.alias(boundary));
 
-    let df_with_boundary = (**df)
-        .clone()
-        .select(select_exprs)
+    // Each window function is staged under a name no input column has
+    // (`select_windowed`, #346).
+    let df_with_boundary = select_windowed((**df).clone(), select_exprs)
         .map_err(|e| {
             LtseqError::Runtime(format!("Failed to add __boundary__ column: {}", e))
         })?;
@@ -326,8 +326,7 @@ fn group_id_parsed(
         .collect();
     step3a_exprs.push(group_id_expr.alias(&names.id));
 
-    let df_with_group_id = df_with_boundary
-        .select(step3a_exprs)
+    let df_with_group_id = select_windowed(df_with_boundary, step3a_exprs)
         .map_err(|e| {
             LtseqError::Runtime(format!("Failed to add __group_id__ column: {}", e))
         })?;
@@ -376,14 +375,16 @@ fn group_id_parsed(
         .collect();
     final_exprs.push(column(&names.id));
     final_exprs.push(group_count_expr.alias(&names.count));
-    final_exprs.push(rn_expr.alias(&names.rn));
+    // ROW_NUMBER is UInt64; the column is Int64, as the schema says.
+    final_exprs.push(
+        cast(rn_expr, datafusion::arrow::datatypes::DataType::Int64).alias(&names.rn),
+    );
 
     // The windows partition by group, so their output can come back in any
     // order of groups; the sort by group and row number restores the
     // declared order (`with_plan_in_order` below), as the group window
     // operations end with.
-    let result_df = df_with_group_id
-        .select(final_exprs)
+    let result_df = select_windowed(df_with_group_id, final_exprs)
         .and_then(|df| df.sort(original_order(names)))
         .map_err(|e| {
             LtseqError::Runtime(format!(
