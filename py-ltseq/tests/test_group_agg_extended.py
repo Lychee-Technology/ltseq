@@ -169,13 +169,16 @@ class TestNestedTableAgg:
         assert derived.count() == 6
 
     @pytest.mark.parametrize("name", ["__group_id__", "__rn__"])
-    def test_agg_rejects_reserved_output_name(self, runs_table, name):
-        """An output named after an internal column would collide with the
-        group-by/sort key; reject it up front instead of aliasing silently."""
-        with pytest.raises(ValueError, match="reserved"):
-            runs_table.group_ordered(lambda r: r.is_up).agg(
-                lambda g: {name: g.count()}
-            )
+    def test_agg_output_may_have_an_internal_name(self, runs_table, name):
+        """No name is reserved (contract §6.4, #346): the grouping columns
+        take names no output has, so an output named like one is kept."""
+        named = runs_table.group_ordered(lambda r: r.is_up).agg(
+            lambda g: {name: g.count()}
+        )
+        plain = runs_table.group_ordered(lambda r: r.is_up).agg(
+            lambda g: {"n": g.count()}
+        )
+        assert named.to_pandas()[name].tolist() == plain.to_pandas()["n"].tolist()
 
 
 class TestPercentileValidation:

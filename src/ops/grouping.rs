@@ -9,6 +9,10 @@
 //! Adds `__group_id__`, `__group_count__`, and `__rn__` columns to identify
 //! consecutive groups. Supports both simple column references and complex
 //! expressions containing window functions (e.g., `shift()`, `diff()`).
+//! Those are the column names when the input has no columns of them;
+//! otherwise each takes the first free name of its kind (`__rn_1__`, ...),
+//! and `group_id_impl` returns the names it chose as [`GroupColumns`], which
+//! the caller hands to the operations that read them (#346).
 //!
 //! Uses a two-phase approach:
 //! 1. **Lazy phase**: Build boundary detection + cumulative sum → `__group_id__`
@@ -25,6 +29,7 @@
 
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
+use crate::ops::common::{column, free_names};
 use crate::ops::group_window::{original_column_exprs, original_order};
 use crate::ops::linear_scan::{can_linear_scan, linear_scan_group_id};
 use crate::transpiler::contains_window_function;
@@ -44,6 +49,49 @@ use std::sync::Arc;
 // ============================================================================
 // Public API Functions
 // ============================================================================
+
+/// The names of the grouping columns of a `group_id_impl` product: the group
+/// id, the number of rows of the group and the row's number within it.
+///
+/// Contract §6.4 reserves no column name, so these are chosen against the
+/// grouped table's columns (`common::free_names`) and travel from the
+/// producer to each operation that reads them, rather than being fixed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupColumns {
+    pub id: String,
+    pub count: String,
+    pub rn: String,
+}
+
+impl Default for GroupColumns {
+    /// The names a table without columns of these names gets, and the ones
+    /// the metadata-only linear-scan table has.
+    fn default() -> Self {
+        GroupColumns {
+            id: "__group_id__".into(),
+            count: "__group_count__".into(),
+            rn: "__rn__".into(),
+        }
+    }
+}
+
+impl From<(String, String, String)> for GroupColumns {
+    fn from((id, count, rn): (String, String, String)) -> Self {
+        GroupColumns { id, count, rn }
+    }
+}
+
+impl From<GroupColumns> for (String, String, String) {
+    fn from(names: GroupColumns) -> Self {
+        (names.id, names.count, names.rn)
+    }
+}
+
+impl GroupColumns {
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        name == self.id || name == self.count || name == self.rn
+    }
+}
 
 /// Fast path: count groups without building metadata arrays.
 ///
@@ -92,11 +140,12 @@ pub fn group_ordered_count_impl(
     // General path: do the full group_id computation and count
     let result = linear_scan_group_id(table, py_expr)?;
     let df = result.require_df()?;
-    // Filter __rn__ == 1 and count
+    // Filter __rn__ == 1 and count. The table holds only the grouping
+    // columns, under their default names.
     let filtered = (**df)
         .clone()
         .filter(
-            Expr::Column(datafusion::common::Column::new_unqualified("__rn__"))
+            column(&GroupColumns::default().rn)
                 .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
         )
         .map_err(|e| LtseqError::Runtime(e.to_string()))?;
@@ -115,24 +164,46 @@ pub fn group_ordered_count_impl(
 ///    (`df.select()` — one window function level, no nesting)
 /// 2. **SQL phase**: From the materialized `__boundary__` column, compute mask,
 ///    cumulative sum → `__group_id__`, then `__group_count__` and `__rn__`
-pub fn group_id_impl(table: &LTSeqTable, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
+///
+/// The four working columns take names no column of the table has and none
+/// of `avoid` (#346); the result comes with the names of the three it keeps.
+pub fn group_id_impl(
+    table: &LTSeqTable,
+    grouping_expr: Bound<'_, PyDict>,
+    avoid: &[String],
+) -> PyResult<(LTSeqTable, GroupColumns)> {
     // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
-        return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
+        return Ok((
+            LTSeqTable::unloaded(Arc::clone(&table.session)),
+            GroupColumns::default(),
+        ));
     }
     let (df, schema) = table.require_df_and_schema()?;
 
     // Deserialize grouping expression
     let py_expr = dict_to_py_expr(&grouping_expr)?;
-    crate::stack::planned(|| group_id_parsed(table, df, schema, py_expr))
+    let [boundary, id, count, rn] = free_names(
+        ["__boundary__", "__group_id__", "__group_count__", "__rn__"],
+        schema,
+        avoid,
+    );
+    let names = GroupColumns { id, count, rn };
+    let grouped = crate::stack::planned(|| {
+        group_id_parsed(table, df, schema, py_expr, &boundary, &names)
+    })?;
+    Ok((grouped, names))
 }
 
-/// [`group_id_impl`] once its expression is deserialized.
+/// [`group_id_impl`] once its expression is deserialized and its working
+/// columns named.
 fn group_id_parsed(
     table: &LTSeqTable,
     df: &Arc<DataFrame>,
     schema: &ArrowSchema,
     py_expr: PyExpr,
+    boundary: &str,
+    names: &GroupColumns,
 ) -> Result<LTSeqTable, LtseqError> {
     // NOTE: no linear-scan branch here. linear_scan_group_id returns a
     // METADATA-ONLY table (__group_id__/__group_count__/__rn__ without the
@@ -178,7 +249,7 @@ fn group_id_parsed(
         .iter()
         .map(|f| Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
         .collect();
-    select_exprs.push(boundary_expr.alias("__boundary__"));
+    select_exprs.push(boundary_expr.alias(boundary));
 
     let df_with_boundary = (**df)
         .clone()
@@ -200,7 +271,7 @@ fn group_id_parsed(
     use datafusion::scalar::ScalarValue;
 
     // Build mask expression: CASE WHEN __boundary__ IS NULL THEN 1 WHEN __boundary__ THEN 1 ELSE 0 END
-    let boundary_col = col("__boundary__");
+    let boundary_col = column(boundary);
     let mask_expr = Expr::Case(Case {
         expr: None,
         when_then_expr: vec![
@@ -253,7 +324,7 @@ fn group_id_parsed(
         .iter()
         .map(|f| Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
         .collect();
-    step3a_exprs.push(group_id_expr.alias("__group_id__"));
+    step3a_exprs.push(group_id_expr.alias(&names.id));
 
     let df_with_group_id = df_with_boundary
         .select(step3a_exprs)
@@ -262,7 +333,7 @@ fn group_id_parsed(
         })?;
 
     // Build __group_count__: COUNT(*) OVER (PARTITION BY __group_id__)
-    let group_id_col = col("__group_id__");
+    let group_id_col = column(&names.id);
     let count_star = count(lit(1i64));
     let group_count_expr = match count_star {
         Expr::AggregateFunction(agg) => Expr::WindowFunction(Box::new(WindowFunction {
@@ -303,9 +374,9 @@ fn group_id_parsed(
         .iter()
         .map(|f| Expr::Column(datafusion::common::Column::new_unqualified(f.name())))
         .collect();
-    final_exprs.push(col("__group_id__"));
-    final_exprs.push(group_count_expr.alias("__group_count__"));
-    final_exprs.push(rn_expr.alias("__rn__"));
+    final_exprs.push(column(&names.id));
+    final_exprs.push(group_count_expr.alias(&names.count));
+    final_exprs.push(rn_expr.alias(&names.rn));
 
     // The windows partition by group, so their output can come back in any
     // order of groups; the sort by group and row number restores the
@@ -313,7 +384,7 @@ fn group_id_parsed(
     // operations end with.
     let result_df = df_with_group_id
         .select(final_exprs)
-        .and_then(|df| df.sort(original_order()))
+        .and_then(|df| df.sort(original_order(names)))
         .map_err(|e| {
             LtseqError::Runtime(format!(
                 "Failed to add __group_count__ and __rn__ columns: {}",
@@ -328,17 +399,17 @@ fn group_id_parsed(
         .map(|f| (**f).clone())
         .collect();
     result_fields.push(datafusion::arrow::datatypes::Field::new(
-        "__group_id__",
+        &names.id,
         datafusion::arrow::datatypes::DataType::Int64,
         false,
     ));
     result_fields.push(datafusion::arrow::datatypes::Field::new(
-        "__group_count__",
+        &names.count,
         datafusion::arrow::datatypes::DataType::Int64,
         false,
     ));
     result_fields.push(datafusion::arrow::datatypes::Field::new(
-        "__rn__",
+        &names.rn,
         datafusion::arrow::datatypes::DataType::Int64,
         false,
     ));
@@ -354,47 +425,51 @@ fn group_id_parsed(
     .with_plan_in_order())
 }
 
-/// Get only the first row of each group
+/// Get only the first row of each group of a `group_id_impl` product whose
+/// grouping columns are `names`
 ///
 /// It clones a plan that may hold deep expressions, so `lib.rs` runs it
 /// through `stack::planned` (#335).
-pub fn first_row_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
-    first_or_last_row_impl(table, true)
+pub fn first_row_impl(table: &LTSeqTable, names: &GroupColumns) -> Result<LTSeqTable, LtseqError> {
+    first_or_last_row_impl(table, true, names)
 }
 
-/// Get only the last row of each group
-pub fn last_row_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
-    first_or_last_row_impl(table, false)
+/// Get only the last row of each group, as [`first_row_impl`] the first
+pub fn last_row_impl(table: &LTSeqTable, names: &GroupColumns) -> Result<LTSeqTable, LtseqError> {
+    first_or_last_row_impl(table, false, names)
 }
 
 /// Shared implementation for first_row and last_row
-fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> Result<LTSeqTable, LtseqError> {
+fn first_or_last_row_impl(
+    table: &LTSeqTable,
+    is_first: bool,
+    names: &GroupColumns,
+) -> Result<LTSeqTable, LtseqError> {
     // A never-loaded table yields another never-loaded table
     if table.dataframe.is_none() {
         return Ok(LTSeqTable::unloaded(Arc::clone(&table.session)));
     }
     let (df, schema) = table.require_df_and_schema()?;
 
-    // Verify __group_id__ column exists
-    if !schema.fields().iter().any(|f| f.name() == "__group_id__") {
-        return Err(LtseqError::Validation(
-            "__group_id__ column not found. Call flatten() first.".into(),
-        ));
+    let has = |name: &str| schema.fields().iter().any(|f| f.name() == name);
+    // Verify the group id column exists
+    if !has(&names.id) {
+        return Err(LtseqError::Validation(format!(
+            "{} column not found. Call flatten() first.",
+            names.id
+        )));
     }
 
-    let has_rn = schema.fields().iter().any(|f| f.name() == "__rn__");
-    let has_count = schema
-        .fields()
-        .iter()
-        .any(|f| f.name() == "__group_count__");
+    let has_rn = has(&names.rn);
+    let has_count = has(&names.count);
 
     // Both group_id producers (the native window path and the linear scan)
     // emit __rn__ and __group_count__, so the error arm is unreachable for
     // flatten() products. Guard against direct misuse instead of keeping the
     // old collect → MemTable → SQL fallback alive (issue #91 PR 4).
     let (predicate, which) = match (is_first, has_rn, has_count) {
-        (true, true, _) => (col("__rn__").eq(lit(1i64)), "first"),
-        (false, true, true) => (col("__rn__").eq(col("__group_count__")), "last"),
+        (true, true, _) => (column(&names.rn).eq(lit(1i64)), "first"),
+        (false, true, true) => (column(&names.rn).eq(column(&names.count)), "last"),
         _ => {
             return Err(LtseqError::Validation(
                 "first_row/last_row require __rn__ and __group_count__ from flatten(); \
@@ -414,12 +489,13 @@ fn first_or_last_row_impl(table: &LTSeqTable, is_first: bool) -> Result<LTSeqTab
     let picked = (**df)
         .clone()
         .filter(predicate)
-        .and_then(|df| df.sort(original_order()))
+        .and_then(|df| df.sort(original_order(names)))
         .map_err(|e| LtseqError::Runtime(format!("Failed to filter {} rows: {}", which, e)))?;
 
     // Drop the grouping columns by exact name (issue #214): a user column
-    // such as `__rn_x` is not one of them.
-    let keep_cols = original_column_exprs(picked.schema().as_arrow());
+    // such as `__rn_x` is not one of them, nor is a user column `__rn__`
+    // when the grouping took another name (#346).
+    let keep_cols = original_column_exprs(picked.schema().as_arrow(), names);
 
     // If no user columns remain (metadata-only table from linear scan),
     // return the filtered DF as-is — count() still works on it.
@@ -495,8 +571,9 @@ mod tests {
     #[test]
     fn first_and_last_rows_come_back_in_group_order() {
         let table = flattened_in_reverse_group_order();
-        let first = first_row_impl(&table).expect("first_row");
-        let last = last_row_impl(&table).expect("last_row");
+        let names = GroupColumns::default();
+        let first = first_row_impl(&table, &names).expect("first_row");
+        let last = last_row_impl(&table, &names).expect("last_row");
         assert_eq!(values(&first), vec![11, 21, 31]);
         assert_eq!(values(&last), vec![13, 21, 32]);
     }

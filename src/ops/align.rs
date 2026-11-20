@@ -6,7 +6,7 @@
 //! text), joined against the lazy table plan.
 
 use crate::error::LtseqError;
-use crate::ops::common::join_on_columns;
+use crate::ops::common::{column, free_names, join_on_columns};
 use crate::LTSeqTable;
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
 use datafusion::arrow::compute::CastOptions;
@@ -144,6 +144,8 @@ fn build_ref_key_array(
 ///
 /// Native plan: ref DataFrame (`__ref_key__`, `__pos__`) LEFT JOIN table
 /// ON `__ref_key__ = key_col`, ORDER BY `__pos__`, project the table columns.
+/// The two reference columns take other names when the table has columns of
+/// these (#346).
 pub fn align_impl(
     py: Python<'_>,
     table: &LTSeqTable,
@@ -179,9 +181,12 @@ fn align_on_keys(
     let (df, schema) = table.require_df_and_schema()?;
     let pos_array: ArrayRef = Arc::new(UInt64Array::from((0..positions).collect::<Vec<_>>()));
 
+    // The join puts the reference columns next to the table's, so they take
+    // names no column of the table has (#346).
+    let [ref_key, pos] = free_names(["__ref_key__", "__pos__"], schema, &[]);
     let ref_schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("__ref_key__", ref_key_array.data_type().clone(), true),
-        Field::new("__pos__", DataType::UInt64, false),
+        Field::new(&ref_key, ref_key_array.data_type().clone(), true),
+        Field::new(&pos, DataType::UInt64, false),
     ]));
     let ref_batch = RecordBatch::try_new(ref_schema, vec![ref_key_array, pos_array])
         .map_err(|e| LtseqError::Runtime(format!("Failed to build ref batch: {}", e)))?;
@@ -203,16 +208,10 @@ fn align_on_keys(
         ref_df,
         (**df).clone(),
         JoinType::Left,
-        &["__ref_key__"],
+        &[ref_key.as_str()],
         &[key_col],
     )
-    .and_then(|d| {
-        d.sort(vec![SortExpr::new(
-            Expr::Column(Column::new_unqualified("__pos__")),
-            true,
-            false,
-        )])
-    })
+    .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
     .and_then(|d| d.select(table_cols))
     .map_err(|e| LtseqError::Runtime(format!("Align join failed: {}", e)))?;
 
