@@ -37,7 +37,7 @@ use crate::transpiler::pyexpr_to_datafusion;
 use crate::transpiler::window_native::{finalize_window_expr, pyexpr_to_window_expr};
 use crate::types::{dict_to_py_expr, PyExpr};
 use crate::LTSeqTable;
-use datafusion::arrow::datatypes::Schema as ArrowSchema;
+use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::functions_window::expr_fn::lag;
 use datafusion::logical_expr::expr::Sort;
 use datafusion::logical_expr::{Expr, Operator};
@@ -214,6 +214,13 @@ fn group_id_parsed(
     // (pre-existing hole surfaced by the native group-window migration,
     // issue #91 PR 4). The window path below handles shift natively.
 
+    // The pipeline below runs over plain strings and binaries (#338); the
+    // result has the input's types.
+    let input_schema = schema;
+    let (plain_df, plain_schema) = without_views(df, schema)?;
+    let df = &plain_df;
+    let schema = plain_schema.as_ref().unwrap_or(schema);
+
     let has_window = contains_window_function(&py_expr);
 
     // Build ORDER BY from table's sort specs (direction-aware)
@@ -384,17 +391,22 @@ fn group_id_parsed(
     // order of groups; the sort by group and row number restores the
     // declared order (`with_plan_in_order` below), as the group window
     // operations end with.
-    let result_df = select_windowed(df_with_group_id, final_exprs)
-        .and_then(|df| df.sort(original_order(names)))
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Failed to add __group_count__ and __rn__ columns: {}",
-                e
-            ))
-        })?;
+    let windowed = select_windowed(df_with_group_id, final_exprs).map_err(|e| {
+        LtseqError::Runtime(format!("Failed to add __group_count__ and __rn__ columns: {}", e))
+    })?;
+    // The cast back stays beneath the sort, which must be the plan's root
+    // for `with_plan_in_order`.
+    let windowed = if plain_schema.is_some() {
+        with_views(windowed, input_schema)?
+    } else {
+        windowed
+    };
+    let result_df = windowed
+        .sort(original_order(names))
+        .map_err(|e| LtseqError::with_context("Failed to order the groups", e))?;
 
     // Build result schema with internal columns
-    let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = schema
+    let mut result_fields: Vec<datafusion::arrow::datatypes::Field> = input_schema
         .fields()
         .iter()
         .map(|f| (**f).clone())
@@ -424,6 +436,75 @@ fn group_id_parsed(
         None, // row set / columns diverge from the raw file: drop fast-path token
     )
     .with_plan_in_order())
+}
+
+/// The plain type a view type of `data_type` stands for: the large one,
+/// whose offsets do not overflow where a window or sort concatenates a whole
+/// partition.
+fn plain_type(data_type: &DataType) -> Option<DataType> {
+    match data_type {
+        DataType::Utf8View => Some(DataType::LargeUtf8),
+        DataType::BinaryView => Some(DataType::LargeBinary),
+        _ => None,
+    }
+}
+
+/// `df` with each `string_view` and `binary_view` column cast to its plain
+/// type, and the schema it then has; `df` itself, and no schema, when it has
+/// no such column (#338).
+///
+/// Arrow's `concat` of view arrays keeps every data buffer of every input,
+/// and a slice or `take` of the result keeps them all again. Each sort and
+/// window of the group pipeline concatenates what it holds and emits slices
+/// of it, so in small batches the buffers a batch references multiply from
+/// one operator to the next: a Parquet string column at batch size 1 took
+/// seconds for 40 rows. Plain arrays copy their values when concatenated, so
+/// a batch holds only its own.
+fn without_views(
+    df: &Arc<DataFrame>,
+    schema: &ArrowSchema,
+) -> Result<(Arc<DataFrame>, Option<ArrowSchema>), LtseqError> {
+    if !schema.fields().iter().any(|f| plain_type(f.data_type()).is_some()) {
+        return Ok((Arc::clone(df), None));
+    }
+    let exprs = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let column = Expr::Column(datafusion::common::Column::new_unqualified(f.name()));
+            match plain_type(f.data_type()) {
+                Some(plain) => cast(column, plain).alias(f.name()),
+                None => column,
+            }
+        })
+        .collect::<Vec<_>>();
+    let plain = (**df)
+        .clone()
+        .select(exprs)
+        .map_err(|e| LtseqError::with_context("Failed to cast view columns", e))?;
+    let plain_schema = plain.schema().as_arrow().clone();
+    Ok((Arc::new(plain), Some(plain_schema)))
+}
+
+/// `df`, whose leading columns are those of `schema` with `without_views`
+/// applied, with those columns cast back to the types of `schema`.
+fn with_views(df: DataFrame, schema: &ArrowSchema) -> Result<DataFrame, LtseqError> {
+    let exprs = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| {
+            let column = Expr::Column(datafusion::common::Column::new_unqualified(f.name()));
+            match schema.field_with_name(f.name()) {
+                Ok(original) if plain_type(original.data_type()).is_some() => {
+                    cast(column, original.data_type().clone()).alias(f.name())
+                }
+                _ => column,
+            }
+        })
+        .collect::<Vec<_>>();
+    df.select(exprs)
+        .map_err(|e| LtseqError::with_context("Failed to cast view columns back", e))
 }
 
 /// Get only the first row of each group of a `group_id_impl` product whose
