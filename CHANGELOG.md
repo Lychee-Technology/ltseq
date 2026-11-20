@@ -8,6 +8,8 @@
 
 ### Changed
 
+- `group_ordered()` no longer slows down superlinearly over a `string_view` column, such as a Parquet string column, in small batches (#338). Arrow concatenates view arrays by keeping every input's data buffers, so each sort and window of the group pipeline multiplied the buffers a batch referenced; `filter(...).flatten()` on 100 Parquet rows at batch size 1 did not finish. The group windows now run over `large_string`/`large_binary` copies and cast back, so results keep their types; the grouping lambda still reads the view types, so its keys are those `derive` computes from the same lambda.
+
 Literal values in lambdas are typed (#145). They used to be sent to the engine as strings and parsed back, so some queries that ran before now raise, and a few return a different result. Expression types now come from DataFusion's coercion as the expression executes (#225). The archived pre-v0.5 reference's ["Literal values" section](docs/archive/pre-v0.5-api.md#literal-values) describes these rules at baseline commit 3041b44.
 
 - An unsupported value in a lambda raises `TypeError` where it is written, instead of being turned into a string: `r.a == [1, 2]` (use `.is_in([...])`), `bytes`, `timedelta`, `datetime.time`, `Fraction`, `complex`. An integer outside Int64, a non-finite `Decimal` or one with more than 38 digits, and `pandas.NaT`/`pandas.NA` raise `ValueError`.
