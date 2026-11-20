@@ -214,30 +214,42 @@ fn group_id_parsed(
     // (pre-existing hole surfaced by the native group-window migration,
     // issue #91 PR 4). The window path below handles shift natively.
 
-    // The pipeline below runs over plain strings and binaries (#338); the
-    // result has the input's types.
-    let input_schema = schema;
-    let (plain_df, plain_schema) = without_views(df, schema)?;
-    let df = &plain_df;
-    let schema = plain_schema.as_ref().unwrap_or(schema);
-
     let has_window = contains_window_function(&py_expr);
 
     // Build ORDER BY from table's sort specs (direction-aware)
     let order_by: Vec<Sort> = crate::metadata::sort_specs_to_window_sorts(&table.sort_specs);
+
+    // The pipeline below runs over plain strings and binaries (#338); the
+    // result has the input's types. The grouping expression is resolved
+    // against the input's own types and reads each view column cast back to
+    // its view type, so its types and coercions, and with them the groups,
+    // are those of the input.
+    let input_schema = schema;
+    let (plain_df, plain_schema) = without_views(df, schema)?;
+    let df = &plain_df;
+    let schema = plain_schema.as_ref().unwrap_or(schema);
+    let read_as_input = |expr: Expr| -> Result<Expr, LtseqError> {
+        if plain_schema.is_some() {
+            reading_views(expr, input_schema)
+        } else {
+            Ok(expr)
+        }
+    };
 
     // ── Step 1: Build the boundary boolean expression ──────────────────
     let boundary_expr = if has_window {
         // The expression itself IS the boundary condition (contains shift/diff/etc.)
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
-        pyexpr_to_window_expr(py_expr, schema, &table.sort_specs)
-            .map_err(LtseqError::Validation)?
+        let expr = pyexpr_to_window_expr(py_expr, input_schema, &table.sort_specs)
+            .map_err(LtseqError::Validation)?;
+        read_as_input(expr)?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
-        let expr = pyexpr_to_datafusion(py_expr, schema)
+        let expr = pyexpr_to_datafusion(py_expr, input_schema)
             .map_err(LtseqError::Validation)?;
+        let expr = read_as_input(expr)?;
         let lag_expr = lag(expr.clone(), Some(1), None);
         let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
             .map_err(LtseqError::Validation)?;
@@ -484,6 +496,30 @@ fn without_views(
         .map_err(|e| LtseqError::with_context("Failed to cast view columns", e))?;
     let plain_schema = plain.schema().as_arrow().clone();
     Ok((Arc::new(plain), Some(plain_schema)))
+}
+
+/// `expr`, resolved against `schema`, reading each view column of `schema`
+/// as a cast back from the plain copy `without_views` made of it (#338).
+///
+/// The grouping expression must keep the types it has over the input: the
+/// length of a `string_view` is Int32 where that of a `large_string` is
+/// Int64, so an expression resolved over the plain copies could compute
+/// other keys, and other groups, than `derive` computes from the same
+/// lambda. The casts are evaluated inside each operator, so the views they
+/// make do not travel from one operator to the next.
+fn reading_views(expr: Expr, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    expr.transform_up(|e| match &e {
+        Expr::Column(c) => match schema.field_with_name(&c.name) {
+            Ok(f) if plain_type(f.data_type()).is_some() => {
+                Ok(Transformed::yes(cast(e.clone(), f.data_type().clone())))
+            }
+            _ => Ok(Transformed::no(e)),
+        },
+        _ => Ok(Transformed::no(e)),
+    })
+    .map(|t| t.data)
+    .map_err(|e| LtseqError::with_context("Failed to read the view columns", e))
 }
 
 /// `df`, whose leading columns are those of `schema` with `without_views`
