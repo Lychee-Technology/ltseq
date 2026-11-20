@@ -5,6 +5,9 @@ the table and then rendered the returned table a second time through
 ``_repr_html_``.
 """
 
+import json
+import sys
+
 import pytest
 
 from ltseq import LTSeq
@@ -27,10 +30,12 @@ def test_show_n_returns_none(capsys):
     assert len(rows) == 4
 
 
-def test_notebook_cell_ending_in_show_displays_the_table_once():
+def test_notebook_cell_ending_in_show_displays_the_table_once(tmp_path):
     nbformat = pytest.importorskip("nbformat")
     nbclient = pytest.importorskip("nbclient")
     pytest.importorskip("ipykernel")
+    from jupyter_client.kernelspec import KernelSpecManager
+    from jupyter_client.manager import KernelManager
 
     nb = nbformat.v4.new_notebook()
     nb.cells.append(
@@ -40,9 +45,25 @@ def test_notebook_cell_ending_in_show_displays_the_table_once():
             "t.show()"
         )
     )
-    # The python3 kernel is the one `pytest --nbmake tutorials/` runs the
-    # tutorials in.
-    nbclient.NotebookClient(nb, timeout=120, kernel_name="python3").execute()
+    # Run the kernel on the interpreter running pytest, so it imports the
+    # ltseq under test whatever `python3` kernelspec happens to be installed.
+    # Only the private kernel directory is searched, and the native kernel
+    # fallback is off, so no ambient kernelspec can take its place.
+    spec_dir = tmp_path / "kernels" / "ltseq-test"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "kernel.json").write_text(
+        json.dumps(
+            {
+                "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+                "display_name": "ltseq test",
+                "language": "python",
+            }
+        )
+    )
+    ksm = KernelSpecManager(kernel_dirs=[str(tmp_path / "kernels")], ensure_native_kernel=False)
+    km = KernelManager(kernel_name="ltseq-test", kernel_spec_manager=ksm)
+    assert km.kernel_spec.argv[0] == sys.executable
+    nbclient.NotebookClient(nb, timeout=120, km=km).execute()
 
     outputs = nb.cells[0].outputs
     assert [o.output_type for o in outputs] == ["stream"], outputs
