@@ -36,7 +36,7 @@ orders = LTSeq.from_dict({
     "amount":   [120.0, 85.5, 240.0, 60.0, 310.0, 45.0],
 })
 
-orders.show();
+orders.show()
 ```
 
 > **预期输出**
@@ -57,8 +57,8 @@ orders.show();
 > 在 Jupyter 里直接写 `orders`（不调用 `show()`）也可以——LTSeq 实现了
 > `_repr_html_`，会以表格形式渲染前几行预览。
 >
-> `show()` 打印表格后返回表本身，方便继续链式调用；行尾的 `;` 让 Jupyter 不再把
-> 这个返回值渲染第二遍。
+> `show()` 只打印表格，返回 `None`，因此它是链式调用的终点：要继续处理，
+> 请从表本身接着写，而不是从 `show()` 的返回值。
 
 ## 第一步 · 关系操作：filter / derive / select
 
@@ -69,7 +69,7 @@ big = (
     .derive(amount_with_tax=lambda r: r.amount * 1.1)
     .select("order_id", "user", "amount", "amount_with_tax")
 )
-big.show();
+big.show()
 ```
 
 > **预期输出**
@@ -134,7 +134,7 @@ result = (
     .cum_sum("amount")
     .select("order_id", "amount", "prev_amount", "amount_cumsum")
 )
-result.show();
+result.show()
 ```
 
 > **预期输出**

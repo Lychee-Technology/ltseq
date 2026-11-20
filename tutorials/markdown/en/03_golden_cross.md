@@ -64,7 +64,7 @@ t = (
     })
     .cum_sum("changed")                       # → changed_cumsum segment id
 )
-t.select("date", "close", "ma_5", "ma_20", "above", "changed_cumsum").head(5).show();
+t.select("date", "close", "ma_5", "ma_20", "above", "changed_cumsum").head(5).show()
 ```
 
 > **Expected output**
@@ -113,7 +113,7 @@ bull_runs = (
     .derive(gain_pct=lambda r: ((r.close_1 / r.close_0 - 1) * 100).round(2))
     .select("start", "end", "days", "gain_pct")
 )
-bull_runs.show();
+bull_runs.show()
 ```
 
 > **Expected output**
@@ -154,7 +154,7 @@ best = (
     .sort("gain_pct", desc=True)
     .head(1)
 )
-best.show();
+best.show()
 ```
 
 > **Expected output**

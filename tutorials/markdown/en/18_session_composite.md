@@ -92,7 +92,7 @@ flagged = stamped.derive(
     sid=lambda r: r.brk.cum_sum(partition_by="user"),
 )
 
-flagged.show(15);
+flagged.show(15)
 ```
 
 > **Expected output**
@@ -147,7 +147,7 @@ counts = (
     .sort("user")
 )
 
-counts.show();
+counts.show()
 ```
 
 > **Expected output**
@@ -192,7 +192,7 @@ sessions = (
     .sort("user", "start")
 )
 
-sessions.show();
+sessions.show()
 ```
 
 > **Expected output**

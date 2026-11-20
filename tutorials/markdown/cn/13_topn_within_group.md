@@ -39,7 +39,7 @@ trades = LTSeq.from_rows([
 ])
 
 # show() 默认只打印 10 行
-trades.show(11);
+trades.show(11)
 ```
 
 > **预期输出**
@@ -70,7 +70,7 @@ SQL 的 `ORDER BY amount DESC LIMIT 3` 字面意思是"全表排序后取前三"
 ```python
 global_top3 = trades.sort("amount", desc=True).slice(0, 3)
 
-global_top3.show();
+global_top3.show()
 ```
 
 > **预期输出**
@@ -114,7 +114,7 @@ top3 = (
     .sort("symbol", "amount", desc=[False, True])
 )
 
-top3.show();
+top3.show()
 ```
 
 > **预期输出**
@@ -158,7 +158,7 @@ by_symbol = (
     .sort("symbol")
 )
 
-by_symbol.show();
+by_symbol.show()
 ```
 
 > **预期输出**

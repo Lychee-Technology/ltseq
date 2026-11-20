@@ -64,7 +64,7 @@ aligned = trades.asof_join(
     by="symbol",           # 每只代码是独立时间线，绝不串线
     strategy="backward",   # 方向：找不晚于左行的最近右行
 )
-aligned.show();
+aligned.show()
 ```
 
 > **预期输出**
@@ -107,7 +107,7 @@ summary = enriched.group_by("symbol").agg(
     avg_slippage=lambda g: g.slippage.mean(),
     trades=lambda g: g.px.count(),
 ).sort("symbol")
-summary.show();
+summary.show()
 ```
 
 > **预期输出**

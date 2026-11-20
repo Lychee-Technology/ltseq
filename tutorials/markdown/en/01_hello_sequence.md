@@ -34,7 +34,7 @@ orders = LTSeq.from_dict({
     "amount":   [120.0, 85.5, 240.0, 60.0, 310.0, 45.0],
 })
 
-orders.show();
+orders.show()
 ```
 
 > **Expected output**
@@ -55,8 +55,8 @@ orders.show();
 > In Jupyter you can also just evaluate `orders` — LTSeq implements
 > `_repr_html_` and renders a table preview.
 >
-> `show()` prints the table and returns it so you can keep chaining; the
-> trailing `;` stops Jupyter from rendering that returned table a second time.
+> `show()` prints the table and returns `None`, so it ends a chain: to keep
+> going, continue from the table, not from `show()`.
 
 ## Step 1 · Relational ops: filter / derive / select
 
@@ -67,7 +67,7 @@ big = (
     .derive(amount_with_tax=lambda r: r.amount * 1.1)
     .select("order_id", "user", "amount", "amount_with_tax")
 )
-big.show();
+big.show()
 ```
 
 > **Expected output**
@@ -136,7 +136,7 @@ result = (
     .cum_sum("amount")
     .select("order_id", "amount", "prev_amount", "amount_cumsum")
 )
-result.show();
+result.show()
 ```
 
 > **Expected output**

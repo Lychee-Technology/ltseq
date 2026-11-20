@@ -38,7 +38,7 @@ tel = LTSeq.from_rows([
 ]).sort("device", "ts")
 
 print(tel.schema)   # ts 是原生 timestamp
-tel.show();
+tel.show()
 ```
 
 > **预期输出**
@@ -88,7 +88,7 @@ per_min = (
     .sort("minute")
 )
 
-per_min.show();
+per_min.show()
 ```
 
 > **预期输出**
@@ -125,7 +125,7 @@ NULL 行**——0-4 的完整分钟轴上，缺失的那一分钟有了自己的
 ```python
 aligned = per_min.align([0, 1, 2, 3, 4], key=lambda r: r.minute)
 
-aligned.show();
+aligned.show()
 ```
 
 > **预期输出**
@@ -158,7 +158,7 @@ axis = LTSeq.from_rows([{"minute": m} for m in range(5)])
 
 grid = axis.join(per_min, on="minute", how="left").sort("minute")
 
-grid.show();
+grid.show()
 ```
 
 > **预期输出**
@@ -197,7 +197,7 @@ filled = grid.fold(
     into="avg_ffill",
 )
 
-filled.show();
+filled.show()
 ```
 
 > **预期输出**

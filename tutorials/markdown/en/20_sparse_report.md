@@ -39,7 +39,7 @@ shops = LTSeq.from_rows([
     {"region": "south", "city": "shenzhen", "sales": 95},
 ]).sort("region", "city", "sales")
 
-shops.show();
+shops.show()
 ```
 
 > **Expected output**
@@ -79,7 +79,7 @@ sparse1 = shops.derive(
     ),
 )
 
-sparse1.show();
+sparse1.show()
 ```
 
 > **Expected output**
@@ -125,7 +125,7 @@ sparse2 = sparse1.derive(
     ),
 )
 
-sparse2.show();
+sparse2.show()
 ```
 
 > **Expected output**
@@ -170,7 +170,7 @@ filled = sparse2.fold(
     into="region_fill",
 )
 
-filled.select("region_show", "city_show", "sales", "region_fill").show();
+filled.select("region_show", "city_show", "sales", "region_fill").show()
 ```
 
 > **Expected output**

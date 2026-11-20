@@ -43,7 +43,7 @@ for u, seq_ in plans.items():
     ts += 1000
 
 events = LTSeq.from_rows(rows).sort("user", "ts")     # 先按 (user, ts) 排序
-events.select("user", "ts", "event").head(6).show();
+events.select("user", "ts", "event").head(6).show()
 ```
 
 > **预期输出**

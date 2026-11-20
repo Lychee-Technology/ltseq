@@ -58,7 +58,7 @@ t = LTSeq.from_dict({"date": ["D1", "D2", "D3", "D4"], "close": [10.0, 10.8, 10.
     t.sort("date")
      .derive(chg=lambda r: r.close - r.close.shift(1))     # 上一行 / previous row
      .cum_sum("chg")                                        # 累计 / running total
-).show();
+).show()
 ```
 
 ## 案例目录 · Case catalog

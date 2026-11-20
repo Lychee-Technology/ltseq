@@ -46,7 +46,7 @@ for u, seq_ in plans.items():
     ts += 1000
 
 events = LTSeq.from_rows(rows).sort("user", "ts")     # sort by (user, ts) first
-events.select("user", "ts", "event").head(6).show();
+events.select("user", "ts", "event").head(6).show()
 ```
 
 > **Expected output**

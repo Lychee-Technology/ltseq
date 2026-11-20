@@ -43,7 +43,7 @@ tel = LTSeq.from_rows([
 ]).sort("device", "ts")
 
 print(tel.schema)   # ts is a native timestamp
-tel.show();
+tel.show()
 ```
 
 > **Expected output**
@@ -95,7 +95,7 @@ per_min = (
     .sort("minute")
 )
 
-per_min.show();
+per_min.show()
 ```
 
 > **Expected output**
@@ -136,7 +136,7 @@ table** — on the 0-4 axis, the missing minute gets a row of its own.
 ```python
 aligned = per_min.align([0, 1, 2, 3, 4], key=lambda r: r.minute)
 
-aligned.show();
+aligned.show()
 ```
 
 > **Expected output**
@@ -172,7 +172,7 @@ axis = LTSeq.from_rows([{"minute": m} for m in range(5)])
 
 grid = axis.join(per_min, on="minute", how="left").sort("minute")
 
-grid.show();
+grid.show()
 ```
 
 > **Expected output**
@@ -213,7 +213,7 @@ filled = grid.fold(
     into="avg_ffill",
 )
 
-filled.show();
+filled.show()
 ```
 
 > **Expected output**

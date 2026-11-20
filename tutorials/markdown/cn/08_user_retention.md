@@ -48,7 +48,7 @@ print(len(logins), "条登录记录")
 ```python
 dau = logins.group_by("date").agg(active=lambda g: g.user.count())
 # 聚合结果没有确定的行序，展示前先排序
-dau.sort("date").show();
+dau.sort("date").show()
 ```
 
 > **预期输出**
@@ -87,7 +87,7 @@ for d_prev, d_next in zip(days, days[1:]):
         "rate":     round(len(kept) / len(prev_u), 3),
     })
 
-LTSeq.from_rows(retention).show();
+LTSeq.from_rows(retention).show()
 ```
 
 > **预期输出**
@@ -128,7 +128,7 @@ print("== D6 → D7 留存用户 ==")
 d6.semi_join(d7, on=lambda a, b: a.user == b.user).sort("user").show()
 
 print("== D6 → D7 流失用户 ==")
-d6.anti_join(d7, on=lambda a, b: a.user == b.user).sort("user").show();
+d6.anti_join(d7, on=lambda a, b: a.user == b.user).sort("user").show()
 ```
 
 > **预期输出**

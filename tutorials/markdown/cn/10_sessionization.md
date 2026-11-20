@@ -39,7 +39,7 @@ for u, evs in plans.items():
         rows.append({"user": u, "ts": ts, "page": page})
 
 events = LTSeq.from_rows(rows).sort("user", "ts")
-events.show();
+events.show()
 ```
 
 > **预期输出**
@@ -85,7 +85,7 @@ flagged = (
     )
     .cum_sum("new_session")           # → new_session_cumsum：会话号
 )
-flagged.show();
+flagged.show()
 ```
 
 > **预期输出**
@@ -131,7 +131,7 @@ sessions = (
     })
     .derive(dur_min=lambda r: (r.end - r.start) / 60.0)
 )
-sessions.show();
+sessions.show()
 ```
 
 > **预期输出**
@@ -167,7 +167,7 @@ labeled = (
     .flatten()
     .select("user", "ts", "page", "__group_id__")
 )
-labeled.show();
+labeled.show()
 ```
 
 > **预期输出**

@@ -49,7 +49,7 @@ bills = LTSeq.from_rows([
 ])
 
 bills = bills.sort("project", "month")
-bills.show();
+bills.show()
 ```
 
 > **预期输出**
@@ -91,7 +91,7 @@ marked = bills.derive(
     ),
 )
 
-marked.show();
+marked.show()
 ```
 
 > **预期输出**
@@ -135,7 +135,7 @@ numbered = marked.derive(
     cycle_key=lambda r: r.project.s.concat("#", r.cycle_no.cast("string")),
 )
 
-numbered.show();
+numbered.show()
 ```
 
 > **预期输出**
@@ -186,7 +186,7 @@ summary = (
     })
 )
 
-summary.show();
+summary.show()
 ```
 
 > **预期输出**

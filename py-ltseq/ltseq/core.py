@@ -118,26 +118,26 @@ class LTSeq(
         instance._name = None
         return instance
 
-    def show(self, n: int = 10) -> "LTSeq":
+    def show(self, n: int = 10) -> None:
         """
-        Display the data as a pretty-printed ASCII table.
+        Print the data as a pretty-printed ASCII table.
 
-        Returns self for method chaining.
+        Returns ``None`` (contract §7.9), so a notebook cell that ends in
+        ``t.show()`` displays the table once. ``show()`` ends a chain: call it
+        on the table you want to see, and keep the table to continue from.
 
         Args:
             n: Maximum number of rows to display (default 10)
 
-        Returns:
-            self (for chaining)
-
         Example:
             >>> t = LTSeq.read_csv("data.csv")
             >>> t.show()
-            >>> t.filter(lambda r: r.active).show().derive(upper=lambda r: r.name.s.upper())
+            >>> active = t.filter(lambda r: r.active)
+            >>> active.show()
+            >>> active.derive(upper=lambda r: r.name.s.upper()).show()
         """
         out = self._inner.show(n)
         print(out)
-        return self
 
     def __repr__(self) -> str:
         """

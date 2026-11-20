@@ -38,7 +38,7 @@ px = LTSeq.from_rows([
     {"date": "d10", "close": 13.0},
 ]).sort("date")
 
-px.show();
+px.show()
 ```
 
 > **Expected output**
@@ -85,7 +85,7 @@ spans = runs.agg(lambda g: {
     "days": g.count(),
 })
 
-spans.show();
+spans.show()
 ```
 
 > **Expected output**
@@ -136,7 +136,7 @@ longest = (
     .sort("start")
 )
 
-longest.show();
+longest.show()
 ```
 
 > **Expected output**

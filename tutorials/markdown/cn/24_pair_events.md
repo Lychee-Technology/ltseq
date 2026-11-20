@@ -41,7 +41,7 @@ swipes = LTSeq.from_rows([
     {"person": "p4", "ts": 20, "direction": "out"},
 ]).sort("person", "ts")
 
-swipes.show(13);
+swipes.show(13)
 ```
 
 > **预期输出**
@@ -87,7 +87,7 @@ pairs = stamped.filter(
     minutes=lambda r: r.next_ts - r.ts,
 )
 
-pairs.show();
+pairs.show()
 ```
 
 > **预期输出**
@@ -130,7 +130,7 @@ audit = (
     .sort("person")
 )
 
-audit.show();
+audit.show()
 ```
 
 > **预期输出**
@@ -178,7 +178,7 @@ matched = paired.filter(
     minutes=lambda r: r.ts - r.open_in,
 ).sort("person", "ts")
 
-matched.show();
+matched.show()
 ```
 
 > **预期输出**

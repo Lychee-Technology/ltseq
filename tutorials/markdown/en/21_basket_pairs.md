@@ -43,7 +43,7 @@ orders = LTSeq.from_rows([
     {"order_id": "O5", "product": "coke"},
 ])
 
-orders.show(11);
+orders.show(11)
 ```
 
 > **Expected output**
@@ -106,7 +106,7 @@ smaller orientation.
 ```python
 pairs = cartesian.filter(lambda r: r.product < r.product_b)
 
-pairs.sort("order_id", "product", "product_b").show();
+pairs.sort("order_id", "product", "product_b").show()
 ```
 
 > **Expected output**
@@ -153,7 +153,7 @@ counted = (
     .sort("n_orders", "pair", desc=[True, False])
 )
 
-counted.show();
+counted.show()
 ```
 
 > **Expected output**

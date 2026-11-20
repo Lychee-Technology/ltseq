@@ -66,7 +66,7 @@ aligned = trades.asof_join(
     by="symbol",           # each symbol is an independent timeline
     strategy="backward",   # direction: nearest right row not after the left
 )
-aligned.show();
+aligned.show()
 ```
 
 > **Expected output**
@@ -112,7 +112,7 @@ summary = enriched.group_by("symbol").agg(
     avg_slippage=lambda g: g.slippage.mean(),
     trades=lambda g: g.px.count(),
 ).sort("symbol")
-summary.show();
+summary.show()
 ```
 
 > **Expected output**

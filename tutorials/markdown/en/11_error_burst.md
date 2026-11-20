@@ -78,7 +78,7 @@ staged = (
                             .otherwise("normal"),
     )
 )
-staged.select("ts", "level", "err_rate", "lat_avg", "severity").tail(8).show();
+staged.select("ts", "level", "err_rate", "lat_avg", "severity").tail(8).show()
 ```
 
 > **Expected output**
@@ -135,7 +135,7 @@ episodes = (
         "n":        g.count(),
     })
 )
-episodes.show();
+episodes.show()
 ```
 
 > **Expected output**
@@ -179,7 +179,7 @@ no_error  = runs.filter(lambda g: g.none(lambda r: r.level == "ERROR"))
 print("storms with only ERROR rows:  ", len(all_error.agg(summary)))
 print("storms with a row over 900 ms:", len(any_slow.agg(summary)))
 print("episodes with no ERROR row:")
-no_error.agg(summary).show();
+no_error.agg(summary).show()
 ```
 
 > **Expected output**

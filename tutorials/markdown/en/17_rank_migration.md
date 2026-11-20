@@ -42,7 +42,7 @@ sales = LTSeq.from_rows([
     {"day": "d2", "product": "G", "gmv": 700},
 ])
 
-sales.show(12);
+sales.show(12)
 ```
 
 > **Expected output**
@@ -84,7 +84,7 @@ ranked = sales.derive(
     ),
 )
 
-ranked.sort("day", "rk").show(12);
+ranked.sort("day", "rk").show(12)
 ```
 
 > **Expected output**
@@ -144,7 +144,7 @@ mig = (
     .sort("rk")
 )
 
-mig.show();
+mig.show()
 ```
 
 > **Expected output**
@@ -190,7 +190,7 @@ labeled = mig.derive(
     .otherwise("down"),
 )
 
-labeled.show();
+labeled.show()
 ```
 
 > **Expected output**

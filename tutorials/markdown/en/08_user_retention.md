@@ -49,7 +49,7 @@ print(len(logins), "login rows")
 ```python
 dau = logins.group_by("date").agg(active=lambda g: g.user.count())
 # agg rows have no defined order; sort before display
-dau.sort("date").show();
+dau.sort("date").show()
 ```
 
 > **Expected output**
@@ -89,7 +89,7 @@ for d_prev, d_next in zip(days, days[1:]):
         "rate":     round(len(kept) / len(prev_u), 3),
     })
 
-LTSeq.from_rows(retention).show();
+LTSeq.from_rows(retention).show()
 ```
 
 > **Expected output**
@@ -133,7 +133,7 @@ print("== D6 → D7 retained ==")
 d6.semi_join(d7, on=lambda a, b: a.user == b.user).sort("user").show()
 
 print("== D6 → D7 churned ==")
-d6.anti_join(d7, on=lambda a, b: a.user == b.user).sort("user").show();
+d6.anti_join(d7, on=lambda a, b: a.user == b.user).sort("user").show()
 ```
 
 > **Expected output**

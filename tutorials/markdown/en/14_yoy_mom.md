@@ -40,7 +40,7 @@ rows = [
 
 monthly = LTSeq.from_rows(rows).sort("month")
 
-monthly.head(3).show();
+monthly.head(3).show()
 ```
 
 > **Expected output**
@@ -74,7 +74,7 @@ shifted = monthly.derive(
 )
 
 # 2023-12 to 2024-02, across the year boundary
-shifted.slice(11, 3).show();
+shifted.slice(11, 3).show()
 ```
 
 > **Expected output**
@@ -119,7 +119,7 @@ rates = shifted.derive(
     .otherwise("slide"),
 )
 
-rates.slice(11, 3).show();
+rates.slice(11, 3).show()
 ```
 
 > **Expected output**
@@ -172,7 +172,7 @@ multi = (
     )
 )
 
-multi.filter(lambda r: r.shop == "S2").show();
+multi.filter(lambda r: r.shop == "S2").show()
 ```
 
 > **Expected output**

@@ -46,7 +46,7 @@ hb = LTSeq.from_rows([
     {"device": "B", "ts": 7},
 ]).sort("device", "ts")
 
-hb.show(11);
+hb.show(11)
 ```
 
 > **Expected output**
@@ -83,7 +83,7 @@ gapped = hb.derive(
     gap=lambda r: r.ts - r.prev,
 )
 
-gapped.show(11);
+gapped.show(11)
 ```
 
 > **Expected output**
@@ -134,7 +134,7 @@ offline = gapped.filter(lambda r: r.gap > 5).derive(
     ),
 )
 
-offline.sort("device", "ts").show();
+offline.sort("device", "ts").show()
 ```
 
 > **Expected output**
@@ -171,7 +171,7 @@ uses conditional aggregates `count_if` / `max_if` in one pass.
 ```python
 worst = offline.filter(lambda r: r.severity == 1)
 
-worst.show();
+worst.show()
 ```
 
 > **Expected output**
@@ -205,7 +205,7 @@ per_device = (
     .sort("device")
 )
 
-per_device.show();
+per_device.show()
 ```
 
 > **Expected output**

@@ -36,7 +36,7 @@ ledger = LTSeq.from_rows([
     {"account": "A3", "seq": 2, "delta": -5},
 ]).sort("account", "seq")
 
-ledger.show();
+ledger.show()
 ```
 
 > **预期输出**
@@ -69,7 +69,7 @@ balances = ledger.derive(
     balance=lambda r: r.delta.cum_sum(partition_by="account"),
 )
 
-balances.show();
+balances.show()
 ```
 
 > **预期输出**
@@ -114,7 +114,7 @@ snapshot = (
     .last()
 )
 
-snapshot.show();
+snapshot.show()
 ```
 
 > **预期输出**
@@ -156,7 +156,7 @@ risk = (
     .last()
 )
 
-risk.show();
+risk.show()
 ```
 
 > **预期输出**
