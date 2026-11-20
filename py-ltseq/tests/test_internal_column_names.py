@@ -377,3 +377,74 @@ def test_derive_outputs_may_have_any_name(inputs, outputs):
     )
     back = {**dict(zip(inputs, neutral_in)), **dict(zip(outputs, neutral_out))}
     assert [{back.get(c, c): v for c, v in row.items()} for row in got] == expected
+
+
+# A group derive() or filter() whose expressions hold windows of several
+# sort keys stages them window node by window node, under names such as
+# `__ltseq_window__`: `g.first()` orders its group, `g.sum()` and
+# `g.count()` do not. A staged name used to be chosen against the input's
+# columns only, so an expression reading a column the table lacks could
+# read a window staged beneath it (R2-F1 of #418's review).
+STAGED = ["__ltseq_window__", "__ltseq_window_1__", "__ltseq_window_2__"]
+
+
+def staged_derive(t: LTSeq, name: str) -> Any:
+    return rows(
+        t.group_ordered(lambda r: r.k).derive(
+            lambda g: {"a": g.first().v, "b": g.sum(name), "c": g.count()}
+        )
+    )
+
+
+def staged_filter(t: LTSeq, name: str) -> Any:
+    return rows(
+        t.group_ordered(lambda r: r.k).filter(
+            lambda g: (g.first().v > 0) & (g.sum(name) > 0) & (g.count() > 0)
+        )
+    )
+
+
+STAGED_READERS = [
+    pytest.param(staged_derive, id="derive"),
+    pytest.param(staged_filter, id="filter"),
+]
+
+
+@pytest.mark.parametrize("read", STAGED_READERS)
+@pytest.mark.parametrize(
+    "inputs, missing",
+    [
+        ([], "__ltseq_window__"),
+        ([], "__ltseq_window_1__"),
+        ([], "__ltseq_window_2__"),
+        (["__ltseq_window__"], "__ltseq_window_1__"),
+        (["__ltseq_window__", "__ltseq_window_1__"], "__ltseq_window_2__"),
+    ],
+)
+def test_a_group_expression_does_not_read_a_staged_window(read, inputs, missing):
+    """An expression reading a column the table lacks fails, also when a
+    window staged for another expression would have had its name."""
+    with pytest.raises(Exception, match=missing):
+        read(numeric(inputs), missing)
+
+
+@pytest.mark.parametrize("read", STAGED_READERS)
+@pytest.mark.parametrize(
+    "inputs, name",
+    [
+        (["__ltseq_window__"], "__ltseq_window__"),
+        (["__ltseq_window_1__"], "__ltseq_window_1__"),
+        (STAGED, "__ltseq_window__"),
+        (STAGED, "__ltseq_window_2__"),
+    ],
+)
+def test_a_group_expression_reads_a_user_column_named_like_a_staged_window(
+    read, inputs, name
+):
+    """A user column with a staged window's name is the one read, beside
+    windows of several sort keys."""
+    neutral = [f"x{i}" for i in range(len(inputs))]
+    expected = read(numeric(neutral), neutral[inputs.index(name)])
+    back = dict(zip(inputs, neutral))
+    got = read(numeric(inputs), name)
+    assert [{back.get(c, c): v for c, v in row.items()} for row in got] == expected

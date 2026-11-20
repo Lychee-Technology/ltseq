@@ -344,8 +344,9 @@ fn free_name(base: &str, taken: &mut HashSet<String>) -> String {
 /// FOLLOWING`) before the projection applies an alias. A user column with
 /// that text as its name makes the window node's schema ambiguous, and
 /// contract §6.4 reserves no name. Here the window node holds each function
-/// under a free name (`__ltseq_window__`, `__ltseq_window_1__`, ...), and the
-/// projection reads that column in the function's place.
+/// under a free name (`__ltseq_window__`, `__ltseq_window_1__`, ...), one no
+/// column of `df` has and no expression reads, and the projection reads that
+/// column in the function's place.
 pub(crate) fn select_windowed(
     df: DataFrame,
     exprs: Vec<Expr>,
@@ -359,8 +360,16 @@ pub(crate) fn select_windowed(
     if windows.is_empty() {
         return df.select(exprs);
     }
-    let mut taken: HashSet<String> =
-        df.schema().fields().iter().map(|f| f.name().clone()).collect();
+    // A staged name is no column of `df` and no column the expressions
+    // read: a reference to a column `df` lacks must stay missing rather
+    // than read a staged window (R2-F1 of #418's review).
+    let mut taken: HashSet<String> = df
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .chain(exprs.iter().flat_map(|e| e.column_refs()).map(|c| c.name.clone()))
+        .collect();
     let mut by_window: HashMap<Expr, String> = HashMap::with_capacity(windows.len());
     // One window node holds windows of one sort key only, so they are
     // grouped as `select` groups them; the groups with more sort keys go
