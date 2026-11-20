@@ -36,7 +36,7 @@
 use crate::engine::RUNTIME;
 use crate::error::LtseqError;
 use crate::gil::detached;
-use crate::ops::common::join_on_columns;
+use crate::ops::common::{column, free_names, join_on_columns, select_windowed};
 use crate::LTSeqTable;
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::common::Column;
@@ -245,28 +245,28 @@ fn distinct_with_keys(
         .map(|c| Expr::Column(Column::new_unqualified(c)))
         .collect();
 
+    // Named against the input, which may have columns of these names (#346).
+    let [pos, rn_name] = free_names(["__distinct_pos__", "__distinct_rn__"], schema, &[]);
     let mut stage = all_column_exprs(schema);
-    stage.push(row_position_expr().alias("__distinct_pos__"));
+    stage.push(row_position_expr().alias(&pos));
 
     let rn = row_number()
         .partition_by(key_exprs)
-        .order_by(vec![SortExpr::new(col("__distinct_pos__"), true, false)])
+        .order_by(vec![SortExpr::new(column(&pos), true, false)])
         .build()
         .map_err(|e| LtseqError::Runtime(format!("Failed to build distinct window: {}", e)))?
-        .alias("__distinct_rn__");
+        .alias(&rn_name);
 
-    let distinct_df = snapshot_single_partition(table)?
-        .select(stage)
+    // The windows are staged under free names too (`select_windowed`).
+    let distinct_df = select_windowed(snapshot_single_partition(table)?, stage)
         .and_then(|d| {
             let mut with_rn = all_column_exprs(schema);
-            with_rn.push(col("__distinct_pos__"));
+            with_rn.push(column(&pos));
             with_rn.push(rn);
-            d.select(with_rn)
+            select_windowed(d, with_rn)
         })
-        .and_then(|d| d.filter(col("__distinct_rn__").eq(lit(1i64))))
-        .and_then(|d| {
-            d.sort(vec![SortExpr::new(col("__distinct_pos__"), true, false)])
-        })
+        .and_then(|d| d.filter(column(&rn_name).eq(lit(1i64))))
+        .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
         .and_then(|d| d.select(all_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("Distinct execution failed: {}", e)))?;
 
@@ -472,14 +472,13 @@ fn widened_set_keys(
 pub fn rvs_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     let (_, schema) = table.require_df_and_schema()?;
 
+    // Named against the input, which may have a column of this name (#346).
+    let [pos] = free_names(["__rvs_pos__"], schema, &[]);
     let mut stage = all_column_exprs(schema);
-    stage.push(row_position_expr().alias("__rvs_pos__"));
+    stage.push(row_position_expr().alias(&pos));
 
-    let result_df = snapshot_single_partition(table)?
-        .select(stage)
-        .and_then(|d| {
-            d.sort(vec![SortExpr::new(col("__rvs_pos__"), false, true)])
-        })
+    let result_df = select_windowed(snapshot_single_partition(table)?, stage)
+        .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), false, true)]))
         .and_then(|d| d.select(all_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("rvs failed: {}", e)))?;
 
@@ -502,17 +501,16 @@ pub fn step_impl(table: &LTSeqTable, n: usize) -> Result<LTSeqTable, LtseqError>
 
     let (_, schema) = table.require_df_and_schema()?;
 
+    // Named against the input, which may have a column of this name (#346).
+    let [pos] = free_names(["__step_pos__"], schema, &[]);
     let mut stage = all_column_exprs(schema);
-    stage.push(row_position_expr().alias("__step_pos__"));
+    stage.push(row_position_expr().alias(&pos));
 
     // The sort by position keeps the kept rows in input order: DataFusion
     // may repartition the filter, and nothing above it requires an order.
-    let result_df = snapshot_single_partition(table)?
-        .select(stage)
-        .and_then(|d| {
-            d.filter((col("__step_pos__") % lit(n as i64)).eq(lit(0i64)))
-        })
-        .and_then(|d| d.sort(vec![SortExpr::new(col("__step_pos__"), true, false)]))
+    let result_df = select_windowed(snapshot_single_partition(table)?, stage)
+        .and_then(|d| d.filter((column(&pos) % lit(n as i64)).eq(lit(0i64))))
+        .and_then(|d| d.sort(vec![SortExpr::new(column(&pos), true, false)]))
         .and_then(|d| d.select(all_column_exprs(schema)))
         .map_err(|e| LtseqError::Runtime(format!("step failed: {}", e)))?;
 

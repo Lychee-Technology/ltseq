@@ -819,12 +819,21 @@ impl LTSeqTable {
         crate::ops::sort::assume_sorted_impl(py, self, sort_exprs, desc_flags, nulls_last_flags)
     }
 
-    /// Add __group_id__ column for consecutive identical grouping values
+    /// Add the grouping columns (group id, group row count, row number in
+    /// the group) for consecutive identical grouping values.
     ///
-    /// Phase B2: Foundation for group_ordered() lazy evaluation.
-    /// Placeholder: will compute __group_id__ via window functions.
-    fn group_id(&self, grouping_expr: Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::grouping::group_id_impl(self, grouping_expr)
+    /// Returns the table and the names of the three columns: `__group_id__`,
+    /// `__group_count__` and `__rn__`, or, for each of these the table or
+    /// `avoid` already has, the first free name of its kind (#346). The
+    /// operations that read the columns take the names as an argument.
+    #[pyo3(signature = (grouping_expr, avoid=Vec::new()))]
+    fn group_id(
+        &self,
+        grouping_expr: Bound<'_, PyDict>,
+        avoid: Vec<String>,
+    ) -> PyResult<(LTSeqTable, (String, String, String))> {
+        let (table, names) = crate::ops::grouping::group_id_impl(self, grouping_expr, &avoid)?;
+        Ok((table, names.into()))
     }
 
     /// Fast path: count the number of groups without building metadata arrays.
@@ -846,18 +855,20 @@ impl LTSeqTable {
 
     /// Get only the first row of each group (Phase B4)
     ///
-    /// Requires __group_id__ column to exist. Returns a new table with only the
-    /// first row per group.
-    fn first_row(&self) -> PyResult<LTSeqTable> {
-        stack::planned(|| crate::ops::grouping::first_row_impl(self))
+    /// Requires the grouping columns `names` that `group_id` returned.
+    /// Returns a new table with only the first row per group.
+    fn first_row(&self, names: (String, String, String)) -> PyResult<LTSeqTable> {
+        let names = names.into();
+        stack::planned(|| crate::ops::grouping::first_row_impl(self, &names))
     }
 
     /// Get only the last row of each group (Phase B4)
     ///
-    /// Requires __group_id__ column to exist. Returns a new table with only the
-    /// last row per group.
-    fn last_row(&self) -> PyResult<LTSeqTable> {
-        stack::planned(|| crate::ops::grouping::last_row_impl(self))
+    /// Requires the grouping columns `names` that `group_id` returned.
+    /// Returns a new table with only the last row per group.
+    fn last_row(&self, names: (String, String, String)) -> PyResult<LTSeqTable> {
+        let names = names.into();
+        stack::planned(|| crate::ops::grouping::last_row_impl(self, &names))
     }
 
     /// Remove duplicate rows based on key columns
@@ -933,14 +944,24 @@ impl LTSeqTable {
 
     /// NestedTable.derive(): add group-window derived columns natively
     /// from serialized group-dialect dicts (issue #91 PR 4).
-    fn derive_group_window(&self, derived: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::group_window::derive_group_window_impl(self, derived)
+    /// `names` are the grouping columns `group_id` returned.
+    fn derive_group_window(
+        &self,
+        derived: &Bound<'_, PyDict>,
+        names: (String, String, String),
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::derive_group_window_impl(self, derived, &names.into())
     }
 
     /// NestedTable.filter(): staged native filter on a serialized
-    /// group-dialect predicate (issue #91 PR 4).
-    fn filter_group_window(&self, predicate: &Bound<'_, PyDict>) -> PyResult<LTSeqTable> {
-        crate::ops::group_window::filter_group_window_impl(self, predicate)
+    /// group-dialect predicate (issue #91 PR 4). `names` are the grouping
+    /// columns `group_id` returned.
+    fn filter_group_window(
+        &self,
+        predicate: &Bound<'_, PyDict>,
+        names: (String, String, String),
+    ) -> PyResult<LTSeqTable> {
+        crate::ops::group_window::filter_group_window_impl(self, predicate, &names.into())
     }
 
     /// Equi-join with another table; the plan stays lazy (`ops::join::join_impl`).

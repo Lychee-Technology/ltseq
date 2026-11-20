@@ -285,7 +285,7 @@ Examples include:
 
 ### Grouping
 
-`group_ordered()` and `group_sorted()` return `NestedTable`, not an eagerly aggregated flat table. Internally, grouped workflows rely on extra columns such as `__group_id__`, `__group_count__`, and `__rn__` to preserve group identity and row position.
+`group_ordered()` and `group_sorted()` return `NestedTable`, not an eagerly aggregated flat table. Internally, grouped workflows rely on extra columns such as `__group_id__`, `__group_count__`, and `__rn__` to preserve group identity and row position. No column name is reserved (contract §6.4), so those are the names only when the table has no columns of them: `group_id` takes the first free name of each kind (`ops::common::free_names`) and returns the names it chose, which Python passes to every operation that reads them (#346). The other operations that add working columns to a plan (`distinct`, `rvs`, `step`, `align`, the group filter) name them the same way. The grouping columns also avoid the output names of a group `derive()` or `agg()` and every column a group expression reads, so a reference to a missing column stays missing. A window function is computed under a free name before the projection that aliases it (`ops::common::select_windowed`), since DataFusion would otherwise name its column after its expression text.
 
 ### Linking
 

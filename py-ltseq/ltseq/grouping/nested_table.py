@@ -45,13 +45,7 @@ class NestedTable:
         """
         self._ltseq = ltseq_instance
         self._grouping_lambda = grouping_lambda
-        self._schema = ltseq_instance._schema.copy()
         self._is_sorted = is_sorted
-
-        # Add internal group columns to schema
-        self._schema["__group_id__"] = "int64"
-        self._schema["__group_count__"] = "int64"
-        self._schema["__rn__"] = "int64"
 
         # Optional filters and derivations
         self._group_filter = None
@@ -68,8 +62,6 @@ class NestedTable:
         columns ``hidden`` that its results drop."""
         self._key_expr = key_expr
         self._hidden = hidden
-        for name in hidden:
-            self._schema.pop(name, None)
         return self
 
     def _visible_schema(self) -> dict[str, str]:
@@ -134,14 +126,14 @@ class NestedTable:
         Example:
             >>> grouped.last()  # Returns LTSeq with last row per group
         """
-        flattened = self.flatten()
+        flattened, names = self._flatten()
         # Construct through __init__ so a subclass keeps the state it sets
         # there. The schema cache stays unset so it is read from the
         # result's own plan, which projects the grouping columns away;
         # copying flattened's would list __group_id__, __group_count__ and
         # __rn__ (#315).
         result = type(flattened)()
-        result._inner = flattened._inner.last_row()
+        result._inner = flattened._inner.last_row(names)
         result._schema_cache = None
         return result
 
@@ -163,7 +155,11 @@ class NestedTable:
         Return the underlying LTSeq with __group_id__ column added.
 
         The __group_id__ column identifies consecutive groups with identical
-        grouping values.
+        grouping values. ``__group_count__`` (the group's row count) and
+        ``__rn__`` (the row's number in its group) follow it. When the table
+        already has a column of one of these names, that column keeps its
+        name and values, and the grouping column takes the first free name
+        of its kind instead (``__group_id_1__``, ``__group_id_2__``, ...).
 
         Returns:
             A new LTSeq with __group_id__ column for each row
@@ -172,15 +168,26 @@ class NestedTable:
             >>> grouped = t.group_ordered(lambda r: r.is_up)
             >>> flattened = grouped.flatten()  # Now has __group_id__ column
         """
+        return self._flatten()[0]
+
+    def _flatten(
+        self, avoid: "list[str] | None" = None
+    ) -> "tuple[LTSeq, tuple[str, str, str]]":
+        """flatten(), and the names its grouping columns took: the group id,
+        the group's row count and the row number in the group (#346). None
+        of them is a column of the grouped table or a name in ``avoid``."""
         # The key is compared with the previous row's key; with rand() in it
         # each row's one draw is compared with the previous row's (#298).
         staged, expr_dict, hidden = self._staged_key()
+        flat, names = staged.group_id(expr_dict, avoid or [])
 
+        # The schema is read from the plan: the grouping columns' names are
+        # the ones group_id chose, and a user column keeps its own type.
         result = self._ltseq.__class__()
-        result._schema = self._schema.copy()
-        result._inner = unstage(staged.group_id(expr_dict), hidden)
+        result._inner = unstage(flat, hidden)
+        result._schema_cache = None
 
-        return result
+        return result, names
 
     def filter(self, group_predicate: Callable) -> "NestedTable":
         """
@@ -233,11 +240,15 @@ class NestedTable:
         # once per row beneath the filter, and dropped after it.
         # The predicate reads the columns the user sees: a column it names
         # like a staged draw of the key stays missing (R3-F1).
+        # The grouping columns take none of the names the predicate reads
+        # either (#346): a column it names that the table lacks stays missing
+        # rather than reading one of them.
         predicate = result.serialize()
-        staged, key_expr, hidden = self._staged_key(_columns(predicate))
-        flat = staged.group_id(key_expr)
+        read = _columns(predicate)
+        staged, key_expr, hidden = self._staged_key(read)
+        flat, names = staged.group_id(key_expr, sorted(read))
         flat, (predicate,), draws = stage_draws(flat, [predicate])
-        inner = unstage(flat.filter_group_window(predicate), draws)
+        inner = unstage(flat.filter_group_window(predicate, names), draws)
         nested = NestedTable(
             LTSeq._from_inner(inner), self._grouping_lambda, is_sorted=self._is_sorted
         )
@@ -278,11 +289,17 @@ class NestedTable:
             ...     "end": g.last().date,
             ... })
         """
-        flattened = self.flatten()
         derive_exprs = self._capture_derive_via_proxy(group_mapper)
+        # The grouping columns take none of the output names and none of the
+        # columns the expressions read (#346): an output may have any name,
+        # and a column the table lacks stays missing rather than reading one
+        # of them.
+        flattened, names = self._flatten(
+            avoid=[*derive_exprs, *sorted(_columns(list(derive_exprs.values())))]
+        )
         from ..core import LTSeq
 
-        return LTSeq._from_inner(flattened._inner.derive_group_window(derive_exprs))
+        return LTSeq._from_inner(flattened._inner.derive_group_window(derive_exprs, names))
 
     def agg(self, group_mapper: Callable) -> "LTSeq":
         """
@@ -329,20 +346,9 @@ class NestedTable:
         if not isinstance(result, dict) or not result:
             raise ValueError("agg lambda must return a non-empty dict of group expressions")
 
-        # Internal columns injected by flatten()/agg for grouping and ordering.
-        # A user output named after one of these would collide with the
-        # group-by/sort key below, giving ambiguous results.
-        reserved = ("__group_id__", "__rn__")
-
-        agg_exprs = {}
         for col_name, expr in result.items():
             if not isinstance(col_name, str):
                 raise ValueError(f"Column name must be a string, got {type(col_name)}")
-            if col_name in reserved:
-                raise ValueError(
-                    f"Output column name '{col_name}' is reserved for internal use; "
-                    f"choose a different name"
-                )
             if not isinstance(expr, GroupExpr):
                 raise ValueError(
                     f"Unsupported expression type for column '{col_name}': {type(expr)}. "
@@ -350,31 +356,39 @@ class NestedTable:
                     f"g.sum('col'), ...); arithmetic combinations are not supported "
                     f"in agg() yet — use derive() + distinct or compute after agg()"
                 )
-            agg_exprs[col_name] = self._group_expr_to_agg_call(expr)
 
-        flattened = self.flatten()
-        inner = flattened._inner.agg(
-            {"type": "Column", "name": "__group_id__"}, agg_exprs
-        )
+        # The grouping columns take names no input column and no output has
+        # (#346): the group id is the group-by key beside the outputs, and
+        # the sort key below. Nor do they take a name the expressions read:
+        # a column the table lacks stays missing rather than reading one of
+        # them.
+        read = _columns([expr.serialize() for expr in result.values()])
+        flattened, (group_id, _, rn) = self._flatten(avoid=[*result, *sorted(read)])
+        agg_exprs = {
+            col_name: self._group_expr_to_agg_call(expr, group_id, rn)
+            for col_name, expr in result.items()
+        }
+        inner = flattened._inner.agg({"type": "Column", "name": group_id}, agg_exprs)
         out = LTSeq._from_inner(inner)
         # Aggregate output order is not guaranteed: restore sequence order via
         # the group id, then project it away.
-        return out.sort("__group_id__").select(*result.keys())
+        return out.sort(group_id).select(*result.keys())
 
     @staticmethod
-    def _group_expr_to_agg_call(expr: "Any") -> dict:
+    def _group_expr_to_agg_call(expr: "Any", group_id: str, rn: str) -> dict:
         """Translate a group-dialect expression into the row-dialect aggregate
-        Call dict that the native agg engine understands."""
+        Call dict that the native agg engine understands, over the grouping
+        columns ``group_id`` and ``rn`` that flatten() added."""
         from .expr import GroupAggExpr, GroupCountExpr, GroupRowColumnExpr
         from ..expr.types import CallExpr, ColumnExpr
 
         if isinstance(expr, GroupCountExpr):
-            return CallExpr("count", (), {}, on=ColumnExpr("__group_id__")).serialize()
+            return CallExpr("count", (), {}, on=ColumnExpr(group_id)).serialize()
         if isinstance(expr, GroupRowColumnExpr):
             # first/last row value, ordered by the in-group row number
             return CallExpr(
                 expr._row_type,
-                (ColumnExpr("__rn__"),),
+                (ColumnExpr(rn),),
                 {},
                 on=ColumnExpr(expr._column),
             ).serialize()
@@ -466,9 +480,9 @@ class _LazyFirstLTSeq:
     def _materialize(self):
         """Eagerly materialize the first-row-per-group LTSeq."""
         if self._materialized is None:
-            flattened = self._nested.flatten()
+            flattened, names = self._nested._flatten()
             from ..core import LTSeq
-            inner = flattened._inner.first_row()
+            inner = flattened._inner.first_row(names)
             result = LTSeq._from_inner(inner)
             self._materialized = result
         return self._materialized
