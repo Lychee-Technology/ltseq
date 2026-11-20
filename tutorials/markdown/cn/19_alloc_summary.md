@@ -41,7 +41,7 @@ fees = LTSeq.from_rows([
 ])
 
 months.show()
-fees.show();
+fees.show()
 ```
 
 > **预期输出**
@@ -78,7 +78,7 @@ fees.show();
 ```python
 fees_joined = months.join(fees, on="year", how="left")
 
-fees_joined.sort("month").show();
+fees_joined.sort("month").show()
 ```
 
 > **预期输出**
@@ -120,7 +120,7 @@ enriched = (
     .sort("month")
 )
 
-enriched.show();
+enriched.show()
 ```
 
 > **预期输出**
@@ -165,7 +165,7 @@ shared = nested.derive(lambda g: {"year_total": g.sum("sales")}).derive(
     share2=lambda r: r.fee / r.year_total * r.sales,
 )
 
-shared.sort("month").show();
+shared.sort("month").show()
 ```
 
 > **预期输出**

@@ -73,7 +73,7 @@ staged = (
                             .otherwise("normal"),
     )
 )
-staged.select("ts", "level", "err_rate", "lat_avg", "severity").tail(8).show();
+staged.select("ts", "level", "err_rate", "lat_avg", "severity").tail(8).show()
 ```
 
 > **预期输出**
@@ -127,7 +127,7 @@ episodes = (
         "n":        g.count(),
     })
 )
-episodes.show();
+episodes.show()
 ```
 
 > **预期输出**
@@ -170,7 +170,7 @@ no_error  = runs.filter(lambda g: g.none(lambda r: r.level == "ERROR"))
 print("全部是 ERROR 的风暴段:", len(all_error.agg(summary)))
 print("有一条超过 900 ms 的风暴段:", len(any_slow.agg(summary)))
 print("没有 ERROR 的事件段:")
-no_error.agg(summary).show();
+no_error.agg(summary).show()
 ```
 
 > **预期输出**

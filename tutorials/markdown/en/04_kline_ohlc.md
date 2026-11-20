@@ -89,7 +89,7 @@ staged = (
                                 r.mm.cast("string").s.pad_left(2, "0")),
     })
 )
-staged.select("ts", "symbol", "bucket", "kline").head(3).show();
+staged.select("ts", "symbol", "bucket", "kline").head(3).show()
 ```
 
 > **Expected output**
@@ -142,7 +142,7 @@ for sym, sub in staged.partition("symbol").items():
     kline_long = part if kline_long is None else kline_long.concat(part)
 
 kline_long = kline_long.sort("kline", "symbol")
-kline_long.head(6).show();
+kline_long.head(6).show()
 ```
 
 > **Expected output**
@@ -188,7 +188,7 @@ wide = kline_long.pivot(
     values="vol",
     agg_fn="sum",
 ).sort("kline")
-wide.show();
+wide.show()
 ```
 
 > **Expected output**

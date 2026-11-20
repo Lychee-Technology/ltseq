@@ -33,7 +33,7 @@ for _ in range(90):
     navs.append(round(nav, 4))
 
 t = LTSeq.from_dict({"day": list(range(1, 91)), "nav": navs}).sort("day")
-t.head(3).show();
+t.head(3).show()
 ```
 
 > **Expected output**
@@ -65,7 +65,7 @@ nav_t = (
 nav_mdd = nav_t.agg(mdd=lambda g: g.dd.min()).to_dicts()[0]["mdd"]
 print("max drawdown =", round(nav_mdd * 100, 2), "%")
 
-nav_t.select("day", "nav", "peak", "dd").tail(3).show();
+nav_t.select("day", "nav", "peak", "dd").tail(3).show()
 ```
 
 > **Expected output**
@@ -106,7 +106,7 @@ compounded = with_ret.fold(
     into="cum_return",
 )
 
-compounded.select("day", "nav", "ret", "cum_return").tail(3).show();
+compounded.select("day", "nav", "ret", "cum_return").tail(3).show()
 ```
 
 > **Expected output**

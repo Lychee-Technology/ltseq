@@ -36,7 +36,7 @@ alerts = LTSeq.from_rows([
     {"rule": "mem", "ts": 15},
 ]).sort("rule", "ts")
 
-alerts.show();
+alerts.show()
 ```
 
 > **预期输出**
@@ -77,7 +77,7 @@ naive = (
     )
 )
 
-naive.filter(lambda r: r.rule == "cpu").show();
+naive.filter(lambda r: r.rule == "cpu").show()
 ```
 
 > **预期输出**
@@ -127,7 +127,7 @@ fired = suppressed.derive(
     is_fired=lambda r: r.last_alert == r.ts,
 )
 
-fired.filter(lambda r: r.rule == "cpu").show();
+fired.filter(lambda r: r.rule == "cpu").show()
 ```
 
 > **预期输出**
@@ -176,7 +176,7 @@ summary = (
     .sort("rule")
 )
 
-summary.show();
+summary.show()
 ```
 
 > **预期输出**

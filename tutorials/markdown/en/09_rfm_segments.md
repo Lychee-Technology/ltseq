@@ -63,7 +63,7 @@ rfm = orders.group_by("user").agg(
     freq=lambda g: g.order_id.count(),         # frequency F
     monetary=lambda g: g.amount.sum(),         # monetary M
 ).sort("user")                                 # agg rows have no defined order
-rfm.show();
+rfm.show()
 ```
 
 > **Expected output**
@@ -100,7 +100,7 @@ rfm = (
         recency=lambda r: r.snap.dt.diff(r.last_date.cast("date32")),
     )
 )
-rfm.select("user", "last_date", "recency", "freq", "monetary").show();
+rfm.select("user", "last_date", "recency", "freq", "monetary").show()
 ```
 
 > **Expected output**
@@ -148,7 +148,7 @@ rfm = rfm.derive(lambda r: {
     # higher is better
     "m_score": 5 - ntile(4).over(order_by=r.monetary, descending=True),
 })
-rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show();
+rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show()
 ```
 
 > **Expected output**
@@ -209,7 +209,7 @@ rfm = rfm.derive(
     "r_score", "f_score", "m_score", "segment",
 ).sort("user")
 
-rfm.show();
+rfm.show()
 ```
 
 > **Expected output**

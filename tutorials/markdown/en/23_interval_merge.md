@@ -64,7 +64,7 @@ step2 = step1.derive(
     prev_running=lambda r: r.running_end.shift(1, partition_by="room"),
 )
 
-step2.show();
+step2.show()
 ```
 
 > **Expected output**
@@ -116,7 +116,7 @@ step3 = step2.derive(
     block=lambda r: r.new_block.cum_sum(partition_by="room"),
 )
 
-step3.show();
+step3.show()
 ```
 
 > **Expected output**
@@ -174,7 +174,7 @@ merged = (
     .sort("room", "start")
 )
 
-merged.show();
+merged.show()
 ```
 
 > **Expected output**

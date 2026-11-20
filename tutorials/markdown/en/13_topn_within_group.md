@@ -41,7 +41,7 @@ trades = LTSeq.from_rows([
 ])
 
 # show() prints 10 rows by default
-trades.show(11);
+trades.show(11)
 ```
 
 > **Expected output**
@@ -73,7 +73,7 @@ direct spelling.
 ```python
 global_top3 = trades.sort("amount", desc=True).slice(0, 3)
 
-global_top3.show();
+global_top3.show()
 ```
 
 > **Expected output**
@@ -119,7 +119,7 @@ top3 = (
     .sort("symbol", "amount", desc=[False, True])
 )
 
-top3.show();
+top3.show()
 ```
 
 > **Expected output**
@@ -165,7 +165,7 @@ by_symbol = (
     .sort("symbol")
 )
 
-by_symbol.show();
+by_symbol.show()
 ```
 
 > **Expected output**

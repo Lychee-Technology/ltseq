@@ -43,7 +43,7 @@ dates = [f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}" for i in range(60)]
 LTSeq.from_dict({"date": dates, "close": closes}).write_csv("stock.csv")
 
 stock = LTSeq.read_csv("stock.csv")
-stock.head(3).show();
+stock.head(3).show()
 ```
 
 > **预期输出**
@@ -82,7 +82,7 @@ indicators = (
     })
     .derive(vol_20=lambda r: r.ret.rolling(20).std().round(4))   # 用到上一步新增的 `ret`
 )
-indicators.select("date", "close", "ma_5", "ma_20", "ret", "vol_20").head(4).show();
+indicators.select("date", "close", "ma_5", "ma_20", "ret", "vol_20").head(4).show()
 ```
 
 > **预期输出**
@@ -123,7 +123,7 @@ labeled = indicators.derive(
 
 labeled.filter(lambda r: r.vol_20 > 0.018).select(
     "date", "close", "ma_5", "vol_20", "trend"
-).head(5).show();
+).head(5).show()
 ```
 
 > **预期输出**

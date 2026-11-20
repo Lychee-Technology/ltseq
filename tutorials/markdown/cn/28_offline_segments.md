@@ -43,7 +43,7 @@ hb = LTSeq.from_rows([
     {"device": "B", "ts": 7},
 ]).sort("device", "ts")
 
-hb.show(11);
+hb.show(11)
 ```
 
 > **预期输出**
@@ -78,7 +78,7 @@ gapped = hb.derive(
     gap=lambda r: r.ts - r.prev,
 )
 
-gapped.show(11);
+gapped.show(11)
 ```
 
 > **预期输出**
@@ -128,7 +128,7 @@ offline = gapped.filter(lambda r: r.gap > 5).derive(
     ),
 )
 
-offline.sort("device", "ts").show();
+offline.sort("device", "ts").show()
 ```
 
 > **预期输出**
@@ -163,7 +163,7 @@ severity == 1 的行就是每设备的"最长离线"；设备级汇总用条件�
 ```python
 worst = offline.filter(lambda r: r.severity == 1)
 
-worst.show();
+worst.show()
 ```
 
 > **预期输出**
@@ -195,7 +195,7 @@ per_device = (
     .sort("device")
 )
 
-per_device.show();
+per_device.show()
 ```
 
 > **预期输出**

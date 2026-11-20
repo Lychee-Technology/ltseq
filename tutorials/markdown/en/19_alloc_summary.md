@@ -45,7 +45,7 @@ fees = LTSeq.from_rows([
 ])
 
 months.show()
-fees.show();
+fees.show()
 ```
 
 > **Expected output**
@@ -82,7 +82,7 @@ the two levels meet in the same row after the join.
 ```python
 fees_joined = months.join(fees, on="year", how="left")
 
-fees_joined.sort("month").show();
+fees_joined.sort("month").show()
 ```
 
 > **Expected output**
@@ -126,7 +126,7 @@ enriched = (
     .sort("month")
 )
 
-enriched.show();
+enriched.show()
 ```
 
 > **Expected output**
@@ -175,7 +175,7 @@ shared = nested.derive(lambda g: {"year_total": g.sum("sales")}).derive(
     share2=lambda r: r.fee / r.year_total * r.sales,
 )
 
-shared.sort("month").show();
+shared.sort("month").show()
 ```
 
 > **Expected output**

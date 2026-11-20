@@ -38,7 +38,7 @@ rows = [
 
 monthly = LTSeq.from_rows(rows).sort("month")
 
-monthly.head(3).show();
+monthly.head(3).show()
 ```
 
 > **预期输出**
@@ -69,7 +69,7 @@ shifted = monthly.derive(
 )
 
 # 2023-12 至 2024-02，跨过年界
-shifted.slice(11, 3).show();
+shifted.slice(11, 3).show()
 ```
 
 > **预期输出**
@@ -112,7 +112,7 @@ rates = shifted.derive(
     .otherwise("下滑"),
 )
 
-rates.slice(11, 3).show();
+rates.slice(11, 3).show()
 ```
 
 > **预期输出**
@@ -162,7 +162,7 @@ multi = (
     )
 )
 
-multi.filter(lambda r: r.shop == "S2").show();
+multi.filter(lambda r: r.shop == "S2").show()
 ```
 
 > **预期输出**

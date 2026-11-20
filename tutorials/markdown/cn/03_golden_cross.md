@@ -61,7 +61,7 @@ t = (
     })
     .cum_sum("changed")                       # → changed_cumsum 段编号
 )
-t.select("date", "close", "ma_5", "ma_20", "above", "changed_cumsum").head(5).show();
+t.select("date", "close", "ma_5", "ma_20", "above", "changed_cumsum").head(5).show()
 ```
 
 > **预期输出**
@@ -108,7 +108,7 @@ bull_runs = (
     .derive(gain_pct=lambda r: ((r.close_1 / r.close_0 - 1) * 100).round(2))
     .select("start", "end", "days", "gain_pct")
 )
-bull_runs.show();
+bull_runs.show()
 ```
 
 > **预期输出**
@@ -147,7 +147,7 @@ best = (
     .sort("gain_pct", desc=True)
     .head(1)
 )
-best.show();
+best.show()
 ```
 
 > **预期输出**

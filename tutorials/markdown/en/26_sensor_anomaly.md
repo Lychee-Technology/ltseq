@@ -66,7 +66,7 @@ banded = temps.derive(
     lower=lambda r: (r.ma - 3 * r.sd).round(2),
 )
 
-banded.filter(lambda r: r.device == "D1").show();
+banded.filter(lambda r: r.device == "D1").show()
 ```
 
 > **Expected output**
@@ -115,7 +115,7 @@ guard = banded.derive(
 
 guard.filter(lambda r: r.device == "D1").select(
     "device", "ts", "temp", "prev_upper", "prev_lower", "is_anomaly"
-).show();
+).show()
 ```
 
 > **Expected output**
@@ -170,7 +170,7 @@ summary = (
     .sort("device")
 )
 
-summary.show();
+summary.show()
 ```
 
 > **Expected output**

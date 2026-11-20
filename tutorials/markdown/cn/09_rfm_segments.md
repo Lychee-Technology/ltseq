@@ -61,7 +61,7 @@ rfm = orders.group_by("user").agg(
     freq=lambda g: g.order_id.count(),         # 购买次数 F
     monetary=lambda g: g.amount.sum(),         # 累计金额 M
 ).sort("user")                                 # 聚合结果没有确定的行序
-rfm.show();
+rfm.show()
 ```
 
 > **预期输出**
@@ -96,7 +96,7 @@ rfm = (
         recency=lambda r: r.snap.dt.diff(r.last_date.cast("date32")),
     )
 )
-rfm.select("user", "last_date", "recency", "freq", "monetary").show();
+rfm.select("user", "last_date", "recency", "freq", "monetary").show()
 ```
 
 > **预期输出**
@@ -141,7 +141,7 @@ rfm = rfm.derive(lambda r: {
     # 越高越好
     "m_score": 5 - ntile(4).over(order_by=r.monetary, descending=True),
 })
-rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show();
+rfm.select("user", "recency", "freq", "monetary", "r_score", "f_score", "m_score").sort("user").show()
 ```
 
 > **预期输出**
@@ -199,7 +199,7 @@ rfm = rfm.derive(
     "r_score", "f_score", "m_score", "segment",
 ).sort("user")
 
-rfm.show();
+rfm.show()
 ```
 
 > **预期输出**
