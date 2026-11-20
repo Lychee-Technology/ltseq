@@ -115,8 +115,9 @@ print(t.sort_keys)        # declared order: [(column, descending?)]
 
 - `sort_keys` returns `[(column, descending)]`, or `None` when order is unknown.
 - `sort_keys` is the order computations follow, and the order rows come
-  back in: `show()`, `to_pandas()`, `head()`, `fold` and the writers return
-  them sorted by it, after any filter, derive or window.
+  out in, after any filter, derive or window: `show()` prints them sorted by
+  it, and `to_pandas()`, `head()`, `fold` and the writers return them sorted
+  by it.
 - Calling a sequence window (`shift`, `rolling`, `diff`, `cum_*`) without a
   prior `sort()` (or `assume_sorted()`) raises `SortRequiredError`. That is a
   **feature, not a bug**: order is an input to computation, and LTSeq refuses

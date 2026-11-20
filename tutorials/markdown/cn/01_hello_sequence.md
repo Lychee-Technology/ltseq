@@ -114,9 +114,9 @@ print(t.sort_keys)        # 声明顺序：[(列名, 是否降序)]
 **解析**
 
 - `sort_keys` 返回 `[(列名, 是否降序)]`；顺序未知时返回 `None`。
-- `sort_keys` 是计算所依据的顺序，也是行返回的顺序：不管之前接了什么
-  `filter`、`derive` 或窗口，`show()`、`to_pandas()`、`head()`、`fold` 和写文件
-  都按它排好序返回行。
+- `sort_keys` 是计算所依据的顺序，也是行输出的顺序：不管之前接了什么
+  `filter`、`derive` 或窗口，`show()` 都按它排好序打印行，`to_pandas()`、
+  `head()`、`fold` 和写文件都按它排好序返回行。
 - 未经 `sort()`（或 `assume_sorted()` 声明已排序）就使用序列窗口函数（`shift` /
   `rolling` / `diff` / `cum_*`），会直接抛 `SortRequiredError`。这是**特性而不是
   缺陷**：顺序是计算输入，LTSeq 拒绝在顺序不明时给出不可复现的结果。
