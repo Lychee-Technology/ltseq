@@ -1993,6 +1993,8 @@ dependencies = [
  "stacker",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
 ]
 

@@ -62,6 +62,11 @@ async-trait = "0.1.92"
 # follows it.
 stacker = "0.1.25"
 
+# Display width and grapheme-safe truncation for `show()` (#316). Already
+# in the tree through DataFusion (`comfy-table`); the versions follow it.
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+
 # The POSIX ACL of a file a writer replaces (#259). Already in the tree
 # through tempfile; the version follows it.
 [target.'cfg(target_os = "linux")'.dependencies]
