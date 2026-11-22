@@ -102,8 +102,9 @@ impl From<PyExprError> for PyErr {
 ///
 /// A failure is classed by the variant that carries it, never by its
 /// message. The transpiler reports a column it cannot find as
-/// `ColumnNotFound` and every other refusal as `Transpile`, whichever
-/// operation lowers the expression. An I/O failure is `Io`
+/// `ColumnNotFound`, a literal argument of the wrong kind (`shift("1")`,
+/// `rolling("3")`, `LiteralValue::require_*`) as `Validation`, and every
+/// other refusal as `Transpile`, whichever operation lowers the expression. An I/O failure is `Io`
 /// (`LtseqError::io`) and a failed execution is `Context`
 /// (`LtseqError::collect`, `with_context`), so a
 /// reader, a writer and a terminal raise one class for the same kind of

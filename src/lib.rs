@@ -57,8 +57,10 @@ fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
 
 /// [`source::read_files`] with the GIL released. A path that names no file
 /// raises `FileNotFoundError` naming it (#261); any other failure raises the
-/// error `failed` makes of it. With the table comes whether `path` was read
-/// as a glob.
+/// error `failed` makes of it. With the table comes the absolute path of the
+/// one file it lists when `path` is that file's local path, and `None` for a
+/// directory, a glob or a URL, a `file` URL included
+/// ([`source::ParquetSource`]).
 fn read_source<'a>(
     py: Python<'_>,
     session: &SessionContext,

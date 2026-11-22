@@ -822,15 +822,20 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             }
             Err(format!("Sub: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
+        // `Int64` addition and multiplication wrap, as DataFusion's
+        // `BinaryExpr` computes them (`add_wrapping`, `mul_wrapping`): the
+        // checked kernels raised an overflow where the materialized first
+        // rows count (R7-F1 of #422's review). `kernel_type` admits no other
+        // integer arithmetic.
         "Add" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(numeric::add(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+                return Ok(Arc::new(numeric::add_wrapping(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             Err(format!("Add: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
         "Mul" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(numeric::mul(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+                return Ok(Arc::new(numeric::mul_wrapping(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             Err(format!("Mul: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }

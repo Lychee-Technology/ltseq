@@ -992,9 +992,10 @@ pub fn search_pattern_count_impl(
     // Try parallel fast path BEFORE creating DataFusion session.
     // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
     // The direct reader opens the one local file the reader listed, by the
-    // absolute path it listed; a directory, a glob or a URL of another store
-    // lists none and is counted by the general path below (R6-F1 and R6-F2
-    // of #422's review).
+    // absolute path it listed when the reader was given that local path; a
+    // directory, a glob or a URL, a `file` URL included, lists none and is
+    // counted by the general path below, which reads with the planned schema
+    // (R6-F1, R6-F2 and R7-F2 of #422's review).
     let file = table.source_parquet_path.as_ref().and_then(|s| s.file.as_deref());
     if let (Some(file), Some(part_col)) = (file, &partition_by) {
         if !table.sort_specs.is_empty() {

@@ -51,9 +51,10 @@ use crate::stored_zones;
 
 /// The source a Parquet reader read, as the direct Parquet scans of the
 /// count fast paths may open it: the one local file the reader listed, by
-/// its absolute path as listed at the call ([`read_files`]), or `None` when
-/// the reader listed anything else, a directory, a glob or a URL of another
-/// store, which those scans do not read (R6-F1 and R6-F2 of #422's review).
+/// its absolute path as listed at the call ([`read_files`]), when the reader
+/// was given that file's local path; `None` when it was given anything else,
+/// a directory, a glob or a URL (a `file` URL included), which those scans
+/// do not read (R6-F1, R6-F2 and R7-F2 of #422's review).
 /// The scans open that path, so they read the file the table lists even
 /// after the working directory changes, and never a file that a glob or a
 /// relative spelling of the path names only later.
@@ -90,9 +91,9 @@ impl From<DataFusionError> for ReadError {
 /// inferred from these files as DataFusion infers it from its listing, with
 /// the zones it leaves out of a Parquet file's schema ([`stored_zones`]);
 /// `options` carry none, as LTSeq's readers give none. With the table comes
-/// the absolute path of the one local file it lists when `path` named one
-/// file, as itself or by a `file` URL, and not a directory or a glob
-/// ([`ParquetSource`]).
+/// the absolute path of the one local file it lists when `path` is the local
+/// path of that file, and `None` for a directory, a glob or a URL, a `file`
+/// URL included ([`ParquetSource`]).
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
     path: &str,
@@ -101,7 +102,7 @@ pub(crate) async fn read_files<'a>(
     let options =
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
-    let (urls, glob) = locate(path, extension)?;
+    let (urls, local_path) = locate(path, extension)?;
     for url in urls.iter().filter(|url| url.is_collection()) {
         let dir = url.get_url().to_file_path();
         if let Some(dir) = dir.as_ref().ok().and_then(|dir| dir.to_str()) {
@@ -135,8 +136,12 @@ pub(crate) async fn read_files<'a>(
         .iter()
         .map(|file| file_url(&urls[0], &file.location))
         .collect::<Result<Vec<_>>>()?;
+    // A `file` URL is left to the general paths: the direct scans read the
+    // file's current schema rather than the one planned here, which only the
+    // plain local path they always read is allowed to do (R7-F2 of #422's
+    // review).
     let file = match paths.as_slice() {
-        [only] if !glob && !urls[0].is_collection() => local_file(only),
+        [only] if local_path && !urls[0].is_collection() => local_file(only),
         _ => None,
     };
     let config = ListingTableConfig::new_with_multi_paths(paths)
@@ -160,7 +165,7 @@ fn local_file(url: &ListingTableUrl) -> Option<String> {
 
 /// The URLs of what `path` names now (contract §4.1), each a file or a
 /// directory to list, or `NotFound` if it names nothing, and whether `path`
-/// was matched as a glob.
+/// was read as the local path it names, not as a glob or a URL.
 ///
 /// A local path that names an existing file or directory is read as itself,
 /// even when its name holds `*`, `?` or `[`. Any other local path that holds
@@ -173,10 +178,11 @@ fn locate(path: &str, extension: &str) -> Result<(Vec<ListingTableUrl>, bool), R
     let local = std::path::Path::new(path);
     let exists =
         |path: &std::path::Path| -> Result<bool> { Ok(python_glob::metadata(path)?.is_some()) };
-    let url = if exists(local)? {
+    let local_path = exists(local)?;
+    let url = if local_path {
         local_url(local)?
     } else if is_local(path) && path.contains(['*', '?', '[']) {
-        return Ok((glob_files(path, extension)?, true));
+        return Ok((glob_files(path, extension)?, false));
     } else {
         let url = ListingTableUrl::parse(path)?;
         if let Ok(file) = url.get_url().to_file_path() {
@@ -196,7 +202,7 @@ fn locate(path: &str, extension: &str) -> Result<(Vec<ListingTableUrl>, bool), R
         )
         .into());
     }
-    Ok((vec![as_collection_if_directory(url)?], false))
+    Ok((vec![as_collection_if_directory(url)?], local_path))
 }
 
 /// Whether `ListingTableUrl::parse` reads `path` as a local path, not a

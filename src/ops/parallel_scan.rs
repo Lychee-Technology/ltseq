@@ -220,8 +220,8 @@ fn process_chunk_session_count(
 /// Returns `Ok(None)` when the predicate is unsupported; the caller counts
 /// through the general linear-scan path instead. `parquet_path` is the one
 /// local file the table lists (`source::ParquetSource`); a failure to open
-/// or read it is an error. A directory, a glob or a URL of another store
-/// never reaches this reader: `group_ordered_count_impl` declines it, and
+/// or read it is an error. A directory, a glob or a URL (a `file` URL
+/// included) never reaches this reader: `group_ordered_count_impl` declines it, and
 /// Python counts it through the DataFusion path. The general path could
 /// read it, and agrees with the reference since #189 and #244; sending such
 /// sources to it is #287.

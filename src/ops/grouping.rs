@@ -100,9 +100,9 @@ impl GroupColumns {
 ///
 /// Returns `Ok(None)` when this path does not count the input: the predicate
 /// is not a shift-based boundary predicate the kernel computes as DataFusion
-/// would, or the table's Parquet source does not list one local file (a
-/// directory, a glob, a URL of another store), which the direct reader does
-/// not open. Python then counts the materialized first rows. Every error is
+/// would, or the table's Parquet source was not read by the local path of
+/// one file (a directory, a glob, a URL, a `file` URL included), which the
+/// direct reader does not open. Python then counts the materialized first rows. Every error is
 /// a genuine failure, which Python reports and never retries (#152): a
 /// listed file the fast path cannot open or read is one, so a read failure
 /// never turns into a fallback.
@@ -131,7 +131,7 @@ pub fn group_ordered_count_impl(
             // The direct reader opens the one local file the reader listed,
             // by the absolute path it listed, not the path as written, which
             // can name another file or none from another working directory.
-            // A directory, a glob or a URL of another store lists none, and
+            // A directory, a glob or a URL (a `file` URL too) lists none, and
             // Python counts it through DataFusion, as it always did; sending
             // such sources to the general path below is #287. A failure to
             // open or read the listed file is an error, not a fallback

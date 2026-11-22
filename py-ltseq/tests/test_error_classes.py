@@ -482,3 +482,90 @@ def test_group_count_falls_back_for_a_parquet_glob(tmp_path):
     pq.write_table(_events(pa.int64()), str(tmp_path / "part-0.parquet"))
     t = LTSeq.read_parquet(str(tmp_path / "*.parquet")).assume_sorted("i")
     assert _sessions(t).count() == len(_sessions(t).to_arrow()) == 3
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(lambda r: (r.k != r.k.shift(1)) & ((r.n + 1) > 0), id="add"),
+        pytest.param(lambda r: (r.k != r.k.shift(1)) & ((r.n * 2) > 0), id="mul"),
+    ],
+)
+def test_group_count_wraps_int64_overflow_as_the_materialized_count(boundary):
+    """The count kernel added and multiplied with Arrow's checked kernels, so
+    an Int64 overflow raised where the materialized first rows, which wrap
+    as DataFusion does, counted; the old retry hid it (R7-F1 of #422's
+    review). The wrapped values (-2**63 and -2) make the second row's
+    predicate false, so only the key change at the third row is a boundary."""
+    big = 2**63 - 1
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "i": pa.array([0, 1, 2], pa.int64()),
+                "k": pa.array([1, 1, 2], pa.int64()),
+                "n": pa.array([big, big, 1], pa.int64()),
+            }
+        )
+    ).sort("i")
+    expected = len(t.group_ordered(boundary).first().to_arrow())
+    assert expected == 2
+    assert t.group_ordered(boundary).first().count() == expected
+
+
+def _rewrite_source(tmp_path, kind):
+    """A Parquet file of an Int32 key read through ``kind`` and declared
+    sorted by ``i``, then rewritten in place: with Int64 keys that do not fit
+    the planned Int32, or without the key."""
+    path = tmp_path / "events.parquet"
+    original = pa.table(
+        {"i": pa.array([0, 1, 2], pa.int64()), "k": pa.array([1, 1, 2], pa.int32())}
+    )
+    pq.write_table(original, str(path))
+    fast = LTSeq.read_parquet(path.as_uri()).assume_sorted("i")
+    general = LTSeq.read_parquet(path.as_uri()).sort("i")
+    if kind == "wider-key":
+        rewritten = pa.table(
+            {
+                "i": pa.array([0, 1, 2], pa.int64()),
+                "k": pa.array([2**32, 2**32, 2**32 + 1], pa.int64()),
+            }
+        )
+    else:
+        rewritten = pa.table({"i": pa.array([0, 1, 2], pa.int64())})
+    pq.write_table(rewritten, str(path))
+    return fast, general
+
+
+def _outcome(count):
+    try:
+        return count()
+    except Exception as e:  # noqa: BLE001 - the class is what is compared
+        return type(e)
+
+
+@pytest.mark.parametrize("kind", ["wider-key", "dropped-key"])
+def test_counts_of_a_rewritten_file_url_follow_the_planned_schema(tmp_path, kind):
+    """A ``file://`` URL naming one file was opened by the direct scans, which
+    read the file's current schema, not the one planned at the read: after a
+    rewrite to Int64 keys beyond Int32 they counted 0 and 3 where the general
+    paths raise a failed cast, and after the key was dropped the pattern
+    count raised ColumnNotFoundError where the general path counted a NULL
+    key (R7-F2 of #422's review). Such a URL is now counted by the general
+    paths."""
+    fast, general = _rewrite_source(tmp_path, kind)
+
+    def pattern(t):
+        return t.search_pattern_count(lambda r: r.k.is_null() | (r.k > 0), partition_by="k")
+
+    def groups(t):
+        return t.group_ordered(lambda r: r.k != r.k.shift(1)).first()
+
+    expected_pattern = _outcome(lambda: pattern(general))
+    expected_groups = _outcome(lambda: len(groups(general).to_arrow()))
+    if kind == "wider-key":
+        assert expected_pattern is ValueError
+        assert expected_groups is ValueError
+    else:
+        assert isinstance(expected_pattern, int)
+    assert _outcome(lambda: pattern(fast)) == expected_pattern
+    assert _outcome(lambda: groups(fast).count()) == expected_groups

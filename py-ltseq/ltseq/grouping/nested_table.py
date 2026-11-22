@@ -494,9 +494,9 @@ class _LazyFirstLTSeq:
         # As flatten() does (#298).
         staged, expr_dict, _ = self._nested._staged_key()
         # `None` means the kernel does not count this input (an unsupported
-        # predicate, or a Parquet source that is not one file): count the
-        # materialized first rows. An error is a failure and propagates; a
-        # retry would hide it (#152).
+        # predicate, or a Parquet source not read by one file's local path):
+        # count the materialized first rows. An error is a failure and
+        # propagates; a retry would hide it (#152).
         count = staged.group_ordered_count(expr_dict)
         if count is None:
             return self._materialize().count()
