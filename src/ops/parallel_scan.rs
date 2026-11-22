@@ -1137,7 +1137,10 @@ mod tests {
             df,
             schema,
             vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
-            Some(path.to_string()),
+            Some(crate::source::ParquetSource {
+                path: path.to_string(),
+                glob: false,
+            }),
         )
     }
 

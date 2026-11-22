@@ -49,6 +49,17 @@ use url::{ParseError, Url};
 use crate::python_glob;
 use crate::stored_zones;
 
+/// The source a Parquet reader read: the path as given, and whether the
+/// reader matched it as a glob ([`locate`]) rather than reading it as the
+/// file, directory or URL it names. A local path that names an existing
+/// file is that file even when its name holds `*`, `?` or `[`, so the path's
+/// text alone cannot tell the two apart (R5-F1 of #422's review).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParquetSource {
+    pub(crate) path: String,
+    pub(crate) glob: bool,
+}
+
 /// Why a reader built no table.
 #[derive(Debug)]
 pub(crate) enum ReadError {
@@ -76,16 +87,17 @@ impl From<DataFusionError> for ReadError {
 /// URL, so an execution looks up each file and no directory. The schema is
 /// inferred from these files as DataFusion infers it from its listing, with
 /// the zones it leaves out of a Parquet file's schema ([`stored_zones`]);
-/// `options` carry none, as LTSeq's readers give none.
+/// `options` carry none, as LTSeq's readers give none. With the table comes
+/// whether `path` was read as a glob ([`locate`]).
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
     path: &str,
     options: impl ReadOptions<'a>,
-) -> Result<DataFrame, ReadError> {
+) -> Result<(DataFrame, bool), ReadError> {
     let options =
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
-    let urls = locate(path, extension)?;
+    let (urls, glob) = locate(path, extension)?;
     for url in urls.iter().filter(|url| url.is_collection()) {
         let dir = url.get_url().to_file_path();
         if let Some(dir) = dir.as_ref().ok().and_then(|dir| dir.to_str()) {
@@ -126,11 +138,12 @@ pub(crate) async fn read_files<'a>(
     // footer it reads afresh ([`LocalFiles`]), where a cached copy would
     // outlive that footer.
     let table = ListingTable::try_new(config)?;
-    Ok(session.read_table(Arc::new(table))?)
+    Ok((session.read_table(Arc::new(table))?, glob))
 }
 
 /// The URLs of what `path` names now (contract §4.1), each a file or a
-/// directory to list, or `NotFound` if it names nothing.
+/// directory to list, or `NotFound` if it names nothing, and whether `path`
+/// was matched as a glob.
 ///
 /// A local path that names an existing file or directory is read as itself,
 /// even when its name holds `*`, `?` or `[`. Any other local path that holds
@@ -139,14 +152,14 @@ pub(crate) async fn read_files<'a>(
 /// A URL is taken as written, as `ListingTableUrl::parse` takes it. A path
 /// that cannot be looked up, such as one in a directory that cannot be
 /// searched, is an error, not `NotFound` ([`python_glob::metadata`]).
-fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
+fn locate(path: &str, extension: &str) -> Result<(Vec<ListingTableUrl>, bool), ReadError> {
     let local = std::path::Path::new(path);
     let exists =
         |path: &std::path::Path| -> Result<bool> { Ok(python_glob::metadata(path)?.is_some()) };
     let url = if exists(local)? {
         local_url(local)?
     } else if is_local(path) && path.contains(['*', '?', '[']) {
-        return glob_files(path, extension);
+        return Ok((glob_files(path, extension)?, true));
     } else {
         let url = ListingTableUrl::parse(path)?;
         if let Ok(file) = url.get_url().to_file_path() {
@@ -166,7 +179,7 @@ fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError
         )
         .into());
     }
-    Ok(vec![as_collection_if_directory(url)?])
+    Ok((vec![as_collection_if_directory(url)?], false))
 }
 
 /// Whether `ListingTableUrl::parse` reads `path` as a local path, not a

@@ -1333,7 +1333,10 @@ mod tests {
             df,
             schema,
             declared_specs(),
-            Some(path_str),
+            Some(crate::source::ParquetSource {
+                path: path_str,
+                glob: false,
+            }),
         );
 
         let result = linear_scan_group_id(&table, &secondary_key_predicate());

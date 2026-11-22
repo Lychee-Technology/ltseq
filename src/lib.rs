@@ -57,14 +57,15 @@ fn parse_exprs(dicts: &[Bound<'_, PyDict>]) -> PyResult<Vec<PyExpr>> {
 
 /// [`source::read_files`] with the GIL released. A path that names no file
 /// raises `FileNotFoundError` naming it (#261); any other failure raises the
-/// error `failed` makes of it.
+/// error `failed` makes of it. With the table comes whether `path` was read
+/// as a glob.
 fn read_source<'a>(
     py: Python<'_>,
     session: &SessionContext,
     path: &str,
     options: impl ReadOptions<'a> + Send,
     failed: impl FnOnce(DataFusionError) -> LtseqError,
-) -> PyResult<DataFrame> {
+) -> PyResult<(DataFrame, bool)> {
     let read = detached(py, || {
         Ok(RUNTIME.block_on(source::read_files(session, path, options)))
     })?;
@@ -85,7 +86,8 @@ pub struct LTSeqTable {
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
     sort_specs: Vec<SortSpec>, // Declared row order (column + direction), drives window ORDER BY
-    source_parquet_path: Option<String>, // Parquet file path for assume_sorted optimization
+    // Parquet source for assume_sorted optimization, and how it was read
+    source_parquet_path: Option<source::ParquetSource>,
     // The plan's root already delivers rows in the declared order, sorted by
     // keys DataFusion cannot tell give the same order: the group operations
     // sort by group and row number. `ordered_df` then adds no sort. Only
@@ -121,7 +123,7 @@ impl LTSeqTable {
         session: Arc<SessionContext>,
         df: DataFrame,
         sort_specs: Vec<SortSpec>,
-        source_parquet_path: Option<String>,
+        source_parquet_path: Option<source::ParquetSource>,
     ) -> Self {
         let schema = Self::schema_from_df(df.schema());
         LTSeqTable {
@@ -141,7 +143,7 @@ impl LTSeqTable {
         df: DataFrame,
         schema: Arc<ArrowSchema>,
         sort_specs: Vec<SortSpec>,
-        source_parquet_path: Option<String>,
+        source_parquet_path: Option<source::ParquetSource>,
     ) -> Self {
         LTSeqTable {
             session,
@@ -349,7 +351,7 @@ impl LTSeqTable {
     #[pyo3(signature = (path, has_header=true))]
     fn read_csv(&mut self, py: Python<'_>, path: String, has_header: bool) -> PyResult<()> {
         let options = CsvReadOptions::new().has_header(has_header);
-        let df = read_source(py, &self.session, &path, options, |e| {
+        let (df, _) = read_source(py, &self.session, &path, options, |e| {
             LtseqError::io("Failed to read CSV", e)
         })?;
 
@@ -365,7 +367,7 @@ impl LTSeqTable {
     ///     path: Path to Parquet file
     #[pyo3(signature = (path))]
     fn read_parquet(&mut self, py: Python<'_>, path: String) -> PyResult<()> {
-        let df = read_source(
+        let (df, glob) = read_source(
             py,
             &self.session,
             &path,
@@ -375,7 +377,7 @@ impl LTSeqTable {
 
         self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
         self.dataframe = Some(Arc::new(df));
-        self.source_parquet_path = Some(path);
+        self.source_parquet_path = Some(source::ParquetSource { path, glob });
         Ok(())
     }
 
@@ -399,7 +401,7 @@ impl LTSeqTable {
     ) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
         let options = CsvReadOptions::new().has_header(has_header);
-        let df = read_source(py, &session, &path, options, |e| {
+        let (df, _) = read_source(py, &session, &path, options, |e| {
             LtseqError::runtime("Failed to read CSV", e)
         })?;
         detached(py, || crate::cursor::create_cursor(df, path))
@@ -415,7 +417,7 @@ impl LTSeqTable {
     #[staticmethod]
     fn scan_parquet(py: Python<'_>, path: String) -> PyResult<crate::cursor::LTSeqCursor> {
         let session = create_session_context();
-        let df = read_source(py, &session, &path, ParquetReadOptions::default(), |e| {
+        let (df, _) = read_source(py, &session, &path, ParquetReadOptions::default(), |e| {
             LtseqError::runtime("Failed to read Parquet", e)
         })?;
         detached(py, || crate::cursor::create_cursor(df, path))

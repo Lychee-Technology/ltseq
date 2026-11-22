@@ -18,6 +18,7 @@ Three things are pinned here:
 """
 
 import os
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -351,24 +352,39 @@ def test_group_count_execution_failure_raises_the_class_of_the_materialized_coun
     assert not isinstance(raised.value, RuntimeError)
 
 
-def test_group_count_reports_a_single_file_source_that_names_nothing_now(tmp_path, monkeypatch):
-    """A local path without glob characters that names nothing when the
-    count's fast path looks it up was taken for a source the direct reader
-    does not open, so the materialized retry, which reads the file
-    DataFusion listed at the call, counted it and the failed lookup was
-    discarded (R4-F1 of #422's review). A relative path looked up from a
-    directory without the file names nothing while the listed file is
-    still readable."""
-    pq.write_table(_events(pa.int64()), str(tmp_path / "e.parquet"))
+@pytest.mark.parametrize("name", ["e.parquet", "e[1].parquet", "e*?.parquet"])
+def test_group_count_reports_a_single_file_source_that_names_nothing_now(tmp_path, monkeypatch, name):
+    """A local file that names nothing when the count's fast path looks it
+    up was taken for a source the direct reader does not open, so the
+    materialized retry, which reads the file DataFusion listed at the call,
+    counted it and the failed lookup was discarded (R4-F1 of #422's
+    review). A relative path looked up from a directory without the file
+    names nothing while the listed file is still readable. A file whose name
+    holds `*`, `?` or `[` is read as that file, not as a glob, so its lookup
+    fails the same way (R5-F1)."""
+    pq.write_table(_events(pa.int64()), str(tmp_path / name))
     monkeypatch.chdir(tmp_path)
-    t = LTSeq.read_parquet("e.parquet").assume_sorted("i")
+    t = LTSeq.read_parquet(name).assume_sorted("i")
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     assert len(_sessions(t).to_arrow()) == 3, "the materialized retry succeeds"
-    with pytest.raises(ValueError, match="Failed to look up Parquet source 'e.parquet'") as raised:
+    with pytest.raises(ValueError, match=re.escape(f"Failed to look up Parquet source '{name}'")) as raised:
         _sessions(t).count()
     assert not isinstance(raised.value, RuntimeError)
+
+
+def test_group_count_falls_back_for_a_relative_parquet_glob_that_names_nothing_now(tmp_path, monkeypatch):
+    """A glob the reader matched is counted through the materialized first
+    rows, which read the files it listed, even where it matches nothing now
+    (R5-F1 of #422's review)."""
+    pq.write_table(_events(pa.int64()), str(tmp_path / "e1.parquet"))
+    monkeypatch.chdir(tmp_path)
+    t = LTSeq.read_parquet("e?.parquet").assume_sorted("i")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert _sessions(t).count() == len(_sessions(t).to_arrow()) == 3
 
 
 def test_group_count_falls_back_for_a_parquet_glob(tmp_path):
