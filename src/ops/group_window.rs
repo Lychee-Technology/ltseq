@@ -342,7 +342,9 @@ fn lower_group_node_once(
             full_frame(),
         ),
         GroupNode::Agg { func, column, arg } => {
-            let col_expr = Expr::Column(Column::new_unqualified(&column));
+            // A missing column is `ColumnNotFound` here, not DataFusion's
+            // planning error (#152).
+            let col_expr = crate::transpiler::parse_column_expr(&column, rx.arrow())?;
             let agg = match func.as_str() {
                 "max" => min_max::max(col_expr),
                 "min" => min_max::min(col_expr),
@@ -361,7 +363,7 @@ fn lower_group_node_once(
             aggregate_to_window(agg, group_partition(names), vec![], full_frame())
         }
         GroupNode::RowColumn { row, column } => {
-            let col_expr = Expr::Column(Column::new_unqualified(&column));
+            let col_expr = crate::transpiler::parse_column_expr(&column, rx.arrow())?;
             match row {
                 // FIRST_VALUE(col) OVER (PARTITION BY __group_id__ ORDER BY __rn__)
                 // — default frame (up to CURRENT ROW) suffices for first_value.

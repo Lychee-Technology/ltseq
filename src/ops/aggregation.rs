@@ -39,6 +39,14 @@ enum AggPlan {
     },
 }
 
+/// A column an aggregate names, which `schema` must have
+/// (`transpiler::parse_column_expr`): a missing one is `ColumnNotFound`
+/// before DataFusion plans anything, as in the aggregates that lower an
+/// expression (#152).
+fn user_column(name: &str, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
+    crate::transpiler::parse_column_expr(name, schema)
+}
+
 /// Every supported aggregate maps to a native plan — there is no fallback.
 ///
 /// `table_order` is the input's declared order (its `sort_specs`), which
@@ -58,9 +66,7 @@ fn pyexpr_to_agg_plan(
         "sum" | "count" | "min" | "max" | "avg" | "mean" | "median" | "variance" | "var"
         | "stddev" | "std" => {
             let col_expr = match on.as_deref() {
-                Some(PyExpr::Column(col_name)) => {
-                    Expr::Column(Column::new_unqualified(col_name))
-                }
+                Some(PyExpr::Column(col_name)) => user_column(col_name, schema)?,
                 _ if func == "count" => {
                     // count() without a specific column → count(*)
                     lit(1i64)
@@ -88,9 +94,7 @@ fn pyexpr_to_agg_plan(
         }
         "percentile" => {
             let col_expr = match on.as_deref() {
-                Some(PyExpr::Column(col_name)) => {
-                    Expr::Column(Column::new_unqualified(col_name))
-                }
+                Some(PyExpr::Column(col_name)) => user_column(col_name, schema)?,
                 _ => return Err(validation_error!("percentile requires a column reference")),
             };
             // The default applies only when p is absent; a supplied argument
@@ -257,10 +261,7 @@ fn pyexpr_to_agg_plan(
             // means "every value", so clamp instead of failing at collect.
             let k = k.min(i64::from(i32::MAX));
 
-            let col_f64 = cast(
-                Expr::Column(Column::new_unqualified(col_name)),
-                DataType::Float64,
-            );
+            let col_f64 = cast(user_column(col_name, schema)?, DataType::Float64);
             // ORDER BY col DESC NULLS LAST, so a NULL never takes one of the
             // k slots (#199); array_to_string drops the NULLs a slice past
             // the non-null values still reaches. An all-NULL group keeps
@@ -296,13 +297,11 @@ fn pyexpr_to_agg_plan(
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err(validation_error!("{} requires a column reference", func));
             };
-            let col_expr = Expr::Column(Column::new_unqualified(col_name));
+            let col_expr = user_column(col_name, schema)?;
             let order: Vec<SortExpr> = match args.first() {
-                Some(PyExpr::Column(name)) if !name.is_empty() => vec![SortExpr::new(
-                    Expr::Column(Column::new_unqualified(name)),
-                    true,
-                    false,
-                )],
+                Some(PyExpr::Column(name)) if !name.is_empty() => {
+                    vec![SortExpr::new(user_column(name, schema)?, true, false)]
+                }
                 None if !table_order.is_empty() => table_order.to_vec(),
                 None => return Err(validation_error!("{}() requires a declared row order", func)),
                 Some(_) => {
@@ -326,7 +325,7 @@ fn pyexpr_to_agg_plan(
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
                 return Err(validation_error!("mode requires a column reference"));
             };
-            let col_expr = Expr::Column(Column::new_unqualified(col_name));
+            let col_expr = user_column(col_name, schema)?;
             let sort = SortExpr::new(col_expr.clone(), true, false);
             let agg = agg_fn::first_value(col_expr, vec![sort]);
             Ok(AggPlan::Plain(agg))
@@ -345,10 +344,7 @@ fn pyexpr_to_agg_plan(
                     _ => return Err(validation_error!("skew requires a column reference")),
                 },
             };
-            let x = cast(
-                Expr::Column(Column::new_unqualified(&col_name)),
-                DataType::Float64,
-            );
+            let x = cast(user_column(&col_name, schema)?, DataType::Float64);
 
             let m1_name = format!("__{}_skew_m1", out_key);
             let m2_name = format!("__{}_skew_m2", out_key);

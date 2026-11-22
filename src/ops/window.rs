@@ -75,18 +75,25 @@ pub(crate) fn derive_with_window_functions_from_parsed(
 /// two-step derive workaround. Two-level nesting is planned natively by the
 /// staged planner (issue #101); this hint now covers what remains — three
 /// and deeper levels, and ranking-over-window shapes.
+///
+/// Only the transpiler's own refusal of a window in row context gets the
+/// hint, recognized by variant and exact text: any other error, such as a
+/// `ColumnNotFound` whose column name happens to contain those words, keeps
+/// its variant and its Python class (#152).
 fn nested_window_hint(err: LtseqError) -> LtseqError {
-    let msg = err.to_string();
-    if msg.contains("requires DataFrame context") {
-        LtseqError::Validation(format!(
+    if !crate::transpiler::is_window_in_row_context(&err) {
+        return err;
+    }
+    match err {
+        // Still the transpiler's refusal, now with the workaround.
+        LtseqError::Transpile(msg) => LtseqError::Transpile(format!(
             "{}. Window functions cannot be applied to another window function's \
              result in a single derive; split it into two steps, e.g. \
              t.derive(mid=lambda r: r.x.rolling(3).mean())\
              .derive(out=lambda r: r.mid.shift(1))",
             msg.trim_end_matches('.')
-        ))
-    } else {
-        err
+        )),
+        other => other,
     }
 }
 

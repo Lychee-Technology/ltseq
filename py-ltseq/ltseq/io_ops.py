@@ -361,8 +361,9 @@ class IOMixin:
 
         Raises:
             ValueError: If the file cannot be created, written or replaced,
-                or the table's plan fails to execute; a file already at
-                ``path`` is left as it was
+                or the table's plan fails to execute. A file that is
+                replaced by a rename is then left as it was; one written
+                directly (see above) can hold part of the output
 
         Example:
             >>> t.write_csv("output.csv")
@@ -407,7 +408,9 @@ class IOMixin:
             ValueError: If the file cannot be created, written or replaced,
                 the table's plan fails to execute, compression is not
                 recognized, or a ``timestamp[s]`` value has no millisecond
-                count in int64; ``path`` is left as it was
+                count in int64. A file that is replaced by a rename is then
+                left as it was; one written directly (see above) can hold
+                part of the output
             TypeError: If a column is or contains a ``struct`` without fields
                 or a ``fixed_size_binary`` of width 0, which Parquet cannot
                 store; raised before anything is written

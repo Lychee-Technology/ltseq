@@ -55,9 +55,38 @@ enum Miss {
 }
 
 impl Miss {
-    fn failed(message: impl Into<String>) -> Self {
-        Miss::Failed(LtseqError::Runtime(message.into()))
+    /// A failure to open or read the source, built by `LtseqError::io` as
+    /// the readers' and the general path's are, so the fast path raises the
+    /// class they raise and keeps the error it wraps (#152).
+    fn io(
+        context: impl AsRef<str>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Miss::Failed(LtseqError::io(context.as_ref(), source))
     }
+}
+
+/// The results of a scan's parallel workers, in worker order, or why there
+/// is no count. A failure wins over a decline from the same scan: a worker
+/// that cannot read its part of the source reports it even if another
+/// worker declined, so a read failure never turns into a fallback. Rayon's
+/// own `collect::<Result<..>>` keeps whichever error it meets first, so
+/// the workers' outcomes are gathered here, short-circuiting on a failure
+/// only.
+fn gather<T: Send>(
+    workers: impl ParallelIterator<Item = Result<T, Miss>>,
+) -> Result<Vec<T>, Miss> {
+    let outcomes = workers
+        .map(|outcome| match outcome {
+            Ok(value) => Ok(Some(value)),
+            Err(Miss::Unsupported) => Ok(None),
+            Err(Miss::Failed(err)) => Err(err),
+        })
+        .collect::<Result<Vec<Option<T>>, LtseqError>>()?;
+    outcomes
+        .into_iter()
+        .collect::<Option<Vec<T>>>()
+        .ok_or(Miss::Unsupported)
 }
 
 impl From<LtseqError> for Miss {
@@ -120,24 +149,28 @@ fn process_chunk_session_count(
     batch_rows: usize,
 ) -> Result<RgChunkResult, Miss> {
     let file = File::open(parquet_path)
-        .map_err(|e| Miss::failed(format!("Failed to open Parquet: {}", e)))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| Miss::failed(format!("Failed to read Parquet metadata: {}", e)))?;
+        .map_err(|e| Miss::io(format!("Failed to open Parquet '{parquet_path}'"), e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+        Miss::io(format!("Failed to read Parquet metadata of '{parquet_path}'"), e)
+    })?;
     let row_groups: Vec<usize> = (start_rg..end_rg).collect();
     let reader = builder
         .with_row_groups(row_groups)
         .with_projection(projection_mask.clone())
         .with_batch_size(batch_rows)
         .build()
-        .map_err(|e| Miss::failed(format!("Failed to build Parquet reader: {}", e)))?;
+        .map_err(|e| {
+            Miss::io(format!("Failed to build Parquet reader for '{parquet_path}'"), e)
+        })?;
 
     let mut count = 0usize;
     let mut first_row: Option<RecordBatch> = None;
     let mut last_row: Option<RecordBatch> = None;
 
     for batch_result in reader {
-        let batch = batch_result
-            .map_err(|e| Miss::failed(format!("Failed to read Parquet batch: {}", e)))?;
+        let batch = batch_result.map_err(|e| {
+            Miss::io(format!("Failed to read Parquet batch of '{parquet_path}'"), e)
+        })?;
         let n = batch.num_rows();
         if n == 0 {
             continue;
@@ -236,9 +269,10 @@ fn chunked_group_count(
 
     // 2. Open Parquet and read metadata (sequential, metadata-only).
     let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
+        .map_err(|e| Miss::io(format!("Failed to open Parquet '{parquet_path}'"), e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+        Miss::io(format!("Failed to read Parquet metadata of '{parquet_path}'"), e)
+    })?;
 
     let parquet_schema = builder.schema().clone();
     let num_row_groups = builder.metadata().num_row_groups();
@@ -290,23 +324,24 @@ fn chunked_group_count(
     let chunk_size = num_row_groups.div_ceil(num_threads);
     let path_str = parquet_path.to_string();
 
-    let chunk_results: Vec<RgChunkResult> = (0..num_threads)
-        .into_par_iter()
-        .filter(|&t| t * chunk_size < num_row_groups) // skip idle threads
-        .map(|t| {
-            let start_rg = t * chunk_size;
-            let end_rg = (start_rg + chunk_size).min(num_row_groups);
-            process_chunk_session_count(
-                &path_str,
-                start_rg,
-                end_rg,
-                &projection_mask,
-                predicate,
-                &name_to_idx,
-                batch_rows,
-            )
-        })
-        .collect::<Result<Vec<_>, Miss>>()?;
+    let chunk_results: Vec<RgChunkResult> = gather(
+        (0..num_threads)
+            .into_par_iter()
+            .filter(|&t| t * chunk_size < num_row_groups) // skip idle threads
+            .map(|t| {
+                let start_rg = t * chunk_size;
+                let end_rg = (start_rg + chunk_size).min(num_row_groups);
+                process_chunk_session_count(
+                    &path_str,
+                    start_rg,
+                    end_rg,
+                    &projection_mask,
+                    predicate,
+                    &name_to_idx,
+                    batch_rows,
+                )
+            }),
+    )?;
 
     // 5. Sum internal boundary counts.
     let total_internal: usize = chunk_results.iter().map(|r| r.count).sum();
@@ -417,10 +452,11 @@ fn pattern_match_count(
 
     // Step 2: Open file and get metadata
     let file = File::open(parquet_path)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to open Parquet: {}", e)))?;
+        .map_err(|e| Miss::io(format!("Failed to open Parquet '{parquet_path}'"), e))?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| LtseqError::Runtime(format!("Failed to read Parquet metadata: {}", e)))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+        Miss::io(format!("Failed to read Parquet metadata of '{parquet_path}'"), e)
+    })?;
 
     let parquet_schema = builder.schema().clone();
     let num_row_groups = builder.metadata().num_row_groups();
@@ -495,10 +531,11 @@ fn pattern_match_count(
         name_to_idx: &name_to_idx,
     };
 
-    let rg_results: Vec<RgMatchResult> = (0..num_row_groups)
-        .into_par_iter()
-        .map(|rg_idx| read_match_and_extract_boundary(&scan, rg_idx))
-        .collect::<Result<Vec<_>, Miss>>()?;
+    let rg_results: Vec<RgMatchResult> = gather(
+        (0..num_row_groups)
+            .into_par_iter()
+            .map(|rg_idx| read_match_and_extract_boundary(&scan, rg_idx)),
+    )?;
 
     // Step 5: Sum intra-RG counts
     let intra_rg_count: usize = rg_results.iter().map(|r| r.count).sum();
@@ -540,26 +577,34 @@ fn read_match_and_extract_boundary(
         num_steps,
         name_to_idx,
     } = *scan;
-    let fail = |what: &str, e: &dyn std::fmt::Display| {
-        Miss::failed(format!(
-            "Parallel fused read+match failed: {what} RG {row_group_idx}: {e}"
-        ))
+    let fail = |what: &str, e: parquet::errors::ParquetError| {
+        Miss::io(format!("{what} row group {row_group_idx} of '{parquet_path}'"), e)
     };
-    let file = File::open(parquet_path).map_err(|e| fail("Failed to open Parquet for", &e))?;
+    let file = File::open(parquet_path).map_err(|e| {
+        Miss::io(
+            format!("Failed to open Parquet for row group {row_group_idx} of '{parquet_path}'"),
+            e,
+        )
+    })?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| fail("Failed to build reader for", &e))?;
+        .map_err(|e| fail("Failed to build reader for", e))?;
 
     let reader = builder
         .with_row_groups(vec![row_group_idx])
         .with_projection(projection_mask.clone())
         .build()
-        .map_err(|e| fail("Failed to build reader for", &e))?;
+        .map_err(|e| fail("Failed to build reader for", e))?;
 
     let mut rg_batches: Vec<RecordBatch> = Vec::new();
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| fail("Failed to read batch from", &e))?;
+        let batch = batch_result.map_err(|e| {
+            Miss::io(
+                format!("Failed to read a batch of row group {row_group_idx} of '{parquet_path}'"),
+                e,
+            )
+        })?;
 
         if batch.num_rows() == 0 {
             continue;
@@ -1210,6 +1255,77 @@ mod tests {
             );
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A worker's read failure wins over another worker's decline (#152):
+    /// whichever order the workers finish in, the scan reports the failure,
+    /// so it never becomes a fallback to the general path.
+    #[test]
+    fn a_failure_wins_over_a_decline_from_the_same_scan() {
+        let failure = || {
+            Miss::io(
+                "Failed to read Parquet batch of 'x'",
+                std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+            )
+        };
+        for failed_at in 0..4 {
+            for declined_at in (0..4).filter(|&i| i != failed_at) {
+                let outcomes = || {
+                    (0..4usize).into_par_iter().map(move |i| {
+                        if i == failed_at {
+                            Err(failure())
+                        } else if i == declined_at {
+                            Err(Miss::Unsupported)
+                        } else {
+                            Ok(i)
+                        }
+                    })
+                };
+                // Repeated, since the workers may finish in any order.
+                for _ in 0..50 {
+                    match gather(outcomes()) {
+                        Err(Miss::Failed(err)) => {
+                            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}")
+                        }
+                        other => panic!(
+                            "failed at {failed_at}, declined at {declined_at}: {:?}",
+                            other.map(|v| v.len())
+                        ),
+                    }
+                }
+            }
+        }
+
+        let declined = gather((0..4usize).into_par_iter().map(|i| {
+            if i == 2 {
+                Err(Miss::Unsupported)
+            } else {
+                Ok(i)
+            }
+        }));
+        assert!(matches!(declined, Err(Miss::Unsupported)), "{declined:?}");
+        let counted = gather((0..4usize).into_par_iter().map(Ok));
+        assert_eq!(counted.expect("every worker counted"), vec![0, 1, 2, 3]);
+    }
+
+    /// A source the fast paths cannot open is an I/O error (#152), the
+    /// class the general path raises for it, with the reader's error kept.
+    #[test]
+    fn a_source_the_fast_paths_cannot_open_is_an_io_error() {
+        let path = write_parquet(&events(), 2, "vanished");
+        let table = sorted_parquet_table(&path);
+        std::fs::remove_file(&path).expect("remove the source");
+
+        let group = parallel_streaming_group_count(&table, &sessionization(), &path)
+            .expect_err("a vanished source is an error, not a fallback");
+        let steps = [binop("Gt", col("t"), col("i"))];
+        let pattern = parallel_pattern_match_count(&table, &steps, "u", &path)
+            .expect_err("a vanished source is an error, not a fallback");
+        for err in [group, pattern] {
+            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
+            assert!(std::error::Error::source(&err).is_some(), "{err:?}");
+            assert!(err.to_string().contains("Failed to open Parquet"), "{err}");
+        }
     }
 
     /// A predicate with no fused form makes the parallel count fall back, and

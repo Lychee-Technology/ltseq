@@ -63,8 +63,12 @@ use datafusion::functions::regex::expr_fn::regexp_like;
 // Math functions (for gcd, lcm, factorial)
 use datafusion::functions::math::expr_fn::{factorial, gcd, lcm};
 
-/// Parse a column reference into a DataFusion expression
-fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
+/// Parse a column reference into a DataFusion expression: a column `schema`
+/// does not have is `ColumnNotFound`. The planners that build a column
+/// reference without lowering an expression (`agg`'s bare-column
+/// aggregates, the group dialect's aggregates and row picks) go through it
+/// too, so a missing column raises the same class from every path (#152).
+pub(crate) fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
     if !schema.fields().iter().any(|f| f.name() == name) {
         return Err(LtseqError::ColumnNotFound(name.to_string()));
     }
@@ -1010,6 +1014,34 @@ fn parse_call_temporal(
     }
 }
 
+/// The window functions row lowering refuses: they need the window planner.
+const WINDOW_CALLS: [&str; 12] = [
+    "shift", "rolling", "diff", "cum_sum", "cum_max", "cum_min", "mean", "sum", "min", "max",
+    "count", "std",
+];
+
+/// The refusal of a window function `func` reached by row lowering: a window
+/// applied where only a row expression can be planned, such as the input of
+/// another window.
+fn window_in_row_context(func: &str) -> LtseqError {
+    transpile_error!(
+        "Window function '{}' requires DataFrame context - should be handled in derive()",
+        func
+    )
+}
+
+/// Whether `err` is exactly the refusal `window_in_row_context` builds, and
+/// not merely an error whose text mentions it (a column or method name can
+/// say anything). `derive`'s nested-window hint keys on this (#152).
+pub(crate) fn is_window_in_row_context(err: &LtseqError) -> bool {
+    let LtseqError::Transpile(msg) = err else {
+        return false;
+    };
+    WINDOW_CALLS.iter().any(|func| {
+        matches!(window_in_row_context(func), LtseqError::Transpile(own) if own == *msg)
+    })
+}
+
 /// Parse a function call into a DataFusion expression.
 ///
 /// Dispatches to category-specific handlers: conditional, null, math,
@@ -1039,10 +1071,7 @@ fn parse_call_expr(
         "cast" | "is_in" => parse_call_type_ops(func, receiver(on, func)?, args, rx),
         // Window functions (must be handled elsewhere)
         "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min" | "mean" | "sum"
-        | "min" | "max" | "count" | "std" => Err(transpile_error!(
-            "Window function '{}' requires DataFrame context - should be handled in derive()",
-            func
-        )),
+        | "min" | "max" | "count" | "std" => Err(window_in_row_context(func)),
         // String operations
         "str_char" | "str_concat_ws" => parse_call_string_standalone(func, on, args, rx),
         f if f.starts_with("str_") => parse_call_string(func, receiver(on, func)?, args, rx),
@@ -1931,14 +1960,29 @@ mod tests {
     #[test]
     fn window_function_call_rejected_in_row_context() {
         let schema = test_schema();
-        for func in ["shift", "rolling", "diff", "cum_sum", "cum_max", "cum_min"] {
+        for func in WINDOW_CALLS {
             let err =
                 pyexpr_to_datafusion(call_expr(func, col_expr("a"), vec![]), &schema).unwrap_err();
             assert!(
                 err.to_string().contains("requires DataFrame context"),
                 "func {func}: {err}"
             );
+            assert!(is_window_in_row_context(&err), "func {func}: {err:?}");
         }
+    }
+
+    /// An error that only mentions the refusal's words is not the refusal
+    /// (#152): a missing column named after them stays `ColumnNotFound`.
+    #[test]
+    fn only_the_refusal_itself_is_a_window_in_row_context() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(col_expr("x requires DataFrame context"), &schema)
+            .unwrap_err();
+        assert!(matches!(err, LtseqError::ColumnNotFound(_)), "{err:?}");
+        assert!(!is_window_in_row_context(&err));
+        assert!(!is_window_in_row_context(&LtseqError::Transpile(
+            "Method 'requires DataFrame context' not yet supported".into()
+        )));
     }
 
     #[test]

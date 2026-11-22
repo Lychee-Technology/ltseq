@@ -25,6 +25,7 @@ import pytest
 
 from ltseq import LTSeq
 from ltseq.exceptions import ColumnNotFoundError
+from ltseq.expr import ColumnExpr
 
 MISSING = {"type": "Column", "name": "nope"}
 X = {"type": "Column", "name": "x"}
@@ -64,6 +65,67 @@ def test_missing_column_reaching_rust_is_column_not_found(operation):
     search_first, one classed as a validation error) naming the column."""
     with pytest.raises(ColumnNotFoundError, match="Column 'nope' not found in schema"):
         OPERATIONS[operation](_table()._inner)
+
+
+def _sorted_table():
+    return LTSeq.from_arrow(pa.table({"x": [1, 2, 3], "g": [1, 1, 2]})).sort("x")
+
+
+def test_missing_column_named_like_the_nested_window_refusal_is_column_not_found():
+    """derive's nested-window hint read the error's text, so a missing
+    column whose name contained "requires DataFrame context" lost its class
+    and got an unrelated hint."""
+    t = _sorted_table()
+    with pytest.raises(ColumnNotFoundError, match="not found in schema") as raised:
+        t.derive(out=lambda r: ColumnExpr("missing requires DataFrame context").shift(1))
+    assert "split it into two steps" not in str(raised.value)
+
+
+def test_window_over_a_nested_window_keeps_the_hint():
+    with pytest.raises(ValueError, match="split it into two steps") as raised:
+        _sorted_table().derive(out=lambda r: r.x.rolling(3).mean().shift(1).rolling(2).sum())
+    assert not isinstance(raised.value, ColumnNotFoundError)
+
+
+# Aggregates that take a bare column build its reference without lowering an
+# expression; they raised DataFusion's RuntimeError for a missing one.
+BARE_AGGREGATES = {
+    "sum": lambda c: c.sum(),
+    "min": lambda c: c.min(),
+    "max": lambda c: c.max(),
+    "mean": lambda c: c.mean(),
+    "median": lambda c: c.median(),
+    "std": lambda c: c.std(),
+    "count": lambda c: c.count(),
+    "first": lambda c: c.first(),
+    "last": lambda c: c.last(),
+    "mode": lambda c: c.mode(),
+    "skew": lambda c: c.skew(),
+    "top_k": lambda c: c.top_k(2),
+}
+
+
+@pytest.mark.parametrize("aggregate", BARE_AGGREGATES)
+def test_bare_column_aggregate_of_a_missing_column_is_column_not_found(aggregate):
+    t = _sorted_table()
+    with pytest.raises(ColumnNotFoundError, match="Column 'missing' not found in schema"):
+        t.agg(n=lambda r: BARE_AGGREGATES[aggregate](ColumnExpr("missing"))).to_dicts()
+
+
+GROUP_WINDOWS = {
+    "derive GroupAgg": lambda n: n.derive(lambda g: {"m": g.max("missing")}),
+    "derive GroupRowColumn": lambda n: n.derive(lambda g: {"m": g.first().missing}),
+    "filter GroupAgg": lambda n: n.filter(lambda g: g.sum("missing") > 1),
+    "filter GroupRowColumn": lambda n: n.filter(lambda g: g.last().missing > 1),
+}
+
+
+@pytest.mark.parametrize("case", GROUP_WINDOWS)
+def test_group_window_of_a_missing_column_is_column_not_found(case):
+    """The group dialect's aggregates and row picks raised RuntimeError."""
+    nested = _sorted_table().group_ordered(lambda r: r.g)
+    with pytest.raises(ColumnNotFoundError, match="Column 'missing' not found in schema"):
+        GROUP_WINDOWS[case](nested).to_dicts()
 
 
 def _divides_by_zero():
@@ -142,12 +204,20 @@ def test_pattern_count_with_a_key_the_fast_path_cannot_compare_falls_back(key_ty
     assert got == expected
 
 
-def test_pattern_count_reports_a_source_it_cannot_read(tmp_path):
-    """A read failure inside the fast path is an error, not a fallback."""
+def test_pattern_count_reports_a_source_it_cannot_read_as_the_general_path_does(tmp_path):
+    """A read failure inside the fast path is an error, not a fallback, and
+    of the class the general path raises for it. The fast path
+    (``assume_sorted`` on Parquet) raised RuntimeError here and the general
+    path (``sort``) ValueError."""
     path = str(tmp_path / "events.parquet")
     pq.write_table(_events(pa.int64()), path, row_group_size=3)
-    t = LTSeq.read_parquet(path).assume_sorted("i")
+    fast = LTSeq.read_parquet(path).assume_sorted("i")
+    general = LTSeq.read_parquet(path).sort("i")
     os.remove(path)
 
-    with pytest.raises(RuntimeError, match="Failed to open Parquet"):
-        t.search_pattern_count(*STEPS, partition_by="k")
+    with pytest.raises(ValueError, match="I/O error .*Failed to open Parquet") as raised:
+        fast.search_pattern_count(*STEPS, partition_by="k")
+    assert not isinstance(raised.value, RuntimeError)
+    with pytest.raises(ValueError) as raised:
+        general.search_pattern_count(*STEPS, partition_by="k")
+    assert not isinstance(raised.value, RuntimeError)
