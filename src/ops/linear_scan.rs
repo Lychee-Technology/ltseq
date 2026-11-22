@@ -163,7 +163,17 @@ fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataT
                     };
                     match binary_input_types(&l, &operator, &r).ok()? {
                         (T::Int64, T::Int64) => Some(T::Int64),
-                        (T::Float64, T::Float64) if op == "Sub" => Some(T::Float64),
+                        // Only when both operands are Float64 already: the
+                        // kernel subtracts two `Float64Array`s and does not
+                        // cast an integer operand as DataFusion's coercion
+                        // does, so `n - f.shift(1)` with an integer `n` raised
+                        // where the materialized first rows count (R9-F1 of
+                        // #422's review). Python counts those instead.
+                        (T::Float64, T::Float64)
+                            if op == "Sub" && l == T::Float64 && r == T::Float64 =>
+                        {
+                            Some(T::Float64)
+                        }
                         _ => None,
                     }
                 }

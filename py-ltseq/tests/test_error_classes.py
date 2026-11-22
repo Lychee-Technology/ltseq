@@ -414,6 +414,43 @@ def test_group_count_does_not_divide_where_a_boolean_guard_skips_it(tmp_path, so
     assert t.group_ordered(boundary).first().count() == expected
 
 
+def _mixed_subtraction_rows():
+    """An Int64 ``n`` and a Float64 ``f``, which DataFusion coerces to Float64."""
+    return pa.table(
+        {
+            "i": pa.array(range(4), pa.int64()),
+            "n": pa.array([1, 4, 2, 0], pa.int64()),
+            "f": pa.array([0.5] * 4, pa.float64()),
+        }
+    )
+
+
+@pytest.mark.parametrize("source", ["memory", "parquet"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(lambda r: (r.n - r.f.shift(1)) > 2.0, id="int-minus-float"),
+        pytest.param(lambda r: (r.f.shift(1) - r.n) > -2.0, id="float-minus-int"),
+    ],
+)
+def test_group_count_of_mixed_integer_float_subtraction_is_the_materialized_count(
+    tmp_path, source, boundary
+):
+    """The kernel subtracted only two Float64 or two integer arrays, so an
+    integer minus a Float64 raised ``Sub: unsupported types`` where the
+    materialized first rows count; the old retry hid it (R9-F1 of #422's
+    review). The kernel now declines a subtraction whose operands are not
+    both Float64 or both integers."""
+    if source == "memory":
+        t = LTSeq.from_arrow(_mixed_subtraction_rows()).sort("i")
+    else:
+        path = tmp_path / "mixed.parquet"
+        pq.write_table(_mixed_subtraction_rows(), str(path))
+        t = LTSeq.read_parquet(str(path)).assume_sorted("i")
+    expected = len(t.group_ordered(boundary).first().to_arrow())
+    assert t.group_ordered(boundary).first().count() == expected
+
+
 def _other_events():
     """Rows of the same schema as ``_events`` with one session and no pattern."""
     return pa.table(
@@ -655,6 +692,19 @@ def test_row_lowering_refuses_a_window_before_reading_its_offset(operation):
     prefix, not the wrong-kind literal (R8-F2 of #422's review)."""
     with pytest.raises(ValueError, match=r"^Transpilation error: Window function 'shift'"):
         operation(_dated()).to_arrow()
+
+
+@pytest.mark.parametrize("offset", ["1.5", "9223372036854775808"])
+def test_derive_rejects_a_decimal_shift_offset_it_cannot_represent(offset):
+    """``require_i64`` rejects a ``Decimal`` that is not integral or does not
+    fit in Int64 as a validation error, with its message alone, though
+    ``Decimal("1")`` of the same kind is accepted (R9-F2 of #422's review)."""
+    from decimal import Decimal
+
+    t = _dated()
+    assert t.derive(v=lambda r: r.x.shift(Decimal("1"))).to_arrow().num_rows == 2
+    with pytest.raises(ValueError, match=r"^shift\(\) offset must be an integer, got a Decimal128"):
+        t.derive(v=lambda r: r.x.shift(Decimal(offset))).to_arrow()
 
 
 def test_derive_reads_a_shift_offset_of_the_wrong_kind():
