@@ -258,6 +258,9 @@ pub fn truncate_specs_at_overwrite(
 /// select(exprs, copies)`. The expressions are computed beneath the sort, so
 /// the projection above it only picks columns, which DataFusion does not
 /// repartition. Later transforms keep only the declared keys' order (#311).
+///
+/// The window functions of `exprs` are computed as [`select_windowed`]
+/// computes them.
 pub fn select_in_order(
     df: DataFrame,
     exprs: Vec<Expr>,
@@ -265,12 +268,10 @@ pub fn select_in_order(
     kept: usize,
 ) -> datafusion::error::Result<DataFrame> {
     if kept == specs.len() {
-        return df.select(exprs);
+        return select_windowed(df, exprs);
     }
     let outputs = exprs.len();
-    let names: HashSet<String> = df
-        .clone()
-        .select(exprs.clone())?
+    let names: HashSet<String> = select_windowed(df.clone(), exprs.clone())?
         .schema()
         .fields()
         .iter()
@@ -286,7 +287,7 @@ pub fn select_in_order(
         stage.push(Expr::Column(Column::new_unqualified(&spec.column)).alias(&name));
         order.push(spec.sort_expr_on(&name));
     }
-    let stage = df.select(stage)?;
+    let stage = select_windowed(df, stage)?;
     let picked: Vec<Expr> = stage
         .schema()
         .columns()
@@ -347,6 +348,12 @@ fn free_name(base: &str, taken: &mut HashSet<String>) -> String {
 /// under a free name (`__ltseq_window__`, `__ltseq_window_1__`, ...), one no
 /// column of `df` has and no expression reads, and the projection reads that
 /// column in the function's place.
+///
+/// The free names also keep apart two windows whose texts are the same
+/// (#318): a cast takes the name of the expression inside it, so
+/// `lag(CAST(g AS Float64))` and `lag(g)` both read as `lag(?table?.g, ...)`,
+/// and a window node that names them by that text rejects them as
+/// duplicates.
 pub(crate) fn select_windowed(
     df: DataFrame,
     exprs: Vec<Expr>,

@@ -264,7 +264,8 @@ def test_plan_keeps_the_sort():
 
     `sort("m")` reads its input as one stream in table order (#268), so the
     window and its claims stay inside that stream; a second window ordered by
-    `m` still meets the first in one plan.
+    `m` still meets the first in one plan. The window node holds the rolling
+    max under a staged name (`__ltseq_window__`, #318), which the sort reads.
     """
     t = (
         LTSeq.from_dict({"x": [3, 2, 1, 0]})
@@ -275,7 +276,7 @@ def test_plan_keeps_the_sort():
     lines = physical.splitlines()
     window = max(i for i, line in enumerate(lines) if "BoundedWindowAggExec" in line)
     assert any(
-        "SortExec" in line and "CURRENT ROW@" in line and "ASC NULLS LAST" in line
+        "SortExec" in line and "__ltseq_window__@" in line and "ASC NULLS LAST" in line
         for line in lines[:window]
     ), physical
     ranked = {r["x"]: r["o"] for r in t.derive(o=lambda r: row_number().over(order_by="m")).to_dicts()}

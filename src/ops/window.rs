@@ -286,9 +286,7 @@ fn native_window_derive(
             .map_err(LtseqError::Transpile)?;
         stage1.push(window_expr.alias(hidden_name));
     }
-    let stage_df = (**df)
-        .clone()
-        .select(stage1)
+    let stage_df = crate::ops::common::select_windowed((**df).clone(), stage1)
         .map_err(|e| LtseqError::Runtime(format!("Nested window stage failed: {}", e)))?;
 
     // Stage 2: original columns + the rewritten user expressions (hidden
@@ -429,10 +427,9 @@ fn native_cum_sum(
         all_exprs.push(cumsum_expr.alias(&cumsum_col_name));
     }
 
-    // Apply via df.select() — stays lazy
-    let result_df = (**df)
-        .clone()
-        .select(all_exprs)
+    // Stays lazy. The windows are staged under free names, so two sums
+    // whose inputs differ only by a cast do not collide (#318).
+    let result_df = crate::ops::common::select_windowed((**df).clone(), all_exprs)
         .map_err(|e| {
             LtseqError::Runtime(format!("Native cum_sum derive failed: {}", e))
         })?;
