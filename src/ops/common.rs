@@ -258,6 +258,9 @@ pub fn truncate_specs_at_overwrite(
 /// select(exprs, copies)`. The expressions are computed beneath the sort, so
 /// the projection above it only picks columns, which DataFusion does not
 /// repartition. Later transforms keep only the declared keys' order (#311).
+///
+/// The window functions of `exprs` are computed as [`select_windowed`]
+/// computes them.
 pub fn select_in_order(
     df: DataFrame,
     exprs: Vec<Expr>,
@@ -265,12 +268,10 @@ pub fn select_in_order(
     kept: usize,
 ) -> datafusion::error::Result<DataFrame> {
     if kept == specs.len() {
-        return df.select(exprs);
+        return select_windowed(df, exprs);
     }
     let outputs = exprs.len();
-    let names: HashSet<String> = df
-        .clone()
-        .select(exprs.clone())?
+    let names: HashSet<String> = select_windowed(df.clone(), exprs.clone())?
         .schema()
         .fields()
         .iter()
@@ -286,7 +287,7 @@ pub fn select_in_order(
         stage.push(Expr::Column(Column::new_unqualified(&spec.column)).alias(&name));
         order.push(spec.sort_expr_on(&name));
     }
-    let stage = df.select(stage)?;
+    let stage = select_windowed(df, stage)?;
     let picked: Vec<Expr> = stage
         .schema()
         .columns()
@@ -347,6 +348,12 @@ fn free_name(base: &str, taken: &mut HashSet<String>) -> String {
 /// under a free name (`__ltseq_window__`, `__ltseq_window_1__`, ...), one no
 /// column of `df` has and no expression reads, and the projection reads that
 /// column in the function's place.
+///
+/// The free names also keep apart two windows whose texts are the same
+/// (#318): a cast takes the name of the expression inside it, so
+/// `lag(CAST(g AS Float64))` and `lag(g)` both read as `lag(?table?.g, ...)`,
+/// and a window node that names them by that text rejects them as
+/// duplicates.
 pub(crate) fn select_windowed(
     df: DataFrame,
     exprs: Vec<Expr>,
@@ -354,7 +361,9 @@ pub(crate) fn select_windowed(
     use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
     use std::collections::HashMap;
 
-    use datafusion::logical_expr::utils::{find_window_exprs, group_window_expr_by_sort_keys};
+    use datafusion::logical_expr::utils::{
+        compare_sort_expr, find_window_exprs, group_window_expr_by_sort_keys,
+    };
 
     let windows = find_window_exprs(exprs.iter());
     if windows.is_empty() {
@@ -372,10 +381,26 @@ pub(crate) fn select_windowed(
         .collect();
     let mut by_window: HashMap<Expr, String> = HashMap::with_capacity(windows.len());
     // One window node holds windows of one sort key only, so they are
-    // grouped as `select` groups them; the groups with more sort keys go
-    // lower, as `LogicalPlanBuilder::window_plan` puts them.
+    // grouped as `select` groups them, and stacked in the order
+    // `LogicalPlanBuilder::window_plan` stacks them: by the sort keys
+    // themselves first, then with the longer of two keys where one is a
+    // prefix of the other lower. The order matters beyond the plan's
+    // shape: a window node's sort does not keep the order of rows that tie
+    // on its keys, so a window that ties (an implicit-order `shift` on
+    // tied sort keys) reads the order the node beneath it left. Stacking
+    // by key length alone let a sibling `over(order_by=...)` window run
+    // first and change which row such a `shift` reads (R1-F1 of #421's
+    // review).
     let mut groups = group_window_expr_by_sort_keys(windows)?;
-    groups.sort_by_key(|(key, _)| std::cmp::Reverse(key.len()));
+    let schema = df.logical_plan().schema().clone();
+    groups.sort_by(|(key_a, _), (key_b, _)| {
+        key_a
+            .iter()
+            .zip(key_b.iter())
+            .map(|((a, _), (b, _))| compare_sort_expr(a, b, &schema))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or_else(|| key_b.len().cmp(&key_a.len()))
+    });
     let mut df = df;
     for (_, group) in groups {
         let staged: Vec<Expr> = group
