@@ -17,6 +17,7 @@ Three things are pinned here:
   type, not by a marker in the message.
 """
 
+import datetime
 import os
 import re
 
@@ -352,23 +353,65 @@ def test_group_count_execution_failure_raises_the_class_of_the_materialized_coun
 def test_group_count_boundary_evaluation_failure_raises_the_class_of_the_materialized_count():
     """A failure evaluating the boundary predicate in the count kernel raised
     RuntimeError, where the materialized first rows raise ValueError for the
-    same division by zero (R6-F3 of #422's review)."""
+    same division by zero (R6-F3 of #422's review). The division is outside
+    every ``&`` and ``|``, so both paths evaluate it on every row, and the
+    kernel is the one that raises here."""
     t = LTSeq.from_arrow(
         pa.table(
             {
                 "i": pa.array(range(4), pa.int64()),
-                "k": pa.array([1, 1, 2, 2], pa.int64()),
                 "n": pa.array([1, 2, 3, 4], pa.int64()),
                 "d": pa.array([1, 0, 1, 1], pa.int64()),
             }
         )
     ).sort("i")
-    sessions = t.group_ordered(lambda r: (r.k != r.k.shift(1)) & ((r.n / r.d) > 0.0)).first()
+    sessions = t.group_ordered(lambda r: (r.n / r.d) > (r.n.shift(1) / r.d.shift(1))).first()
     with pytest.raises(ValueError, match="Divide by zero"):
         len(sessions.to_arrow())
-    with pytest.raises(ValueError, match="Divide by zero") as raised:
+    with pytest.raises(ValueError, match="group boundary.*Divide by zero") as raised:
         sessions.count()
     assert not isinstance(raised.value, RuntimeError)
+
+
+def _guarded_division_rows():
+    # No ``k`` is negative, so the reference never needs ``n / d``, and the
+    # zero divisors in rows 1 and 3 are never divided by.
+    return pa.table(
+        {
+            "i": pa.array(range(4), pa.int64()),
+            "k": pa.array([1, 1, 2, 2], pa.int64()),
+            "n": pa.array([1, 1, 1, 1], pa.int64()),
+            "d": pa.array([1, 0, 1, 0], pa.int64()),
+        }
+    )
+
+
+@pytest.mark.parametrize("source", ["memory", "parquet"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(
+            lambda r: (r.k != r.k.shift(1)) | ((r.k < 0) & ((r.n / r.d) > 0.0)), id="or-and"
+        ),
+        pytest.param(
+            lambda r: ((r.k < 0) & ((r.n / r.d) > 0.0)) | (r.k != r.k.shift(1)), id="guard-first"
+        ),
+    ],
+)
+def test_group_count_does_not_divide_where_a_boolean_guard_skips_it(tmp_path, source, boundary):
+    """The kernel evaluated both operands of ``&`` and ``|`` on every row, so a
+    division the reference skips raised divide by zero where the materialized
+    first rows count 2; the old retry hid it (R8-F1 of #422's review). The
+    kernel now declines a division beneath a Boolean operator."""
+    if source == "memory":
+        t = LTSeq.from_arrow(_guarded_division_rows()).sort("i")
+    else:
+        path = tmp_path / "events.parquet"
+        pq.write_table(_guarded_division_rows(), str(path))
+        t = LTSeq.read_parquet(str(path)).assume_sorted("i")
+    expected = len(t.group_ordered(boundary).first().to_arrow())
+    assert expected == 2
+    assert t.group_ordered(boundary).first().count() == expected
 
 
 def _other_events():
@@ -569,3 +612,51 @@ def test_counts_of_a_rewritten_file_url_follow_the_planned_schema(tmp_path, kind
         assert isinstance(expected_pattern, int)
     assert _outcome(lambda: pattern(fast)) == expected_pattern
     assert _outcome(lambda: groups(fast).count()) == expected_groups
+
+
+def _dated():
+    return LTSeq.from_arrow(
+        pa.table(
+            {
+                "x": pa.array([1, 2], pa.int64()),
+                "d": pa.array([datetime.date(2020, 1, 1)] * 2),
+            }
+        )
+    ).sort("x")
+
+
+WRONG_KIND = {
+    "filter": lambda t: t.filter(lambda r: r.d.dt.add(days="1") > r.d),
+    "select": lambda t: t.select(lambda r: r.d.dt.add(days="1")),
+    "derive": lambda t: t.derive(v=lambda r: r.d.dt.add(days="1")),
+}
+
+
+@pytest.mark.parametrize("operation", WRONG_KIND)
+def test_wrong_kind_literal_gives_its_message_alone_in_every_operation(operation):
+    """A literal argument that lowering reads and finds of the wrong kind is a
+    validation error, without the transpilation prefix, whichever operation
+    lowers it (R8-F2 of #422's review)."""
+    with pytest.raises(ValueError) as raised:
+        WRONG_KIND[operation](_dated()).to_arrow()
+    assert str(raised.value).startswith("dt_add days must be an integer, got a String literal '1'")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param(lambda t: t.filter(lambda r: r.x.shift("1") == 0), id="filter"),
+        pytest.param(lambda t: t.select(lambda r: r.x.shift("1")), id="select"),
+    ],
+)
+def test_row_lowering_refuses_a_window_before_reading_its_offset(operation):
+    """``filter`` and ``select`` refuse a window in row context before its
+    offset is read, so ``shift("1")`` there is the window refusal, with the
+    prefix, not the wrong-kind literal (R8-F2 of #422's review)."""
+    with pytest.raises(ValueError, match=r"^Transpilation error: Window function 'shift'"):
+        operation(_dated()).to_arrow()
+
+
+def test_derive_reads_a_shift_offset_of_the_wrong_kind():
+    with pytest.raises(ValueError, match=r"^shift\(\) offset must be an integer"):
+        _dated().derive(v=lambda r: r.x.shift("1")).to_arrow()

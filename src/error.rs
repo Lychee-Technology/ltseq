@@ -101,10 +101,16 @@ impl From<PyExprError> for PyErr {
 /// - `NoData`, `NoSchema`, `Runtime` → `RuntimeError`
 ///
 /// A failure is classed by the variant that carries it, never by its
-/// message. The transpiler reports a column it cannot find as
-/// `ColumnNotFound`, a literal argument of the wrong kind (`shift("1")`,
-/// `rolling("3")`, `LiteralValue::require_*`) as `Validation`, and every
-/// other refusal as `Transpile`, whichever operation lowers the expression. An I/O failure is `Io`
+/// message. Expression lowering reports a column it cannot find as
+/// `ColumnNotFound`, a literal argument that `LiteralValue::require_*`
+/// finds of the wrong kind (`shift("1")` in `derive`, `dt.add(days="1")`)
+/// as `Validation`, and every other refusal as `Transpile`, whichever
+/// operation lowers the expression. A refusal met before that check is
+/// `Transpile` even when the argument is also of the wrong kind: `filter`
+/// and `select` lower rows, which refuse a window such as `shift("1")`
+/// before reading its offset. These categories are lowering's; a planner
+/// validating an aggregate's argument may return `Validation` for a value of
+/// the right kind (`top_k(0)`). An I/O failure is `Io`
 /// (`LtseqError::io`) and a failed execution is `Context`
 /// (`LtseqError::collect`, `with_context`), so a
 /// reader, a writer and a terminal raise one class for the same kind of

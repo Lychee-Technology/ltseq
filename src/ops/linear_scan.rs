@@ -63,9 +63,14 @@ use std::sync::Arc;
 /// 3. Computes, at every node, what DataFusion computes for it on these
 ///    column types ([`kernel_type`]), so the count equals the materialized
 ///    reference.
+/// 4. Has no division beneath a `&` or `|` ([`guards_a_division`]): the
+///    kernel evaluates both operands on every row, where DataFusion may not
+///    evaluate the one a Boolean operator does not need, so a division by
+///    zero there failed only in the kernel.
 pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
     is_supported_expr(expr)
         && contains_shift(expr)
+        && !guards_a_division(expr)
         && kernel_type(expr, schema, has_fused_form(expr, schema)) == Some(DataType::Boolean)
 }
 
@@ -165,6 +170,46 @@ fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataT
                 _ => None,
             }
         }
+    }
+}
+
+/// Whether a division, the one operator the kernel admits that can fail on
+/// a value (a zero divisor), lies beneath a `&` or `|`.
+///
+/// DataFusion's `BinaryExpr` short-circuits `AND` and `OR`: when the left
+/// operand decides every row it does not evaluate the right one, and when it
+/// decides most rows it evaluates the right one only on the others. So in
+/// `(k != k.shift(1)) | ((k < 0) & ((n / d) > 0.0))` the reference never
+/// divides when no `k` is negative, while the kernel divides on every row and
+/// raised for a zero `d` where the materialized first rows count (R8-F1 of
+/// #422's review). Which rows DataFusion evaluates depends on the batch, so
+/// the kernel cannot reproduce it, and such a predicate is declined: Python
+/// counts the materialized first rows, which raise or count as the reference
+/// does. Both operands are checked, since a `&` or `|` may itself be the
+/// operand another one skips. A division the predicate always demands (one
+/// outside every `&` and `|`) is evaluated on every row on both paths and
+/// stays admitted. `+`, `-` and `*` wrap and comparisons do not fail.
+fn guards_a_division(expr: &PyExpr) -> bool {
+    fn contains_div(expr: &PyExpr) -> bool {
+        match expr {
+            PyExpr::BinOp { op, left, right } => {
+                op == "Div" || contains_div(left) || contains_div(right)
+            }
+            PyExpr::UnaryOp { operand, .. } => contains_div(operand),
+            PyExpr::Call { on, .. } => on.as_deref().is_some_and(contains_div),
+            PyExpr::Alias { expr, .. } => contains_div(expr),
+            PyExpr::Column(_) | PyExpr::Literal(_) | PyExpr::Window { .. } => false,
+        }
+    }
+    match expr {
+        PyExpr::BinOp { op, left, right } if op == "And" || op == "Or" => {
+            contains_div(left) || contains_div(right)
+        }
+        PyExpr::BinOp { left, right, .. } => guards_a_division(left) || guards_a_division(right),
+        PyExpr::UnaryOp { operand, .. } => guards_a_division(operand),
+        PyExpr::Call { on, .. } => on.as_deref().is_some_and(guards_a_division),
+        PyExpr::Alias { expr, .. } => guards_a_division(expr),
+        PyExpr::Column(_) | PyExpr::Literal(_) | PyExpr::Window { .. } => false,
     }
 }
 
@@ -1676,6 +1721,33 @@ mod tests {
             (binop("Gt", binop("Div", col("i64"), shift1("i64")), int(1)), false),
             (binop("Gt", binop("Div", col("f64"), shift1("f64")), float(1.5)), false),
             (binop("Gt", binop("Div", col("ts"), shift1("ts")), float(1.5)), false),
+            // A division beneath `&` or `|` is one DataFusion may not
+            // evaluate, so the kernel declines it (R8-F1 of #422's review).
+            (binop("Or", changes("i64"), binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0))), false),
+            (binop("And", binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0)), changes("i64")), false),
+            (
+                binop(
+                    "Or",
+                    changes("i64"),
+                    binop(
+                        "And",
+                        binop("Lt", col("i64"), int(0)),
+                        binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0)),
+                    ),
+                ),
+                false,
+            ),
+            (
+                PyExpr::UnaryOp {
+                    op: "Not".into(),
+                    operand: Box::new(binop(
+                        "And",
+                        changes("i32"),
+                        binop("Gt", binop("Div", col("i32"), col("i64")), float(0.0)),
+                    )),
+                },
+                false,
+            ),
             // Float thresholds against integers: integral and below 2^53 only.
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(2.0)), true),
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(1.5)), false),
