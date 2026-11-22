@@ -293,7 +293,9 @@ class TestParquetFastPaths:
         path.unlink()
         with raises_naming(path):
             t.group_ordered(lambda r: r.x != r.x.shift(1)).first().count()
-        with pytest.raises(RuntimeError, match="No such file"):
+        # A read failure in the fast path is a ValueError, as the general
+        # path raises for it (#152).
+        with pytest.raises(ValueError, match="No such file"):
             t.search_pattern_count(lambda r: r.x == 1, lambda r: r.x == 2, partition_by="g")
 
     def test_a_rewritten_file_is_read_as_it_is_now(self, tmp_path):
