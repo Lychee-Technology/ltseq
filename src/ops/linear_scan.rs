@@ -895,14 +895,12 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LT
 
     let sorted_projected = build_boundary_scan_df(df, &table.sort_specs, predicate)?;
 
+    // A failed execution is the `LtseqError::collect` every terminal raises
+    // (R3-F2 of #422's review), so the count and the materialized first rows
+    // raise one class for it.
     let proj_batches = RUNTIME
-        .block_on(async {
-            sorted_projected
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect projected data: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+        .block_on(sorted_projected.collect())
+        .map_err(LtseqError::collect)?;
 
     let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
     if total_rows == 0 {

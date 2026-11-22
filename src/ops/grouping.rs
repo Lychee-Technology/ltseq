@@ -130,9 +130,11 @@ pub fn group_ordered_count_impl(
             // The direct reader opens one file. A directory or a glob is
             // counted by Python through DataFusion, as it always was; sending
             // such sources to the general path below is #287. A path that
-            // names nothing now (a file deleted since the read) is left to
-            // Python too, whose execution reports it as every terminal does.
-            if !is_regular_file(parquet_path) {
+            // names nothing now (a glob, or a file deleted since the read) is
+            // left to Python too, whose execution reports a deleted file as
+            // every terminal does. Any other failure to look the path up is
+            // an error, not a fallback (R3-F1 of #422's review).
+            if !names_one_file(parquet_path, |p| std::fs::metadata(p))? {
                 return Ok(None);
             }
             if let Some(count) = crate::ops::parallel_scan::parallel_streaming_group_count(
@@ -156,16 +158,34 @@ pub fn group_ordered_count_impl(
             column(&GroupColumns::default().rn)
                 .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
         )
-        .map_err(|e| LtseqError::Runtime(e.to_string()))?;
+        .map_err(|e| LtseqError::with_context("Failed to plan the group count", e))?;
+    // A failed execution is the `LtseqError::collect` every terminal raises,
+    // so this count and the materialized first rows raise one class.
     RUNTIME
         .block_on(filtered.count())
         .map(Some)
-        .map_err(|e| LtseqError::Runtime(e.to_string()))
+        .map_err(LtseqError::collect)
 }
 
-/// Whether `path` names a regular file now, following a link.
-fn is_regular_file(path: &str) -> bool {
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+/// Whether `path` names a regular file now, following a link, looked up with
+/// `metadata` (`std::fs::metadata`, or a stand-in in tests).
+///
+/// `Ok(false)` for a path the direct reader does not open: a directory, or a
+/// path that names nothing (a glob, or a file deleted since the read). Any
+/// other failure of the lookup, such as a permission or I/O error, is an
+/// `LtseqError::Io` naming the path, so it is raised rather than retried.
+fn names_one_file(
+    path: &str,
+    metadata: impl FnOnce(&str) -> std::io::Result<std::fs::Metadata>,
+) -> Result<bool, LtseqError> {
+    match metadata(path) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(LtseqError::io(
+            &format!("Failed to look up Parquet source '{path}'"),
+            e,
+        )),
+    }
 }
 
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.
@@ -650,6 +670,28 @@ mod tests {
     use crate::engine::create_session_context;
     use datafusion::arrow::array::{Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field};
+
+    /// A directory and a path that names nothing are fallbacks; a lookup
+    /// that fails otherwise is an `Io` error naming the path, never a
+    /// fallback (R3-F1 of #422's review).
+    #[test]
+    fn names_one_file_falls_back_only_for_what_the_reader_does_not_open() {
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().unwrap();
+        assert!(!names_one_file(dir, |p| std::fs::metadata(p)).unwrap());
+        let missing = format!("{dir}/ltseq-no-such-file-*.parquet");
+        assert!(!names_one_file(&missing, |p| std::fs::metadata(p)).unwrap());
+        let exe = std::env::current_exe().unwrap();
+        assert!(names_one_file(exe.to_str().unwrap(), |p| std::fs::metadata(p)).unwrap());
+
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
+            let err = names_one_file("events.parquet", |_| Err(std::io::Error::from(kind)))
+                .unwrap_err();
+            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
+            assert!(err.to_string().contains("'events.parquet'"), "{err}");
+            assert!(std::error::Error::source(&err).is_some());
+        }
+    }
 
     /// A table with the columns of a `flatten()` product, its rows in reverse
     /// group order: groups 3, 2 and 1, each in row order. `v` is ten times

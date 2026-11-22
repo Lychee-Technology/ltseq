@@ -289,3 +289,63 @@ def test_group_count_falls_back_for_a_predicate_the_kernel_declines():
     pred = lambda r: r.k.shift(1, default=0) != r.k  # noqa: E731
     assert t._inner.group_ordered_count(t._capture_expr(pred)) is None
     assert t.group_ordered(pred).first().count() == len(t.group_ordered(pred).first().to_arrow())
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a POSIX user that directory permissions apply to",
+)
+def test_group_count_reports_a_failed_source_lookup_the_retry_would_hide(tmp_path, monkeypatch):
+    """The count's fast path took any failure to look its Parquet source up
+    for a source it does not open, so the materialized retry, which reads
+    the file DataFusion listed at the call, counted it and the failure was
+    discarded (R3-F1 of #422's review). A relative path looked up from
+    another directory, where its first segment cannot be searched, fails
+    the lookup while the listed file is still readable."""
+    data = tmp_path / "data"
+    (data / "sub").mkdir(parents=True)
+    pq.write_table(_events(pa.int64()), str(data / "sub" / "events.parquet"))
+    monkeypatch.chdir(data)
+    fast = LTSeq.read_parquet("sub/events.parquet").assume_sorted("i")
+
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "sub").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    (elsewhere / "sub").chmod(0)
+    try:
+        assert len(_sessions(fast).to_arrow()) == 3, "the materialized retry succeeds"
+        with pytest.raises(ValueError, match="Failed to look up Parquet source 'sub/events.parquet'") as raised:
+            _sessions(fast).count()
+        assert not isinstance(raised.value, RuntimeError)
+    finally:
+        (elsewhere / "sub").chmod(0o755)
+
+
+def test_group_count_falls_back_for_a_parquet_directory(tmp_path):
+    """A directory, which the direct reader does not open, is still counted
+    through the materialized first rows."""
+    pq.write_table(_events(pa.int64()), str(tmp_path / "part-0.parquet"))
+    t = LTSeq.read_parquet(str(tmp_path)).assume_sorted("i")
+    assert _sessions(t).count() == len(_sessions(t).to_arrow()) == 3
+
+
+def test_group_count_execution_failure_raises_the_class_of_the_materialized_count():
+    """The general count path raised RuntimeError for a failed execution,
+    where the materialized first rows raise ValueError (R3-F2 of #422's
+    review)."""
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "i": pa.array(range(5), pa.int64()),
+                "k": pa.array([1, 1, 2, 2, 3], pa.int64()),
+                "n": pa.array([1, 2, 3, 4, 5], pa.int64()),
+                "d": pa.array([1, 1, 1, 1, 0], pa.int64()),
+            }
+        )
+    ).sort("i")
+    failing = t.filter(lambda r: r.n // r.d > 0)
+    with pytest.raises(ValueError, match="Divide by zero"):
+        len(_sessions(failing).to_arrow())
+    with pytest.raises(ValueError, match="Divide by zero") as raised:
+        _sessions(failing).count()
+    assert not isinstance(raised.value, RuntimeError)
