@@ -171,7 +171,7 @@ fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError
 
 /// Whether `ListingTableUrl::parse` reads `path` as a local path, not a
 /// URL: it is absolute, or has no scheme.
-fn is_local(path: &str) -> bool {
+pub(crate) fn is_local(path: &str) -> bool {
     std::path::Path::new(path).is_absolute()
         || matches!(Url::parse(path), Err(ParseError::RelativeUrlWithoutBase))
 }

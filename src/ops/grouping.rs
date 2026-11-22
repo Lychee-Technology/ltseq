@@ -127,13 +127,12 @@ pub fn group_ordered_count_impl(
     // parallel_streaming_group_count).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            // The direct reader opens one file. A directory or a glob is
-            // counted by Python through DataFusion, as it always was; sending
-            // such sources to the general path below is #287. A path that
-            // names nothing now (a glob, or a file deleted since the read) is
-            // left to Python too, whose execution reports a deleted file as
-            // every terminal does. Any other failure to look the path up is
-            // an error, not a fallback (R3-F1 of #422's review).
+            // The direct reader opens one file. A directory, a glob or a URL
+            // is counted by Python through DataFusion, as it always was;
+            // sending such sources to the general path below is #287. Any
+            // other failure to look the path up, a local path without glob
+            // characters that names nothing now included, is an error, not a
+            // fallback (R3-F1 and R4-F1 of #422's review).
             if !names_one_file(parquet_path, |p| std::fs::metadata(p))? {
                 return Ok(None);
             }
@@ -170,17 +169,27 @@ pub fn group_ordered_count_impl(
 /// Whether `path` names a regular file now, following a link, looked up with
 /// `metadata` (`std::fs::metadata`, or a stand-in in tests).
 ///
-/// `Ok(false)` for a path the direct reader does not open: a directory, or a
-/// path that names nothing (a glob, or a file deleted since the read). Any
-/// other failure of the lookup, such as a permission or I/O error, is an
-/// `LtseqError::Io` naming the path, so it is raised rather than retried.
+/// `Ok(false)` for a source the direct reader does not open: a directory, a
+/// local glob that names nothing as written (one holding `*`, `?` or `[`), or
+/// a URL. A lookup that fails otherwise is an `LtseqError::Io` naming the
+/// path, so it is raised rather than retried: a permission or I/O error, and
+/// finding nothing at a local path without glob characters, which named one
+/// file or directory when it was read (R4-F1 of #422's review). The
+/// materialized retry reads the files DataFusion listed at the call, so it
+/// could count a file the path no longer names, such as a relative path
+/// looked up from another working directory.
 fn names_one_file(
     path: &str,
     metadata: impl FnOnce(&str) -> std::io::Result<std::fs::Metadata>,
 ) -> Result<bool, LtseqError> {
     match metadata(path) {
         Ok(meta) => Ok(meta.is_file()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && (!crate::source::is_local(path) || path.contains(['*', '?', '['])) =>
+        {
+            Ok(false)
+        }
         Err(e) => Err(LtseqError::io(
             &format!("Failed to look up Parquet source '{path}'"),
             e,
@@ -671,9 +680,10 @@ mod tests {
     use datafusion::arrow::array::{Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field};
 
-    /// A directory and a path that names nothing are fallbacks; a lookup
-    /// that fails otherwise is an `Io` error naming the path, never a
-    /// fallback (R3-F1 of #422's review).
+    /// A directory, a glob that names nothing and a URL are fallbacks; a
+    /// lookup that fails otherwise, finding nothing at a local path without
+    /// glob characters included, is an `Io` error naming the path, never a
+    /// fallback (R3-F1 and R4-F1 of #422's review).
     #[test]
     fn names_one_file_falls_back_only_for_what_the_reader_does_not_open() {
         let dir = std::env::temp_dir();
@@ -683,6 +693,13 @@ mod tests {
         assert!(!names_one_file(&missing, |p| std::fs::metadata(p)).unwrap());
         let exe = std::env::current_exe().unwrap();
         assert!(names_one_file(exe.to_str().unwrap(), |p| std::fs::metadata(p)).unwrap());
+        assert!(!names_one_file("s3://bucket/events.parquet", |p| std::fs::metadata(p)).unwrap());
+
+        for missing in [format!("{dir}/ltseq-no-such-file.parquet"), "events.parquet".into()] {
+            let err = names_one_file(&missing, |p| std::fs::metadata(p)).unwrap_err();
+            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
+            assert!(err.to_string().contains(&format!("'{missing}'")), "{err}");
+        }
 
         for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
             let err = names_one_file("events.parquet", |_| Err(std::io::Error::from(kind)))
