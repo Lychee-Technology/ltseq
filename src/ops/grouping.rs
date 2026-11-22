@@ -100,11 +100,12 @@ impl GroupColumns {
 ///
 /// Returns `Ok(None)` when this path does not count the input: the predicate
 /// is not a shift-based boundary predicate the kernel computes as DataFusion
-/// would, or the table's Parquet source is not one regular file (a directory
-/// or a glob), which the direct reader cannot open. Python then counts the
-/// materialized first rows. Every error is a genuine failure, which Python
-/// reports and never retries (#152): a source the fast path cannot read is
-/// one, so a read failure never turns into a fallback.
+/// would, or the table's Parquet source does not list one local file (a
+/// directory, a glob, a URL of another store), which the direct reader does
+/// not open. Python then counts the materialized first rows. Every error is
+/// a genuine failure, which Python reports and never retries (#152): a
+/// listed file the fast path cannot open or read is one, so a read failure
+/// never turns into a fallback.
 ///
 /// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
 /// predicate under the GIL and wraps this call in `gil::detached`. Both paths
@@ -127,21 +128,20 @@ pub fn group_ordered_count_impl(
     // parallel_streaming_group_count).
     if let Some(ref source) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            // The direct reader opens one file. A directory, a glob or a URL
-            // is counted by Python through DataFusion, as it always was;
-            // sending such sources to the general path below is #287. Any
-            // other failure to look the path up, a local file the reader read
-            // that names nothing now included, glob characters in its name or
-            // not, is an error, not a fallback (R3-F1, R4-F1 and R5-F1 of
-            // #422's review).
-            if !names_one_file(source, |p| std::fs::metadata(p))? {
+            // The direct reader opens the one local file the reader listed,
+            // by the absolute path it listed, not the path as written, which
+            // can name another file or none from another working directory.
+            // A directory, a glob or a URL of another store lists none, and
+            // Python counts it through DataFusion, as it always did; sending
+            // such sources to the general path below is #287. A failure to
+            // open or read the listed file is an error, not a fallback
+            // (R3-F1 to R6-F2 of #422's review).
+            let Some(file) = source.file.as_deref() else {
                 return Ok(None);
-            }
-            if let Some(count) = crate::ops::parallel_scan::parallel_streaming_group_count(
-                table,
-                py_expr,
-                &source.path,
-            )? {
+            };
+            if let Some(count) =
+                crate::ops::parallel_scan::parallel_streaming_group_count(table, py_expr, file)?
+            {
                 return Ok(Some(count));
             }
         }
@@ -165,41 +165,6 @@ pub fn group_ordered_count_impl(
         .block_on(filtered.count())
         .map(Some)
         .map_err(LtseqError::collect)
-}
-
-/// Whether `source` names a regular file now, following a link, its path
-/// looked up with `metadata` (`std::fs::metadata`, or a stand-in in tests).
-///
-/// `Ok(false)` for a source the direct reader does not open: one the reader
-/// matched as a glob, which it looks nothing up for, a directory, or a URL.
-/// A lookup that fails otherwise is an `LtseqError::Io` naming the path, so
-/// it is raised rather than retried: a permission or I/O error, and finding
-/// nothing at a local path the reader read as itself, which named one file
-/// or directory when it was read (R4-F1 of #422's review). That holds for a
-/// file whose name holds `*`, `?` or `[` too: the reader read it as that
-/// file, not as a glob, and it is the reader's resolution, not the path's
-/// text, that tells them apart (R5-F1). The materialized retry reads the
-/// files DataFusion listed at the call, so it could count a file the path no
-/// longer names, such as a relative path looked up from another working
-/// directory.
-fn names_one_file(
-    source: &crate::source::ParquetSource,
-    metadata: impl FnOnce(&str) -> std::io::Result<std::fs::Metadata>,
-) -> Result<bool, LtseqError> {
-    if source.glob {
-        return Ok(false);
-    }
-    let path = source.path.as_str();
-    match metadata(path) {
-        Ok(meta) => Ok(meta.is_file()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !crate::source::is_local(path) => {
-            Ok(false)
-        }
-        Err(e) => Err(LtseqError::io(
-            &format!("Failed to look up Parquet source '{path}'"),
-            e,
-        )),
-    }
 }
 
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.
@@ -684,58 +649,6 @@ mod tests {
     use crate::engine::create_session_context;
     use datafusion::arrow::array::{Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{DataType, Field};
-
-    fn read(path: &str) -> crate::source::ParquetSource {
-        crate::source::ParquetSource {
-            path: path.into(),
-            glob: false,
-        }
-    }
-
-    /// A directory, a glob and a URL are fallbacks; a lookup that fails
-    /// otherwise, finding nothing at a local path the reader read as itself
-    /// included, glob characters in its name or not, is an `Io` error naming
-    /// the path, never a fallback (R3-F1, R4-F1 and R5-F1 of #422's review).
-    #[test]
-    fn names_one_file_falls_back_only_for_what_the_reader_does_not_open() {
-        let dir = std::env::temp_dir();
-        let dir = dir.to_str().unwrap();
-        assert!(!names_one_file(&read(dir), |p| std::fs::metadata(p)).unwrap());
-        let exe = std::env::current_exe().unwrap();
-        let exe = exe.to_str().unwrap();
-        assert!(names_one_file(&read(exe), |p| std::fs::metadata(p)).unwrap());
-        let url = read("s3://bucket/events.parquet");
-        assert!(!names_one_file(&url, |p| std::fs::metadata(p)).unwrap());
-
-        // A glob is never looked up: not when it matches nothing now, nor
-        // when its text names an existing file.
-        for pattern in [format!("{dir}/ltseq-no-such-file-*.parquet"), exe.into()] {
-            let glob = crate::source::ParquetSource {
-                path: pattern,
-                glob: true,
-            };
-            assert!(!names_one_file(&glob, |_| panic!("looked up a glob")).unwrap());
-        }
-
-        for missing in [
-            format!("{dir}/ltseq-no-such-file.parquet"),
-            format!("{dir}/ltseq-no-such-file-[1].parquet"),
-            "events.parquet".into(),
-            "e*?[1].parquet".into(),
-        ] {
-            let err = names_one_file(&read(&missing), |p| std::fs::metadata(p)).unwrap_err();
-            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
-            assert!(err.to_string().contains(&format!("'{missing}'")), "{err}");
-        }
-
-        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
-            let failed = |_: &str| Err(std::io::Error::from(kind));
-            let err = names_one_file(&read("events.parquet"), failed).unwrap_err();
-            assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
-            assert!(err.to_string().contains("'events.parquet'"), "{err}");
-            assert!(std::error::Error::source(&err).is_some());
-        }
-    }
 
     /// A table with the columns of a `flatten()` product, its rows in reverse
     /// group order: groups 3, 2 and 1, each in row order. `v` is ten times

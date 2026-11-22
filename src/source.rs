@@ -49,15 +49,17 @@ use url::{ParseError, Url};
 use crate::python_glob;
 use crate::stored_zones;
 
-/// The source a Parquet reader read: the path as given, and whether the
-/// reader matched it as a glob ([`locate`]) rather than reading it as the
-/// file, directory or URL it names. A local path that names an existing
-/// file is that file even when its name holds `*`, `?` or `[`, so the path's
-/// text alone cannot tell the two apart (R5-F1 of #422's review).
+/// The source a Parquet reader read, as the direct Parquet scans of the
+/// count fast paths may open it: the one local file the reader listed, by
+/// its absolute path as listed at the call ([`read_files`]), or `None` when
+/// the reader listed anything else, a directory, a glob or a URL of another
+/// store, which those scans do not read (R6-F1 and R6-F2 of #422's review).
+/// The scans open that path, so they read the file the table lists even
+/// after the working directory changes, and never a file that a glob or a
+/// relative spelling of the path names only later.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParquetSource {
-    pub(crate) path: String,
-    pub(crate) glob: bool,
+    pub(crate) file: Option<String>,
 }
 
 /// Why a reader built no table.
@@ -88,12 +90,14 @@ impl From<DataFusionError> for ReadError {
 /// inferred from these files as DataFusion infers it from its listing, with
 /// the zones it leaves out of a Parquet file's schema ([`stored_zones`]);
 /// `options` carry none, as LTSeq's readers give none. With the table comes
-/// whether `path` was read as a glob ([`locate`]).
+/// the absolute path of the one local file it lists when `path` named one
+/// file, as itself or by a `file` URL, and not a directory or a glob
+/// ([`ParquetSource`]).
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
     path: &str,
     options: impl ReadOptions<'a>,
-) -> Result<(DataFrame, bool), ReadError> {
+) -> Result<(DataFrame, Option<String>), ReadError> {
     let options =
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
@@ -131,6 +135,10 @@ pub(crate) async fn read_files<'a>(
         .iter()
         .map(|file| file_url(&urls[0], &file.location))
         .collect::<Result<Vec<_>>>()?;
+    let file = match paths.as_slice() {
+        [only] if !glob && !urls[0].is_collection() => local_file(only),
+        _ => None,
+    };
     let config = ListingTableConfig::new_with_multi_paths(paths)
         .with_listing_options(options)
         .with_schema(schema);
@@ -138,7 +146,16 @@ pub(crate) async fn read_files<'a>(
     // footer it reads afresh ([`LocalFiles`]), where a cached copy would
     // outlive that footer.
     let table = ListingTable::try_new(config)?;
-    Ok((session.read_table(Arc::new(table))?, glob))
+    Ok((session.read_table(Arc::new(table))?, file))
+}
+
+/// The absolute local path the listed file `url` names, or `None` for a
+/// file of another store or a path that is not UTF-8.
+fn local_file(url: &ListingTableUrl) -> Option<String> {
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.get_url().to_file_path().ok()?.into_os_string().into_string().ok()
 }
 
 /// The URLs of what `path` names now (contract §4.1), each a file or a
@@ -184,7 +201,7 @@ fn locate(path: &str, extension: &str) -> Result<(Vec<ListingTableUrl>, bool), R
 
 /// Whether `ListingTableUrl::parse` reads `path` as a local path, not a
 /// URL: it is absolute, or has no scheme.
-pub(crate) fn is_local(path: &str) -> bool {
+fn is_local(path: &str) -> bool {
     std::path::Path::new(path).is_absolute()
         || matches!(Url::parse(path), Err(ParseError::RelativeUrlWithoutBase))
 }

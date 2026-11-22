@@ -920,13 +920,16 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LT
         name_to_idx.insert(field.name().clone(), i);
     }
 
-    let boundaries = boundary_flags(predicate, &concat_batch, &name_to_idx)
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Vectorized boundary evaluation failed: {}",
-                e
-            ))
-        })?;
+    // A failure evaluating the boundary, such as a division by zero, is an
+    // execution failure, which the materialized first rows raise for the same
+    // rows as the `ValueError` of `LtseqError::collect`; it raised
+    // `RuntimeError` here (R6-F3 of #422's review).
+    let boundaries = boundary_flags(predicate, &concat_batch, &name_to_idx).map_err(|e| {
+        LtseqError::with_context(
+            "Failed to evaluate the group boundary",
+            datafusion::common::DataFusionError::Execution(e),
+        )
+    })?;
 
     build_group_metadata_from_boundaries(&boundaries, table)
 }
@@ -1334,8 +1337,7 @@ mod tests {
             schema,
             declared_specs(),
             Some(crate::source::ParquetSource {
-                path: path_str,
-                glob: false,
+                file: Some(path_str),
             }),
         );
 

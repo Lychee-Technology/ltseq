@@ -65,7 +65,7 @@ fn read_source<'a>(
     path: &str,
     options: impl ReadOptions<'a> + Send,
     failed: impl FnOnce(DataFusionError) -> LtseqError,
-) -> PyResult<(DataFrame, bool)> {
+) -> PyResult<(DataFrame, Option<String>)> {
     let read = detached(py, || {
         Ok(RUNTIME.block_on(source::read_files(session, path, options)))
     })?;
@@ -86,7 +86,7 @@ pub struct LTSeqTable {
     dataframe: Option<Arc<DataFrame>>,
     schema: Option<Arc<ArrowSchema>>,
     sort_specs: Vec<SortSpec>, // Declared row order (column + direction), drives window ORDER BY
-    // Parquet source for assume_sorted optimization, and how it was read
+    // Parquet source for assume_sorted optimization: the one file it lists, if any
     source_parquet_path: Option<source::ParquetSource>,
     // The plan's root already delivers rows in the declared order, sorted by
     // keys DataFusion cannot tell give the same order: the group operations
@@ -367,7 +367,7 @@ impl LTSeqTable {
     ///     path: Path to Parquet file
     #[pyo3(signature = (path))]
     fn read_parquet(&mut self, py: Python<'_>, path: String) -> PyResult<()> {
-        let (df, glob) = read_source(
+        let (df, file) = read_source(
             py,
             &self.session,
             &path,
@@ -377,7 +377,7 @@ impl LTSeqTable {
 
         self.schema = Some(LTSeqTable::schema_from_df(df.schema()));
         self.dataframe = Some(Arc::new(df));
-        self.source_parquet_path = Some(source::ParquetSource { path, glob });
+        self.source_parquet_path = Some(source::ParquetSource { file });
         Ok(())
     }
 

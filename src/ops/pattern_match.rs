@@ -991,15 +991,17 @@ pub fn search_pattern_count_impl(
 
     // Try parallel fast path BEFORE creating DataFusion session.
     // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
-    if let (Some(ref source), Some(ref part_col)) = (&table.source_parquet_path, &partition_by) {
+    // The direct reader opens the one local file the reader listed, by the
+    // absolute path it listed; a directory, a glob or a URL of another store
+    // lists none and is counted by the general path below (R6-F1 and R6-F2
+    // of #422's review).
+    let file = table.source_parquet_path.as_ref().and_then(|s| s.file.as_deref());
+    if let (Some(file), Some(part_col)) = (file, &partition_by) {
         if !table.sort_specs.is_empty() {
             // No count means the input is outside the fast path: fall
             // through to the general path. An error is the caller's.
             if let Some(count) = crate::ops::parallel_scan::parallel_pattern_match_count(
-                table,
-                py_exprs,
-                part_col,
-                &source.path,
+                table, py_exprs, part_col, file,
             )? {
                 return Ok(count);
             }

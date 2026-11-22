@@ -296,28 +296,25 @@ def test_group_count_falls_back_for_a_predicate_the_kernel_declines():
     not hasattr(os, "geteuid") or os.geteuid() == 0,
     reason="needs a POSIX user that directory permissions apply to",
 )
-def test_group_count_reports_a_failed_source_lookup_the_retry_would_hide(tmp_path, monkeypatch):
-    """The count's fast path took any failure to look its Parquet source up
-    for a source it does not open, so the materialized retry, which reads
-    the file DataFusion listed at the call, counted it and the failure was
-    discarded (R3-F1 of #422's review). A relative path looked up from
-    another directory, where its first segment cannot be searched, fails
-    the lookup while the listed file is still readable."""
+def test_counts_read_the_listed_file_where_its_relative_path_cannot_be_looked_up(tmp_path, monkeypatch):
+    """The direct scans open the file the reader listed, by the absolute path
+    it listed at the call, not the relative path as written, so a working
+    directory in which that path cannot be searched does not change the
+    count (R3-F1 and R6-F2 of #422's review)."""
     data = tmp_path / "data"
     (data / "sub").mkdir(parents=True)
     pq.write_table(_events(pa.int64()), str(data / "sub" / "events.parquet"))
     monkeypatch.chdir(data)
     fast = LTSeq.read_parquet("sub/events.parquet").assume_sorted("i")
+    patterns = fast.search_pattern_count(*STEPS, partition_by="k")
 
     elsewhere = tmp_path / "elsewhere"
     (elsewhere / "sub").mkdir(parents=True)
     monkeypatch.chdir(elsewhere)
     (elsewhere / "sub").chmod(0)
     try:
-        assert len(_sessions(fast).to_arrow()) == 3, "the materialized retry succeeds"
-        with pytest.raises(ValueError, match="Failed to look up Parquet source 'sub/events.parquet'") as raised:
-            _sessions(fast).count()
-        assert not isinstance(raised.value, RuntimeError)
+        assert _sessions(fast).count() == len(_sessions(fast).to_arrow()) == 3
+        assert fast.search_pattern_count(*STEPS, partition_by="k") == patterns
     finally:
         (elsewhere / "sub").chmod(0o755)
 
@@ -352,25 +349,81 @@ def test_group_count_execution_failure_raises_the_class_of_the_materialized_coun
     assert not isinstance(raised.value, RuntimeError)
 
 
-@pytest.mark.parametrize("name", ["e.parquet", "e[1].parquet", "e*?.parquet"])
-def test_group_count_reports_a_single_file_source_that_names_nothing_now(tmp_path, monkeypatch, name):
-    """A local file that names nothing when the count's fast path looks it
-    up was taken for a source the direct reader does not open, so the
-    materialized retry, which reads the file DataFusion listed at the call,
-    counted it and the failed lookup was discarded (R4-F1 of #422's
-    review). A relative path looked up from a directory without the file
-    names nothing while the listed file is still readable. A file whose name
-    holds `*`, `?` or `[` is read as that file, not as a glob, so its lookup
-    fails the same way (R5-F1)."""
+def test_group_count_boundary_evaluation_failure_raises_the_class_of_the_materialized_count():
+    """A failure evaluating the boundary predicate in the count kernel raised
+    RuntimeError, where the materialized first rows raise ValueError for the
+    same division by zero (R6-F3 of #422's review)."""
+    t = LTSeq.from_arrow(
+        pa.table(
+            {
+                "i": pa.array(range(4), pa.int64()),
+                "k": pa.array([1, 1, 2, 2], pa.int64()),
+                "n": pa.array([1, 2, 3, 4], pa.int64()),
+                "d": pa.array([1, 0, 1, 1], pa.int64()),
+            }
+        )
+    ).sort("i")
+    sessions = t.group_ordered(lambda r: (r.k != r.k.shift(1)) & ((r.n / r.d) > 0.0)).first()
+    with pytest.raises(ValueError, match="Divide by zero"):
+        len(sessions.to_arrow())
+    with pytest.raises(ValueError, match="Divide by zero") as raised:
+        sessions.count()
+    assert not isinstance(raised.value, RuntimeError)
+
+
+def _other_events():
+    """Rows of the same schema as ``_events`` with one session and no pattern."""
+    return pa.table(
+        {
+            "i": pa.array(range(3), pa.int64()),
+            "k": pa.array([1, 1, 1], pa.int64()),
+            "e": pa.array([0, 0, 0], pa.int64()),
+        }
+    )
+
+
+@pytest.mark.parametrize("other", [False, True], ids=["nothing", "another-file"])
+@pytest.mark.parametrize(
+    "name", ["e.parquet", "e[1].parquet", "e*?.parquet", "source:events.parquet"]
+)
+def test_counts_read_the_listed_file_from_another_working_directory(tmp_path, monkeypatch, name, other):
+    """A relative path names nothing, or another file, from another working
+    directory. The direct scans opened the path as written there, so they
+    raised for nothing and counted the other file, where every other read
+    of the table reads the file listed at the call (R4-F1, R5-F1 and R6-F2
+    of #422's review). A name with `*`, `?` or `[` is read as that file, not
+    as a glob, and one that reads like a URL, `source:events.parquet`, as
+    the local file it names: its lookup was taken for a URL that names
+    nothing and the count fell back."""
     pq.write_table(_events(pa.int64()), str(tmp_path / name))
     monkeypatch.chdir(tmp_path)
     t = LTSeq.read_parquet(name).assume_sorted("i")
+    patterns = LTSeq.read_parquet(name).sort("i").search_pattern_count(*STEPS, partition_by="k")
+    assert patterns == 3
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
+    if other:
+        pq.write_table(_other_events(), str(elsewhere / name))
     monkeypatch.chdir(elsewhere)
-    assert len(_sessions(t).to_arrow()) == 3, "the materialized retry succeeds"
-    with pytest.raises(ValueError, match=re.escape(f"Failed to look up Parquet source '{name}'")) as raised:
+
+    assert _sessions(t).count() == len(_sessions(t).to_arrow()) == 3
+    assert t.search_pattern_count(*STEPS, partition_by="k") == patterns
+
+
+def test_counts_raise_naming_the_listed_file_when_it_is_gone(tmp_path, monkeypatch):
+    """A listed file that cannot be opened is a failure of both direct scans,
+    raised naming the file, not a fallback to the general path."""
+    pq.write_table(_events(pa.int64()), str(tmp_path / "events.parquet"))
+    monkeypatch.chdir(tmp_path)
+    t = LTSeq.read_parquet("events.parquet").assume_sorted("i")
+    os.remove(tmp_path / "events.parquet")
+    listed = re.escape(str(tmp_path / "events.parquet"))
+
+    with pytest.raises(ValueError, match=f"Failed to open Parquet '{listed}'") as raised:
         _sessions(t).count()
+    assert not isinstance(raised.value, RuntimeError)
+    with pytest.raises(ValueError, match=f"Failed to open Parquet '{listed}'") as raised:
+        t.search_pattern_count(*STEPS, partition_by="k")
     assert not isinstance(raised.value, RuntimeError)
 
 
@@ -385,6 +438,42 @@ def test_group_count_falls_back_for_a_relative_parquet_glob_that_names_nothing_n
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     assert _sessions(t).count() == len(_sessions(t).to_arrow()) == 3
+
+
+def _sources(tmp_path):
+    pq.write_table(_events(pa.int64()), str(tmp_path / "part-0.parquet"))
+    return {
+        "glob": str(tmp_path / "part-?.parquet"),
+        "directory": str(tmp_path),
+        "file-url": (tmp_path / "part-0.parquet").as_uri(),
+    }
+
+
+@pytest.mark.parametrize("kind", ["glob", "directory", "file-url"])
+def test_pattern_count_counts_the_files_a_source_lists(tmp_path, kind):
+    """The pattern count's direct scan opened the path as written whatever
+    the reader had made of it, so a glob or a directory raised a failed read
+    and a file URL did too, where the general path counted the files listed
+    at the call (R6-F1 of #422's review)."""
+    path = _sources(tmp_path)[kind]
+    fast = LTSeq.read_parquet(path).assume_sorted("i")
+    general = LTSeq.read_parquet(path).sort("i")
+    expected = general.search_pattern_count(*STEPS, partition_by="k")
+    assert expected == 3
+    assert fast.search_pattern_count(*STEPS, partition_by="k") == expected
+    assert _sessions(fast).count() == len(_sessions(fast).to_arrow()) == 3
+
+
+def test_pattern_count_of_a_glob_ignores_a_file_named_like_it(tmp_path):
+    """A file created after the read at the glob's own name is not one the
+    glob listed. The direct scan opened it and counted its rows (R6-F1 of
+    #422's review)."""
+    pq.write_table(_events(pa.int64()), str(tmp_path / "part-0.parquet"))
+    glob = str(tmp_path / "part-?.parquet")
+    t = LTSeq.read_parquet(glob).assume_sorted("i")
+    pq.write_table(_other_events(), glob)
+    assert t.search_pattern_count(*STEPS, partition_by="k") == 3
+    assert _sessions(t).count() == 3
 
 
 def test_group_count_falls_back_for_a_parquet_glob(tmp_path):

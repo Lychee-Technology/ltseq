@@ -218,11 +218,13 @@ fn process_chunk_session_count(
 /// 4. total = Σ(chunk internal counts) + seam boundaries.
 ///
 /// Returns `Ok(None)` when the predicate is unsupported; the caller counts
-/// through the general linear-scan path instead. A source this reader
-/// cannot read, such as a directory, is an error instead, so Python
-/// counts it through the DataFusion path. The general path could read it,
-/// and agrees with the reference since #189 and #244; sending such sources
-/// to it is #287.
+/// through the general linear-scan path instead. `parquet_path` is the one
+/// local file the table lists (`source::ParquetSource`); a failure to open
+/// or read it is an error. A directory, a glob or a URL of another store
+/// never reaches this reader: `group_ordered_count_impl` declines it, and
+/// Python counts it through the DataFusion path. The general path could
+/// read it, and agrees with the reference since #189 and #244; sending such
+/// sources to it is #287.
 pub fn parallel_streaming_group_count(
     table: &LTSeqTable,
     predicate: &PyExpr,
@@ -1137,9 +1139,9 @@ mod tests {
             df,
             schema,
             vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
+            // The one file the reader lists, as `read_files` records it.
             Some(crate::source::ParquetSource {
-                path: path.to_string(),
-                glob: false,
+                file: std::path::Path::new(path).is_file().then(|| path.to_string()),
             }),
         )
     }
