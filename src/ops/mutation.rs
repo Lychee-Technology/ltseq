@@ -187,8 +187,7 @@ fn conditional_update_parsed(
     predicate: crate::types::PyExpr,
     update_map: std::collections::HashMap<String, ScalarValue>,
 ) -> Result<LTSeqTable, LtseqError> {
-    let predicate_expr = crate::transpiler::pyexpr_to_datafusion(predicate, schema)
-        .map_err(LtseqError::Validation)?;
+    let predicate_expr = crate::transpiler::pyexpr_to_datafusion(predicate, schema)?;
 
     // Plan building only; nothing executes here.
     let result_df = {

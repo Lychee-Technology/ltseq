@@ -232,7 +232,8 @@ fn eval_lowered_binop(
         right: operand(right)?,
     };
     let schema = Arc::new(Schema::new(fields));
-    let expr = crate::transpiler::pyexpr_to_datafusion(lowered, &schema)?;
+    let expr =
+        crate::transpiler::pyexpr_to_datafusion(lowered, &schema).map_err(|e| e.to_string())?;
     let df_schema = DFSchema::try_from(Arc::clone(&schema)).map_err(|e| e.to_string())?;
     let physical = create_physical_expr(
         &expr,
@@ -497,7 +498,8 @@ fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
     match expr {
         PyExpr::Literal(value) => value
             .require_str("search_pattern string argument")
-            .map(str::to_string),
+            .map(str::to_string)
+            .map_err(|e| e.to_string()),
         _ => Err("Expected literal string argument".to_string()),
     }
 }
@@ -993,22 +995,15 @@ pub fn search_pattern_count_impl(
         (&table.source_parquet_path, &partition_by)
     {
         if !table.sort_specs.is_empty() {
-            match crate::ops::parallel_scan::parallel_pattern_match_count(
+            // No count means the input is outside the fast path: fall
+            // through to the general path. An error is the caller's.
+            if let Some(count) = crate::ops::parallel_scan::parallel_pattern_match_count(
                 table,
                 py_exprs,
                 part_col,
                 parquet_path,
-            ) {
-                Ok(count) => {
-                    return Ok(count);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to general path
-                }
+            )? {
+                return Ok(count);
             }
         }
     }

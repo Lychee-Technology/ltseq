@@ -36,12 +36,13 @@ pub(crate) mod true_div;
 pub(crate) mod window_native;
 
 pub(crate) use float_lists::FloatListZeros;
-pub(crate) use opaque_cast::{cast as lower_cast, OpaqueCast};
 pub(crate) use literals::{column_value, encoded_float};
-pub(crate) use resolve::{binary_input_types, Resolver};
+pub(crate) use opaque_cast::{cast as lower_cast, OpaqueCast};
 pub(crate) use resolve::planned_type;
+pub(crate) use resolve::{binary_input_types, Resolver};
 pub use window_native::pyexpr_to_window_expr;
 
+use crate::error::{transpile_error, LtseqError};
 use crate::types::{arg, Arg, PyExpr};
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
@@ -54,9 +55,7 @@ use datafusion::functions::string::expr_fn::{
     split_part, starts_with, upper,
 };
 // Unicode functions (for length, substr, padding, left/right)
-use datafusion::functions::unicode::expr_fn::{
-    character_length, left, right, strpos, substring,
-};
+use datafusion::functions::unicode::expr_fn::{character_length, left, right, strpos, substring};
 // Datetime functions
 use datafusion::functions::datetime::expr_fn::{current_date, date_part, now};
 // Regex functions
@@ -65,9 +64,9 @@ use datafusion::functions::regex::expr_fn::regexp_like;
 use datafusion::functions::math::expr_fn::{factorial, gcd, lcm};
 
 /// Parse a column reference into a DataFusion expression
-fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, String> {
+fn parse_column_expr(name: &str, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
     if !schema.fields().iter().any(|f| f.name() == name) {
-        return Err(format!("Column '{}' not found in schema", name));
+        return Err(LtseqError::ColumnNotFound(name.to_string()));
     }
     // Use Column::new_unqualified to preserve case-sensitive column names
     // (col() function lowercases column names, which breaks uppercase column names like 'IsOfficial')
@@ -116,9 +115,9 @@ pub(crate) fn binary_expr(
     left: Expr,
     right: Expr,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     use literal_policy::Position;
-    let op = parse_binary_op(op)?;
+    let op = parse_binary_op(op).map_err(LtseqError::Transpile)?;
     let position = match op {
         BinaryOp::FloorDiv
         | BinaryOp::Native(
@@ -140,9 +139,11 @@ pub(crate) fn binary_expr(
     };
     let (left, right) = match (position, op) {
         (Some(Position::Comparison), BinaryOp::Native(operator)) => {
-            return literals::comparison(operator, left, right, rx)
+            return literals::comparison(operator, left, right, rx).map_err(LtseqError::Transpile)
         }
-        (Some(_), _) => literals::arithmetic_operands(left, right, rx)?,
+        (Some(_), _) => {
+            literals::arithmetic_operands(left, right, rx).map_err(LtseqError::Transpile)?
+        }
         (None, _) => (left, right),
     };
     Ok(match op {
@@ -174,18 +175,18 @@ fn parse_binop_expr(
     left: PyExpr,
     right: PyExpr,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     let left_expr = pyexpr_to_datafusion_inner(left, rx)?;
     let right_expr = pyexpr_to_datafusion_inner(right, rx)?;
     binary_expr(op, left_expr, right_expr, rx)
 }
 
 /// Parse a unary operation into a DataFusion expression
-fn parse_unaryop_expr(op: &str, operand: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+fn parse_unaryop_expr(op: &str, operand: PyExpr, rx: &Resolver<'_>) -> Result<Expr, LtseqError> {
     let operand_expr = pyexpr_to_datafusion_inner(operand, rx)?;
     match op {
         "Not" => Ok(operand_expr.not()),
-        _ => Err(format!("Unknown unary operator: {}", op)),
+        _ => Err(transpile_error!("Unknown unary operator: {}", op)),
     }
 }
 
@@ -195,6 +196,12 @@ pub(crate) fn require_on<T>(on: Option<T>, func: &str) -> Result<T, String> {
     on.ok_or_else(|| format!("{func} must be called as a method on an expression"))
 }
 
+/// [`require_on`] as a transpilation error, for the lowering functions.
+/// The evaluators of `search_pattern` and the linear scan keep the message.
+pub(crate) fn receiver<T>(on: Option<T>, func: &str) -> Result<T, LtseqError> {
+    require_on(on, func).map_err(LtseqError::Transpile)
+}
+
 /// Resolve the input of a function usable both ways: the receiver for a
 /// method call, or `args[0]` for a standalone call.
 fn resolve_on_or_args(
@@ -202,13 +209,13 @@ fn resolve_on_or_args(
     args: &[PyExpr],
     rx: &Resolver<'_>,
     func_name: &str,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match on {
         Some(on) => pyexpr_to_datafusion_inner(on.clone(), rx),
         None => {
             let input = args
                 .first()
-                .ok_or_else(|| format!("{} requires an argument", func_name))?;
+                .ok_or_else(|| transpile_error!("{} requires an argument", func_name))?;
             pyexpr_to_datafusion_inner(input.clone(), rx)
         }
     }
@@ -221,20 +228,20 @@ fn parse_call_conditional(
     func: &str,
     args: &[PyExpr],
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "if_else" => {
             if args.len() != 3 {
-                return Err(
+                return Err(LtseqError::Transpile(
                     "if_else requires 3 arguments: condition, true_value, false_value".to_string(),
-                );
+                ));
             }
             let cond_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let true_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
             let false_expr = pyexpr_to_datafusion_inner(args[2].clone(), rx)?;
-            literals::if_else(cond_expr, true_expr, false_expr, rx)
+            literals::if_else(cond_expr, true_expr, false_expr, rx).map_err(LtseqError::Transpile)
         }
-        _ => Err(format!("Not a conditional function: {}", func)),
+        _ => Err(transpile_error!("Not a conditional function: {}", func)),
     }
 }
 
@@ -244,22 +251,25 @@ fn parse_call_null_ops(
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "fill_null" => {
             if args.is_empty() {
-                return Err("fill_null requires a default value argument".to_string());
+                return Err(transpile_error!(
+                    "fill_null requires a default value argument"
+                ));
             }
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            let on_expr = pyexpr_to_datafusion_inner(receiver(on, func)?, rx)?;
             let default_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             literals::coalesce_values(vec![on_expr, default_expr], rx)
+                .map_err(LtseqError::Transpile)
         }
         "is_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            let on_expr = pyexpr_to_datafusion_inner(receiver(on, func)?, rx)?;
             Ok(on_expr.is_null())
         }
         "is_not_null" => {
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            let on_expr = pyexpr_to_datafusion_inner(receiver(on, func)?, rx)?;
             Ok(on_expr.is_not_null())
         }
         // `p IS NOT TRUE`: TRUE where p is FALSE or NULL. delete() filters on
@@ -267,20 +277,20 @@ fn parse_call_null_ops(
         // volatile (rand()). DataFusion coerces a dictionary-encoded Boolean
         // and refuses a non-Boolean operand.
         "is_not_true" => {
-            let on_expr = pyexpr_to_datafusion_inner(require_on(on, func)?, rx)?;
+            let on_expr = pyexpr_to_datafusion_inner(receiver(on, func)?, rx)?;
             Ok(on_expr.is_not_true())
         }
         "coalesce" => {
             if args.is_empty() {
-                return Err("coalesce requires at least one argument".to_string());
+                return Err(transpile_error!("coalesce requires at least one argument"));
             }
             let coalesce_args: Vec<Expr> = args
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
-            literals::coalesce_values(coalesce_args, rx)
+            literals::coalesce_values(coalesce_args, rx).map_err(LtseqError::Transpile)
         }
-        _ => Err(format!("Not a null operation: {}", func)),
+        _ => Err(transpile_error!("Not a null operation: {}", func)),
     }
 }
 
@@ -289,8 +299,8 @@ fn parse_call_null_ops(
 /// their own lowering).
 pub(crate) fn round_decimals(
     decimals: Arg<'_>,
-    lower: impl FnOnce(&PyExpr) -> Result<Expr, String>,
-) -> Result<Expr, String> {
+    lower: impl FnOnce(&PyExpr) -> Result<Expr, LtseqError>,
+) -> Result<Expr, LtseqError> {
     match decimals {
         Arg::Absent => Ok(lit(0i64)),
         Arg::Literal(value) => Ok(lit(value.require_i64("round() decimals")?)),
@@ -304,7 +314,7 @@ fn parse_call_math(
     on: Option<&PyExpr>,
     args: &[PyExpr],
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "abs" => {
             use datafusion::functions::math::expr_fn::abs;
@@ -342,12 +352,14 @@ fn parse_call_math(
             let base = resolve_on_or_args(on, args, rx, "power")?;
             let exp_expr = if on.is_none() {
                 if args.len() < 2 {
-                    return Err("power() requires two arguments: base and exponent".to_string());
+                    return Err(transpile_error!(
+                        "power() requires two arguments: base and exponent"
+                    ));
                 }
                 pyexpr_to_datafusion_inner(args[1].clone(), rx)?
             } else {
                 if args.is_empty() {
-                    return Err("power() requires an exponent argument".to_string());
+                    return Err(transpile_error!("power() requires an exponent argument"));
                 }
                 pyexpr_to_datafusion_inner(args[0].clone(), rx)?
             };
@@ -433,13 +445,13 @@ fn parse_call_math(
             if let Some(on) = on {
                 let y_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
                 if args.is_empty() {
-                    return Err("atan2() requires x argument".to_string());
+                    return Err(transpile_error!("atan2() requires x argument"));
                 }
                 let x_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(atan2(y_expr, x_expr))
             } else {
                 if args.len() < 2 {
-                    return Err("atan2() requires two arguments: y and x".to_string());
+                    return Err(transpile_error!("atan2() requires two arguments: y and x"));
                 }
                 let y_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 let x_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
@@ -454,14 +466,14 @@ fn parse_call_math(
             // gcd(a, b) — both args required
             if let Some(on) = on {
                 if args.is_empty() {
-                    return Err("gcd() requires a second argument".to_string());
+                    return Err(transpile_error!("gcd() requires a second argument"));
                 }
                 let a_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(gcd(a_expr, b_expr))
             } else {
                 if args.len() < 2 {
-                    return Err("gcd() requires two arguments".to_string());
+                    return Err(transpile_error!("gcd() requires two arguments"));
                 }
                 let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
@@ -471,14 +483,14 @@ fn parse_call_math(
         "math_lcm" => {
             if let Some(on) = on {
                 if args.is_empty() {
-                    return Err("lcm() requires a second argument".to_string());
+                    return Err(transpile_error!("lcm() requires a second argument"));
                 }
                 let a_expr = pyexpr_to_datafusion_inner(on.clone(), rx)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 Ok(lcm(a_expr, b_expr))
             } else {
                 if args.len() < 2 {
-                    return Err("lcm() requires two arguments".to_string());
+                    return Err(transpile_error!("lcm() requires two arguments"));
                 }
                 let a_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
                 let b_expr = pyexpr_to_datafusion_inner(args[1].clone(), rx)?;
@@ -489,18 +501,22 @@ fn parse_call_math(
             let input = resolve_on_or_args(on, args, rx, "factorial")?;
             Ok(factorial(input))
         }
-        _ => Err(format!("Not a math function: {}", func)),
+        _ => Err(transpile_error!("Not a math function: {}", func)),
     }
 }
 
 /// The Arrow type a `cast(target)` call names. Shared by the row
 /// transpiler and the window planner, which lowers a cast whose input is a
 /// window expression (#312).
-pub(crate) fn cast_target_type(args: &[PyExpr]) -> Result<DataType, String> {
+pub(crate) fn cast_target_type(args: &[PyExpr]) -> Result<DataType, LtseqError> {
     let target_type = match arg(args, 0) {
-        Arg::Absent => return Err("cast requires a target type argument".to_string()),
+        Arg::Absent => return Err(transpile_error!("cast requires a target type argument")),
         Arg::Literal(value) => value.require_str("cast() target type")?.to_string(),
-        Arg::Expr(_) => return Err("cast target type must be a string literal".to_string()),
+        Arg::Expr(_) => {
+            return Err(transpile_error!(
+                "cast target type must be a string literal"
+            ))
+        }
     };
     Ok(match target_type.to_lowercase().as_str() {
         "int32" | "i32" => DataType::Int32,
@@ -510,7 +526,12 @@ pub(crate) fn cast_target_type(args: &[PyExpr]) -> Result<DataType, String> {
         "utf8" | "string" | "str" => DataType::Utf8,
         "bool" | "boolean" => DataType::Boolean,
         "date32" | "date" => DataType::Date32,
-        _ => return Err(format!("Unsupported cast target type: {}", target_type)),
+        _ => {
+            return Err(transpile_error!(
+                "Unsupported cast target type: {}",
+                target_type
+            ))
+        }
     })
 }
 
@@ -520,7 +541,7 @@ fn parse_call_type_ops(
     on: PyExpr,
     args: Vec<PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "cast" => {
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
@@ -529,12 +550,12 @@ fn parse_call_type_ops(
         "is_in" => {
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             if args.is_empty() {
-                return Err("is_in requires at least one value".to_string());
+                return Err(transpile_error!("is_in requires at least one value"));
             }
             // Python refuses an expression item when the lambda is captured
             // (#294), so every item reaching here is a literal.
             if let Some(position) = args.iter().position(|a| !matches!(a, PyExpr::Literal(_))) {
-                return Err(format!(
+                return Err(transpile_error!(
                     "is_in takes literal values only, but item {position} is an expression"
                 ));
             }
@@ -542,9 +563,9 @@ fn parse_call_type_ops(
                 .into_iter()
                 .map(|a| pyexpr_to_datafusion_inner(a, rx))
                 .collect::<Result<Vec<_>, _>>()?;
-            literals::in_list(on_expr, list_exprs, rx)
+            literals::in_list(on_expr, list_exprs, rx).map_err(LtseqError::Transpile)
         }
-        _ => Err(format!("Not a type operation: {}", func)),
+        _ => Err(transpile_error!("Not a type operation: {}", func)),
     }
 }
 
@@ -555,16 +576,16 @@ fn parse_call_string_standalone(
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "str_char" => {
             // chr(n) → single-character string from code point; standalone: args[0] is the input
             let n_expr = match on {
                 Some(on) => pyexpr_to_datafusion_inner(on, rx)?,
                 None => {
-                    let input = args
-                        .first()
-                        .ok_or("str_char requires a code point argument")?;
+                    let input = args.first().ok_or_else(|| {
+                        transpile_error!("str_char requires a code point argument")
+                    })?;
                     pyexpr_to_datafusion_inner(input.clone(), rx)?
                 }
             };
@@ -573,9 +594,9 @@ fn parse_call_string_standalone(
         "str_concat_ws" => {
             // concat_ws(delimiter, s1, s2, ...) — first arg is always the delimiter literal
             if args.len() < 2 {
-                return Err(
+                return Err(LtseqError::Transpile(
                     "str_concat_ws requires a delimiter and at least one string".to_string(),
-                );
+                ));
             }
             let delim_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
             let str_exprs: Vec<Expr> = args
@@ -585,7 +606,10 @@ fn parse_call_string_standalone(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(concat_ws(delim_expr, str_exprs))
         }
-        _ => Err(format!("Not a standalone string function: {}", func)),
+        _ => Err(transpile_error!(
+            "Not a standalone string function: {}",
+            func
+        )),
     }
 }
 
@@ -595,12 +619,12 @@ fn parse_call_string(
     on: PyExpr,
     args: Vec<PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         "str_contains" => {
             validate_string_column(&on, rx.arrow(), "str_contains")?;
             if args.is_empty() {
-                return Err("str_contains requires a pattern argument".to_string());
+                return Err(transpile_error!("str_contains requires a pattern argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -609,7 +633,9 @@ fn parse_call_string(
         "str_starts_with" => {
             validate_string_column(&on, rx.arrow(), "str_starts_with")?;
             if args.is_empty() {
-                return Err("str_starts_with requires a prefix argument".to_string());
+                return Err(transpile_error!(
+                    "str_starts_with requires a prefix argument"
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let prefix_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -618,7 +644,7 @@ fn parse_call_string(
         "str_ends_with" => {
             validate_string_column(&on, rx.arrow(), "str_ends_with")?;
             if args.is_empty() {
-                return Err("str_ends_with requires a suffix argument".to_string());
+                return Err(transpile_error!("str_ends_with requires a suffix argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let suffix_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -647,7 +673,9 @@ fn parse_call_string(
         "str_slice" => {
             validate_string_column(&on, rx.arrow(), "str_slice")?;
             if args.len() < 2 {
-                return Err("str_slice requires start and length arguments".to_string());
+                return Err(transpile_error!(
+                    "str_slice requires start and length arguments"
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let start_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -657,7 +685,9 @@ fn parse_call_string(
         "str_regex_match" => {
             validate_string_column(&on, rx.arrow(), "str_regex_match")?;
             if args.is_empty() {
-                return Err("str_regex_match requires a pattern argument".to_string());
+                return Err(transpile_error!(
+                    "str_regex_match requires a pattern argument"
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -666,7 +696,9 @@ fn parse_call_string(
         "str_replace" => {
             validate_string_column(&on, rx.arrow(), "str_replace")?;
             if args.len() < 2 {
-                return Err("str_replace requires 'old' and 'new' arguments".to_string());
+                return Err(transpile_error!(
+                    "str_replace requires 'old' and 'new' arguments"
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let old_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -684,7 +716,7 @@ fn parse_call_string(
         "str_pad_left" => {
             validate_string_column(&on, rx.arrow(), "str_pad_left")?;
             if args.is_empty() {
-                return Err("str_pad_left requires a width argument".to_string());
+                return Err(transpile_error!("str_pad_left requires a width argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -698,7 +730,7 @@ fn parse_call_string(
         "str_pad_right" => {
             validate_string_column(&on, rx.arrow(), "str_pad_right")?;
             if args.is_empty() {
-                return Err("str_pad_right requires a width argument".to_string());
+                return Err(transpile_error!("str_pad_right requires a width argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let width_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -712,7 +744,9 @@ fn parse_call_string(
         "str_split" => {
             validate_string_column(&on, rx.arrow(), "str_split")?;
             if args.len() < 2 {
-                return Err("str_split requires delimiter and index arguments".to_string());
+                return Err(transpile_error!(
+                    "str_split requires delimiter and index arguments"
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let delimiter_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -722,7 +756,7 @@ fn parse_call_string(
         "str_like" => {
             validate_string_column(&on, rx.arrow(), "str_like")?;
             if args.is_empty() {
-                return Err("str_like requires a pattern argument".to_string());
+                return Err(transpile_error!("str_like requires a pattern argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let pattern_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -761,7 +795,7 @@ fn parse_call_string(
             // strpos(str, substr) → 1-based position, 0 if not found
             validate_string_column(&on, rx.arrow(), "str_pos")?;
             if args.is_empty() {
-                return Err("str_pos requires a substring argument".to_string());
+                return Err(transpile_error!("str_pos requires a substring argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let sub_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -770,7 +804,7 @@ fn parse_call_string(
         "str_left" => {
             validate_string_column(&on, rx.arrow(), "str_left")?;
             if args.is_empty() {
-                return Err("str_left requires a length argument".to_string());
+                return Err(transpile_error!("str_left requires a length argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -779,7 +813,7 @@ fn parse_call_string(
         "str_right" => {
             validate_string_column(&on, rx.arrow(), "str_right")?;
             if args.is_empty() {
-                return Err("str_right requires a length argument".to_string());
+                return Err(transpile_error!("str_right requires a length argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let n_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
@@ -801,7 +835,7 @@ fn parse_call_string(
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok(ascii(on_expr))
         }
-        _ => Err(format!("Not a string function: {}", func)),
+        _ => Err(transpile_error!("Not a string function: {}", func)),
     }
 }
 
@@ -811,14 +845,14 @@ fn parse_call_temporal(
     on: PyExpr,
     args: &[PyExpr],
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     /// Helper for simple date_part extractions
     fn date_part_extract(
         part: &str,
         func_name: &str,
         on: PyExpr,
         rx: &Resolver<'_>,
-    ) -> Result<Expr, String> {
+    ) -> Result<Expr, LtseqError> {
         validate_temporal_column(&on, rx.arrow(), func_name)?;
         let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
         Ok(date_part(lit(part), on_expr))
@@ -836,18 +870,20 @@ fn parse_call_temporal(
             // Args: (days, months, years[, hours, minutes, seconds, weeks])
             // Legacy form accepts 3 args; extended form accepts 7 args.
             if args.len() < 3 {
-                return Err(
+                return Err(LtseqError::Transpile(
                     "dt_add requires at least 3 arguments: days, months, years".to_string(),
-                );
+                ));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
 
             // An absent field is 0; a present one must be a literal integer.
-            let field = |i: usize, name: &str| -> Result<i64, String> {
+            let field = |i: usize, name: &str| -> Result<i64, LtseqError> {
                 match arg(args, i) {
                     Arg::Absent => Ok(0),
                     Arg::Literal(value) => value.require_i64(&format!("dt_add {name}")),
-                    Arg::Expr(_) => Err(format!("dt_add {name} must be a literal integer")),
+                    Arg::Expr(_) => {
+                        Err(transpile_error!("dt_add {name} must be a literal integer"))
+                    }
                 }
             };
 
@@ -866,10 +902,12 @@ fn parse_call_temporal(
             // out-of-range literal moved the date by some other amount.
             // Terms that cancel give the total they add up to.
             let wide = |v: i64| v as i128;
-            let total_months = i32::try_from(wide(years) * 12 + wide(months))
-                .map_err(|_| format!("dt_add years={years}, months={months} is out of range"))?;
-            let total_days = i32::try_from(wide(weeks) * 7 + wide(days))
-                .map_err(|_| format!("dt_add weeks={weeks}, days={days} is out of range"))?;
+            let total_months = i32::try_from(wide(years) * 12 + wide(months)).map_err(|_| {
+                transpile_error!("dt_add years={years}, months={months} is out of range")
+            })?;
+            let total_days = i32::try_from(wide(weeks) * 7 + wide(days)).map_err(|_| {
+                transpile_error!("dt_add weeks={weeks}, days={days} is out of range")
+            })?;
             let total_nanos = i64::try_from(
                 wide(hours) * 3_600_000_000_000
                     + wide(minutes) * 60_000_000_000
@@ -880,7 +918,8 @@ fn parse_call_temporal(
                     "dt_add hours={hours}, minutes={minutes}, seconds={seconds} \
                      is out of range"
                 )
-            })?;
+            })
+            .map_err(LtseqError::Transpile)?;
 
             let interval = ScalarValue::new_interval_mdn(total_months, total_days, total_nanos);
             Ok(on_expr + lit(interval))
@@ -890,16 +929,19 @@ fn parse_call_temporal(
             // unit: "day" (default), "month", "year", "hour", "minute", "second"
             validate_temporal_column(&on, rx.arrow(), "dt_diff")?;
             if args.is_empty() {
-                return Err("dt_diff requires another date argument".to_string());
+                return Err(transpile_error!("dt_diff requires another date argument"));
             }
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             let other_expr = pyexpr_to_datafusion_inner(args[0].clone(), rx)?;
-            let other_expr = literals::dt_diff_other(&on_expr, other_expr, rx)?;
+            let other_expr =
+                literals::dt_diff_other(&on_expr, other_expr, rx).map_err(LtseqError::Transpile)?;
 
             let unit = match arg(args, 1) {
                 Arg::Absent => "day".to_string(),
                 Arg::Literal(value) => value.require_str("dt_diff unit")?.to_lowercase(),
-                Arg::Expr(_) => return Err("dt_diff unit must be a literal string".to_string()),
+                Arg::Expr(_) => {
+                    return Err(transpile_error!("dt_diff unit must be a literal string"))
+                }
             };
 
             match unit.as_str() {
@@ -920,7 +962,7 @@ fn parse_call_temporal(
                 "hour" | "hours" => dt_elapsed(on_expr, other_expr, rx, 3_600),
                 "minute" | "minutes" => dt_elapsed(on_expr, other_expr, rx, 60),
                 "second" | "seconds" => dt_elapsed(on_expr, other_expr, rx, 1),
-                _ => Err(format!(
+                _ => Err(transpile_error!(
                     "dt_diff unsupported unit '{}'; use day/month/year/hour/minute/second",
                     unit
                 )),
@@ -946,7 +988,7 @@ fn parse_call_temporal(
             let correction = case(doy_today.lt(doy_birth))
                 .when(lit(true), lit(1_f64))
                 .otherwise(lit(0_f64))
-                .map_err(|e| format!("dt_age case expression failed: {}", e))?;
+                .map_err(|e| transpile_error!("dt_age case expression failed: {}", e))?;
 
             Ok(year_diff - correction)
         }
@@ -964,7 +1006,7 @@ fn parse_call_temporal(
             let on_expr = pyexpr_to_datafusion_inner(on, rx)?;
             Ok((date_part(lit("dow"), on_expr) + lit(6_f64)) % lit(7_f64))
         }
-        _ => Err(format!("Not a temporal function: {}", func)),
+        _ => Err(transpile_error!("Not a temporal function: {}", func)),
     }
 }
 
@@ -977,7 +1019,7 @@ fn parse_call_expr(
     on: Option<PyExpr>,
     args: Vec<PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match func {
         // Conditional
         "if_else" => parse_call_conditional(func, &args, rx),
@@ -994,32 +1036,31 @@ fn parse_call_expr(
         "lcm" => parse_call_math("math_lcm", on.as_ref(), &args, rx),
         "factorial" => parse_call_math("math_factorial", on.as_ref(), &args, rx),
         // Type / membership
-        "cast" | "is_in" => parse_call_type_ops(func, require_on(on, func)?, args, rx),
+        "cast" | "is_in" => parse_call_type_ops(func, receiver(on, func)?, args, rx),
         // Window functions (must be handled elsewhere)
         "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min" | "mean" | "sum"
-        | "min" | "max" | "count" | "std" => Err(format!(
+        | "min" | "max" | "count" | "std" => Err(transpile_error!(
             "Window function '{}' requires DataFrame context - should be handled in derive()",
             func
         )),
         // String operations
         "str_char" | "str_concat_ws" => parse_call_string_standalone(func, on, args, rx),
-        f if f.starts_with("str_") => parse_call_string(func, require_on(on, func)?, args, rx),
+        f if f.starts_with("str_") => parse_call_string(func, receiver(on, func)?, args, rx),
         // Temporal operations
         "dt_now" => Ok(now()),
         "dt_today" => Ok(current_date()),
-        f if f.starts_with("dt_") => {
-            parse_call_temporal(func, require_on(on, func)?, &args, rx)
-        }
-        _ => Err(format!("Method '{}' not yet supported", func)),
+        f if f.starts_with("dt_") => parse_call_temporal(func, receiver(on, func)?, &args, rx),
+        _ => Err(transpile_error!("Method '{}' not yet supported", func)),
     }
 }
 
 /// Convert PyExpr to DataFusion Expr, resolved against `schema`: coerced as
 /// DataFusion's analyzer will coerce it, so the type DataFusion reports for
 /// it (and stores for a projection of it) is the type it executes as.
-pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    let rx = Resolver::new(schema)?;
+pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
+    let rx = Resolver::new(schema).map_err(LtseqError::Transpile)?;
     rx.resolve(lower_expr(py_expr, &rx)?)
+        .map_err(LtseqError::Transpile)
 }
 
 /// [`pyexpr_to_datafusion`] for an expression whose name becomes an output
@@ -1027,11 +1068,14 @@ pub fn pyexpr_to_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Exp
 /// casts, which change the name DataFusion derives from an expression, so
 /// the resolved expression keeps the name of the expression as written, as
 /// DataFusion's analyzer does when it coerces a projection.
-pub fn pyexpr_to_named_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Result<Expr, String> {
-    let rx = Resolver::new(schema)?;
+pub fn pyexpr_to_named_datafusion(
+    py_expr: PyExpr,
+    schema: &ArrowSchema,
+) -> Result<Expr, LtseqError> {
+    let rx = Resolver::new(schema).map_err(LtseqError::Transpile)?;
     let lowered = lower_expr(py_expr, &rx)?;
     let name = lowered.schema_name().to_string();
-    let resolved = rx.resolve(lowered)?;
+    let resolved = rx.resolve(lowered).map_err(LtseqError::Transpile)?;
     Ok(if resolved.schema_name().to_string() == name {
         resolved
     } else {
@@ -1042,26 +1086,24 @@ pub fn pyexpr_to_named_datafusion(py_expr: PyExpr, schema: &ArrowSchema) -> Resu
 /// Lower `py_expr` without resolving it: the row-level part of an
 /// expression that the window and group dialects lower, resolve as a whole,
 /// and ask `rx` about.
-pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+pub(crate) fn lower_expr(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, LtseqError> {
     pyexpr_to_datafusion_inner(py_expr, rx)
 }
 
 /// Lower one PyExpr node, recursively (see `lower_expr`). Each node is
 /// lowered through `Resolver::lowering`, so questions about it while its
 /// parent is lowered do not coerce it again.
-fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+fn pyexpr_to_datafusion_inner(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, LtseqError> {
     crate::stack::guarded(|| rx.lowering(|| lower_node(py_expr, rx)))
 }
 
-fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
+fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, LtseqError> {
     match py_expr {
         PyExpr::Column(name) => parse_column_expr(&name, rx.arrow()),
         PyExpr::Literal(value) => Ok(lit(value.to_scalar_value())),
         PyExpr::BinOp { op, left, right } => parse_binop_expr(&op, *left, *right, rx),
         PyExpr::UnaryOp { op, operand } => parse_unaryop_expr(&op, *operand, rx),
-        PyExpr::Call { func, on, args, .. } => {
-            parse_call_expr(&func, on.map(|on| *on), args, rx)
-        }
+        PyExpr::Call { func, on, args, .. } => parse_call_expr(&func, on.map(|on| *on), args, rx),
         PyExpr::Alias { expr, alias } => {
             let inner = pyexpr_to_datafusion_inner(*expr, rx)?;
             Ok(inner.alias(alias))
@@ -1069,7 +1111,9 @@ fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
         PyExpr::Window { .. } => {
             // Window expressions are planned by derive_with_window_functions
             // (window_native), not by the row-level transpiler.
-            Err("Window expressions must go through derive() / the window planner".to_string())
+            Err(transpile_error!(
+                "Window expressions must go through derive() / the window planner"
+            ))
         }
     }
 }
@@ -1082,12 +1126,18 @@ fn lower_node(py_expr: PyExpr, rx: &Resolver<'_>) -> Result<Expr, String> {
 /// window.rs (issue #101). Do not duplicate this match.
 pub(crate) fn is_window_call(func: &str, on: Option<&PyExpr>) -> bool {
     // Direct window functions
-    if matches!(func, "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min") {
+    if matches!(
+        func,
+        "shift" | "rolling" | "diff" | "cum_sum" | "cum_max" | "cum_min"
+    ) {
         return true;
     }
     // Aggregation functions applied to rolling windows
     if matches!(func, "mean" | "sum" | "min" | "max" | "count" | "std") {
-        if let Some(PyExpr::Call { func: inner_func, .. }) = on {
+        if let Some(PyExpr::Call {
+            func: inner_func, ..
+        }) = on
+        {
             if inner_func == "rolling" {
                 return true;
             }
@@ -1182,13 +1232,15 @@ fn validate_string_column(
     on: &PyExpr,
     schema: &ArrowSchema,
     func_name: &str,
-) -> Result<(), String> {
+) -> Result<(), LtseqError> {
     if let PyExpr::Column(col_name) = on {
         if let Some(dtype) = get_column_type(col_name, schema) {
             if !is_string_type(&dtype) {
-                return Err(format!(
+                return Err(transpile_error!(
                     "String function '{}' requires a string column, but '{}' has type {:?}",
-                    func_name, col_name, dtype
+                    func_name,
+                    col_name,
+                    dtype
                 ));
             }
         }
@@ -1212,10 +1264,13 @@ fn dt_elapsed(
     other_expr: Expr,
     rx: &Resolver<'_>,
     unit_seconds: i64,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     use datafusion::arrow::datatypes::TimeUnit;
 
-    let type_of = |expr: &Expr| rx.data_type(expr).map_err(|e| format!("dt_diff: {e}"));
+    let type_of = |expr: &Expr| {
+        rx.data_type(expr)
+            .map_err(|e| transpile_error!("dt_diff: {e}"))
+    };
     // `Expr::cast_to` compares against the type DataFusion reports before
     // coercion and can skip a needed cast (a CASE reports its first branch),
     // so casts are explicit, decided from the resolved types.
@@ -1223,7 +1278,10 @@ fn dt_elapsed(
         if from == to {
             expr
         } else {
-            Expr::Cast(datafusion::logical_expr::Cast::new(Box::new(expr), to.clone()))
+            Expr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(expr),
+                to.clone(),
+            ))
         }
     };
     let on_type = type_of(&on_expr)?;
@@ -1251,7 +1309,7 @@ fn dt_elapsed(
             (Some(_), Some(_)) => Some(finer(*lu, *ru)),
             (None, None) => None,
             _ => {
-                return Err(format!(
+                return Err(transpile_error!(
                     "dt_diff cannot subtract {other_type:?} from {on_type:?}: one timestamp is \
                      timezone-aware and the other is naive; both must be aware or both naive"
                 ))
@@ -1295,18 +1353,22 @@ fn dt_elapsed(
     // Date32/Date64 pair the two disagree: the logical type is Duration(ms) while the
     // kernel that runs after coercion returns an Int64 day count. Coerce the operands
     // first so the type read below is the type the kernel produces.
-    let is_temporal =
-        |t: &DataType| matches!(t, DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _));
-    let (on_coerced, other_coerced) =
-        binary_input_types(&on_type, &Operator::Minus, &other_type)
-            .ok()
-            .filter(|(l, r)| is_temporal(l) && is_temporal(r))
-            .ok_or_else(|| {
-                format!(
-                    "dt_diff cannot subtract {other_type:?} from {on_type:?}; \
+    let is_temporal = |t: &DataType| {
+        matches!(
+            t,
+            DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _)
+        )
+    };
+    let (on_coerced, other_coerced) = binary_input_types(&on_type, &Operator::Minus, &other_type)
+        .ok()
+        .filter(|(l, r)| is_temporal(l) && is_temporal(r))
+        .ok_or_else(|| {
+            format!(
+                "dt_diff cannot subtract {other_type:?} from {on_type:?}; \
                      both sides must be dates or timestamps"
-                )
-            })?;
+            )
+        })
+        .map_err(LtseqError::Transpile)?;
     let on_expr = cast(on_expr, &on_type, &on_coerced);
     let other_expr = cast(other_expr, &other_type, &other_coerced);
     let diff_expr = on_expr - other_expr;
@@ -1318,7 +1380,7 @@ fn dt_elapsed(
         DataType::Duration(TimeUnit::Microsecond) => 1_000,
         DataType::Duration(TimeUnit::Nanosecond) => 1,
         other => {
-            return Err(format!(
+            return Err(transpile_error!(
                 "dt_diff cannot measure a difference of type {other:?}; \
                  both sides must be dates or timestamps"
             ))
@@ -1342,11 +1404,11 @@ fn validate_temporal_column(
     on: &PyExpr,
     schema: &ArrowSchema,
     func_name: &str,
-) -> Result<(), String> {
+) -> Result<(), LtseqError> {
     if let PyExpr::Column(col_name) = on {
         if let Some(dtype) = get_column_type(col_name, schema) {
             if !is_temporal_type(&dtype) {
-                return Err(format!(
+                return Err(transpile_error!(
                     "Temporal function '{}' requires a date/datetime column, but '{}' has type {:?}. \
                      Consider using to_date() or to_timestamp() to convert the column first.",
                     func_name, col_name, dtype
@@ -1436,7 +1498,11 @@ mod tests {
             ("Or", Operator::Or),
         ];
         for (name, expected) in table {
-            assert_eq!(parse_binary_op(name), Ok(BinaryOp::Native(expected)), "op {name}");
+            assert_eq!(
+                parse_binary_op(name),
+                Ok(BinaryOp::Native(expected)),
+                "op {name}"
+            );
         }
         assert_eq!(parse_binary_op("FloorDiv"), Ok(BinaryOp::FloorDiv));
     }
@@ -1445,7 +1511,10 @@ mod tests {
     fn operator_unknown_is_error() {
         for bad in ["Pow", "BitXor", "floordiv", ""] {
             let err = parse_binary_op(bad).unwrap_err();
-            assert!(err.contains("Unknown binary operator"), "op {bad}: {err}");
+            assert!(
+                err.to_string().contains("Unknown binary operator"),
+                "op {bad}: {err}"
+            );
         }
     }
 
@@ -1457,7 +1526,10 @@ mod tests {
         let schema = test_schema();
         let table = [
             (LiteralValue::Null, ScalarValue::Null),
-            (LiteralValue::Boolean(true), ScalarValue::Boolean(Some(true))),
+            (
+                LiteralValue::Boolean(true),
+                ScalarValue::Boolean(Some(true)),
+            ),
             (LiteralValue::Int64(42), ScalarValue::Int64(Some(42))),
             (LiteralValue::Float64(2.5), ScalarValue::Float64(Some(2.5))),
             (
@@ -1472,7 +1544,10 @@ mod tests {
                 },
                 ScalarValue::Decimal128(Some(150), 3, 2),
             ),
-            (LiteralValue::Date32(19723), ScalarValue::Date32(Some(19723))),
+            (
+                LiteralValue::Date32(19723),
+                ScalarValue::Date32(Some(19723)),
+            ),
             (
                 LiteralValue::Timestamp {
                     value: 1_000_000_500,
@@ -1492,7 +1567,8 @@ mod tests {
         ];
         for (value, expected) in table {
             assert_eq!(
-                pyexpr_to_datafusion(PyExpr::Literal(value.clone()), &schema),
+                pyexpr_to_datafusion(PyExpr::Literal(value.clone()), &schema)
+                    .map_err(|e| e.to_string()),
                 Ok(lit(expected)),
                 "{value:?}"
             );
@@ -1512,7 +1588,49 @@ mod tests {
     fn column_missing_is_error() {
         let schema = test_schema();
         let err = pyexpr_to_datafusion(col_expr("nope"), &schema).unwrap_err();
-        assert!(err.contains("Column 'nope' not found in schema"), "{err}");
+        assert!(
+            matches!(&err, LtseqError::ColumnNotFound(name) if name == "nope"),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "Column 'nope' not found in schema");
+    }
+
+    /// A missing column keeps its class from wherever lowering meets it, so
+    /// every operation that lowers an expression raises `ColumnNotFoundError`
+    /// for it (#152), not a `ValueError` naming it in a message.
+    #[test]
+    fn column_missing_deep_in_an_expression_stays_column_not_found() {
+        let schema = test_schema();
+        let nested = PyExpr::BinOp {
+            op: "Gt".to_string(),
+            left: Box::new(call_expr("abs", col_expr("nope"), vec![])),
+            right: Box::new(int_lit(1)),
+        };
+        for lowered in [
+            pyexpr_to_datafusion(nested.clone(), &schema),
+            pyexpr_to_named_datafusion(nested.clone(), &schema),
+            pyexpr_to_window_expr(
+                call_expr("shift", col_expr("nope"), vec![int_lit(1)]),
+                &schema,
+                &[],
+            ),
+        ] {
+            let err = lowered.unwrap_err();
+            assert!(
+                matches!(&err, LtseqError::ColumnNotFound(name) if name == "nope"),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// Every other refusal of the transpiler is `Transpile`, whichever
+    /// operation lowered the expression.
+    #[test]
+    fn other_refusals_are_transpile_errors() {
+        let schema = test_schema();
+        let err = pyexpr_to_datafusion(call_expr("str_contains", col_expr("a"), vec![]), &schema)
+            .unwrap_err();
+        assert!(matches!(&err, LtseqError::Transpile(_)), "{err:?}");
     }
 
     #[test]
@@ -1635,10 +1753,7 @@ mod tests {
             &schema,
         )
         .unwrap();
-        let expected = floor_div::floor_div(
-            Expr::Column(Column::new_unqualified("a")),
-            lit(2_i64),
-        );
+        let expected = floor_div::floor_div(Expr::Column(Column::new_unqualified("a")), lit(2_i64));
         assert_eq!(expr, expected);
     }
 
@@ -1665,7 +1780,16 @@ mod tests {
         );
         assert_eq!(div(int_lit(2)), true_div::true_div(a(), lit(2_i64)));
         let float = div(PyExpr::Literal(crate::types::LiteralValue::Float64(2.0)));
-        assert!(matches!(float, Expr::BinaryExpr(BinaryExpr { op: Operator::Divide, .. })), "{float}");
+        assert!(
+            matches!(
+                float,
+                Expr::BinaryExpr(BinaryExpr {
+                    op: Operator::Divide,
+                    ..
+                })
+            ),
+            "{float}"
+        );
     }
 
     /// Lowering coerces each node once, however deep the expression: the
@@ -1733,7 +1857,10 @@ mod tests {
             &schema,
         )
         .unwrap_err();
-        assert!(err.contains("Unknown binary operator: Pow"), "{err}");
+        assert!(
+            err.to_string().contains("Unknown binary operator: Pow"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1761,7 +1888,10 @@ mod tests {
             &schema,
         )
         .unwrap_err();
-        assert!(err.contains("Unknown unary operator: Neg"), "{err}");
+        assert!(
+            err.to_string().contains("Unknown unary operator: Neg"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1795,17 +1925,17 @@ mod tests {
             &schema,
         )
         .unwrap_err();
-        assert!(err.contains("window planner"), "{err}");
+        assert!(err.to_string().contains("window planner"), "{err}");
     }
 
     #[test]
     fn window_function_call_rejected_in_row_context() {
         let schema = test_schema();
         for func in ["shift", "rolling", "diff", "cum_sum", "cum_max", "cum_min"] {
-            let err = pyexpr_to_datafusion(call_expr(func, col_expr("a"), vec![]), &schema)
-                .unwrap_err();
+            let err =
+                pyexpr_to_datafusion(call_expr(func, col_expr("a"), vec![]), &schema).unwrap_err();
             assert!(
-                err.contains("requires DataFrame context"),
+                err.to_string().contains("requires DataFrame context"),
                 "func {func}: {err}"
             );
         }
@@ -1816,7 +1946,11 @@ mod tests {
         let schema = test_schema();
         let err =
             pyexpr_to_datafusion(call_expr("made_up", col_expr("a"), vec![]), &schema).unwrap_err();
-        assert!(err.contains("Method 'made_up' not yet supported"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("Method 'made_up' not yet supported"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1824,15 +1958,21 @@ mod tests {
         let schema = test_schema();
         let err = pyexpr_to_datafusion(call_expr("str_lower", col_expr("a"), vec![]), &schema)
             .unwrap_err();
-        assert!(err.contains("requires a string column"), "{err}");
+        assert!(
+            err.to_string().contains("requires a string column"),
+            "{err}"
+        );
     }
 
     #[test]
     fn temporal_function_on_non_temporal_column_is_error() {
         let schema = test_schema();
-        let err = pyexpr_to_datafusion(call_expr("dt_year", col_expr("a"), vec![]), &schema)
-            .unwrap_err();
-        assert!(err.contains("requires a date/datetime column"), "{err}");
+        let err =
+            pyexpr_to_datafusion(call_expr("dt_year", col_expr("a"), vec![]), &schema).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a date/datetime column"),
+            "{err}"
+        );
     }
 
     // ---- standalone calls: no receiver, inputs in args ----
@@ -1843,18 +1983,21 @@ mod tests {
         let schema = test_schema();
         let a = || Expr::Column(Column::new_unqualified("a"));
         assert_eq!(
-            pyexpr_to_datafusion(standalone_call("abs", vec![col_expr("a")]), &schema),
+            pyexpr_to_datafusion(standalone_call("abs", vec![col_expr("a")]), &schema)
+                .map_err(|e| e.to_string()),
             Ok(abs(a()))
         );
         assert_eq!(
-            pyexpr_to_datafusion(call_expr("abs", col_expr("a"), vec![]), &schema),
+            pyexpr_to_datafusion(call_expr("abs", col_expr("a"), vec![]), &schema)
+                .map_err(|e| e.to_string()),
             Ok(abs(a()))
         );
         assert_eq!(
             pyexpr_to_datafusion(
                 standalone_call("coalesce", vec![col_expr("a"), int_lit(0)]),
                 &schema
-            ),
+            )
+            .map_err(|e| e.to_string()),
             Ok(coalesce(vec![a(), lit(0_i64)]))
         );
     }
@@ -1870,7 +2013,8 @@ mod tests {
             right: Box::new(int_lit(1)),
         };
         assert_eq!(
-            pyexpr_to_datafusion(call_expr("is_not_true", p, vec![]), &schema),
+            pyexpr_to_datafusion(call_expr("is_not_true", p, vec![]), &schema)
+                .map_err(|e| e.to_string()),
             Ok(Expr::Column(Column::new_unqualified("a"))
                 .gt(lit(1_i64))
                 .is_not_true())
@@ -1893,9 +2037,11 @@ mod tests {
         ] {
             let err = pyexpr_to_datafusion(call_expr("is_in", col_expr("a"), items), &schema)
                 .unwrap_err();
-            assert_eq!(
-                err,
-                format!("is_in takes literal values only, but item {position} is an expression")
+            assert!(
+                matches!(&err, LtseqError::Transpile(message) if *message == format!(
+                    "is_in takes literal values only, but item {position} is an expression"
+                )),
+                "{err:?}"
             );
         }
         assert!(
@@ -1919,7 +2065,10 @@ mod tests {
         ] {
             let err = pyexpr_to_datafusion(standalone_call(func, vec![col_expr("s")]), &schema)
                 .unwrap_err();
-            assert!(err.contains("must be called as a method"), "{func}: {err}");
+            assert!(
+                err.to_string().contains("must be called as a method"),
+                "{func}: {err}"
+            );
         }
     }
 

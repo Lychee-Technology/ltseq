@@ -17,8 +17,8 @@
 //! - `{"type": "GroupRowColumn", "row": "first|last", "column": c}`
 //! - `{"type": "GroupQuantifier", "quant": "all|any|none", "pred": <row-dialect dict>}`
 
-use crate::error::LtseqError;
 use crate::error::PyExprError;
+use crate::error::{transpile_error, LtseqError};
 use crate::ops::common::{column, free_names, select_windowed};
 use crate::ops::grouping::GroupColumns;
 use crate::stack::MAX_EXPR_DEPTH;
@@ -314,9 +314,10 @@ fn group_node_to_expr(
     node: GroupNode,
     schema: &ArrowSchema,
     names: &GroupColumns,
-) -> Result<Expr, String> {
-    let rx = Resolver::new(schema)?;
+) -> Result<Expr, LtseqError> {
+    let rx = Resolver::new(schema).map_err(LtseqError::Transpile)?;
     rx.resolve(lower_group_node(node, &rx, names)?)
+        .map_err(LtseqError::Transpile)
 }
 
 /// Lower one group-dialect node, through `Resolver::lowering`.
@@ -324,7 +325,7 @@ fn lower_group_node(
     node: GroupNode,
     rx: &Resolver<'_>,
     names: &GroupColumns,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     crate::stack::guarded(|| rx.lowering(|| lower_group_node_once(node, rx, names)))
 }
 
@@ -332,7 +333,7 @@ fn lower_group_node_once(
     node: GroupNode,
     rx: &Resolver<'_>,
     names: &GroupColumns,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match node {
         GroupNode::Count => aggregate_to_window(
             agg_fn::count(lit(1i64)),
@@ -355,7 +356,7 @@ fn lower_group_node_once(
                     let sort = Sort::new(col_expr, true, false);
                     agg_fn::approx_percentile_cont(sort, lit(p), None)
                 }
-                other => return Err(format!("Unknown group aggregate: '{}'", other)),
+                other => return Err(transpile_error!("Unknown group aggregate: '{}'", other)),
             };
             aggregate_to_window(agg, group_partition(names), vec![], full_frame())
         }
@@ -368,7 +369,7 @@ fn lower_group_node_once(
                     .partition_by(group_partition(names))
                     .order_by(rn_order(names))
                     .build()
-                    .map_err(|e| format!("Failed to build first_value window: {}", e)),
+                    .map_err(|e| transpile_error!("Failed to build first_value window: {}", e)),
                 // LAST_VALUE needs the full frame, or each row would see
                 // itself as "last" (SQL default frame ends at CURRENT ROW).
                 RowPick::Last => last_value(col_expr)
@@ -376,21 +377,21 @@ fn lower_group_node_once(
                     .order_by(rn_order(names))
                     .window_frame(full_frame())
                     .build()
-                    .map_err(|e| format!("Failed to build last_value window: {}", e)),
+                    .map_err(|e| transpile_error!("Failed to build last_value window: {}", e)),
             }
         }
         GroupNode::Quantifier { quant, pred } => {
             if crate::transpiler::contains_window_function(&pred) {
-                return Err(
-                    "Quantifier predicates cannot contain window functions (shift/diff/rolling/cum_sum)"
-                        .to_string(),
-                );
+                return Err(transpile_error!(
+                    "Quantifier predicates cannot contain window functions \
+                     (shift/diff/rolling/cum_sum)"
+                ));
             }
             let inner = crate::transpiler::lower_expr(pred, rx)?;
             let case_expr = case(inner)
                 .when(lit(true), lit(1i64))
                 .otherwise(lit(0i64))
-                .map_err(|e| format!("Failed to build quantifier CASE: {}", e))?;
+                .map_err(|e| transpile_error!("Failed to build quantifier CASE: {}", e))?;
             // all  → MIN(CASE...) OVER (...) = 1  (no row failed)
             // any  → MAX(CASE...) OVER (...) = 1  (some row passed)
             // none → MAX(CASE...) OVER (...) = 0  (no row passed)
@@ -413,7 +414,10 @@ fn lower_group_node_once(
                 "Not" => Ok(Expr::Not(Box::new(operand_expr))),
                 "IsNull" => Ok(operand_expr.is_null()),
                 "IsNotNull" => Ok(operand_expr.is_not_null()),
-                other => Err(format!("Unknown group unary operator: '{}'", other)),
+                other => Err(transpile_error!(
+                    "Unknown group unary operator: '{}'",
+                    other
+                )),
             }
         }
         GroupNode::Literal(py_expr) => crate::transpiler::lower_expr(py_expr, rx),
@@ -500,7 +504,7 @@ fn derive_group_window_parsed(
         .collect();
     let mut final_names: Vec<String> = Vec::new();
     for (name, node) in nodes {
-        let expr = group_node_to_expr(node, schema, names).map_err(LtseqError::Transpile)?;
+        let expr = group_node_to_expr(node, schema, names)?;
         stage_a.push(expr.alias(&name));
         final_names.push(name);
     }
@@ -555,7 +559,7 @@ fn filter_group_window_parsed(
     node: GroupNode,
     names: &GroupColumns,
 ) -> Result<LTSeqTable, LtseqError> {
-    let pred_expr = group_node_to_expr(node, schema, names).map_err(LtseqError::Transpile)?;
+    let pred_expr = group_node_to_expr(node, schema, names)?;
     let [flag] = free_names(["__group_filter__"], schema, &[]);
 
     // Stage A: all current columns + the predicate as a hidden column.

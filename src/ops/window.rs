@@ -261,8 +261,7 @@ fn native_window_derive(
     if plan.stage_cols.is_empty() {
         let mut derived: Vec<(String, Expr)> = Vec::with_capacity(parsed_cols.len());
         for (col_name_str, py_expr) in parsed_cols.iter() {
-            let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
-                .map_err(LtseqError::Transpile)?;
+            let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)?;
             derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
         }
         let all_exprs = crate::ops::common::merge_derived_columns(schema, derived);
@@ -282,8 +281,7 @@ fn native_window_derive(
     // Stage 1: original columns + hidden inner-window columns.
     let mut stage1: Vec<Expr> = original_columns(schema);
     for (hidden_name, py_expr) in plan.stage_cols.iter() {
-        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
-            .map_err(LtseqError::Transpile)?;
+        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)?;
         stage1.push(window_expr.alias(hidden_name));
     }
     let stage_df = crate::ops::common::select_windowed((**df).clone(), stage1)
@@ -297,8 +295,7 @@ fn native_window_derive(
     let mut derived: Vec<(String, Expr)> = Vec::with_capacity(plan.final_cols.len());
     for (col_name_str, py_expr) in plan.final_cols.iter() {
         let window_expr =
-            pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)
-                .map_err(LtseqError::Transpile)?;
+            pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)?;
         derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
     }
     let stage2 = crate::ops::common::merge_derived_columns(schema, derived);
@@ -390,8 +387,7 @@ fn native_cum_sum(
         }
 
         // Build native cum_sum expression: SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
-        let mut col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr.clone(), schema)
-            .map_err(LtseqError::Transpile)?;
+        let mut col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr.clone(), schema)?;
 
         // A Null-typed column (e.g. inferred from a header-only CSV) is
         // allowed by the numeric check but SUM(Null) has no return type.
@@ -420,8 +416,7 @@ fn native_cum_sum(
             order_by.clone(),
             frame,
         )
-        .and_then(|window| rx.resolve(window))
-        .map_err(LtseqError::Transpile)?;
+        .and_then(|window| rx.resolve(window).map_err(LtseqError::Transpile))?;
 
         let cumsum_col_name = format!("{}_cumsum", col_name);
         all_exprs.push(cumsum_expr.alias(&cumsum_col_name));

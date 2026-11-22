@@ -82,9 +82,7 @@ fn derive_parsed(
     let mut derived_names = std::collections::HashSet::new();
 
     for (col_name_str, py_expr) in parsed_cols {
-        let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(LtseqError::Validation)?
-            .alias(&col_name_str);
+        let df_expr = pyexpr_to_datafusion(py_expr, schema)?.alias(&col_name_str);
 
         derived_names.insert(col_name_str.clone());
         derived_exprs.push((col_name_str, df_expr));

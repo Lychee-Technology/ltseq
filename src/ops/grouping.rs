@@ -115,24 +115,18 @@ pub fn group_ordered_count_impl(
     }
 
     // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
-    // counting with seam stitching. It falls back to the general path below
-    // when the predicate has no fused form. A source it cannot read is an
-    // error, not a fallback (see parallel_streaming_group_count).
+    // counting with seam stitching. It returns no count when the predicate
+    // has no fused form, and the general path below counts instead. A source
+    // it cannot read is an error, not a fallback (see
+    // parallel_streaming_group_count).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            match crate::ops::parallel_scan::parallel_streaming_group_count(
+            if let Some(count) = crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
                 py_expr,
                 parquet_path,
-            ) {
-                Ok(count) => return Ok(count),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to the general path.
-                }
+            )? {
+                return Ok(count);
             }
         }
     }
@@ -241,18 +235,15 @@ fn group_id_parsed(
         // The expression itself IS the boundary condition (contains shift/diff/etc.)
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
-        let expr = pyexpr_to_window_expr(py_expr, input_schema, &table.sort_specs)
-            .map_err(LtseqError::Validation)?;
+        let expr = pyexpr_to_window_expr(py_expr, input_schema, &table.sort_specs)?;
         read_as_input(expr)?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
-        let expr = pyexpr_to_datafusion(py_expr, input_schema)
-            .map_err(LtseqError::Validation)?;
+        let expr = pyexpr_to_datafusion(py_expr, input_schema)?;
         let expr = read_as_input(expr)?;
         let lag_expr = lag(expr.clone(), Some(1), None);
-        let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
-            .map_err(LtseqError::Validation)?;
+        let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")?;
         // IS DISTINCT FROM handles NULLs correctly (unlike !=)
         Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
             Box::new(expr),

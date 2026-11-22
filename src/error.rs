@@ -92,13 +92,27 @@ impl From<PyExprError> for PyErr {
 
 /// Unified error type for all LTSeq table operations.
 ///
-/// Each variant maps to a Python exception type:
-/// - `NoData`, `NoSchema`, `Runtime`, `Io`, `Collect` → `PyRuntimeError`
-/// - `Validation`, `ColumnNotFound`, `Transpile`, `Type` → `PyValueError`
-/// - `TypeMismatch` → `PyTypeError`
+/// Each variant raises one Python exception class (`From<LtseqError> for
+/// PyErr` below):
+/// - `ColumnNotFound`, `SortRequired`, `SchemaMismatch` → the
+///   `ltseq.exceptions` class of that name, each a `ValueError`
+/// - `Validation`, `Transpile`, `Io`, `Context` → `ValueError`
+/// - `TypeMismatch` → `TypeError`
+/// - `NoData`, `NoSchema`, `Runtime` → `RuntimeError`
 ///
-/// The `Context` variant wraps a source error with additional context,
-/// enabling error chain traversal via `std::error::Error::source()`.
+/// A failure is classed by the variant that carries it, never by its
+/// message. The transpiler reports a column it cannot find as
+/// `ColumnNotFound` and every other refusal as `Transpile`, whichever
+/// operation lowers the expression. An I/O failure is `Io`
+/// (`LtseqError::io`) and a failed execution is `Context`
+/// (`LtseqError::collect`, `with_context`), so a
+/// reader, a writer and a terminal raise one class for the same kind of
+/// failure. These are the classes LTSeq raises today; the v0.5 contract
+/// (§20.1) gives I/O and execution failures classes of their own, which is
+/// M15 (#266).
+///
+/// `Io` and `Context` keep the error they wrap, reachable through
+/// `std::error::Error::source()`.
 #[derive(Debug)]
 pub enum LtseqError {
     /// The table was never loaded from a data source (`LTSeqTable::unloaded`).
@@ -129,14 +143,16 @@ pub enum LtseqError {
     /// Runtime error with context message wrapping a source error.
     Runtime(String),
 
-    /// I/O error with context.
-    Io(String),
-
-    /// DataFrame collect/execution error.
-    Collect(String),
+    /// Opening, reading, creating or writing a file failed. Built by
+    /// `LtseqError::io`, which keeps the underlying error as `source`.
+    Io {
+        message: String,
+        source: Box<dyn StdError + Send + Sync>,
+    },
 
     /// Context error: wraps a source error with additional context.
-    /// Used for preserving error chains.
+    /// Used for preserving error chains; a failed execution is one
+    /// (`LtseqError::collect`).
     Context {
         message: String,
         source: Box<dyn StdError + Send + Sync>,
@@ -159,9 +175,7 @@ impl fmt::Display for LtseqError {
             LtseqError::Transpile(msg) => write!(f, "Transpilation error: {}", msg),
             LtseqError::TypeMismatch(msg) => write!(f, "Type error: {}", msg),
             LtseqError::Runtime(msg) => write!(f, "{}", msg),
-            LtseqError::Io(msg) => write!(f, "{}", msg),
-            LtseqError::Collect(msg) => write!(f, "{}", msg),
-            LtseqError::Context { message, source } => {
+            LtseqError::Io { message, source } | LtseqError::Context { message, source } => {
                 write!(f, "{}: {}", message, source)
             }
         }
@@ -171,7 +185,9 @@ impl fmt::Display for LtseqError {
 impl StdError for LtseqError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            LtseqError::Context { source, .. } => Some(source.as_ref()),
+            LtseqError::Io { source, .. } | LtseqError::Context { source, .. } => {
+                Some(source.as_ref())
+            }
             _ => None,
         }
     }
@@ -191,10 +207,13 @@ impl From<LtseqError> for PyErr {
             LtseqError::SchemaMismatch(_) => {
                 raise_custom::<exceptions::PyValueError>("SchemaMismatchError", err.to_string())
             }
-            // Map to PyValueError
-            LtseqError::Validation(_)
-            | LtseqError::Transpile(_)
-            | LtseqError::Context { .. } => {
+            // Map to PyValueError. `Io` and `Context` are listed apart from
+            // the argument errors because M15 (#266) moves them to classes
+            // of their own.
+            LtseqError::Validation(_) | LtseqError::Transpile(_) => {
+                PyErr::new::<exceptions::PyValueError, _>(err.to_string())
+            }
+            LtseqError::Io { .. } | LtseqError::Context { .. } => {
                 PyErr::new::<exceptions::PyValueError, _>(err.to_string())
             }
             // Map to PyTypeError
@@ -202,16 +221,29 @@ impl From<LtseqError> for PyErr {
                 PyErr::new::<exceptions::PyTypeError, _>(err.to_string())
             }
             // Map to PyRuntimeError
-            LtseqError::NoData
-            | LtseqError::NoSchema
-            | LtseqError::Runtime(_)
-            | LtseqError::Io(_)
-            | LtseqError::Collect(_) => {
+            LtseqError::NoData | LtseqError::NoSchema | LtseqError::Runtime(_) => {
                 PyErr::new::<exceptions::PyRuntimeError, _>(err.to_string())
             }
         }
     }
 }
+
+/// `LtseqError::Transpile` with a `format!` message:
+/// `transpile_error!("{func} requires an argument")`.
+macro_rules! transpile_error {
+    ($($arg:tt)*) => {
+        $crate::error::LtseqError::Transpile(format!($($arg)*))
+    };
+}
+pub(crate) use transpile_error;
+
+/// `LtseqError::Validation` with a `format!` message.
+macro_rules! validation_error {
+    ($($arg:tt)*) => {
+        $crate::error::LtseqError::Validation(format!($($arg)*))
+    };
+}
+pub(crate) use validation_error;
 
 // ---------------------------------------------------------------------------
 // Convenience constructors for common error patterns
@@ -242,9 +274,9 @@ impl LtseqError {
 
     /// Create an I/O error by wrapping a source error with context.
     ///
-    /// Preserves the error chain if source implements StdError.
+    /// Preserves the error chain.
     pub fn io(context: &str, source: impl StdError + Send + Sync + 'static) -> Self {
-        LtseqError::Context {
+        LtseqError::Io {
             message: format!("I/O error ({})", context),
             source: Box::new(source),
         }
@@ -258,5 +290,40 @@ impl LtseqError {
             message: "Failed to collect results".to_string(),
             source: Box::new(source),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `io()` builds the variant its name says, which decides the Python
+    /// class (#152): it used to build a generic `Context`, so an I/O failure
+    /// raised one class or another depending on the constructor its site
+    /// happened to use.
+    #[test]
+    fn io_and_collect_build_their_own_variant_and_keep_the_source() {
+        let io = LtseqError::io(
+            "Failed to create file 'x'",
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert!(matches!(io, LtseqError::Io { .. }), "{io:?}");
+        assert!(io.source().is_some());
+        assert!(
+            io.to_string()
+                .starts_with("I/O error (Failed to create file 'x'): "),
+            "{io}"
+        );
+
+        let collect =
+            LtseqError::collect(datafusion::error::DataFusionError::Execution("boom".into()));
+        assert!(matches!(collect, LtseqError::Context { .. }), "{collect:?}");
+        assert!(collect.source().is_some());
+        assert!(
+            collect
+                .to_string()
+                .starts_with("Failed to collect results: "),
+            "{collect}"
+        );
     }
 }

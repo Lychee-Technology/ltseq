@@ -426,8 +426,7 @@ fn sort_parsed(
             _ => None,
         };
 
-        let df_expr = pyexpr_to_datafusion(py_expr, schema)
-            .map_err(LtseqError::Validation)?;
+        let df_expr = pyexpr_to_datafusion(py_expr, schema)?;
         let data_type = rx.data_type(&df_expr).map_err(LtseqError::Validation)?;
 
         // Capture column name if this is a simple column reference. A

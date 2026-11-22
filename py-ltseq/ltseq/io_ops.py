@@ -360,7 +360,9 @@ class IOMixin:
             path: Path where the CSV file will be written
 
         Raises:
-            RuntimeError: If write fails
+            ValueError: If the file cannot be created, written or replaced,
+                or the table's plan fails to execute; a file already at
+                ``path`` is left as it was
 
         Example:
             >>> t.write_csv("output.csv")
@@ -402,10 +404,10 @@ class IOMixin:
                          Defaults to uncompressed if not specified.
 
         Raises:
-            RuntimeError: If write fails
-            ValueError: If compression is not recognized, or if a
-                ``timestamp[s]`` value has no millisecond count in int64;
-                ``path`` is left as it was
+            ValueError: If the file cannot be created, written or replaced,
+                the table's plan fails to execute, compression is not
+                recognized, or a ``timestamp[s]`` value has no millisecond
+                count in int64; ``path`` is left as it was
             TypeError: If a column is or contains a ``struct`` without fields
                 or a ``fixed_size_binary`` of width 0, which Parquet cannot
                 store; raised before anything is written
