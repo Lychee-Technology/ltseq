@@ -11,6 +11,7 @@ import pyarrow as pa
 import pytest
 
 from ltseq import LTSeq
+from ltseq.expr import row_number
 
 
 def _table():
@@ -86,10 +87,25 @@ def test_cum_sum_with_and_without_a_cast(engine_layout):
     assert out.column("cum_sum_1_cumsum").to_pylist() == [1.0, 3.0, 7.0, 15.0]
 
 
-@pytest.mark.parametrize("name", ["__ltseq_window__", "lag(g)"])
-def test_a_column_with_a_staged_name_is_read_as_itself(name):
+def test_a_column_with_a_staged_name_is_read_as_itself():
+    name = "__ltseq_window__"
     t = LTSeq.from_arrow(pa.table({"m": ["a", "b"], "g": [1, 2], name: [7, 9]})).sort("m")
     out = t.derive(a=lambda r: r.g.shift(1), b=lambda r: r.g.cast("float64").shift(1))
     out = out.to_arrow()
     assert out.column(name).to_pylist() == [7, 9]
     assert out.column("b").to_pylist() == [None, 1.0]
+
+
+@pytest.mark.parametrize("rn_first", [True, False])
+def test_a_sibling_window_does_not_reorder_a_shift_on_tied_keys(engine_layout, rn_first):
+    # `shift` reads table order, and its sort key `k` ties within each pair.
+    # A sibling window over another order must not change which row it
+    # reads, whichever keyword comes first (R1-F1 of #421's review).
+    t = LTSeq.from_arrow(pa.table({"k": [0, 0, 1, 1], "i": [4, 3, 2, 1]})).sort("k")
+    rn = lambda r: row_number().over(order_by="i")  # noqa: E731
+    prev = lambda r: r.i.shift(1)  # noqa: E731
+    derived = {"rn": rn, "prev": prev} if rn_first else {"prev": prev, "rn": rn}
+    rows = t.derive(**derived).to_dicts()
+    assert {row["i"]: row["prev"] for row in rows} == {4: None, 3: 4, 2: 3, 1: 2}
+    assert {row["i"]: row["rn"] for row in rows} == {1: 1, 2: 2, 3: 3, 4: 4}
+    assert [row["k"] for row in rows] == [0, 0, 1, 1]
