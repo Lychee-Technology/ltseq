@@ -221,3 +221,71 @@ def test_pattern_count_reports_a_source_it_cannot_read_as_the_general_path_does(
     with pytest.raises(ValueError) as raised:
         general.search_pattern_count(*STEPS, partition_by="k")
     assert not isinstance(raised.value, RuntimeError)
+
+
+# ---- group_ordered(...).first().count(): a decline falls back, a failure raises ----
+
+
+def _sessions(t):
+    return t.group_ordered(lambda r: r.k != r.k.shift(1)).first()
+
+
+class _FailingCount:
+    """A grouped table whose count kernel fails as a read inside it does,
+    with an ``LtseqError::Io``; every other method is the table's own, so
+    the materialized retry would succeed."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def group_ordered_count(self, expr_dict):
+        raise ValueError("I/O error: Failed to open Parquet 'events.parquet': transient")
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_group_count_reports_a_fast_path_failure_the_retry_would_hide(monkeypatch):
+    """count() caught every error of the count kernel and counted the
+    materialized first rows instead, so a failure the retry did not meet
+    was discarded (R2-F1 of #422's review). Only a decline (None) falls
+    back now."""
+    from ltseq.grouping.nested_table import NestedTable
+
+    t = LTSeq.from_arrow(_events(pa.int64())).sort("i")
+    assert _sessions(t).count() == 3
+    assert len(_sessions(t).to_arrow()) == 3
+
+    real = NestedTable._staged_key
+
+    def failing(self, *args, **kwargs):
+        staged, expr_dict, hidden = real(self, *args, **kwargs)
+        return _FailingCount(staged), expr_dict, hidden
+
+    monkeypatch.setattr(NestedTable, "_staged_key", failing)
+    assert len(_sessions(t).to_arrow()) == 3, "the materialized retry succeeds"
+    with pytest.raises(ValueError, match="transient"):
+        _sessions(t).count()
+    with pytest.raises(ValueError, match="transient"):
+        len(_sessions(t))
+
+
+def test_group_count_reports_a_source_the_fast_path_cannot_read(tmp_path):
+    """A read failure of the Parquet count is the error count() raises, not
+    a retry through DataFusion that reports something else."""
+    path = str(tmp_path / "events.parquet")
+    pq.write_table(_events(pa.int64()), path, row_group_size=3)
+    fast = LTSeq.read_parquet(path).assume_sorted("i")
+    with open(path, "wb") as f:
+        f.write(b"not a parquet file")
+
+    with pytest.raises(ValueError, match="Failed to read Parquet metadata") as raised:
+        _sessions(fast).count()
+    assert not isinstance(raised.value, RuntimeError)
+
+
+def test_group_count_falls_back_for_a_predicate_the_kernel_declines():
+    t = LTSeq.from_arrow(_events(pa.int64())).sort("i")
+    pred = lambda r: r.k.shift(1, default=0) != r.k  # noqa: E731
+    assert t._inner.group_ordered_count(t._capture_expr(pred)) is None
+    assert t.group_ordered(pred).first().count() == len(t.group_ordered(pred).first().to_arrow())

@@ -5,7 +5,7 @@ when `can_linear_scan` admits the predicate, and otherwise materializes the
 grouped table. The materialized count is the reference: the predicate is
 evaluated in SQL three-valued logic, and a row whose predicate is NULL starts
 a group. The kernel must decline a predicate before executing it or return
-the reference's count. `count()` falls back only when the kernel raises, so
+the reference's count. `count()` falls back only when the kernel declines, so
 a wrong kernel count reaches the user.
 
 The predicates are generated over NULL-bearing columns from leaves that
@@ -22,8 +22,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from ltseq import LTSeq
-
-DECLINED = "only supports shift-based boundary predicates"
 
 # NULLs sit in the first and last rows, next to each other, and in different
 # rows per column, so a comparison or arithmetic result is NULL on some rows
@@ -145,12 +143,7 @@ def kernel(t: LTSeq, pred):
     """The kernel's count, or None when it declines the predicate before
     executing. Any other error fails the test: the kernel admitted a
     predicate it cannot evaluate."""
-    try:
-        return t._inner.group_ordered_count(t._capture_expr(pred))
-    except ValueError as error:
-        if DECLINED in str(error):
-            return None
-        raise
+    return t._inner.group_ordered_count(t._capture_expr(pred))
 
 
 def operators(node, found: set) -> set:

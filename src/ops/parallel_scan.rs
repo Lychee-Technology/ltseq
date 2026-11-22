@@ -1152,7 +1152,9 @@ mod tests {
             vec![SortSpec::new("i".to_string(), false, true, &datafusion::arrow::datatypes::DataType::Int64)],
         )
         .expect("in-memory table");
-        group_ordered_count_impl(&table, expr).expect("general path count")
+        group_ordered_count_impl(&table, expr)
+            .expect("general path count")
+            .expect("the general path counts every supported predicate")
     }
 
     /// The parallel count stitches chunks at their first rows, so its answer
@@ -1328,6 +1330,38 @@ mod tests {
         }
     }
 
+    /// `group_ordered_count_impl` reports a source the fast path cannot read
+    /// as an error, never as "no count", which Python would answer by
+    /// materializing the table and retrying (R2-F1 of #152's review).
+    #[test]
+    fn group_count_reports_an_unreadable_file_instead_of_declining() {
+        let path = write_parquet(&events(), 2, "unreadable");
+        let table = sorted_parquet_table(&path);
+        std::fs::write(&path, b"not a parquet file").expect("overwrite the source");
+
+        let err = group_ordered_count_impl(&table, &sessionization())
+            .expect_err("an unreadable source is an error, not a fallback");
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, LtseqError::Io { .. }), "{err:?}");
+        assert!(err.to_string().contains("Failed to read Parquet metadata"), "{err}");
+    }
+
+    /// A Parquet directory is not one file, which the direct reader opens:
+    /// the count declines it, and Python counts it through DataFusion.
+    #[test]
+    fn group_count_declines_a_parquet_directory() {
+        let dir = std::env::temp_dir().join(format!("ltseq_issue152_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        let file = write_parquet(&events(), 2, "in_dir");
+        std::fs::rename(&file, dir.join("part-0.parquet")).expect("move the file in");
+        let dir_path = dir.to_str().expect("utf-8 temp path").to_string();
+        let table = sorted_parquet_table(&dir_path);
+
+        let declined = group_ordered_count_impl(&table, &sessionization());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(declined.expect("a directory is not an error"), None);
+    }
+
     /// A predicate with no fused form makes the parallel count fall back, and
     /// `group_ordered_count_impl` answers through the general path instead.
     #[test]
@@ -1340,7 +1374,9 @@ mod tests {
         let declined = parallel_streaming_group_count(&table, &expr, &path)
             .expect("a predicate without a fused form is not an error");
         assert_eq!(declined, None, "no fused form, so no fast-path count");
-        let count = group_ordered_count_impl(&table, &expr).expect("general path count");
+        let count = group_ordered_count_impl(&table, &expr)
+            .expect("general path count")
+            .expect("the general path counts it");
         let _ = std::fs::remove_file(&path);
         assert_eq!(count, general_path_count(&expr));
     }

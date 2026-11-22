@@ -841,11 +841,15 @@ impl LTSeqTable {
     /// This is used for the `group_ordered(cond).first().count()` pattern,
     /// where we only need the total number of groups (sessions).
     /// Avoids allocating 3 x N arrays for 100M+ rows.
+    ///
+    /// Returns `None` when this path does not count the input, and Python
+    /// counts the materialized first rows instead; an error is a failure to
+    /// report, never a request to retry (#152).
     fn group_ordered_count(
         &self,
         py: Python<'_>,
         grouping_expr: Bound<'_, PyDict>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<Option<usize>> {
         let py_expr = dict_to_py_expr(&grouping_expr)?;
         // Moved into the closure, so it drops on its guarded stack.
         detached(py, move || {

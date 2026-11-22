@@ -43,12 +43,11 @@ def test_nan_and_infinite_thresholds_are_refused(steps, threshold):
 
 @pytest.mark.parametrize("threshold", [-0.5, 1.5, math.nan, math.inf, -math.inf])
 def test_kernel_declines_non_integral_thresholds(steps, threshold):
-    """The direct kernel call must raise (so Python falls back), never return a
-    truncated answer. It declines before scanning: an integer compared with a
+    """The direct kernel call must decline (return None, so Python falls back),
+    never return a truncated answer. It declines before scanning: an integer compared with a
     float the kernel cannot read exactly is not eligible."""
     expr = steps._capture_expr(lambda r: (r.x - r.x.shift(1)) > threshold)
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        steps._inner.group_ordered_count(expr)
+    assert steps._inner.group_ordered_count(expr) is None
 
 
 def test_kernel_keeps_integral_float_thresholds(steps):
@@ -63,8 +62,7 @@ def test_decimal_thresholds_take_the_datafusion_path(steps, threshold, expected)
     """The kernel has no decimal arithmetic, so it declines every Decimal
     literal up front, integral ones included, and the count falls back."""
     pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        steps._inner.group_ordered_count(steps._capture_expr(pred))
+    assert steps._inner.group_ordered_count(steps._capture_expr(pred)) is None
     assert steps.group_ordered(pred).first().count() == _reference(steps, pred) == expected
 
 
@@ -82,8 +80,7 @@ def test_string_threshold_is_not_a_number_for_the_kernel(steps):
     """A string literal is a string (#145, P5): the kernel declines it, and the
     DataFusion path, which coerces the string, counts the groups."""
     pred = lambda r: (r.x - r.x.shift(1)) > "1"  # noqa: E731
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        steps._inner.group_ordered_count(steps._capture_expr(pred))
+    assert steps._inner.group_ordered_count(steps._capture_expr(pred)) is None
     assert steps.group_ordered(pred).first().count() == _reference(steps, pred) == 3
 
 
@@ -100,8 +97,7 @@ def test_first_count_matches_reference_beyond_float_precision(xs, threshold, exp
     pred = lambda r: (r.x - r.x.shift(1)) > threshold  # noqa: E731
     assert _reference(t, pred) == expected
     assert t.group_ordered(pred).first().count() == expected
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        t._inner.group_ordered_count(t._capture_expr(pred))
+    assert t._inner.group_ordered_count(t._capture_expr(pred)) is None
 
 
 def test_kernel_keeps_integral_float_thresholds_below_2_pow_53():

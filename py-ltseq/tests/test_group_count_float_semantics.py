@@ -6,7 +6,7 @@ grouped table, whose count is the reference. DataFusion compares floats by
 IEEE 754 totalOrder except that `-0.0` equals `0.0`. The kernel used to call
 Arrow's comparison kernels directly, which apply totalOrder without that
 exception and so put `-0.0` below `0.0`: a zero that changed sign started a
-group for the kernel only. `count()` falls back only when the kernel raises,
+group for the kernel only. `count()` falls back only when the kernel declines,
 so its count reached the user.
 
 The predicates cover every Float64 shape the kernel admits (`==`, `!=` and
@@ -31,8 +31,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from ltseq import LTSeq
-
-DECLINED = "only supports shift-based boundary predicates"
 
 NAN = math.nan
 NEG_NAN = math.copysign(math.nan, -1.0)
@@ -104,12 +102,10 @@ def reference(t: LTSeq, pred) -> int:
 def kernel(t: LTSeq, pred) -> int:
     """The kernel's count. Every predicate here is one the kernel admits, so
     a decline fails the test instead of passing it vacuously."""
-    try:
-        return t._inner.group_ordered_count(t._capture_expr(pred))
-    except ValueError as error:
-        if DECLINED in str(error):
-            pytest.fail(f"the kernel declined a Float64 predicate: {error}")
-        raise
+    count = t._inner.group_ordered_count(t._capture_expr(pred))
+    if count is None:
+        pytest.fail("the kernel declined a Float64 predicate")
+    return count
 
 
 def assert_kernel_matches_reference(t: LTSeq):

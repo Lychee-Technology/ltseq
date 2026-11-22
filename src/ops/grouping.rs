@@ -98,6 +98,14 @@ impl GroupColumns {
 /// Used for `group_ordered(cond).first().count()` — returns just the
 /// number of groups (sessions) without allocating per-row arrays.
 ///
+/// Returns `Ok(None)` when this path does not count the input: the predicate
+/// is not a shift-based boundary predicate the kernel computes as DataFusion
+/// would, or the table's Parquet source is not one regular file (a directory
+/// or a glob), which the direct reader cannot open. Python then counts the
+/// materialized first rows. Every error is a genuine failure, which Python
+/// reports and never retries (#152): a source the fast path cannot read is
+/// one, so a read failure never turns into a fallback.
+///
 /// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
 /// predicate under the GIL and wraps this call in `gil::detached`. Both paths
 /// below (the rayon Parquet scan and the general linear scan) are pure Rust
@@ -105,13 +113,11 @@ impl GroupColumns {
 pub fn group_ordered_count_impl(
     table: &LTSeqTable,
     py_expr: &PyExpr,
-) -> Result<usize, LtseqError> {
+) -> Result<Option<usize>, LtseqError> {
     // Only works for linear scan predicates (shift-based boundary detection)
     // whose result the kernel computes as DataFusion would.
     if !can_linear_scan(py_expr, table.require_schema()?) {
-        return Err(LtseqError::Validation(
-            "group_ordered_count only supports shift-based boundary predicates".into(),
-        ));
+        return Ok(None);
     }
 
     // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
@@ -121,12 +127,20 @@ pub fn group_ordered_count_impl(
     // parallel_streaming_group_count).
     if let Some(ref parquet_path) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
+            // The direct reader opens one file. A directory or a glob is
+            // counted by Python through DataFusion, as it always was; sending
+            // such sources to the general path below is #287. A path that
+            // names nothing now (a file deleted since the read) is left to
+            // Python too, whose execution reports it as every terminal does.
+            if !is_regular_file(parquet_path) {
+                return Ok(None);
+            }
             if let Some(count) = crate::ops::parallel_scan::parallel_streaming_group_count(
                 table,
                 py_expr,
                 parquet_path,
             )? {
-                return Ok(count);
+                return Ok(Some(count));
             }
         }
     }
@@ -145,7 +159,13 @@ pub fn group_ordered_count_impl(
         .map_err(|e| LtseqError::Runtime(e.to_string()))?;
     RUNTIME
         .block_on(filtered.count())
+        .map(Some)
         .map_err(|e| LtseqError::Runtime(e.to_string()))
+}
+
+/// Whether `path` names a regular file now, following a link.
+fn is_regular_file(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.
