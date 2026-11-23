@@ -98,6 +98,15 @@ impl GroupColumns {
 /// Used for `group_ordered(cond).first().count()` — returns just the
 /// number of groups (sessions) without allocating per-row arrays.
 ///
+/// Returns `Ok(None)` when this path does not count the input: the predicate
+/// is not a shift-based boundary predicate the kernel computes as DataFusion
+/// would, or the table's Parquet source was not read by the local path of
+/// one file (a directory, a glob, a URL, a `file` URL included), which the
+/// direct reader does not open. Python then counts the materialized first rows. Every error is
+/// a genuine failure, which Python reports and never retries (#152): a
+/// listed file the fast path cannot open or read is one, so a read failure
+/// never turns into a fallback.
+///
 /// Runs with the GIL released: `lib.rs::group_ordered_count` deserializes the
 /// predicate under the GIL and wraps this call in `gil::detached`. Both paths
 /// below (the rayon Parquet scan and the general linear scan) are pure Rust
@@ -105,34 +114,35 @@ impl GroupColumns {
 pub fn group_ordered_count_impl(
     table: &LTSeqTable,
     py_expr: &PyExpr,
-) -> Result<usize, LtseqError> {
+) -> Result<Option<usize>, LtseqError> {
     // Only works for linear scan predicates (shift-based boundary detection)
     // whose result the kernel computes as DataFusion would.
     if !can_linear_scan(py_expr, table.require_schema()?) {
-        return Err(LtseqError::Validation(
-            "group_ordered_count only supports shift-based boundary predicates".into(),
-        ));
+        return Ok(None);
     }
 
     // Parquet fast path (bypasses DataFusion entirely): parallel per-RG
-    // counting with seam stitching. It falls back to the general path below
-    // when the predicate has no fused form. A source it cannot read is an
-    // error, not a fallback (see parallel_streaming_group_count).
-    if let Some(ref parquet_path) = table.source_parquet_path {
+    // counting with seam stitching. It returns no count when the predicate
+    // has no fused form, and the general path below counts instead. A source
+    // it cannot read is an error, not a fallback (see
+    // parallel_streaming_group_count).
+    if let Some(ref source) = table.source_parquet_path {
         if !table.sort_specs.is_empty() {
-            match crate::ops::parallel_scan::parallel_streaming_group_count(
-                table,
-                py_expr,
-                parquet_path,
-            ) {
-                Ok(count) => return Ok(count),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to the general path.
-                }
+            // The direct reader opens the one local file the reader listed,
+            // by the absolute path it listed, not the path as written, which
+            // can name another file or none from another working directory.
+            // A directory, a glob or a URL (a `file` URL too) lists none, and
+            // Python counts it through DataFusion, as it always did; sending
+            // such sources to the general path below is #287. A failure to
+            // open or read the listed file is an error, not a fallback
+            // (R3-F1 to R6-F2 of #422's review).
+            let Some(file) = source.file.as_deref() else {
+                return Ok(None);
+            };
+            if let Some(count) =
+                crate::ops::parallel_scan::parallel_streaming_group_count(table, py_expr, file)?
+            {
+                return Ok(Some(count));
             }
         }
     }
@@ -148,10 +158,13 @@ pub fn group_ordered_count_impl(
             column(&GroupColumns::default().rn)
                 .eq(Expr::Literal(datafusion::common::ScalarValue::Int64(Some(1)), None)),
         )
-        .map_err(|e| LtseqError::Runtime(e.to_string()))?;
+        .map_err(|e| LtseqError::with_context("Failed to plan the group count", e))?;
+    // A failed execution is the `LtseqError::collect` every terminal raises,
+    // so this count and the materialized first rows raise one class.
     RUNTIME
         .block_on(filtered.count())
-        .map_err(|e| LtseqError::Runtime(e.to_string()))
+        .map(Some)
+        .map_err(LtseqError::collect)
 }
 
 /// Add __group_id__, __group_count__, and __rn__ columns to identify consecutive groups.
@@ -241,18 +254,15 @@ fn group_id_parsed(
         // The expression itself IS the boundary condition (contains shift/diff/etc.)
         // e.g., (r.userid != r.userid.shift(1)) | (r.eventtime - r.eventtime.shift(1) > 1800)
         // Convert using the window-aware transpiler → native DataFusion Expr with LAG/LEAD
-        let expr = pyexpr_to_window_expr(py_expr, input_schema, &table.sort_specs)
-            .map_err(LtseqError::Validation)?;
+        let expr = pyexpr_to_window_expr(py_expr, input_schema, &table.sort_specs)?;
         read_as_input(expr)?
     } else {
         // Simple expression (e.g., column reference) — build:
         // expr IS DISTINCT FROM LAG(expr, 1) OVER (ORDER BY sort_exprs)
-        let expr = pyexpr_to_datafusion(py_expr, input_schema)
-            .map_err(LtseqError::Validation)?;
+        let expr = pyexpr_to_datafusion(py_expr, input_schema)?;
         let expr = read_as_input(expr)?;
         let lag_expr = lag(expr.clone(), Some(1), None);
-        let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")
-            .map_err(LtseqError::Validation)?;
+        let lag_with_order = finalize_window_expr(lag_expr, vec![], &order_by, "group_id")?;
         // IS DISTINCT FROM handles NULLs correctly (unlike !=)
         Expr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
             Box::new(expr),

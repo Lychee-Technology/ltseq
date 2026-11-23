@@ -3,8 +3,8 @@
 On sorted Parquet the count kernel splits the row groups into chunks, counts
 them in parallel and stitches the chunks at their first rows. These tests put
 row-group seams everywhere, with NULLs on both sides of some, and compare the
-kernel (`_inner.group_ordered_count`, which raises instead of falling back to
-Python) with the DataFusion path, `len(group_ordered(pred).first().to_pandas())`.
+kernel (`_inner.group_ordered_count`, which returns None instead of falling
+back to Python) with the DataFusion path, `len(group_ordered(pred).first().to_pandas())`.
 """
 
 from decimal import Decimal
@@ -96,7 +96,7 @@ DIRECTORY_PREDICATES = {
 @pytest.mark.parametrize("name", DIRECTORY_PREDICATES)
 def test_parquet_directory_count_matches_reference(tmp_path, name):
     # The direct Parquet reader opens a single file. For a directory the
-    # kernel raises and count() materializes through DataFusion; the count
+    # kernel declines and count() materializes through DataFusion; the count
     # must be the reference's whichever path answers.
     events = pa.table(
         {
@@ -165,8 +165,7 @@ def test_kernel_declines_what_it_would_compute_differently(name):
     t = LTSeq.from_arrow(
         pa.table({"i": pa.array(range(len(values)), pa.int64()), "v": pa.array(values, dtype)})
     ).sort("i")
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        _kernel(t, pred)
+    assert _kernel(t, pred) is None
     assert t.group_ordered(pred).first().count() == _reference(t, pred)
 
 
@@ -206,8 +205,7 @@ def test_kernel_declines_shift_keyword_arguments(tmp_path, source, name):
         pq.write_table(events, path, row_group_size=2)
         t = LTSeq.read_parquet(path).assume_sorted("i")
     pred = SHIFT_KWARGS[name]
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        _kernel(t, pred)
+    assert _kernel(t, pred) is None
     reference = _count_outcome(lambda: _reference(t, pred))
     assert _count_outcome(lambda: t.group_ordered(pred).first().count()) == reference
 

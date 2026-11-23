@@ -161,8 +161,7 @@ def _reference(t, pred):
 def test_linear_scan_leaves_other_literal_kinds_to_datafusion(literal):
     t = LTSeq.from_arrow(pa.table({"x": pa.array([1, 1, 3], pa.int64())})).sort("x")
     pred = lambda r: (r.x - r.x.shift(1)) > literal  # noqa: E731
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        t._inner.group_ordered_count(t._capture_expr(pred))
+    assert t._inner.group_ordered_count(t._capture_expr(pred)) is None
 
 
 @pytest.mark.parametrize(
@@ -193,8 +192,7 @@ def test_a_float_threshold_outside_the_fused_shape_is_declined_before_collecting
     multi-pass one has no integer/float comparison. Such a predicate used to
     be collected and then fail inside the kernel."""
     t = LTSeq.from_arrow(pa.table({"k": range(5), "x": pa.array([1, 1, 3, 3, 5], pa.int64())})).sort("k")
-    with pytest.raises(ValueError, match="only supports shift-based boundary predicates"):
-        t._inner.group_ordered_count(t._capture_expr(pred))
+    assert t._inner.group_ordered_count(t._capture_expr(pred)) is None
     assert t.group_ordered(pred).first().count() == _reference(t, pred)
 
 

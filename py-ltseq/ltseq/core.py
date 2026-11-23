@@ -380,7 +380,7 @@ class LTSeq(
 
         Raises:
             MemoryError: If the dataset is too large to fit in memory
-            RuntimeError: If execution fails
+            ValueError: If execution fails
 
         Example:
             >>> result = t.filter(lambda r: r.age > 18).collect()
@@ -406,7 +406,7 @@ class LTSeq(
 
         Raises:
             MemoryError: If the dataset is too large to fit in memory
-            RuntimeError: If execution fails
+            ValueError: If execution fails
 
         Example:
             >>> t = LTSeq.read_csv("data.csv")

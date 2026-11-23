@@ -202,10 +202,16 @@ def test_funnel_from_pandas(engine_layout):
 def test_funnel_from_parquet(engine_layout, tmp_path):
     path = str(tmp_path / "events.parquet")
     _funnel_frame().to_parquet(path, index=False)
-    # `sort`, not `assume_sorted`: on a Parquet table declared sorted, a count
-    # partitioned by a string key raises instead of leaving the parallel scan
-    # (#211).
     _assert_funnel(LTSeq.read_parquet(path).sort("u", "ts"))
+
+
+def test_funnel_from_parquet_declared_sorted(engine_layout, tmp_path):
+    # On a Parquet table declared sorted, a count partitioned by a string key
+    # leaves the parallel scan for the general path; it used to raise (#211,
+    # #152).
+    path = str(tmp_path / "events.parquet")
+    _funnel_frame().sort_values(["u", "ts"]).to_parquet(path, index=False)
+    _assert_funnel(LTSeq.read_parquet(path).assume_sorted("u", "ts"))
 
 
 # ---- numbers of two types ----

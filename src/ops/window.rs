@@ -75,18 +75,25 @@ pub(crate) fn derive_with_window_functions_from_parsed(
 /// two-step derive workaround. Two-level nesting is planned natively by the
 /// staged planner (issue #101); this hint now covers what remains — three
 /// and deeper levels, and ranking-over-window shapes.
+///
+/// Only the transpiler's own refusal of a window in row context gets the
+/// hint, recognized by variant and exact text: any other error, such as a
+/// `ColumnNotFound` whose column name happens to contain those words, keeps
+/// its variant and its Python class (#152).
 fn nested_window_hint(err: LtseqError) -> LtseqError {
-    let msg = err.to_string();
-    if msg.contains("requires DataFrame context") {
-        LtseqError::Validation(format!(
+    if !crate::transpiler::is_window_in_row_context(&err) {
+        return err;
+    }
+    match err {
+        // Still the transpiler's refusal, now with the workaround.
+        LtseqError::Transpile(msg) => LtseqError::Transpile(format!(
             "{}. Window functions cannot be applied to another window function's \
              result in a single derive; split it into two steps, e.g. \
              t.derive(mid=lambda r: r.x.rolling(3).mean())\
              .derive(out=lambda r: r.mid.shift(1))",
             msg.trim_end_matches('.')
-        ))
-    } else {
-        err
+        )),
+        other => other,
     }
 }
 
@@ -261,8 +268,7 @@ fn native_window_derive(
     if plan.stage_cols.is_empty() {
         let mut derived: Vec<(String, Expr)> = Vec::with_capacity(parsed_cols.len());
         for (col_name_str, py_expr) in parsed_cols.iter() {
-            let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
-                .map_err(LtseqError::Transpile)?;
+            let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)?;
             derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
         }
         let all_exprs = crate::ops::common::merge_derived_columns(schema, derived);
@@ -282,8 +288,7 @@ fn native_window_derive(
     // Stage 1: original columns + hidden inner-window columns.
     let mut stage1: Vec<Expr> = original_columns(schema);
     for (hidden_name, py_expr) in plan.stage_cols.iter() {
-        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)
-            .map_err(LtseqError::Transpile)?;
+        let window_expr = pyexpr_to_window_expr(py_expr.clone(), schema, &table.sort_specs)?;
         stage1.push(window_expr.alias(hidden_name));
     }
     let stage_df = crate::ops::common::select_windowed((**df).clone(), stage1)
@@ -297,8 +302,7 @@ fn native_window_derive(
     let mut derived: Vec<(String, Expr)> = Vec::with_capacity(plan.final_cols.len());
     for (col_name_str, py_expr) in plan.final_cols.iter() {
         let window_expr =
-            pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)
-                .map_err(LtseqError::Transpile)?;
+            pyexpr_to_window_expr(py_expr.clone(), &stage_schema, &table.sort_specs)?;
         derived.push((col_name_str.clone(), window_expr.alias(col_name_str)));
     }
     let stage2 = crate::ops::common::merge_derived_columns(schema, derived);
@@ -390,8 +394,7 @@ fn native_cum_sum(
         }
 
         // Build native cum_sum expression: SUM(col) OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)
-        let mut col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr.clone(), schema)
-            .map_err(LtseqError::Transpile)?;
+        let mut col_expr = crate::transpiler::pyexpr_to_datafusion(py_expr.clone(), schema)?;
 
         // A Null-typed column (e.g. inferred from a header-only CSV) is
         // allowed by the numeric check but SUM(Null) has no return type.
@@ -420,8 +423,7 @@ fn native_cum_sum(
             order_by.clone(),
             frame,
         )
-        .and_then(|window| rx.resolve(window))
-        .map_err(LtseqError::Transpile)?;
+        .and_then(|window| rx.resolve(window).map_err(LtseqError::Transpile))?;
 
         let cumsum_col_name = format!("{}_cumsum", col_name);
         all_exprs.push(cumsum_expr.alias(&cumsum_col_name));

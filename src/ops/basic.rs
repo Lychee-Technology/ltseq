@@ -61,7 +61,7 @@ fn filter_parsed(table: &LTSeqTable, py_expr: PyExpr) -> Result<LTSeqTable, Ltse
     let schema = table.require_schema()?;
 
     // 3. Transpile to DataFusion expr
-    let df_expr = pyexpr_to_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
+    let df_expr = pyexpr_to_datafusion(py_expr, schema)?;
 
     // 4. Get DataFrame
     let df = table.require_df()?;
@@ -197,7 +197,7 @@ fn select_parsed(
         }
 
         // Transpile
-        let df_expr = pyexpr_to_named_datafusion(py_expr, schema).map_err(LtseqError::Transpile)?;
+        let df_expr = pyexpr_to_named_datafusion(py_expr, schema)?;
 
         df_exprs.push(df_expr);
     }
@@ -330,8 +330,7 @@ fn search_first_parsed(
     py_expr: PyExpr,
 ) -> Result<LTSeqTable, LtseqError> {
     // Transpile to DataFusion Expr
-    let df_expr = pyexpr_to_datafusion(py_expr, schema)
-        .map_err(LtseqError::Validation)?;
+    let df_expr = pyexpr_to_datafusion(py_expr, schema)?;
 
     // Apply filter and limit to first result (plan building only). "First"
     // is in table order, so the limit goes above the order; DataFusion moves
@@ -467,7 +466,7 @@ pub fn materialize_impl(table: &LTSeqTable) -> Result<LTSeqTable, LtseqError> {
     let schema = table.require_schema()?;
     let batches = crate::engine::RUNTIME
         .block_on(table.ordered_df()?.collect())
-        .map_err(|e| LtseqError::Runtime(format!("collect() materialization failed: {}", e)))?;
+        .map_err(|e| LtseqError::with_context("collect() materialization failed", e))?;
 
     // The data now lives in memory, so the snapshot drops source_parquet_path
     // and downstream ops scan it instead of re-reading the file. A 0-row plan

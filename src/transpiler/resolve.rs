@@ -208,10 +208,7 @@ impl<'a> Resolver<'a> {
     /// parent is lowered, which is when lowering asks about it (the type of
     /// an operand, a value, a list) and coerces the parent around it. A node
     /// lowering fails on, or DataFusion cannot coerce, is not remembered.
-    pub(crate) fn lowering(
-        &self,
-        lower: impl FnOnce() -> Result<Expr, String>,
-    ) -> Result<Expr, String> {
+    pub(crate) fn lowering<E>(&self, lower: impl FnOnce() -> Result<Expr, E>) -> Result<Expr, E> {
         let mark = self.known.borrow().len();
         let lowered = lower();
         let coerced = lowered

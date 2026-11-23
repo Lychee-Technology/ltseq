@@ -60,7 +60,8 @@ def test_timed_region_executes_the_whole_result(tmp_path, build):
     bench = bench_core.Benchmarks(str(tmp_path))
     t = small_table()
 
-    with pytest.raises(RuntimeError, match="Divide by zero"):
+    # collect() raises the ValueError every terminal gives a failed execution (#152).
+    with pytest.raises(ValueError, match="Divide by zero"):
         bench.run_benchmark(
             "boom", 100, lambda: build(t), group=bench_core.OPERATOR, warmup=0
         )

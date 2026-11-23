@@ -49,6 +49,20 @@ use url::{ParseError, Url};
 use crate::python_glob;
 use crate::stored_zones;
 
+/// The source a Parquet reader read, as the direct Parquet scans of the
+/// count fast paths may open it: the one local file the reader listed, by
+/// its absolute path as listed at the call ([`read_files`]), when the reader
+/// was given that file's local path; `None` when it was given anything else,
+/// a directory, a glob or a URL (a `file` URL included), which those scans
+/// do not read (R6-F1, R6-F2 and R7-F2 of #422's review).
+/// The scans open that path, so they read the file the table lists even
+/// after the working directory changes, and never a file that a glob or a
+/// relative spelling of the path names only later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParquetSource {
+    pub(crate) file: Option<String>,
+}
+
 /// Why a reader built no table.
 #[derive(Debug)]
 pub(crate) enum ReadError {
@@ -76,16 +90,19 @@ impl From<DataFusionError> for ReadError {
 /// URL, so an execution looks up each file and no directory. The schema is
 /// inferred from these files as DataFusion infers it from its listing, with
 /// the zones it leaves out of a Parquet file's schema ([`stored_zones`]);
-/// `options` carry none, as LTSeq's readers give none.
+/// `options` carry none, as LTSeq's readers give none. With the table comes
+/// the absolute path of the one local file it lists when `path` is the local
+/// path of that file, and `None` for a directory, a glob or a URL, a `file`
+/// URL included ([`ParquetSource`]).
 pub(crate) async fn read_files<'a>(
     session: &SessionContext,
     path: &str,
     options: impl ReadOptions<'a>,
-) -> Result<DataFrame, ReadError> {
+) -> Result<(DataFrame, Option<String>), ReadError> {
     let options =
         options.to_listing_options(&session.copied_config(), session.copied_table_options());
     let extension = options.file_extension.as_str();
-    let urls = locate(path, extension)?;
+    let (urls, local_path) = locate(path, extension)?;
     for url in urls.iter().filter(|url| url.is_collection()) {
         let dir = url.get_url().to_file_path();
         if let Some(dir) = dir.as_ref().ok().and_then(|dir| dir.to_str()) {
@@ -119,6 +136,14 @@ pub(crate) async fn read_files<'a>(
         .iter()
         .map(|file| file_url(&urls[0], &file.location))
         .collect::<Result<Vec<_>>>()?;
+    // A `file` URL is left to the general paths: the direct scans read the
+    // file's current schema rather than the one planned here, which only the
+    // plain local path they always read is allowed to do (R7-F2 of #422's
+    // review).
+    let file = match paths.as_slice() {
+        [only] if local_path && !urls[0].is_collection() => local_file(only),
+        _ => None,
+    };
     let config = ListingTableConfig::new_with_multi_paths(paths)
         .with_listing_options(options)
         .with_schema(schema);
@@ -126,11 +151,21 @@ pub(crate) async fn read_files<'a>(
     // footer it reads afresh ([`LocalFiles`]), where a cached copy would
     // outlive that footer.
     let table = ListingTable::try_new(config)?;
-    Ok(session.read_table(Arc::new(table))?)
+    Ok((session.read_table(Arc::new(table))?, file))
+}
+
+/// The absolute local path the listed file `url` names, or `None` for a
+/// file of another store or a path that is not UTF-8.
+fn local_file(url: &ListingTableUrl) -> Option<String> {
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.get_url().to_file_path().ok()?.into_os_string().into_string().ok()
 }
 
 /// The URLs of what `path` names now (contract §4.1), each a file or a
-/// directory to list, or `NotFound` if it names nothing.
+/// directory to list, or `NotFound` if it names nothing, and whether `path`
+/// was read as the local path it names, not as a glob or a URL.
 ///
 /// A local path that names an existing file or directory is read as itself,
 /// even when its name holds `*`, `?` or `[`. Any other local path that holds
@@ -139,14 +174,15 @@ pub(crate) async fn read_files<'a>(
 /// A URL is taken as written, as `ListingTableUrl::parse` takes it. A path
 /// that cannot be looked up, such as one in a directory that cannot be
 /// searched, is an error, not `NotFound` ([`python_glob::metadata`]).
-fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError> {
+fn locate(path: &str, extension: &str) -> Result<(Vec<ListingTableUrl>, bool), ReadError> {
     let local = std::path::Path::new(path);
     let exists =
         |path: &std::path::Path| -> Result<bool> { Ok(python_glob::metadata(path)?.is_some()) };
-    let url = if exists(local)? {
+    let local_path = exists(local)?;
+    let url = if local_path {
         local_url(local)?
     } else if is_local(path) && path.contains(['*', '?', '[']) {
-        return glob_files(path, extension);
+        return Ok((glob_files(path, extension)?, false));
     } else {
         let url = ListingTableUrl::parse(path)?;
         if let Ok(file) = url.get_url().to_file_path() {
@@ -166,7 +202,7 @@ fn locate(path: &str, extension: &str) -> Result<Vec<ListingTableUrl>, ReadError
         )
         .into());
     }
-    Ok(vec![as_collection_if_directory(url)?])
+    Ok((vec![as_collection_if_directory(url)?], local_path))
 }
 
 /// Whether `ListingTableUrl::parse` reads `path` as a local path, not a

@@ -574,9 +574,9 @@ pub fn write_csv_impl(table: &LTSeqTable, path: String) -> Result<(), LtseqError
         let mut writer = builder.build(output.file());
 
         for batch in &batches {
-            writer.write(batch).map_err(|e| {
-                LtseqError::Io(format!("Failed to write CSV batch: {}", e))
-            })?;
+            writer
+                .write(batch)
+                .map_err(|e| LtseqError::io("Failed to write CSV batch", e))?;
         }
 
         Ok::<_, LtseqError>(())
@@ -1218,31 +1218,28 @@ pub fn write_parquet_impl(
         let mut output = Output::create(&path)?;
 
         // Stream batches from DataFusion directly into the Parquet writer
-        let mut stream = df
-            .execute_stream()
-            .await
-            .map_err(|e| LtseqError::Runtime(format!("Failed to create stream: {}", e)))?;
+        // Executing the plan fails as a terminal's collect does; only the
+        // file's own failures are I/O.
+        let mut stream = df.execute_stream().await.map_err(LtseqError::collect)?;
 
         let units = ParquetUnits::of(&schema);
         let written = units
             .as_ref()
             .map_or(schema, |units| Arc::clone(&units.schema));
         let mut writer = ArrowWriter::try_new(output.file(), written, Some(props))
-            .map_err(|e| LtseqError::Io(format!("Failed to create Parquet writer: {}", e)))?;
+            .map_err(|e| LtseqError::io("Failed to create Parquet writer", e))?;
 
         let mut wrote_any = false;
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| {
-                LtseqError::Io(format!("Failed to read batch: {}", e))
-            })?;
+            let batch = batch_result.map_err(LtseqError::collect)?;
             let batch = match &units {
                 Some(units) => units.convert(&batch)?,
                 None => batch,
             };
             if batch.num_rows() > 0 {
-                writer.write(&batch).map_err(|e| {
-                    LtseqError::Io(format!("Failed to write Parquet batch: {}", e))
-                })?;
+                writer
+                    .write(&batch)
+                    .map_err(|e| LtseqError::io("Failed to write Parquet batch", e))?;
                 wrote_any = true;
             }
         }
@@ -1251,9 +1248,9 @@ pub fn write_parquet_impl(
             return Err(LtseqError::Validation("No data to write".into()));
         }
 
-        writer.close().map_err(|e| {
-            LtseqError::Io(format!("Failed to close Parquet writer: {}", e))
-        })?;
+        writer
+            .close()
+            .map_err(|e| LtseqError::io("Failed to close Parquet writer", e))?;
 
         output.commit(&path)
     })

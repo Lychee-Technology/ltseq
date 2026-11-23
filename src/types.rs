@@ -1,6 +1,6 @@
 //! PyExpr type definition and deserialization
 
-use crate::error::PyExprError;
+use crate::error::{validation_error, LtseqError, PyExprError};
 use crate::stack::MAX_EXPR_DEPTH;
 use datafusion::arrow::array::timezone::Tz;
 use datafusion::arrow::datatypes::TimeUnit;
@@ -83,7 +83,7 @@ impl LiteralValue {
 
     /// An integer argument: an `Int64`, or a `Decimal128` with an integral
     /// value that fits. Anything else is an error naming `what`.
-    pub fn require_i64(&self, what: &str) -> Result<i64, String> {
+    pub fn require_i64(&self, what: &str) -> Result<i64, LtseqError> {
         match self {
             LiteralValue::Int64(v) => Ok(*v),
             LiteralValue::Decimal128 { value, scale, .. } => {
@@ -93,28 +93,28 @@ impl LiteralValue {
                         return Ok(v);
                     }
                 }
-                Err(format!("{what} must be an integer, got {self}"))
+                Err(validation_error!("{what} must be an integer, got {self}"))
             }
-            _ => Err(format!("{what} must be an integer, got {self}")),
+            _ => Err(validation_error!("{what} must be an integer, got {self}")),
         }
     }
 
     /// A numeric argument: an `Int64`, `Float64` or `Decimal128` (the
     /// correctly rounded float of its decimal value).
-    pub fn require_f64(&self, what: &str) -> Result<f64, String> {
+    pub fn require_f64(&self, what: &str) -> Result<f64, LtseqError> {
         match self {
             LiteralValue::Int64(v) => Ok(*v as f64),
             LiteralValue::Float64(v) => Ok(*v),
             LiteralValue::Decimal128 { value, scale, .. } => Ok(decimal_to_f64(*value, *scale)),
-            _ => Err(format!("{what} must be a number, got {self}")),
+            _ => Err(validation_error!("{what} must be a number, got {self}")),
         }
     }
 
     /// A string argument; only a `String` literal qualifies.
-    pub fn require_str(&self, what: &str) -> Result<&str, String> {
+    pub fn require_str(&self, what: &str) -> Result<&str, LtseqError> {
         match self {
             LiteralValue::String(v) => Ok(v),
-            _ => Err(format!("{what} must be a string, got {self}")),
+            _ => Err(validation_error!("{what} must be a string, got {self}")),
         }
     }
 }
@@ -858,11 +858,16 @@ mod tests {
         }
     }
 
+    /// A `require_*` result with its error as the message Python sees.
+    fn msg<T>(result: Result<T, LtseqError>) -> Result<T, String> {
+        result.map_err(|e| e.to_string())
+    }
+
     #[test]
     fn require_i64_takes_integers_and_integral_decimals() {
-        assert_eq!(LiteralValue::Int64(-3).require_i64("k"), Ok(-3));
-        assert_eq!(decimal(30, 2, 1).require_i64("k"), Ok(3));
-        assert_eq!(decimal(-300, 3, 2).require_i64("k"), Ok(-3));
+        assert_eq!(msg(LiteralValue::Int64(-3).require_i64("k")), Ok(-3));
+        assert_eq!(msg(decimal(30, 2, 1).require_i64("k")), Ok(3));
+        assert_eq!(msg(decimal(-300, 3, 2).require_i64("k")), Ok(-3));
         let table = [
             (decimal(15, 2, 1), "k must be an integer, got a Decimal128 literal 1.5"),
             (
@@ -878,32 +883,32 @@ mod tests {
             (LiteralValue::Null, "k must be an integer, got a Null literal"),
         ];
         for (value, expected) in table {
-            assert_eq!(value.require_i64("k"), Err(expected.to_string()), "{value:?}");
+            assert_eq!(msg(value.require_i64("k")), Err(expected.to_string()), "{value:?}");
         }
     }
 
     #[test]
     fn require_f64_takes_every_number_kind() {
-        assert_eq!(LiteralValue::Int64(2).require_f64("p"), Ok(2.0));
-        assert_eq!(LiteralValue::Float64(0.5).require_f64("p"), Ok(0.5));
-        assert_eq!(decimal(95, 2, 2).require_f64("p"), Ok(0.95));
+        assert_eq!(msg(LiteralValue::Int64(2).require_f64("p")), Ok(2.0));
+        assert_eq!(msg(LiteralValue::Float64(0.5).require_f64("p")), Ok(0.5));
+        assert_eq!(msg(decimal(95, 2, 2).require_f64("p")), Ok(0.95));
         // Correctly rounded, like Python's float(Decimal("0.1")).
-        assert_eq!(decimal(1, 1, 1).require_f64("p"), Ok(0.1));
+        assert_eq!(msg(decimal(1, 1, 1).require_f64("p")), Ok(0.1));
         assert_eq!(
-            LiteralValue::String("0.5".to_string()).require_f64("p"),
+            msg(LiteralValue::String("0.5".to_string()).require_f64("p")),
             Err("p must be a number, got a String literal '0.5'".to_string())
         );
         assert_eq!(
-            LiteralValue::Date32(0).require_f64("p"),
+            msg(LiteralValue::Date32(0).require_f64("p")),
             Err("p must be a number, got a Date32 literal (day 0)".to_string())
         );
     }
 
     #[test]
     fn require_str_takes_only_strings() {
-        assert_eq!(LiteralValue::String("day".to_string()).require_str("unit"), Ok("day"));
+        assert_eq!(msg(LiteralValue::String("day".to_string()).require_str("unit")), Ok("day"));
         assert_eq!(
-            LiteralValue::Int64(5).require_str("unit"),
+            msg(LiteralValue::Int64(5).require_str("unit")),
             Err("unit must be a string, got an Int64 literal 5".to_string())
         );
     }

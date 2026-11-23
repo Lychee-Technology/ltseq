@@ -83,8 +83,9 @@ def divide_by_zero_on_last_row() -> LTSeq:
         return t.derive(lambda r: {"q": r.n // r.d})
 
 
-# (writer, table, exception, message). Where the class is `Exception`, the
-# writers disagree on it (#266 settles classes); it still excludes a panic.
+# (writer, table, exception, message). A failure after the output opened,
+# whether the writer's own or the plan's, is a `ValueError` from both writers
+# (#152); #266 gives them classes of their own.
 FAILURES = {
     # The types refused at the call.
     "parquet struct<>": (
@@ -103,16 +104,16 @@ FAILURES = {
     "csv list<int64>": (
         "write_csv",
         lambda: table(x=pa.array([[1]], pa.list_(pa.int64()))),
-        Exception,
-        "not supported in CSV",
+        ValueError,
+        "I/O error .*not supported in CSV",
     ),
     "parquet execution error": (
         "write_parquet",
         divide_by_zero_on_last_row,
-        Exception,
+        ValueError,
         "Divide by zero",
     ),
-    "csv execution error": ("write_csv", divide_by_zero_on_last_row, Exception, "Divide by zero"),
+    "csv execution error": ("write_csv", divide_by_zero_on_last_row, ValueError, "Divide by zero"),
     # Until #270 writes a valid file for 0 rows.
     "parquet 0 rows": (
         "write_parquet",

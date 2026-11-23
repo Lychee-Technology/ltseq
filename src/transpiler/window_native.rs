@@ -19,6 +19,7 @@
 //! When `partition_by` is specified, any sort expression that matches a partition
 //! column is filtered out of ORDER BY to avoid redundant sorting.
 
+use crate::error::{transpile_error, LtseqError};
 use crate::types::{arg, Arg, LiteralValue, PyExpr};
 use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
 use datafusion::logical_expr::expr::Sort;
@@ -72,7 +73,7 @@ fn peek_partition_by_cols(py_expr: &PyExpr) -> Vec<String> {
 fn extract_partition_by(
     kwargs: &HashMap<String, PyExpr>,
     rx: &Resolver<'_>,
-) -> Result<Vec<Expr>, String> {
+) -> Result<Vec<Expr>, LtseqError> {
     let pb = match kwargs.get("partition_by") {
         Some(pb) => pb,
         None => return Ok(vec![]),
@@ -102,7 +103,7 @@ pub(crate) fn aggregate_to_window(
     partition_by: Vec<Expr>,
     order_by: Vec<Sort>,
     frame: WindowFrame,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match agg_expr {
         Expr::AggregateFunction(agg_func) => {
             Ok(Expr::WindowFunction(Box::new(WindowFunctionExpr {
@@ -120,7 +121,7 @@ pub(crate) fn aggregate_to_window(
                 },
             })))
         }
-        _ => Err(format!(
+        _ => Err(transpile_error!(
             "Expected AggregateFunction expr, got: {:?}",
             agg_expr
         )),
@@ -138,7 +139,7 @@ pub(crate) fn finalize_window_expr(
     partition_by_exprs: Vec<Expr>,
     order_by: &[Sort],
     context: &str,
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     // Start by applying partition_by (if any). We need at least one builder method
     // call to get an ExprFuncBuilder, so we always call order_by or partition_by.
     if order_by.is_empty() && partition_by_exprs.is_empty() {
@@ -151,7 +152,7 @@ pub(crate) fn finalize_window_expr(
         window_expr
             .partition_by(partition_by_exprs)
             .build()
-            .map_err(|e| format!("Failed to build {} window expr: {}", context, e))
+            .map_err(|e| transpile_error!("Failed to build {} window expr: {}", context, e))
     } else {
         let mut builder = window_expr.order_by(order_by.to_vec());
         if !partition_by_exprs.is_empty() {
@@ -159,7 +160,7 @@ pub(crate) fn finalize_window_expr(
         }
         builder
             .build()
-            .map_err(|e| format!("Failed to build {} window expr: {}", context, e))
+            .map_err(|e| transpile_error!("Failed to build {} window expr: {}", context, e))
     }
 }
 
@@ -167,7 +168,7 @@ pub fn pyexpr_to_window_expr(
     py_expr: PyExpr,
     schema: &ArrowSchema,
     sort_specs: &[crate::SortSpec],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     // Filter out sort expressions that duplicate partition_by columns.
     // Within a partition, all rows share the same partition key values,
     // so ordering by a partition key is redundant and wastes sort effort.
@@ -179,8 +180,8 @@ pub fn pyexpr_to_window_expr(
         .map(|spec| spec.to_window_sort())
         .collect();
 
-    let rx = Resolver::new(schema)?;
-    rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?)
+    let rx = Resolver::new(schema).map_err(LtseqError::Transpile)?;
+    rx.resolve(pyexpr_to_window_inner(py_expr, &rx, &order_by)?).map_err(LtseqError::Transpile)
 }
 
 /// Internal recursive conversion, one node at a time through
@@ -189,7 +190,7 @@ fn pyexpr_to_window_inner(
     py_expr: PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     crate::stack::guarded(|| rx.lowering(|| lower_window_node(py_expr, rx, order_by)))
 }
 
@@ -197,7 +198,7 @@ fn lower_window_node(
     py_expr: PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     match &py_expr {
         PyExpr::Call { func, .. } => match func.as_str() {
             "shift" => convert_shift(&py_expr, rx, order_by),
@@ -219,7 +220,7 @@ fn lower_window_node(
                     }
                 }
                 // Not a rolling aggregation - fall back to non-window conversion
-                Err(format!(
+                Err(transpile_error!(
                     "Aggregation function '{}' not applied to rolling() - not a window function",
                     func
                 ))
@@ -239,9 +240,9 @@ fn lower_window_node(
             PyExpr::Call { func, on, .. } if super::is_window_call(func, on.as_deref()) => {
                 convert_window_sequence(&py_expr, rx, order_by)
             }
-            _ => Err(
-                ".over() must wrap a ranking or sequence window function".to_string(),
-            ),
+            _ => Err(transpile_error!(
+                ".over() must wrap a ranking or sequence window function"
+            )),
         },
         // BinOp, UnaryOp might contain window functions in their children
         PyExpr::BinOp { .. } | PyExpr::UnaryOp { .. } => {
@@ -259,18 +260,20 @@ fn convert_shift(
     py_expr: &PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Call {
         on, args, kwargs, ..
     } = py_expr
     {
         let col_expr =
-            super::lower_expr(super::require_on(on.as_deref(), "shift")?.clone(), rx)?;
+            super::lower_expr(super::receiver(on.as_deref(), "shift")?.clone(), rx)?;
 
         let offset = match arg(args, 0) {
             Arg::Absent => 1,
             Arg::Literal(value) => value.require_i64("shift() offset")?,
-            Arg::Expr(_) => return Err("shift() offset must be a literal integer".to_string()),
+            Arg::Expr(_) => {
+                return Err(transpile_error!("shift() offset must be a literal integer"))
+            }
         };
 
         // lag/lead take the default as a scalar, so only a literal can be one.
@@ -280,8 +283,8 @@ fn convert_shift(
                 &col_expr,
                 value.to_scalar_value(),
                 rx,
-            )?),
-            Some(_) => return Err("shift() default must be a literal value".to_string()),
+            ).map_err(LtseqError::Transpile)?),
+            Some(_) => return Err(transpile_error!("shift() default must be a literal value")),
         };
 
         // Extract partition_by from kwargs
@@ -293,31 +296,37 @@ fn convert_shift(
         } else {
             let lead_by = offset
                 .checked_neg()
-                .ok_or_else(|| format!("shift() offset {offset} is out of range"))?;
+                .ok_or_else(|| transpile_error!("shift() offset {offset} is out of range"))?;
             lead(col_expr, Some(lead_by), default_value)
         };
 
         finalize_window_expr(window_expr, partition_by_exprs, order_by, "shift")
     } else {
-        Err("Expected Call expression for shift".to_string())
+        Err(transpile_error!("Expected Call expression for shift"))
     }
 }
 
 /// Convert diff(n) to col - lag(col, n) with ORDER BY
 ///
 /// Supports `partition_by` kwarg: `diff(n, partition_by="col")`
-fn convert_diff(py_expr: &PyExpr, rx: &Resolver<'_>, order_by: &[Sort]) -> Result<Expr, String> {
+fn convert_diff(
+    py_expr: &PyExpr,
+    rx: &Resolver<'_>,
+    order_by: &[Sort],
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Call {
         on, args, kwargs, ..
     } = py_expr
     {
         let col_expr =
-            super::lower_expr(super::require_on(on.as_deref(), "diff")?.clone(), rx)?;
+            super::lower_expr(super::receiver(on.as_deref(), "diff")?.clone(), rx)?;
 
         let periods = match arg(args, 0) {
             Arg::Absent => 1,
             Arg::Literal(value) => value.require_i64("diff() periods")?,
-            Arg::Expr(_) => return Err("diff() periods must be a literal integer".to_string()),
+            Arg::Expr(_) => {
+                return Err(transpile_error!("diff() periods must be a literal integer"))
+            }
         };
 
         // Extract partition_by from kwargs
@@ -329,7 +338,7 @@ fn convert_diff(py_expr: &PyExpr, rx: &Resolver<'_>, order_by: &[Sort]) -> Resul
 
         Ok(col_expr - lag_with_order)
     } else {
-        Err("Expected Call expression for diff".to_string())
+        Err(transpile_error!("Expected Call expression for diff"))
     }
 }
 
@@ -342,10 +351,10 @@ fn convert_cum_agg(
     py_expr: &PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Call { on, kwargs, .. } = py_expr {
         let col_expr =
-            super::lower_expr(super::require_on(on.as_deref(), &func)?.clone(), rx)?;
+            super::lower_expr(super::receiver(on.as_deref(), &func)?.clone(), rx)?;
 
         // Extract partition_by from kwargs
         let partition_by_exprs = extract_partition_by(kwargs, rx)?;
@@ -354,7 +363,7 @@ fn convert_cum_agg(
             "cum_sum" => sum(col_expr),
             "cum_max" => max(col_expr),
             "cum_min" => min(col_expr),
-            other => return Err(format!("Unknown cumulative aggregate: '{}'", other)),
+            other => return Err(transpile_error!("Unknown cumulative aggregate: '{}'", other)),
         };
         let frame = WindowFrame::new_bounds(
             WindowFrameUnits::Rows,
@@ -364,7 +373,7 @@ fn convert_cum_agg(
 
         aggregate_to_window(agg_expr, partition_by_exprs, order_by.to_vec(), frame)
     } else {
-        Err(format!("Expected Call expression for {}", func))
+        Err(transpile_error!("Expected Call expression for {}", func))
     }
 }
 
@@ -376,7 +385,7 @@ fn convert_rolling_agg(
     py_expr: &PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Call { func, on, .. } = py_expr {
         // `on` is the rolling() call
         if let Some(PyExpr::Call {
@@ -388,17 +397,17 @@ fn convert_rolling_agg(
         {
             // Get window size from rolling() args
             let window_size = match arg(inner_args, 0) {
-                Arg::Absent => return Err("rolling() requires a window size".to_string()),
+                Arg::Absent => return Err(transpile_error!("rolling() requires a window size")),
                 Arg::Literal(value) => value.require_i64("rolling() window size")?,
                 Arg::Expr(_) => {
-                    return Err("rolling() window size must be a literal integer".to_string())
+                    return Err(transpile_error!("rolling() window size must be a literal integer"))
                 }
             };
 
             // A window size below 1 used to be silently clamped to a
             // degenerate current-row-only frame (issue #125 finding 8).
             if window_size < 1 {
-                return Err(format!(
+                return Err(transpile_error!(
                     "rolling() window size must be >= 1, got {}",
                     window_size
                 ));
@@ -411,16 +420,15 @@ fn convert_rolling_agg(
                 match key.as_str() {
                     "partition_by" => {}
                     "min_periods" => {
-                        return Err(
+                        return Err(transpile_error!(
                             "rolling() does not support min_periods; LTSeq rolling \
                              uses SQL partial-frame semantics (the window start is \
                              clipped at the first row, so early rows aggregate over \
                              fewer than window_size rows)"
-                                .to_string(),
-                        )
+                        ))
                     }
                     other => {
-                        return Err(format!(
+                        return Err(transpile_error!(
                             "rolling() got an unexpected keyword argument '{}'; \
                              supported: partition_by",
                             other
@@ -431,7 +439,7 @@ fn convert_rolling_agg(
 
             // Get the column being aggregated
             let col_expr = super::lower_expr(
-                super::require_on(inner_on.as_deref(), "rolling")?.clone(),
+                super::receiver(inner_on.as_deref(), "rolling")?.clone(),
                 rx,
             )?;
 
@@ -446,7 +454,12 @@ fn convert_rolling_agg(
                 "max" => max(col_expr),
                 "count" => count(col_expr),
                 "std" => stddev(col_expr),
-                _ => return Err(format!("Unknown rolling aggregation function: {}", func)),
+                _ => {
+                    return Err(transpile_error!(
+                        "Unknown rolling aggregation function: {}",
+                        func
+                    ))
+                }
             };
 
             // Build window frame: ROWS BETWEEN (window_size-1) PRECEDING AND CURRENT ROW
@@ -461,10 +474,10 @@ fn convert_rolling_agg(
 
             aggregate_to_window(agg_expr, partition_by_exprs, order_by.to_vec(), frame)
         } else {
-            Err("Expected rolling() call as inner expression".to_string())
+            Err(transpile_error!("Expected rolling() call as inner expression"))
         }
     } else {
-        Err("Expected Call expression for rolling aggregation".to_string())
+        Err(transpile_error!("Expected Call expression for rolling aggregation"))
     }
 }
 
@@ -478,9 +491,9 @@ fn over_order_by(
     descending: bool,
     nulls_last: bool,
     rx: &Resolver<'_>,
-) -> Result<Sort, String> {
+) -> Result<Sort, LtseqError> {
     let expr = super::lower_expr(order_by.clone(), rx)?;
-    let data_type = rx.data_type(&expr)?;
+    let data_type = rx.data_type(&expr).map_err(LtseqError::Transpile)?;
     Ok(Sort {
         expr: crate::order_key::order_key(expr, &data_type),
         asc: !descending,
@@ -493,7 +506,7 @@ fn convert_window_ranking(
     py_expr: &PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Window {
         expr,
         partition_by,
@@ -505,7 +518,7 @@ fn convert_window_ranking(
         // Get the inner function call
         let (func_name, args) = match expr.as_ref() {
             PyExpr::Call { func, args, .. } => (func.as_str(), args),
-            _ => return Err("Window expression must wrap a function call".to_string()),
+            _ => return Err(transpile_error!("Window expression must wrap a function call")),
         };
 
         // Create the window function
@@ -515,14 +528,14 @@ fn convert_window_ranking(
             "dense_rank" => dense_rank(),
             "ntile" => match arg(args, 0) {
                 Arg::Absent => {
-                    return Err("ntile() requires a bucket count argument".to_string())
+                    return Err(transpile_error!("ntile() requires a bucket count argument"))
                 }
                 Arg::Literal(value) => ntile(lit(value.require_i64("ntile() bucket count")?)),
                 Arg::Expr(_) => {
-                    return Err("ntile() bucket count must be a literal integer".to_string())
+                    return Err(transpile_error!("ntile() bucket count must be a literal integer"))
                 }
             },
-            _ => return Err(format!("Unsupported window function: {}", func_name)),
+            _ => return Err(transpile_error!("Unsupported window function: {}", func_name)),
         };
 
         // Build PARTITION BY
@@ -553,10 +566,10 @@ fn convert_window_ranking(
         // count, so Int64 holds every one exactly (#323).
         let ranking = builder
             .build()
-            .map_err(|e| format!("Failed to build window ranking expr: {}", e))?;
+            .map_err(|e| transpile_error!("Failed to build window ranking expr: {}", e))?;
         Ok(cast(ranking, DataType::Int64))
     } else {
-        Err("Expected Window expression".to_string())
+        Err(transpile_error!("Expected Window expression"))
     }
 }
 
@@ -572,7 +585,7 @@ fn convert_window_sequence(
     py_expr: &PyExpr,
     rx: &Resolver<'_>,
     table_order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     if let PyExpr::Window {
         expr,
         partition_by,
@@ -594,7 +607,7 @@ fn convert_window_sequence(
         let synthesized = synthesize_seq_call(expr.as_ref(), partition_by.as_deref())?;
         pyexpr_to_window_inner(synthesized, rx, &effective_order_by)
     } else {
-        Err("Expected Window expression for sequence window".to_string())
+        Err(transpile_error!("Expected Window expression for sequence window"))
     }
 }
 
@@ -602,7 +615,10 @@ fn convert_window_sequence(
 /// matching converter reads. For `rolling(n).agg()` the kwarg lives on the
 /// inner `rolling()` call (where convert_rolling_agg reads it), not the outer
 /// aggregate. With no partition_by the call is returned unchanged.
-fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<PyExpr, String> {
+fn synthesize_seq_call(
+    inner: &PyExpr,
+    partition_by: Option<&PyExpr>,
+) -> Result<PyExpr, LtseqError> {
     let pb = match partition_by {
         Some(pb) => pb.clone(),
         None => return Ok(inner.clone()),
@@ -642,7 +658,7 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
                     on: Some(Box::new(new_rolling)),
                 })
             } else {
-                Err("Expected rolling() call in rolling aggregate".to_string())
+                Err(transpile_error!("Expected rolling() call in rolling aggregate"))
             }
         } else {
             let mut new_kwargs = kwargs.clone();
@@ -655,7 +671,7 @@ fn synthesize_seq_call(inner: &PyExpr, partition_by: Option<&PyExpr>) -> Result<
             })
         }
     } else {
-        Err("Window must wrap a function call".to_string())
+        Err(transpile_error!("Window must wrap a function call"))
     }
 }
 
@@ -670,10 +686,10 @@ fn convert_cast_over_window(
     args: &[PyExpr],
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     use crate::transpiler::contains_window_function;
 
-    let on = super::require_on(on, "cast")?;
+    let on = super::receiver(on, "cast")?;
     let on_expr = if contains_window_function(&on) {
         pyexpr_to_window_inner(*on, rx, order_by)?
     } else {
@@ -709,7 +725,7 @@ fn convert_expr_with_window_children(
     py_expr: PyExpr,
     rx: &Resolver<'_>,
     order_by: &[Sort],
-) -> Result<Expr, String> {
+) -> Result<Expr, LtseqError> {
     use crate::transpiler::contains_window_function;
 
     match py_expr {
@@ -739,7 +755,7 @@ fn convert_expr_with_window_children(
             };
             match op.as_str() {
                 "Not" => Ok(operand_expr.not()),
-                _ => Err(format!("Unknown unary operator: {}", op)),
+                _ => Err(transpile_error!("Unknown unary operator: {}", op)),
             }
         }
         PyExpr::Call {
@@ -754,14 +770,14 @@ fn convert_expr_with_window_children(
 
             match func.as_str() {
                 "fill_null" => {
-                    let on = super::require_on(on, &func)?;
+                    let on = super::receiver(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
                         super::lower_expr(*on, rx)?
                     };
                     if args.is_empty() {
-                        return Err("fill_null requires a default value".to_string());
+                        return Err(transpile_error!("fill_null requires a default value"));
                     }
                     let default_expr = if contains_window_function(&args[0]) {
                         pyexpr_to_window_inner(args[0].clone(), rx, order_by)?
@@ -769,9 +785,10 @@ fn convert_expr_with_window_children(
                         super::lower_expr(args[0].clone(), rx)?
                     };
                     super::literals::coalesce_values(vec![on_expr, default_expr], rx)
+                        .map_err(LtseqError::Transpile)
                 }
                 "is_null" => {
-                    let on = super::require_on(on, &func)?;
+                    let on = super::receiver(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
@@ -780,7 +797,7 @@ fn convert_expr_with_window_children(
                     Ok(on_expr.is_null())
                 }
                 "is_not_null" => {
-                    let on = super::require_on(on, &func)?;
+                    let on = super::receiver(on, &func)?;
                     let on_expr = if contains_window_function(&on) {
                         pyexpr_to_window_inner(*on, rx, order_by)?
                     } else {
@@ -790,7 +807,7 @@ fn convert_expr_with_window_children(
                 }
                 "if_else" => {
                     if args.len() != 3 {
-                        return Err("if_else requires 3 arguments".to_string());
+                        return Err(transpile_error!("if_else requires 3 arguments"));
                     }
                     let cond_expr = if contains_window_function(&args[0]) {
                         pyexpr_to_window_inner(args[0].clone(), rx, order_by)?
@@ -808,6 +825,7 @@ fn convert_expr_with_window_children(
                         super::lower_expr(args[2].clone(), rx)?
                     };
                     super::literals::if_else(cond_expr, true_expr, false_expr, rx)
+                        .map_err(LtseqError::Transpile)
                 }
                 "abs" | "ceil" | "floor" | "round" => {
                     use datafusion::functions::math::expr_fn::{abs, ceil, floor, round};
@@ -818,9 +836,9 @@ fn convert_expr_with_window_children(
                     let (input, rest) = match on {
                         Some(on) => (*on, args.as_slice()),
                         None => {
-                            let (first, rest) = args
-                                .split_first()
-                                .ok_or_else(|| format!("{}() requires an argument", func))?;
+                            let (first, rest) = args.split_first().ok_or_else(|| {
+                                transpile_error!("{}() requires an argument", func)
+                            })?;
                             (first.clone(), rest)
                         }
                     };
@@ -846,7 +864,7 @@ fn convert_expr_with_window_children(
                 _ if on.as_deref().is_some_and(contains_window_function)
                     || args.iter().any(contains_window_function) =>
                 {
-                    Err(window_input_unsupported(&func))
+                    Err(LtseqError::Transpile(window_input_unsupported(&func)))
                 }
                 _ => {
                     // For other function calls, try to handle as non-window

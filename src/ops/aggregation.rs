@@ -12,7 +12,7 @@
 //! round-trips).
 
 use crate::engine::RUNTIME;
-use crate::error::LtseqError;
+use crate::error::{validation_error, LtseqError};
 use crate::transpiler::{min_max, narrow_decimals, Resolver};
 use crate::types::{arg, dict_to_py_expr, Arg, PyExpr};
 use crate::LTSeqTable;
@@ -39,6 +39,14 @@ enum AggPlan {
     },
 }
 
+/// A column an aggregate names, which `schema` must have
+/// (`transpiler::parse_column_expr`): a missing one is `ColumnNotFound`
+/// before DataFusion plans anything, as in the aggregates that lower an
+/// expression (#152).
+fn user_column(name: &str, schema: &ArrowSchema) -> Result<Expr, LtseqError> {
+    crate::transpiler::parse_column_expr(name, schema)
+}
+
 /// Every supported aggregate maps to a native plan — there is no fallback.
 ///
 /// `table_order` is the input's declared order (its `sort_specs`), which
@@ -48,9 +56,9 @@ fn pyexpr_to_agg_plan(
     schema: &ArrowSchema,
     out_key: &str,
     table_order: &[SortExpr],
-) -> Result<AggPlan, String> {
+) -> Result<AggPlan, LtseqError> {
     let PyExpr::Call { func, on, args, .. } = py_expr else {
-        return Err("Expected aggregate function call".to_string());
+        return Err(validation_error!("Expected aggregate function call"));
     };
 
     match func.as_str() {
@@ -58,14 +66,17 @@ fn pyexpr_to_agg_plan(
         "sum" | "count" | "min" | "max" | "avg" | "mean" | "median" | "variance" | "var"
         | "stddev" | "std" => {
             let col_expr = match on.as_deref() {
-                Some(PyExpr::Column(col_name)) => {
-                    Expr::Column(Column::new_unqualified(col_name))
-                }
+                Some(PyExpr::Column(col_name)) => user_column(col_name, schema)?,
                 _ if func == "count" => {
                     // count() without a specific column → count(*)
                     lit(1i64)
                 }
-                _ => return Err(format!("Aggregate '{}' requires a column reference", func)),
+                _ => {
+                    return Err(validation_error!(
+                        "Aggregate '{}' requires a column reference",
+                        func
+                    ))
+                }
             };
 
             let agg_expr = match func.as_str() {
@@ -83,38 +94,46 @@ fn pyexpr_to_agg_plan(
         }
         "percentile" => {
             let col_expr = match on.as_deref() {
-                Some(PyExpr::Column(col_name)) => {
-                    Expr::Column(Column::new_unqualified(col_name))
-                }
-                _ => return Err("percentile requires a column reference".to_string()),
+                Some(PyExpr::Column(col_name)) => user_column(col_name, schema)?,
+                _ => return Err(validation_error!("percentile requires a column reference")),
             };
             // The default applies only when p is absent; a supplied argument
             // that is not a number in [0, 1] is an error, never the median.
             let p = match arg(args, 0) {
                 Arg::Absent => 0.5,
-                Arg::Literal(value) => value.require_f64("percentile() p")?,
-                Arg::Expr(_) => return Err("percentile() p must be a literal number".to_string()),
+                Arg::Literal(value) => value
+                    .require_f64("percentile() p")?,
+                Arg::Expr(_) => {
+                    return Err(validation_error!("percentile() p must be a literal number"))
+                }
             };
             if !(0.0..=1.0).contains(&p) {
-                return Err(format!("percentile() p must be between 0 and 1, got {p}"));
+                return Err(validation_error!(
+                    "percentile() p must be between 0 and 1, got {p}"
+                ));
             }
             let sort = datafusion::logical_expr::SortExpr::new(col_expr, true, false);
             Ok(AggPlan::Plain(agg_fn::approx_percentile_cont(sort, lit(p), None)))
         }
         // Conditional aggregations
         "count_if" => {
-            let predicate = args.first().ok_or("count_if requires a predicate argument")?;
+            let predicate = args
+                .first()
+                .ok_or_else(|| validation_error!("count_if requires a predicate argument"))?;
             let pred_expr = crate::transpiler::pyexpr_to_datafusion(predicate.clone(), schema)?;
             // count_if(cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
             let case_expr = case(pred_expr)
                 .when(lit(true), lit(1i64))
                 .otherwise(lit(0i64))
-                .map_err(|e| format!("Failed to create CASE: {}", e))?;
+                .map_err(|e| validation_error!("Failed to create CASE: {}", e))?;
             Ok(AggPlan::Plain(agg_fn::sum(case_expr)))
         }
         "sum_if" | "avg_if" | "min_if" | "max_if" => {
             if args.len() < 2 {
-                return Err(format!("{} requires predicate and column arguments", func));
+                return Err(validation_error!(
+                    "{} requires predicate and column arguments",
+                    func
+                ));
             }
             let pred_expr = crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?;
             let col_expr = crate::transpiler::pyexpr_to_datafusion(args[1].clone(), schema)?;
@@ -124,7 +143,10 @@ fn pyexpr_to_agg_plan(
                 // column to the Int64 of the 0; widened first, it is summed
                 // as decimal128, as `sum` sums it (#241).
                 "sum_if" => {
-                    let summed = match Resolver::new(schema)?.value_type(&col_expr) {
+                    let summed = match Resolver::new(schema)
+                        .map_err(LtseqError::Validation)?
+                        .value_type(&col_expr)
+                    {
                         Ok(value_type) => narrow_decimals::widened(col_expr, &value_type),
                         Err(_) => col_expr,
                     };
@@ -136,7 +158,7 @@ fn pyexpr_to_agg_plan(
             let case_expr = case(pred_expr)
                 .when(lit(true), true_val)
                 .otherwise(false_val)
-                .map_err(|e| format!("Failed to create CASE: {}", e))?;
+                .map_err(|e| validation_error!("Failed to create CASE: {}", e))?;
 
             let agg_expr = match func.as_str() {
                 "sum_if" => agg_fn::sum(case_expr),
@@ -152,7 +174,7 @@ fn pyexpr_to_agg_plan(
             // corr(col_a, col_b) — both come from args for a standalone call
             let (col_a, col_b) = if let Some(on) = on {
                 if args.is_empty() {
-                    return Err("corr requires a second column argument".to_string());
+                    return Err(validation_error!("corr requires a second column argument"));
                 }
                 (
                     crate::transpiler::pyexpr_to_datafusion((**on).clone(), schema)?,
@@ -160,7 +182,7 @@ fn pyexpr_to_agg_plan(
                 )
             } else {
                 if args.len() < 2 {
-                    return Err("corr requires two column arguments".to_string());
+                    return Err(validation_error!("corr requires two column arguments"));
                 }
                 (
                     crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
@@ -172,7 +194,7 @@ fn pyexpr_to_agg_plan(
         "covar" => {
             let (col_a, col_b) = if let Some(on) = on {
                 if args.is_empty() {
-                    return Err("covar requires a second column argument".to_string());
+                    return Err(validation_error!("covar requires a second column argument"));
                 }
                 (
                     crate::transpiler::pyexpr_to_datafusion((**on).clone(), schema)?,
@@ -180,7 +202,7 @@ fn pyexpr_to_agg_plan(
                 )
             } else {
                 if args.len() < 2 {
-                    return Err("covar requires two column arguments".to_string());
+                    return Err(validation_error!("covar requires two column arguments"));
                 }
                 (
                     crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?,
@@ -201,7 +223,7 @@ fn pyexpr_to_agg_plan(
                 (col, delim)
             } else {
                 if args.is_empty() {
-                    return Err("concat_agg requires a column argument".to_string());
+                    return Err(validation_error!("concat_agg requires a column argument"));
                 }
                 let col = crate::transpiler::pyexpr_to_datafusion(args[0].clone(), schema)?;
                 let delim = if args.len() > 1 {
@@ -220,26 +242,26 @@ fn pyexpr_to_agg_plan(
         // legacy SQL expression exactly.
         "top_k" => {
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
-                return Err("top_k requires a column reference".to_string());
+                return Err(validation_error!("top_k requires a column reference"));
             };
             // The default applies only when k is absent; a supplied argument
             // that is not a positive integer is an error, never 10.
             let k = match arg(args, 0) {
                 Arg::Absent => 10,
-                Arg::Literal(value) => value.require_i64("top_k() k")?,
-                Arg::Expr(_) => return Err("top_k() k must be a literal integer".to_string()),
+                Arg::Literal(value) => value
+                    .require_i64("top_k() k")?,
+                Arg::Expr(_) => {
+                    return Err(validation_error!("top_k() k must be a literal integer"))
+                }
             };
             if k < 1 {
-                return Err(format!("top_k() k must be >= 1, got {k}"));
+                return Err(validation_error!("top_k() k must be >= 1, got {k}"));
             }
             // array_slice takes an i32 end index; any k beyond it already
             // means "every value", so clamp instead of failing at collect.
             let k = k.min(i64::from(i32::MAX));
 
-            let col_f64 = cast(
-                Expr::Column(Column::new_unqualified(col_name)),
-                DataType::Float64,
-            );
+            let col_f64 = cast(user_column(col_name, schema)?, DataType::Float64);
             // ORDER BY col DESC NULLS LAST, so a NULL never takes one of the
             // k slots (#199); array_to_string drops the NULLs a slice past
             // the non-null values still reaches. An all-NULL group keeps
@@ -248,7 +270,7 @@ fn pyexpr_to_agg_plan(
             let agg = agg_fn::array_agg(col_f64)
                 .order_by(vec![sort])
                 .build()
-                .map_err(|e| format!("Failed to build top_k array_agg: {}", e))?;
+                .map_err(|e| validation_error!("Failed to build top_k array_agg: {}", e))?;
 
             let hidden = format!("__{}_topk_arr", out_key);
             use datafusion::functions_nested::expr_fn::{array_slice, array_to_string};
@@ -273,19 +295,17 @@ fn pyexpr_to_agg_plan(
         // required. "last" is first_value over the reversed order.
         "first" | "last" => {
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
-                return Err(format!("{} requires a column reference", func));
+                return Err(validation_error!("{} requires a column reference", func));
             };
-            let col_expr = Expr::Column(Column::new_unqualified(col_name));
+            let col_expr = user_column(col_name, schema)?;
             let order: Vec<SortExpr> = match args.first() {
-                Some(PyExpr::Column(name)) if !name.is_empty() => vec![SortExpr::new(
-                    Expr::Column(Column::new_unqualified(name)),
-                    true,
-                    false,
-                )],
+                Some(PyExpr::Column(name)) if !name.is_empty() => {
+                    vec![SortExpr::new(user_column(name, schema)?, true, false)]
+                }
                 None if !table_order.is_empty() => table_order.to_vec(),
-                None => return Err(format!("{}() requires a declared row order", func)),
+                None => return Err(validation_error!("{}() requires a declared row order", func)),
                 Some(_) => {
-                    return Err(format!(
+                    return Err(validation_error!(
                         "{}() takes no arguments in agg(); it reads each group's rows in table order",
                         func
                     ))
@@ -303,9 +323,9 @@ fn pyexpr_to_agg_plan(
         // deferred per issue #91 risk 3.
         "mode" => {
             let Some(PyExpr::Column(col_name)) = on.as_deref() else {
-                return Err("mode requires a column reference".to_string());
+                return Err(validation_error!("mode requires a column reference"));
             };
-            let col_expr = Expr::Column(Column::new_unqualified(col_name));
+            let col_expr = user_column(col_name, schema)?;
             let sort = SortExpr::new(col_expr.clone(), true, false);
             let agg = agg_fn::first_value(col_expr, vec![sort]);
             Ok(AggPlan::Plain(agg))
@@ -321,13 +341,10 @@ fn pyexpr_to_agg_plan(
                 Some(PyExpr::Column(name)) => name.clone(),
                 _ => match args.first() {
                     Some(PyExpr::Column(name)) if !name.is_empty() => name.clone(),
-                    _ => return Err("skew requires a column reference".to_string()),
+                    _ => return Err(validation_error!("skew requires a column reference")),
                 },
             };
-            let x = cast(
-                Expr::Column(Column::new_unqualified(&col_name)),
-                DataType::Float64,
-            );
+            let x = cast(user_column(&col_name, schema)?, DataType::Float64);
 
             let m1_name = format!("__{}_skew_m1", out_key);
             let m2_name = format!("__{}_skew_m2", out_key);
@@ -352,7 +369,7 @@ fn pyexpr_to_agg_plan(
             let post = numerator / nullif(power(sd, lit(3.0)), lit(0.0));
             Ok(AggPlan::Staged { parts, post })
         }
-        _ => Err(format!("Unknown aggregate function: {}", func)),
+        _ => Err(validation_error!("Unknown aggregate function: {}", func)),
     }
 }
 
@@ -391,8 +408,7 @@ fn parse_group_exprs(
         return Ok(Vec::new());
     };
 
-    let df_expr = crate::transpiler::pyexpr_to_named_datafusion(py_expr, schema)
-        .map_err(|e| LtseqError::Validation(format!("Transpile failed: {}", e)))?;
+    let df_expr = crate::transpiler::pyexpr_to_named_datafusion(py_expr, schema)?;
 
     Ok(vec![df_expr])
 }
@@ -460,9 +476,7 @@ fn agg_parsed(
             return Err(table_order_required(&py_expr, &key_str));
         }
 
-        match pyexpr_to_agg_plan(&py_expr, schema, &key_str, &table_order)
-            .map_err(LtseqError::Validation)?
-        {
+        match pyexpr_to_agg_plan(&py_expr, schema, &key_str, &table_order)? {
             AggPlan::Plain(expr) => {
                 agg_exprs.push(resolve(expr)?.alias(&key_str));
                 staged_posts.push((key_str, None));

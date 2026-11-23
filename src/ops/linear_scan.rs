@@ -63,9 +63,14 @@ use std::sync::Arc;
 /// 3. Computes, at every node, what DataFusion computes for it on these
 ///    column types ([`kernel_type`]), so the count equals the materialized
 ///    reference.
+/// 4. Has no division beneath a `&` or `|` ([`guards_a_division`]): the
+///    kernel evaluates both operands on every row, where DataFusion may not
+///    evaluate the one a Boolean operator does not need, so a division by
+///    zero there failed only in the kernel.
 pub fn can_linear_scan(expr: &PyExpr, schema: &ArrowSchema) -> bool {
     is_supported_expr(expr)
         && contains_shift(expr)
+        && !guards_a_division(expr)
         && kernel_type(expr, schema, has_fused_form(expr, schema)) == Some(DataType::Boolean)
 }
 
@@ -158,13 +163,63 @@ fn kernel_type(expr: &PyExpr, schema: &ArrowSchema, fused: bool) -> Option<DataT
                     };
                     match binary_input_types(&l, &operator, &r).ok()? {
                         (T::Int64, T::Int64) => Some(T::Int64),
-                        (T::Float64, T::Float64) if op == "Sub" => Some(T::Float64),
+                        // Only when both operands are Float64 already: the
+                        // kernel subtracts two `Float64Array`s and does not
+                        // cast an integer operand as DataFusion's coercion
+                        // does, so `n - f.shift(1)` with an integer `n` raised
+                        // where the materialized first rows count (R9-F1 of
+                        // #422's review). Python counts those instead.
+                        (T::Float64, T::Float64)
+                            if op == "Sub" && l == T::Float64 && r == T::Float64 =>
+                        {
+                            Some(T::Float64)
+                        }
                         _ => None,
                     }
                 }
                 _ => None,
             }
         }
+    }
+}
+
+/// Whether a division, the one operator the kernel admits that can fail on
+/// a value (a zero divisor), lies beneath a `&` or `|`.
+///
+/// DataFusion's `BinaryExpr` short-circuits `AND` and `OR`: when the left
+/// operand decides every row it does not evaluate the right one, and when it
+/// decides most rows it evaluates the right one only on the others. So in
+/// `(k != k.shift(1)) | ((k < 0) & ((n / d) > 0.0))` the reference never
+/// divides when no `k` is negative, while the kernel divides on every row and
+/// raised for a zero `d` where the materialized first rows count (R8-F1 of
+/// #422's review). Which rows DataFusion evaluates depends on the batch, so
+/// the kernel cannot reproduce it, and such a predicate is declined: Python
+/// counts the materialized first rows, which raise or count as the reference
+/// does. Both operands are checked, since a `&` or `|` may itself be the
+/// operand another one skips. A division the predicate always demands (one
+/// outside every `&` and `|`) is evaluated on every row on both paths and
+/// stays admitted. `+`, `-` and `*` wrap and comparisons do not fail.
+fn guards_a_division(expr: &PyExpr) -> bool {
+    fn contains_div(expr: &PyExpr) -> bool {
+        match expr {
+            PyExpr::BinOp { op, left, right } => {
+                op == "Div" || contains_div(left) || contains_div(right)
+            }
+            PyExpr::UnaryOp { operand, .. } => contains_div(operand),
+            PyExpr::Call { on, .. } => on.as_deref().is_some_and(contains_div),
+            PyExpr::Alias { expr, .. } => contains_div(expr),
+            PyExpr::Column(_) | PyExpr::Literal(_) | PyExpr::Window { .. } => false,
+        }
+    }
+    match expr {
+        PyExpr::BinOp { op, left, right } if op == "And" || op == "Or" => {
+            contains_div(left) || contains_div(right)
+        }
+        PyExpr::BinOp { left, right, .. } => guards_a_division(left) || guards_a_division(right),
+        PyExpr::UnaryOp { operand, .. } => guards_a_division(operand),
+        PyExpr::Call { on, .. } => on.as_deref().is_some_and(guards_a_division),
+        PyExpr::Alias { expr, .. } => guards_a_division(expr),
+        PyExpr::Column(_) | PyExpr::Literal(_) | PyExpr::Window { .. } => false,
     }
 }
 
@@ -822,15 +877,20 @@ fn vectorized_binop(op: &str, left: &ArrayRef, right: &ArrayRef) -> Result<Array
             }
             Err(format!("Sub: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
+        // `Int64` addition and multiplication wrap, as DataFusion's
+        // `BinaryExpr` computes them (`add_wrapping`, `mul_wrapping`): the
+        // checked kernels raised an overflow where the materialized first
+        // rows count (R7-F1 of #422's review). `kernel_type` admits no other
+        // integer arithmetic.
         "Add" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(numeric::add(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+                return Ok(Arc::new(numeric::add_wrapping(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             Err(format!("Add: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
         "Mul" => {
             if let (Some(l), Some(r)) = (coerce_to_i64(left), coerce_to_i64(right)) {
-                return Ok(Arc::new(numeric::mul(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
+                return Ok(Arc::new(numeric::mul_wrapping(&l, &r).map_err(|e| e.to_string())?) as ArrayRef);
             }
             Err(format!("Mul: unsupported types {:?} and {:?}", left.data_type(), right.data_type()))
         }
@@ -895,14 +955,12 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LT
 
     let sorted_projected = build_boundary_scan_df(df, &table.sort_specs, predicate)?;
 
+    // A failed execution is the `LtseqError::collect` every terminal raises
+    // (R3-F2 of #422's review), so the count and the materialized first rows
+    // raise one class for it.
     let proj_batches = RUNTIME
-        .block_on(async {
-            sorted_projected
-                .collect()
-                .await
-                .map_err(|e| format!("Failed to collect projected data: {}", e))
-        })
-        .map_err(LtseqError::Runtime)?;
+        .block_on(sorted_projected.collect())
+        .map_err(LtseqError::collect)?;
 
     let total_rows: usize = proj_batches.iter().map(|b| b.num_rows()).sum();
     if total_rows == 0 {
@@ -922,13 +980,16 @@ pub fn linear_scan_group_id(table: &LTSeqTable, predicate: &PyExpr) -> Result<LT
         name_to_idx.insert(field.name().clone(), i);
     }
 
-    let boundaries = boundary_flags(predicate, &concat_batch, &name_to_idx)
-        .map_err(|e| {
-            LtseqError::Runtime(format!(
-                "Vectorized boundary evaluation failed: {}",
-                e
-            ))
-        })?;
+    // A failure evaluating the boundary, such as a division by zero, is an
+    // execution failure, which the materialized first rows raise for the same
+    // rows as the `ValueError` of `LtseqError::collect`; it raised
+    // `RuntimeError` here (R6-F3 of #422's review).
+    let boundaries = boundary_flags(predicate, &concat_batch, &name_to_idx).map_err(|e| {
+        LtseqError::with_context(
+            "Failed to evaluate the group boundary",
+            datafusion::common::DataFusionError::Execution(e),
+        )
+    })?;
 
     build_group_metadata_from_boundaries(&boundaries, table)
 }
@@ -1335,7 +1396,9 @@ mod tests {
             df,
             schema,
             declared_specs(),
-            Some(path_str),
+            Some(crate::source::ParquetSource {
+                file: Some(path_str),
+            }),
         );
 
         let result = linear_scan_group_id(&table, &secondary_key_predicate());
@@ -1668,6 +1731,33 @@ mod tests {
             (binop("Gt", binop("Div", col("i64"), shift1("i64")), int(1)), false),
             (binop("Gt", binop("Div", col("f64"), shift1("f64")), float(1.5)), false),
             (binop("Gt", binop("Div", col("ts"), shift1("ts")), float(1.5)), false),
+            // A division beneath `&` or `|` is one DataFusion may not
+            // evaluate, so the kernel declines it (R8-F1 of #422's review).
+            (binop("Or", changes("i64"), binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0))), false),
+            (binop("And", binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0)), changes("i64")), false),
+            (
+                binop(
+                    "Or",
+                    changes("i64"),
+                    binop(
+                        "And",
+                        binop("Lt", col("i64"), int(0)),
+                        binop("Gt", binop("Div", col("i64"), col("i32")), float(0.0)),
+                    ),
+                ),
+                false,
+            ),
+            (
+                PyExpr::UnaryOp {
+                    op: "Not".into(),
+                    operand: Box::new(binop(
+                        "And",
+                        changes("i32"),
+                        binop("Gt", binop("Div", col("i32"), col("i64")), float(0.0)),
+                    )),
+                },
+                false,
+            ),
             // Float thresholds against integers: integral and below 2^53 only.
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(2.0)), true),
             (binop("Gt", binop("Sub", col("i64"), shift1("i64")), float(1.5)), false),

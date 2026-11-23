@@ -232,7 +232,8 @@ fn eval_lowered_binop(
         right: operand(right)?,
     };
     let schema = Arc::new(Schema::new(fields));
-    let expr = crate::transpiler::pyexpr_to_datafusion(lowered, &schema)?;
+    let expr =
+        crate::transpiler::pyexpr_to_datafusion(lowered, &schema).map_err(|e| e.to_string())?;
     let df_schema = DFSchema::try_from(Arc::clone(&schema)).map_err(|e| e.to_string())?;
     let physical = create_physical_expr(
         &expr,
@@ -497,7 +498,8 @@ fn extract_literal_string(expr: &PyExpr) -> Result<String, String> {
     match expr {
         PyExpr::Literal(value) => value
             .require_str("search_pattern string argument")
-            .map(str::to_string),
+            .map(str::to_string)
+            .map_err(|e| e.to_string()),
         _ => Err("Expected literal string argument".to_string()),
     }
 }
@@ -989,26 +991,20 @@ pub fn search_pattern_count_impl(
 
     // Try parallel fast path BEFORE creating DataFusion session.
     // This avoids the expensive require_df_and_schema() when the parallel path succeeds.
-    if let (Some(ref parquet_path), Some(ref part_col)) =
-        (&table.source_parquet_path, &partition_by)
-    {
+    // The direct reader opens the one local file the reader listed, by the
+    // absolute path it listed when the reader was given that local path; a
+    // directory, a glob or a URL, a `file` URL included, lists none and is
+    // counted by the general path below, which reads with the planned schema
+    // (R6-F1, R6-F2 and R7-F2 of #422's review).
+    let file = table.source_parquet_path.as_ref().and_then(|s| s.file.as_deref());
+    if let (Some(file), Some(part_col)) = (file, &partition_by) {
         if !table.sort_specs.is_empty() {
-            match crate::ops::parallel_scan::parallel_pattern_match_count(
-                table,
-                py_exprs,
-                part_col,
-                parquet_path,
-            ) {
-                Ok(count) => {
-                    return Ok(count);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("PARALLEL_FALLBACK") {
-                        return Err(e);
-                    }
-                    // Fall through to general path
-                }
+            // No count means the input is outside the fast path: fall
+            // through to the general path. An error is the caller's.
+            if let Some(count) = crate::ops::parallel_scan::parallel_pattern_match_count(
+                table, py_exprs, part_col, file,
+            )? {
+                return Ok(count);
             }
         }
     }
