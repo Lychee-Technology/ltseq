@@ -8,6 +8,7 @@
 
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyAnyMethods, PyType};
+use datafusion::error::DataFusionError;
 use pyo3::{exceptions, Bound, Py, PyErr, Python};
 use std::error::Error as StdError;
 use std::fmt;
@@ -187,10 +188,40 @@ impl fmt::Display for LtseqError {
             LtseqError::TypeMismatch(msg) => write!(f, "Type error: {}", msg),
             LtseqError::Runtime(msg) => write!(f, "{}", msg),
             LtseqError::Io { message, source } | LtseqError::Context { message, source } => {
-                write!(f, "{}: {}", message, source)
+                write!(f, "{}: {}", message, reported(source.as_ref()))
             }
         }
     }
+}
+
+/// What DataFusion 56's Parquet reader adds when a filter pushed into the
+/// scan fails (`row_filter.rs`): the filter's error, under this context,
+/// boxed in an Arrow and then a Parquet error.
+const PUSHED_FILTER_CONTEXT: &str = "Error evaluating filter predicate";
+
+/// The error a message shows for `source`: `source` itself, except that a
+/// filter the Parquet reader evaluates shows the error the filter raised
+/// (B3 of the DataFusion 56 spike, #296). The reader wraps it twice
+/// (`Parquet error: External: External error: Error evaluating filter
+/// predicate caused by ...`), so the same failing expression read different
+/// messages in `filter` over Parquet and in `derive`. `source` stays the
+/// whole chain.
+fn reported<'a>(source: &'a (dyn StdError + Send + Sync + 'static)) -> &'a dyn fmt::Display {
+    let mut next: Option<&(dyn StdError + 'static)> = Some(source);
+    while let Some(error) = next {
+        let datafusion = error.downcast_ref::<DataFusionError>().or_else(|| {
+            error
+                .downcast_ref::<std::sync::Arc<DataFusionError>>()
+                .map(|shared| shared.as_ref())
+        });
+        if let Some(DataFusionError::Context(context, raised)) = datafusion {
+            if context == PUSHED_FILTER_CONTEXT {
+                return raised.as_ref();
+            }
+        }
+        next = error.source();
+    }
+    source
 }
 
 impl StdError for LtseqError {
@@ -307,6 +338,35 @@ impl LtseqError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filter the Parquet reader evaluates reports the error the filter
+    /// raised, as `derive` reports it, not the reader's wrapping (#296, B3).
+    #[test]
+    fn a_pushed_parquet_filter_reports_the_error_it_raised() {
+        use datafusion::arrow::error::ArrowError;
+        use datafusion::parquet::errors::ParquetError;
+        let raised = || {
+            DataFusionError::ArrowError(
+                Box::new(ArrowError::CastError("Can't cast value 1 to type Int32".into())),
+                None,
+            )
+        };
+        let wrapped = DataFusionError::ParquetError(Box::new(ParquetError::External(Box::new(
+            ArrowError::ExternalError(Box::new(raised().context(PUSHED_FILTER_CONTEXT))),
+        ))));
+        let shown = LtseqError::collect(wrapped).to_string();
+        assert_eq!(shown, LtseqError::collect(raised()).to_string());
+        assert_eq!(
+            shown,
+            "Failed to collect results: Arrow error: Cast error: Can't cast value 1 to type Int32"
+        );
+        // Any other chain is shown whole, and the source keeps the wrapping.
+        let other = raised().context("Some other context");
+        let expected = format!("Failed to collect results: {other}");
+        let error = LtseqError::collect(other);
+        assert_eq!(error.to_string(), expected);
+        assert!(error.source().is_some());
+    }
 
     /// `io()` builds the variant its name says, which decides the Python
     /// class (#152): it used to build a generic `Context`, so an I/O failure

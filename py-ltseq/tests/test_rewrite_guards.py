@@ -258,6 +258,79 @@ def test_a_filter_after_a_sort_does_not_skip_a_key_the_sort_computes(engine_layo
         filtered.to_arrow()
 
 
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        pytest.param(lambda r: LiteralExpr(False), id="false"),
+        pytest.param(lambda r: LiteralExpr(1) == 2, id="folds_to_false"),
+        pytest.param(lambda r: (r.x > 5) & (r.x < 2), id="contradiction"),
+    ],
+)
+@pytest.mark.parametrize("s, fails", [(["1", "2"], False), (["bad", "2"], True)])
+def test_a_filter_that_is_never_true_after_a_sort_evaluates_its_keys(
+    engine_layout, predicate, s, fails
+):
+    """#296 (B2 of the DataFusion 56 spike). DataFusion 56's
+    `push_down_filter` turns a filter whose predicate is, or simplifies to,
+    FALSE into an empty relation (apache/datafusion#26132). Above a sort
+    with a key that can fail, that dropped the sort and its key, which the
+    sort demands on every row of its input (D10a): no rows came back where
+    the sort alone raises. The `push_down_filter` guard refuses a rewrite
+    that drops a demanded expression that can fail, as the
+    `eliminate_filter` one does."""
+    t = LTSeq.from_arrow(pa.table({"x": pa.array([0, 1], pa.int64()), "s": s}))
+    filtered = t.sort("x", lambda r: r.s.cast("int32")).filter(predicate)
+    if fails:
+        with pytest.raises(ValueError, match="Cast error"):
+            filtered.to_arrow()
+        with pytest.raises(ValueError, match="Cast error"):
+            filtered.count()
+    else:
+        assert filtered.to_arrow().num_rows == 0
+        assert filtered.count() == 0
+
+
+@pytest.mark.parametrize(
+    "predicate, kept",
+    [
+        pytest.param(
+            lambda r: (r.x > 6) & (r.x < 5) & (10 // r.y > 1), None, id="bounds"
+        ),
+        pytest.param(
+            lambda r: (r.x == 1) & (r.x != 1) & (10 // r.y > 1), None, id="equality"
+        ),
+        pytest.param(
+            lambda r: ((r.x > 6) & (r.x < 5) & (10 // r.y > 1)) | (r.y == 1),
+            lambda y: [v for v in y if v == 1],
+            id="or_branch",
+        ),
+    ],
+)
+@pytest.mark.parametrize("y, fails", [([1, 1], False), ([0, 1], True)])
+def test_a_contradiction_beside_a_failing_conjunct_keeps_its_error(
+    engine_layout, predicate, kept, y, fails
+):
+    """#296. DataFusion 56's `push_down_filter` simplifies a filter's
+    comparisons of one column with literals (`simplify_predicates`), and
+    replaces a conjunction whose comparisons contradict with FALSE, or drops
+    the `OR` branch they contradict, with every other conjunct of it. Where
+    the column is NULL those comparisons are NULL, so the division beside
+    them is demanded on that row (D10), and the filter raised nothing and
+    kept no row (or only `y == 1`). The rewrite runs outside the guarded
+    `simplify_expressions`; the `push_down_filter` guard refuses it because
+    it drops a demanded expression that can fail."""
+    t = LTSeq.from_arrow(
+        pa.table({"x": pa.array([None, 1], pa.int64()), "y": pa.array(y, pa.int64())})
+    )
+    filtered = t.filter(predicate)
+    if fails:
+        with pytest.raises(ValueError, match="Divide by zero"):
+            filtered.to_arrow()
+    else:
+        expected = kept(y) if kept else []
+        assert filtered.to_arrow().column("y").to_pylist() == expected
+
+
 def test_a_filter_after_a_sort_by_computed_keys_that_cannot_fail_still_moves(engine_layout):
     """R4-F1. Where no key can fail, the sort is moved above the filter as
     before, with no barrier, and ties on `x` keep the order of the second

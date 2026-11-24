@@ -70,11 +70,11 @@ def attempt(run):
 def cast_message(error: Exception) -> str:
     """Arrow's message for a failed cast, without its numbers: with many
     partitions, another value can be the first to fail. A Parquet scan that
-    evaluates the filter itself wraps the error it raises, any error, in
-    one of its own and prints Arrow's in its debug form."""
+    evaluates the filter itself wraps the error it raises in its own, and
+    LTSeq reports the error the filter raised (#296), so ``filter`` and
+    ``derive`` give one message."""
     text = re.sub(r"-?\d+", "N", str(error))
-    wrapped = re.search(r'\w+Error\("(.*?)"\)', text)
-    return wrapped.group(1) if wrapped else re.sub(r"^.*?Arrow error: [^:]+: ", "", text)
+    return re.sub(r"^Failed to collect results: Arrow error: [^:]+: ", "", text)
 
 
 def comparison(op, target, literal):

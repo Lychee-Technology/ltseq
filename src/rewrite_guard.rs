@@ -781,8 +781,13 @@ impl OptimizerRule for Guarded {
             Guard::KeepBarriers => {
                 let before = filtered_below_barriers(&plan);
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
+                // DataFusion 56's `push_down_filter` also folds a filter on a
+                // literal FALSE into an empty relation (apache/datafusion#26132),
+                // which drops what the plan under it demands, as
+                // `eliminate_filter` would: refused the same way.
                 if rewritten.transformed
-                    && !filtered_below_barriers(&rewritten.data).is_subset(&before)
+                    && (!filtered_below_barriers(&rewritten.data).is_subset(&before)
+                        || !keeps_demanded(&plan, &rewritten.data))
                 {
                     return Ok(Transformed::no(plan));
                 }
@@ -790,22 +795,13 @@ impl OptimizerRule for Guarded {
             }
             Guard::KeepFailures { own: false } => {
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
-                if !rewritten.transformed {
-                    return Ok(rewritten);
-                }
-                // Every occurrence of a demanded expression that can fail
-                // is still demanded: one left elsewhere in the plan does
-                // not stand in for one the rewrite removed (R2-F1).
-                let before = Inliner::default().demanded_in(&plan);
-                if before.is_empty() {
-                    return Ok(rewritten);
-                }
-                let after = Inliner::default().demanded_in(&rewritten.data);
-                Ok(if covers(&after, &before) {
-                    rewritten
-                } else {
-                    Transformed::no(plan)
-                })
+                Ok(
+                    if !rewritten.transformed || keeps_demanded(&plan, &rewritten.data) {
+                        rewritten
+                    } else {
+                        Transformed::no(plan)
+                    },
+                )
             }
             Guard::KeepFailures { own: true } => {
                 let rewritten = self.inner.rewrite(plan.clone(), config)?;
@@ -824,6 +820,14 @@ impl OptimizerRule for Guarded {
             }
         }
     }
+}
+
+/// Whether every occurrence of a demanded expression of `before` that can
+/// fail is still demanded in `after`: one left elsewhere in the plan does
+/// not stand in for one the rewrite removed (R2-F1).
+fn keeps_demanded(before: &LogicalPlan, after: &LogicalPlan) -> bool {
+    let demanded = Inliner::default().demanded_in(before);
+    demanded.is_empty() || covers(&Inliner::default().demanded_in(after), &demanded)
 }
 
 /// The joins of `plan` and what each joins, as a string: a join is
@@ -1768,6 +1772,25 @@ mod tests {
         session.read_table(Arc::new(table)).unwrap()
     }
 
+    /// A memory table of Boolean columns, which DataFusion 56's `CASE`
+    /// lowering takes as leaves.
+    fn flags(session: &SessionContext, columns: &[(&str, Vec<bool>)]) -> DataFrame {
+        use datafusion::arrow::array::BooleanArray;
+        let schema = Schema::new(
+            columns
+                .iter()
+                .map(|(name, _)| Field::new(*name, DataType::Boolean, false))
+                .collect::<Vec<_>>(),
+        );
+        let arrays = columns
+            .iter()
+            .map(|(_, values)| Arc::new(BooleanArray::from(values.clone())) as ArrayRef)
+            .collect();
+        let batch = RecordBatch::try_new(Arc::new(schema), arrays).unwrap();
+        let table = MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap();
+        session.read_table(Arc::new(table)).unwrap()
+    }
+
     /// The same table read from a Parquet file, which takes the filters a
     /// memory table does not.
     fn parquet(session: &SessionContext, name: &str, columns: &[(&str, Vec<i64>)]) -> DataFrame {
@@ -2172,6 +2195,12 @@ mod tests {
     /// END` into `x != 0 AND 10 / x > 1`, which keeps the one occurrence of
     /// the division but evaluates it on every row, and raised on `x = 0`.
     /// The guarded simplifier keeps the `CASE` where a branch can fail.
+    ///
+    /// DataFusion 56 lowers a `CASE` to `AND`/`OR` only when every
+    /// condition and branch is a column or a literal, neither of which can
+    /// fail, so its simplifier no longer makes this rewrite of a fallible
+    /// branch; the test keeps the guard's half as a regression test, and
+    /// its control is a `CASE` of Boolean columns.
     #[test]
     fn plan_guard_case_rewrites() {
         use datafusion::logical_expr::when;
@@ -2198,7 +2227,10 @@ mod tests {
         assert!(plan.contains("CASE WHEN"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 2, "{plan}");
         // Where no branch can fail, the rewrite still applies.
-        let df = t.clone().filter(guarded(col("x").gt(lit(1_i64)))).unwrap();
+        let f = flags(&session, &[("c", vec![true, false]), ("d", vec![true, true])]);
+        let df = f
+            .filter(when(col("c"), lit(false)).otherwise(col("d")).unwrap())
+            .unwrap();
         let plan = logical(&df);
         assert!(!plan.contains("CASE"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 1, "{plan}");
@@ -2211,21 +2243,24 @@ mod tests {
     /// single in-branch label accepted that rewrite, and the division was
     /// evaluated on every row with `z`, `x = 0` among them. Counting how
     /// deep the branch is refuses it.
+    ///
+    /// As for `plan_guard_case_rewrites`, DataFusion 56 lowers only a
+    /// `CASE` of columns and literals, so the control nests one of Boolean
+    /// columns.
     #[test]
     fn plan_guard_nested_case_rewrites() {
         use datafusion::logical_expr::when;
         let session = session();
         let t = table(&session, &[("x", vec![0, 2]), ("z", vec![1, 1])]);
-        let nested = |value: Expr| {
-            let innermost = when(col("x").eq(lit(0_i64)), lit(false))
-                .otherwise(value)
-                .unwrap();
+        let nested_on = |condition: Expr, value: Expr| {
+            let innermost = when(condition, lit(false)).otherwise(value).unwrap();
             let middle = when(innermost, lit(1_i64)).otherwise(lit(0_i64)).unwrap();
             when(col("z").eq(lit(1_i64)), middle)
                 .otherwise(lit(0_i64))
                 .unwrap()
                 .gt(lit(0_i64))
         };
+        let nested = |value: Expr| nested_on(col("x").eq(lit(0_i64)), value);
         let df = t.clone().filter(nested(fallible().gt(lit(1_i64)))).unwrap();
         let plan = logical(&df);
         assert!(plan.contains("THEN Boolean(false) ELSE"), "{plan}");
@@ -2245,7 +2280,17 @@ mod tests {
         assert!(plan.contains("THEN Boolean(false) ELSE"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 2, "{plan}");
         // Where no branch can fail, the rewrite still applies.
-        let df = t.filter(nested(col("x").gt(lit(1_i64)))).unwrap();
+        let f = flags(
+            &session,
+            &[("c", vec![true, false]), ("d", vec![true, true]), ("e", vec![true, true])],
+        )
+        .select(vec![
+            col("c"),
+            col("d"),
+            when(col("e"), lit(1_i64)).otherwise(lit(0_i64)).unwrap().alias("z"),
+        ])
+        .unwrap();
+        let df = f.filter(nested_on(col("c"), col("d"))).unwrap();
         let plan = logical(&df);
         assert!(!plan.contains("THEN Boolean(false)"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 1, "{plan}");
@@ -2737,6 +2782,10 @@ mod tests {
     /// inputs swaps the winner, and DataFusion's physical optimizer then
     /// fails its own schema check at collect. Keeping each join's inputs
     /// (`PhysicalGuard::NoSwap`) keeps the merged metadata.
+    ///
+    /// DataFusion 56's own `join_selection` no longer fails here, so the
+    /// control now pins that the unguarded session gives the same rows; the
+    /// guard stays for order (X5, `plan_guard_join_selection`).
     #[test]
     fn join_selection_keeps_clashing_schema_metadata() {
         use datafusion::arrow::array::LargeStringArray;
@@ -2806,8 +2855,7 @@ mod tests {
                 .with_physical_optimizer_rules(rules)
                 .build(),
         );
-        let error = filtered(&unguarded).unwrap_err().to_string();
-        assert!(error.contains("Schema metadata mismatch"), "{error}");
+        assert_eq!(filtered(&unguarded).unwrap(), 1);
     }
 
     /// X5: over an input in descending order, DataFusion turns a

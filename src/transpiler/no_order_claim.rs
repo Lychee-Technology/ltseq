@@ -112,10 +112,6 @@ impl AggregateUDFImpl for NoOrderClaim {
         self.inner().return_field(arg_fields)
     }
 
-    fn is_nullable(&self) -> bool {
-        self.inner().is_nullable()
-    }
-
     fn accumulator(&self, args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         self.inner().accumulator(args)
     }
@@ -212,6 +208,7 @@ impl AggregateUDFImpl for NoOrderClaim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::datatypes::Field;
     use datafusion::functions_aggregate::count::count_udaf;
     use datafusion::functions_aggregate::sum::sum_udaf;
 
@@ -247,7 +244,13 @@ mod tests {
             );
             assert_eq!(wrapped.name(), inner.name());
             assert_eq!(wrapped.signature(), inner.signature());
-            assert_eq!(wrapped.is_nullable(), inner.is_nullable());
+            // DataFusion 56 deprecated `is_nullable`: a function's nullability
+            // is its return field's, which the wrapper forwards.
+            let field: FieldRef = Arc::new(Field::new("x", data_type.clone(), true));
+            assert_eq!(
+                wrapped.return_field(std::slice::from_ref(&field)).ok(),
+                inner.return_field(std::slice::from_ref(&field)).ok()
+            );
             assert_eq!(
                 wrapped.return_type(std::slice::from_ref(&data_type)).ok(),
                 inner.return_type(std::slice::from_ref(&data_type)).ok()

@@ -475,11 +475,12 @@ mod tests {
     fn a_case_is_typed_by_every_branch() {
         let arrow = schema();
         let rx = Resolver::new(&arrow).unwrap();
-        // Uncoerced, DataFusion reports the first THEN branch's type.
+        // Uncoerced, DataFusion 55 reported the first THEN branch's type;
+        // 56 reports the type the branches coerce to, as the resolver does.
         let df_schema = DFSchema::try_from(arrow.clone()).unwrap();
         assert_eq!(
             when("s", "us").get_type(&df_schema).unwrap(),
-            DataType::Timestamp(TimeUnit::Second, None)
+            DataType::Timestamp(TimeUnit::Microsecond, None)
         );
         let cases = [
             (

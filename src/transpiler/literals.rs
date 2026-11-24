@@ -360,6 +360,42 @@ pub(crate) fn encoded_float(data_type: &DataType) -> Option<DataType> {
     (value != data_type && value.is_floating()).then(|| value.clone())
 }
 
+/// `expr` decoded to its value type when it is run-end encoded (also
+/// inside a dictionary), else `expr` as it is.
+///
+/// DataFusion 56 compares a run-end encoded value with an IN list at the
+/// encoded type, where 55 decoded it first, and its set filter for a list
+/// of four items or more reads the list's NULL items by `null_count`, which
+/// is 0 for a run-end encoded array, whose nulls are in its values: a value
+/// outside a list that holds NULL tested FALSE instead of NULL (B1 of the
+/// DataFusion 56 spike, #296). The decoding is a cast in the plan, as in
+/// [`decoded_float`], so the input keeps its encoding everywhere else, and
+/// the items are placed among the decoded values.
+fn decoded_run_end(expr: Expr, rx: &Resolver<'_>) -> Expr {
+    match rx.data_type(&expr).ok().as_ref().and_then(run_end_value) {
+        Some(value_type) => cast(expr, value_type),
+        None => expr,
+    }
+}
+
+/// The value type of `data_type` when a run-end encoding is part of it
+/// (also under or over a dictionary); `None` for any other type.
+fn run_end_value(data_type: &DataType) -> Option<DataType> {
+    let mut value = data_type;
+    let mut run_end = false;
+    loop {
+        value = match value {
+            DataType::Dictionary(_, value) => value,
+            DataType::RunEndEncoded(_, values) => {
+                run_end = true;
+                values.data_type()
+            }
+            _ => break,
+        };
+    }
+    run_end.then(|| value.clone())
+}
+
 /// `low <= value <= high` as `value >= low AND value <= high`, or for
 /// `negated` its complement, `value < low OR value > high`. It names
 /// `value` twice, so `value` must not be volatile.
@@ -448,8 +484,10 @@ fn compared(
 /// list is split into one IN per comparison type, joined by OR. All types
 /// come from DataFusion's coercion of the equality and of the IN. Each IN
 /// is built by [`membership`], which keeps a float list from deciding a
-/// zero by its sign.
+/// zero by its sign. A run-end encoded `expr` is tested decoded
+/// ([`decoded_run_end`]).
 pub(crate) fn in_list(expr: Expr, list: Vec<Expr>, rx: &Resolver<'_>) -> Result<Expr, String> {
+    let expr = decoded_run_end(expr, rx);
     // Each kept item, with its equality's two sides as DataFusion coerces them.
     let mut kept = Vec::with_capacity(list.len());
     for item in list {
