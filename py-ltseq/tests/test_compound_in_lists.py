@@ -303,7 +303,21 @@ def test_a_staged_item_keeps_the_difference_in_the_filter_plan(kind):
     kept = t.filter(lambda r: written(r, items, "eq") & ~r.x.is_in(d["null"]))
     logical, _ = kept.explain_plan()
     filters = [l for l in logical.splitlines() if "Filter:" in l]
-    assert "EmptyRelation" in logical or all(" NOT IN (" in l for l in filters), logical
+    # Either a filter that tests both lists, or an empty relation that the
+    # NOT IN holding NULL accounts for: that list alone folds to one, and
+    # the staged list alone keeps its filter. A plan with no filter and no
+    # such witness passes neither (R1-F5 of #296's review).
+    if "EmptyRelation: rows=0" in logical:
+        assert not filters, logical
+        alone = lambda predicate: t.filter(predicate).explain_plan()[0]
+        null_alone = alone(lambda r: ~r.x.is_in(d["null"]))
+        staged_alone = alone(lambda r: written(r, items, "eq"))
+        assert "EmptyRelation: rows=0" in null_alone, null_alone
+        assert "EmptyRelation" not in staged_alone, staged_alone
+        assert any(" IN (" in l for l in staged_alone.splitlines() if "Filter:" in l), staged_alone
+    else:
+        assert filters, logical
+        assert all(" NOT IN (" in l and l.count(" IN (") >= 2 for l in filters), logical
     assert kept.to_arrow().num_rows == 0
 
 
@@ -337,6 +351,46 @@ def test_a_run_end_encoded_value_keeps_the_null_of_a_list(engine_layout, kind):
     assert kept(lambda r: r.x.is_in(items)) == [0]
     assert kept(lambda r: if_else(~r.x.is_in(items), 1, 2) == 1) == []
     assert kept(lambda r: (~r.x.is_in(items)).is_null()) == [1, 2]
+
+
+def sql_literal(value):
+    if value is None:
+        return "NULL"
+    return f"'{value}'" if isinstance(value, str) else repr(value)
+
+
+@pytest.mark.parametrize("kind", RUN_END)
+def test_a_where_clause_keeps_the_null_of_a_list_on_a_run_end_value(engine_layout, kind):
+    """R1-F2 of #296's review: `filter_where`'s SQL meets the same set
+    filter as `is_in` does. On run-end encoded `x = [1, 42, NULL]`,
+    `(x IN (NULL, 1, 2, 3)) IS NULL` kept only the NULL row; SQL keeps the
+    42 row too, whose test is NULL. A WHERE clause's list may hold a
+    column, which `is_in` refuses (#294), so one case lists `k`."""
+    value_type, values, items = RUN_END[kind]
+    x = pc.run_end_encode(pa.array(values, value_type))
+    t = LTSeq.from_arrow(pa.table({"k": pa.array(range(len(values)), pa.int64()), "x": x}))
+    listed = ", ".join(sql_literal(i) for i in items)
+
+    def kept(clause):
+        rows = LTSeq._from_inner(t._inner.filter_where(clause)).to_arrow()
+        return sorted(rows.column("k").to_pylist())
+
+    assert kept(f"(x IN ({listed})) IS NULL") == [1, 2]
+    assert kept(f"(x NOT IN ({listed})) IS NULL") == [1, 2]
+    assert kept(f"x NOT IN ({listed})") == []
+    assert kept(f"x IN ({listed})") == [0]
+    assert kept(f"CASE WHEN x NOT IN ({listed}) THEN 1 ELSE 2 END = 1") == []
+    if kind == "int64":
+        # 42 is not k (1), and the list's NULL makes the test NULL.
+        assert kept("(x IN (k, NULL, 1, 2, 3)) IS NULL") == [1, 2]
+    # The plan tests the decoded value; the column keeps its encoding.
+    _, physical = LTSeq._from_inner(
+        t._inner.filter_where(f"(x IN ({listed})) IS NULL")
+    ).explain_plan()
+    assert "CAST(x" in physical, physical
+    assert pa.types.is_run_end_encoded(
+        LTSeq._from_inner(t._inner.filter_where("k >= 0")).to_arrow().schema.field("x").type
+    )
 
 
 # --- volatile values -----------------------------------------------------------

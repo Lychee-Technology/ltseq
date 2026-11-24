@@ -283,7 +283,11 @@ class TransformMixin(LookupMixin, LTSeqLike):
             New LTSeq with filtered rows
 
         Raises:
-            ValueError: If schema not initialized
+            ValueError: If schema not initialized, or if the predicate
+                compares values the planner refuses, such as a string with
+                a decimal of negative scale, which would round it
+                (``r.d == "1"``, or ``r.d == r.s`` for a string column
+                ``s``, on ``decimal128(10, -2)``; #296)
             TypeError: If predicate invalid
             AttributeError: If column not found
 

@@ -73,6 +73,7 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercionRewriter;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::scalar::ScalarValue;
 
+use super::literal_policy::negative_scale_string_cast;
 use super::narrow_decimals;
 
 /// Why DataFusion did not answer a type question.
@@ -169,8 +170,13 @@ impl<'a> Resolver<'a> {
     /// reports the problem where it always has, when the plan is built or run.
     /// One whose coercion panics is an error, since building its plan would
     /// panic again.
+    ///
+    /// A resolved expression that casts a string to a decimal of negative
+    /// scale is refused ([`negative_scale_string_cast`], #296).
     pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
-        Ok(self.coerced(&expr)?.unwrap_or(expr))
+        let resolved = self.coerced(&expr)?.unwrap_or(expr);
+        negative_scale_string_cast(&resolved, &self.schema)?;
+        Ok(resolved)
     }
 
     /// `expr` coerced as [`Resolver::resolve`] coerces it, or `None` where

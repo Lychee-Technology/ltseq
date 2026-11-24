@@ -370,8 +370,9 @@ pub(crate) fn encoded_float(data_type: &DataType) -> Option<DataType> {
 /// outside a list that holds NULL tested FALSE instead of NULL (B1 of the
 /// DataFusion 56 spike, #296). The decoding is a cast in the plan, as in
 /// [`decoded_float`], so the input keeps its encoding everywhere else, and
-/// the items are placed among the decoded values.
-fn decoded_run_end(expr: Expr, rx: &Resolver<'_>) -> Expr {
+/// the items are placed among the decoded values. A WHERE clause's IN list
+/// is tested decoded too (`filter_where`, R1-F2 of #296's review).
+pub(crate) fn decoded_run_end(expr: Expr, rx: &Resolver<'_>) -> Expr {
     match rx.data_type(&expr).ok().as_ref().and_then(run_end_value) {
         Some(value_type) => cast(expr, value_type),
         None => expr,

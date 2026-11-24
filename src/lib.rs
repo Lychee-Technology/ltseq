@@ -944,6 +944,11 @@ impl LTSeqTable {
     ///
     /// Returns:
     ///     New LTSeqTable with rows matching the WHERE clause
+    ///
+    /// Raises:
+    ///     RuntimeError: The clause does not parse, holds a subquery, or
+    ///         compares a string with a decimal of negative scale, which
+    ///         would round it (`d = '1'` on `decimal128(10, -2)`, #296)
     fn filter_where(&self, where_clause: &str) -> PyResult<LTSeqTable> {
         stack::planned(|| crate::ops::aggregation::filter_where_impl(self, where_clause))
     }

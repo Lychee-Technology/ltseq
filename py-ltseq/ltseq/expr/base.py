@@ -1162,6 +1162,12 @@ class Expr(ABC):
                 Compare a value of the same row with ``==``:
                 ``(r.x == r.y) | r.x.is_in([3])``. For membership in
                 another table, use a join or ``semi_join``.
+            ValueError: Raised when the query is built (``filter``,
+                ``derive``, ...), not here: a value the receiver does not
+                take, such as a string for a decimal of negative scale,
+                which would be rounded to it (``r.d.is_in(["1"])`` on
+                ``decimal128(10, -2)``; use a ``Decimal``, #296), or a
+                number for a date or timestamp.
 
         Example:
             >>> t.filter(lambda r: r.status.is_in(["active", "pending", "review"]))
