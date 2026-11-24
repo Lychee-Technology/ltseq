@@ -1,0 +1,190 @@
+{
+ "label": "55",
+ "ltseq_core": "/var/tmp/af296/site55/ltseq/ltseq_core.cpython-313-x86_64-linux-gnu.so",
+ "python": "3.13.18 (main, Oct 26 2026, 14:08:20) [Clang 23.1.3 ]",
+ "machine": "Linux-7.0.14-30-pve-x86_64-with-glibc2.41",
+ "processor": "x86_64",
+ "layout": {
+  "target_partitions": 8,
+  "batch_size": 8192
+ },
+ "repeat": 3,
+ "cases": [
+  {
+   "shape": "sorted",
+   "depth": 25,
+   "runs": [
+    {
+     "derive_s": 0.005523885018192232,
+     "distinct_count_s": 0.0319901310140267,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0017650840454734862,
+     "distinct_count_s": 0.005103353993035853,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0018040079739876091,
+     "distinct_count_s": 0.005372710002120584,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.005372710002120584
+  },
+  {
+   "shape": "sorted",
+   "depth": 50,
+   "runs": [
+    {
+     "derive_s": 0.005153779988177121,
+     "distinct_count_s": 0.010518249997403473,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005244277010206133,
+     "distinct_count_s": 0.010468079010024667,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0051856019999831915,
+     "distinct_count_s": 0.010519984003622085,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.010518249997403473
+  },
+  {
+   "shape": "sorted",
+   "depth": 100,
+   "runs": [
+    {
+     "derive_s": 0.01990633801324293,
+     "distinct_count_s": 0.03059020300861448,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.018530368979554623,
+     "distinct_count_s": 0.029340549022890627,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.018306025012861937,
+     "distinct_count_s": 0.029157846001908183,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.029340549022890627
+  },
+  {
+   "shape": "sorted",
+   "depth": 200,
+   "runs": [
+    {
+     "derive_s": 0.07115128397708759,
+     "distinct_count_s": 0.10093016200698912,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07512902899179608,
+     "distinct_count_s": 0.10597092600073665,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07764631503960118,
+     "distinct_count_s": 0.10742439999012277,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.10597092600073665
+  },
+  {
+   "shape": "unsorted",
+   "depth": 25,
+   "runs": [
+    {
+     "derive_s": 0.002085678977891803,
+     "distinct_count_s": 0.006721033016219735,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0020731829572468996,
+     "distinct_count_s": 0.004558515036478639,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.0018797310185618699,
+     "distinct_count_s": 0.00361703202361241,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.004558515036478639
+  },
+  {
+   "shape": "unsorted",
+   "depth": 50,
+   "runs": [
+    {
+     "derive_s": 0.0052008809871040285,
+     "distinct_count_s": 0.008268302015494555,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005193524993956089,
+     "distinct_count_s": 0.009487537026870996,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.005538358993362635,
+     "distinct_count_s": 0.00824110402027145,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.008268302015494555
+  },
+  {
+   "shape": "unsorted",
+   "depth": 100,
+   "runs": [
+    {
+     "derive_s": 0.018443170993123204,
+     "distinct_count_s": 0.025035221013240516,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.01848283497383818,
+     "distinct_count_s": 0.02489764499478042,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.01833335997071117,
+     "distinct_count_s": 0.024897266004700214,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.02489764499478042
+  },
+  {
+   "shape": "unsorted",
+   "depth": 200,
+   "runs": [
+    {
+     "derive_s": 0.07362087501678616,
+     "distinct_count_s": 0.09309151896741241,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07132203504443169,
+     "distinct_count_s": 0.09206353599438444,
+     "rows": 3
+    },
+    {
+     "derive_s": 0.07177404902176932,
+     "distinct_count_s": 0.09116510296007618,
+     "rows": 3
+    }
+   ],
+   "median_distinct_count_s": 0.09206353599438444
+  }
+ ]
+}

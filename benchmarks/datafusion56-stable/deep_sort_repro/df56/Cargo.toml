@@ -1,0 +1,21 @@
+# #296: plain-DataFusion reproduction of 56's deep sort/grouping planning
+# cost, against DataFusion 56.0.0. Cargo.lock beside this file pins the
+# resolved graph; run with `cargo run --release --locked -q -- 25 50 100 200`.
+[package]
+name = "df296_deep_sort_56"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "df296_deep_sort_56"
+path = "../repro.rs"
+
+[dependencies]
+datafusion = "=56.0.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
+
+[profile.release]
+debug = false
+
+[workspace]
