@@ -31,8 +31,8 @@ use datafusion::scalar::ScalarValue;
 
 use super::exact::{hold_instant, Holding, Placement};
 use super::literal_policy::{
-    exact_domain, fit, held, interpret, literal_text, timestamp_literal, widening, Fit, Position,
-    Reading, Widening,
+    exact_domain, fit, held, interpret, literal_text, negative_scale_string, timestamp_literal,
+    widening, Fit, Position, Reading, Widening,
 };
 use super::Resolver;
 
@@ -812,6 +812,13 @@ fn values(
         ),
         [] => unreachable!("checked above"),
     };
+    // A string the values unify to a decimal of negative scale with would
+    // be rounded to it (#296, B4).
+    if let Ok(unified) = unified_type(values.clone()) {
+        for literal in literals.iter().flatten() {
+            negative_scale_string(literal, &unified, &name)?;
+        }
+    }
     // Read each literal next to the context. One that is not judged there
     // becomes a value as written, like the values that are not literals.
     for (value, literal) in values.iter_mut().zip(literals.iter_mut()) {
@@ -975,6 +982,7 @@ fn fixed_target(
     name: &str,
 ) -> Result<(ScalarValue, Fit), String> {
     let read = replacement(interpret(&literal, target, Position::Value, name)?).unwrap_or(literal);
+    negative_scale_string(&read, target, name)?;
     let fit = fit(&read, target, target);
     Ok((read, fit))
 }

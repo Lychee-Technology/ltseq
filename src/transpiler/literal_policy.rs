@@ -86,6 +86,41 @@ pub(crate) enum Position {
     Value,
 }
 
+/// Refuses a string literal read as a decimal of negative scale (#296, B4
+/// of the DataFusion 56 spike). Such a decimal holds multiples of
+/// 10^-scale, and DataFusion 56 casts a string to it by rounding, so `"1"`
+/// is 0 in `decimal128(10, -2)` and compares equal to 0; 55 refused the
+/// cast at collect. LTSeq refuses it where the query is built, in every
+/// position that casts the string to the decimal: a comparison, an `is_in`
+/// item, a value DataFusion unifies to the decimal and a fixed target
+/// (`shift` default, `insert`, `update`). A string that the decimal is
+/// cast to instead, as in `if_else(c, "1", r.d)`, is a string value, and
+/// is not refused.
+pub(crate) fn negative_scale_string(
+    literal: &ScalarValue,
+    decimal: &DataType,
+    name: &str,
+) -> Result<(), String> {
+    use DataType as T;
+    use ScalarValue as S;
+    let scale = match decimal {
+        T::Decimal32(_, scale)
+        | T::Decimal64(_, scale)
+        | T::Decimal128(_, scale)
+        | T::Decimal256(_, scale) => *scale,
+        _ => return Ok(()),
+    };
+    if scale >= 0 || !matches!(literal, S::Utf8(Some(_)) | S::LargeUtf8(Some(_)) | S::Utf8View(Some(_))) {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} is {decimal}, a decimal of negative scale, which would round the string {} \
+         to a multiple of 10^{}; use a Decimal literal",
+        literal_text(literal),
+        -scale
+    ))
+}
+
 /// How to read `literal` next to a value of type `context` in `position`,
 /// or an error. `name` describes the value in errors ("column 'x'").
 pub(crate) fn interpret(
@@ -146,6 +181,13 @@ pub(crate) fn interpret(
              columns",
             literal_text(literal)
         )),
+        // A string compared with a decimal of negative scale (B4, #296).
+        (
+            T::Decimal32(..) | T::Decimal64(..) | T::Decimal128(..) | T::Decimal256(..),
+            S::Utf8(_) | S::LargeUtf8(_) | S::Utf8View(_),
+        ) if position == Position::Comparison => {
+            negative_scale_string(literal, context, name).map(|()| Reading::Keep)
+        }
         (T::Timestamp(unit, zone), _) => zoned(literal, *unit, zone.as_deref(), position, name),
         _ => Ok(Reading::Keep),
     }
