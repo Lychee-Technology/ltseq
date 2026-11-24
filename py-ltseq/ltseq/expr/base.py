@@ -445,6 +445,13 @@ def coalesce(*args: "Expr") -> "CallExpr":
     Returns:
         Expression that evaluates to the first non-null argument
 
+    Raises:
+        ValueError: Raised when the query is built (``derive``,
+            ``filter``, ...), not here: a string next to a decimal of
+            negative scale, which would be rounded to a multiple of its
+            power of ten (``coalesce(r.d, "1")`` on ``decimal128(10, -2)``;
+            use ``Decimal(100)``, #296).
+
     Example:
         >>> from ltseq import coalesce
         >>> t.derive(name=lambda r: coalesce(r.preferred_name, r.full_name, "Unknown"))
@@ -1106,6 +1113,14 @@ class Expr(ABC):
 
         Returns:
             Expression that replaces nulls with default
+
+        Raises:
+            ValueError: Raised when the query is built (``derive``,
+                ``filter``, ...), not here: a default the value does not
+                take, such as a string for a decimal of negative scale,
+                which would be rounded to a multiple of its power of ten
+                (``r.d.fill_null("1")`` on ``decimal128(10, -2)``; use
+                ``Decimal(100)``, #296).
 
         Example:
             >>> t.derive(lambda r: {"email": r.email.fill_null("unknown@example.com")})
