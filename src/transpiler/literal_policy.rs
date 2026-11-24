@@ -110,7 +110,12 @@ pub(crate) fn negative_scale_string(
         | T::Decimal256(_, scale) => *scale,
         _ => return Ok(()),
     };
-    if scale >= 0 || !matches!(literal, S::Utf8(Some(_)) | S::LargeUtf8(Some(_)) | S::Utf8View(Some(_))) {
+    if scale >= 0
+        || !matches!(
+            literal,
+            S::Utf8(Some(_)) | S::LargeUtf8(Some(_)) | S::Utf8View(Some(_))
+        )
+    {
         return Ok(());
     }
     Err(format!(

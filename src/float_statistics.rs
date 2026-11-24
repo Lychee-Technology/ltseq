@@ -58,8 +58,8 @@ use datafusion::parquet::basic::{LogicalType, Type as PhysicalType};
 use datafusion::parquet::errors::Result as ParquetResult;
 use datafusion::parquet::file::metadata::page_index::PageIndexProvider;
 use datafusion::parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData};
-use datafusion::parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use datafusion::parquet::file::page_index::column_index::ColumnIndexMetaData;
+use datafusion::parquet::file::page_index::offset_index::OffsetIndexMetaData;
 use datafusion::parquet::file::statistics::Statistics as ChunkStatistics;
 use datafusion::parquet::schema::types::ColumnDescriptor;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -295,14 +295,22 @@ impl PageIndexProvider for FloatlessPageIndex {
         self.inner.has_column_indexes()
     }
 
-    fn column_index(&self, row_group_idx: usize, column_idx: usize) -> Option<&ColumnIndexMetaData> {
+    fn column_index(
+        &self,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> Option<&ColumnIndexMetaData> {
         if self.floats.get(column_idx).copied().unwrap_or(false) {
             return None;
         }
         self.inner.column_index(row_group_idx, column_idx)
     }
 
-    fn offset_index(&self, row_group_idx: usize, column_idx: usize) -> Option<&OffsetIndexMetaData> {
+    fn offset_index(
+        &self,
+        row_group_idx: usize,
+        column_idx: usize,
+    ) -> Option<&OffsetIndexMetaData> {
         self.inner.offset_index(row_group_idx, column_idx)
     }
 
@@ -432,10 +440,8 @@ mod tests {
             .map(|leaf| is_float_leaf(leaf))
             .collect();
         assert_eq!(floats, [false, true, true, true]);
-        let (index_before, index_after) = (
-            before.page_index().unwrap(),
-            after.page_index().unwrap(),
-        );
+        let (index_before, index_after) =
+            (before.page_index().unwrap(), after.page_index().unwrap());
         assert_eq!(after.num_row_groups(), 4);
         for (g, (group_before, group_after)) in before
             .row_groups()
@@ -452,8 +458,14 @@ mod tests {
             {
                 if !floats[c] {
                     assert_eq!(chunk_after, chunk_before);
-                    assert_eq!(index_after.column_index(g, c), index_before.column_index(g, c));
-                    assert_eq!(index_after.offset_index(g, c), index_before.offset_index(g, c));
+                    assert_eq!(
+                        index_after.column_index(g, c),
+                        index_before.column_index(g, c)
+                    );
+                    assert_eq!(
+                        index_after.offset_index(g, c),
+                        index_before.offset_index(g, c)
+                    );
                     continue;
                 }
                 let (stats_before, stats_after) = (
@@ -476,7 +488,10 @@ mod tests {
                 assert_eq!(chunk_after.bloom_filter_length(), None);
                 assert!(index_before.column_index(g, c).is_some());
                 assert!(index_after.column_index(g, c).is_none());
-                assert_eq!(index_after.offset_index(g, c), index_before.offset_index(g, c));
+                assert_eq!(
+                    index_after.offset_index(g, c),
+                    index_before.offset_index(g, c)
+                );
             }
         }
     }

@@ -2227,7 +2227,10 @@ mod tests {
         assert!(plan.contains("CASE WHEN"), "{plan}");
         assert_eq!(collect(&df).unwrap(), 2, "{plan}");
         // Where no branch can fail, the rewrite still applies.
-        let f = flags(&session, &[("c", vec![true, false]), ("d", vec![true, true])]);
+        let f = flags(
+            &session,
+            &[("c", vec![true, false]), ("d", vec![true, true])],
+        );
         let df = f
             .filter(when(col("c"), lit(false)).otherwise(col("d")).unwrap())
             .unwrap();
@@ -2282,12 +2285,19 @@ mod tests {
         // Where no branch can fail, the rewrite still applies.
         let f = flags(
             &session,
-            &[("c", vec![true, false]), ("d", vec![true, true]), ("e", vec![true, true])],
+            &[
+                ("c", vec![true, false]),
+                ("d", vec![true, true]),
+                ("e", vec![true, true]),
+            ],
         )
         .select(vec![
             col("c"),
             col("d"),
-            when(col("e"), lit(1_i64)).otherwise(lit(0_i64)).unwrap().alias("z"),
+            when(col("e"), lit(1_i64))
+                .otherwise(lit(0_i64))
+                .unwrap()
+                .alias("z"),
         ])
         .unwrap();
         let df = f.filter(nested_on(col("c"), col("d"))).unwrap();

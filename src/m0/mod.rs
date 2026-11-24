@@ -490,9 +490,11 @@ fn session_with(p: Prototypes, mut config: SessionConfig) -> SessionContext {
         // The check pairs partition i's last row with partition i + 1's
         // first, so each partition must read only its own range, and
         // `PruneOff`, the check's baseline, reads the same way. A declared
-        // order keeps partitions to their ranges, but a limit above the scan
-        // clears that, and DataFusion 55 then lets an idle partition steal a
-        // sibling's ranges. `Pruning::Off` alone keeps today's scheduling.
+        // order keeps partitions to their ranges; in DataFusion 55 a limit
+        // above the scan cleared that and let an idle partition steal a
+        // sibling's ranges, which 56 no longer does (apache/datafusion#26434).
+        // Turning stealing off keeps the check independent of either.
+        // `Pruning::Off` alone keeps today's scheduling.
         options.execution.enable_file_stream_work_stealing = false;
     }
     if p.order != Order::Off {

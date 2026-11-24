@@ -6,9 +6,9 @@
 //!
 //! Both implement `From<...> for PyErr` for automatic conversion in `#[pymethods]`.
 
+use datafusion::error::DataFusionError;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyAnyMethods, PyType};
-use datafusion::error::DataFusionError;
 use pyo3::{exceptions, Bound, Py, PyErr, Python};
 use std::error::Error as StdError;
 use std::fmt;
@@ -347,7 +347,9 @@ mod tests {
         use datafusion::parquet::errors::ParquetError;
         let raised = || {
             DataFusionError::ArrowError(
-                Box::new(ArrowError::CastError("Can't cast value 1 to type Int32".into())),
+                Box::new(ArrowError::CastError(
+                    "Can't cast value 1 to type Int32".into(),
+                )),
                 None,
             )
         };
