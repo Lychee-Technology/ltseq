@@ -457,18 +457,28 @@ def test_a_zero_a_column_holds_on_each_float_type(x_type):
     assert wrong == {}
 
 
-@pytest.mark.xfail(strict=True, reason="#296: DataFusion intersects lists comparing their items as expressions")
 def test_two_columns_holding_zeros_of_either_sign():
-    """Two lists the optimizer builds, each with a zero, are intersected by
-    the simplifier before they are split, and `-0.0` and `0.0` are different
-    items there.
+    """Two lists the optimizer builds, each with a zero. DataFusion 55's
+    simplifier intersected them before they were split, comparing their
+    items as expressions, where `-0.0` and `0.0` differ, and planned an
+    empty relation (#296). DataFusion 56 intersects only lists of literals
+    that are neither NULL nor floats (apache/datafusion#24952), so both lists
+    reach `ltseq_float_list_zeros` and are split.
 
     The table is not sorted: a sort reads its input as one stream (#268),
     and a filter pushed into that stream is planned apart from the derive,
-    which keeps the two lists from meeting."""
+    which kept the two lists from meeting and hid the bug on 55 (#402). So
+    the optimized plan must hold both lists, each beside its zero range, not
+    only give the right rows."""
     unsorted = LTSeq.from_arrow(table(pa.float64()).to_arrow())
     t = unsorted.derive(a=lambda r: LiteralExpr(-0.0), b=lambda r: LiteralExpr(0.0))
     kept = t.filter(lambda r: any_equal(r.x, [r.a, 1.0, 2.5, 7.0]) & any_equal(r.x, [r.b, 3.0, 4.0, 5.0]))
+    logical, physical = kept.explain_plan()
+    assert "EmptyRelation" not in logical, logical
+    assert "x IN ([Float64(1), Float64(2.5), Float64(7)])" in logical, logical
+    assert "x IN ([Float64(3), Float64(4), Float64(5)])" in logical, logical
+    assert logical.count("?table?.x <= Float64(0)") == 2, logical
+    assert "FilterExec" in physical, physical
     assert sorted(kept.to_arrow().column("k").to_pylist()) == [k for k, v in enumerate(X) if v == 0.0]
 
 

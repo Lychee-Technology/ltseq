@@ -18,9 +18,11 @@
 //! list, so no such list should reach this rule with one zero; completing
 //! it keeps the rule correct if one does.
 //!
-//! It cannot undo what the simplifier did to such a list before: two lists
-//! on one value are intersected and subtracted comparing their items as
-//! expressions, so `0.0` and `-0.0` differ there (#296).
+//! DataFusion 55's simplifier could intersect and subtract two such lists
+//! on one value before this rule saw them, comparing their items as
+//! expressions, where `0.0` and `-0.0` differ (#296). DataFusion 56 leaves
+//! lists with float items alone (apache/datafusion#24952), so the rule sees
+//! each list whole (`test_two_columns_holding_zeros_of_either_sign`).
 
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::Result;

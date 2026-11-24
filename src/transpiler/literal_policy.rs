@@ -92,10 +92,10 @@ pub(crate) enum Position {
 /// is 0 in `decimal128(10, -2)` and compares equal to 0; 55 refused the
 /// cast at collect. LTSeq refuses it where the query is built, in every
 /// position that casts the string to the decimal: a comparison, an `is_in`
-/// item, a value DataFusion unifies to the decimal and a fixed target
-/// (`shift` default, `insert`, `update`). A string that the decimal is
-/// cast to instead, as in `if_else(c, "1", r.d)`, is a string value, and
-/// is not refused.
+/// item, a value DataFusion unifies to the decimal, and a `shift` default
+/// (`insert` and `update` refuse a string for any decimal column already).
+/// A string that the decimal is cast to instead, as in `if_else(c, "1",
+/// r.d)`, is a string value, and is not refused.
 pub(crate) fn negative_scale_string(
     literal: &ScalarValue,
     decimal: &DataType,
@@ -114,7 +114,7 @@ pub(crate) fn negative_scale_string(
         return Ok(());
     }
     Err(format!(
-        "{name} is {decimal}, a decimal of negative scale, which would round the string {} \
+        "{name} is {decimal}, a decimal of negative scale, which would round the string '{}' \
          to a multiple of 10^{}; use a Decimal literal",
         literal_text(literal),
         -scale
