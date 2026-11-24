@@ -1251,4 +1251,3 @@ ProjectionExec: expr=[k@0 as k, x@1 as x, c@2 as c, 1 as z1]
   FilterExec: x@1 IN (SET) ([1, 2, 10, 11])
     DataSourceExec: partitions=1, partition_sizes=[1]
 ```
-

@@ -843,4 +843,3 @@ Projection: count(Int64(1)) AS count(*) AS n
     Filter: CAST(random() * Float64(10) AS Int64) IN ([Int64(0), Int64(1), Int64(2), Int64(3), Int64(4)]) OR CAST(random() * Float64(10) AS Int64) IN ([Int64(3), Int64(4), Int64(5), Int64(6), Int64(7)])
       TableScan: r projection=[]
 ```
-

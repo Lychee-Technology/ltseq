@@ -1109,4 +1109,3 @@ sorted, 56.0.0 stable, filter physical:
 ```text
 EmptyExec
 ```
-
