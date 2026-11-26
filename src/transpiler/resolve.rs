@@ -175,7 +175,8 @@ impl<'a> Resolver<'a> {
     /// scale is refused ([`negative_scale_string_cast`], #296).
     pub(crate) fn resolve(&self, expr: Expr) -> Result<Expr, String> {
         let resolved = self.coerced(&expr)?.unwrap_or(expr);
-        negative_scale_string_cast(&resolved, &self.schema)?;
+        let schema = &self.schema;
+        negative_scale_string_cast(&resolved, &|operand| ask(|| operand.get_type(schema)).ok())?;
         Ok(resolved)
     }
 

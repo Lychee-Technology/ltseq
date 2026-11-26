@@ -54,8 +54,7 @@ use chrono::{DateTime, LocalResult, NaiveDateTime, Offset, TimeZone};
 use datafusion::arrow::array::timezone::Tz;
 use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::DFSchema;
-use datafusion::logical_expr::{Cast, Expr, ExprSchemable, TryCast};
+use datafusion::logical_expr::{Cast, Expr, TryCast};
 use datafusion::scalar::ScalarValue;
 
 use super::exact::{
@@ -144,7 +143,10 @@ pub(crate) fn negative_scale_string(
 /// opaque cast that raises on a failing row instead, and is not refused.
 /// A decimal cast to a string, as in `if_else(c, "1", r.d)`, is not
 /// either.
-pub(crate) fn negative_scale_string_cast(coerced: &Expr, schema: &DFSchema) -> Result<(), String> {
+pub(crate) fn negative_scale_string_cast(
+    coerced: &Expr,
+    type_of: &impl Fn(&Expr) -> Option<DataType>,
+) -> Result<(), String> {
     use DataType as T;
     let mut refused = None;
     let _ = coerced.apply(|e| {
@@ -165,13 +167,13 @@ pub(crate) fn negative_scale_string_cast(coerced: &Expr, schema: &DFSchema) -> R
             }
             _ => return Ok(TreeNodeRecursion::Continue),
         };
-        let string = matches!(
-            input.get_type(schema),
-            Ok(T::Utf8 | T::LargeUtf8 | T::Utf8View)
-        ) || matches!(
-            input.get_type(schema),
-            Ok(T::Dictionary(_, value)) if matches!(*value, T::Utf8 | T::LargeUtf8 | T::Utf8View)
-        );
+        let string = match type_of(input) {
+            Some(T::Utf8 | T::LargeUtf8 | T::Utf8View) => true,
+            Some(T::Dictionary(_, value)) => {
+                matches!(*value, T::Utf8 | T::LargeUtf8 | T::Utf8View)
+            }
+            _ => false,
+        };
         if !string {
             return Ok(TreeNodeRecursion::Continue);
         }
