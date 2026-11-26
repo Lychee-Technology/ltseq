@@ -1,12 +1,12 @@
 # Draft upstream report: planning a sort or grouping over a deep expression is about cubic in its depth in 56.0.0
 
-**Status: draft, not filed.** The owner's decision on PR #423's review
-round 1 (R1-F4) asks the operator to file this with apache/datafusion
-before the upgrade merges; the filed issue is the tracked mitigation for
-the reduced `distinct` depth in `test_operations_on_a_deep_plan_on_a_small_thread`.
-Once it is filed, record its URL in this file and in the PR, and when it is
-fixed upstream, raise `DISTINCT_DEEP` in `py-ltseq/tests/test_expression_depth.py`
-back to the test's `DEEP` (500).
+**Status: filed at https://github.com/apache/datafusion/issues/27763.** The
+owner's decision on PR #423's review round 1 (R1-F4) asks the operator to
+file this with apache/datafusion before the upgrade merges; the filed issue
+is the tracked mitigation for the reduced `distinct` depth in
+`test_operations_on_a_deep_plan_on_a_small_thread`. Its URL is also recorded
+in PR #423's description. When it is fixed upstream, raise `DISTINCT_DEEP`
+in `py-ltseq/tests/test_expression_depth.py` back to the test's `DEEP` (500).
 
 The text below the line is the proposed issue body. The reproduction is
 [`deep_sort_repro/repro.rs`](deep_sort_repro/repro.rs); it uses only
