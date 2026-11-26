@@ -3,7 +3,9 @@
 `pytest py-ltseq/tests/memory -m memory -v` (contract row R3, #274), run
 from each tree's root with that tree's fat-LTO release `.so` in
 `py-ltseq/ltseq/` (CI's `memory-harness` job runs the same command on a
-debug build). Full logs: `memory/harness-55.log`, `memory/harness-56.log`.
+debug build). Full logs, committed: [`memory/harness-55.log`](memory/harness-55.log),
+[`memory/harness-56.log`](memory/harness-56.log). The 56 run on the final Rust
+sources (`5a6fdfa`) is [`final-head/harness-56.log`](final-head/harness-56.log).
 
 | | 55.0.0 (`291aa14`) | 56.0.0 stable |
 |---|---|---|

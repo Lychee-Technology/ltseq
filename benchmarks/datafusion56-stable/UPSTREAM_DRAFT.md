@@ -1,6 +1,6 @@
 # Draft upstream report: planning a sort or grouping over a deep expression is about cubic in its depth in 56.0.0
 
-**Status: filed at https://github.com/apache/datafusion/issues/27763.** The
+**Status: the operator reports filing this at https://github.com/apache/datafusion/issues/27763 (#296, 2026-11-26).** The
 owner's decision on PR #423's review round 1 (R1-F4) asks the operator to
 file this with apache/datafusion before the upgrade merges; the filed issue
 is the tracked mitigation for the reduced `distinct` depth in

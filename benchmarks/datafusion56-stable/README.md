@@ -9,10 +9,17 @@ directory was produced on RC1, and nothing there is restated as stable.
 
 | | Baseline | Candidate |
 |---|---|---|
-| Source | `291aa14cf8af5c108ba35a06b960ed9fc9ed5cee` (`main`, PR #423's merge base) | PR #423 at `f3c94046`: the reviewed head `5f93a2e4` plus docstrings, so the same Rust sources (DataFusion 56.0.0 since `27379478`) |
+| Source | `291aa14cf8af5c108ba35a06b960ed9fc9ed5cee` (`main`, PR #423's merge base) | PR #423 at `f3c94046`: the reviewed head `5f93a2e4` plus docstrings, so the same Rust sources (DataFusion 56.0.0 since `27379478`). Not the final Rust sources: see below |
 | DataFusion | 55.0.0 | 56.0.0 from crates.io (`Cargo.lock` checksum `0d7fbede7d2bf609055871b98ad99151a2cdd95ba333f5a8874ad03e8dc07779`; the upstream `56.0.0` tag is commit `7e7ae72a820e2bf87da1205b96639fba334ed2f7`) |
 | arrow / parquet | 59.2.0 | 60.2.0 |
 | Lockfile | `Cargo.lock` at `291aa14` | the PR's `Cargo.lock` |
+
+PR #423's final Rust sources are `5a6fdfa`'s, one commit after the
+measured candidate. That commit changes how the negative-scale string-cast
+check reads a type (`src/transpiler/literal_policy.rs`,
+`src/transpiler/resolve.rs`). Each item that runs LTSeq's transpiler was
+rerun on a release wheel of `5a6fdfa` and came out the same; see
+[`results/final-head/`](results/final-head/README.md).
 
 Both are **release** wheels built the way the project ships them: the
 `[profile.release]` of each tree (fat LTO, one codegen unit, `opt-level = 3`,
@@ -111,7 +118,8 @@ its files, the build it ran on and its outcome, and what is not done here.
 | `df56-stable-switches.patch`, `results/suite.md` | the evidence-only switches for the stable tree, and the guard ablations on both engines |
 | `compare_core.py`, `results/bench.md`, `results/bench_core/` | `bench_core.py` and `bench_in_lists.py` on the release wheels |
 | `results/packaging.md` | the fat-LTO release build of each engine |
-| `results/memory.md`, `results/memory/` | the memory harness on each release build |
+| `results/memory.md`, `results/memory/harness-55.log`, `results/memory/harness-56.log` | the memory harness on each release build, with its full logs |
+| `results/final-head/` | the transpiler-dependent items rerun on the final Rust sources (`5a6fdfa`) |
 
 ```bash
 REPO=$(git rev-parse --show-toplevel); cd "$REPO"

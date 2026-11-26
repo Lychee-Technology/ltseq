@@ -1,0 +1,68 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.18, pytest-9.1.1, pluggy-1.6.0 -- <venv>/bin/python
+rootdir: /var/tmp/af296/mem56
+configfile: pyproject.toml
+plugins: nbmake-1.5.5, platformdirs-4.13.5, xdist-3.8.0
+collecting ... collected 23 items / 5 deselected / 18 selected
+
+py-ltseq/tests/memory/test_bounded_memory.py::test_must_stream_pipeline_stays_within_the_budget[to_batches] PASSED [  5%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_must_stream_pipeline_stays_within_the_budget[count] PASSED [ 11%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_must_stream_pipeline_stays_within_the_budget[write_parquet] PASSED [ 16%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_must_stream_pipeline_stays_within_the_budget[write_csv] XFAIL [ 22%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_must_stream_pipeline_stays_within_the_budget[iterate] XFAIL [ 27%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_a_materializing_pipeline_exceeds_the_budget PASSED [ 33%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_the_baseline_stays_within_the_budget PASSED [ 38%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_holding_part_of_the_input_exceeds_a_state_bound PASSED [ 44%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[shift] PASSED [ 50%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[shift_by_key] PASSED [ 55%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[rolling] PASSED [ 61%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[cum_sum] PASSED [ 66%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[row_number] PASSED [ 72%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[group_ordered] PASSED [ 77%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[search_pattern] PASSED [ 83%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[asof_join] PASSED [ 88%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[distinct] PASSED [ 94%]
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[tail] PASSED [100%]
+
+=============================== warnings summary ===============================
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[shift_by_key]
+  py-ltseq/tests/memory/test_bounded_memory.py:80: ShouldBoundExceeded: shift_by_key -> to_batches: peak > 265.9 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+    warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))
+
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[group_ordered]
+  py-ltseq/tests/memory/test_bounded_memory.py:80: ShouldBoundExceeded: group_ordered -> to_batches: peak > 256.3 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 1,024 rows of state, 16 MiB allowance)
+    warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))
+
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[search_pattern]
+  py-ltseq/tests/memory/test_bounded_memory.py:80: ShouldBoundExceeded: search_pattern -> to_batches: peak > 262.7 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 2 rows of state, 16 MiB allowance)
+    warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))
+
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[asof_join]
+  py-ltseq/tests/memory/test_bounded_memory.py:80: ShouldBoundExceeded: asof_join -> to_batches: peak > 264.5 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+    warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))
+
+py-ltseq/tests/memory/test_bounded_memory.py::test_should_bound_is_reported[distinct]
+  py-ltseq/tests/memory/test_bounded_memory.py:80: ShouldBoundExceeded: distinct -> to_batches: peak > 257.3 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+    warnings.warn(harness.ShouldBoundExceeded(measurement.describe()))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============= peak memory above the level before the reader's call =============
+filter_select_derive -> to_batches: peak 10.3 MiB, within the 64.0 MiB budget
+filter_select_derive -> count: peak 6.2 MiB, within the 64.0 MiB budget
+filter_select_derive -> write_parquet: peak 41.8 MiB, within the 64.0 MiB budget
+filter_select_derive -> write_csv: peak > 257.1 MiB (stopped), OVER the 64.0 MiB budget
+filter_select_derive -> iterate: peak > 265.0 MiB (stopped), OVER the 64.0 MiB budget
+collect -> to_batches: peak > 265.2 MiB (stopped), OVER the 64.0 MiB budget
+assume_sorted -> to_batches: peak 11.2 MiB, within the 64.0 MiB budget
+collect_head -> to_batches: peak 42.8 MiB, OVER the 27.2 MiB state bound (11.2 MiB baseline, 0 rows of state, 16 MiB allowance)
+shift -> to_batches: peak 13.9 MiB, within the 27.2 MiB state bound (11.2 MiB baseline, 1 row of state, 16 MiB allowance)
+shift_by_key -> to_batches: peak > 265.9 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+rolling -> to_batches: peak 14.6 MiB, within the 27.2 MiB state bound (11.2 MiB baseline, 16 rows of state, 16 MiB allowance)
+cum_sum -> to_batches: peak 13.8 MiB, within the 27.2 MiB state bound (11.2 MiB baseline, 1 row of state, 16 MiB allowance)
+row_number -> to_batches: peak 23.8 MiB, within the 27.2 MiB state bound (11.2 MiB baseline, 1 row of state, 16 MiB allowance)
+group_ordered -> to_batches: peak > 256.3 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 1,024 rows of state, 16 MiB allowance)
+search_pattern -> to_batches: peak > 262.7 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 2 rows of state, 16 MiB allowance)
+asof_join -> to_batches: peak > 264.5 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+distinct -> to_batches: peak > 257.3 MiB (stopped), OVER the 27.2 MiB state bound (11.2 MiB baseline, 8 rows of state, 16 MiB allowance)
+tail -> to_batches: peak 10.3 MiB, within the 27.2 MiB state bound (11.2 MiB baseline, 10 rows of state, 16 MiB allowance)
+=========== 16 passed, 5 deselected, 2 xfailed, 5 warnings in 19.21s ===========
