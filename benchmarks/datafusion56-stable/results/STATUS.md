@@ -32,11 +32,11 @@ Reported on #296 by the operator after the local runs (their comment of
 
 - **Upstream filing**: `../UPSTREAM_DRAFT.md` was filed at
   https://github.com/apache/datafusion/issues/27763.
-- **The PR description**: PR #423's description was rewritten from this
-  evidence, separating `benchmarks/datafusion56-stable/` from the frozen RC1
-  archive (`benchmarks/datafusion56/`). It predates `5a6fdfa` and the
-  `final-head/` rerun, so it has to say that the release runs were made
-  at `f3c9404`.
+- **The PR description**: PR #423's description was updated to separate
+  `benchmarks/datafusion56-stable/` from the frozen RC1 archive
+  (`benchmarks/datafusion56/`), state that the initial stable runs were made
+  at `f3c9404`, and cite `results/final-head/` for the reruns on the final
+  Rust sources (`5a6fdfa`) and the committed memory-harness logs.
 
 Not done here, and not claimed:
 
