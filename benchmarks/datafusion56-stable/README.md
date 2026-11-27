@@ -118,7 +118,7 @@ its files, the build it ran on and its outcome, and what is not done here.
 | `df56-stable-switches.patch`, `results/suite.md` | the evidence-only switches for the stable tree, and the guard ablations on both engines |
 | `compare_core.py`, `results/bench.md`, `results/bench_core/` | `bench_core.py` and `bench_in_lists.py` on the release wheels |
 | `results/packaging.md` | the fat-LTO release build of each engine |
-| `results/memory.md`, `results/memory/harness-55.log`, `results/memory/harness-56.log` | the memory harness on each release build, with its full logs |
+| `results/memory.md`, `results/memory/harness-55.txt`, `results/memory/harness-56.txt` | the memory harness on each release build, with its full logs |
 | `results/final-head/` | the transpiler-dependent items rerun on the final Rust sources (`5a6fdfa`) |
 
 ```bash

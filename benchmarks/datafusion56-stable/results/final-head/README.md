@@ -32,7 +32,7 @@ files in `results/` are compared against these.
 | Plans | `plans-56.json` | `--compare-plans` with `../plans-55.json` gives `../plans.md` byte for byte |
 | Witnesses | `witnesses-56.json` | `--compare` with `../witnesses-55.json` gives `../witnesses.md` byte for byte |
 | Deep `distinct` timings | `deep-distinct-56.json`, `deep-distinct.md` | every median within 2 % of `f3c9404`'s (sorted, 200 levels: 28.3 s against 28.6 s; 25 levels: 0.022 s against 0.023 s) |
-| Memory harness | `harness-56.log` | 16 passed, 5 deselected, 2 xfailed; per-test outcomes and every reader's within/OVER verdict the same. The peaks of pipelines that finish move by at most 1.7 MiB (`row_number`, 23.8 to 22.1 MiB), against a state bound of 26.9 MiB here (10.9 MiB baseline) |
+| Memory harness | `harness-56.txt` | 16 passed, 5 deselected, 2 xfailed; per-test outcomes and every reader's within/OVER verdict the same. The peaks of pipelines that finish move by at most 1.7 MiB (`row_number`, 23.8 to 22.1 MiB), against a state bound of 26.9 MiB here (10.9 MiB baseline) |
 
 Not rerun on `5a6fdfa`, and why:
 

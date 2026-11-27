@@ -23,7 +23,7 @@ the other items were not rerun. Each file below names the build it ran on.
 | Guard ablations on stable | `suite.md`, `../df56-stable-switches.patch` | debug builds with evidence-only switches | every rule the PR keeps is still needed except `ltseq_keep_sorts_above_offsets` (redundant for its tests) and `ltseq_float_list_zeros` (one plan-shape assertion only) |
 | `bench_core.py` and `bench_in_lists.py` | `bench.md`, `bench_core/` | fat-LTO release wheels | geometric mean 56 / 55 = 0.94 over 47 benchmarks; slower: `read_csv_10000` (1.26×) and the float intersection (1.65×, expected from apache/datafusion#24952) |
 | Fat-LTO release build | `packaging.md` | the shipped release profile | both build without warnings; 56's `.so` is 8.4 % larger |
-| Memory harness | `memory.md`, `memory/harness-55.log`, `memory/harness-56.log` | fat-LTO release `.so` | 16 passed, 2 xfailed on both, same per-test outcomes |
+| Memory harness | `memory.md`, `memory/harness-55.txt`, `memory/harness-56.txt` | fat-LTO release `.so` | 16 passed, 2 xfailed on both, same per-test outcomes |
 | Rerun on the final Rust sources (`5a6fdfa`) | `final-head/` | fat-LTO release wheel of `5a6fdfa` | matrix, plans, witnesses and memory verdicts the same as `f3c9404`'s; deep `distinct` medians within 2 % |
 | macOS | (CI) | | from CI's `macos` job on the PR, per the owner's decision; not run here |
 
